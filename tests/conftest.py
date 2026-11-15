@@ -34,7 +34,7 @@ SCRUBBED_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _a_clean_factory_env():
+def _a_scrub_live_factory_env():
     scrubbed = {name: os.environ.pop(name) for name in list(os.environ)
                 if name.startswith(SCRUBBED_PREFIXES)}
     yield
@@ -42,8 +42,6 @@ def _a_clean_factory_env():
 
 
 def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
-    """The scrubbed environment with HOME, the XDG dirs and the factory state
-    dir all under `home`, then `extra`."""
     return {
         **os.environ,
         "HOME": str(home),
@@ -58,18 +56,15 @@ def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
 
 
 def reap_state(home: Path) -> None:
-    """Kill every process a pidfile or lock in home's factory state dir names,
-    and its process group when it leads one, but only while that process's
-    HOME is still `home`: a reused pid is never signalled."""
     state = home / ".local/state/factory"
     pids = set()
     for path in (*state.glob("*.pid"), *state.glob("*.lock")):
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if text.isdigit():
             pids.add(int(text))
-    ours = [pid for pid in pids if _home_of(pid) == str(home)]
+    started_here = [pid for pid in pids if _home_of(pid) == str(home)]
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in ours:
+        for pid in started_here:
             try:
                 if os.getpgid(pid) == pid:
                     os.killpg(pid, sig)
@@ -77,7 +72,7 @@ def reap_state(home: Path) -> None:
                     os.kill(pid, sig)
             except OSError:
                 pass
-        if sig == signal.SIGTERM and ours:
+        if sig == signal.SIGTERM and started_here:
             time.sleep(0.2)
 
 
@@ -152,7 +147,7 @@ def _fake_gh_store(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_local_overlay(_a_clean_factory_env):
+def _no_local_overlay(_a_scrub_live_factory_env):
     """No host's orch.local.yml or machines.local.yml leaks into a test (#107).
     Overlay tests clear ORCH_NO_LOCAL_OVERLAY with monkeypatch.delenv."""
     previous = os.environ.get("ORCH_NO_LOCAL_OVERLAY")
@@ -165,7 +160,7 @@ def _no_local_overlay(_a_clean_factory_env):
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_real_db_backup(_a_clean_factory_env, tmp_path_factory: pytest.TempPathFactory):
+def _no_real_db_backup(_a_scrub_live_factory_env, tmp_path_factory: pytest.TempPathFactory):
     """#66: `orch poll` backs up after every cycle; never to the real
     ~/.local/share/factory/backup. Tests that need a path set their own."""
     backup = tmp_path_factory.mktemp("db-backup") / "orch.db"

@@ -4,9 +4,7 @@ A box job exports ORCH_DB, ORCH_WAITER_DRAIN and friends at the live
 ~/.local/state/factory. This runs tests/test_deploy.py and
 tests/test_waiter_service.py in a child pytest with those names pointed at a
 decoy state dir, then checks that neither the decoy nor the real live dir
-changed and that nothing the child started is still running. Other actors
-on a box rewrite the real live pidfiles too, so there only a pidfile that
-names a process of this run counts; the decoy must stay byte-identical.
+changed and that nothing the child started is still running.
 """
 
 from __future__ import annotations
