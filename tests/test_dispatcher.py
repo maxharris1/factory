@@ -6152,6 +6152,128 @@ def test_edit_after_handling_is_not_reread(tmp_path: Path) -> None:
     assert _attention(queue) == []
 
 
+def _edited_ready(head: str) -> Comment:
+    return replace(
+        comment("ready-edited", READY.format(head=head), author="claude-login"),
+        edited_at=5,
+    )
+
+
+def test_edited_ready_flags_attention_and_queues_no_review(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "a" * 40
+
+    dispatcher.process(
+        ticket(_edited_ready(head), head=head, ci={head: CIResult("success")})
+    )
+
+    assert handled_outcome(queue, "ready-edited") == "rejected-edited"
+    assert queue.claim("codex") is None
+    assert _attention(queue) == ["edited-comment"]
+    assert [wake["outcome"] for wake in rejected_wakes(queue)] == ["rejected-edited"]
+
+
+def test_edited_ready_shows_in_orch_status_and_the_dashboard(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.status import SQLiteStatusReader, build_status, render
+
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "a" * 40
+    dispatcher.process(
+        ticket(_edited_ready(head), head=head, ci={head: CIResult("success")})
+    )
+
+    reader = SQLiteStatusReader(queue.path)
+    text = render(build_status(reader, reader, clock=lambda: 200.0,
+                               attention=reader.attention()))
+    assert "owner/repo#42 edited-comment" in text
+    snapshot = collect_snapshot(queue.path, tmp_path / "none.log", now=200.0)
+    reasons = [
+        item["detail"].split(":")[0]
+        for item in snapshot["attention"]["items"]
+        if item["kind"] == "needs-attention"
+    ]
+    assert reasons == ["edited-comment"]
+
+
+def test_clean_ready_after_edited_ready_queues_review_and_clears_attention(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "a" * 40
+    clean = comment(
+        "ready-clean", READY.format(head=head), author="claude-login", created_at=2
+    )
+
+    dispatcher.process(
+        ticket(_edited_ready(head), clean, head=head, ci={head: CIResult("success")})
+    )
+
+    review = queue.claim("codex")
+    assert review is not None
+    assert review.request.head == head
+    assert _attention(queue) == []
+
+
+def test_rejected_repost_after_edited_ready_leaves_attention(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "a" * 40
+    stale = comment(
+        "ready-stale", READY.format(head="b" * 40), author="claude-login", created_at=2
+    )
+
+    dispatcher.process(
+        ticket(_edited_ready(head), stale, head=head, ci={head: CIResult("success")})
+    )
+
+    assert handled_outcome(queue, "ready-stale") == "stale-ready-head"
+    assert queue.claim("codex") is None
+    assert _attention(queue) == ["edited-comment"]
+
+
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+def test_edited_verdict_flags_attention_until_a_clean_repost_acts(
+    tmp_path: Path,
+    verdict: str,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    body = VERDICT.format(round=1, head=head, verdict=verdict, risk="high")
+    edited = replace(
+        comment("verdict-edited", body, author="codex-login", created_at=2),
+        edited_at=5,
+    )
+    clean = comment("verdict-clean", body, author="codex-login", created_at=3)
+    # handoff, not merge: a merge clears every flag, so it would hide the clear.
+    snapshot = {
+        "head": head,
+        "ci": {head: CIResult("success")},
+        "factory_config": factory(ship="handoff"),
+    }
+
+    dispatcher.process(ticket(edited, **snapshot))
+
+    assert handled_outcome(queue, "verdict-edited") == "rejected-edited"
+    assert queue.claim("claude") is None
+    assert actions.handoffs == []
+    assert _attention(queue) == ["edited-comment"]
+
+    dispatcher.process(ticket(edited, clean, **snapshot))
+
+    if verdict == "REVISE":
+        fix = queue.claim("claude")
+        assert fix is not None and fix.request.action == "fix"
+    else:
+        assert actions.handoffs == [head]
+    assert _attention(queue) == []
+
+
 def _busy_dispatcher(
     tmp_path: Path,
     now: list[float],

@@ -214,6 +214,10 @@ class CommentsMixin:
             if handled:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                if (
+                    kind == "ready" and outcome in ("queued-review", "answered-review")
+                ) or (kind == "verdict" and _acted_verdict(outcome)):
+                    self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
