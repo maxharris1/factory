@@ -11,7 +11,7 @@ from lib.factory_md import FactoryConfig
 from lib.hold import LabelEvent
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
-from lib.update_check import UpdateClass
+from lib.update_check import RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
     from lib.dispatcher import Dispatcher
@@ -352,3 +352,7 @@ class Feeder(Protocol):
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
 # trivial, and why (lib/update_check.py).
 UpdateClassifier = Callable[[str, str, str, str, tuple[str, ...]], UpdateClass]
+
+# (repo, base branch, last reviewed head, new head) -> None when the new head
+# descends from the last reviewed one, else both fork points (lib/update_check.py).
+RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]

@@ -101,7 +101,18 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "source": source,
         "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
         "update": _update_scope(detail) if job.request.action == "review" else None,
+        "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
     }
+
+
+def _rebase_scope(detail: dict[str, object]) -> dict | None:
+    rebase = detail.get("rebase")
+    if not isinstance(rebase, dict):
+        return None
+    keys = ("last_reviewed_head", "reviewed_base", "base")
+    if not all(isinstance(rebase.get(key), str) and _HEAD.fullmatch(rebase[key]) for key in keys):
+        return None
+    return {key: rebase[key] for key in keys}
 
 
 def _update_scope(detail: dict[str, object]) -> dict | None:
