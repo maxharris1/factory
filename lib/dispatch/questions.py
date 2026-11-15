@@ -10,6 +10,7 @@ from dataclasses import replace
 from lib.dispatch.constants import FINISHED_STATES
 from lib.dispatch.helpers import (
     _ANSWERS,
+    _REGISTERING_ACTIONS,
     _REJECTED_OUTCOMES,
     _comment_link,
     _comment_order,
@@ -22,7 +23,7 @@ from lib.dispatch.helpers import (
     _state_for_action,
 )
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
 from lib.state_backup import RESTORED
@@ -296,6 +297,11 @@ class QuestionsMixin:
                 continue
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
+                continue
+            if (
+                kind in _REGISTERING_ACTIONS
+                and self._registration(ticket, item, kind) is Registration.UNREGISTERED
+            ):
                 continue
             return item
         return None
