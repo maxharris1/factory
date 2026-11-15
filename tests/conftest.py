@@ -204,13 +204,19 @@ def _stop_survivors(before: set[int], survivors) -> list[str]:
     return described
 
 
+_collection_leaked = pytest.StashKey[bool]()
+_registered_by = pytest.StashKey[dict[object, Path]]()
+
+
 def _collection_leak(config: pytest.Config, before: set[int], owner: str) -> str:
     from tests import child_reaper
 
     root = config._tmp_path_factory.getbasetemp()
     tag = os.environ.get(child_reaper.TAG, "")
-    described = _stop_survivors(before, lambda: child_reaper.leaked(before, tag, root))
-    return f"{owner} left processes running:\n" + "\n".join(described) if described else ""
+    if not (described := _stop_survivors(before, lambda: child_reaper.leaked(before, tag, root))):
+        return ""
+    config.stash[_collection_leaked] = True
+    return f"{owner} left processes running:\n" + "\n".join(described)
 
 
 @pytest.hookimpl(wrapper=True)
@@ -218,12 +224,17 @@ def pytest_make_collect_report(collector: pytest.Collector):
     from tests import child_reaper
 
     before = set(child_reaper._table())
+    plugins = set(collector.config.pluginmanager.get_plugins())
     try:
         report = yield
     except BaseException as interrupted:
         if leak := _collection_leak(collector.config, before, collector.nodeid):
             interrupted.add_note(leak)
         raise
+    finally:
+        if module := collector.getparent(pytest.Module):
+            registered = collector.config.stash.setdefault(_registered_by, {})
+            registered.update(dict.fromkeys(collector.config.pluginmanager.get_plugins() - plugins, module.path))
     if leak := _collection_leak(collector.config, before, collector.nodeid):
         report.longrepr = f"{report.longrepr}\n\n{leak}" if report.failed else leak
         report.outcome = "failed"
@@ -239,12 +250,18 @@ def pytest_collection(session: pytest.Session):
     try:
         return (yield)
     finally:
-        loaded = sorted(os.path.relpath(plugin.__file__, session.config.rootpath)
-                        for plugin in session.config.pluginmanager.get_plugins() - plugins
-                        if getattr(plugin, "__file__", None))
+        registered = session.config.stash.get(_registered_by, {})
+        sources = {getattr(plugin, "__file__", None) or registered.get(plugin)
+                   for plugin in session.config.pluginmanager.get_plugins() - plugins}
+        loaded = sorted(os.path.relpath(source, session.config.rootpath) for source in sources if source)
         owner = f"collection hooks in {', '.join(loaded)}" if loaded else "collection"
         if leak := _collection_leak(session.config, before, owner):
             session.ihook.pytest_collectreport(report=pytest.CollectReport("", "failed", leak, []))
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    if session.config.stash.get(_collection_leaked, False) and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 _broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}

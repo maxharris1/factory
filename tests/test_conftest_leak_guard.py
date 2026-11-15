@@ -89,3 +89,47 @@ def test_a_module_whose_collection_hook_leaves_a_loop_running_fails_the_run(
     assert f"{pid} HOME= sleep 60" in result.stdout
     assert "1 passed" not in result.stdout
     assert not alive(pid)
+
+
+EXIT_HOOK = HOOK_LOOP.replace(
+    "str(child.pid))\n", "str(child.pid))\n    import pytest\n    pytest.exit('collection ended', returncode=0)\n"
+)
+
+
+@pytest.mark.parametrize("extra", [[], ["--collect-only"]])
+def test_a_collection_hook_that_leaks_and_then_exits_zero_fails_the_run(tmp_path: Path, extra: list[str]) -> None:
+    record = tmp_path / "pid"
+    result = _run_guarded(tmp_path, EXIT_HOOK.format(hook="pytest_collection_finish", record=str(record)), *extra)
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "test_leak.py" in result.stdout and "left processes running" in result.stdout
+    assert not alive(pid)
+
+
+OBJECT_HOOK = '''
+import os
+import subprocess
+
+
+class Hooks:
+    def pytest_collection_finish(self, session):
+        child = subprocess.Popen(["sleep", "60"], env={{"PATH": os.environ["PATH"]}}, start_new_session=True)
+        open({record!r}, "w").write(str(child.pid))
+
+
+def pytest_generate_tests(metafunc):
+    metafunc.config.pluginmanager.register(Hooks(), name="class-collection-hook")
+
+
+def test_passes():
+    pass
+'''
+
+
+def test_a_hook_object_a_module_registers_is_named_by_that_module(tmp_path: Path) -> None:
+    record = tmp_path / "pid"
+    result = _run_guarded(tmp_path, OBJECT_HOOK.format(record=str(record)))
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "collection hooks in test_leak.py left processes running" in result.stdout
+    assert not alive(pid)
