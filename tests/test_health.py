@@ -1213,7 +1213,7 @@ def _published(tmp_path: Path, monkeypatch, *, every: int | None = None, live: b
 
 
 def _states(text: str) -> list[str]:
-    return re.findall(r"UNKNOWN|STALE|DOWN|UP", text)
+    return re.findall(r"UNKNOWN|STALE|DOWN|UP", text.partition("process details")[2])
 
 
 @pytest.mark.parametrize("every, live, seconds", [(5, False, 300), (1440, False, 86400),
