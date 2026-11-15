@@ -38,6 +38,8 @@ PROC = Path("/proc")
 PR_SET_CHILD_SUBREAPER = 36
 ORPHAN_POLL_SECONDS = 0.05
 
+_open, _read, _close, _listdir = os.open, os.read, os.close, os.listdir
+
 _spawned: set[int] = set()
 _spawning = threading.Lock()
 
@@ -149,11 +151,23 @@ def _registered(spawn):
     return wrapper
 
 
+def _proc_text(path: str) -> str:
+    fd = _open(path, os.O_RDONLY)
+    try:
+        chunks = []
+        while chunk := _read(fd, 65536):
+            chunks.append(chunk)
+    finally:
+        _close(fd)
+    return b"".join(chunks).decode()
+
+
 def _children() -> set[int]:
+    tasks = f"{PROC}/{os.getpid()}/task"
     found: set[int] = set()
-    for task in (PROC / str(os.getpid()) / "task").iterdir():
+    for tid in _listdir(tasks):
         try:
-            found.update(int(pid) for pid in (task / "children").read_text().split())
+            found.update(int(pid) for pid in _proc_text(f"{tasks}/{tid}/children").split())
         except OSError:
             continue
     return found
@@ -161,7 +175,7 @@ def _children() -> set[int]:
 
 def _zombie(pid: int) -> bool:
     try:
-        return (PROC / str(pid) / "stat").read_text().rpartition(")")[2].split()[0] == "Z"
+        return _proc_text(f"{PROC}/{pid}/stat").rpartition(")")[2].split()[0] == "Z"
     except OSError:
         return False
 
