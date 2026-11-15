@@ -82,7 +82,7 @@ def test_the_control_dir_is_removed_after_each_test(tmp_path: Path) -> None:
     assert not Path(second).exists()
 
 
-def _run_guarded(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
+def _run_guarded(tmp_path: Path, body: str, *args: str) -> subprocess.CompletedProcess:
     case = tmp_path / "case"
     case.mkdir()
     (case / "test_leak.py").write_text(body, encoding="utf-8")
@@ -90,7 +90,7 @@ def _run_guarded(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "tests.child_reaper",
          "-p", "tests.conftest", "--rootdir", str(case), "--basetemp", str(tmp_path / "bt"),
-         str(case / "test_leak.py")],
+         *args, str(case / "test_leak.py")],
         cwd=case, capture_output=True, text=True, timeout=120, env=env,
     )
 

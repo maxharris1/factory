@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from lib.remote import Exchanged, RemoteTarget, ssh_argv
 from lib.telemetry import Scrubber, Session, harness_argv
 from lib.usage import reserve_check
 from lib.usage_readings import Reading, TelemetryUsage, parse_codex, parse_get_usage
+from tests import child_reaper
 from tests.test_dashboard import make_db
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -612,17 +614,22 @@ def test_capture_and_reads_open_no_file_but_the_database_and_the_jobs_rollout(
     [rollout] = (home / "sessions").rglob("rollout-*.jsonl")
     opened: list[str] = []
     real_open, real_os_open, real_path_open = builtins.open, os.open, Path.open
+    test_thread = threading.get_ident()
+
+    def record(path) -> None:
+        if threading.get_ident() == test_thread:
+            opened.append(str(path))
 
     def record_open(file, *args, **kwargs):
-        opened.append(str(file))
+        record(file)
         return real_open(file, *args, **kwargs)
 
     def record_os_open(path, *args, **kwargs):
-        opened.append(str(path))
+        record(path)
         return real_os_open(path, *args, **kwargs)
 
     def record_path_open(self, *args, **kwargs):
-        opened.append(str(self))
+        record(self)
         return real_path_open(self, *args, **kwargs)
 
     session = _start(tmp_path, WRAPPER, "codex-bot", {"CODEX_HOME": str(home)})
@@ -632,6 +639,9 @@ def test_capture_and_reads_open_no_file_but_the_database_and_the_jobs_rollout(
     monkeypatch.setattr(os, "open", record_os_open)
     monkeypatch.setattr(Path, "open", record_path_open)
     session.consume(io.BytesIO(CODEX_EXEC))
+    reaper = threading.Thread(target=child_reaper.reap_orphans)
+    reaper.start()
+    reaper.join()
     session.finish(0)
     claude = _session(tmp_path / "orch.db")
     claude.add_usage(parse_get_usage(GET_USAGE, CAPTURED))
