@@ -27,9 +27,9 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   the reason "port held by another owner: PORT on HOST".
 
 A row is (component, device, bot, pid, started_at, last_seen, version,
-interval_seconds, stopped_at, checked_at), one per process: the key holds
-the pid, so one waiter exiting never removes another's row. Every value is
-an allowlisted name, a device listed in machines.yml, a number or a
+interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds),
+one per process: the key holds the pid, so one waiter exiting never removes
+another's row. Every value is an allowlisted name, a device listed in machines.yml, a number or a
 12-digit git SHA (`HealthStore.beat` refuses anything else), so no argv,
 environment value, path, URL or token can reach a row. A beat also removes
 rows other processes left for the same component and bot once they are
@@ -40,17 +40,23 @@ orch.health.db), not in orch.db: a heartbeat every 15 seconds from each
 component would otherwise wake the dashboard's live push (which watches
 orch.db for changes) and add writers to the dispatcher's database. The file
 is created with orch.db's permission bits and group, so a waiter running as
-another bot user can write it whenever it can write orch.db. Every open
-waits at most BUSY_SECONDS for a lock: a beat that cannot be written is
-logged and dropped, and a report that cannot be read says so (`error`) and
-needs attention.
+another bot user can write it whenever it can write orch.db. It runs in WAL
+mode (#440), so a reader never blocks a beat; the -wal and -shm files get
+the same bits and group. A beat from a heartbeat or probe thread waits at
+most DB_BUSY_SECONDS for a lock, since that delays nothing else; every other
+open waits at most BUSY_SECONDS: a beat that cannot be written is logged and
+dropped, and a report that cannot be read says so (`error`) and needs
+attention.
 
 State (`classify`): up while the last beat is at most STALE_BEATS (3)
 intervals old, stale up to DOWN_BEATS (8) intervals, then down; a clean
 stop is down at once, and so is a component with no beat at all. A device
 whose latest probe failed is at least stale. With the default 15 seconds,
 stale after 45 seconds and down after 2 minutes; a probe (60 seconds) is
-stale after 3 minutes and down after 8.
+stale after 3 minutes and down after 8. A poller that still beats while its
+current cycle (`cycle_started_at`) has run over SLOW_CYCLE_SECONDS (300) is
+stale with the reason "poller slow (cycle Ns)"; each poller row also carries
+its last cycle's length (`last_cycle_seconds`).
 
 `build_report` shows one entry per (component, device, bot), the best of
 its processes' rows (for a device probe or tunnel, its newest check), and
@@ -123,6 +129,7 @@ STALE_BEATS = 3
 DOWN_BEATS = 8
 BUSY_SECONDS = 0.5
 DB_BUSY_SECONDS = 5.0
+SLOW_CYCLE_SECONDS = 300.0
 TUNNEL_TIMEOUT = 10.0
 TUNNEL_SEEN = 405
 TUNNEL_HELD = "linear-webhook-tunnel.held"
@@ -168,13 +175,17 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     interval_seconds REAL NOT NULL,
     stopped_at REAL,
     checked_at REAL,
+    cycle_started_at REAL,
+    last_cycle_seconds REAL,
     PRIMARY KEY (component, device, bot, pid)
 )
 """
+_ADDED = ("cycle_started_at", "last_cycle_seconds")
 _COLUMNS = (
     "component, device, bot, pid, started_at, last_seen, version, "
-    "interval_seconds, stopped_at, checked_at"
+    "interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds"
 )
+Cycle = Callable[[], "tuple[float | None, float | None]"]
 
 
 class HealthError(ValueError):
@@ -263,14 +274,28 @@ def _check(component: str, device: str, bot: str, pid: int, version: str,
         raise HealthError(f"interval must be {MIN_INTERVAL:g} to {MAX_INTERVAL:g} seconds")
 
 
-def _create(path: Path, like: Path) -> None:
-    """Create the health file with orch.db's permission bits and group."""
-    mode, gid = 0o600, None
+def _check_cycle(*values: float | None) -> None:
+    for value in values:
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise HealthError("cycle times must be non-negative numbers")
+
+
+def _sharing(like: Path) -> tuple[int, int | None]:
     try:
         info = like.stat()
-        mode, gid = stat.S_IMODE(info.st_mode) & 0o666, info.st_gid
+        return stat.S_IMODE(info.st_mode) & 0o666, info.st_gid
     except OSError:
-        pass
+        return 0o600, None
+
+
+def _create(path: Path, like: Path) -> None:
+    """Create the health file with orch.db's permission bits and group."""
+    mode, gid = _sharing(like)
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
     except FileExistsError:
@@ -286,6 +311,21 @@ def _create(path: Path, like: Path) -> None:
         os.close(fd)
 
 
+def _share_sidecars(path: Path) -> None:
+    """Give the -wal and -shm files the health file's permission bits and group."""
+    mode, gid = _sharing(path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        try:
+            if sidecar.stat().st_uid != os.geteuid():
+                continue
+            os.chmod(sidecar, mode)
+            if gid is not None:
+                os.chown(sidecar, -1, gid)
+        except OSError:
+            pass
+
+
 class HealthStore:
     """Writes heartbeat rows to the health file beside `db`, for `devices` only."""
 
@@ -295,16 +335,37 @@ class HealthStore:
         self.path = health_path(self.db)
         self.devices = frozenset(devices)
         self.clock = clock
+        self._prepared = False
+        self._prepare_lock = threading.Lock()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, busy: float = BUSY_SECONDS) -> sqlite3.Connection:
         if not self.path.exists():
             _create(self.path, self.db)
-        connection = sqlite3.connect(self.path, timeout=BUSY_SECONDS)
-        connection.execute(_SCHEMA)
+        connection = sqlite3.connect(self.path, timeout=busy)
+        try:
+            with self._prepare_lock:
+                if not self._prepared:
+                    self._prepare(connection)
+                    self._prepared = True
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
-    def _write(self, sql: str, params: tuple) -> int:
-        connection = self._connect()
+    def _prepare(self, connection: sqlite3.Connection) -> None:
+        """First open: WAL, so a reader never blocks a beat, and the cycle columns
+        an older file lacks."""
+        connection.execute("PRAGMA journal_mode = WAL")
+        _share_sidecars(self.path)
+        with connection:
+            connection.execute(_SCHEMA)
+            have = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+            for column in _ADDED:
+                if column not in have:
+                    connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {column} REAL")
+
+    def _write(self, sql: str, params: tuple, busy: float = BUSY_SECONDS) -> int:
+        connection = self._connect(busy)
         try:
             with connection:
                 return connection.execute(sql, params).rowcount
@@ -321,20 +382,28 @@ class HealthStore:
         started_at: float | None = None,
         version: str = "unknown",
         interval: float = BEAT_SECONDS,
+        cycle_started_at: float | None = None,
+        last_cycle_seconds: float | None = None,
+        busy: float = BUSY_SECONDS,
     ) -> None:
         _check(component, device, bot, pid, version, interval, self.devices)
+        _check_cycle(cycle_started_at, last_cycle_seconds)
         now = float(self.clock())
-        connection = self._connect()
+        connection = self._connect(busy)
         try:
             with connection:
                 connection.execute(
-                    f"INSERT INTO {TABLE} ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) "
+                    f"INSERT INTO {TABLE} ({_COLUMNS}) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) "
                     "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
                     "started_at = excluded.started_at, last_seen = excluded.last_seen, "
                     "version = excluded.version, interval_seconds = excluded.interval_seconds, "
-                    "stopped_at = NULL, checked_at = excluded.checked_at",
+                    "stopped_at = NULL, checked_at = excluded.checked_at, "
+                    "cycle_started_at = excluded.cycle_started_at, "
+                    "last_cycle_seconds = excluded.last_cycle_seconds",
                     (component, device, bot, pid, _real(started_at, now), now, version,
-                     float(interval), now),
+                     float(interval), now, _optional(cycle_started_at),
+                     _optional(last_cycle_seconds)),
                 )
                 connection.execute(
                     f"DELETE FROM {TABLE} WHERE component = ? AND bot = ? AND pid IS NOT ? "
@@ -355,18 +424,21 @@ class HealthStore:
         started_at: float | None = None,
         version: str = "unknown",
         interval: float = BEAT_SECONDS,
+        busy: float = BUSY_SECONDS,
     ) -> None:
         """A failed check (an unreachable device or tunnel): recorded, never seen."""
         _check(component, device, bot, pid, version, interval, self.devices)
         now = float(self.clock())
         self._write(
-            f"INSERT INTO {TABLE} ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?) "
+            f"INSERT INTO {TABLE} ({_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL) "
             "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
             "started_at = excluded.started_at, version = excluded.version, "
             "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
             "checked_at = excluded.checked_at",
             (component, device, bot, pid, _real(started_at, now), version,
              float(interval), now),
+            busy,
         )
 
     def stop(self, component: str, device: str, *, bot: str = "", pid: int) -> None:
@@ -419,6 +491,10 @@ def _real(value: float | None, default: float) -> float:
     return float(default if value is None else value)
 
 
+def _optional(value: float | None) -> float | None:
+    return None if value is None else float(value)
+
+
 # Signals a heartbeat thread never takes, so the kernel delivers them to the
 # main thread: `orch wait` blocks SIGINT and SIGTERM there while it claims a
 # job (lib/wait.py), and a signal taken by an unblocked heartbeat thread
@@ -458,6 +534,9 @@ class _Loop:
 class Beater:
     """Heartbeats for one process: one row per device, every `interval`.
 
+    `cycle` (the poller's) returns (cycle_started_at, last_cycle_seconds),
+    written on each beat.
+
     Use as a context manager: the thread starts on entry; on exit it stops
     and the rows are marked stopped (`on_exit="stop"`) or removed
     (`"delete"`). A failed write logs one line naming the exception class,
@@ -477,6 +556,7 @@ class Beater:
         pid: int | None = None,
         version: str | None = None,
         log: Log = _stderr,
+        cycle: Cycle | None = None,
     ):
         if on_exit not in ("stop", "delete"):
             raise ValueError("on_exit must be stop or delete")
@@ -489,6 +569,7 @@ class Beater:
         self.pid = pid if pid is not None else os.getpid()
         self.version = version if version is not None else LOADED_VERSION
         self.log = log
+        self.cycle = cycle
         self.started_at = float(self.store.clock())
         self._lock = threading.Lock()
         self._closed = False
@@ -500,11 +581,14 @@ class Beater:
             if self._closed:
                 return
             try:
+                cycle_started_at, last_cycle_seconds = (
+                    self.cycle() if self.cycle is not None else (None, None))
                 for device in self.devices:
                     self.store.beat(
                         self.component, device, bot=self.bot, pid=self.pid,
                         started_at=self.started_at, version=self.version,
-                        interval=self.interval,
+                        interval=self.interval, cycle_started_at=cycle_started_at,
+                        last_cycle_seconds=last_cycle_seconds, busy=DB_BUSY_SECONDS,
                     )
                 self._failing = False
             except Exception as exc:  # a heartbeat never stops its component
@@ -639,7 +723,7 @@ class DeviceProber:
             reached = probe_device(self.transport, item.target)
             record = self.store.beat if reached else self.store.checked
             record(DEVICE_PROBE, item.device, pid=self.pid, started_at=self.started_at,
-                   version=self.version, interval=self.interval)
+                   version=self.version, interval=self.interval, busy=DB_BUSY_SECONDS)
             self._failing.discard(item.device)
         except Exception as exc:  # a probe never stops the poller
             if item.device not in self._failing:
@@ -717,7 +801,7 @@ class TunnelProber:
             seen = self.fetch(self.url, TUNNEL_TIMEOUT) == TUNNEL_SEEN
             record = self.store.beat if seen else self.store.checked
             record(TUNNEL, self.device, pid=self.pid, started_at=self.started_at,
-                   version=self.version, interval=self.interval)
+                   version=self.version, interval=self.interval, busy=DB_BUSY_SECONDS)
             self._failing = False
         except Exception as exc:  # a probe never stops the listener
             if not self._failing:
@@ -816,8 +900,10 @@ def poller_beats(
     transport: Transport | None = None,
     interval: float = BEAT_SECONDS,
     log: Log = _stderr,
+    cycle: Cycle | None = None,
 ) -> PollerBeats:
-    """The poller's beats for `db`, probing machines.yml's remote devices."""
+    """The poller's beats for `db`, probing machines.yml's remote devices;
+    `cycle` reports the poll cycle (`Beater`)."""
     machines = load_machines(machines_path)
     store = HealthStore(db, devices=known_devices(machines))
     if transport is None:
@@ -825,7 +911,7 @@ def poller_beats(
 
         transport = SshTransport()
     beater = Beater(db, POLLER, devices=[local_device(machines)], store=store,
-                    interval=interval, log=log)
+                    interval=interval, log=log, cycle=cycle)
     return PollerBeats(beater, DeviceProber(store, probe_targets(machines), transport, log=log))
 
 
@@ -884,6 +970,8 @@ class Heartbeat(NamedTuple):
     interval_seconds: float
     stopped_at: float | None
     checked_at: float | None
+    cycle_started_at: float | None = None
+    last_cycle_seconds: float | None = None
 
 
 def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
@@ -900,7 +988,12 @@ def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
         ).fetchone()
         if not exists:
             return ()
-        rows = connection.execute(f"SELECT {_COLUMNS} FROM {TABLE}").fetchall()
+        have = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+        columns = ", ".join(
+            name if name in have else f"NULL AS {name}"
+            for name in (part.strip() for part in _COLUMNS.split(","))
+        )
+        rows = connection.execute(f"SELECT {columns} FROM {TABLE}").fetchall()
     finally:
         connection.close()
     result = []
@@ -912,7 +1005,8 @@ def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
 
 
 def classify(row: Heartbeat, now: float) -> tuple[str, str]:
-    """(state, reason): up, stale or down by the age of the last beat."""
+    """(state, reason): up, stale or down by the age of the last beat; a
+    poller that beats while one cycle runs past SLOW_CYCLE_SECONDS is stale."""
     if row.last_seen is None:
         return DOWN, _never(row.component)
     if row.stopped_at is not None and row.stopped_at >= row.last_seen:
@@ -925,12 +1019,19 @@ def classify(row: Heartbeat, now: float) -> tuple[str, str]:
     elif age > STALE_BEATS * interval or failed:
         state = STALE
     else:
+        cycle = _cycle_seconds(row, now)
+        if row.component == POLLER and cycle is not None and cycle > SLOW_CYCLE_SECONDS:
+            return STALE, f"poller slow (cycle {int(cycle)}s)"
         return UP, ""
     if failed and row.component == DASHBOARD_PUSH:
         return state, f"push failing, last pushed {age_text(age)} ago"
     if failed:
         return state, f"unreachable, last reached {age_text(age)} ago"
     return state, f"no heartbeat for {age_text(age)}"
+
+
+def _cycle_seconds(row: Heartbeat, now: float) -> float | None:
+    return None if row.cycle_started_at is None else max(0.0, now - row.cycle_started_at)
 
 
 def _never(component: str) -> str:
@@ -953,6 +1054,8 @@ class Component:
     interval: float = BEAT_SECONDS
     configured: bool = True
     stale_code: bool = False
+    last_cycle_seconds: float | None = None
+    cycle_seconds: float | None = None
 
     @property
     def label(self) -> str:
@@ -1178,6 +1281,8 @@ def build_report(
             interval=row.interval_seconds,
             configured=registry.wants(row.component, row.device, row.bot),
             stale_code=_stale(row.component, row.version, checkout),
+            last_cycle_seconds=row.last_cycle_seconds,
+            cycle_seconds=_cycle_seconds(row, now),
         )
         key = (row.component, row.device, row.bot)
         if key not in best or _better(item, best[key]):
@@ -1428,7 +1533,10 @@ def render_lines(report: HealthReport, now: float) -> list[str]:
         header += f", {len(report.storage_alerts)} inode alert{'' if len(report.storage_alerts) == 1 else 's'}"
     lines = [f"Health ({header})"]
     for c in report.components:
-        reason = f" ({c.reason})" if c.reason else ""
+        notes = [c.reason] if c.reason else []
+        if c.last_cycle_seconds is not None:
+            notes.append(f"last cycle {int(c.last_cycle_seconds)}s")
+        reason = f" ({', '.join(notes)})" if notes else ""
         if not c.configured:
             reason += " (not configured)"
         if c.stale_code:
@@ -1486,6 +1594,8 @@ def report_json(report: HealthReport, now: float) -> dict:
                 "started_at": c.started_at,
                 "version": c.version,
                 "stale_code": c.stale_code,
+                "last_cycle_seconds": c.last_cycle_seconds,
+                "cycle_seconds": c.cycle_seconds,
                 "label": c.label,
                 "anchor": c.anchor,
             }

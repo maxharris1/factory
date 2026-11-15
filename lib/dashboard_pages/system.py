@@ -227,6 +227,7 @@ SCRIPT_COMPONENTS = r"""
       var st = HEALTH_STATE[c.state] || ['OTHER', 'muted'];
       add(cell, chip(st[0], st[1]));
       if (c.reason) add(cell, el('span', 'muted', ' ' + c.reason));
+      if (typeof c.last_cycle_seconds === 'number') add(cell, el('span', 'muted', ' last cycle ' + Math.floor(c.last_cycle_seconds) + 's'));
       if (c.configured === false) add(cell, el('span', 'muted', ' (not configured)'));
       add(tr, el('td', null, c.last_seen_et || 'never'));
       ticking(add(tr, el('td', 'num')), c.last_seen_age_seconds, '', '');
@@ -519,6 +520,8 @@ def _components(snapshot: dict) -> str:
     for row in rows:
         label, cls = _HEALTH_STATE.get(row["state"], ("OTHER", "muted"))
         reason = _span("muted", " " + row["reason"]) if row.get("reason") else ""
+        if row.get("last_cycle_seconds") is not None:
+            reason += _span("muted", f" last cycle {int(row['last_cycle_seconds'])}s")
         if row.get("configured") is False:
             reason += _span("muted", " (not configured)")
         body.append(
