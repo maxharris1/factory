@@ -45,6 +45,8 @@ review:
   verify: none
 ship: merge
 skills: []
+feeder:
+  max_holders_per_path: 1
 ---
 
 ## Context

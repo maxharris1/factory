@@ -53,6 +53,10 @@ still ship `enabled: false` until Max turns them on.
   a ticket (a `Conflicts with` edge still does), and an update from base that
   keeps both sides of a conflict hunk in such a file, unchanged and one after
   the other, still carries the approval. Code paths are never affected.
+- Up to `factory.md` `feeder.max_holders_per_path` tickets (default 2, issue
+  #269) may hold one `Touches:` path at once; the serial merge and the base
+  update resolve the overlap. Paths in `feeder.exclusive_paths` and
+  `Conflicts with` edges keep one holder.
   Hooks never see `kind=go`, `kind=plan` or `kind=ready`.
 
 ## GitHub adapter
@@ -529,7 +533,12 @@ priority Urgent..Low as tiers 0-3). Inside a tier: urgent (an `urgent`
 label or Linear priority Urgent), then `bug`, then the ticket that unblocks
 the most open intake tickets (through `Blocked by:` lines, plus the
 unstarted tickets that share a `Touches:` path with it; `critical_path_order:
-false` turns this off), then oldest. The feeder also records those marks in
+false` turns this off), then oldest. A ticket waits while its project's
+`feeder.max_holders_per_path` tickets in flight (default 2) already hold one
+of its `Touches:` paths, naming them (`waiting on file lib/x.py held by #1,
+#2`); a path in `feeder.exclusive_paths` and a `Conflicts with` edge keep
+one holder, and a ticket fed onto a held path logs `feeder: owner/app#3
+shares lib/x.py with #1`. The feeder also records those marks in
 `ticket_priority`, refreshed every poll (a label added after the feed still
 moves the queued job), which the queue's claim order reads (tier, then
 urgent, then a resumed paused step, then bug, then unblocks, then oldest).

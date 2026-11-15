@@ -58,9 +58,14 @@ than it has free slots.
 
 Gates (#156, lib/feeder_gates.py): a ticket not started yet is fed only
 once every ticket or PR its `Blocked by` or `Depends on` lines (and, on
-Linear, its blocks relations) name is done, and nothing in flight shares a
-`Touches:` path or a `Conflicts with` edge with it (a `Touches:` path in the
-project's `shared_paths` never collides). In flight is a fed ticket whose PR is still
+Linear, its blocks relations) name is done, fewer than the project's
+factory.md `feeder.max_holders_per_path` tickets in flight (default 2, #269)
+hold each of its `Touches:` paths, and nothing in flight shares a
+`Conflicts with` edge with it. A `Touches:` path in the project's
+`shared_paths` never collides; one in its `feeder.exclusive_paths` keeps one
+holder. A ticket fed onto a path another ticket holds logs
+`feeder: owner/app#3 shares lib/x.py with #1`, and the serial merge plus the
+base update resolve the overlap. In flight is a fed ticket whose PR is still
 open, or one selected earlier in this poll. A ticket that waits is
 `waiting-blocked` with its reason and takes no room; it is re-checked every
 poll. Blocker and holder statuses come from one batched, cached read per
@@ -112,16 +117,18 @@ from lib.feeder_gates import (
     ATTENTION_REASONS,
     GateLines,
     Holds,
+    PathPolicy,
     Progress,
     Ref,
     RefStatus,
     Wait,
     blocker_waits,
     github_ref,
+    labels,
     linear_status,
     parse_gate_lines,
+    path_matches,
     paths_collide,
-    shared_path_matches,
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
@@ -725,6 +732,7 @@ class Feeder:
                 waiting += 1
                 continue
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
+            sharing = holds.co_holders(candidate.ref, candidate.lines)
             holds.take(candidate.ref, (), _holding(candidate.lines, candidate.ref in capped))
             try:
                 ref = self._feed(candidate, now, holds)
@@ -752,6 +760,12 @@ class Feeder:
                 continue
             fed.append(ref)
             self.log(f"feeder: fed {candidate.issue.repo}#{candidate.issue.key} as {ref.ticket_id}")
+            if sharing:
+                shares = "; ".join(
+                    f"{path} with {labels(holders, candidate.ref.repo)}"
+                    for path, holders in sharing.items()
+                )
+                self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} shares {shares}")
         return FeedReport(
             fed=tuple(fed),
             eligible=len(candidates),
@@ -910,8 +924,13 @@ class Feeder:
         for blocker, pull in via.items():
             if _progress(statuses, pull) is Progress.DONE:
                 statuses[blocker] = statuses[pull]
-        holds = Holds(shared={
-            c.ref.repo: c.context.config.shared_paths for c in candidates
+        holds = Holds(policies={
+            c.ref.repo: PathPolicy(
+                shared=c.context.config.shared_paths,
+                exclusive=c.context.config.exclusive_paths,
+                max_holders=c.context.config.max_holders_per_path,
+            )
+            for c in candidates
         })
         released: list[Ref] = []
         capped = self._capped({row.ticket for row in holders.values() if row.ticket})
@@ -936,7 +955,8 @@ class Feeder:
                 holds.take(ref, (), GateLines())
         self._release(released)
         self._flip_capped(flips)
-        unblocks = critical_path_counts(candidates, gated, {c.ref for c in unstarted}, pull_of, holds.shared)
+        shared = {repo: policy.shared for repo, policy in holds.policies.items()}
+        unblocks = critical_path_counts(candidates, gated, {c.ref for c in unstarted}, pull_of, shared)
         return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
@@ -1406,9 +1426,9 @@ def _paths_meet(first: Collection[str], second: Collection[str], shared: Collect
     return any(
         paths_collide(path, other)
         for path in first
-        if not shared_path_matches(shared, path)
+        if not path_matches(shared, path)
         for other in second
-        if not shared_path_matches(shared, other)
+        if not path_matches(shared, other)
     )
 
 
