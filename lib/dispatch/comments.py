@@ -13,6 +13,7 @@ from lib.dispatch.helpers import (
     _holds,
     _matching_head,
     _redrive_eligible,
+    _round_number,
 )
 from lib.dispatch.types import (
     Comment,
@@ -224,6 +225,7 @@ class CommentsMixin:
                 ):
                     self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
+        self._remember_verdicts(ticket, comments)
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
         if comment.edited_at is not None:
@@ -345,6 +347,35 @@ class CommentsMixin:
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
+            )
+
+    def _remember_verdicts(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        rows = []
+        for comment in comments:
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if fields.get("kind") == "verdict" and self._trusted(
+                ticket, comment, fields, reviewer, role="reviewer"
+            ):
+                rows.append(
+                    (
+                        fields.get("head") or "",
+                        _round_number(fields.get("round")),
+                        ticket.repo.lower(),
+                        ticket.ticket_id,
+                        comment.id,
+                    )
+                )
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                UPDATE handled_comments SET verdict_head = ?, verdict_round = ?
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ? AND verdict_head IS NULL
+                """,
+                rows,
             )
 
     def _remember_links(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:

@@ -653,3 +653,30 @@ def test_a_reposted_red_ready_after_two_returns_to_an_older_head_queues_no_extra
         board.poll()
         assert len(board.jobs("fix")) == fixes, f"repost {repost} queued another fix"
         assert board.queue.claim("claude") is None
+
+
+def test_a_red_ready_back_at_an_older_head_queues_a_ci_fix_while_the_handled_verdict_is_unseen(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    assert board.outcome("approve-older") == "approve-ci-red-fix"
+    board.finish("claude")
+
+    pr.push(older, ci="failure")
+    handled_verdict = next(item for item in pr.comments if item.id == "approve-older")
+    pr.comments.remove(handled_verdict)
+    board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+    pr.comments.append(handled_verdict)
+    board.poll()
+
+    fix = board.queue.claim("claude")
+    assert fix is not None, "the ready back at the older head left no runnable CI fix"
+    assert fix.request.head == older
+    assert CI_LOG in json.loads(fix.request.detail)["instruction"]

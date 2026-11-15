@@ -102,6 +102,11 @@ class SchemaMixin:
             )
             _add_missing_columns(
                 connection,
+                "handled_comments",
+                {"verdict_head": "TEXT", "verdict_round": "INTEGER"},
+            )
+            _add_missing_columns(
+                connection,
                 "ticket_state",
                 {
                     "stuck_wake_job_id": "TEXT",

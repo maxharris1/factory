@@ -539,36 +539,22 @@ class ReadyMixin:
     def _verdict_handled(
         self, ticket: TrackedTicket, head: str, review_round: int | None, ready_id: str
     ) -> bool:
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
-        ready = next((item for item in ticket.comments if item.id == ready_id), None)
+        self._remember_verdicts(ticket, ticket.comments)
         with self._connect() as connection:
-            handled = {
-                str(row["comment_id"])
-                for row in connection.execute(
-                    """
-                    SELECT comment_id FROM handled_comments
-                    WHERE repo = ? AND ticket_id = ? AND outcome != 'rejected-edited'
-                    """,
-                    (ticket.repo.lower(), ticket.ticket_id),
-                )
-            }
-        for item in ticket.comments:
-            if item.id not in handled or (
-                ready is not None and _comment_order(item) <= _comment_order(ready)
-            ):
-                continue
-            try:
-                fields = parse_comment(item.body).as_dict()
-            except HandoffError:
-                continue
-            if (
-                fields.get("kind") == "verdict"
-                and _round_number(fields.get("round")) == review_round
-                and _matching_head(fields.get("head") or "", head) is not None
-                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
-            ):
-                return True
-        return False
+            rows = connection.execute(
+                """
+                SELECT verdict.verdict_head FROM handled_comments AS verdict
+                WHERE verdict.repo = ? AND verdict.ticket_id = ?
+                  AND verdict.outcome != 'rejected-edited' AND verdict.verdict_round = ?
+                  AND verdict.rowid > COALESCE((
+                      SELECT ready.rowid FROM handled_comments AS ready
+                      WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id
+                        AND ready.comment_id = ?
+                  ), 0)
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, review_round, ready_id),
+            ).fetchall()
+        return any(_matching_head(str(row["verdict_head"]), head) is not None for row in rows)
 
     def _flag_ready_after_cap(
         self,
