@@ -21,6 +21,17 @@ The whole tree is checked, not a list of named files: the routers reach
 other skills by reference (interrogate runs arena; figure-it-out runs
 show-me-your-work and architect).
 
+On a remote device the same ssh call first reads the checkout's HEAD
+(#297). When it is not the box checkout's HEAD (the commit whose
+skills.lock the waiter checks against), or the checkout does not exist, the
+start fails with CheckoutLagging (`preflight-lagging: ...` or
+`preflight-no-checkout: ...`) before any hash is compared, so the error names
+the cause. The waiter requeues such a job without charging a round and
+marks the target lagging, so placement skips that device until
+`orch heal devices` brings it up to date. The box is never refused for its
+own lag (its health entry shows it), and the check is skipped when the box
+HEAD cannot be read.
+
 On the box the files are read in place. On a remote device one ssh call
 sends the paths on stdin (relative to $HOME, or absolute) and reads back one
 `<sha256> <path>` line per file, or `- <path>` for a file that is not there.
@@ -41,11 +52,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib.device_monitor import remote_target
+from lib.health import checkout_sha
 from lib.device_pool import Placement
 from lib.machines_yml import Device
 from lib.pstack_pin import DIR_HARNESS, FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job, SQLiteJobQueue
-from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, ssh_argv
+from lib.remote import SSH_UNREACHABLE, CaptureTransport, RemoteTarget, SshTransport, ssh_argv
 from lib.wait import OWNING_BOTS, retry_locked
 
 DETAIL_KEY = "skill_preflight"
@@ -55,11 +67,20 @@ ABSENT = "-"
 _SKILLS_DIR = {harness: rel for rel, harness in DIR_HARNESS.items()}
 
 HOME_PREFIX = "~/"
+HEAD_MARK = "@head"
 
 # Reads one path per line on stdin, absolute or relative to $HOME, and prints
 # `<sha256> <path>`, or `- <path>` when the path is not a readable regular
 # file (a symlink to one counts: local installs link).
+# $1 is the checkout. The first line printed is `@head <sha> <branch>`
+# (`-` for no sha or a detached HEAD), or `@head missing` when $1 is not a
+# directory.
 _SCRIPT = (
+    'c=$1; if [ ! -d "$c" ]; then echo "@head missing"; '
+    "elif h=$(git -C \"$c\" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
+    'b=$(git -C "$c" symbolic-ref -q --short HEAD 2>/dev/null) || b=-; '
+    'echo "@head $h $b"; '
+    'else echo "@head - -"; fi; '
     "if command -v sha256sum >/dev/null 2>&1; then s=sha256sum; "
     "elif command -v shasum >/dev/null 2>&1; then s='shasum -a 256'; "
     "else echo 'orch-skills: no sha256sum or shasum' >&2; exit 4; fi; "
@@ -74,6 +95,10 @@ _SCRIPT = (
 
 class PreflightError(ValueError):
     """The pinned skills are not all on the placed device. One line."""
+
+
+class CheckoutLagging(PreflightError):
+    """The placed device's factory checkout is not the box's commit, or is missing."""
 
 
 @dataclass(frozen=True)
@@ -166,30 +191,78 @@ def local_hashes(home: Path, paths: list[str]) -> dict[str, str]:
     return found
 
 
-def remote_script() -> str:
-    return f"exec sh -c {shlex.quote(_SCRIPT)} orch-skills"
+def remote_script(checkout: str) -> str:
+    return f"exec sh -c {shlex.quote(_SCRIPT)} orch-skills {shlex.quote(checkout)}"
 
 
-def remote_hashes(
-    transport: CaptureTransport, device: Device, placement: Placement, paths: list[str]
-) -> dict[str, str]:
-    """One ssh round trip: the hash of each path on the device, absent ones left out."""
-    target = remote_target(device, placement.harness, placement.job_id)
-    if target is None:
-        raise PreflightError(f"preflight: {device.name} has no usable ssh_alias or workdir_root")
+@dataclass(frozen=True)
+class Head:
+    """The checkout's HEAD as the device reported it; sha None when it has none."""
+
+    exists: bool
+    sha: str | None
+    branch: str | None
+
+
+@dataclass(frozen=True)
+class Seen:
+    head: Head
+    found: dict[str, str]
+
+
+def remote_seen(
+    transport: CaptureTransport, target: RemoteTarget, checkout: str, paths: list[str]
+) -> Seen | None:
+    """One ssh round trip: the checkout's HEAD and the hash of each path. None when unreachable."""
     by_wire = {_wire(key): key for key in paths}
     stdin = "".join(f"{rel}\n" for rel in by_wire).encode("utf-8")
-    result = transport.call(ssh_argv(target, remote_script()), timeout=TIMEOUT_SECONDS, input=stdin)
+    result = transport.call(
+        ssh_argv(target, remote_script(checkout)), timeout=TIMEOUT_SECONDS, input=stdin
+    )
     if result.code == SSH_UNREACHABLE:
-        raise PreflightError(f"preflight-unreachable: {device.name} ({target.alias})")
+        return None
     if result.code != 0:
-        raise PreflightError(f"preflight-failed: {device.name} exited {result.code}")
+        raise PreflightError(f"preflight-failed: {target.device} exited {result.code}")
+    head = Head(exists=False, sha=None, branch=None)
     found: dict[str, str] = {}
     for line in result.stdout.splitlines():
+        if line.startswith(f"{HEAD_MARK} "):
+            fields = line.split()[1:]
+            if fields == ["missing"]:
+                continue
+            sha = fields[0] if fields and fields[0] != ABSENT else None
+            branch = fields[1] if len(fields) > 1 and fields[1] != ABSENT else None
+            head = Head(exists=True, sha=sha, branch=branch)
+            continue
         digest, _, rel = line.partition(" ")
         if rel in by_wire and digest != ABSENT:
             found[by_wire[rel]] = digest
-    return found
+    return Seen(head, found)
+
+
+def remote_hashes(
+    transport: CaptureTransport, device: Device, placement: Placement, paths: list[str],
+    checkout: str,
+) -> Seen:
+    target = remote_target(device, placement.harness, placement.job_id)
+    if target is None:
+        raise PreflightError(f"preflight: {device.name} has no usable ssh_alias or workdir_root")
+    seen = remote_seen(transport, target, checkout, paths)
+    if seen is None:
+        raise PreflightError(f"preflight-unreachable: {device.name} ({target.alias})")
+    return seen
+
+
+def lag(device: str, bot: str, checkout: str, head: Head, box: str | None) -> str | None:
+    """Why the checkout cannot run a job for the box's commit, or None."""
+    if box is None:
+        return None
+    if not head.exists:
+        return f"preflight-no-checkout: {device} {bot} {checkout}"
+    if head.sha != box:
+        at = head.sha[:12] if head.sha else "no commit"
+        return f"preflight-lagging: {device} {bot} {checkout} at {at}, box at {box[:12]}"
+    return None
 
 
 def compare(pinned: dict[str, str], found: dict[str, str]) -> str | None:
@@ -226,7 +299,11 @@ def check(
         found = local_hashes(home, paths)
     else:
         name = device.name
-        found = remote_hashes(transport, device, placement, paths)
+        seen = remote_hashes(transport, device, placement, paths, checkout)
+        lagging = lag(name, bot, checkout, seen.head, checkout_sha(root))
+        if lagging is not None:
+            raise CheckoutLagging(lagging)
+        found = seen.found
     return Report(name, skills, checkout, pinned.commit, found, compare(expected, found))
 
 
