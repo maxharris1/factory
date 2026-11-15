@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.device_pool import free_slots, used_slots
+from lib.device_pool import free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _ANSWERS,
@@ -107,11 +107,12 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
+        blocked = sync_blocks(self.queue)
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
-            and free_slots(config, harness, used) == 0
+            and free_slots(config, harness, used, blocked) == 0
         )
 
     def _restart_queue_wait(self, job: Job, now: float) -> None:
