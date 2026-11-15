@@ -13,8 +13,8 @@ config (lib/orch_yml.py Intake). Nothing here names a project, a label or a
 state. Trusted appliers default to the keys of `trusted_logins` (GitHub) or
 `trusted_linear_users` (Linear).
 
-For each eligible ticket, in priority order (urgent, then bug, then oldest)
-and only while its builder harness has room, the feeder:
+For each eligible ticket, in priority order and only while its builder
+harness has room, the feeder:
 
 1. opens a branch from the base branch with an empty start commit (a GitHub
    issue gets `factory/issue-<n>`; a Linear issue uses its own
@@ -57,9 +57,15 @@ A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
 its `Conflicts with` edges while it waits for a go, and takes its paths back
 on the poll after the round resumes (#270).
 
+Priority order (#258, lib/queue.py rank): a ticket's tier first (the first of
+the project's `priority_labels` it carries, or its Linear priority when the
+project sets `priority_from_linear`; no tier sorts after every tier), then
+urgent, then bug, then how many of this poll's candidates it unblocks
+(critical_path_counts; 0 with `critical_path_order: false`), then the oldest.
+
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
-the feeder has a ticket id for, so an urgent or bug label added after the
-feed still moves its queued job.
+the feeder has a ticket id for, so a label or blocker change after the feed
+still moves its queued job.
 
 The feeder starts no harness and runs no job. It writes only through the
 GitHub and Linear clients it is given; tests pass fakes.

@@ -12,20 +12,24 @@ from pathlib import Path
 
 import pytest
 
+from lib.dashboard import collect_snapshot, render_pages
 from lib.feeder import ensure_tables, feeder_items
 from lib.orch_yml import load_orch_yml
 from lib.queue import JobRequest, SQLiteJobQueue, claim_order
+from lib.status import SQLiteStatusReader, build_status, render
 from tests.test_feeder import (
     GITHUB_ORCH,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
     FakeLinear,
+    dispatcher_for,
     issue,
     linear_issue,
     make_feeder,
     orch_config,
     rows,
 )
+from tests.test_dashboard_layout import _no_script, _run_page, _section, needs_node
 from tests.test_feeder_gates import HOME, MERGED, OPEN, OPEN_PULL, fed_heads, ref, states
 
 TIERS = "      priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]\n"
@@ -185,6 +189,48 @@ def test_tickets_waiting_on_a_path_count_toward_its_holder(tmp_path: Path) -> No
     assert unblocks == {"1": 0, "2": 2, "3": 1, "4": 1, "5": 1}
     _enqueue(queue, now, pull["1"], pull["2"])
     assert _claim_tickets(queue) == [pull["2"], pull["1"]]
+
+
+def _fed_tier_two(tmp_path: Path) -> Path:
+    """#1 (priority:p2) fed and queued as PR 501; #2 (no tier) waits for room."""
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=1, now=now)
+    dispatcher_for(tmp_path, queue)
+    github.issues[HOME] = [issue(1, labels=(READY, "priority:p2"), created_at=1.0), issue(2, created_at=2.0)]
+    feeder.feed_once()
+    _enqueue(queue, now, "501")
+    return tmp_path / "orch.db"
+
+
+def test_orch_status_prints_the_tier_before_the_state(tmp_path: Path) -> None:
+    reader = SQLiteStatusReader(_fed_tier_two(tmp_path))
+    text = render(build_status(reader, reader, clock=lambda: 20_000.0,
+                               feeder=reader.feeder(), attention=reader.attention()))
+    assert "  owner/app#1 tier 2 fed -> PR #501\n" in text
+    assert "  owner/app#2 waiting for capacity\n" in text
+
+
+CHIP = '<span class="chip accent">tier 2</span>'
+
+
+def test_the_dashboard_shows_the_tier_in_the_feeder_and_the_queue(tmp_path: Path) -> None:
+    snapshot = collect_snapshot(_fed_tier_two(tmp_path), tmp_path / "none.log", now=20_000.0)
+    assert [(item["issue"], item["tier"]) for item in snapshot["feeder"]["items"]] == [("1", 2), ("2", None)]
+    assert [(row["ticket_id"], row["tier"]) for row in snapshot["queued"]] == [("501", 2)]
+    index = _no_script(render_pages(snapshot)["index.html"])
+    assert _section(index, "feeder").count("tier") == 1
+    assert f"<li>owner/app#1 fed → PR #501 {CHIP}</li>" in _section(index, "feeder")
+    assert _section(index, "queue").count(CHIP) == 1
+
+
+@needs_node
+def test_the_script_draws_the_same_tier_chips(tmp_path: Path) -> None:
+    snapshot = collect_snapshot(_fed_tier_two(tmp_path), tmp_path / "none.log", now=20_000.0)
+    out = _run_page(tmp_path, snapshot, "main", ["kpis", "queue"])
+    server = _section(_no_script(render_pages(snapshot)["index.html"]), "feeder")
+    assert out["html"]["kpis"].endswith(server)
+    assert out["html"]["queue"].count(CHIP) == 1
+
 
 # The two tables exactly as they were before issue #258.
 OLD_PRIORITY = """

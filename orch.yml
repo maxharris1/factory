@@ -68,6 +68,12 @@ approver_logins:
 # a Linear project names the workflow state a trusted Linear user moves the
 # issue to. trusted: defaults to the trusted_logins (GitHub) or
 # trusted_linear_users (Linear) keys. A project without intake is not fed.
+# Build order (issue #258): priority_labels is an ordered label list; a
+# ticket's tier is the first one it carries, and a ticket with none sorts
+# after every tier. priority_from_linear: true (Linear projects) maps Linear
+# priority Urgent..Low to tiers 0-3. Inside a tier: urgent, then bug, then
+# the ticket that unblocks the most open intake tickets (critical_path_order,
+# default true), then the oldest.
 projects:
   - repo: aut0-code/aut0
     factory_ref: dev
@@ -92,6 +98,7 @@ projects:
     ready_starts_review: true
     intake:
       label: factory:ready
+      priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]
 # Host-specific values (the Linear project id, trusted_linear_users,
 # linear_webhook, a device's slots) go in the gitignored orch.local.yml
 # beside this file, merged in at load (config/orch.local.example.yml).

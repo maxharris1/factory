@@ -2,11 +2,12 @@
 
 A slot is one row in `device_slots`, in the dispatcher database next to
 `jobs`. `claim` moves the first queued job for a harness, in the queue's
-claim order (lib/queue.py claim_order: urgent, a resumed paused step, bug,
-then oldest), to running and holds a slot for it on the least-loaded
-device (lowest utilization, slots held over slot_max; a tie goes to a remote
-before the local box, remotes in machines.yml order; issue #223) that is
-schedulable and lists that harness (issue #85). Both writes happen
+claim order (lib/queue.py claim_order: priority tier, then urgent, a resumed
+paused step, bug, the ticket that unblocks more, then oldest), to running
+and holds a slot for it on the least-loaded device (lowest utilization,
+slots held over slot_max; a tie goes to a remote before the local box,
+remotes in machines.yml order; issue #223) that is schedulable and lists
+that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
