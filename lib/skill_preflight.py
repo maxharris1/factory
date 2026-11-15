@@ -28,9 +28,12 @@ start fails with CheckoutLagging (`preflight-lagging: ...` or
 `preflight-no-checkout: ...`) before any hash is compared, so the error names
 the cause. The waiter requeues such a job without charging a round and
 marks the target lagging, so placement skips that device until
-`orch heal devices` brings it up to date. The box is never refused for its
-own lag (its health entry shows it), and the check is skipped when the box
-HEAD cannot be read.
+`orch heal devices` brings it up to date. The check is skipped when the box
+HEAD cannot be read. On the box the checkout's HEAD is compared with its
+own fetched origin/main instead: a box HEAD behind it (self-deploy has not
+moved it yet, say a job was running) fails the same way, until it deploys.
+A box HEAD with commits origin/main lacks is not refused here; self-deploy
+escalates it and health flags it.
 
 On the box the files are read in place. On a remote device one ssh call
 sends the paths on stdin (relative to $HOME, or absolute) and reads back one
@@ -48,6 +51,7 @@ import hashlib
 import json
 import shlex
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -262,6 +266,24 @@ def lag(device: str, bot: str, checkout: str, head: Head, box: str | None) -> st
     return None
 
 
+def box_behind_origin(device: str, bot: str, checkout: str) -> str | None:
+    head = checkout_sha(Path(checkout))
+    upstream = checkout_sha(Path(checkout), "refs/remotes/origin/main")
+    if head is None or upstream is None or head == upstream:
+        return None
+    try:
+        behind = subprocess.run(
+            ["git", "-C", checkout, "merge-base", "--is-ancestor", head, upstream],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=TIMEOUT_SECONDS, check=False,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not behind:
+        return None
+    return (f"preflight-lagging: {device} {bot} {checkout} at {head[:12]}, "
+            f"origin/main at {upstream[:12]}")
+
+
 def compare(pinned: dict[str, str], found: dict[str, str]) -> str | None:
     for path in sorted(pinned):
         if path not in found:
@@ -293,6 +315,9 @@ def check(
     paths = sorted(expected)
     if device is None or device.local or placement is None:
         name = device.name if device is not None else "box"
+        lagging = box_behind_origin(name, bot, checkout)
+        if lagging is not None:
+            raise CheckoutLagging(lagging)
         found = local_hashes(home, paths)
     else:
         name = device.name

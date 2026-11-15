@@ -598,3 +598,37 @@ def test_a_remote_checkout_on_the_box_commit_starts(
     assert started == job_id
     assert sync_rows(device.db) == []
     assert len(device.ssh.calls()) == 1
+
+
+def test_a_box_checkout_behind_its_origin_main_requeues_without_a_round_until_it_deploys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=False)
+    install(device.home)
+    deploy(lock_root)
+    head = commit_checkout(lock_root)
+    (lock_root / "later").write_text("merged\n", encoding="utf-8")
+    git = ["git", "-C", str(lock_root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "later"], check=True)
+    subprocess.run([*git, "commit", "-qm", "merged"], check=True)
+    later = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True,
+                           text=True).stdout.strip()
+    subprocess.run([*git, "update-ref", "refs/remotes/origin/main", later], check=True)
+    subprocess.run([*git, "reset", "-q", "--hard", head], check=True)
+
+    job_id, started = device.run_one()
+
+    assert started is None
+    assert device.spawn.calls == []
+    assert state(device.db, job_id) == "queued"
+    error = (f"preflight-lagging: box claude-bot {lock_root.resolve()} at {head[:12]}, "
+             f"origin/main at {later[:12]}")
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
+    assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
+    assert any("requeued, no round charged" in line for line in device.log)
+
+    subprocess.run([*git, "reset", "-q", "--hard", later], check=True)
+    with sqlite3.connect(device.db) as connection:
+        device_sync.clear(connection, "box")
+
+    assert device.waiter.step() == job_id

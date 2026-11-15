@@ -12,9 +12,10 @@ runs as the owning bot's own user and login, starts the job itself:
 * before anything starts it checks every pinned skill file on the placed
   device against skills/skills.lock (lib/skill_preflight.py), and a missing
   or changed file fails the job. A remote factory checkout that is not on
-  the box's commit, or missing (#297), instead marks that target lagging in
-  device_sync and requeues the job with no round charged (a free requeue
-  from the shared budget, then T6), so it goes to an up-to-date device;
+  the box's commit, or missing, or a box checkout behind its fetched
+  origin/main (#297), instead marks that target lagging in device_sync and
+  requeues the job with no round charged (a free requeue from the shared
+  budget, then T6), so it goes to an up-to-date device;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -698,7 +699,10 @@ class Waiter:
     def _requeue_lagging(
         self, job: Job, placement: Placement | None, checkout: str | None, reason: str, label: str
     ) -> None:
-        assert placement is not None and checkout is not None
+        if placement is None or checkout is None:
+            self.log(f"{label}: not started: {reason}; failed it for T6")
+            self._fail(job)
+            return
         claimer, _ = self._claimer
 
         def write() -> tuple[str, str] | None:
