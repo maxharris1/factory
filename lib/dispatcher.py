@@ -10,14 +10,14 @@ import time
 import traceback
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
 from lib import attention, project_rules
 from lib.device_pool import free_slots, used_slots
-from lib.factory_md import FactoryConfig
+from lib.factory_md import FactoryConfig, family_findings
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.hold import HoldDecision, LabelEvent, decide
@@ -166,6 +166,9 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #206: factory.md's config when a go routed this ticket to other
+    # harnesses; factory then holds the routed pair.
+    factory_md: FactoryConfig | None = None
     # Issue #115: the source issue (`#115`, or a Linear key) and the open
     # PR's title, so the poller can prefix a title that lacks it.
     source_issue: str | None = None
@@ -300,6 +303,14 @@ class RetryableStateError(RuntimeError):
 
 class RetryableShipError(RetryableStateError):
     pass
+
+
+class RouteError(RuntimeError):
+    """A ticket's restored routing fails factory.md's cross-family rule."""
+
+    def __init__(self, message: str, source_comment_id: str):
+        super().__init__(message)
+        self.source_comment_id = source_comment_id
 
 
 class ShipError(RuntimeError):
@@ -969,6 +980,14 @@ class Dispatcher:
         return prior is None or prior["workflow_state"] != "merged"
 
     def process(self, ticket: TrackedTicket) -> None:
+        try:
+            ticket = self._routed(ticket)
+        except RouteError as error:
+            if ticket.closed and self._watched(ticket):
+                self._abandon_closed(ticket)
+            else:
+                self._reject_route(ticket, error)
+            return
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         try:
             self._title_pull(ticket)
@@ -1833,8 +1852,13 @@ class Dispatcher:
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
+            routed = _route_go(ticket, fields)
+            if routed is None:
+                return True, "rejected-go-same-family"
+            ticket = routed
             resumed = self._resume_after_cap(ticket, comment)
             if resumed is not None:
+                self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed
         if not trusted:
             return True, "rejected-go-author"
@@ -1898,6 +1922,7 @@ class Dispatcher:
         )
         if job.request.source_comment_id != comment.id:
             return True, f"deduped-{action}"
+        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         self._set_workflow_state(ticket, state)
         return True, f"answered-{action}" if answered else f"queued-{action}"
 
@@ -2238,7 +2263,11 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        builder_harness = self._job_builder_harness(ticket)
+        builder_harness = (
+            ticket.factory.builder_harness
+            if ticket.factory_md is not None
+            else self._job_builder_harness(ticket)
+        )
         if builder_harness is None and ticket.ready_starts_review:
             # The project builds its PRs outside the queue (orch.yml
             # projects[].ready_starts_review): factory.md's builder, trusted
@@ -3993,6 +4022,7 @@ class Dispatcher:
                   AND action IN (
                       'plan', 'build', 'review', 'fix', 'update-from-main', 'clarify'
                   )
+                  AND attempt = 1
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
@@ -4081,9 +4111,10 @@ class Dispatcher:
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
         if tracker is None:
             return None
-        return self._observed(
+        fresh = self._observed(
             self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
         )
+        return None if fresh is None else self._routed(fresh)
 
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         """Every read outside the poll's snapshot passes here: one showing
@@ -5213,6 +5244,37 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, state),
             )
 
+    def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
+        """The ticket with the builder and reviewer its latest plan, build or
+        fix step was routed to (issue #206), or as read when that step names
+        no routing. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
+        factory.md model hints, fails the cross-family rule."""
+        if ticket.factory_md is not None:
+            return ticket
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT detail, source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND action IN ('plan', 'build', 'fix') AND attempt = 1
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        routing = _detail_routing(None if row is None else row["detail"])
+        if routing is None:
+            return ticket
+        routed = _route(ticket, *routing)
+        errors = _family_errors(routed.factory)
+        if errors:
+            raise RouteError(
+                f"{ticket.repo}#{ticket.ticket_id} routing "
+                f"{routing[0]} / {routing[1]}: {'; '.join(errors)}",
+                str(row["source_comment_id"]),
+            )
+        return routed
+
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -5220,6 +5282,7 @@ class Dispatcher:
                 SELECT recipient FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('plan', 'build', 'fix', 'update-from-main')
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -5235,6 +5298,7 @@ class Dispatcher:
                 """
                 SELECT recipient, generation FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'plan'
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -5580,6 +5644,39 @@ class Dispatcher:
             self._record_job_event(connection, job, "retry-skipped", detail, now)
             connection.commit()
         self._log_job_event(job, "retry-skipped", detail)
+
+    def _reject_route(self, ticket: TrackedTicket, error: RouteError) -> None:
+        """A restored same-family pair (#206): the ticket goes stuck and no
+        job queued under that pair can be claimed."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._set_stuck_in_transaction(
+                connection,
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                source_comment_id=error.source_comment_id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                reason="route-same-family",
+            )
+            for job in connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND recipient != 'grok'
+                """,
+                key,
+            ).fetchall():
+                self.queue.cancel(
+                    str(job["id"]), "route-same-family", connection=connection
+                )
+            self._ensure_stuck_wake_in_transaction(
+                connection,
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                detail=str(error),
+            )
+            connection.commit()
 
     def _mark_stuck_and_wake(
         self,
@@ -5939,6 +6036,11 @@ class Dispatcher:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if ticket.factory_md is not None:
+            context["routing"] = {
+                "builder": ticket.factory.builder_harness,
+                "reviewer": ticket.factory.reviewer_harness,
+            }
         if kind is not None:
             context["kind"] = kind
         if resume:
@@ -6824,7 +6926,10 @@ class ReviewShipper:
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
         self.dispatcher._observed(found[0])
-        return found[0]
+        try:
+            return self.dispatcher._routed(found[0])
+        except RouteError as error:
+            raise ShipError(str(error)) from error
 
 
 class PollLoop:
@@ -7014,6 +7119,70 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def _detail_routing(detail: str | None) -> tuple[str, str] | None:
+    """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    routing = context.get("routing") if isinstance(context, dict) else None
+    if not isinstance(routing, dict):
+        return None
+    builder, reviewer = routing.get("builder"), routing.get("reviewer")
+    if builder not in HARNESSES or reviewer not in HARNESSES:
+        return None
+    return builder, reviewer
+
+
+def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
+    """ticket with factory.md's harnesses swapped for builder and reviewer.
+    A model hint is kept only for a side whose harness stays factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    return replace(
+        ticket,
+        factory_md=base,
+        factory=replace(
+            base,
+            builder_harness=builder,
+            builder_model=base.builder_model if builder == base.builder_harness else None,
+            reviewer_harness=reviewer,
+            reviewer_model=(
+                base.reviewer_model if reviewer == base.reviewer_harness else None
+            ),
+        ),
+    )
+
+
+def _route_go(ticket: TrackedTicket, fields: Mapping[str, str]) -> TrackedTicket | None:
+    """The ticket routed as a go names it (#206), or None when the pair
+    fails factory.md's cross-family rule. A go naming neither harness
+    routes back to factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    if "builder" not in fields and "reviewer" not in fields:
+        return replace(ticket, factory=base, factory_md=None)
+    routed = _route(
+        ticket,
+        fields.get("builder", base.builder_harness),
+        fields.get("reviewer", base.reviewer_harness),
+    )
+    return None if _family_errors(routed.factory) else routed
+
+
+def _family_errors(config: FactoryConfig) -> list[str]:
+    return [
+        finding.message
+        for finding in family_findings(
+            config.builder_harness,
+            config.builder_model,
+            config.reviewer_harness,
+            config.reviewer_model,
+        )
+        if finding.severity == "error"
+    ]
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

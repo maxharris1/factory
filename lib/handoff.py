@@ -2,7 +2,8 @@
 
 The header is one HTML comment. Canonical key order is KEYS. v1 keys are
 the example keys plus state and builder, which GitHub-issue repos also
-show as labels and which Aut0 carries in the header instead.
+show as labels and which Aut0 carries in the header instead, and reviewer.
+A go's builder and reviewer route that ticket (issue #206).
 
 labels_for returns the labels a later dispatcher would apply. It does
 not write anything. tickets linear, and the Aut0 repo, return no labels.
@@ -42,6 +43,7 @@ KEYS = (
     "risk",
     "state",
     "builder",
+    "reviewer",
 )
 
 # Kebab-case forms of the section 4.1 states.
@@ -250,8 +252,8 @@ def _check_value(key: str, value: str) -> None:
         if value not in STATES:
             raise HandoffError(f"bad state {value!r}")
         return
-    if key == "builder":
+    if key in ("builder", "reviewer"):
         if value not in HARNESSES:
-            raise HandoffError(f"bad builder {value!r}")
+            raise HandoffError(f"bad {key} {value!r}")
         return
     raise HandoffError(f"unknown key {key!r}")
