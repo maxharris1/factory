@@ -33,6 +33,10 @@ default 0. A trusted REVISE at the cap gets an extra round from the poller
 itself while ticket_state.cap_extra is below it; after that the ticket
 waits for a person as before.
 
+review.start_before_ci is optional (issue #262): a boolean, default false.
+True queues the review as soon as a trusted ready lands while CI is still
+running on that head. Ship still needs green CI on the approved head.
+
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It only acts on ship: merge; on any
@@ -148,6 +152,7 @@ class FactoryConfig:
     shared_paths: tuple[str, ...] = ()
     followup_from_round: int | None = None
     auto_extra_rounds: int = 0
+    start_before_ci: bool = False
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -211,7 +216,14 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     tickets = _choice(data, "tickets", TICKETS, findings)
     builder_harness, builder_model = _actor(data, "builder", findings, unknown)
     reviewer_harness, reviewer_model = _actor(data, "reviewer", findings, unknown)
-    rounds_low, rounds_high, verify, followup_from_round, auto_extra_rounds = _review(
+    (
+        rounds_low,
+        rounds_high,
+        verify,
+        followup_from_round,
+        auto_extra_rounds,
+        start_before_ci,
+    ) = _review(
         data, findings, unknown
     )
     ship = _ship(data, findings)
@@ -285,6 +297,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         shared_paths=shared_paths,
         followup_from_round=followup_from_round,
         auto_extra_rounds=auto_extra_rounds,
+        start_before_ci=start_before_ci,
     )
     return config, findings
 
@@ -359,20 +372,20 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, int]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None, 0
+        return None, None, None, None, 0, False
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None, 0
+        return None, None, None, None, 0, False
     findings.extend(
         _unknown(
             review,
-            {"rounds", "verify", "followup_from_round", "auto_extra_rounds"},
+            {"rounds", "verify", "followup_from_round", "auto_extra_rounds", "start_before_ci"},
             "review",
             unknown,
         )
@@ -406,7 +419,16 @@ def _review(
         verify,
         _followup_from_round(review, findings, unknown),
         _auto_extra_rounds(review, findings, unknown),
+        _start_before_ci(review, findings, unknown),
     )
+
+
+def _start_before_ci(review: dict, findings: list[Finding], unknown: str) -> bool:
+    value = review.get("start_before_ci", False)
+    if not isinstance(value, bool):
+        findings.append(Finding(unknown, "review.start_before_ci must be true or false"))
+        return False
+    return value
 
 
 def _followup_from_round(

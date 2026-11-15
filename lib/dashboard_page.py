@@ -12,7 +12,7 @@ import functools
 import json
 from pathlib import Path
 
-from lib.dashboard_flow import flowmap_layout, load_chart
+from lib.dashboard_flow import flowmap_layout
 from lib.dashboard_pages import (
     activity, common, efficiency, lanes, shell, system, ticket_detail, tickets,
 )
@@ -92,19 +92,17 @@ def font_faces() -> str:
     return json.dumps(faces, separators=(",", ":"))
 
 
-@functools.lru_cache(maxsize=1)
-def _flowmap_json() -> str:
-    chart = load_chart()
+def _flowmap_json(chart: dict | None) -> str:
     return json.dumps(flowmap_layout(chart) if chart else None, separators=(",", ":")).replace("<", "\\u003c")
 
 
-def page_script() -> str:
+def page_script(chart: dict | None) -> str:
     return (
         lanes_script(SCRIPT).replace("__TELEMETRY__", TELEMETRY_SCRIPT)
         .replace("__PIXELSTRIP__", px_script())
         .replace("__SHELL__", json.dumps(shell_table(), separators=(",", ":")))
         .replace("__POLL_MS__", str(POLL_MS))
-        .replace("__FLOWMAP__", _flowmap_json())
+        .replace("__FLOWMAP__", _flowmap_json(chart))
         .replace("__BOARD__", json.dumps(tickets.board_constants(), separators=(",", ":")).replace("<", "\\u003c"))
         .replace("__FONTS__", font_faces())
     )
@@ -112,5 +110,5 @@ def page_script() -> str:
 
 def render_pages(snapshot: dict) -> dict[str, str]:
     """Every page, by file name. Every value is escaped and already redacted."""
-    script = page_script()
+    script = page_script(snapshot.get("statechart"))
     return {name: _page(snapshot, name, css=CSS, script=script) for name in PAGES}

@@ -23,6 +23,7 @@ reachable from it lies on a cycle (done, merged, handed-off, ...).
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from collections import deque
@@ -400,7 +401,7 @@ def _col_x(column: int) -> int:
 
 
 def _row_y(row: int) -> int:
-    return 76 if row >= STOP_ROW else 9 + row * 16
+    return 76 + (row - STOP_ROW) * 16 if row >= STOP_ROW else 9 + row * 16
 
 
 def _flowmap_places(chart: dict) -> dict[str, tuple[int, int]]:
@@ -414,12 +415,13 @@ def _flowmap_places(chart: dict) -> dict[str, tuple[int, int]]:
             continue
         exits = [nxt for nxt in adjacency[name] if nxt != name]
         if phase == "Stop" and not exits:
-            candidates = [(column, STOP_ROW) for column in columns]
+            grid = []
         else:
             home = FLOWMAP_COLUMNS.get(phase, FLOWMAP_COLUMNS["Review"])
             order = [home, *(column for column in columns if column != home)]
-            candidates = [(column, row) for column in order for row in range(STOP_ROW + 1)]
-        place = next(spot for spot in candidates if spot not in taken)
+            grid = [(column, row) for column in order for row in range(STOP_ROW + 1)]
+        rail = ((column, row) for row in itertools.count(STOP_ROW) for column in columns)
+        place = next(spot for spot in itertools.chain(grid, rail) if spot not in taken)
         places[name] = place
         taken.add(place)
     return places
@@ -459,7 +461,8 @@ def _route(a: dict, b: dict, nodes: Sequence[dict]) -> list[list[int]]:
 def flowmap_layout(chart: dict) -> dict:
     """The full state chart on FlowMap's 250 x 88 cell grid (4 px cells,
     1000 x 352 px): phase columns (Ship two columns wide), stop states on
-    the bottom rail, and a wire route for every ordered pair of states so
+    the bottom rail (it wraps into more rows, and the grid grows, when they
+    overflow it), and a wire route for every ordered pair of states so
     an off-chart hop has one too. `edges` lists the chart's transitions."""
     places = _flowmap_places(chart)
     adjacency = _adjacency(chart)
@@ -486,10 +489,11 @@ def flowmap_layout(chart: dict) -> dict:
         if a is not b or a["name"] in loops
     }
     edges = [f'{edge["from"]}>{edge["to"]}' for edge in chart["edges"]]
-    rail = {node["col"] for node in nodes if node["row"] >= STOP_ROW}
+    last = max([STOP_ROW, *(node["row"] for node in nodes)])
+    rail = {node["col"] for node in nodes if node["row"] == last}
     free = [column for column in range(len(FLOWMAP_COLUMNS)) if column not in rail]
     return {
-        "grid": {"w": GRID_W, "h": GRID_H, "cell": CELL},
+        "grid": {"w": GRID_W, "h": GRID_H + _row_y(last) - _row_y(STOP_ROW), "cell": CELL},
         "node": {"w": FM_NODE_W, "h": FM_NODE_H},
         "nodes": nodes,
         "edges": edges,
@@ -499,7 +503,7 @@ def flowmap_layout(chart: dict) -> dict:
             for label, column, span in FLOWMAP_HEADS
         ],
         "rail": {"y": 72, "x0": 3, "x1": 247},
-        "stop_label": {"x": _col_x(free[0]) * CELL if free else 700, "y": 314},
+        "stop_label": {"x": _col_x(free[0]) * CELL if free else 700, "y": (_row_y(last) + 2) * CELL + 2},
     }
 
 
