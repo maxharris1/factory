@@ -263,8 +263,6 @@ class _Candidate:
 
     @property
     def tier(self) -> int | None:
-        """The index of the first priority label the ticket carries, else its
-        Linear priority as 0-3 when the project opts in, else None."""
         intake = self.project.intake
         assert intake is not None
         labels = {label.lower() for label in self.issue.labels}
@@ -1021,8 +1019,7 @@ def critical_path_counts(
     """How many of this poll's candidates each one unblocks (#258): those
     whose Blocked by names it or its PR, the unstarted ones in its repo that
     share a Touches: path with it, and every candidate blocked by one of
-    those, transitively. 0 for each ticket of a project that turns
-    critical_path_order off. Reads only gate lines and feeder rows."""
+    those, transitively."""
     owner = {c.ref: c.ref for c in candidates}
     owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
     blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
@@ -1055,7 +1052,6 @@ def critical_path_counts(
 
 
 def _paths_meet(first: Collection[str], second: Collection[str], shared: Collection[str]) -> bool:
-    """Two Touches: sets collide on a path outside shared_paths."""
     return any(
         paths_collide(path, other)
         for path in first

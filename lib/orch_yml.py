@@ -117,12 +117,6 @@ class Intake:
     project names the workflow state. trusted lists who may apply it (GitHub
     logins or Linear user ids); None means the keys of trusted_logins or
     trusted_linear_users.
-
-    Build order (issue #258): a ticket's tier is the index of the first of
-    priority_labels it carries, else (priority_from_linear, Linear only) its
-    Linear priority 1-4 as tier 0-3; a ticket with neither sorts after every
-    tier. critical_path_order ranks a ticket inside its tier by how many
-    open intake tickets it unblocks, before age.
     """
 
     label: str | None = None

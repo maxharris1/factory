@@ -710,8 +710,6 @@ def set_ticket_priority(
 
 @dataclass(frozen=True)
 class PriorityMark:
-    """A ticket's claim-order marks as the feeder last wrote them."""
-
     urgent: bool = False
     bug: bool = False
     tier: int | None = None
@@ -739,9 +737,6 @@ def priority_marks(connection: sqlite3.Connection) -> dict[tuple[str, str], Prio
 def rank(
     *, tier: int | None, urgent: bool, resume: bool, bug: bool, unblocks: int
 ) -> tuple[bool, int, int, int]:
-    """Sort key ahead of age (issue #258): a tier first (no tier after every
-    tier), then urgent, a resumed paused step, bug, everything else, then
-    the ticket that unblocks more. Callers append their age and key."""
     base = 0 if urgent else 1 if resume else 2 if bug else 3
     return tier is None, tier or 0, base, -unblocks
 

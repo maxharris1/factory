@@ -97,7 +97,7 @@ class FeederItem:
     state: str
     pr: str | None = None
     reason: str | None = None  # why a waiting-blocked ticket waits (#156)
-    tier: int | None = None  # its priority tier (#258); None: no tier
+    tier: int | None = None
 
 
 @dataclass(frozen=True)
