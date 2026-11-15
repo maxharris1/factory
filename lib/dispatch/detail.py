@@ -101,10 +101,38 @@ class DetailMixin:
                 timeout_seconds=timeout_seconds,
                 generation=self._generation(repo, ticket_id),
                 head=head,
-                detail=detail,
+                detail=self._linked_wake_detail(
+                    repo, ticket_id, source_comment_id, detail
+                ),
             ),
             dedupe_key=f"t7:{_scope(repo, ticket_id)}:{reason}:{once_key}",
         )
+
+    def _linked_wake_detail(
+        self,
+        repo: str,
+        ticket_id: str,
+        source_comment_id: str,
+        detail: str,
+    ) -> str:
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            parsed = {"detail": detail}
+        parsed.setdefault("link", self._wake_link(repo, ticket_id, source_comment_id))
+        return json.dumps(parsed, separators=(",", ":"), sort_keys=True)
+
+    def _wake_link(self, repo: str, ticket_id: str, source_comment_id: str) -> str:
+        fallback = f"comment:{source_comment_id}"
+        ticket = self._polled.get((repo.lower(), ticket_id))
+        if ticket is None:
+            return fallback
+        for comment in ticket.comments:
+            if comment.id == source_comment_id and comment.url:
+                return comment.url
+        return ticket.ticket_url or fallback
 
     def _enqueue_or_flag(
         self,
@@ -278,6 +306,8 @@ class DetailMixin:
     ) -> None:
         detail: dict[str, object] = {
             "project_bot": ticket.grok_bot,
+            "follow_up_owner": ticket.grok_bot,
+            "link": _comment_link(comment),
             "outcome": outcome,
             "pr_number": ticket.pr_number,
             "post_to": ticket.ticket_url,

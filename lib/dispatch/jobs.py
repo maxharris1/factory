@@ -524,6 +524,7 @@ class JobsMixin:
                 detail=json.dumps(
                     {
                         "project_bot": _detail_project_bot(job.request.detail),
+                        "job_id": job.id,
                         "detail": (
                             f"device {device} offline {int(seconds // 60)} minutes "
                             f"during the {job.request.action} job"
@@ -626,6 +627,7 @@ class JobsMixin:
                 {
                     "project_bot": _detail_project_bot(job.request.detail),
                     "detail": f"{job.request.action} job failed twice",
+                    "job_id": job.id,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -1045,10 +1047,14 @@ class JobsMixin:
                 )
                 return
         generation = int(state["generation"]) + 1
-        reason = (
+        source_comment_id = str(state["stuck_source_comment_id"] or "-")
+        reason = self._linked_wake_detail(
+            repo,
+            ticket_id,
+            source_comment_id,
             detail
             or previous_detail
-            or str(state["stuck_reason"] or "ticket is stuck")
+            or str(state["stuck_reason"] or "ticket is stuck"),
         )
         queued = self.queue.enqueue_in_transaction(
             connection,
@@ -1057,7 +1063,7 @@ class JobsMixin:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                source_comment_id=source_comment_id,
                 timeout_seconds=int(
                     state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
                 ),
