@@ -10,9 +10,8 @@ A job's path is its ticket's history: the start state, then the state each
 of the ticket's jobs worked in (build -> building, review -> review, ...),
 then the ticket's current workflow state. Where two of those states have no
 direct transition, a bridge of at most MAX_BRIDGE steps through the chart is
-filled in (intake -> questions -> building, since questions is Grok Bot's
-step and has no job of its own); longer gaps are kept as a jump with no
-edge drawn. Once the ticket has rows in ticket_transitions, those rows are
+filled in, never through a human wait (HUMAN_WAITS); any other gap is kept
+as a jump with no edge drawn. Once the ticket has rows in ticket_transitions, those rows are
 the path from the first one on, with their times and no bridge.
 
 The job view draws the whole chart on a canvas (flowmap_layout places the
@@ -200,11 +199,7 @@ def chart_visits(
             visits[-1].steps.extend(steps)
             continue
         if visits and chart is not None and state not in adjacency[visits[-1].state]:
-            last = visits[-1].state
-            avoid = HUMAN_WAITS
-            if last == chart["start"]:
-                avoid = HUMAN_WAITS.difference(adjacency[last])
-            bridge = _bridge(adjacency, last, state, MAX_BRIDGE, avoid) or []
+            bridge = _bridge(adjacency, visits[-1].state, state, MAX_BRIDGE, HUMAN_WAITS) or []
             visits.extend(Visit(name, []) for name in bridge[1:-1])
         visits.append(Visit(state, steps))
     return visits

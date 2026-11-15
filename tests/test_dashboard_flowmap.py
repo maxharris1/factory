@@ -159,9 +159,14 @@ def test_bridges_before_the_first_row_add_no_human_wait_visit():
     ]
     rows = [flow.Transition("building", "review", 4000.0, "set-state")]
     result = flow.job_flow(CHART, jobs, "review", 5000.0, rows, None)
-    assert "waiting-max" not in result["path"]
-    assert result["path"][:2] == ["intake", "questions"]
-    assert HUMAN_WAITS.isdisjoint(result["path"][2:])
+    assert HUMAN_WAITS.isdisjoint(result["path"]), result["path"]
+
+
+def test_a_lone_build_job_draws_the_start_hop_off_chart():
+    jobs = [flow.JobStep("build", "claude", 1000.0, None, None)]
+    result = flow.job_flow(CHART, jobs, None, 2000.0)
+    assert result["path"] == ["intake", "building"]
+    assert result["visits"][1]["off_chart"] is True
 
 
 def test_a_bridge_never_passes_through_a_human_wait_state():
@@ -169,5 +174,4 @@ def test_a_bridge_never_passes_through_a_human_wait_state():
     for a in names:
         for b in names:
             path = flow.chart_path(CHART, [a, b])
-            allowed = {"questions"} if a == CHART["start"] else set()
-            assert HUMAN_WAITS.isdisjoint(set(path[1:-1]) - allowed), (a, b, path)
+            assert HUMAN_WAITS.isdisjoint(path[1:-1]), (a, b, path)
