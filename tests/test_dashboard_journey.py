@@ -416,6 +416,46 @@ def test_first_row_after_a_ready_keeps_both_reviews_on_their_own_visits(tmp_path
     ]
 
 
+def test_script_only_first_row_leaves_the_old_visit_its_retried_review(tmp_path: Path) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    failed = board.fail("codex")
+    board.now[0] += 100
+    board.poll()
+    retry = board.finish("codex")
+    assert failed.request.action == retry.request.action == "review"
+    ticket = board.snapshot(pr)
+    board.dispatcher._prepare_ship_intent(ticket, "approval", pr.head, "handoff")
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 100
+    board.dispatcher._discard_pending_ship_intent(ticket, "approval")
+    with board.queue.connect() as connection:
+        jobs = [
+            flow.JobStep(row["action"], row["recipient"], row["created_at"], None, None)
+            for row in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
+        ]
+        rows = [
+            flow.Transition(row["from_state"], row["to_state"], row["at"])
+            for row in connection.execute("SELECT * FROM ticket_transitions ORDER BY id")
+        ]
+    assert [(job.action, job.created_at) for job in jobs][-2:] == [
+        ("review", failed.created_at),
+        ("review", retry.created_at),
+    ]
+    assert [(row.from_state, row.to_state) for row in rows] == [("ship", "review")]
+    result = flow.job_flow(_chart(), jobs, "review", board.now[0], rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"] == [
+        ("codex", failed.created_at),
+        ("script", rows[0].at),
+    ]
+
+
 @pytest.mark.parametrize(
     ("jobs", "from_state", "to_state", "visits"),
     [
