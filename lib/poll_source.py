@@ -329,7 +329,7 @@ class LivePollSource:
         cleared = _secret_env_names(self.config)
         actions: dict[str, ReviewActions] = {}
         for project in self.config.projects:
-            if project.linear_project_id is None:
+            if not project.linear_project_ids:
                 action: ReviewActions = GitHubReviewActions(
                     runner=self.gh_runner,
                     timeout_seconds=self.timeout_seconds,
@@ -455,7 +455,7 @@ class LivePollSource:
         PR is read by tracked_tickets on its own cadence)."""
         tickets: list[TrackedTicket] = []
         for project in self.config.projects:
-            if project.linear_project_id is not None:
+            if project.linear_project_ids:
                 continue
             try:
                 factory = self._factory(project)
@@ -527,9 +527,9 @@ class LivePollSource:
         reserve: int = 0,
     ) -> tuple[TrackedTicket, ...]:
         projects = {
-            project.linear_project_id: project
+            project_id: project
             for project in self.config.projects
-            if project.linear_project_id is not None
+            for project_id in project.linear_project_ids
         }
         if not projects or not self._linear_due:
             return ()
@@ -841,9 +841,9 @@ class LivePollSource:
         pages = 0
         if project_ids is None:
             project_ids = tuple(
-                project.linear_project_id
+                project_id
                 for project in self.config.projects
-                if project.linear_project_id is not None
+                for project_id in sorted(project.linear_project_ids)
             )
         while True:
             if not self._linear_request_available(
@@ -968,9 +968,9 @@ class LivePollSource:
         issue_id = issue.get("id")
         project = issue.get("project")
         configured = {
-            item.linear_project_id
+            project_id
             for item in self.config.projects
-            if item.linear_project_id is not None
+            for project_id in item.linear_project_ids
         }
         if not (
             isinstance(issue_id, str)
@@ -1891,11 +1891,10 @@ def _has_label(value: object, prefix: str) -> bool:
 
 
 def _matches_linear_project(issue: Mapping[str, Any], project: Project) -> bool:
-    configured = project.linear_project_id
-    if configured is None:
+    if not project.linear_project_ids:
         return False
     value = _object(issue.get("project"), "Linear issue project")
-    return configured == value.get("id")
+    return value.get("id") in project.linear_project_ids
 
 
 def _linear_project(

@@ -249,11 +249,11 @@ class FakeLinear:
     def __init__(self) -> None:
         self.issues: list[IntakeIssue] = []
         self.posted: dict[str, list[Comment]] = {}
-        self.queries: list[tuple[str, str]] = []
+        self.queries: list[tuple[frozenset[str], str]] = []
         self._next = 0
 
-    def linear_intake(self, project_id: str, state: str) -> list[IntakeIssue]:
-        self.queries.append((project_id, state))
+    def linear_intake(self, project_ids: frozenset[str], state: str) -> list[IntakeIssue]:
+        self.queries.append((project_ids, state))
         return list(self.issues)
 
     def linear_comments(self, issue_id: str) -> list[Comment]:
@@ -501,7 +501,7 @@ def test_a_linear_issue_moved_to_the_intake_state_by_a_trusted_user_is_fed(
 
     report = feeder.feed_once()
 
-    assert linear.queries == [("proj-1", "In Progress")]
+    assert linear.queries == [(frozenset({"proj-1"}), "In Progress")]
     assert report.fed == (TicketRef("acme/linear-app", "AUT-7", "linear"),)
     pull = github.pulls[("acme/linear-app", 501)]
     assert pull["head"] == "max/aut-7-linear-work"  # Linear's own branch name

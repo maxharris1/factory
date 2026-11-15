@@ -91,6 +91,7 @@ _PROJECT_KEYS = {
     "job_timeout",
     "factory_ref",
     "linear_project_id",
+    "linear_project_ids",
     "grok_bot",
     "linear_ready_for_review",
     "ready_starts_review",
@@ -133,7 +134,7 @@ class Project:
     repo: str
     job_timeout: int | None = None
     factory_ref: str | None = None
-    linear_project_id: str | None = None
+    linear_project_ids: frozenset[str] = frozenset()
     grok_bot: str = "grok-bot"
     linear_ready_for_review: bool = False
     # A trusted ready from factory.md's builder starts review even with no
@@ -292,7 +293,7 @@ def load_approvals(path: Path) -> tuple[Approvals | None, list[Finding]]:
 
 def linear_approver_findings(config: OrchConfig) -> list[Finding]:
     if config.approver_linear_users is not None or not any(
-        project.linear_project_id is not None for project in config.projects
+        project.linear_project_ids for project in config.projects
     ):
         return []
     return [
@@ -413,7 +414,7 @@ def _validate(
     if (
         "linear_webhook" in data
         and projects is not None
-        and not any(project.linear_project_id is not None for project in projects)
+        and not any(project.linear_project_ids for project in projects)
     ):
         findings.append(
             Finding(
@@ -423,7 +424,7 @@ def _validate(
         )
     if (
         projects is not None
-        and any(project.linear_project_id is not None for project in projects)
+        and any(project.linear_project_ids for project in projects)
         and linear is None
         and "linear" not in data
     ):
@@ -567,43 +568,12 @@ def _projects(
             )
             ok = False
             continue
-        linear_project_id = item.get("linear_project_id")
-        if linear_project_id is not None and (
-            not isinstance(linear_project_id, str)
-            or not linear_project_id.strip()
-            or len(linear_project_id) > 200
-            or (
-                linear_project_id.startswith("REPLACE_WITH_")
-                and not allow_placeholders
-            )
-        ):
-            findings.append(
-                Finding(
-                    "error",
-                    f"projects[{index}].linear_project_id must be a project id",
-                )
-            )
+        linear_project_ids = _linear_project_ids(
+            item, index, seen_linear, allow_placeholders, findings
+        )
+        if linear_project_ids is None:
             ok = False
             continue
-        if (
-            isinstance(linear_project_id, str)
-            and linear_project_id.startswith("REPLACE_WITH_")
-            and allow_placeholders
-        ):
-            findings.append(
-                Finding(
-                    "warning",
-                    "accepted placeholder "
-                    f"projects[{index}].linear_project_id",
-                )
-            )
-        if linear_project_id in seen_linear:
-            findings.append(
-                Finding("error", f"duplicate Linear project {linear_project_id!r}")
-            )
-            ok = False
-        if linear_project_id is not None:
-            seen_linear.add(linear_project_id)
         grok_bot = item.get("grok_bot", "grok-bot")
         if not isinstance(grok_bot, str) or _TOKEN.fullmatch(grok_bot) is None:
             findings.append(
@@ -621,7 +591,7 @@ def _projects(
             )
             ok = False
             continue
-        if linear_ready and linear_project_id is None:
+        if linear_ready and not linear_project_ids:
             findings.append(
                 Finding(
                     "error",
@@ -642,7 +612,7 @@ def _projects(
             continue
         intake = None
         if "intake" in item:
-            intake = _intake(item["intake"], index, linear_project_id, findings)
+            intake = _intake(item["intake"], index, bool(linear_project_ids), findings)
             if intake is None:
                 ok = False
                 continue
@@ -651,7 +621,7 @@ def _projects(
                 repo=repo,
                 job_timeout=timeout,
                 factory_ref=factory_ref,
-                linear_project_id=linear_project_id,
+                linear_project_ids=linear_project_ids,
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
                 ready_starts_review=ready_starts_review,
@@ -663,10 +633,60 @@ def _projects(
     return tuple(projects)
 
 
+def _linear_project_ids(
+    item: dict,
+    index: int,
+    seen_linear: set[str],
+    allow_placeholders: bool,
+    findings: list[Finding],
+) -> frozenset[str] | None:
+    where = f"projects[{index}]"
+    if "linear_project_id" in item and "linear_project_ids" in item:
+        findings.append(
+            Finding("error", f"{where} sets both linear_project_id and linear_project_ids")
+        )
+        return None
+    if "linear_project_ids" in item:
+        key = "linear_project_ids"
+        raw = item[key]
+        if not isinstance(raw, list) or not raw:
+            findings.append(
+                Finding("error", f"{where}.{key} must be a non-empty list of project ids")
+            )
+            return None
+    else:
+        key = "linear_project_id"
+        single = item.get(key)
+        raw = [] if single is None else [single]
+    ids: set[str] = set()
+    for value in raw:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 200
+            or (value.startswith("REPLACE_WITH_") and not allow_placeholders)
+        ):
+            findings.append(Finding("error", f"{where}.{key} must be a project id"))
+            return None
+        if value.startswith("REPLACE_WITH_"):
+            findings.append(Finding("warning", f"accepted placeholder {where}.{key}"))
+        if value in ids:
+            findings.append(Finding("error", f"{where}.{key} names {value!r} twice"))
+            return None
+        ids.add(value)
+    ok = True
+    for value in sorted(ids):
+        if value in seen_linear:
+            findings.append(Finding("error", f"duplicate Linear project {value!r}"))
+            ok = False
+    seen_linear.update(ids)
+    return frozenset(ids) if ok else None
+
+
 def _intake(
     value: object,
     index: int,
-    linear_project_id: object,
+    linear: bool,
     findings: list[Finding],
 ) -> Intake | None:
     where = f"projects[{index}].intake"
@@ -680,7 +700,6 @@ def _intake(
         if key not in _INTAKE_KEYS:
             findings.append(Finding("error", f"unknown field '{where}.{key}'"))
             ok = False
-    linear = linear_project_id is not None
     label = value.get("label")
     state = value.get("linear_state")
     if linear:
