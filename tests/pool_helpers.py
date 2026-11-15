@@ -15,11 +15,9 @@ CLAIM_HASH = job_token.digest(CLAIM_PROOF)
 
 
 def pool_claim(queue: SQLiteJobQueue, recipient: str, machines: Path | None = None) -> Job:
-    """Claim the oldest queued job for recipient with a slot from machines.yml.
-
-    The claim's proof is CLAIM_PROOF (#127)."""
+    """Claim the oldest queued job for recipient with a slot from machines.yml."""
     config, _ = load_machines_yml(machines or ROOT / "machines.yml", allow_placeholders=True)
     assert config is not None
-    claimed = DevicePool(queue, config).claim(recipient, token_hash=CLAIM_HASH)
+    claimed = DevicePool(queue, config).claim(recipient)
     assert claimed is not None
     return claimed[0]
