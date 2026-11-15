@@ -1,0 +1,4 @@
+decision	choice	why
+which box lagging row refuses every placement	only a box LAGGING row whose checkout is the waiter source checkout (skill_preflight.ROOT, resolved)	a remote start checks box_behind_origin on that root, so only its lag refuses remote placements; a separate local factory_root refuses only box placements, which blocked_by already covers as a (box, harness) pair
+how the dispatcher learns the source checkout	read skill_preflight.ROOT at call time	the waiter writes that same resolved path when a remote start is refused, and tests monkeypatch it
+proof	the verdict paired repro as a parametrized test (waiter-first, dispatcher-first)	failed 1, passed 1 before the fix; both pass after, and the unchanged verdict file passes 2 of 2

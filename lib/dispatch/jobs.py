@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib import device_sync
+from lib import device_sync, skill_preflight
 from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
@@ -76,11 +76,14 @@ class _LinkDrop:
         return f"link-drop on {self.detail} ({self.used} free requeues spent)"
 
 
-def _harnesses_a_lagging_box_refuses_everywhere(
+def _harnesses_a_lagging_source_checkout_refuses_everywhere(
     rows: list[device_sync.Row], box: str
 ) -> frozenset[str]:
+    source = str(skill_preflight.ROOT.resolve())
     return frozenset(
-        row.harness for row in rows if row.device == box and row.state == device_sync.LAGGING
+        row.harness
+        for row in rows
+        if row.device == box and row.checkout == source and row.state == device_sync.LAGGING
     )
 
 
@@ -138,7 +141,9 @@ class JobsMixin:
         with self.queue.connect() as connection:
             rows = device_sync.read(connection)
         blocked = device_sync.blocked_by(rows)
-        refused_everywhere = _harnesses_a_lagging_box_refuses_everywhere(rows, box_device(config))
+        refused_everywhere = _harnesses_a_lagging_source_checkout_refuses_everywhere(
+            rows, box_device(config)
+        )
         return frozenset(
             harness
             for harness in HARNESSES

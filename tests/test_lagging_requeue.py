@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from lib import device_sync, skill_preflight
-from lib.device_pool import Placement
+from lib.device_pool import Placement, choose_device
 from lib.device_monitor import DeviceMonitor
 from lib.dispatcher import Dispatcher
 from lib.job_state import LAGGING_BACKOFF_SECONDS, LAGGING_WAIT_SECONDS, free_requeues
@@ -312,4 +313,54 @@ def test_partial_recovery_healthy_box_can_take_retry(
     factory.poll(START + 936 + LAGGING_BACKOFF_SECONDS[-1])
     assert factory.device.waiter.step() == job_id
     assert factory.jobs() == [(job_id, "running", 1)], "the same row starts on the box"
+    assert factory.stuck() == (0, None)
+
+
+@pytest.mark.parametrize("dispatch_first", [False, True], ids=["waiter-first", "dispatcher-first"])
+def test_a_lagging_separate_box_checkout_leaves_a_current_remote_the_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, dispatch_first: bool
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root)
+    local_root = tmp_path / "local-factory"
+    shutil.copytree(factory.root, local_root)
+    subprocess.run([*git_in(factory.root), "reset", "-q", "--hard", factory.later], check=True)
+    pool = factory.device.waiter.pool
+    config = replace(pool.config, devices=tuple(
+        replace(device, factory_root=str(local_root)) if device.local else device
+        for device in pool.config.devices
+    ))
+    pool.config = config
+    factory.dispatcher.devices.config = config
+    job_id, started = factory.device.run_one()
+    assert started is None
+    with factory.device.queue.connect() as connection:
+        rows = device_sync.read(connection)
+    assert [(row.device, row.checkout, row.state) for row in rows] == [
+        ("box", str(local_root), device_sync.LAGGING)
+    ]
+    factory.poll(START + 30)
+    assert factory.jobs() == [(job_id, "queued", 1)]
+    config = replace(config, devices=tuple(replace(device, enabled=True) for device in config.devices))
+    pool.config = config
+    factory.dispatcher.devices.config = config
+    subprocess.run(["git", "clone", "-q", str(factory.root), str(factory.device.checkout)], check=True)
+    report = skill_preflight.check(
+        bot="claude-bot", placement=Placement(job_id, "pc", "claude", "claude-bot", START),
+        device=config.device("pc"), transport=SshTransport(), home=factory.device.home,
+        checkout=str(factory.device.checkout), root=factory.root,
+    )
+    assert report.error is None, "the pc is current"
+    with factory.device.queue.connect() as connection:
+        blocked = device_sync.blocked(connection)
+    assert choose_device(config, "claude", {}, blocked).name == "pc"
+
+    factory.now[0] = START + 935
+    if dispatch_first:
+        factory.poll(START + 935)
+        assert factory.jobs() == [(job_id, "queued", 1)], "the lagging box blocks only the box"
+        assert factory.device.waiter.step() == job_id
+    else:
+        assert factory.device.waiter.step() == job_id
+        factory.poll(START + 935)
+    assert factory.jobs() == [(job_id, "running", 1)], "the same row starts on the pc"
     assert factory.stuck() == (0, None)
