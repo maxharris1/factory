@@ -596,3 +596,60 @@ def test_a_red_ready_before_a_finished_reviews_verdict_is_read_waits_for_one_com
     assert CI_LOG in instruction(fix)
     board.queue.finish(board.claim("claude").id, owner="claude", handoff_comment_id="fix")
     assert board.queue.claim("claude") is None
+
+
+def test_a_red_ready_after_an_edited_verdict_waits_for_the_corrected_verdicts_combined_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    revise = VERDICT.format(round="1/3", head=pr.head, verdict="REVISE", risk="high")
+    board.post(pr, "revise-edited", revise, "codex-login")
+    pr.comments[-1] = replace(pr.comments[-1], edited_at=board.now[0] + 1)
+    board.poll()
+    assert board.outcome("revise-edited") == "rejected-edited"
+
+    board.post(pr, "revise-corrected", revise, "codex-login")
+    unread_verdict = pr.comments.pop()
+    pr.ci[pr.head] = "failure"
+    ready = board.ready(pr, pr.head, "ready-red-before-corrected-verdict")
+    board.poll()
+    assert board.outcome(ready) == "ci-red-in-flight"
+
+    pr.comments.append(unread_verdict)
+    board.poll()
+
+    [fix] = [job for job in board.jobs("fix") if job["state"] != "cancelled"]
+    assert fix["source_comment_id"] == "revise-corrected"
+    assert CI_LOG in instruction(fix)
+
+
+def test_a_reposted_red_ready_after_two_returns_to_an_older_head_queues_no_extra_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    for cycle in (1, 2):
+        pr.push(older, ci="pending")
+        board.ready(pr, older, f"pending-review-{cycle}")
+        board.poll()
+        board.finish("codex")
+        pr.push(sha(2), ci="failure")
+        board.post(
+            pr, f"approve-older-{cycle}", APPROVE.format(round="1/3", head=older), "codex-login"
+        )
+        board.poll()
+        board.finish("claude")
+        pr.push(older, ci="failure")
+        board.ready(pr, older, f"ready-back-at-older-head-{cycle}")
+        board.poll()
+        board.finish("claude")
+    fixes = len(board.jobs("fix"))
+
+    for repost in (1, 2, 3):
+        board.ready(pr, older, f"red-ready-again-{repost}")
+        board.poll()
+        assert len(board.jobs("fix")) == fixes, f"repost {repost} queued another fix"
+        assert board.queue.claim("claude") is None

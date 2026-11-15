@@ -494,20 +494,27 @@ class ReadyMixin:
         key = f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}"
         repeat = f"{key}:after-"
         with self._connect() as connection:
-            later = connection.execute(
+            latest = connection.execute(
                 """
-                SELECT later.id FROM jobs AS keyed
-                JOIN jobs AS later
-                  ON lower(later.repo) = lower(keyed.repo)
-                 AND later.ticket_id = keyed.ticket_id
-                 AND later.action IN ('review', 'fix') AND later.state != 'cancelled'
-                 AND later.rowid > keyed.rowid
+                SELECT keyed.dedupe_key, (
+                    SELECT later.id FROM jobs AS later
+                    WHERE lower(later.repo) = lower(keyed.repo)
+                      AND later.ticket_id = keyed.ticket_id
+                      AND later.action IN ('review', 'fix') AND later.state != 'cancelled'
+                      AND later.rowid > keyed.rowid
+                    ORDER BY later.rowid DESC LIMIT 1
+                ) AS later_id
+                FROM jobs AS keyed
                 WHERE keyed.dedupe_key = ? OR substr(keyed.dedupe_key, 1, ?) = ?
-                ORDER BY keyed.rowid DESC, later.rowid DESC LIMIT 1
+                ORDER BY keyed.rowid DESC LIMIT 1
                 """,
                 (key, len(repeat), repeat),
             ).fetchone()
-        return key if later is None else f"{repeat}{later['id']}"
+        if latest is None:
+            return key
+        if latest["later_id"] is None:
+            return str(latest["dedupe_key"])
+        return f"{repeat}{latest['later_id']}"
 
     def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
         with self._connect() as connection:
@@ -538,7 +545,10 @@ class ReadyMixin:
             handled = {
                 str(row["comment_id"])
                 for row in connection.execute(
-                    "SELECT comment_id FROM handled_comments WHERE repo = ? AND ticket_id = ?",
+                    """
+                    SELECT comment_id FROM handled_comments
+                    WHERE repo = ? AND ticket_id = ? AND outcome != 'rejected-edited'
+                    """,
                     (ticket.repo.lower(), ticket.ticket_id),
                 )
             }
