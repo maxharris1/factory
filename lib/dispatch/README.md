@@ -28,7 +28,7 @@ another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
 | Questions (T5) | `questions.py` (`QuestionsMixin`) | `_t5_questions`, `_t5_answers`, `_answered_by`, cancel and requeue of answered jobs |
 | Plan | `plan.py` (`PlanMixin`) | `_t_plan`, `_latest_plan_step` |
 | Jobs (T6) | `jobs.py` (`JobsMixin`) | `_t6`, `reconcile_jobs`, abandoned and dead jobs, devices, failure waits, stuck wakes |
-| Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_linked_wake_detail`, `_wake_link`, `_deliver_grok_jobs` |
+| Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_grok_request`, `_linked_wake_detail`, `_wake_link`, `_deliver_grok_jobs` |
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
 | Poll | `poll.py` (`PollMixin`, `PollLoop`) | `poll_once`, handoff verification, poll-error streaks, attention |

@@ -44,21 +44,23 @@ class CapsMixin:
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
-                JobRequest(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
-                    action="clarify",
-                    recipient="grok",
-                    source_comment_id=comment.id,
-                    timeout_seconds=ticket.job_timeout_minutes * 60,
-                    generation=generation,
-                    detail=self._job_detail(
-                        ticket,
+                self._grok_request(
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
                         action="clarify",
-                        instruction=(
-                            "kind=go must set state=planning or state=building"
+                        recipient="grok",
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        detail=self._job_detail(
+                            ticket,
+                            action="clarify",
+                            instruction=(
+                                "kind=go must set state=planning or state=building"
+                            ),
                         ),
-                    ),
+                    )
                 ),
                 dedupe_key=(
                     f"t1-clarify:{_scope(ticket.repo, ticket.ticket_id)}:"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 
 from lib.dispatch.constants import GROK_WAKE_REASONS
 from lib.dispatch.helpers import (
@@ -92,20 +93,31 @@ class DetailMixin:
             )
             return
         self.queue.enqueue(
-            JobRequest(
-                repo=repo,
-                ticket_id=ticket_id,
-                action=reason,
-                recipient="grok",
-                source_comment_id=source_comment_id,
-                timeout_seconds=timeout_seconds,
-                generation=self._generation(repo, ticket_id),
-                head=head,
-                detail=self._linked_wake_detail(
-                    repo, ticket_id, source_comment_id, detail
-                ),
+            self._grok_request(
+                JobRequest(
+                    repo=repo,
+                    ticket_id=ticket_id,
+                    action=reason,
+                    recipient="grok",
+                    source_comment_id=source_comment_id,
+                    timeout_seconds=timeout_seconds,
+                    generation=self._generation(repo, ticket_id),
+                    head=head,
+                    detail=detail,
+                )
             ),
             dedupe_key=f"t7:{_scope(repo, ticket_id)}:{reason}:{once_key}",
+        )
+
+    def _grok_request(self, request: JobRequest) -> JobRequest:
+        return replace(
+            request,
+            detail=self._linked_wake_detail(
+                request.repo,
+                request.ticket_id,
+                request.source_comment_id,
+                request.detail or "",
+            ),
         )
 
     def _linked_wake_detail(
@@ -125,14 +137,24 @@ class DetailMixin:
         return json.dumps(parsed, separators=(",", ":"), sort_keys=True)
 
     def _wake_link(self, repo: str, ticket_id: str, source_comment_id: str) -> str:
-        fallback = f"comment:{source_comment_id}"
         ticket = self._polled.get((repo.lower(), ticket_id))
-        if ticket is None:
-            return fallback
-        for comment in ticket.comments:
-            if comment.id == source_comment_id and comment.url:
-                return comment.url
-        return ticket.ticket_url or fallback
+        if ticket is not None:
+            for comment in ticket.comments:
+                if comment.id == source_comment_id and comment.url:
+                    return comment.url
+        with self._connect() as connection:
+            handled = connection.execute(
+                """
+                SELECT link FROM handled_comments
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (repo.lower(), ticket_id, source_comment_id),
+            ).fetchone()
+        if handled is not None and handled["link"]:
+            return str(handled["link"])
+        if ticket is not None and ticket.ticket_url:
+            return ticket.ticket_url
+        return f"comment:{source_comment_id}"
 
     def _enqueue_or_flag(
         self,
@@ -187,6 +209,8 @@ class DetailMixin:
         comment queues goes through here, so no claim sees an answered step
         queued. Returns the job and that answer.
         """
+        if request.recipient == "grok":
+            request = self._grok_request(request)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
         if request.action not in _ANSWERS:
             return job, None
@@ -307,7 +331,6 @@ class DetailMixin:
         detail: dict[str, object] = {
             "project_bot": ticket.grok_bot,
             "follow_up_owner": ticket.grok_bot,
-            "link": _comment_link(comment),
             "outcome": outcome,
             "pr_number": ticket.pr_number,
             "post_to": ticket.ticket_url,

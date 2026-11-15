@@ -438,7 +438,7 @@ def legacy_db(
             rows,
         )
         connection.execute(
-            "INSERT INTO handled_comments VALUES (?, ?, ?, ?)",
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, ?)",
             (AUT0, "AUT-2286", "6813518921", "failed-verdict-GitHubAdapterError"),
         )
 
@@ -641,7 +641,7 @@ def aut0_dispatcher(
     legacy_db(path, rows)
     with sqlite3.connect(path) as connection:
         connection.executemany(
-            "INSERT OR IGNORE INTO handled_comments VALUES (?, 'AUT-2286', ?, ?)",
+            "INSERT OR IGNORE INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES (?, 'AUT-2286', ?, ?)",
             [(AUT0, comment_id, "failed-verdict-GitHubAdapterError") for comment_id in handled],
         )
     gh = RecordedGh()

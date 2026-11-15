@@ -107,7 +107,7 @@ def _verdict(connection: sqlite3.Connection, ticket_id: str, comment_id: str, ve
             (repo, ticket_id, comment_id),
         )
     connection.execute(
-        "INSERT INTO handled_comments VALUES (?, ?, ?, 'handled')", (repo, ticket_id, comment_id)
+        "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, 'handled')", (repo, ticket_id, comment_id)
     )
 
 
@@ -132,10 +132,10 @@ def _seeded(directory: Path) -> Path:
             "INSERT INTO review_events VALUES ('owner/repo', '7', 'c7', 'capped-review')"
         )
         connection.execute(
-            "INSERT INTO handled_comments VALUES ('owner/repo', '1', 'v1', 'duplicate-verdict')"
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', '1', 'v1', 'duplicate-verdict')"
         )
         connection.execute(
-            "INSERT INTO handled_comments VALUES ('owner/repo', '1', 'v2', 'duplicate-verdict')"
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', '1', 'v2', 'duplicate-verdict')"
         )
         _telemetry(connection, build_1, {"Skill": 2, "Agent": 1, "Bash": 9})
         _telemetry(connection, build_2, {"Skill": 1, "Task": 4, "Agent": 1}, elapsed=5400)

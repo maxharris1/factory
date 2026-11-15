@@ -442,7 +442,7 @@ def test_claim_heartbeat_finish_and_verdict_each_change_the_fingerprint(
                 "comment_id TEXT, outcome TEXT, PRIMARY KEY (repo, ticket_id, comment_id))"
             )
             connection.execute(
-                "INSERT INTO handled_comments VALUES ('maxharris1/factory', '58', 'c2', "
+                "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES ('maxharris1/factory', '58', 'c2', "
                 "'queued-review-fix')"
             )
         connection.close()

@@ -2,13 +2,17 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from lib.dispatcher import Comment
+from lib.poll_source import _linear_comment
 from lib.queue import Job
 from tests.test_hooks import (
     HEAD_A,
     VERDICT,
     FakeBot,
     FakeGrokDelivery,
+    FakeSource,
     approve,
     in_review,
     say,
@@ -18,6 +22,8 @@ from tests.test_hooks import (
 )
 
 PR_URL = "https://github.com/owner/repo/pull/42"
+LINEAR_URL = "https://linear.app/team/issue/AUT-42/title"
+GO = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator{state} -->\nGo.\n"
 
 
 def linked(comment: Comment) -> Comment:
@@ -97,14 +103,7 @@ def test_job_failed_twice_wake_links_the_queueing_comment_and_names_the_job(
     now = [100.0]
     delivery = FakeGrokDelivery()
     dispatcher, queue = setup(tmp_path, now=now, grok_delivery=delivery)
-    go = linked(
-        say(
-            "904",
-            "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->\nGo.\n",
-            "grok-login",
-            1,
-        )
-    )
+    go = linked(say("904", GO.format(state=" state=building"), "grok-login", 1))
     dispatcher.process(on_pr(go))
     failed_id = ""
     for at in (110.0, 130.0):
@@ -134,3 +133,102 @@ def test_done_wake_links_the_approve_and_names_the_follow_up_owner(
     [wake] = [job for job in FakeBot(queue, "grok").drain() if job.request.action == "done"]
     assert detail(wake)["link"] == verdict.url
     assert detail(wake)["follow_up_owner"] == "grok-bot"
+
+
+def test_clarify_wake_for_a_go_without_state_links_the_go(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = linked(say("906", GO.format(state=""), "grok-login", 1))
+
+    dispatcher.process(on_pr(go))
+
+    [wake] = FakeBot(queue, "grok").drain()
+    assert wake.request.action == "clarify"
+    assert detail(wake)["link"] == go.url
+
+
+@pytest.mark.parametrize("answered", [False, True])
+def test_clarify_wakes_for_questions_and_answers_link_their_comment(
+    tmp_path: Path, answered: bool
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    question = linked(
+        say(
+            "907",
+            "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\nWhich side?\n",
+            "claude-login",
+            1,
+        )
+    )
+    dispatcher.process(on_pr(question))
+    cause = question
+    if answered:
+        FakeBot(queue, "grok").drain()
+        cause = linked(
+            say(
+                "908",
+                "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\nLeft.\n",
+                "grok-login",
+                2,
+            )
+        )
+        dispatcher.process(on_pr(question, cause))
+
+    [wake] = FakeBot(queue, "grok").drain()
+    assert wake.request.action == "clarify"
+    assert detail(wake)["link"] == cause.url
+
+
+def test_job_failed_twice_wake_links_the_queueing_comment_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now=now)
+    go = linked(say("909", GO.format(state=" state=building"), "grok-login", 1))
+    dispatcher.poll_once(FakeSource(on_pr(go)))
+    for at in (110.0, 130.0):
+        now[0] = at
+        build = queue.claim("claude")
+        assert build is not None
+        queue.finish(build.id, owner="claude", handoff_comment_id=None)
+        if at == 110.0:
+            dispatcher.reconcile_jobs()
+
+    class Unavailable(FakeSource):
+        def tracked_tickets(self, refs):
+            raise RuntimeError("ticket API temporarily unavailable")
+
+    delivery = FakeGrokDelivery()
+    restarted, _ = setup(tmp_path, now=now, grok_delivery=delivery)
+    restarted.poll_once(Unavailable())
+
+    [wake] = delivery.jobs
+    assert detail(wake)["job_id"] == build.id
+    assert detail(wake)["link"] == go.url
+
+
+def test_done_wake_on_linear_falls_back_to_the_ticket_url(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.trusted_logins["linear"]["linear:reviewer-id"] = frozenset({"codex-bot"})
+    approval = _linear_comment(
+        {
+            "id": "d5abb520-f2c4-4d85-b534-f5a3ed449000",
+            "body": VERDICT.format(head=HEAD_A, verdict="APPROVE"),
+            "createdAt": "2026-11-14T01:00:00+00:00",
+            "user": {"id": "reviewer-id"},
+        }
+    )
+    in_review(queue, HEAD_A, ticket_id="AUT-42")
+    linear = ticket(approval, ship="merge", ticket_id="AUT-42")
+    linear = replace(
+        linear,
+        factory=replace(linear.factory, tickets="linear"),
+        ticket_url=LINEAR_URL,
+        pr_number="42",
+        grok_bot="project-bot",
+    )
+
+    dispatcher.process(linear)
+
+    [wake] = [job for job in FakeBot(queue, "grok").drain() if job.request.action == "done"]
+    assert detail(wake)["follow_up_owner"] == "project-bot"
+    assert detail(wake)["link"] == LINEAR_URL

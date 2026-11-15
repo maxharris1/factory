@@ -88,6 +88,7 @@ class SchemaMixin:
                 )
                 """
             )
+            _add_missing_columns(connection, "handled_comments", {"link": "TEXT"})
             _add_missing_columns(
                 connection,
                 "ticket_state",
