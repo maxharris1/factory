@@ -230,3 +230,43 @@ class ResumeMixin:
             )
             connection.commit()
         return "queued-blocked-review"
+
+    def _resume_unsatisfiable(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[bool, str] | None:
+        if self._unsat_parked(ticket):
+            if not self._may_lift_cap(comment.author):
+                self._wake_comment_problem(
+                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
+                )
+                return True, "go-not-from-approver"
+            return self._resume_paused(ticket, comment)
+        with self._connect() as connection:
+            resumed = connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND source_comment_id = ? AND dedupe_key LIKE 't5:%'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+        return None if resumed is None else self._resume_paused(ticket, comment)
+
+    def _unsat_parked(self, ticket: TrackedTicket) -> bool:
+        with self._connect() as connection:
+            parked = connection.execute(
+                """
+                SELECT 1 FROM ticket_state
+                JOIN review_events
+                  ON review_events.repo = ticket_state.repo
+                 AND review_events.ticket_id = ticket_state.ticket_id
+                 AND review_events.comment_id = ticket_state.paused_question_id
+                WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
+                  AND ticket_state.workflow_state = 'waiting-max'
+                  AND review_events.outcome = 'waiting-max-unsat'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        return parked is not None

@@ -59,6 +59,8 @@ class ReadyMixin:
         if state == "capped":
             self._flag_ready_after_cap(ticket, comment, fields["head"])
             return True, "capped-ready"
+        if state == "waiting-max" and self._unsat_parked(ticket):
+            return True, "ready-while-unsat"
         if state == "blocked":
             return True, "blocked-ready"
         reported_head = fields["head"]
@@ -597,6 +599,12 @@ class ReadyMixin:
                       recorded.review_round = ?
                       OR recorded.head IS NULL AND verdict.comment_id = ? AND verdict.rowid <= (
                           SELECT MAX(handled_rowid) FROM verdict_heads_floor
+                      ) AND NOT EXISTS (
+                          SELECT 1 FROM handled_times AS handled
+                          WHERE handled.repo = verdict.repo
+                            AND handled.ticket_id = verdict.ticket_id
+                            AND handled.comment_id = verdict.comment_id
+                            AND handled.handled_at < ?
                       )
                   )
                   AND verdict.rowid > COALESCE((
@@ -611,6 +619,7 @@ class ReadyMixin:
                     review_queued_at,
                     review_round,
                     handoff_id,
+                    review_queued_at,
                     ready_id,
                 ),
             ).fetchall()

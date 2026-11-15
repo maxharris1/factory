@@ -187,12 +187,11 @@ def test_blocked_at_the_cap_is_never_granted(tmp_path: Path) -> None:
     assert auto_rows(flow) == []
 
 
-@pytest.mark.parametrize("extra", ["repeat=f-1", "unsat=ac-1"])
-def test_repeat_and_unsat_are_never_granted(tmp_path: Path, extra: str) -> None:
+def test_repeat_is_never_granted(tmp_path: Path) -> None:
     flow = AutoFlow(tmp_path)
     flow.to_round_three()
     body = VERDICT.format(round="3/3", head=flow.head, verdict="REVISE", risk="high")
-    body = body.replace(" -->", f" {extra} -->", 1)
+    body = body.replace(" -->", " repeat=f-1 -->", 1)
     assert flow.post("revise-flagged", body, "codex-login") == "capped-review"
     assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 0)
     assert capped_wakes(flow) == 1
