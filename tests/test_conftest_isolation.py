@@ -4,12 +4,26 @@ cannot break that teardown."""
 
 from __future__ import annotations
 
-import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _run_with_suite_conftest(tmp_path: Path, name: str, body: str) -> subprocess.CompletedProcess:
+    """Run one generated test file under the suite's own conftest, loaded as a
+    plugin from the repo so its `lib` imports and skills install still work."""
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / name).write_text(body, encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "tests.conftest", "--rootdir", str(case), str(case / name)],
+        cwd=case, capture_output=True, text=True, timeout=120, env=env,
+    )
 
 PATCHING_TEST = '''
 import os
@@ -41,32 +55,20 @@ def test_the_control_dir_is_back_and_gone_after(tmp_path):
 def test_a_test_that_patches_os_and_shutil_does_not_break_conftest_teardown(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "tests").mkdir()
-    shutil.copy(ROOT / "tests" / "conftest.py", tmp_path / "tests" / "conftest.py")
-    (tmp_path / "tests" / "test_patching.py").write_text(PATCHING_TEST, encoding="utf-8")
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "tests/test_patching.py"],
-        cwd=tmp_path, capture_output=True, text=True, timeout=120,
-    )
+    result = _run_with_suite_conftest(tmp_path, "test_patching.py", PATCHING_TEST)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed" in result.stdout
     assert "error" not in result.stdout.lower()
 
 
 def test_the_control_dir_is_removed_after_each_test(tmp_path: Path) -> None:
-    (tmp_path / "tests").mkdir()
-    shutil.copy(ROOT / "tests" / "conftest.py", tmp_path / "tests" / "conftest.py")
     record = tmp_path / "dirs.txt"
-    (tmp_path / "tests" / "test_record.py").write_text(
+    result = _run_with_suite_conftest(
+        tmp_path,
+        "test_record.py",
         "import os\n"
         f"def test_one():\n    open({str(record)!r}, 'a').write(os.environ['ORCH_SSH_CONTROL_DIR'] + '\\n')\n"
         f"def test_two():\n    open({str(record)!r}, 'a').write(os.environ['ORCH_SSH_CONTROL_DIR'] + '\\n')\n",
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_record.py"],
-        cwd=tmp_path, capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     first, second = record.read_text(encoding="utf-8").split()
