@@ -114,13 +114,7 @@ def _retry_why(detail: dict[str, object], facts: dict) -> str:
     )
 
 
-def ready_handoff(bot: str, facts: dict) -> tuple[str, str]:
-    # #105: round and risk come from the job, never from the builder.
-    round_key = f" round={facts['round']}" if facts["round"] else ""
-    risk_key = f" risk={facts['risk']}" if facts["risk"] else ""
-    header = (
-        f"<!-- orch:v1 kind=ready from={bot} role=builder{round_key} "
-        f"head=<pushed-head-sha>{risk_key} -->"
-    )
+def ready_handoff(bot: str) -> tuple[str, str]:
+    header = f"<!-- orch:v1 kind=ready from={bot} role=builder head=<pushed-head-sha> -->"
     example = "What changed, the tests and their results, and anything left open."
     return header, example

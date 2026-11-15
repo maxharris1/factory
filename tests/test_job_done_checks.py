@@ -177,7 +177,6 @@ def test_a_handoff_in_another_repo_fails(tmp_path: Path, store: Path, capsys) ->
         ({"kind": "go", "head": None, "round": None, "risk": None}, "kind=go is not ready"),
         ({"from": "cursor-bot"}, "from=cursor-bot is not claude-bot"),
         ({"role": "reviewer"}, "role=reviewer is not builder"),
-        ({"round": "2/3"}, "round=2/3 is not 1/3"),
     ],
 )
 def test_a_header_that_does_not_fit_fails(

@@ -169,6 +169,6 @@ def _handoff(job: Job, bot: str, kind: str, facts: dict, *, skills_read: bool) -
     elif _is_plan(job, kind):
         header, example = plan.handoff(bot, facts)
     else:
-        header, example = build.ready_handoff(bot, facts)
+        header, example = build.ready_handoff(bot)
     role = "reviewer" if kind == "review" else "builder"
     return handoff_section(bot, role, facts, header, example, skills_read=skills_read)
