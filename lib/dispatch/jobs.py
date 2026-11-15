@@ -964,9 +964,9 @@ class JobsMixin:
         already answered (#71 stale-ready-verdict) still counts. An update
         job's ready is matched by TU's attribution, not by time.
 
-        A review's is a reviewer verdict for the job's head (as a prefix,
-        like every head compare) and round; a review job with no round or no
-        head takes none. A build or fix job's is a builder ready from the
+        A review's is a verdict from the job's recipient for the job's head
+        (as a prefix, like every head compare) and round; a review job with
+        no round or no head takes none. A build or fix job's is a builder ready from the
         job's recipient at a new head: one other than the job's own, or any
         head for a job that has none. That ready counts once T2 routed it,
         or while it waits on CI at the polled PR head. One T2 left unhandled
@@ -987,7 +987,7 @@ class JobsMixin:
             round_field = _detail_round(job.request.detail)
             if job.request.head is None or round_field is None:
                 return None
-            kind, bot, role = "verdict", f"{ticket.factory.reviewer_harness}-bot", "reviewer"
+            kind, bot, role = "verdict", f"{job.request.recipient}-bot", "reviewer"
         elif action in ("build", "fix", "update-from-main"):
             round_field = None
             kind, bot, role = "ready", f"{job.request.recipient}-bot", "builder"

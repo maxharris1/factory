@@ -168,7 +168,8 @@ class DispatcherBase:
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, state, failure_handled, handoff_comment_id, head, detail FROM jobs
+                SELECT id, state, failure_handled, handoff_comment_id, recipient, head, detail
+                FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action IN ({marks})
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, *actions),
@@ -192,12 +193,14 @@ class DispatcherBase:
 
     @staticmethod
     def _can_register(job: sqlite3.Row, comment: Comment, kind: str) -> bool:
-        if kind != "verdict":
-            return True
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             return False
+        if fields.get("from") != f"{job['recipient']}-bot":
+            return False
+        if kind != "verdict":
+            return True
         job_round = _detail_round(job["detail"])
         return _matching_head(fields.get("head") or "", job["head"]) is not None and (
             job_round is None or fields.get("round") == job_round
