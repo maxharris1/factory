@@ -218,6 +218,40 @@ def is_terminal(chart: dict | None, state: str | None) -> bool:
     return not any(name in _reach(adjacency, name) for name in ahead)
 
 
+PIPELINE = ("Ask", "Plan", "Build", "Review", "Ship")
+SHIPPED = ("handed-off", "merged", "done")
+PHASES = (*PIPELINE, "Shipped", "Stop")
+PHASE_OVERRIDES = {"capped": "Stop", **{name: "Shipped" for name in SHIPPED}}
+
+
+def ticket_phases(chart: dict | None) -> dict[str, str]:
+    """Every chart state's board phase, from the legend item that shares its
+    colour group, then PHASE_OVERRIDES. In reading order: breadth first from
+    the start state, then any state the start cannot reach."""
+    if chart is None:
+        return {}
+    legend = {item["group"]: item["name"] for item in chart["legend"]}
+    groups = {state["name"]: state["group"] for state in chart["states"]}
+    adjacency = _adjacency(chart)
+    order = [chart["start"]]
+    queue = deque(order)
+    while queue:
+        for nxt in adjacency[queue.popleft()]:
+            if nxt not in order:
+                order.append(nxt)
+                queue.append(nxt)
+    order += [name for name in groups if name not in order]
+    phases = {}
+    for name in order:
+        phase = PHASE_OVERRIDES.get(name) or legend.get(groups[name])
+        phases[name] = phase if phase in PHASES else "Stop"
+    return phases
+
+
+def ticket_phase(phases: dict[str, str], state: str, stuck: bool) -> str:
+    return "Stop" if stuck else phases.get(state, "Stop")
+
+
 def job_flow(
     chart: dict | None,
     history: Sequence[tuple[str, float]],
