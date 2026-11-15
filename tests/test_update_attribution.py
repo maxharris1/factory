@@ -20,6 +20,7 @@ from lib.job_state import (
     REQUEUED_EARLY_EXIT,
     RUN_DIED,
     derive,
+    fail_lagging,
     never_started,
     record_job_event,
     requeue_link_drop,
@@ -390,3 +391,30 @@ def test_an_unattributed_ready_is_no_later_workers_handoff(tmp_path: Path, keep_
     jobs = [(r["id"] == job.id, r["state"], r["handoff_comment_id"]) for r in board.jobs("update-from-main")]
     assert board.state("42")["update_failures"] == 0
     assert jobs == [(True, "queued", None)]
+
+
+def test_a_ready_after_a_lagging_refusal_charges_no_update_failure(tmp_path: Path) -> None:
+    """#357: a start the preflight refused for a lagging checkout never ran."""
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    pool = _pool(board)
+    update, placement = pool.claim("claude")
+    assert never_started(placement)
+    with board.queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        assert fail_lagging(
+            connection,
+            update.id,
+            now=board.now[0],
+            reason="preflight-lagging: box behind origin/main",
+            slot_guard="harness = ?",
+            slot_params=("claude",),
+        )
+        connection.commit()
+    board.ready(pr, sha(1), "old-ready")
+    assert _attributed(board, pr) is None
+    board.poll()
+    assert board.outcome("old-ready") == "update-unattributed"
+    row = board.state("42")
+    assert (row["update_failures"], row["stuck"]) == (0, 0)

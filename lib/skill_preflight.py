@@ -110,7 +110,12 @@ class PreflightError(ValueError):
 
 
 class CheckoutLagging(PreflightError):
-    """The placed device's factory checkout is not the box's commit, or is missing."""
+    """The placed device's factory checkout is not the box's commit, or is
+    missing. box_behind_origin: the box's own checkout lags its origin/main."""
+
+    def __init__(self, message: str, *, box_behind_origin: bool = False):
+        super().__init__(message)
+        self.box_behind_origin = box_behind_origin
 
 
 @dataclass(frozen=True)
@@ -342,7 +347,7 @@ def check(
         name = device.name if device is not None else "box"
         lagging = box_behind_origin(name, bot, checkout)
         if lagging is not None:
-            raise CheckoutLagging(lagging)
+            raise CheckoutLagging(lagging, box_behind_origin=True)
         found = local_hashes(home, paths)
         if home_install_stale(expected, found):
             install_errors = install_into_home(Path(checkout), home)
@@ -351,7 +356,7 @@ def check(
         name = device.name
         lagging = box_behind_origin("box", bot, str(root.resolve()))
         if lagging is not None:
-            raise CheckoutLagging(lagging)
+            raise CheckoutLagging(lagging, box_behind_origin=True)
         seen = remote_hashes(transport, device, placement, paths, checkout)
         lagging = lag(name, bot, checkout, seen.head, checkout_sha(root))
         if lagging is not None:

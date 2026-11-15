@@ -13,9 +13,11 @@ runs as the owning bot's own user and login, starts the job itself:
   device against skills/skills.lock (lib/skill_preflight.py), and a missing
   or changed file fails the job. A remote factory checkout that is not on
   the box's commit, or missing, or a box checkout behind its fetched
-  origin/main (#297), instead marks that target lagging in device_sync and
-  requeues the job with no round charged (a free requeue from the shared
-  budget, then T6), so it goes to an up-to-date device;
+  origin/main (#297), instead marks the checkout that lags (the box's own,
+  for a box behind origin/main) lagging in device_sync and fails the job
+  unhandled with a preflight-lagging event (#357). T6 requeues that same row
+  after a backoff, charging no round, attempt or free requeue, and marks the
+  ticket stuck device-lagging if it still lags past the bound;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -126,7 +128,7 @@ from typing import Protocol
 import yaml
 
 from lib.brief import BriefError, render_brief
-from lib.device_pool import DevicePool, Placement
+from lib.device_pool import DevicePool, Placement, box_device
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
@@ -144,7 +146,7 @@ from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
 from lib.skill_preflight import CheckoutLagging, PreflightError
 from lib import device_sync
-from lib.job_state import RELEASED_UNSTARTED, requeue_unstarted
+from lib.job_state import fail_lagging
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -794,7 +796,7 @@ class Waiter:
                 if lock >= 0:
                     os.close(lock)
         except CheckoutLagging as exc:
-            self._requeue_lagging(job, placement, factory_root, str(exc), label)
+            self._fail_lagging(job, placement, factory_root, exc, label)
             return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
@@ -825,14 +827,25 @@ class Waiter:
         self.log(f"{label}: started orch job run (pid {child.pid}) on {where}")
         return job.id
 
-    def _requeue_lagging(
-        self, job: Job, placement: Placement | None, checkout: str | None, reason: str, label: str
+    def _fail_lagging(
+        self,
+        job: Job,
+        placement: Placement | None,
+        checkout: str | None,
+        exc: CheckoutLagging,
+        label: str,
     ) -> None:
+        reason = str(exc)
         if placement is None or checkout is None:
             self.log(f"{label}: not started: {reason}; failed it for T6")
             self._fail(job)
             return
         claimer, _ = self._claimer
+        lagging = placement.device
+        if exc.box_behind_origin:
+            lagging = box_device(self.pool.config)
+            if placement.device != lagging:
+                checkout = str(skill_preflight.ROOT.resolve())
 
         def write() -> tuple[str, str] | None:
             with self.queue.connect() as connection:
@@ -840,7 +853,7 @@ class Waiter:
                 now = self.queue.now()
                 device_sync.upsert(
                     connection,
-                    device=placement.device,
+                    device=lagging,
                     bot=self.bot,
                     harness=self.recipient,
                     checkout=checkout,
@@ -850,11 +863,10 @@ class Waiter:
                     detail=reason,
                     now=now,
                 )
-                result = requeue_unstarted(
+                result = fail_lagging(
                     connection,
                     job.id,
                     now=now,
-                    event=RELEASED_UNSTARTED,
                     reason=reason,
                     slot_guard=(
                         "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
@@ -867,14 +879,14 @@ class Waiter:
 
         try:
             result = retry_locked(write)
-        except (QueueError, sqlite3.Error, OSError) as exc:
-            self.log(f"{label}: not started: {reason}; could not requeue it ({_one_line(exc)})")
+        except (QueueError, sqlite3.Error, OSError) as error:
+            self.log(f"{label}: not started: {reason}; could not record it ({_one_line(error)})")
             self._fail(job)
             return
         if result is None:
             self.log(f"{label}: not started: {reason}; its claim changed, left alone")
             return
-        self.log(f"{label}: not started: {result[1]}")
+        self.log(f"{label}: not started: {reason}; failed for T6 to requeue after a backoff")
 
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.

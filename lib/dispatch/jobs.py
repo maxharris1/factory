@@ -7,7 +7,8 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.device_pool import free_slots, sync_blocks, used_slots
+from lib import device_sync
+from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _ANSWERS,
@@ -30,6 +31,7 @@ from lib.dispatch.types import Comment, RouteError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
+    LAGGING_WAIT_SECONDS,
     LINK_DROP_BACKOFF_SECONDS,
     MAX_LINK_DROP_REQUEUES,
     RELEASED_UNSTARTED,
@@ -38,12 +40,16 @@ from lib.job_state import (
     Liveness,
     claimed_too_long,
     derive,
+    fail_lag_blocked,
+    lagging_end,
+    lagging_requeue,
     last_run_end,
     link_drop_end,
     link_drop_requeues,
     link_drop_settled_at,
     read_placements,
     release_link_dropped,
+    requeue_lagging,
     requeue_link_drop,
     requeue_unstarted,
     unstarted_too_long,
@@ -68,6 +74,14 @@ class _LinkDrop:
     @property
     def spent(self) -> str:
         return f"link-drop on {self.detail} ({self.used} free requeues spent)"
+
+
+def _harnesses_a_lagging_box_refuses_everywhere(
+    rows: list[device_sync.Row], box: str
+) -> frozenset[str]:
+    return frozenset(
+        row.harness for row in rows if row.device == box and row.state == device_sync.LAGGING
+    )
 
 
 class JobsMixin:
@@ -117,6 +131,47 @@ class JobsMixin:
             and free_slots(config, harness, used, blocked) == 0
         )
 
+    def _lag_blocked_recipients(self) -> frozenset[str]:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return frozenset()
+        with self.queue.connect() as connection:
+            rows = device_sync.read(connection)
+        blocked = device_sync.blocked_by(rows)
+        refused_everywhere = _harnesses_a_lagging_box_refuses_everywhere(rows, box_device(config))
+        return frozenset(
+            harness
+            for harness in HARNESSES
+            if any(device.eligible(harness) for device in config.devices)
+            and (
+                harness in refused_everywhere
+                or all(
+                    blocked.blocks(device.name, harness)
+                    for device in config.devices
+                    if device.eligible(harness)
+                )
+            )
+        )
+
+    def _fail_lag_blocked_past_wait(self, job: Job, now: float) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lagging = lagging_requeue(connection, job.id)
+            failed = (
+                lagging is not None
+                and lagging.past_wait(now)
+                and fail_lag_blocked(
+                    connection,
+                    job.id,
+                    now=now,
+                    detail=f"queued; every {job.request.recipient} checkout is lagging",
+                )
+            )
+            connection.commit()
+        if failed:
+            self._log_job_event(job, "lag-blocked", "queued; every checkout is lagging")
+        return failed
+
     def _restart_queue_wait(self, job: Job, now: float) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -136,7 +191,14 @@ class JobsMixin:
         self._close_abandoned_jobs()
         now = self.queue.now()
         busy = self._busy_recipients()
+        lag_blocked = self._lag_blocked_recipients()
         for job in self.queue.outstanding():
+            if (
+                job.state == "queued"
+                and job.request.recipient in lag_blocked
+                and self._fail_lag_blocked_past_wait(job, now)
+            ):
+                continue
             # A queued job's last_activity_at is its queue-wait start: when
             # it was queued, or when a claim that never started was released
             # (#77 F1.2), so a release never times out a job for the wait
@@ -635,6 +697,8 @@ class JobsMixin:
             and _merge_only(job.request.detail)
             and self._queue_owns_base_updates(job.request.repo, job.request.ticket_id)
         )
+        if not queue_owned and self._lagging_handled(job):
+            return
         link_drop = self._link_drop(job)
         if link_drop is not None:
             with self._connect() as connection:
@@ -710,6 +774,56 @@ class JobsMixin:
             ),
         )
         self.queue.mark_failure_handled(job.id)
+
+    def _lagging_handled(self, job: Job) -> bool:
+        """#357: a start refused because a checkout lags requeues the same row
+        after a backoff, and sticks the ticket device-lagging if it still lags
+        past the wait. True when T6 handled the job."""
+        with self._connect() as connection:
+            lagging = lagging_end(connection, job.id)
+        if lagging is None:
+            return False
+        if job.request.action == "review" and self._review_retry_waits(job):
+            return True
+        now = self.queue.now()
+        if lagging.past_wait(now) and job.request.recipient in self._lag_blocked_recipients():
+            self._mark_stuck_and_wake(
+                repo=job.request.repo,
+                ticket_id=job.request.ticket_id,
+                source_comment_id=job.request.source_comment_id,
+                timeout_seconds=job.request.timeout_seconds,
+                reason="device-lagging",
+                detail=json.dumps(
+                    {
+                        "project_bot": _detail_project_bot(job.request.detail),
+                        "detail": (
+                            f"{job.request.action} job not started: device still lagging "
+                            f"after {int(LAGGING_WAIT_SECONDS // 60)} min; last refusal "
+                            f"{lagging.detail}"
+                        ),
+                        "job_id": job.id,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+            self.queue.mark_failure_handled(job.id)
+            return True
+        backoff = lagging.backoff()
+        if now < (job.finished_at or now) + backoff:
+            self._record_job_event_once(
+                job, "requeue-deferred", f"preflight lagging; T6 requeues it after a {backoff} s backoff"
+            )
+            return True
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = requeue_lagging(
+                connection, job.id, now=now, reason=f"preflight lagging: {lagging.detail}"
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
+        return True
 
     def _link_drop(self, job: Job) -> _LinkDrop | None:
         """#218: the job's latest run ended in a link drop, unless it is a
