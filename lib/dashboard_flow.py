@@ -54,7 +54,9 @@ JOB_STATES = {
     "refused": "refused",
     "awaiting-ok": "awaiting-ok",
 }
-QUEUES_JOB_BEFORE_ROW = "set-state"
+QUEUE_JOB_BEFORE_ROW = frozenset(
+    {"set-state", "plan-gap", "t3", "t5-answers", "cap-resume", "update-queued"}
+)
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
 GLOSS = {
@@ -345,7 +347,7 @@ def _first_row_floor(
     )
     if not _every_path_visits(chart, last_state, first.from_state, first.to_state):
         return last_other_job
-    if first.source != QUEUES_JOB_BEFORE_ROW:
+    if first.source not in QUEUE_JOB_BEFORE_ROW:
         return first.at
     kept_by_old_visit, *later = sorted(
         (step.created_at, step.attempt) for state, step in steps

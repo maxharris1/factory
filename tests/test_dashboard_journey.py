@@ -522,6 +522,55 @@ def test_first_row_written_polls_after_its_review_was_queued_owns_that_review(
     ]
 
 
+PLAN = "<!-- orch:v1 kind=plan from=claude-bot role=builder round={round}/2 ac={ac} -->\nPlan.\n"
+
+
+def test_legacy_plan_gap_first_row_leaves_the_old_plan_to_its_visit() -> None:
+    jobs = [_step("plan", "claude", 111.0), _step("plan", "claude", 126.0)]
+    rows = [_row("plan-check", "planning", 127.0, "plan-gap")]
+    result = flow.job_flow(_chart(), jobs, "planning", 200.0, rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "planning"] == [
+        ("claude", 111.0),
+        ("claude", 127.0),
+    ]
+
+
+def test_resumed_plan_gap_first_row_owns_the_plan_it_queued(tmp_path: Path) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go", state="planning")
+    board.poll()
+    board.finish("claude")
+    board.post(pr, "plan-1", PLAN.format(round=1, ac="unmet"), "claude-login")
+    board.actions.state_failures.add((pr.repo, "plan-check"))
+    board.poll()
+    assert board.state("42")["workflow_state"] == "plan-check"
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 100
+    board.actions.state_failures.clear()
+
+    def ticking() -> float:
+        board.now[0] += 1
+        return board.now[0]
+
+    board.queue.clock = ticking
+    board.poll()
+    assert board.outcome("plan-1") == "queued-plan-gap"
+    jobs, rows = _recorded(board)
+    old, new = [job.created_at for job in jobs if job.action == "plan"]
+    assert [(row.from_state, row.to_state, row.source) for row in rows] == [
+        ("plan-check", "planning", "plan-gap")
+    ]
+    assert old < new < rows[0].at
+    expected = [("claude", old), ("claude", rows[0].at)]
+    result = flow.job_flow(_chart(), jobs, "planning", board.now[0], rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "planning"] == expected
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "missing.log", now=board.now[0])
+    job = next(job for job in snapshot["queued"] if job["ticket_id"] == "42")
+    assert [(v["who"], v["started_at"]) for v in job["flow"]["visits"] if v["state"] == "planning"] == expected
+
+
 @pytest.mark.parametrize(
     ("jobs", "from_state", "to_state", "visits"),
     [
