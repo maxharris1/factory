@@ -61,6 +61,8 @@ class ReadyMixin:
             return True, "capped-ready"
         if state == "waiting-max" and self._unsat_parked(ticket):
             return True, "ready-while-unsat"
+        if state == "blocked":
+            return True, "blocked-ready"
         reported_head = fields["head"]
         reentry: int | None = None
         rereview = False

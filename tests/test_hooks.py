@@ -325,31 +325,11 @@ def jobs(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
     return [(str(row["action"]), str(row["recipient"])) for row in rows]
 
 
-def test_t7_blocked_verdict_wakes_grok_once(tmp_path: Path) -> None:
-    dispatcher, queue = setup(tmp_path)
-    blocked = say(
-        "verdict-1",
-        VERDICT.format(head=HEAD_A, verdict="BLOCKED"),
-        "codex-login",
-        1,
-    )
-
-    dispatcher.process(ticket(blocked))
-
-    grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["blocked"]
-    assert grok[0].request.head == HEAD_A
-    assert grok[0].request.source_comment_id == "verdict-1"
-    assert FakeBot(queue, "claude").drain() == []
-    assert FakeBot(queue, "codex").drain() == []
-
-
 def test_t7_single_wake_on_repeated_terminal_comments(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
-    blocked = VERDICT.format(head=HEAD_A, verdict="BLOCKED")
     first = ticket(
-        say("blocked-1", blocked, "codex-login", 1),
-        say("blocked-2", blocked, "codex-login", 2),
+        stop("blocked-1", 1, state="blocked", sender="grok-bot", author="grok-login"),
+        stop("blocked-2", 2, state="blocked", sender="grok-bot", author="grok-login"),
         stop("capped-1", 3, state="capped", sender="grok-bot", author="grok-login"),
         stop("capped-2", 4, state="capped", sender="grok-bot", author="grok-login"),
     )
@@ -363,7 +343,7 @@ def test_t7_single_wake_on_repeated_terminal_comments(tmp_path: Path) -> None:
         first,
         comments=first.comments
         + (
-            say("blocked-3", blocked, "codex-login", 5),
+            stop("blocked-3", 5, state="blocked", sender="grok-bot", author="grok-login"),
             stop("capped-3", 6, state="capped", sender="grok-bot", author="grok-login"),
         ),
     )

@@ -22,6 +22,7 @@ RULE_MODULE = {
     "_resume_after_cap": "resume",
     "_resume_unsatisfiable": "resume",
     "_unsat_parked": "resume",
+    "_resume_after_blocked": "resume",
     "_over_cap": "effective",
     "_config_cap": "effective",
     "_effective_cap": "effective",

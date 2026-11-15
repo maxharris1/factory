@@ -67,22 +67,25 @@ class DetailMixin:
         timeout_seconds: int,
         detail: str,
         head: str | None = None,
+        once_key: str | None = None,
     ) -> None:
         """T7: one Grok wake per stop, across restarts.
 
         refused wakes once per ticket. blocked and capped wake once per
         ticket and head. unparsed, ship-failed and go-not-from-approver wake
-        once per comment.
+        once per comment. A caller's once_key replaces the reason's key, as
+        a BLOCKED verdict wakes once per verdict comment.
         stuck goes through the ticket's stuck flag, which wakes once.
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
-        if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
-            once_key = source_comment_id
-        elif reason in ("blocked", "capped", "done", "awaiting-ok"):
-            once_key = head or "-"
-        else:
-            once_key = "-"
+        if once_key is None:
+            if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
+                once_key = source_comment_id
+            elif reason in ("blocked", "capped", "done", "awaiting-ok"):
+                once_key = head or "-"
+            else:
+                once_key = "-"
         if reason == "stuck":
             self._mark_stuck_and_wake(
                 repo=repo,

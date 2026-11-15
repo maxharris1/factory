@@ -65,6 +65,9 @@ class QuestionsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
+            if waiting is not None and waiting["workflow_state"] == "blocked":
+                connection.commit()
+                return True, "questions-while-blocked"
             if waiting is not None and waiting["workflow_state"] == "waiting-max":
                 connection.commit()
                 if waiting["paused_question_id"] == comment.id:
