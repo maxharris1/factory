@@ -1,0 +1,6 @@
+decision	choice	why
+stuck slot (round 2, ac-2)	running and queued rows carry their ticket's stuck flag; px_state and PX.state map it to the static red "stuck" state	one classifier feeds both renderers and every strip, so no page can animate a stuck ticket
+fold (round 2, ac-1)	KPI burst strip absolute in the tile's top padding and the label a block, as Lanes.dc.html; no artboard px changed	the in-flow strip and inline label added 13.4px over the artboard; the 15-slot fixture went from 912.8 to 899.4px
+fold line	the test asserts against the 900px viewport, not the 868px status-line top	with artboard values a layout whose three rows each wrap a round line cannot clear the sticky status line; left open for Max
+browser harness	Chrome over --remote-debugging-pipe with Emulation.setDeviceMetricsOverride	Chrome clamps windows to 500px wide and --dump-dom gave an 813px viewport for a 900px window
+Tickets list CSS (round 2, f-1)	queue-item rules move to tickets.CSS	its only consumer is job.html

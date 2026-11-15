@@ -1,10 +1,17 @@
 """#140: the Lanes page (index.html): status tiles, the queue lane, slot tiles per state,
 Just happened and Intake, server render against the page script."""
 
+import base64
 import copy
+import glob
 import json
+import os
 import re
+import shutil
+import sqlite3
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,9 +30,11 @@ STATES = {
     "stale": {"job_state": "stale", "action": "build"},
     "dead": {"job_state": "dead", "action": "build"},
     "overdue": {"job_state": "running", "action": "build", "overdue": True},
+    "stuck": {"job_state": "running", "action": "review", "stuck": True},
 }
 EFFECT = {"plan": "field", "build": "fill", "review": "scan", "fix": "patch", "claimed": "spin3",
-          "stale": "decay", "dead": "static", "overdue": "static"}
+          "stale": "decay", "dead": "static", "overdue": "static", "stuck": "static"}
+BROKEN = ("dead", "overdue", "stuck")
 
 
 def _base(tmp_path: Path) -> dict:
@@ -34,7 +43,7 @@ def _base(tmp_path: Path) -> dict:
 
 def _row(template: dict, name: str, **extra) -> dict:
     row = copy.deepcopy(template)
-    row.update({"job": f"t-{name}", "overdue": False, "device": "box", "round": "2/3",
+    row.update({"job": f"t-{name}", "overdue": False, "stuck": False, "device": "box", "round": "2/3",
                 "elapsed_seconds": 300, "timeout_seconds": 1200, "heartbeat_age_seconds": 4,
                 "recipient": "claude"})
     row.update(STATES[name])
@@ -53,10 +62,14 @@ def _tiles(tmp_path: Path) -> dict:
     return snapshot
 
 
-def _tile(html: str, name: str) -> str:
-    match = re.search(rf'<a class="tile [^"]*" href="job.html#job-t-{name}"[^>]*>.*?</a>', html, re.S)
-    assert match, name
+def _job_tile(html: str, job: str) -> str:
+    match = re.search(rf'<a class="tile [^"]*" href="job.html#job-{re.escape(job)}"[^>]*>.*?</a>', html, re.S)
+    assert match, job
     return match.group(0)
+
+
+def _tile(html: str, name: str) -> str:
+    return _job_tile(html, f"t-{name}")
 
 
 @pytest.mark.parametrize("name", list(STATES))
@@ -75,9 +88,40 @@ def test_each_slot_state_has_its_strip_chip_and_link(tmp_path: Path, name: str) 
         assert any(f'aria-label="{verb}…"' in tile for verb in spec["verbs"])
     else:
         assert 'class="glyph"' not in tile
-    if name in ("dead", "overdue"):
+    if name in BROKEN:
         assert 'data-tint="#f7768e"' in tile and 'class="tile claude bad"' in tile
     assert "running" not in re.sub(r"<[^>]+>", " ", tile).lower()
+
+
+def _stuck_review(tmp_path: Path) -> tuple[dict, dict]:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE ticket_state SET stuck = 1 WHERE ticket_id = '13'")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    row = next(r for r in snapshot["running"] if r["ticket_id"] == "13")
+    assert row["job_state"] == "running" and row["action"] == "review"
+    return snapshot, row
+
+
+def _assert_static_red(tile: str) -> None:
+    assert 'data-px="static" data-tint="#f7768e"' in tile
+    assert 'class="glyph"' not in tile and "Scrutinizing" not in tile
+    assert '<span class="chip bad">stuck</span>' in tile and 'class="tile codex bad"' in tile
+
+
+def test_a_stuck_tickets_running_job_is_static_red(tmp_path: Path) -> None:
+    snapshot, row = _stuck_review(tmp_path)
+    assert row["stuck"] is True
+    assert {r["ticket_id"]: r["stuck"] for r in snapshot["running"]}["14"] is False
+    html = _no_script(render_pages(snapshot)["index.html"])
+    _assert_static_red(_job_tile(html, row["job"]))
+
+
+@needs_node
+def test_the_page_script_draws_a_stuck_tickets_job_static_red(tmp_path: Path) -> None:
+    snapshot, row = _stuck_review(tmp_path)
+    lanes = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
+    _assert_static_red(_job_tile(lanes, row["job"]))
 
 
 def test_build_fill_and_stale_decay_follow_the_job(tmp_path: Path) -> None:
@@ -248,3 +292,189 @@ def test_beat_only_on_a_real_heartbeat_drop_and_burst_only_on_a_change(tmp_path:
     assert seen[-1]["job-t-plan"]["beats"] == 0
     assert all(str(s["burst"]) == "0" for k, s in seen[0].items() if k.startswith("kpi-"))
     assert str(seen[-1]["kpi-1"]["burst"]) == "1" and str(seen[-1]["kpi-0"]["burst"]) == "0"
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CHROME = next(
+    (
+        path
+        for path in (
+            *(shutil.which(name) for name in ("google-chrome", "chromium", "chromium-browser", "chrome")),
+            *sorted(glob.glob(str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux64/chrome"))),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )
+        if path and Path(path).is_file()
+    ),
+    None,
+)
+needs_chrome = pytest.mark.skipif(CHROME is None, reason="no Chrome or Chromium found")
+FOLD = 900
+SHOTS = ("issue-140-lanes-1440.png", "issue-140-lanes-375.png")
+
+
+def fifteen_slot_snapshot(tmp_path: Path) -> dict:
+    snapshot = _base(tmp_path)
+    template = snapshot["running"][0]
+    snapshot["slots"]["devices"] = [
+        {"name": name, "slot_max": cap, "held": held, "enabled": True, "placeholder": False,
+         "harnesses": ["claude", "codex", "cursor"]}
+        for name, cap, held in (("box", 5, 5), ("pc", 6, 6), ("mac", 4, 3))
+    ]
+    snapshot["running"] = [
+        _row(template, name, device=device, job=f"{device}-{i}", recipient="codex" if name == "review" else "claude")
+        for device, names in (
+            ("box", ["build", "fix", "review", "stale", "dead"]),
+            ("pc", ["plan", "build", "review", "fix", "claimed", "overdue"]),
+            ("mac", ["build", "review"]),
+        )
+        for i, name in enumerate(names)
+    ]
+    snapshot["queue"]["totals"]["running"] = len(snapshot["running"])
+    snapshot["queued"] = snapshot["queued"][:1]
+    snapshot["queued"][0].update(no_waiter=None, no_waiter_link=None)
+    snapshot["stuck"] = {"tickets": [], "overdue_jobs": []}
+    snapshot["health"] = {"components": [], "counts": {}}
+    return snapshot
+
+
+def _page_with_status_stub(snapshot: dict, page: str) -> str:
+    shim = (
+        "<script>window.fetch = function () { return Promise.resolve({ok: true, status: 200,"
+        f" json: function () {{ return Promise.resolve({json.dumps(snapshot)}); }}}}); }};</script>"
+    )
+    return render_pages(snapshot)[page].replace("<script>", shim + "<script>", 1)
+
+
+class Browser:
+    def __init__(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        to_chrome, self._send = os.pipe()
+        self._recv, from_chrome = os.pipe()
+
+        def pipes() -> None:
+            os.dup2(to_chrome, 3)
+            os.dup2(from_chrome, 4)
+
+        self.proc = subprocess.Popen(
+            [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+             "--remote-debugging-pipe", f"--user-data-dir={self.tmp.name}", "about:blank"],
+            pass_fds=(3, 4), preexec_fn=pipes,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        os.close(to_chrome)
+        os.close(from_chrome)
+        self._buffer = b""
+        self._id = 0
+        target = self._call("Target.createTarget", url="about:blank")["targetId"]
+        self.session = self._call("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
+        self.call("Emulation.setEmulatedMedia", features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
+
+    def _call(self, method: str, session: str | None = None, **params: object) -> dict:
+        self._id += 1
+        message = {"id": self._id, "method": method, "params": params}
+        if session:
+            message["sessionId"] = session
+        os.write(self._send, json.dumps(message).encode() + b"\0")
+        while True:
+            while b"\0" not in self._buffer:
+                chunk = os.read(self._recv, 1 << 20)
+                assert chunk, "Chrome closed its DevTools pipe"
+                self._buffer += chunk
+            raw, self._buffer = self._buffer.split(b"\0", 1)
+            reply = json.loads(raw)
+            if reply.get("id") == self._id:
+                assert "error" not in reply, reply["error"]
+                return reply["result"]
+
+    def call(self, method: str, **params: object) -> dict:
+        return self._call(method, self.session, **params)
+
+    def eval(self, expression: str) -> object:
+        result = self.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=True)
+        assert "exceptionDetails" not in result, result["exceptionDetails"]
+        return result["result"].get("value")
+
+    def open(self, html: str, width: int, height: int = FOLD) -> None:
+        page = Path(self.tmp.name) / "page.html"
+        page.write_text(html, encoding="utf-8")
+        # Chrome will not size a window below 500px wide.
+        self.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
+        self.call("Page.navigate", url=page.as_uri())
+        self.eval("""new Promise(function (done) { (function wait() {
+          var link = document.getElementById('link');
+          if (link && / live/.test(' ' + link.className)) document.fonts.ready.then(function () { done(true); });
+          else setTimeout(wait, 50); })(); })""")
+
+    def screenshot(self, path: Path, width: int) -> None:
+        height = self.eval("document.documentElement.scrollHeight")
+        self.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
+        path.write_bytes(base64.b64decode(self.call("Page.captureScreenshot", format="png")["data"]))
+
+    def close(self) -> None:
+        self.proc.kill()
+        self.proc.wait()
+        os.close(self._send)
+        os.close(self._recv)
+        self.tmp.cleanup()
+
+
+@pytest.fixture
+def browser():
+    chrome = Browser()
+    yield chrome
+    chrome.close()
+
+
+@needs_chrome
+def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: Browser) -> None:
+    browser.open(_page_with_status_stub(fifteen_slot_snapshot(tmp_path), "index.html"), 1440)
+    rows = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
+      return {device: lane.getAttribute('data-device'), tiles: [].map.call(lane.querySelectorAll('.tile'),
+        function (t) { var b = t.getBoundingClientRect(); return [b.top, b.bottom]; })};
+    })""")
+    assert {row["device"]: len(row["tiles"]) for row in rows} == {"box": 5, "pc": 6, "mac": 4}
+    for row in rows:
+        assert len({top for top, _ in row["tiles"]}) <= 2, f"{row['device']} wraps onto a second row"
+    assert browser.eval("innerHeight") == FOLD
+    bottom = max(b for row in rows for _, b in row["tiles"])
+    assert bottom <= FOLD, f"the last slot ends at {bottom}px, below the {FOLD}px fold"
+
+
+@needs_chrome
+def test_the_jobs_list_keeps_its_spacing_on_the_tickets_page(tmp_path: Path, browser: Browser) -> None:
+    browser.open(_page_with_status_stub(_base(tmp_path), "job.html"), 375)
+    items = browser.eval("""[].map.call(document.querySelectorAll('#jobs .queue-item'), function (a) {
+      var s = getComputedStyle(a), kids = [].map.call(a.children, function (c) { return c.getBoundingClientRect(); });
+      return {display: s.display, underline: s.textDecorationLine,
+              gaps: kids.slice(1).map(function (k, i) { return k.top >= kids[i].bottom ? 8 : k.left - kids[i].right; })};
+    })""")
+    assert items
+    for item in items:
+        assert item["display"] == "flex" and item["underline"] == "none"
+        assert min(item["gaps"]) >= 8, item
+
+
+def write_screenshots(out: Path) -> list[Path]:
+    html = _page_with_status_stub(fifteen_slot_snapshot(Path(tempfile.mkdtemp())), "index.html")
+    chrome = Browser()
+    try:
+        paths = []
+        for name, width in zip(SHOTS, (1440, 375)):
+            chrome.open(html, width)
+            paths.append(out.resolve() / name)
+            chrome.screenshot(paths[-1], width)
+        return paths
+    finally:
+        chrome.close()
+
+
+def test_review_screenshots_are_committed() -> None:
+    for name in SHOTS:
+        assert (ROOT / "docs" / "screenshots" / name).stat().st_size > 0, name
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["--shots"] or len(sys.argv) != 3 or CHROME is None:
+        sys.exit("usage: python -m tests.test_dashboard_lanes --shots <dir>  (needs Chrome or Chromium)")
+    for written in write_screenshots(Path(sys.argv[2])):
+        print(written)
