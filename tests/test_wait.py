@@ -679,6 +679,7 @@ def _raise_interrupted(*_args: object) -> None:
 GUARDED = (signal.SIGINT, signal.SIGTERM)
 
 
+@pytest.mark.serial
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_a_signal_between_claim_and_print_still_delivers_the_job(
     tmp_path: Path, restore_signals: None, signum: int
@@ -695,6 +696,7 @@ def test_a_signal_between_claim_and_print_still_delivers_the_job(
     assert state_of(db, job.id)["state"] == "running"
 
 
+@pytest.mark.serial
 def test_ctrl_c_while_printing_does_not_fail_a_delivered_job(
     tmp_path: Path, restore_signals: None
 ) -> None:
@@ -727,6 +729,7 @@ def test_signals_are_unblocked_while_sleeping(tmp_path: Path, restore_signals: N
     assert all(signal.SIGINT not in mask and signal.SIGTERM not in mask for mask in masks)
 
 
+@pytest.mark.serial
 def test_wait_for_job_restores_the_callers_mask_and_handlers(tmp_path: Path) -> None:
     _, queue = make_db(tmp_path)
     saved = {signum: signal.getsignal(signum) for signum in GUARDED}

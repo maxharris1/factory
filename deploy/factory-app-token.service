@@ -1,0 +1,7 @@
+[Unit]
+Description=Factory token broker: mint each bot's GitHub App installation token before it expires (#171)
+
+[Service]
+Type=oneshot
+ExecStart=%h/factory/deploy/app-token-service.sh once
+Environment=PYTHONUNBUFFERED=1
