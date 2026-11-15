@@ -1112,6 +1112,7 @@ class JobsMixin:
             if kind == "questions":
                 if (
                     (update and not after_source)
+                    or outcome == "no-questions"
                     or not _asks_questions(fields, parsed.body)
                     or (outcome is not None and outcome.startswith(_REJECTED_OUTCOMES))
                 ):

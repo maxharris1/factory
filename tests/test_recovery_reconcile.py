@@ -653,3 +653,23 @@ def test_the_question_its_answers_answered_does_not_settle_a_resumed_review(
         board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
     assert "done-from-questions" not in board.events(resumed.id)
     assert board.rows("review") == [("done", 1), ("failed", 1), ("queued", 2)], board.rows("review")
+
+
+def test_a_handled_no_questions_comment_edited_into_a_question_does_not_settle_a_failed_review(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    review = _claimed_review(board)
+    board.post(
+        "review-q",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\nNo questions.\n",
+        bot="codex",
+    )
+    board.dispatcher.poll_once(Source(_green(board), board.now))
+    assert board.dispatcher._handled_outcome(_green(board), "review-q") == "no-questions"
+    board.comments[-1] = replace(board.comments[-1], body=REVIEWER_QUESTIONS)
+    board.queue.finish(review, owner="codex", handoff_comment_id=None)
+    for _ in range(2):
+        board.dispatcher.poll_once(Source(_green(board), board.now))
+    assert "done-from-questions" not in board.events(review)
+    assert board.rows("review") == [("failed", 1), ("queued", 2)], board.rows("review")
