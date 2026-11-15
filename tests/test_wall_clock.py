@@ -606,3 +606,45 @@ def test_a_remote_deadline_kills_tagged_children_left_after_the_wrapper_exits(
         time.sleep(0.2)
         _reap_children()
         libc.prctl(36, 0, 0, 0, 0)
+
+
+def test_stops_that_reach_a_run_while_it_finishes_still_leave_its_exit_status(
+    tmp_path: Path,
+) -> None:
+    import shutil
+    import subprocess
+
+    from lib import remote
+
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    for tool in ("awk", "mv"):
+        real = shutil.which(tool)
+        assert real is not None
+        shim = shims / tool
+        shim.write_text(f'#!/bin/sh\nsleep 0.5\nexec {real} "$@"\n')
+        shim.chmod(0o755)
+    target = remote.RemoteTarget(
+        device="pc", alias="fake", user="codex-bot", workdir_root=str(tmp_path / "work"),
+        job_id="finishing", tag=remote.new_tag(),
+    )
+    ended = tmp_path / "ended"
+    harness = (
+        "import signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "open(sys.argv[1], 'w').close(); sys.exit(3)"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", harness, str(ended)], {})
+    launch = remote.launch_script(target, start, size=1, not_after=int(time.time()) + 60)
+    env = {**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}
+    rundir = Path(remote.run_dir(target)) / target.tag
+    subprocess.run(["sh", "-c", launch], input=b"x", env=env, capture_output=True, check=True)
+    deadline = time.monotonic() + 20
+    while not ended.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ended.exists()
+    check = ["sh", "-c", remote.check_script(target)]
+    while subprocess.run(check).returncode != 0 and time.monotonic() < deadline:
+        subprocess.run(["sh", "-c", remote.stop_script(target)], check=True)
+        time.sleep(0.1)
+    assert subprocess.run(check).returncode == 0
+    assert (rundir / "exit").read_text().strip() == "3"

@@ -701,6 +701,13 @@ _DEADLINE = (
     'while live; do sh -c "$5"; sleep 1; done'
 )
 
+_WRITE_RESULT_PAST_STOPS = (
+    'trap "" TERM INT; '
+    f"awk {shlex.quote(HANDOFF_AWK)} "
+    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
+    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+)
+
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
 # directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
 # budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop
@@ -723,9 +730,7 @@ _WRAPPER = (
     '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
-    f"awk {shlex.quote(HANDOFF_AWK)} "
-    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
-    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+    + _WRITE_RESULT_PAST_STOPS
 )
 
 
