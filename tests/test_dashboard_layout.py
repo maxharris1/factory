@@ -618,6 +618,8 @@ class Node {
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
   removeAttribute(k) { delete this.attrs[k]; }
+  hasAttribute(k) { return k in this.attrs; }
+  closest(tag) { let n = this; while (n && n.tagName !== tag) n = n.parentNode; return n || null; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   cloneNode(deep) { const n = new Node(this.tagName); n.className = this.className;
     n.attrs = Object.assign({}, this.attrs); n._text = this._text;
@@ -633,6 +635,11 @@ class Node {
       .filter(k => k in this.attrs).map(k => '[' + k + '=' + this.attrs[k] + ']').join('');
     return pad + this.tagName + (this.className ? '.' + this.className.split(' ').join('.') : '') + attrs +
       (this._text ? ' "' + this._text + '"' : '') + '\n' + this.children.map(c => c.dump((depth || 0) + 1)).join(''); }
+}
+class Text extends Node {
+  constructor(text) { super('#text'); this._text = String(text); }
+  html() { return esc(this._text); }
+  dump(depth) { return ' '.repeat(depth || 0) + '"' + this._text + '"\n'; }
 }
 function esc(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#x27;'); }
@@ -658,6 +665,7 @@ const docListeners = {};
 global.document = {body, hidden: false, activeElement: null, getElementById: (id) => ids[id] || null,
   createElement: (tag) => new Node(tag),
   createElementNS: (ns, tag) => { const n = new Node(tag); n.ns = ns; return n; },
+  createTextNode: (text) => new Text(text),
   addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); }};
 // Scripted user actions, run after the first render: click a node (by href,
 // id or class), press a key, advance the clock, or record what the body holds.
@@ -676,7 +684,8 @@ function fire(target, type, extra) {
 function pick(spec) {
   return find(body, n => (spec.href === undefined || n.attrs.href === spec.href) &&
     (spec.id === undefined || n.attrs.id === spec.id) &&
-    (spec.cls === undefined || n.className.split(' ').includes(spec.cls)));
+    (spec.cls === undefined || n.className.split(' ').includes(spec.cls)) &&
+    (spec.attr === undefined || Object.entries(spec.attr).every(([k, v]) => n.attrs[k] === v)));
 }
 const steps = [];
 function act(actions) {
