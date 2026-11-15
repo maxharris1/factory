@@ -9,6 +9,8 @@ budget and its rate-limit backoff, and the API key is only read from the
 configured environment variable at request time.
 
 Reads:
+* ahead_commits and commit_pulls: a branch's commits past the base, and the
+  open PRs that carry a commit, for the stacked-branch hold (#205);
 * github_intake: open issues carrying the label (`issues?labels=`), and for
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
@@ -319,6 +321,44 @@ class GitHubIntakeClient(GitHubReviewActions):
             and ((item.get("head") or {}).get("ref") == branch)
         )
         return numbers[0] if numbers else None
+
+    def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
+        """The commits on tip that base lacks (#205). The compare read
+        lists up to 250; a longer list fails rather than hide a commit."""
+        if not _BRANCH.fullmatch(base) or not _BRANCH.fullmatch(tip):
+            raise GitHubAdapterError("branch name is not safe")
+        compared = self._json(
+            f"{_repo_path(repo)}/compare/{quote(base, safe='/')}...{quote(tip, safe='/')}"
+        )
+        commits = compared.get("commits") if isinstance(compared, dict) else None
+        if not isinstance(commits, list):
+            raise GitHubAdapterError("compare read has no commits")
+        shas = tuple(
+            item["sha"] for item in commits
+            if isinstance(item, dict) and isinstance(item.get("sha"), str) and _SHA.fullmatch(item["sha"])
+        )
+        total = compared.get("total_commits")
+        if not isinstance(total, int) or isinstance(total, bool) or total != len(shas):
+            raise GitHubAdapterError(f"{tip} has {total} commits past {base}; read {len(shas)}")
+        return shas
+
+    def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
+        """The open PRs that carry sha (#205), cached like the gate reads."""
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("commit sha is not a full sha")
+        pulls = self._json(
+            f"{_repo_path(repo)}/commits/{sha}/pulls?per_page=100", cache_ttl=REF_STATUS_CACHE
+        )
+        if not isinstance(pulls, list):
+            raise GitHubAdapterError("commit pulls list is not a list")
+        return frozenset(
+            item["number"]
+            for item in pulls
+            if isinstance(item, dict)
+            and isinstance(item.get("number"), int)
+            and not isinstance(item.get("number"), bool)
+            and item.get("state") == "open"
+        )
 
     def pull_state(self, repo: str, number: int) -> str:
         """open, closed or merged: a recorded PR is rechecked before a feed resumes."""

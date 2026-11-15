@@ -1,0 +1,8 @@
+decision	choice	why
+restart gate (ac-1)	a stale waiter restarts on a matching ack alone; the running-job count is no longer read	the ack is written only from a step that decided not to claim, so every earlier claim has started and written remote.json; jobs run in their own session and _recover adopts the remote ones
+ack poll (ac-1)	the pass polls for the ack from every draining waiter, not only idle ones	the restart lands in the same pass as the drain, as ac-3 asks
+delete waiter_jobs and running_jobs	removed with their test callers in one change	no reader is left; keeping "unknown count means busy" would let an unreadable orch.db stall the queue again (plan option B rejected)
+handshake (ac-2)	marker, ack-matches-marker, ack read before decide, and acknowledged-marker on respawn all unchanged	these are what stop a claim racing the restart; their tests pass as written
+old "claim before ack keeps it draining" test	rewritten: the claimed job stays running through the restart and the old waiter claims nothing after its ack	the old assertion encoded the removed rule; the new one checks the ac-2 invariant
+baseline (ac-3)	new test red on 1377da5 heal.py (no waiter restart while job A runs), green after	red-then-green proves the test checks the change
+box-local runs	unchanged: a dead runner after restart is failed by the poller DEAD path	same as after a waiter crash today; out of scope

@@ -715,13 +715,12 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         encoding="utf-8")
     poller_env = sandbox_env(tmp_path)
     pollers: list[subprocess.Popen] = []
-    children: list[int] = []
     bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"],
                                  start_new_session=True)
     try:
         pollers.extend(subprocess.Popen(["/bin/sh", str(poller)], env=poller_env)
                        for _ in range(20))
-        children.extend(_child(tmp_path / f"child-{proc.pid}") for proc in pollers)
+        children = [_child(tmp_path / f"child-{proc.pid}") for proc in pollers]
         result = _install(environment)
 
         assert result.returncode == 0, result.stderr
@@ -744,15 +743,11 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         assert listener.exists()
     finally:
         os.killpg(bystander.pid, signal.SIGKILL)
+        reap_home(tmp_path)
         for proc in (*pollers, bystander):
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
-        for child in children:
-            try:
-                os.kill(child, signal.SIGKILL)
-            except OSError:
-                pass
 
 
 def test_install_leaves_the_legacy_launchers_when_the_crontab_is_unreadable(

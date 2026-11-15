@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
+from lib.poll_source import IntakeRisks
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, factory
 
@@ -108,6 +109,7 @@ def test_pr_89_is_flagged_after_the_cap_then_ends_merged(tmp_path: Path) -> None
     now = [1000.0]
     actions = FakeReviewActions()
     dispatcher, queue = _dispatcher(tmp_path, actions, now)
+    IntakeRisks(dispatcher.state_path).keep(data["repo"], data["ticket_id"], data["risk"])
     base = TrackedTicket(
         repo=data["repo"],
         ticket_id=data["ticket_id"],

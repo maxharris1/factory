@@ -12,7 +12,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from lib.dashboard_telemetry import rollup_panel, TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
-from lib.dashboard_pages.activity import _ATTENTION, _attention, _handoffs, _health_link, _verdicts
+from lib.dashboard_pages.activity import _ATTENTION, _attention, _health_link, _relay
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_devices, _lanes
@@ -375,7 +375,7 @@ PX_SCRIPT = r"""
     this._burstSeen = this._num(this.props.burst, 0);
     this._beatAt = -1000;
     this._burstAt = -1000;
-    this._doneAt = this._bool(this.props.done) ? -1000 : null;
+    this._doneAt = this._bool(this.props.done) && el.getAttribute('data-settle') === null ? -1000 : null;
     this._sysStill = sysStill;
   }
 
@@ -795,6 +795,7 @@ PX_SCRIPT = r"""
     if (opts.still) el.setAttribute('data-still', 'true');
     if (opts.cell !== null && opts.cell !== undefined) el.setAttribute('data-cell', String(Math.max(2, Math.min(16, Math.floor(Number(opts.cell) || 4)))));
     if (opts.done) el.setAttribute('data-done', 'true');
+    if (opts.settle) el.setAttribute('data-settle', 'true');
     el.setAttribute('data-px-key', String(key));
     el.setAttribute('aria-hidden', 'true');
     el.setAttribute('style', style + 'height:' + height + 'px');
@@ -1256,7 +1257,7 @@ def _statusline(snapshot: dict) -> str:
 
 _PANELS = {
     "index.html": (_kpis, _lanes, _just_happened_and_intake),
-    "activity.html": (_attention, _handoffs, _verdicts),
+    "activity.html": (_attention, _relay),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel),
     "health.html": (_components, _drift_row, _log_row, _no_waiter),
     "job.html": (_board, _tickets, _jobview),
