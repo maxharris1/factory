@@ -6250,21 +6250,20 @@ def test_edited_verdict_flags_attention_until_a_clean_repost_acts(
         edited_at=5,
     )
     clean = comment("verdict-clean", body, author="codex-login", created_at=3)
-    # handoff, not merge: a merge clears every flag, so it would hide the clear.
-    snapshot = {
+    unmerged_ship = {
         "head": head,
         "ci": {head: CIResult("success")},
         "factory_config": factory(ship="handoff"),
     }
 
-    dispatcher.process(ticket(edited, **snapshot))
+    dispatcher.process(ticket(edited, **unmerged_ship))
 
     assert handled_outcome(queue, "verdict-edited") == "rejected-edited"
     assert queue.claim("claude") is None
     assert actions.handoffs == []
     assert _attention(queue) == ["edited-comment"]
 
-    dispatcher.process(ticket(edited, clean, **snapshot))
+    dispatcher.process(ticket(edited, clean, **unmerged_ship))
 
     if verdict == "REVISE":
         fix = queue.claim("claude")
