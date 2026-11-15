@@ -385,8 +385,8 @@ def test_card_strips_show_the_step_and_bot_and_never_move_when_stopped_or_waitin
         assert "tk-stop" in card["attrs"]["class"].split()
         assert (_canvas(card)["data-px"], _canvas(card)["data-tint"]) == ("static", "#f7768e")
     waiting = _card(board, "#".join(tickets["awaiting-ok"]))
-    assert (_canvas(waiting)["data-px"], _canvas(waiting)["data-tint"]) == ("off", "#ff9e64")
-    assert not page.PX_EFFECTS["off"]
+    assert (_canvas(waiting)["data-px"], _canvas(waiting)["data-tint"]) == ("static", "#ff9e64")
+    assert not page.PX_EFFECTS["static"]
     assert f"waiting on {APPROVER}" in _text(waiting)
     stuck = _card(board, "#".join(STUCK))
     assert "stuck" in _text(_one(stuck, _cls("chip")))

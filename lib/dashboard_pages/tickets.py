@@ -175,7 +175,7 @@ SCRIPT_TICKETS = r"""
     card.setAttribute('data-ticket', ticketKey(t));
     var key = 'ticket-' + ticketKey(t);
     var strip = stop ? PX.strip(key, {state: 'stuck', height: 8})
-      : waiting ? PX.strip(key, {effect: 'off', tint: WAIT_TINT, height: 8})
+      : waiting ? PX.strip(key, {effect: 'static', tint: WAIT_TINT, height: 8})
       : c.live ? PX.jobStrip(c.live, 8) : null;
     if (strip) {
       var box = add(card, el('div', 'tk-strip'));
@@ -445,7 +445,7 @@ def _card(card: dict) -> str:
     if stop:
         strip = px.px_strip(key, state="stuck", height=8)
     elif waiting:
-        strip = px.px_strip(key, effect="off", tint=_WAIT_TINT, height=8)
+        strip = px.px_strip(key, effect="static", tint=_WAIT_TINT, height=8)
     else:
         strip = px.px_job_strip(live, height=8) if live else ""
     name = _ticket(ticket)
