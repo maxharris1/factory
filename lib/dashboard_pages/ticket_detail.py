@@ -23,6 +23,7 @@ VERBS = {
 NEXT_ORDER = {"normal": 0, "human": 1, "stop": 2}
 FIRST_REASON = "ticket arrives"
 STOP_TINT = journey_canvas.STOP
+HOP_TINT = "#c0caf5"
 CHART_SUB = "· {n} states, with this ticket's path drawn on the whole machine"
 
 
@@ -91,9 +92,14 @@ CSS = """\
 .jd-cap .who{padding:0 6px;border:1px solid var(--m);color:var(--m);font-size:11px;line-height:1.6;white-space:nowrap}
 .jd-cap .dur{color:var(--text);white-space:nowrap}
 .jd-cap .note{flex:1 1 240px;min-width:0;font:13px/1.5 var(--sans);color:var(--text-2)}
-.jd-ctl{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px;font:12px/1.5 var(--mono);color:var(--muted)}
-.jd-ctl button{padding:2px 8px;border:1px solid var(--line-hi);background:transparent;color:var(--text-2);font:inherit;cursor:pointer}
-.jd-ctl button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.jd-ctl{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:0 12px 12px;font:12px/1.5 var(--mono);color:#8b93b8}
+.jd-ctl .axis{display:flex;gap:0}
+.jd-ctl button{height:44px;padding:0 12px;font:inherit;font-size:12px;cursor:pointer;background:#1f2230;color:#c0caf5;border:1px solid #414868}
+.jd-ctl button[aria-pressed="true"]{background:rgba(158,206,106,0.09);color:#9ece6a;border-color:#9ece6a}
+.jd-ctl .gap{flex:1 1 0}
+.jd-ctl .key{display:flex;align-items:center;gap:6px}
+.jd-ctl .key i{width:12px;height:8px;background:var(--m)}
+.jd-ctl .key i.off{width:4px;height:12px;background:repeating-linear-gradient(180deg,var(--m) 0 4px,transparent 4px 8px)}
 .jd-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-legend span{display:flex;align-items:center;gap:6px}
 .jd-legend i{width:10px;height:10px;background:var(--m)}
@@ -334,17 +340,17 @@ def _journey(row: dict, model: dict) -> str:
         if model["all_durations_known"]
         else ""
     )
-    legend = "".join(f'<span><i style="--m:{TINT[w]}"></i>{w}</span>' for w in _LEGEND_WHO)
-    legend += f'<span><i style="--m:{STOP_TINT}"></i>stopped</span>'
-    legend += f'<span><i class="off" style="--m:{TINT["script"]}"></i>off-chart hop</span>'
+    legend = "".join(f'<span class="key"><i style="--m:{TINT[w]}"></i>{w}</span>' for w in _LEGEND_WHO)
+    legend += f'<span class="key"><i style="--m:{STOP_TINT}"></i>stopped</span>'
+    legend += f'<span class="key"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
     return (
         f'<section class="jd-panel"><h2>{_span("t", "Journey")}'
         f'{_span("count", "this ticket through time · pick a step for its reason")}</h2>'
         f'<div class="jd-box"><canvas class="jd-journey" width="1000" height="336" role="img" '
         f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>{_caption(model)}'
-        '<div class="jd-ctl"><button type="button" data-scale="even" aria-pressed="true">even steps</button>'
-        f'{scale}<button type="button" data-replay="1">replay</button></div>'
-        f'<div class="jd-legend">{legend}</div></section>'
+        '<div class="jd-ctl"><div class="axis" role="group" aria-label="Time axis">'
+        '<button type="button" data-scale="even" aria-pressed="true">even steps</button>'
+        f'{scale}</div><button type="button" data-replay="1">replay</button><span class="gap"></span>{legend}</div></section>'
     )
 
 
@@ -423,7 +429,7 @@ def _jobview(snapshot: dict) -> str:
 
 _SCRIPT = r"""
   var DETAIL = {verbs: __VERBS__, order: {normal: 0, human: 1, stop: 2},
-                first: 'ticket arrives', stop: '#f7768e', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
+                first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__};
   var SEL = {};
   var journeys = [];
@@ -585,6 +591,7 @@ _SCRIPT = r"""
     if (tint) i.style.setProperty('--m', tint);
     if (bg) i.style.background = bg;
     s.appendChild(document.createTextNode(text));
+    return s;
   }
   function reasonOf(v) {
     return v.reason !== null && v.reason !== undefined ? v.reason : (v.index === 0 ? DETAIL.first : '');
@@ -626,20 +633,23 @@ _SCRIPT = r"""
     cap.setAttribute('aria-live', 'polite');
     fillCaption(cap, m, m.selected);
     var ctl = add(sec, el('div', 'jd-ctl'));
-    function ctlButton(text, attr, val, pressed) {
-      var b = add(ctl, el('button', null, text));
+    var axis = add(ctl, el('div', 'axis'));
+    axis.setAttribute('role', 'group');
+    axis.setAttribute('aria-label', 'Time axis');
+    function ctlButton(parent, text, attr, val, pressed) {
+      var b = add(parent, el('button', null, text));
       b.setAttribute('type', 'button');
       b.setAttribute(attr, val);
       if (pressed !== null) { b.setAttribute('aria-pressed', pressed ? 'true' : 'false'); scales.push(b); }
       return b;
     }
-    ctlButton('even steps', 'data-scale', 'even', scale === 'even');
-    if (m.all_durations_known) ctlButton('to scale', 'data-scale', 'scale', scale === 'scale');
-    ctlButton('replay', 'data-replay', '1', null);
-    var legend = add(sec, el('div', 'jd-legend'));
-    DETAIL.who.forEach(function (w) { legendItem(legend, null, JOURNEY.tint[w], w); });
-    legendItem(legend, null, DETAIL.stop, 'stopped');
-    legendItem(legend, 'off', JOURNEY.tint.script, 'off-chart hop');
+    ctlButton(axis, 'even steps', 'data-scale', 'even', scale === 'even');
+    if (m.all_durations_known) ctlButton(axis, 'to scale', 'data-scale', 'scale', scale === 'scale');
+    ctlButton(ctl, 'replay', 'data-replay', '1', null);
+    span(ctl, 'gap');
+    DETAIL.who.forEach(function (w) { legendItem(ctl, null, JOURNEY.tint[w], w).className = 'key'; });
+    legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key';
+    legendItem(ctl, 'off', DETAIL.hop, 'off-chart hop').className = 'key';
     return {sec: sec, canvas: canvas, cap: cap};
   }
   function nextPanel(m) {
@@ -788,7 +798,10 @@ _SCRIPT = r"""
         scales.forEach(function (b) { b.setAttribute('aria-pressed', b === t ? 'true' : 'false'); });
         placeHits(j);
       } else if (t.hasAttribute('data-replay')) s.tPlay = Date.now();
+      else return;
+      drawOne(j, Date.now());
     });
+    if (cp.canvas) cp.sec.addEventListener('toggle', function () { drawOne(j, Date.now()); });
     placeHits(j);
     journeys.push(j);
     PX.onFrame(journeyFrame);

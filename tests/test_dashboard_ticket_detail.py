@@ -423,3 +423,102 @@ def test_a_rebuild_keeps_the_picked_scale_pressed(tmp_path: Path) -> None:
         chrome.close()
         server.shutdown()
     assert after == ["even=false", "scale=true"]
+
+
+def _fully_timed(snapshot: dict) -> dict:
+    flow = _review(snapshot)["flow"]
+    flow["all_durations_known"] = True
+    for i, visit in enumerate(flow["visits"]):
+        visit.update(duration_seconds=(i + 1) * 600, time_known=True)
+    return snapshot
+
+
+def _click_canvas(chrome: _Chrome, x: int, y: int) -> None:
+    point = chrome.run(
+        f"(() => {{const r = document.querySelector('#job-h-review .jd-journey').getBoundingClientRect();"
+        f"return {{x: r.x + {x}, y: r.y + {y}}}}})()"
+    )
+    for kind in ("mousePressed", "mouseReleased"):
+        chrome.send("Input.dispatchMouseEvent", chrome.session, type=kind, button="left", clickCount=1, **point)
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"timed": _fully_timed(_snapshot(tmp_path))})
+    chrome = _Chrome(tmp_path / "profile")
+    canvas = "document.querySelector('#job-h-review .jd-journey').toDataURL()"
+    try:
+        chrome.send("Emulation.setEmulatedMedia", chrome.session,
+                    features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
+        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
+              "document.querySelector('#job-h-review canvas.jd-journey')")
+        time.sleep(0.4)
+        even = chrome.run(canvas)
+        chrome.run("document.querySelector('#job-h-review [data-scale=scale]').click()")
+        time.sleep(0.2)
+        clicked = chrome.run(canvas)
+        chrome.run("location.hash = '#job-r-cursor'")
+        _wait(chrome, "document.querySelector('#job-r-cursor canvas.jd-journey')")
+        chrome.run("location.hash = '#job-h-review'")
+        _wait(chrome, "document.querySelector('#job-h-review [data-scale=scale][aria-pressed=true]')")
+        time.sleep(0.4)
+        rebuilt = chrome.run(canvas)
+        _click_canvas(chrome, 336, 140)
+        selected = chrome.run("document.querySelector('#job-h-review .runlog [aria-pressed=true]').dataset.visit")
+        chrome.run("document.querySelector('#job-h-review details.jd-chart').open = true")
+        time.sleep(0.2)
+        chart = chrome.run(f"{PAINTED}('#job-h-review canvas.jd-flowmap')")
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert {"scale drawn": clicked != even, "same as a fresh to-scale paint": clicked == rebuilt,
+            "review drawn at x=336 to scale": selected, "chart painted": chart > 0} == {
+        "scale drawn": True, "same as a fresh to-scale paint": True,
+        "review drawn at x=336 to scale": "3", "chart painted": True}
+
+
+CONTROL_STRIP = r"""
+(() => {
+  const ctl = document.querySelector('#job-h-review .jd-ctl');
+  const look = b => {const c = getComputedStyle(b); return [b.offsetHeight, c.backgroundColor, c.color, c.borderTopColor];};
+  return {
+    axis: ctl.querySelector('[role=group]').getAttribute('aria-label'),
+    scales: [...ctl.querySelectorAll('[role=group] [data-scale]')].map(b => [b.textContent, b.getAttribute('aria-pressed'), ...look(b)]),
+    replay: look(ctl.querySelector('[data-replay]')),
+    keys: [...ctl.querySelectorAll('.key')].map(k => k.textContent),
+    separateLegend: !!document.querySelector('#job-h-review .jd-panel .jd-legend'),
+  };
+})()"""
+
+OFF = ["rgb(31, 34, 48)", "rgb(192, 202, 245)", "rgb(65, 72, 104)"]
+ON = ["rgba(158, 206, 106, 0.09)", "rgb(158, 206, 106)", "rgb(158, 206, 106)"]
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_the_journey_control_strip_matches_journey_climb(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"timed": _fully_timed(_snapshot(tmp_path))})
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
+              "document.querySelector('#job-h-review .jd-ctl')")
+        strip = chrome.run(CONTROL_STRIP)
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert strip == {
+        "axis": "Time axis",
+        "scales": [["even steps", "true", 44, *ON], ["to scale", "false", 44, *OFF]],
+        "replay": [44, *OFF],
+        "keys": ["script", "claude", "codex", "cursor", "grok", "stopped", "off-chart hop"],
+        "separateLegend": False,
+    }
+
+
+def test_the_no_script_control_strip_holds_the_axis_replay_and_legend_in_one_row(tmp_path: Path) -> None:
+    journey = _journey(_article(_fully_timed(_snapshot(tmp_path))))
+    strip = re.search(r'<div class="jd-ctl">(.*)</div></section>$', journey, re.S).group(1)
+    assert re.search(r'<div class="axis" role="group" aria-label="Time axis">.*data-scale="even".*data-scale="scale".*</div>'
+                     r'<button type="button" data-replay="1">replay</button><span class="gap"></span>', strip, re.S)
+    assert re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', strip) == [
+        "script", "claude", "codex", "cursor", "grok", "stopped", "off-chart hop"]
+    assert "jd-legend" not in journey
