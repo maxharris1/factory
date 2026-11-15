@@ -154,7 +154,7 @@ own_supervisors() {
             if is_own_supervisor_argv "$pid" "${argv[@]}"; then
                 printf '%s\n' "$pid"
             fi
-        done < <(ps -U "$(id -u)" -o pid= -o command=)
+        done < <(ps -ww -U "$(id -u)" -o pid= -o command=)
     fi
 }
 
@@ -175,7 +175,7 @@ running_pid() {
         mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
         is_supervisor_argv "${argv[@]}" || return 1
     else
-        command="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+        command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
         read -r -a argv <<<"$command"
         is_supervisor_argv "${argv[@]}" || return 1
     fi
@@ -214,7 +214,7 @@ waiter_pid() {
         [[ -r "${PROC}/${pid}/cmdline" ]] || return 1
         mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
     else
-        command="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+        command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
         read -r -a argv <<<"$command"
     fi
     is_waiter_argv "${argv[@]}" || return 1

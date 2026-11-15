@@ -245,7 +245,7 @@ def test_stop_never_signals_a_lock_pid_that_is_not_this_bots_waiter(home: Path) 
 def _supervisors(home: Path, bot: str = "claude-bot") -> list[int]:
     tag = f"waiter-service.sh {bot} _supervise {home / '.local/state/factory'}"
     listing = subprocess.run(
-        ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "command="],
+        ["ps", "-ww", "-A", "-o", "pid=", "-o", "ppid=", "-o", "command="],
         text=True, capture_output=True, check=True,
     ).stdout
     rows = [line.split(None, 2) for line in listing.splitlines() if tag in line]
@@ -314,10 +314,12 @@ def test_a_supervisor_the_pidfile_does_not_name_exits(home: Path) -> None:
     assert f"no longer names this supervisor (pid {stray})" in log
 
 
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
 def test_restart_after_a_pidfile_mismatch_leaves_one_supervisor_and_one_waiter(
-    home: Path,
+    home: Path, proc: str
 ) -> None:
-    assert _service(home, "claude-bot", "start").returncode == 0
+    proc_env = {"ORCH_PROC_DIR": proc if proc == "/proc" else str(home / proc), "COLUMNS": "80"}
+    assert _service(home, "claude-bot", "start", **proc_env).returncode == 0
     old_waiter = _wait_for(lambda: _starts(home))[0]
     old_supervisor = _supervisor(home)
     stray = _stray(home)
@@ -326,7 +328,7 @@ def test_restart_after_a_pidfile_mismatch_leaves_one_supervisor_and_one_waiter(
     assert sorted(_supervisors(home)) == sorted([old_supervisor, stray])
     before = set(_starts(home))
 
-    restarted = _service(home, "claude-bot", "restart")
+    restarted = _service(home, "claude-bot", "restart", **proc_env)
     assert restarted.returncode == 0, restarted.stderr
     assert f"stopped stray waiter supervisor (pid {old_supervisor})" in restarted.stdout
     assert not alive(stray) and not alive(old_supervisor) and not alive(old_waiter)
