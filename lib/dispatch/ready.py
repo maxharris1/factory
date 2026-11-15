@@ -12,9 +12,9 @@ from lib.dispatch.helpers import (
     _detail_round_number,
     _has_questions,
     _matching_head,
-    _ready_outcome,
     _round_number,
     _scope,
+    _verdict_outcome,
 )
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -607,7 +607,7 @@ class ReadyMixin:
         return any(
             _matching_head(str(row["head"]), head) is not None
             if row["head"] is not None
-            else row["comment_id"] not in visible and not _ready_outcome(str(row["outcome"]))
+            else row["comment_id"] not in visible and _verdict_outcome(str(row["outcome"]))
             for row in rows
         )
 

@@ -89,29 +89,32 @@ ACTED_VERDICT_OUTCOMES = frozenset(
 )
 
 
-READY_OUTCOMES = frozenset(
+VERDICT_OUTCOMES = ACTED_VERDICT_OUTCOMES | frozenset(
     {
-        "capped-ready",
-        "ready-already-shipped",
-        "ready-after-cap",
-        "ready-on-merged-pr",
-        "ready-on-closed-pr",
-        "stale-ready-head",
-        "stale-ready-verdict",
-        "stale-ready",
-        "queued-review",
-        "answered-review",
-        "ci-red-in-flight",
-        "queued-ci-fix",
+        "answered-fix",
+        "approve-ci-red",
+        "approve-ci-red-fix",
+        "capped-patch-review",
+        "stuck-ci-red-3",
+        "refused-ship-head",
+        "stale-approve",
+        "stale-revise",
+        "superseded-approve",
+        "rejected-approve-author",
+        "rejected-revise-author",
+        "rejected-over-cap",
+        "rejected-unregistered-verdict",
+        "duplicate-verdict",
+        "after-handoff",
+        "ticket-stuck",
     }
 )
 
 
-def _ready_outcome(outcome: str) -> bool:
+def _verdict_outcome(outcome: str) -> bool:
     return (
-        outcome in READY_OUTCOMES
-        or outcome.startswith("rejected-ready-")
-        or outcome.startswith("update-")
+        outcome in VERDICT_OUTCOMES
+        or outcome.startswith(("ship-already-completed-", "failed-verdict-"))
     )
 
 

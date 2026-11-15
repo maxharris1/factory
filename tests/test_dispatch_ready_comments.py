@@ -25,7 +25,11 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
     reviewed_at_pending_ci(board, pr, older)
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
-    if mode == "interrupt":
+    if mode == "upgrade":
+        board.poll()
+        with board.queue.connect() as connection:
+            connection.execute("DROP TABLE verdict_heads")
+    else:
         original = board.dispatcher._mark_handled
 
         def stop_after_handled(ticket, comment_id, outcome):
@@ -36,10 +40,6 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
         board.dispatcher._mark_handled = stop_after_handled
         with pytest.raises(KeyboardInterrupt):
             board.poll()
-    else:
-        board.poll()
-        with board.queue.connect() as connection:
-            connection.execute("DROP TABLE verdict_heads")
     board.dispatcher = Dispatcher(
         tmp_path / "d.db",
         board.queue,
@@ -200,20 +200,34 @@ def test_an_upgrade_backfills_the_post_time_of_a_verdict_recorded_before_it(
     assert CI_LOG in instruction(fixes[0])
 
 
+def _handled_ready_at_a_newer_head(board, pr) -> str:
+    board.ready(pr, sha(2), "wrong-head-ready")
+    board.poll()
+    assert board.outcome("wrong-head-ready") == "stale-ready-head"
+    return "wrong-head-ready"
+
+
+def _handled_duplicate_go(board, pr) -> str:
+    pr.push(sha(2), ci="pending")
+    board.go(pr, "duplicate-go")
+    board.poll()
+    assert board.outcome("duplicate-go") == "deduped-build"
+    return "duplicate-go"
+
+
 @pytest.mark.parametrize("omitted", [False, True])
 @pytest.mark.parametrize("upgrade", [False, True])
-def test_an_upgrade_never_counts_a_handled_builder_ready_as_the_reviews_verdict(
-    tmp_path: Path, upgrade: bool, omitted: bool
+@pytest.mark.parametrize("handled", [_handled_ready_at_a_newer_head, _handled_duplicate_go])
+def test_an_upgrade_never_counts_a_handled_non_verdict_as_the_reviews_verdict(
+    tmp_path: Path, upgrade: bool, omitted: bool, handled
 ) -> None:
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
     reviewed_at_pending_ci(board, pr, older)
-    board.ready(pr, sha(2), "wrong-head-ready")
-    board.poll()
-    assert board.outcome("wrong-head-ready") == "stale-ready-head"
+    comment_id = handled(board, pr)
     if omitted:
-        pr.comments.remove(next(item for item in pr.comments if item.id == "wrong-head-ready"))
+        pr.comments.remove(next(item for item in pr.comments if item.id == comment_id))
     if upgrade:
         with board.queue.connect() as connection:
             connection.execute("DROP TABLE verdict_heads")
