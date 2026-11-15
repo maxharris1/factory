@@ -85,7 +85,7 @@ class ResumeAfterCapMixin:
                         action="fix",
                         head=ticket.current_head,
                         round_number=int(row["review_round"]) + 1,
-                        cap=self._config_cap(ticket) + cap_extra,
+                        cap=self._config_cap(ticket, connection) + cap_extra,
                         instruction=verdict,
                         resume=True,
                     ),

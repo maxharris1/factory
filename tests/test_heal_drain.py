@@ -1,4 +1,5 @@
-"""#219: a stale-code waiter with jobs in flight is drained, not restarted."""
+"""#219, #309: a stale-code waiter is drained until it stops claiming, then restarted
+with its running jobs left going."""
 
 from __future__ import annotations
 
@@ -13,10 +14,6 @@ from tests.test_heal import CHECKOUT, NOW, Posts, Runs, component, facts, log_li
 
 STALE = component(version="0123456789ab")
 LABEL = STALE["label"]
-
-
-def busy(jobs: int | None, **changes):
-    return facts(waiter_jobs={"codex-bot": jobs}, **changes)
 
 
 def run(tmp_path: Path, host, *, now: float = NOW, data: dict | None = None,
@@ -36,49 +33,39 @@ def marker(tmp_path: Path) -> Path:
     return tmp_path / "waiter-codex-bot.drain"
 
 
-def test_a_busy_stale_waiter_is_drained_not_restarted() -> None:
-    (action,) = heal.decide(report(STALE), {}, busy(2), NOW)
-    assert (action.kind, action.reason) == (DRAIN, "stale code, 2 running jobs")
-
-
-def test_an_idle_stale_waiter_restarts_once_it_acknowledges_the_drain() -> None:
-    (action,) = heal.decide(report(STALE), {}, busy(0, drain_acked={"codex-bot": CHECKOUT}),
-                            NOW)
+def test_a_stale_waiter_restarts_once_it_acknowledges_the_drain() -> None:
+    (action,) = heal.decide(report(STALE), {}, facts(drain_acked={"codex-bot": CHECKOUT}), NOW)
     assert action.kind == RESTART
 
 
-def test_an_idle_stale_waiter_without_an_ack_for_this_commit_is_drained() -> None:
+def test_a_stale_waiter_without_an_ack_for_this_commit_is_drained() -> None:
     for acked in ({}, {"codex-bot": "0123456789ab"}):
-        (action,) = heal.decide(report(STALE), {}, busy(0, drain_acked=acked), NOW)
+        (action,) = heal.decide(report(STALE), {}, facts(drain_acked=acked), NOW)
         assert (action.kind, action.reason) == (
             DRAIN, "stale code, waiting for the waiter to stop claiming")
 
 
-def test_an_unknown_job_count_counts_as_busy() -> None:
-    (action,) = heal.decide(report(STALE), {}, busy(None), NOW)
-    assert (action.kind, action.reason) == (DRAIN, "stale code, unknown running jobs")
-
-
-def test_a_down_waiter_restarts_even_with_jobs() -> None:
+def test_a_down_waiter_restarts_without_an_ack() -> None:
     down = component(state="down", reason="no heartbeat")
-    (action,) = heal.decide(report(down), {}, busy(3), NOW)
+    (action,) = heal.decide(report(down), {}, facts(), NOW)
     assert action.kind == RESTART
 
 
 def test_draining_writes_the_marker_and_logs_once(tmp_path: Path) -> None:
-    _, runs, _ = run(tmp_path, busy(1))
+    _, runs, _ = run(tmp_path, facts())
     first_mtime = marker(tmp_path).stat().st_mtime_ns
-    run(tmp_path, busy(1), now=NOW + 120)
+    run(tmp_path, facts(), now=NOW + 120)
     assert runs.calls == []
     assert marker(tmp_path).read_text() == f"{CHECKOUT}\n"
     assert marker(tmp_path).stat().st_mtime_ns == first_mtime
     assert log_lines(tmp_path) == [
-        f"2027-01-15T08:00:00Z self-heal: drain {LABEL} (stale code, 1 running jobs)"]
+        f"2027-01-15T08:00:00Z self-heal: drain {LABEL} "
+        "(stale code, waiting for the waiter to stop claiming)"]
 
 
-def test_a_drained_waiter_restarts_once_its_jobs_finish(tmp_path: Path) -> None:
-    run(tmp_path, busy(1))
-    _, runs, _ = run(tmp_path, busy(0, drain_acked={"codex-bot": CHECKOUT}), now=NOW + 120)
+def test_a_drained_waiter_restarts_in_the_pass_it_acknowledges(tmp_path: Path) -> None:
+    run(tmp_path, facts())
+    _, runs, _ = run(tmp_path, facts(drain_acked={"codex-bot": CHECKOUT}), now=NOW + 120)
     assert [call[0] for call in runs.calls] == [
         ["/srv/factory/deploy/waiter-service.sh", "codex-bot", "restart"]]
     assert not marker(tmp_path).exists()
@@ -86,41 +73,32 @@ def test_a_drained_waiter_restarts_once_its_jobs_finish(tmp_path: Path) -> None:
 
 
 def test_a_marker_for_a_waiter_no_longer_stale_is_removed(tmp_path: Path) -> None:
-    run(tmp_path, busy(1))
-    run(tmp_path, busy(1), data=report(component()), now=NOW + 120)
+    run(tmp_path, facts())
+    run(tmp_path, facts(), data=report(component()), now=NOW + 120)
     assert not marker(tmp_path).exists()
 
 
 def test_a_drain_over_two_hours_escalates_once_and_kills_nothing(tmp_path: Path) -> None:
     since = NOW - 2 * 3600 - 60
-    actions = heal.decide(report(STALE), {}, busy(1, drain_since={"codex-bot": since}), NOW)
+    host = facts(drain_since={"codex-bot": since})
+    actions = heal.decide(report(STALE), {}, host, NOW)
     assert [a.kind for a in actions] == [DRAIN, ESCALATE]
-    assert actions[1].reason == "draining for 121m, 1 running jobs"
+    assert actions[1].reason == "draining for 121m, waiting for the waiter to stop claiming"
     posts = Posts()
-    host = busy(1, drain_since={"codex-bot": since})
     _, runs, _ = run(tmp_path, host, posts=posts)
     run(tmp_path, host, posts=posts, runs=runs, now=NOW + 120)
     assert runs.calls == []
     assert len(posts.calls) == 1
 
 
-def test_facts_count_running_jobs_per_owned_waiter_and_date_the_marker(tmp_path: Path) -> None:
-    db = tmp_path / "orch.db"
-    with sqlite3.connect(db) as connection:
-        connection.execute("CREATE TABLE jobs (id TEXT, recipient TEXT, state TEXT)")
-        connection.executemany("INSERT INTO jobs VALUES (?, ?, ?)", [
-            ("1", "codex", "running"), ("2", "codex", "running"), ("3", "codex", "queued"),
-            ("4", "claude", "running"), ("5", "codex", "done")])
+def test_facts_date_the_marker_of_each_owned_waiter(tmp_path: Path) -> None:
     (tmp_path / "waiter-autostart-codex-bot").touch()
     marker(tmp_path).write_text("x\n")
-    host = heal.facts_for("box", tmp_path, tmp_path, db, NOW)
-    assert host.waiter_jobs == {"codex-bot": 2}
+    host = heal.facts_for("box", tmp_path, tmp_path, None, NOW)
     assert host.drain_since == {"codex-bot": marker(tmp_path).stat().st_mtime}
-    assert heal.facts_for("box", tmp_path, tmp_path, None, NOW).waiter_jobs == {"codex-bot": None}
-    assert heal.running_jobs(tmp_path / "missing.db", "codex") is None
 
 
-# --- the drain handshake: no claim lands between the idle check and the restart ----------------
+# --- the drain handshake: no claim lands between the ack and the restart -----------------------
 
 
 def real_waiter(tmp_path: Path):
@@ -140,6 +118,13 @@ def stale_pair():
                   component(bot="claude-bot", version="aaaaaaaaaaaa"))
 
 
+def running(db: Path) -> int:
+    with sqlite3.connect(db) as connection:
+        return connection.execute(
+            "SELECT count(*) FROM jobs WHERE state = 'running' AND recipient = 'claude'"
+        ).fetchone()[0]
+
+
 def heal_with_waiter(tmp_path: Path, db: Path, *, on_service=None, on_sleep=None,
                      refresh: bool = True):
     calls: list[tuple[str, int | None]] = []
@@ -147,7 +132,7 @@ def heal_with_waiter(tmp_path: Path, db: Path, *, on_service=None, on_sleep=None
     def service(argv, env, log_path):
         if on_service is not None:
             on_service(argv)
-        calls.append((Path(argv[0]).name, heal.running_jobs(db, "claude")))
+        calls.append((Path(argv[0]).name, running(db)))
         return 0
 
     host = heal.facts_for("box", tmp_path, tmp_path, db, NOW)
@@ -159,8 +144,8 @@ def heal_with_waiter(tmp_path: Path, db: Path, *, on_service=None, on_sleep=None
     return calls
 
 
-def busy_restarts(calls) -> list:
-    return [call for call in calls if call[0] == "waiter-service.sh" and call[1] != 0]
+def waiter_restarts(calls) -> list:
+    return [call for call in calls if call[0] == "waiter-service.sh"]
 
 
 def test_a_claim_during_the_poller_restart_never_gets_its_waiter_restarted(
@@ -176,29 +161,35 @@ def test_a_claim_during_the_poller_restart_never_gets_its_waiter_restarted(
 
     calls = heal_with_waiter(tmp_path, db, on_service=claim_during_poller_restart,
                              refresh=False)
-    assert busy_restarts(calls) == []
+    assert waiter_restarts(calls) == []
     assert heal.drain_path(tmp_path, "claude-bot").exists()
 
 
-def test_a_claim_before_the_waiter_acknowledges_keeps_it_draining(tmp_path: Path) -> None:
-    from tests.test_waiter import enqueue
+def test_a_job_claimed_before_the_ack_keeps_running_through_the_restart(tmp_path: Path) -> None:
+    from tests.test_waiter import enqueue, state
 
     db, queue, waiter = real_waiter(tmp_path)
     job = enqueue(queue, "race")
     claimed: list[str | None] = []
+    later: list[str] = []
 
     def waiter_runs(_seconds):
         if not claimed:
             marker, waiter.drain = waiter.drain, None
             claimed.append(waiter.step())
             waiter.drain = marker
-        waiter.step()
+            later.append(enqueue(queue, "after-the-ack"))
+        assert waiter.step() is None
 
-    calls = heal_with_waiter(tmp_path, db, on_sleep=waiter_runs)
+    def old_waiter_claims_nothing(argv):
+        if argv[0].endswith("waiter-service.sh"):
+            assert waiter.step() is None
+            assert (state(db, job), state(db, later[0])) == ("running", "queued")
+
+    calls = heal_with_waiter(tmp_path, db, on_sleep=waiter_runs,
+                             on_service=old_waiter_claims_nothing)
     assert claimed == [job]
-    assert busy_restarts(calls) == []
-    assert [c for c in calls if c[0] == "waiter-service.sh"] == []
-    assert heal.drain_path(tmp_path, "claude-bot").exists()
+    assert waiter_restarts(calls) == [("waiter-service.sh", 1)]
 
 
 def test_an_idle_waiter_that_acknowledges_the_drain_restarts_in_the_same_pass(
@@ -210,9 +201,8 @@ def test_an_idle_waiter_that_acknowledges_the_drain_restarts_in_the_same_pass(
     steps: list[str | None] = []
     calls = heal_with_waiter(tmp_path, db, on_sleep=lambda _s: steps.append(waiter.step()))
     assert set(steps) == {None}
-    assert ("waiter-service.sh", 0) in calls
-    assert busy_restarts(calls) == []
-    assert heal.running_jobs(db, "claude") == 0
+    assert waiter_restarts(calls) == [("waiter-service.sh", 0)]
+    assert running(db) == 0
     assert not heal.drain_path(tmp_path, "claude-bot").exists()
     assert not heal.drain_ack_path(tmp_path, "claude-bot").exists()
     assert waiter.step() == job
@@ -279,5 +269,75 @@ def test_a_replacement_waiter_never_claims_into_a_restart_its_predecessor_acknow
             fresh.step()
 
     calls = heal_with_waiter(tmp_path, db, on_service=claim_during_poller_restart)
-    assert ("waiter-service.sh", 0) in calls
-    assert busy_restarts(calls) == []
+    assert waiter_restarts(calls) == [("waiter-service.sh", 0)]
+
+
+# --- #309: a drained waiter restarts on its ack, with its runs still going ---------------------
+
+
+def test_a_drained_waiter_with_a_running_remote_job_restarts_in_the_same_pass(
+        tmp_path: Path) -> None:
+    from lib.waiter import REMOTE_RECORD
+    from tests.handoff_store import serve_job
+    from tests.test_waiter import FakeSpawn, enqueue, state
+    from tests.test_waiter_remote import Liveness, _done_row, make_waiter, remote_machines
+
+    machines = remote_machines(tmp_path, box_enabled=False)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    for flag in ("waiter-autostart-claude-bot", "poller-autostart"):
+        (state_dir / flag).touch()
+
+    def start_waiter(version: str, **options):
+        waiter, queue, db = make_waiter(tmp_path, machines, FakeSpawn(), **options)
+        waiter.drain, waiter.version = heal.drain_path(state_dir, "claude-bot"), version
+        return waiter, queue, db
+
+    old, queue, db = start_waiter("aaaaaaaaaaaa")
+    running = enqueue(queue, "running")
+    assert old.step() == running
+    queued = enqueue(queue, "queued")
+    alive = Liveness()
+    log: list[str] = []
+    waiters = {}
+    restarts: list[list[str]] = []
+
+    def service(argv, env, log_path):
+        if Path(argv[0]).name == "waiter-service.sh":
+            assert (state(db, running), state(db, queued)) == ("running", "queued")
+            assert old.step() is None
+            heal.drain_path(state_dir, "claude-bot").unlink(missing_ok=True)
+            heal.drain_ack_path(state_dir, "claude-bot").unlink(missing_ok=True)
+            waiters["new"] = start_waiter(CHECKOUT, alive=alive, log=log)[0]
+            restarts.append(list(argv))
+        return 0
+
+    heal.heal(stale_pair(), facts=heal.facts_for("box", state_dir, state_dir, db, NOW),
+              state_dir=state_dir, deploy=Path("deploy"), webhook=heal.Webhook(), environ={},
+              now=NOW, run=service,
+              refresh=lambda: heal.facts_for("box", state_dir, state_dir, db, NOW),
+              sleep=lambda _seconds: old.step())
+    assert restarts == [["deploy/waiter-service.sh", "claude-bot", "restart"]]
+    assert state(db, running) == "running"
+
+    new = waiters["new"]
+    assert new.step() == queued
+    assert any("adopted the remote run" in line and running in line for line in log)
+    assert new.running() == {running, queued}
+
+    serve_job(db, running, "4242")
+    job_dir = state_dir / "jobs" / running
+    with open(job_dir / "run.log", "a", encoding="utf-8") as handle:
+        handle.write("ORCH-HANDOFF: 4242\n")
+    (job_dir / "exit").write_text("0\n", encoding="utf-8")
+    alive.running = False
+    new.step()
+    new.step()
+    assert _done_row(db, running) == ("done", "4242")
+    assert len([line for line in log if "orch job done" in line and running in line]) == 1
+    assert not (job_dir / REMOTE_RECORD).exists()
+
+    third_log: list[str] = []
+    third = start_waiter(CHECKOUT, alive=Liveness(), log=third_log)[0]
+    third.step()
+    assert not any("orch job done" in line and running in line for line in third_log)

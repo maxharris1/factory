@@ -16,6 +16,7 @@ from tests.test_hooks import (
     FakeReviewActions,
     FakeSource,
     approve,
+    factory,
     in_review,
     say,
     setup,
@@ -220,6 +221,51 @@ def test_job_failed_twice_wake_links_the_queueing_comment_after_a_restart(
     [wake] = delivery.jobs
     assert detail(wake)["job_id"] == build.id
     assert detail(wake)["link"] == go.url
+
+
+def test_stuck_wake_after_a_rejected_route_links_the_read_cause(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    routed = replace(factory(), reviewer_harness="cursor", reviewer_model="gpt-5")
+    go = linked(
+        say("go-1", GO.format(state=" state=building builder=claude"), "grok-login", 1)
+    )
+    dispatcher.process(replace(on_pr(go), factory=routed))
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM comment_links")
+
+    delivery = FakeGrokDelivery()
+    restarted, queue = setup(tmp_path, grok_delivery=delivery)
+    drifted = replace(
+        factory(),
+        builder_harness="codex",
+        reviewer_harness="cursor",
+        reviewer_model="claude-sonnet-4",
+    )
+    ready = linked(
+        say(
+            "ready-1",
+            "<!-- orch:v1 kind=ready from=claude-bot role=builder "
+            f"head={HEAD_A} -->\nReady.\n",
+            "claude-login",
+            2,
+        )
+    )
+    restarted.process(replace(on_pr(go, ready), factory=drifted))
+    restarted.reconcile_jobs()
+
+    [wake] = delivery.jobs
+    assert wake.request.action == "stuck"
+    assert detail(wake)["link"] == go.url
+    with queue.connect() as connection:
+        remembered = connection.execute(
+            "SELECT link FROM comment_links WHERE comment_id = 'go-1'"
+        ).fetchone()
+    assert remembered["link"] == go.url
 
 
 def test_done_wake_on_linear_falls_back_to_the_ticket_url(tmp_path: Path) -> None:

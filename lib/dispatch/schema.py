@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Mapping
 
 from lib import attention, project_rules
+from lib.intake_risk import INTAKE_RISK_SCHEMA
 from lib.pr_title import SOURCES_TABLE
 
 
@@ -165,6 +166,7 @@ class SchemaMixin:
                 """
             )
             project_rules.ensure_table(connection)
+            connection.execute(INTAKE_RISK_SCHEMA)
             connection.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {SOURCES_TABLE} (

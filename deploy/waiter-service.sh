@@ -33,9 +33,10 @@
 # keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
 #
 # Drain (#219): self-heal writes waiter-<bot>.drain in the state directory
-# when this bot's waiter runs stale code with jobs in flight; the waiter
-# (told the path by ORCH_WAITER_DRAIN) then claims nothing, acknowledges in
-# waiter-<bot>.drain.ack, and self-heal restarts it after its last job.
+# when this bot's waiter runs stale code; the waiter (told the path by
+# ORCH_WAITER_DRAIN) then claims nothing, acknowledges in
+# waiter-<bot>.drain.ack, and self-heal restarts it at once (#309); its
+# running jobs keep going and the new waiter adopts the remote ones.
 # start removes the marker and the ack.
 #
 # Environment: ~/.config/factory/waiter.env, if present, is read for the
