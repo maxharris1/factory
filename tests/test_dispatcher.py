@@ -7075,7 +7075,6 @@ def retry(
 
 
 def retry_setup(tmp_path: Path, **kwargs) -> tuple[Dispatcher, SQLiteJobQueue]:
-    """Grok delivery that never succeeds, so a stuck wake stays queued."""
     return setup(tmp_path, grok_delivery=RaisingGrokDelivery(RuntimeError("down")), **kwargs)
 
 

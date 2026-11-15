@@ -137,7 +137,6 @@ def _retry_detail(job: Job) -> str | None:
 
 
 def _append_detail(detail: str, note: str) -> str:
-    """detail with note added: inside a JSON wake's "detail", else as text."""
     try:
         context = json.loads(detail)
     except ValueError:

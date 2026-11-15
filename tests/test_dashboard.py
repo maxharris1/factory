@@ -333,8 +333,6 @@ def snapshot_for(tmp_path: Path, **kwargs) -> dict:
     return collect_snapshot(db, log, now=NOW, **kwargs)
 
 
-# --- #216: kind=retry history ----------------------------------------------
-
 RETRIES_TABLE = """
 CREATE TABLE IF NOT EXISTS ticket_retries (
     repo TEXT NOT NULL, ticket_id TEXT NOT NULL, comment_id TEXT NOT NULL,

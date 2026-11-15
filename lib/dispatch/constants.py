@@ -40,7 +40,6 @@ GROK_WAKE_REASONS = (
     "go-not-from-approver",
 )
 CORE_KINDS = ("go", "plan", "ready", "retry")
-# The note a rejected retry's Grok wake carries, for Max.
 RETRY_REJECTION_NOTES = {
     "rejected-retry-author": (
         "a retry must come from grok-bot as orchestrator"

@@ -15,9 +15,8 @@ from lib.queue import Job, JobRequest, _job
 
 RetryStep = Literal["replay", "ci-fix", "plan", "build"]
 
-# A retry buys exactly one more attempt and never resets the counter that
-# made the ticket stuck. "replay" clones the newest harness job at attempt 2,
-# so its next failure is stuck again.
+_LAST_ATTEMPT = 2
+_LAST_PLAN_GAP_COUNT = 1
 _STEP_BY_REASON: Mapping[str, RetryStep] = {
     "ci-red-3": "ci-fix",
     "plan-gaps-2": "plan",
@@ -36,7 +35,6 @@ def _retry_step(
     workflow_state: str | None,
     newest_job_state: str | None,
 ) -> RetryStep | None:
-    """The step a retry queues, or None when it only clears stuck."""
     step = _STEP_BY_REASON.get(stuck_reason or "")
     if step is None:
         step = (
@@ -88,7 +86,6 @@ class RetryMixin:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[str, str | None]:
-        """The retry's outcome and the state label to write after commit."""
         key = (ticket.repo.lower(), ticket.ticket_id)
         row = connection.execute(
             """
@@ -147,9 +144,7 @@ class RetryMixin:
         state = "planning" if step == "plan" else row["workflow_state"]
         gaps = int(row["plan_gap_count"])
         if step == "plan":
-            # One plan round left: the resumed plan is checked as round 2,
-            # and gaps again go stuck again.
-            gaps = min(gaps, 1)
+            gaps = min(gaps, _LAST_PLAN_GAP_COUNT)
         connection.execute(
             """
             UPDATE ticket_state
@@ -212,7 +207,7 @@ class RetryMixin:
             return replace(
                 newest.request,
                 generation=generation,
-                attempt=2,
+                attempt=_LAST_ATTEMPT,
                 detail=_with_fields(
                     newest.request.detail,
                     retry_of=newest.id,

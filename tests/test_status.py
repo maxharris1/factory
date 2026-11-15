@@ -494,7 +494,6 @@ def test_dispatcher_stuck_flag_is_rendered_as_paused(tmp_path: Path) -> None:
 
 
 def test_a_stuck_ticket_shows_its_accepted_retries(tmp_path: Path) -> None:
-    """#216: rejected retries are not history; the newest accepted one is shown."""
     path = tmp_path / "queue.sqlite3"
     create_database(path)
     with sqlite3.connect(path) as connection:

@@ -1447,8 +1447,6 @@ def _add_job_tickets(
         key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
         if key in histories:
             histories[key].append((str(row["action"]), float(row["created_at"])))
-    # Issue #216: only a ticket with an accepted retry gets the key, so every
-    # other snapshot keeps its shape.
     retries: dict[tuple[str, str], int] = {}
     if "ticket_retries" in tables:
         for row in connection.execute(

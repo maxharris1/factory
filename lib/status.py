@@ -46,8 +46,6 @@ class StatusError(RuntimeError):
 
 @dataclass(frozen=True)
 class Retried:
-    """Issue #216: accepted kind=retry comments, and the newest one."""
-
     count: int
     stuck_reason: str | None
     action: str | None

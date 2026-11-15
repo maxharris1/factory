@@ -1256,7 +1256,6 @@ _TICKET_URL = re.compile(
 
 
 def _retry(argv: list[str]) -> int:
-    """`orch retry`: post the grok-bot kind=retry comment for a stuck ticket (#216)."""
     prog = "orch retry"
     parser = _Parser(prog=prog, add_help=True)
     parser.add_argument("ticket")
@@ -1300,9 +1299,6 @@ def _retry(argv: list[str]) -> int:
 
 
 def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> str | None:
-    """Why the dispatcher would refuse this retry, read from orch.db; None to post.
-
-    An unreadable database skips the check: the dispatcher is the authority."""
     path = Path(db) if db else None
     if path is None or not path.is_file():
         print(

@@ -125,7 +125,6 @@ class CommentsMixin:
                 "retry",
             ):
                 continue
-            # A retry is the one comment a stuck ticket acts on (TR).
             if kind != "retry" and self._is_stuck(ticket):
                 self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
                 self._mark_handled(ticket, comment.id, "ticket-stuck")

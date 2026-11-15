@@ -994,14 +994,13 @@ class JobsMixin:
             )
             connection.commit()
 
-    def _after_retries(
+    def _with_retry_note(
         self,
         connection: sqlite3.Connection,
         repo: str,
         ticket_id: str,
         detail: str,
     ) -> str:
-        """A stuck wake's detail, naming the retries Max already gave (TR)."""
         retries = connection.execute(
             """
             SELECT comment_id FROM ticket_retries
@@ -1072,7 +1071,7 @@ class JobsMixin:
         if detail is None and previous_detail is not None:
             reason = previous_detail
         else:
-            reason = self._after_retries(
+            reason = self._with_retry_note(
                 connection,
                 repo,
                 ticket_id,

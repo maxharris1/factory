@@ -489,8 +489,6 @@ def test_job_cancel_of_an_unknown_job_exits_2(tmp_path: Path, capsys) -> None:
     assert "unknown job nope" in capsys.readouterr().err
 
 
-# --- #216: orch retry ----------------------------------------------------------
-
 TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 RETRY_GH = """\
 import json, os, sys
@@ -507,7 +505,6 @@ print(json.dumps({{"id": 987654}}))
 
 @pytest.fixture
 def retry_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A gh that records each call and whether a token variable reached it."""
     directory = tmp_path / "retry-gh"
     directory.mkdir()
     fallback = None
