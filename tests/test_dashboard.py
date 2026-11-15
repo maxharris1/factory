@@ -348,6 +348,7 @@ def test_retry_outcomes_group_as_routed_or_rejected(tmp_path: Path) -> None:
     outcomes = [
         "queued-retry-fix",
         "retried-no-job",
+        "retried-merge-queue",
         "rejected-retry-author",
         "rejected-retry-no-reason",
         "rejected-retry-not-stuck",
@@ -364,6 +365,7 @@ def test_retry_outcomes_group_as_routed_or_rejected(tmp_path: Path) -> None:
     assert kinds == {
         "queued-retry-fix": "routed",
         "retried-no-job": "routed",
+        "retried-merge-queue": "routed",
         "rejected-retry-author": "rejected",
         "rejected-retry-no-reason": "rejected",
         "rejected-retry-not-stuck": "rejected",

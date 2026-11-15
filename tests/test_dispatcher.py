@@ -7300,6 +7300,21 @@ def test_retry_after_ci_red_3_queues_ci_fix(tmp_path: Path) -> None:
     assert (row["stuck"], row["gate_count"]) == (0, 3)
 
 
+@pytest.mark.parametrize(("state", "action"), [("planning", "plan"), ("building", "build")])
+def test_a_built_retry_job_is_the_last_attempt(tmp_path: Path, state: str, action: str) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_state(queue, state=state, stuck=1, stuck_reason="t7-stuck")
+
+    dispatcher.process(ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == f"queued-retry-{action}"
+    (job,) = queued_harness_jobs(queue)
+    assert (job.request.action, job.request.attempt) == (action, 2)
+    fail_once_through_t6(dispatcher, queue)
+    assert ticket_row(queue)["stuck_reason"] == "job-failed-2"
+    assert queued_harness_jobs(queue) == []
+
+
 def rejected_wakes(queue: SQLiteJobQueue) -> list[dict]:
     return [json.loads(row["detail"]) for row in jobs_of(queue, "rejected")]
 

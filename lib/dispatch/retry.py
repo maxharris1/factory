@@ -8,24 +8,27 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal
 
-from lib.dispatch.helpers import _comment_link, _scope
+from lib.dispatch.constants import UPDATE_FAILURES_TO_STOP
+from lib.dispatch.helpers import _comment_link, _queue_state, _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import parse_comment
 from lib.queue import Job, JobRequest, _job
 
-RetryStep = Literal["replay", "ci-fix", "plan", "build"]
+RetryStep = Literal["replay", "ci-fix", "plan", "build", "update"]
 
 _LAST_ATTEMPT = 2
 _LAST_PLAN_GAP_COUNT = 1
 _STEP_BY_REASON: Mapping[str, RetryStep] = {
     "ci-red-3": "ci-fix",
     "plan-gaps-2": "plan",
+    "update-failed-2": "update",
 }
 _STEP_BY_STATE: Mapping[str, RetryStep] = {
     "planning": "plan",
     "building": "build",
     "fixing": "replay",
     "review": "replay",
+    "updating": "update",
 }
 _HARNESS_ACTIONS = ("plan", "build", "review", "fix", "update-from-main")
 
@@ -90,7 +93,8 @@ class RetryMixin:
         row = connection.execute(
             """
             SELECT stuck, stuck_reason, stuck_source_comment_id, workflow_state,
-                   review_round, plan_gap_count, generation
+                   review_round, plan_gap_count, generation,
+                   update_failures, update_failed_job
             FROM ticket_state
             WHERE repo = ? AND ticket_id = ?
             """,
@@ -141,19 +145,34 @@ class RetryMixin:
             reason, row["workflow_state"], None if newest is None else newest.state
         )
         generation = int(row["generation"]) + 1
-        state = "planning" if step == "plan" else row["workflow_state"]
+        state = row["workflow_state"]
         gaps = int(row["plan_gap_count"])
+        update_failures = int(row["update_failures"])
+        update_failed_job = row["update_failed_job"]
         if step == "plan":
+            state = "planning"
             gaps = min(gaps, _LAST_PLAN_GAP_COUNT)
+        elif step == "update":
+            state = _queue_state(ticket.factory.ship)
+            update_failures = UPDATE_FAILURES_TO_STOP - 1
+            update_failed_job = None
         connection.execute(
             """
             UPDATE ticket_state
             SET stuck = 0, stuck_reason = NULL, stuck_source_comment_id = NULL,
                 stuck_wake_job_id = NULL, generation = ?, workflow_state = ?,
-                plan_gap_count = ?
+                plan_gap_count = ?, update_failures = ?, update_failed_job = ?
             WHERE repo = ? AND ticket_id = ?
             """,
-            (generation, state, gaps, *key),
+            (generation, state, gaps, update_failures, update_failed_job, *key),
+        )
+        connection.execute(
+            """
+            UPDATE jobs SET failure_handled = 1
+            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+              AND state = 'failed' AND failure_handled = 0
+            """,
+            key,
         )
         for wake in connection.execute(
             """
@@ -164,6 +183,10 @@ class RetryMixin:
             key,
         ).fetchall():
             self.queue.cancel(str(wake["id"]), "retried", connection=connection)
+        if step == "update":
+            return self._record_retry(
+                connection, ticket, comment, reason, None, f"retried-{state}"
+            ), state
         request = (
             None
             if step is None
@@ -261,6 +284,7 @@ class RetryMixin:
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
             generation=generation,
+            attempt=_LAST_ATTEMPT,
             head=head,
             detail=_with_fields(detail, retry_comment=comment.id),
         )

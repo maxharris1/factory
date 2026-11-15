@@ -910,7 +910,7 @@ def _poll_health(
 
 def _verdict_kind(outcome: str) -> str:
     """Group a handled comment's outcome for the feed."""
-    if outcome.startswith("queued-") or outcome == "retried-no-job":
+    if outcome.startswith(("queued-", "retried-")):
         return "routed"
     if outcome.startswith("stale-"):
         return "stale"
