@@ -1,9 +1,11 @@
 """#193: T6 reconciles every result kind before a retry, and never retries in waiting-max.
 
 A failed harness job that already posted its plan, questions, ready or
-verdict is done with it. Inside poll_once, T6 trusts only a ticket read that
-began at or after the failure. A harness job that fails while its ticket
-waits on Max is never retried: Max's answers resume the paused step.
+verdict is done with it. Inside poll_once, T6 reads the ticket again
+uncached before a retry; a source with no uncached read counts only a read
+that began at or after the failure. A harness job that fails while its
+ticket waits on Max is never retried: Max's answers resume the paused step,
+once, even after they clear waiting-max.
 
 Every test drives the real Dispatcher through poll_once on a fake clock and
 a fake source. Nothing reaches GitHub or the live orch.db.
@@ -11,25 +13,32 @@ a fake source. Nothing reaches GitHub or the live orch.db.
 
 from __future__ import annotations
 
+import copy
 import sqlite3
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lib.device_pool import DevicePool
-from lib.dispatcher import CIResult, TicketRef, TrackedTicket
+from lib.dispatcher import CIResult, Dispatcher, TicketRef, TrackedTicket
 from lib.job_state import record_job_event
 from lib.machines_yml import Device, MachinesConfig
-from lib.queue import JobRequest
+from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
     ANSWERS,
     GO,
     PLAN,
     QUESTIONS,
     READY,
+    FakeGrokDelivery,
+    FakeReviewActions,
     FakeSource,
     comment,
     setup,
     ticket,
 )
+from tests.test_live_poll_no_webhook import Clock, Linear, issue, source_for
+from tests.test_live_poll_webhook import FakeDirty, webhook_config
 
 HEAD = "a193" + "0" * 36
 NEW_HEAD = "a193" + "1" * 36
@@ -38,6 +47,10 @@ MAX_QUESTIONS = (
     "<!-- orch:v1 kind=questions from=grok-bot role=orchestrator state=waiting-max -->\n"
     "Questions.\n"
 )
+
+
+def _stamp(at: float) -> str:
+    return datetime.fromtimestamp(at, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class Source(FakeSource):
@@ -373,3 +386,96 @@ def test_a_failed_grok_wake_in_waiting_max_is_still_retried(tmp_path: Path) -> N
             "SELECT count(*) FROM jobs WHERE dedupe_key LIKE ?", (f"t6-retry:{grok['id']}:%",)
         ).fetchone()[0]
     assert retried == 1, "the clarify wake that asks Max is still retried"
+
+
+def test_a_cached_read_from_before_the_failure_does_not_retry_a_posted_plan(tmp_path: Path) -> None:
+    clock = Clock()
+    value = issue("AUT-1")
+    first = value["comments"]["nodes"][0]
+    first["body"] = first["body"].replace("state=building", "state=planning")
+    first["createdAt"] = _stamp(clock.now)
+    linear = Linear([value])
+    config = replace(
+        webhook_config(),
+        trusted_linear_users={
+            "linear:user-1": frozenset({"grok-bot"}),
+            "linear:builder": frozenset({"claude-bot"}),
+        },
+    )
+    source, _ = source_for(config, linear, clock=clock)
+    source.linear_dirty = FakeDirty()
+    path = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(path, clock=clock)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={"linear": config.trusted_linear_users, "github": {}},
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    box = Device(name="box", slot_max=2, harnesses={"claude": "claude-bot"}, local=True)
+    DevicePool(queue, MachinesConfig(devices=(box,)))
+    source.active_tickets = dispatcher.active_job_tickets
+    source.unpolled_tickets = dispatcher.unpolled_linear_tickets
+    source.error_sink = dispatcher.record_poll_error
+    dispatcher.poll_once(source)
+    plan_job = queue.claim("claude")
+    assert plan_job is not None
+    cached_at = source._linear_documents["AUT-1"][0]
+    clock.now += 10
+    posted = copy.deepcopy(value)
+    posted["comments"]["nodes"].append(
+        {
+            "id": "posted-plan",
+            "body": PLAN.format(round=1, ac="met"),
+            "createdAt": _stamp(clock.now),
+            "user": {"id": "builder"},
+        }
+    )
+    linear.by_key["AUT-1"] = posted
+    linear.by_key["id-AUT-1"] = posted
+    queue.finish(plan_job.id, owner="claude", handoff_comment_id=None)
+    clock.now += 50
+    dispatcher.poll_once(source)
+    with queue.connect() as connection:
+        failed_at = connection.execute(
+            "SELECT finished_at FROM jobs WHERE id = ?", (plan_job.id,)
+        ).fetchone()[0]
+        rows = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT action, state, attempt, handoff_comment_id FROM jobs "
+                "WHERE recipient = 'claude' ORDER BY created_at, rowid"
+            )
+        ]
+    assert cached_at < failed_at, "the poll's Linear document predates the failure"
+    assert rows == [("plan", "done", 1, "posted-plan")], rows
+
+
+def test_answers_beside_a_detached_failed_step_queue_one_step(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    build = board.start("building")
+    board.wait_on_max()
+    board.link_drop(build)
+    board.fail(build)
+    board.post("a-1", ANSWERS, bot="grok")
+    board.poll(at=board.now[0] + 61)
+    queued = [row for row in board.rows("build") if row[0] == "queued"]
+    assert len(queued) == 1, f"one resumed build and no requeue beside it: {board.rows('build')}"
+    assert "requeued-link-drop" not in board.events(build)
+    board.poll()
+    assert [row for row in board.rows("build") if row[0] == "queued"] == queued
+
+
+def test_a_detached_step_failing_after_answers_resumed_it_is_not_requeued(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    build = board.start("building")
+    board.wait_on_max()
+    board.link_drop(build)
+    board.post("a-1", ANSWERS, bot="grok")
+    board.poll()
+    assert board.workflow_state() != "waiting-max"
+    board.fail(build)
+    board.poll(at=board.now[0] + 61)
+    assert [row for row in board.rows("build") if row[0] == "queued"] == [("queued", 1)]
+    assert "resumed-by-answers" in board.events(build)

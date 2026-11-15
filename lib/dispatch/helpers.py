@@ -107,7 +107,7 @@ def _round_number(value: object) -> int | None:
 # _posted_handoff: a ready whose head T2 could not yet check against the PR.
 _HANDOFF_UNREAD = object()
 
-# _posted_handoff: no ticket read began at or after the job failed (#193).
+# _authoritative_handoff: no authoritative ticket read since the job failed (#193).
 _NO_READ_SINCE_FAILURE = object()
 
 # The result kinds that settle each failed harness job, so T6 never retries it (#193).
