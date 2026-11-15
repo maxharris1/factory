@@ -59,6 +59,7 @@ def serve_handoff(
     repo: str | None = None,
     pr_head: str = HEAD,
     branch: str | None = None,
+    is_pr: bool = True,
     body: str | None = None,
     **changes: str | None,
 ) -> None:
@@ -85,6 +86,8 @@ def serve_handoff(
             "issue_url": f"https://api.github.com/repos/{repo}/issues/{number}",
         },
     )
+    if not is_pr:
+        return
     serve(
         store,
         f"repos/{repo}/pulls/{number}",

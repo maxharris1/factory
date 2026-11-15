@@ -259,6 +259,40 @@ def test_with_no_pr_number_the_comment_must_be_on_a_pr_on_the_jobs_branch(
     assert done(db, job, "1013") == 0
 
 
+QUESTIONS = {"kind": "questions", "round": None, "head": None, "verdict": None, "ac": None}
+EVERY_HANDOFF = [
+    pytest.param("build", "claude", "claude-bot", {}, id="ready"),
+    pytest.param("fix", "claude", "claude-bot", {}, id="fix-ready"),
+    pytest.param("plan", "claude", "claude-bot", {}, id="plan"),
+    pytest.param("review", "codex", "codex-bot", {}, id="verdict"),
+    pytest.param("build", "claude", "claude-bot", QUESTIONS, id="builder-questions"),
+    pytest.param("review", "codex", "codex-bot", QUESTIONS, id="reviewer-questions"),
+]
+
+
+@pytest.mark.parametrize(("action", "recipient", "bot", "changes"), EVERY_HANDOFF)
+def test_with_no_pr_number_every_handoff_must_be_on_a_pr_on_the_jobs_branch(
+    tmp_path: Path, store: Path, capsys, action: str, recipient: str, bot: str, changes: dict
+) -> None:
+    db, _, job = running_job(tmp_path, action=action, recipient=recipient, pr_number=None)
+
+    serve_handoff(store, job, "2001", bot=bot, number=9, branch="someone-elses-branch", **changes)
+    assert done(db, job, "2001", bot) == 1
+    assert "#9 is on branch someone-elses-branch, not factory/issue-42" in capsys.readouterr().err
+
+    serve_handoff(store, job, "2002", bot=bot, number=11, is_pr=False, **changes)
+    assert done(db, job, "2002", bot) == 1
+    assert "#11 is not a PR" in capsys.readouterr().err
+
+    assert row(db, job.id)["state"] == "running"
+    assert len(invalid_events(db, job.id)) == 2
+    assert len(flags(db)) == 1
+
+    serve_handoff(store, job, "2003", bot=bot, number=9, branch="factory/issue-42", **changes)
+    assert done(db, job, "2003", bot) == 0
+    assert row(db, job.id)["state"] == "done"
+
+
 def test_a_github_read_failure_changes_nothing(
     tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

@@ -14,10 +14,9 @@ the brief showed. A `questions` handoff is accepted from any job, with its
 role, and carries no head or round.
 
 A ready names the PR's current head; a verdict names the job's head, when
-the job has one. With
-no PR number on the job (a Linear ticket before its PR is known) the PR is
-the comment's own, which must be a PR on the job's branch when the job
-names one.
+the job has one. With no PR number on the job (a Linear ticket before its
+PR is known) the PR is the comment's own: every handoff kind, questions
+included, must be on a PR, and on the job's branch when the job names one.
 """
 
 from __future__ import annotations
@@ -142,6 +141,13 @@ def problems(
         found.append(f"comment {comment_id} is in {repo}, not {expected.repo}")
     if expected.pr is not None and number != expected.pr:
         found.append(f"comment {comment_id} is on #{number}, not PR #{expected.pr}")
+    pull = None
+    if expected.pr is None:
+        pull = _pull(repo, number, read)
+        if pull is None:
+            found.append(f"#{number} is not a PR")
+        elif expected.branch is not None and pull.ref != expected.branch:
+            found.append(f"#{number} is on branch {pull.ref}, not {expected.branch}")
     user = comment.get("user")
     login = str(user.get("login") or "") if isinstance(user, Mapping) else ""
     if expected.bot not in _bots_for(trusted_logins, login):
@@ -167,27 +173,32 @@ def problems(
             found.append(f"no head; the reviewed head is {expected.head}")
         elif not _same_head(reported, expected.head):
             found.append(f"head={reported} is not the reviewed head {expected.head}")
-    if kind == "ready":
-        found.extend(_ready_head(expected, repo, number, fields["head"], read))
+    if kind == "ready" and expected.pr is not None:
+        pull = _pull(repo, number, read)
+        if pull is None:
+            found.append(f"#{number} is not a PR")
+    if kind == "ready" and pull is not None and not _same_head(fields["head"], pull.sha):
+        found.append(
+            f"head={fields['head']} is not the head of #{number} ({pull.sha or 'unknown'})"
+        )
     return found
 
 
-def _ready_head(
-    expected: Expected, repo: str, number: int, reported: str, read: Read
-) -> list[str]:
+@dataclass(frozen=True)
+class _Pull:
+    sha: str
+    ref: str
+
+
+def _pull(repo: str, number: int, read: Read) -> _Pull | None:
     try:
         pull = read(f"repos/{repo}/pulls/{number}")
     except NotFound:
-        return [f"#{number} is not a PR"]
+        return None
     head = pull.get("head")
-    sha = str(head.get("sha") or "") if isinstance(head, Mapping) else ""
-    ref = str(head.get("ref") or "") if isinstance(head, Mapping) else ""
-    found = []
-    if expected.pr is None and expected.branch is not None and ref != expected.branch:
-        found.append(f"#{number} is on branch {ref}, not {expected.branch}")
-    if not _same_head(reported, sha):
-        found.append(f"head={reported} is not the head of #{number} ({sha or 'unknown'})")
-    return found
+    if not isinstance(head, Mapping):
+        return _Pull(sha="", ref="")
+    return _Pull(sha=str(head.get("sha") or ""), ref=str(head.get("ref") or ""))
 
 
 def _same_head(reported: str, current: str | None) -> bool:
