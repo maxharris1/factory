@@ -549,9 +549,15 @@ class ReadyMixin:
             rows = connection.execute(
                 """
                 SELECT recorded.head FROM handled_comments AS verdict
-                JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
+                LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
-                  AND verdict.outcome != 'rejected-edited' AND recorded.review_round = ?
+                  AND verdict.outcome != 'rejected-edited'
+                  AND (
+                      recorded.review_round = ?
+                      OR recorded.head IS NULL AND verdict.rowid <= (
+                          SELECT MAX(handled_rowid) FROM verdict_heads_floor
+                      )
+                  )
                   AND verdict.rowid > COALESCE((
                       SELECT ready.rowid FROM handled_comments AS ready
                       WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id
@@ -560,7 +566,10 @@ class ReadyMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, review_round, ready_id),
             ).fetchall()
-        return any(_matching_head(str(row["head"]), head) is not None for row in rows)
+        return any(
+            row["head"] is None or _matching_head(str(row["head"]), head) is not None
+            for row in rows
+        )
 
     def _flag_ready_after_cap(
         self,

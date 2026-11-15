@@ -100,6 +100,20 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
+            verdict_heads_existed = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_heads'"
+            ).fetchone()
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS verdict_heads_floor (handled_rowid INTEGER NOT NULL)"
+            )
+            if verdict_heads_existed is None:
+                connection.execute(
+                    """
+                    INSERT INTO verdict_heads_floor
+                    SELECT MAX(rowid) FROM handled_comments HAVING COUNT(*) > 0
+                    """
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS verdict_heads (
@@ -112,6 +126,7 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.commit()
             _add_missing_columns(
                 connection,
                 "ticket_state",
