@@ -105,6 +105,45 @@ def test_verdicts_on_a_database_without_jobs_have_no_time(tmp_path: Path) -> Non
     assert '<span class="count">1 ticket</span>' in relay
 
 
+def test_a_verdict_carries_the_approval_time_recorded_for_its_comment(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, gate_count, stuck, approved_head, "
+            "approved_at, approve_comment_id) VALUES ('maxharris1/cleffy', '42', 0, 0, 'h', ?, 'a-42')",
+            (NOW - 30,))
+        connection.execute(
+            "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, "
+            "held_at) VALUES ('MaxHarris1/Cleffy', '44', 'h', 'codex-bot', 'r', 'a-44', ?)", (NOW - 60,))
+        _handled(connection, ("maxharris1/cleffy", "42", "a-42", "waiting-external"),
+                 ("maxharris1/cleffy", "44", "a-44", "held"),
+                 ("maxharris1/cleffy", "43", "a-43", "waiting-external"))
+    verdicts = {row["ticket_id"]: row["age_seconds"]
+                for row in collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]}
+    assert verdicts == {"42": 30, "44": 60, "43": None}
+
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE ship_holds")
+        connection.execute("ALTER TABLE ticket_state DROP COLUMN approve_comment_id")
+    verdicts = {row["ticket_id"]: row["age_seconds"]
+                for row in collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]}
+    assert verdicts == {"42": None, "44": None, "43": None}
+
+
+def test_a_new_approval_leads_the_relay_ahead_of_an_older_handoff(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_job(connection, "o-claude-build-43", ticket_id="43", state="done", handoff_comment_id="r-43")
+        _finish(connection, "o-claude-build-43", NOW - 20)
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, gate_count, stuck, approved_head, "
+            "approved_at, approve_comment_id) VALUES ('maxharris1/cleffy', '42', 0, 0, 'h', ?, 'a-42')",
+            (NOW - 5,))
+        _handled(connection, ("maxharris1/cleffy", "42", "a-42", "waiting-external"))
+    order = [t["ref"]["ticket_id"] for t in page.relay_threads(collect_snapshot(db, log, now=NOW))]
+    assert order.index("42") < order.index("43")
+
+
 def _keys(threads: list[dict]) -> Counter:
     return Counter(
         (step["type"], step["row"]["job"] if step["type"] == "handoff" else step["row"]["seq"])
