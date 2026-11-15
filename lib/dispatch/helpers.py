@@ -6,6 +6,7 @@ import json
 import re
 import zlib
 from collections.abc import Mapping
+from dataclasses import replace
 
 from lib.dispatch.constants import (
     _FENCE_OPEN,
@@ -14,7 +15,9 @@ from lib.dispatch.constants import (
     _QUESTIONS_HEADING,
 )
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
+from lib.factory_md import FactoryConfig, family_findings
 from lib.queue import Job
+from lib.schema import HARNESSES
 
 
 def _spread(repo: str, ticket_id: str) -> int:
@@ -142,6 +145,70 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def _detail_routing(detail: str | None) -> tuple[str, str] | None:
+    """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    routing = context.get("routing") if isinstance(context, dict) else None
+    if not isinstance(routing, dict):
+        return None
+    builder, reviewer = routing.get("builder"), routing.get("reviewer")
+    if builder not in HARNESSES or reviewer not in HARNESSES:
+        return None
+    return builder, reviewer
+
+
+def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
+    """ticket with factory.md's harnesses swapped for builder and reviewer.
+    A model hint is kept only for a side whose harness stays factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    return replace(
+        ticket,
+        factory_md=base,
+        factory=replace(
+            base,
+            builder_harness=builder,
+            builder_model=base.builder_model if builder == base.builder_harness else None,
+            reviewer_harness=reviewer,
+            reviewer_model=(
+                base.reviewer_model if reviewer == base.reviewer_harness else None
+            ),
+        ),
+    )
+
+
+def _route_go(ticket: TrackedTicket, fields: Mapping[str, str]) -> TrackedTicket | None:
+    """The ticket routed as a go names it (#206), or None when the pair
+    fails factory.md's cross-family rule. A go naming neither harness
+    routes back to factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    if "builder" not in fields and "reviewer" not in fields:
+        return replace(ticket, factory=base, factory_md=None)
+    routed = _route(
+        ticket,
+        fields.get("builder", base.builder_harness),
+        fields.get("reviewer", base.reviewer_harness),
+    )
+    return None if _family_errors(routed.factory) else routed
+
+
+def _family_errors(config: FactoryConfig) -> list[str]:
+    return [
+        finding.message
+        for finding in family_findings(
+            config.builder_harness,
+            config.builder_model,
+            config.reviewer_harness,
+            config.reviewer_model,
+        )
+        if finding.severity == "error"
+    ]
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

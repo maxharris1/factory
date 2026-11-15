@@ -21,7 +21,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, RouteError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
@@ -871,6 +871,39 @@ class JobsMixin:
             self._record_job_event(connection, job, "retry-skipped", detail, now)
             connection.commit()
         self._log_job_event(job, "retry-skipped", detail)
+
+    def _reject_route(self, ticket: TrackedTicket, error: RouteError) -> None:
+        """A restored same-family pair (#206): the ticket goes stuck and no
+        job queued under that pair can be claimed."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._set_stuck_in_transaction(
+                connection,
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                source_comment_id=error.source_comment_id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                reason="route-same-family",
+            )
+            for job in connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND recipient != 'grok'
+                """,
+                key,
+            ).fetchall():
+                self.queue.cancel(
+                    str(job["id"]), "route-same-family", connection=connection
+                )
+            self._ensure_stuck_wake_in_transaction(
+                connection,
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                detail=str(error),
+            )
+            connection.commit()
 
     def _mark_stuck_and_wake(
         self,

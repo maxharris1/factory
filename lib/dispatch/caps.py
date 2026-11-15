@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Mapping
 
 from lib.dispatch.constants import WATCHED_STATES
-from lib.dispatch.helpers import _comment_link, _scope
+from lib.dispatch.helpers import _comment_link, _route_go, _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
@@ -31,8 +31,13 @@ class CapsMixin:
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
+            routed = _route_go(ticket, fields)
+            if routed is None:
+                return True, "rejected-go-same-family"
+            ticket = routed
             resumed = self._resume_after_cap(ticket, comment)
             if resumed is not None:
+                self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed
         if not trusted:
             return True, "rejected-go-author"
@@ -96,6 +101,7 @@ class CapsMixin:
         )
         if job.request.source_comment_id != comment.id:
             return True, f"deduped-{action}"
+        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         self._set_workflow_state(ticket, state)
         return True, f"answered-{action}" if answered else f"queued-{action}"
 

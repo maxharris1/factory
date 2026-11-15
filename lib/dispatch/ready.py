@@ -27,7 +27,11 @@ class ReadyMixin:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        builder_harness = self._job_builder_harness(ticket)
+        builder_harness = (
+            ticket.factory.builder_harness
+            if ticket.factory_md is not None
+            else self._job_builder_harness(ticket)
+        )
         if builder_harness is None and ticket.ready_starts_review:
             # The project builds its PRs outside the queue (orch.yml
             # projects[].ready_starts_review): factory.md's builder, trusted

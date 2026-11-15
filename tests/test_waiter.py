@@ -10,14 +10,17 @@ config file; nothing from a job row or a comment reaches an argv.
 from __future__ import annotations
 
 import ast
+import atexit
 import base64
 import re
 import json
 import os
 import sqlite3
 import stat
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -47,7 +50,22 @@ from tests.test_wait import GO, dispatcher_for, tracked
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
 HARNESS_BINARIES = ("claude", "codex", "cursor-agent")
-MACHINES = ROOT / "machines.yml"
+
+
+def _machines_with_this_checkout() -> Path:
+    """machines.yml with the box's factory_root at this checkout, which a waiter
+    run as its own process preflights (the real box path is not here)."""
+    text = (ROOT / "machines.yml").read_text(encoding="utf-8")
+    box_root = "    factory_root: /home/box/factory\n"
+    assert text.count(box_root) == 1, "machines.yml box factory_root moved"
+    directory = Path(tempfile.mkdtemp(prefix="orch-test-machines-"))
+    atexit.register(shutil.rmtree, directory, True)
+    path = directory / "machines.yml"
+    path.write_text(text.replace(box_root, f"    factory_root: {ROOT}\n"), encoding="utf-8")
+    return path
+
+
+MACHINES = _machines_with_this_checkout()
 
 
 # --- the harness command comes from the bot's own fixed config -------------

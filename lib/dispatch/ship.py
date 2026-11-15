@@ -18,6 +18,7 @@ from lib.dispatch.types import (
     Comment,
     PollSource,
     RetryableStateError,
+    RouteError,
     ShipError,
     ShipRequest,
     TicketRef,
@@ -822,4 +823,7 @@ class ReviewShipper:
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
         self.dispatcher._observed(found[0])
-        return found[0]
+        try:
+            return self.dispatcher._routed(found[0])
+        except RouteError as error:
+            raise ShipError(str(error)) from error

@@ -12,7 +12,13 @@ from lib.dispatch.constants import (
     WORKER_KINDS,
     _NOT_FINISHED,
 )
-from lib.dispatch.helpers import _normalize_trusted_logins, trusted_bots
+from lib.dispatch.helpers import (
+    _detail_routing,
+    _family_errors,
+    _normalize_trusted_logins,
+    _route,
+    trusted_bots,
+)
 from lib.dispatch.types import (
     Comment,
     DeviceChecks,
@@ -21,6 +27,7 @@ from lib.dispatch.types import (
     Hook,
     RetryableStateError,
     ReviewActions,
+    RouteError,
     ShipError,
     TicketRef,
     TrackedTicket,
@@ -163,6 +170,7 @@ class DispatcherBase:
                   AND action IN (
                       'plan', 'build', 'review', 'fix', 'update-from-main', 'clarify'
                   )
+                  AND attempt = 1
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
@@ -187,9 +195,10 @@ class DispatcherBase:
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
         if tracker is None:
             return None
-        return self._observed(
+        fresh = self._observed(
             self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
         )
+        return None if fresh is None else self._routed(fresh)
 
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         """Every read outside the poll's snapshot passes here: one showing
@@ -237,6 +246,37 @@ class DispatcherBase:
                 (ticket.repo.lower(), ticket.ticket_id, state),
             )
 
+    def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
+        """The ticket with the builder and reviewer its latest plan, build or
+        fix step was routed to (issue #206), or as read when that step names
+        no routing. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
+        factory.md model hints, fails the cross-family rule."""
+        if ticket.factory_md is not None:
+            return ticket
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT detail, source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND action IN ('plan', 'build', 'fix') AND attempt = 1
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        routing = _detail_routing(None if row is None else row["detail"])
+        if routing is None:
+            return ticket
+        routed = _route(ticket, *routing)
+        errors = _family_errors(routed.factory)
+        if errors:
+            raise RouteError(
+                f"{ticket.repo}#{ticket.ticket_id} routing "
+                f"{routing[0]} / {routing[1]}: {'; '.join(errors)}",
+                str(row["source_comment_id"]),
+            )
+        return routed
+
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -244,6 +284,7 @@ class DispatcherBase:
                 SELECT recipient FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('plan', 'build', 'fix', 'update-from-main')
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,

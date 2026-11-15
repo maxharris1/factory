@@ -17,6 +17,7 @@ from lib.dispatch.types import (
     Comment,
     RetryableShipError,
     RetryableStateError,
+    RouteError,
     TrackedTicket,
 )
 from lib.handoff import HandoffError, parse_comment
@@ -24,6 +25,14 @@ from lib.handoff import HandoffError, parse_comment
 
 class CommentsMixin:
     def process(self, ticket: TrackedTicket) -> None:
+        try:
+            ticket = self._routed(ticket)
+        except RouteError as error:
+            if ticket.closed and self._watched(ticket):
+                self._abandon_closed(ticket)
+            else:
+                self._reject_route(ticket, error)
+            return
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         try:
             self._title_pull(ticket)

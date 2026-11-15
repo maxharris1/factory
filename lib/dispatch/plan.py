@@ -228,6 +228,7 @@ class PlanMixin:
                 """
                 SELECT recipient, generation FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'plan'
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,

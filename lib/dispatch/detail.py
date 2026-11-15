@@ -214,6 +214,11 @@ class DetailMixin:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if ticket.factory_md is not None:
+            context["routing"] = {
+                "builder": ticket.factory.builder_harness,
+                "reviewer": ticket.factory.reviewer_harness,
+            }
         if kind is not None:
             context["kind"] = kind
         if resume:

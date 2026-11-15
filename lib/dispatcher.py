@@ -15,7 +15,7 @@ import time
 import traceback
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import Protocol
@@ -99,6 +99,8 @@ from lib.dispatch.helpers import (
     _comment_order,
     _detail_project_bot,
     _detail_round_number,
+    _detail_routing,
+    _family_errors,
     _grok_logical_key,
     _has_questions,
     _holds,
@@ -111,6 +113,8 @@ from lib.dispatch.helpers import (
     _redrive_eligible,
     _retry_detail,
     _round_number,
+    _route,
+    _route_go,
     _scope,
     _section_asks,
     _ship_state,
@@ -166,6 +170,7 @@ from lib.dispatch.types import (
     RetryableShipError,
     RetryableStateError,
     ReviewActions,
+    RouteError,
     ShipError,
     ShipRequest,
     TicketRef,
@@ -175,7 +180,7 @@ from lib.dispatch.types import (
 from lib.dispatch.verdict import (
     VerdictMixin,
 )
-from lib.factory_md import FactoryConfig
+from lib.factory_md import FactoryConfig, family_findings
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.hold import HoldDecision, LabelEvent, decide

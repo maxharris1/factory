@@ -85,6 +85,9 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #206: factory.md's config when a go routed this ticket to other
+    # harnesses; factory then holds the routed pair.
+    factory_md: FactoryConfig | None = None
     # Issue #115: the source issue (`#115`, or a Linear key) and the open
     # PR's title, so the poller can prefix a title that lacks it.
     source_issue: str | None = None
@@ -219,6 +222,14 @@ class RetryableStateError(RuntimeError):
 
 class RetryableShipError(RetryableStateError):
     pass
+
+
+class RouteError(RuntimeError):
+    """A ticket's restored routing fails factory.md's cross-family rule."""
+
+    def __init__(self, message: str, source_comment_id: str):
+        super().__init__(message)
+        self.source_comment_id = source_comment_id
 
 
 class ShipError(RuntimeError):
