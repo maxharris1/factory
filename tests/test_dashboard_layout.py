@@ -467,6 +467,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
     assert job["round"] == "2/3"
     assert job["tracker"] == "github"
+    keys = ("state", "who", "started_at", "duration_seconds", "time_known", "off_chart",
+            "reason", "current")
     assert job["flow"] == {
         "state": "review",
         "path": ["intake", "questions", "building", "review", "fixing", "review"],
@@ -474,6 +476,18 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         # #78: the chart's direct successors of review, and review is not finished.
         "next": ["blocked", "ship", "stuck", "fixing", "capped"],
         "terminal": False,
+        "visits": [dict(zip(keys, row)) for row in (
+            ("intake", "script", None, None, False, False, None, False),
+            ("questions", "script", None, None, False, False,
+             "brief and acceptance criteria posted", False),
+            ("building", "claude", NOW - 5000, 1000, True, False, "kind=go, queue build", False),
+            ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False),
+            ("fixing", "claude", NOW - 3000, 1000, True, False, "REVISE, under the round cap",
+             False),
+            ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True),
+        )],
+        "hops_to_shipped": 2,
+        "all_durations_known": False,
     }
 
 

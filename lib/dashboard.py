@@ -57,8 +57,9 @@ import yaml
 
 from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_flow import job_flow, load_chart
+from lib.dashboard_flow import JobStep, job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
+from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_usage import read_usage
 from lib.dashboard_page import PAGES, render_pages
@@ -1210,7 +1211,9 @@ def _read_db(
                         **waiting,
                     }
                 )
-    _add_job_tickets(connection, active, ticket_info, chart, now)
+    _add_job_tickets(
+        connection, active, ticket_info, chart, now, telemetry="job_telemetry" in tables
+    )
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
@@ -1472,6 +1475,8 @@ def _add_job_tickets(
     ticket_info: dict[tuple[str, str], tuple[str, int, str]],
     chart: dict | None,
     now: float,
+    *,
+    telemetry: bool,
 ) -> None:
     """Give each running or queued job its ticket's tracker and flow (current
     statechart state, the path its jobs took, time in state). The job's
@@ -1482,16 +1487,34 @@ def _add_job_tickets(
     # One read for every ticket with a running or queued job, oldest first.
     wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
     ids = sorted({ticket_id for _, ticket_id in wanted})
-    histories: dict[tuple[str, str], list[tuple[str, float]]] = {key: [] for key in wanted}
+    histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
+    columns = (
+        {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
+        if telemetry
+        else set()
+    )
+    joined = "job_id" in columns
+    times = ", ".join(
+        f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
+        for name in ("started_at", "finished_at")
+    )
     for row in connection.execute(
-        "SELECT repo, ticket_id, action, created_at FROM jobs "
-        f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
-        "ORDER BY created_at, rowid",
+        f"SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, {times} "
+        "FROM jobs "
+        + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
+        + f"WHERE jobs.ticket_id IN ({','.join('?' for _ in ids)}) "
+        "ORDER BY jobs.created_at, jobs.rowid",
         ids,
     ):
         key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
         if key in histories:
-            histories[key].append((str(row["action"]), float(row["created_at"])))
+            histories[key].append(JobStep(
+                str(row["action"]),
+                _enum(row["recipient"], RECIPIENTS),
+                float(row["created_at"]),
+                _telemetry_time(row["started_at"]),
+                _telemetry_time(row["finished_at"]),
+            ))
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
         tracker, _review_round, state = ticket_info.get(key, (None, None, None))
