@@ -109,6 +109,10 @@ class HandoffError(ValueError):
     """The comment is not a valid orch:v1 handoff."""
 
 
+class UnmetApproveError(HandoffError):
+    """A verdict=APPROVE that says ac=unmet (#508 counts it as a refused approval)."""
+
+
 @dataclass(frozen=True)
 class Handoff:
     fields: tuple[tuple[str, str], ...]
@@ -155,7 +159,10 @@ def parse_header_line(line: str) -> dict[str, str]:
     if kind == "verdict" and found.get("verdict") == "APPROVE" and "head" not in found:
         raise HandoffError("missing required key 'head'")
     if kind == "verdict" and found.get("verdict") == "APPROVE" and found.get("ac") == "unmet":
-        raise HandoffError("APPROVE needs ac=met; got ac=unmet")
+        raise UnmetApproveError(
+            "APPROVE needs ac=met; got ac=unmet. Post verdict=REVISE with ac=unmet,"
+            " or ac=met if every criterion is met"
+        )
     return {key: found[key] for key in KEYS if key in found}
 
 

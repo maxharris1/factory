@@ -31,6 +31,7 @@ RULE_MODULE = {
     "_t3_repeat": "repeat",
     "_t4": "t4",
     "_approve_ci_red_fix": "t4",
+    "_approve_refusal": "t4",
     "_t_blocked": "blocked",
     "_blocked_by_another": "blocked",
     "_blocked_review_recorded": "blocked",
