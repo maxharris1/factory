@@ -147,6 +147,11 @@ class QuestionsMixin:
             ticket, comment, fields, "grok-bot", role="orchestrator"
         ):
             return True, "rejected-answers-author"
+        if self._parked_for_max(ticket) == "repeat":
+            self._wake_comment_problem(
+                ticket, comment, "go-not-from-approver", "answers-while-repeat-block"
+            )
+            return True, "answers-while-repeat-block"
         resumed = self._resume_paused(ticket, comment)
         return (True, "rejected-answers-without-question") if resumed is None else resumed
 

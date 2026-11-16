@@ -30,14 +30,21 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from lib.dispatcher import Comment, trusted_bots
 from lib.handoff import HandoffError, parse_comment
 
-_TAGGED = re.compile(r"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?=[*_`]*(?:\W|$)).*)$", re.IGNORECASE)
+_ID_END = r"[*_`]*+(?![^\W_]|-[^\W_])"
+_TAGGED = re.compile(rf"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?={_ID_END}).*)$", re.IGNORECASE)
 _RULE = re.compile(r"\brule:\s*(.+?)(?:\.(?:\s|$)|$)", re.IGNORECASE)
 _ROUND = re.compile(r"^([1-9][0-9]*)")
-_MARKDOWN = MarkdownIt("commonmark")
+_MARKDOWN = MarkdownIt("commonmark").enable("table")
+_CRITERION = re.compile(
+    rf"^(?P<tag>\[blocking\]\s+)?[*_`]*ac-(?P<n>[1-9][0-9]*){_ID_END}\s*"
+    r"(?:[:,|\u2013\u2014-]\s*)?[*_`]*(?P<status>unmet\b)?",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -120,6 +127,47 @@ def _verdicts(
         ):
             found[int(number.group(1))] = (fields, handoff.body, comment)
     return found
+
+
+def blocking_ids(body: str) -> frozenset[str]:
+    found: set[str] = set()
+    for entry in _entries(body):
+        finding = _TAGGED.match(entry)
+        if finding is not None and finding.group(1).lower() == "blocking":
+            found.add(f"f-{finding.group(3)}")
+        criterion = _CRITERION.match(entry)
+        if criterion is not None and (criterion["tag"] or criterion["status"]):
+            found.add(f"ac-{criterion['n']}")
+    return frozenset(found)
+
+
+def _entries(body: str) -> list[str]:
+    tokens = _MARKDOWN.parse(body)
+    entries: list[str] = []
+    quoted = 0
+    row: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.type == "blockquote_open":
+            quoted += 1
+        elif token.type == "blockquote_close":
+            quoted -= 1
+        elif quoted:
+            continue
+        elif token.type == "tr_open":
+            row = []
+        elif token.type == "inline" and tokens[index - 1].type == "td_open":
+            row.append(token.content.strip())
+        elif token.type == "tr_close" and row:
+            entries.append(" | ".join(row))
+        elif token.type == "inline":
+            entries.extend(_list_item_lead(tokens, index))
+    return entries
+
+
+def _list_item_lead(tokens: list[Token], index: int) -> list[str]:
+    opener = [token.type for token in tokens[max(index - 2, 0) : index]]
+    opens_item = opener == ["list_item_open", "paragraph_open"]
+    return [" ".join(tokens[index].content.split())] if opens_item else []
 
 
 def _tagged_items(body: str) -> list[tuple[str, int, str]]:
