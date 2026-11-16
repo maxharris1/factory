@@ -176,6 +176,8 @@ def merge_update_task(verify_unavailable: bool) -> str:
         "update": {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []},
         "rebase": None,
         "start_before_ci": False,
+        "no_ci_base": None,
+        "local_checks": (),
     }
     return "\n".join(review_task_lines(facts))
 
