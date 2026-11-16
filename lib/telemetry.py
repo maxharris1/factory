@@ -39,7 +39,12 @@ stdout on a pipe and hands the pipe to a `Session` here:
   `edit <n> files`, the error kind) and the exit reason is a fixed label too:
   no command line, tool argument, pattern, path, query or error message is
   ever stored (#100 r10, Max: "Hide those fields in the job modal instead").
-  File paths are only counted.
+  File paths are only counted, but for one exception (#505): `skill_reads`,
+  the pinned skill files the run read (`SkillReads`), each relative to the
+  placed device's skills tree and kept only when skills/skills.lock lists
+  it, so the column holds names from that closed set alone, in counters
+  mode too. NULL when the run has no known skills tree or skills.lock
+  cannot be read.
 * The one exception (#147, Max, 2026-11-13): the live run (`LiveRun`), so
   the agent's task-list text, its current and last finished task, and its
   sub-agents' description and type. Never a prompt, a result, a summary or
@@ -102,6 +107,7 @@ import itertools
 import json
 import math
 import os
+import posixpath
 import re
 import shlex
 import sqlite3
@@ -124,6 +130,8 @@ from lib.codex_rollout import default_home as codex_home
 from lib import lane_limit
 from lib.job_state import USAGE_LIMIT, record_job_event
 from lib.usage_readings import Reading, parse_codex, store
+from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
+from lib.pstack_pin import Pin, load_pin
 
 TABLE = "job_telemetry"
 STATE_DIR_ENV = "ORCH_JOB_STATE_DIR"
@@ -182,12 +190,14 @@ COLUMNS = (
     "subagents",
     "tokens_unknown",
     "slot_hours_lost",
+    "skill_reads",
 )
 LIVE_RUN_COLUMNS = ("plan", "current_task", "last_finished", "subagents")
 ADDED_COLUMNS = {
     **dict.fromkeys(LIVE_RUN_COLUMNS, "TEXT"),
     "tokens_unknown": "INTEGER",
     "slot_hours_lost": "REAL",
+    "skill_reads": "TEXT",
 }
 
 DDL = f"""
@@ -221,7 +231,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     last_finished TEXT,
     subagents TEXT,
     tokens_unknown INTEGER,
-    slot_hours_lost REAL
+    slot_hours_lost REAL,
+    skill_reads TEXT
 )
 """
 INDEX = f"CREATE INDEX IF NOT EXISTS {TABLE}_updated ON {TABLE} (updated_at)"
@@ -992,16 +1003,150 @@ class LiveRun:
         return [agent for agent in agents if id(agent) in chosen]
 
 
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_READ_VERBS = frozenset({"cat", "head", "tail", "nl", "less", "more", "bat", "sed", "awk"})
+_SHELL_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "}", "!"})
+_OPERATORS = ";&|()<>\n"
+_NOT_A_PATH = re.compile(r"[$*?\[`~]")
+_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+
+
+def _simple_commands(script: str) -> list[list[str]]:
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=_OPERATORS)
+    lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
+    commands: list[list[str]] = [[]]
+    redirect = False
+    for token in lexer:
+        if redirect:
+            redirect = False
+        elif token and not token.strip(_OPERATORS):
+            redirect = "<" in token or ">" in token
+            if not redirect:
+                commands.append([])
+        else:
+            commands[-1].append(token)
+    return [list(itertools.takewhile(lambda word: not word.startswith("#"), words)) for words in commands]
+
+
+class SkillReads:
+    """The skills-lock files under one skills tree that a run read, by their path in the tree.
+
+    Fed the harness's own tool calls: Claude's Read and Skill, and the file
+    operands of read commands (cat, sed, head ...) in Claude's Bash and
+    Codex's shell. A `test -f`, `ls` or `grep` is not a read. A call's files
+    count only once its result arrives. A failed Read or refused Skill loaded
+    nothing. A failed shell call loses only the operands its output names,
+    as `cat: <path>: No such file` does, and all of them when it printed
+    nothing."""
+
+    def __init__(self, root: str, locked: frozenset[str]):
+        self.root = posixpath.normpath(root)
+        self.locked = locked
+        self.skills = {
+            posixpath.basename(posixpath.dirname(rel)): rel
+            for rel in sorted(locked)
+            if posixpath.basename(rel) == "SKILL.md"
+        }
+        self.read: set[str] = set()
+        self.pending: dict[str, dict[str, str | None]] = {}
+
+    @classmethod
+    def pinned(cls, root: str, pin: Pin) -> SkillReads:
+        trees = (("pstack", pin.files), ("factory", pin.factory), ("cursor-team-kit", pin.kit))
+        return cls(root, frozenset(f"{tree}/{rel}" for tree, rows in trees for rel, _ in rows))
+
+    def claude_tool(self, call_id: str, name: str, data: dict) -> None:
+        found: dict[str, str | None] = {}
+        if name == "Read":
+            self._path(found, _str(data.get("file_path")) or "", None)
+            found = dict.fromkeys(found)
+        elif name == "Skill":
+            rel = self.skills.get((_str(data.get("skill")) or "").rpartition(":")[2])
+            if rel is not None:
+                found[rel] = None
+        elif name == "Bash":
+            self._command(found, _command_text(data.get("command")))
+        self._started(call_id, found)
+
+    def command(self, call_id: str, text: str) -> None:
+        found: dict[str, str | None] = {}
+        self._command(found, text)
+        self._started(call_id, found)
+
+    def finished(self, call_id: str, error: bool, output: str) -> None:
+        found = self.pending.pop(call_id, {})
+        if not error:
+            self.read |= found.keys()
+        elif output:
+            self.read |= {rel for rel, operand in found.items() if operand is not None and operand not in output}
+
+    def row(self) -> str:
+        return json.dumps(sorted(self.read))
+
+    def _started(self, call_id: str, found: dict[str, str | None]) -> None:
+        if found:
+            self.pending[call_id] = found
+
+    def _command(self, found: dict[str, str | None], text: str) -> None:
+        try:
+            self._script(found, text, None)
+        except ValueError:
+            return
+
+    def _path(self, found: dict[str, str | None], operand: str, base: str | None) -> None:
+        if _NOT_A_PATH.search(operand) or not (base or posixpath.isabs(operand)):
+            return
+        path = posixpath.normpath(posixpath.join(base or "", operand))
+        rel = path[len(self.root) + 1 :]
+        if path.startswith(self.root + "/") and rel in self.locked:
+            found[rel] = operand
+
+    def _script(self, found: dict[str, str | None], script: str, base: str | None) -> None:
+        for words in _simple_commands(script):
+            base = self._cwd_after(found, words, base)
+
+    def _cwd_after(self, found: dict[str, str | None], words: list[str], base: str | None) -> str | None:
+        words = list(itertools.dropwhile(lambda word: word in _SHELL_WORDS or _ASSIGNMENT.match(word), words))
+        if not words:
+            return base
+        verb, args = posixpath.basename(words[0]), words[1:]
+        if verb == "cd":
+            target = args[0] if args else "~"
+            if _NOT_A_PATH.search(target) or not (base or posixpath.isabs(target)):
+                return None
+            return posixpath.normpath(posixpath.join(base or "", target))
+        if verb in _SHELLS and len(args) > 1 and args[0].startswith("-") and "c" in args[0]:
+            self._script(found, args[1], base)
+        elif verb in _READ_VERBS:
+            for arg in args:
+                if not arg.startswith("-"):
+                    self._path(found, arg, base)
+        return base
+
+
+def skill_reads(root: str | None, log: Log) -> SkillReads | None:
+    if root is None:
+        return None
+    try:
+        return SkillReads.pinned(root, load_pin(FACTORY_CHECKOUT))
+    except (OSError, ValueError, UnicodeError) as exc:
+        log(f"telemetry: skill reads not recorded (skills.lock: {type(exc).__name__})")
+        return None
+
+
 class Summary:
     """Everything the dashboard shows of one run, from its events.
 
     text=False (ORCH_TELEMETRY=counters) keeps the counters only: no live
     run text is read into memory or stored, and its columns stay NULL."""
 
-    def __init__(self, harness: str, scrub: Callable[..., str], *, text: bool = True):
+    def __init__(
+        self, harness: str, scrub: Callable[..., str], *, text: bool = True, skills: SkillReads | None = None
+    ):
         self.harness = harness
         self.scrub = scrub
         self.live = LiveRun() if text else None
+        self.skills = skills
         self.events = 0
         self.turns = 0
         self.tool_calls: Counter[str] = Counter()
@@ -1059,6 +1204,8 @@ class Summary:
         return True
 
     def _finished(self, call_id: str, error: bool, output: str) -> None:
+        if self.skills is not None:
+            self.skills.finished(call_id, error, output)
         entry = self._open.pop(call_id, None)
         if entry is None:
             return
@@ -1146,6 +1293,8 @@ class Summary:
                 self._touch(data.get("file_path") or data.get("notebook_path"))
             step = self._step(now, "tool", label, "running")
         self._open[call_id] = (step, command)
+        if self.skills is not None:
+            self.skills.claude_tool(call_id, name, data)
         if self.live is not None:
             self.live.tool_use(name, call_id, data, now)
 
@@ -1222,6 +1371,8 @@ class Summary:
             self._tool("shell")
             command = _command_text(item.get("command"))
             self.commands += 1
+            if self.skills is not None:
+                self.skills.command(ident, command)
             step = self._step(now, "command", "command", "running")
         elif item_type == "file_change":
             self._tool("file_change")
@@ -1259,6 +1410,7 @@ class Summary:
             "cost_usd": self.cost_usd,
             "last_event_at": self.last_event_at,
             "steps": json.dumps(list(self.steps)),
+            "skill_reads": None if self.skills is None else self.skills.row(),
             **(dict.fromkeys(LIVE_RUN_COLUMNS) if self.live is None else self.live.row(self.scrub)),
         }
 
@@ -1326,6 +1478,7 @@ class Session:
         rollout_home: str | None = None,
         text: bool = True,
         guard: Guard | None = None,
+        skills: SkillReads | None = None,
     ):
         self.connect = connect
         self.guard = guard
@@ -1343,7 +1496,7 @@ class Session:
         self.stdout = stdout
         self.clock = clock
         self.monotonic = monotonic
-        self.summary = Summary(harness, scrub, text=text)
+        self.summary = Summary(harness, scrub, text=text, skills=skills)
         self.started_at = clock()
         self._started = monotonic()
         self._lock = threading.Lock()
@@ -1586,6 +1739,7 @@ def start_session(
     worker_env: bool = False,
     device: str = "box",
     guard: Guard | None = None,
+    skills_root: str | None = None,
 ) -> Session | None:
     """A session for one `orch job run`, or None when ORCH_TELEMETRY is off.
 
@@ -1594,7 +1748,9 @@ def start_session(
     that report is read, every text is hidden.
 
     guard: runs in each summary write's transaction and refuses it by
-    raising."""
+    raising.
+
+    skills_root: the placed device's skills tree, for `skill_reads` (#505)."""
     env = os.environ if environ is None else environ
     if not enabled(env):
         return None
@@ -1625,4 +1781,5 @@ def start_session(
         rollout_home=codex_home(dict(env)) if harness == "codex" and not worker_env else None,
         text=text_enabled(env),
         guard=guard,
+        skills=skill_reads(skills_root, log),
     )
