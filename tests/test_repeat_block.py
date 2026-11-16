@@ -142,8 +142,21 @@ def test_marked_up_criterion_prefix_does_not_repeat(tmp_path: Path) -> None:
         (F1, "- [blocking] __f-1__-other: a different identifier.\n" + F2),
         (F1, "- [blocking] f-1-other: a different identifier.\n" + F2),
         (AC2, "- [blocking] **ac-2**_other: a different identifier.\n" + F2),
+        (AC2, "- [blocking] **ac-2**--other: a different identifier.\n" + F2),
+        (AC2, "- [blocking] **ac-2**-_other: a different identifier.\n" + F2),
+        (F1, "- [blocking] **f-1**--other: a different identifier.\n" + F2),
+        (F1, "- [blocking] **f-1**-_other: a different identifier.\n" + F2),
     ],
-    ids=["bold-finding", "underscore-finding", "bare-finding", "criterion-underscore"],
+    ids=[
+        "bold-finding",
+        "underscore-finding",
+        "bare-finding",
+        "criterion-underscore",
+        "criterion-double-hyphen",
+        "criterion-hyphen-underscore",
+        "finding-double-hyphen",
+        "finding-hyphen-underscore",
+    ],
 )
 def test_a_suffix_after_id_markup_does_not_repeat(tmp_path: Path, bodies: tuple[str, ...]) -> None:
     flow = AppFlow(tmp_path, enabled=True)
@@ -190,6 +203,40 @@ def test_a_released_named_repeat_still_blocks_the_next_round(tmp_path: Path) -> 
 
     assert_parked(flow, fixes, "revise-2", 2)
     assert len(repeat_wakes(flow)) == 2
+
+
+@pytest.mark.parametrize(
+    ("last", "expected", "wakes"),
+    [
+        (F1, "queued-review-fix", []),
+        (F2, "waiting-max-repeat", ["repeat-block: f-2, comment:102, comment:103"]),
+    ],
+    ids=["superseded-id", "final-id"],
+)
+def test_the_last_of_tied_round_one_verdicts_is_the_predecessor(
+    tmp_path: Path, last: str, expected: str, wakes: list[str]
+) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_first_review(flow)
+    flow.now[0] += 10
+    post = flow.post
+
+    def post_in_the_same_second(*args: str) -> str:
+        flow.now[0] -= 10
+        return post(*args)
+
+    flow.post = post_in_the_same_second
+    assert revise(flow, "1/3", "100", " unsat=ac-1", body=F1) == "waiting-max-unsat"
+    assert flow.post("101", "/go", MAX) == "resumed-review"
+    flow.finish("codex")
+    assert revise(flow, "1/3", "102", body=F2) == "queued-review-fix"
+    assert {item.created_at for item in flow.comments if item.id in {"100", "101", "102"}} == {flow.now[0]}
+    flow.post = post
+    next_review(flow, 1)
+
+    assert revise(flow, "2/3", "103", body=last) == expected
+
+    assert repeat_wakes(flow) == wakes
 
 
 def withdraw_first_verdict(flow: AppFlow) -> None:
@@ -324,6 +371,8 @@ def test_maxs_go_at_the_cap_also_grants_the_next_round(tmp_path: Path) -> None:
         ("- [blocking] **ac-2**: x.\n- __ac-3__: unmet\n", {"ac-2", "ac-3"}),
         ("- [blocking] **ac-2**-other: x.\n- **ac-3**_b: unmet\n- `ac-4`-b: unmet\n", set()),
         ("- [blocking] **f-1**-other: x.\n- [blocking] __f-2__-b: x.\n- [blocking] f-3-b: x.\n", set()),
+        ("- [blocking] **f-1**--other: x.\n- [blocking] **f-2**-_b: x.\n- **ac-3**--b: unmet\n- `ac-4`-_b: unmet\n", set()),
+        ("- [blocking] **f-1** -- x.\n- [blocking] **f-2**-- x.\n- **ac-3**- unmet\n", {"f-1", "f-2", "ac-3"}),
         ("- [blocking] **f-1**: x.\n- [blocking] **f-2** - x.\n- **ac-3** - unmet\n", {"f-1", "f-2", "ac-3"}),
     ],
 )

@@ -255,7 +255,37 @@ def test_an_emphasized_id_closes_its_finding(finding_id):
     assert [f.id for f in _bundle((R1, closed)).findings] == ["f-2"]
 
 
-@pytest.mark.parametrize("finding_id", ("f-1x", "_f-1_x", "f-1_2", "f-1-x", "**f-1**-other", "__f-1__-x", "**f-1**_x", "`f-1`-x"))
+EXTENDED_IDS = (
+    "f-1x",
+    "_f-1_x",
+    "f-1_2",
+    "f-1-x",
+    "**f-1**-other",
+    "__f-1__-x",
+    "**f-1**_x",
+    "`f-1`-x",
+    "**f-1**--other",
+    "**f-1**-_other",
+    "f-1--x",
+    "`f-1`-*x*",
+)
+
+
+@pytest.mark.parametrize("finding_id", EXTENDED_IDS)
 def test_an_id_running_into_a_word_is_not_a_finding(finding_id):
     raised = _verdict(f"1. [blocking] {finding_id} breaks.\n", round_="1/3", head=HEAD_1, at=1.0, cid="11")
     assert _bundle((raised,), round_=2).findings == ()
+
+
+@pytest.mark.parametrize("finding_id", EXTENDED_IDS)
+def test_an_id_running_into_a_word_does_not_close_the_finding(finding_id):
+    closed = _verdict(f"1. [closed] {finding_id} fixed.\n", round_="2/3", head=HEAD_2, at=2.0, cid="22")
+    assert [f.id for f in _bundle((R1, closed)).findings] == ["f-1", "f-2"]
+
+
+def test_the_later_id_of_tied_reposts_for_one_round_counts():
+    first = _verdict("- [blocking] f-1, typo.\n", round_="1/3", head=HEAD_1, at=1.0, cid="99")
+    repost = _verdict("- [blocking] f-2, corrected.\n", round_="1/3", head=HEAD_2, at=1.0, cid="100")
+    bundle = _bundle((repost, first), round_=2)
+    assert [f.id for f in bundle.findings] == ["f-2"]
+    assert bundle.verdict_url == repost.url

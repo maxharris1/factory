@@ -32,10 +32,10 @@ from dataclasses import dataclass
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from lib.dispatcher import Comment, trusted_bots
+from lib.dispatcher import Comment, _comment_order, trusted_bots
 from lib.handoff import HandoffError, parse_comment
 
-_ID_END = r"[*_`]*+(?![^\W_]|-[^\W_])"
+_ID_END = r"[*_`]*+(?![^\W_]|-[-*_`]*[^\W_])"
 _TAGGED = re.compile(rf"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?={_ID_END}).*)$", re.IGNORECASE)
 _RULE = re.compile(r"\brule:\s*(.+?)(?:\.(?:\s|$)|$)", re.IGNORECASE)
 _ROUND = re.compile(r"^([1-9][0-9]*)")
@@ -110,7 +110,7 @@ def _verdicts(
 ) -> dict[int, tuple[dict[str, str], str, Comment]]:
     """The last trusted reviewer verdict of each earlier round, keyed by round."""
     found: dict[int, tuple[dict[str, str], str, Comment]] = {}
-    for comment in sorted(comments, key=lambda item: item.created_at):
+    for comment in sorted(comments, key=_comment_order):
         try:
             handoff = parse_comment(comment.body)
         except HandoffError:
