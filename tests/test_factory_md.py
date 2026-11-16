@@ -1,5 +1,7 @@
 import copy
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -626,3 +628,62 @@ def test_f2_03_runner_checklist_holds_no_token_and_names_the_wiring() -> None:
     )
     assert [item for item in findings if item.severity == "error"] == []
     assert config is not None and config.ci_runner == "factory-pc-wsl"
+
+
+def with_pre_ready(value: object) -> dict:
+    data = copy.deepcopy(VALID)
+    data["review"]["pre_ready"] = value
+    return data
+
+
+def test_pre_ready_parses_to_its_command_and_timeout(tmp_path: Path) -> None:
+    path = write_factory(tmp_path, with_pre_ready({"command": "make test", "timeout_seconds": 900}))
+    config, findings = load_factory_md(path)
+
+    assert findings == []
+    assert config is not None and config.pre_ready is not None
+    assert (config.pre_ready.command, config.pre_ready.timeout_seconds) == ("make test", 900)
+
+
+def test_pre_ready_is_unset_without_the_key(tmp_path: Path) -> None:
+    config, _ = load_factory_md(write_factory(tmp_path, VALID))
+
+    assert config is not None and config.pre_ready is None
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ({"command": "", "timeout_seconds": 60}, "review.pre_ready.command must be a non-empty string"),
+        ({"command": "  ", "timeout_seconds": 60}, "review.pre_ready.command must be a non-empty string"),
+        ({"timeout_seconds": 60}, "review.pre_ready.command must be a non-empty string"),
+        ({"command": "make", "timeout_seconds": 901}, "review.pre_ready.timeout_seconds must be an integer from 1 to 900"),
+        ({"command": "make", "timeout_seconds": 0}, "review.pre_ready.timeout_seconds must be an integer from 1 to 900"),
+        ({"command": "make", "timeout_seconds": True}, "review.pre_ready.timeout_seconds must be an integer from 1 to 900"),
+        ({"command": "make", "timeout_seconds": "60"}, "review.pre_ready.timeout_seconds must be an integer from 1 to 900"),
+        ({"command": "make"}, "review.pre_ready.timeout_seconds must be an integer from 1 to 900"),
+        ("make test", "review.pre_ready must be a mapping"),
+        ({"command": "make", "timeout_seconds": 60, "env": {}}, "unknown field 'review.pre_ready.env'"),
+    ],
+)
+def test_pre_ready_refuses_bad_values(tmp_path: Path, value: object, message: str) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, with_pre_ready(value)))
+
+    assert config is None
+    assert message in [finding.message for finding in findings]
+
+
+def test_check_config_refuses_a_pre_ready_timeout_over_900(tmp_path: Path) -> None:
+    path = write_factory(tmp_path, with_pre_ready({"command": "make", "timeout_seconds": 901}))
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "review.pre_ready.timeout_seconds must be an integer from 1 to 900" in (
+        result.stdout + result.stderr
+    )

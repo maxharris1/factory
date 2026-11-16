@@ -76,10 +76,22 @@ from lib.orch_yml import (
 from lib.poll_source import IntakeRisks, LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
-from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
+from lib.handoff_check import (
+    Expected,
+    Read,
+    ReadError,
+    expected_for,
+    gh_reader,
+    problems as handoff_problems,
+    ready_head,
+)
+from lib.pre_ready import ContextUnavailable, PreReadyResult, check_environ, spec_for
+from lib.pre_ready import run as run_pre_ready
 from lib.queue import (
     MAX_INVALID_HANDOFFS,
+    PRE_READY_FAILED,
     SLOTS_TABLE,
+    SUBMITTED_INVALID,
     ClaimProofError,
     Proof,
     QueueError,
@@ -1308,14 +1320,22 @@ def _check_handoff(
         errors = [item.message for item in findings if item.severity == "error"]
         if config is None or errors:
             raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
-        found = handoff_problems(
-            expected_for(job_from_row(row), args.bot),
-            args.handoff,
-            gh_reader(),
-            config.trusted_logins,
-        )
+        expected = expected_for(job_from_row(row), args.bot)
+        read = gh_reader()
+        found = handoff_problems(expected, args.handoff, read, config.trusted_logins)
+        event, checked = SUBMITTED_INVALID, None
         if not found:
-            return None
+            checked = _pre_ready_check(config, expected, args.handoff, read)
+            if checked is None:
+                return None
+            if checked.passed:
+                retry_locked(
+                    lambda: queue.record_pre_ready_passed(
+                        args.job_id, comment_id=args.handoff, head=checked.head, proof=proof
+                    )
+                )
+                return None
+            found, event = [f"pre_ready failed: {checked.reason}"], PRE_READY_FAILED
         count, job = retry_locked(
             lambda: queue.record_invalid_handoff(
                 args.job_id,
@@ -1323,15 +1343,18 @@ def _check_handoff(
                 comment_id=args.handoff,
                 detail="; ".join(found),
                 proof=proof,
+                event=event,
             )
         )
     except ClaimProofError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 2
-    except (ReadError, ValueError, sqlite3.Error, OSError) as exc:
+    except (ReadError, ContextUnavailable, ValueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"{prog}: submitted-invalid {args.handoff}: {'; '.join(found)}", file=sys.stderr)
+    if checked is not None and checked.tail:
+        print(checked.tail, file=sys.stderr)
     if job.state == "failed":
         print(
             f"{prog}: {count} invalid handoffs; job {job.id} is failed for T6",
@@ -1344,6 +1367,21 @@ def _check_handoff(
             file=sys.stderr,
         )
     return 1
+
+
+def _pre_ready_check(
+    config: OrchConfig, expected: Expected, comment_id: str, read: Read
+) -> PreReadyResult | None:
+    """#503: a fitting ready runs the base factory.md's review.pre_ready in
+    the job's worktree at the ready's head. None when there is nothing to run."""
+    head = ready_head(expected, comment_id, read)
+    if head is None:
+        return None
+    spec = spec_for(waiter.GhContextSource(config), expected.repo)
+    if spec is None:
+        return None
+    worktree = Path(os.environ.get("ORCH_JOB_WORKTREE") or os.getcwd())
+    return run_pre_ready(spec, worktree, head, check_environ(os.environ, approvals(config)))
 
 
 def _job_cancel(argv: list[str]) -> int:

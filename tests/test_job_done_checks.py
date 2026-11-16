@@ -11,13 +11,21 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
 from lib.cli import main as cli_main
-from lib.queue import MAX_INVALID_HANDOFFS, SUBMITTED_INVALID, JobRequest, SQLiteJobQueue
+from lib.queue import (
+    MAX_INVALID_HANDOFFS,
+    PRE_READY_FAILED,
+    PRE_READY_PASSED,
+    SUBMITTED_INVALID,
+    JobRequest,
+    SQLiteJobQueue,
+)
 from lib.job_token import PROOF_ENV
 from tests.handoff_store import HEAD, serve_handoff
 from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
@@ -360,3 +368,150 @@ def test_a_correct_handoff_after_an_invalid_one_completes_and_clears_the_flag(
 
     assert row(db, job.id)["state"] == "done"
     assert flags(db) == []
+
+
+def pre_ready_setup(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, command: str, timeout: int = 30
+):
+    import base64
+
+    from tests.handoff_store import serve
+
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=work, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init", "-q")
+    (work / "factory.md").write_text(
+        "---\nreview:\n  pre_ready:\n    command: touch head-command-ran\n"
+        "    timeout_seconds: 5\n---\n",
+        encoding="utf-8",
+    )
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD")
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\ntrusted_logins:\n  maxharris1:\n    - claude-bot\n"
+        "projects:\n  - repo: owner/repo\n    factory_ref: main\n"
+        "grok:\n  webhook_url_env: FACTORY_WEBHOOK_URL\n  webhook_key_env: FACTORY_WEBHOOK_KEY\n",
+        encoding="utf-8",
+    )
+    factory = (
+        "---\nbase_branch: main\ntickets: github\nbuilder: {harness: claude}\n"
+        "reviewer: {harness: codex}\nreview:\n  rounds: {low: 1, high: 3}\n  verify: none\n"
+        f"  pre_ready: {{command: {json.dumps(command)}, timeout_seconds: {timeout}}}\n"
+        "ship: merge\nskills: []\n---\n"
+    )
+    serve(
+        store,
+        "repos/owner/repo/contents/factory.md?ref=main",
+        {"encoding": "base64", "content": base64.b64encode(factory.encode()).decode()},
+    )
+    monkeypatch.setenv("ORCH_JOB_WORKTREE", str(work))
+    db, _, job = running_job(tmp_path)
+    serve_handoff(store, job, "1101", pr_head=head)
+    return db, job, orch, work
+
+
+def done_with(db: Path, job, orch: Path, handoff: str = "1101") -> int:
+    return cli_main(
+        ["job", "done", "claude-bot", job.id, "--handoff", handoff, "--db", str(db), "--orch", str(orch)]
+    )
+
+
+def pre_ready_events(db: Path, job_id: str, event: str = PRE_READY_FAILED) -> list[str]:
+    with sqlite3.connect(db) as connection:
+        if not has_table(connection, "job_events"):
+            return []
+        return [
+            detail
+            for (detail,) in connection.execute(
+                "SELECT detail FROM job_events WHERE job_id = ? AND event = ?",
+                (job_id, event),
+            )
+        ]
+
+
+def test_a_ready_whose_pre_ready_fails_is_refused_with_its_output(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    db, job, orch, work = pre_ready_setup(
+        tmp_path, store, monkeypatch, "echo first; echo the last line; exit 1"
+    )
+
+    assert done_with(db, job, orch) == 1
+
+    err = capsys.readouterr().err
+    assert "submitted-invalid 1101: pre_ready failed: exit 1" in err
+    assert "the last line" in err
+    assert (row(db, job.id)["state"], row(db, job.id)["handoff_comment_id"]) == ("running", None)
+    assert pre_ready_events(db, job.id) == ["handoff 1101: pre_ready failed: exit 1"]
+    assert not (work / "head-command-ran").exists()
+
+
+def test_a_ready_whose_pre_ready_passes_completes(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, job, orch, work = pre_ready_setup(tmp_path, store, monkeypatch, "touch base-command-ran")
+
+    assert done_with(db, job, orch) == 0
+
+    assert (row(db, job.id)["state"], row(db, job.id)["handoff_comment_id"]) == ("done", "1101")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert pre_ready_events(db, job.id, PRE_READY_PASSED) == [f"handoff 1101: at {head}"]
+    assert (work / "base-command-ran").exists()
+    assert not (work / "head-command-ran").exists()
+
+
+def test_a_pre_ready_timeout_is_refused(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    db, job, orch, _ = pre_ready_setup(tmp_path, store, monkeypatch, "sleep 5", timeout=1)
+
+    assert done_with(db, job, orch) == 1
+
+    assert "pre_ready failed: timeout after 1s" in capsys.readouterr().err
+    assert row(db, job.id)["state"] == "running"
+
+
+def test_a_worktree_off_the_ready_head_runs_nothing(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    db, job, orch, work = pre_ready_setup(tmp_path, store, monkeypatch, "touch base-command-ran")
+    (work / "factory.md").write_text("dirty\n", encoding="utf-8")
+
+    assert done_with(db, job, orch) == 1
+
+    assert "pre_ready failed: not at head" in capsys.readouterr().err
+    assert not (work / "base-command-ran").exists()
+
+
+def test_an_unreadable_base_factory_md_exits_without_recording(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, job, orch, _ = pre_ready_setup(tmp_path, store, monkeypatch, "true")
+    answers = json.loads(store.read_text(encoding="utf-8"))
+    del answers["repos/owner/repo/contents/factory.md?ref=main"]
+    store.write_text(json.dumps(answers), encoding="utf-8")
+
+    assert done_with(db, job, orch) == 1
+
+    assert row(db, job.id)["state"] == "running"
+    assert pre_ready_events(db, job.id) == []
+
+
+def test_a_questions_handoff_skips_pre_ready(
+    tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, job, orch, work = pre_ready_setup(tmp_path, store, monkeypatch, "exit 1")
+    serve_handoff(store, job, "1102", kind="questions", head=None)
+
+    assert done_with(db, job, orch, "1102") == 0
+    assert row(db, job.id)["state"] == "done"

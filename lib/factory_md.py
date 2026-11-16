@@ -141,6 +141,15 @@ class HoldConfig:
 
 
 @dataclass(frozen=True)
+class PreReady:
+    command: str
+    timeout_seconds: int
+
+
+PRE_READY_MAX_TIMEOUT = 900
+
+
+@dataclass(frozen=True)
 class FactoryConfig:
     base_branch: str
     tickets: str
@@ -166,6 +175,7 @@ class FactoryConfig:
     start_before_ci: bool = False
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
+    pre_ready: PreReady | None = None
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -240,6 +250,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         followup_from_round,
         auto_extra_rounds,
         start_before_ci,
+        pre_ready,
     ) = _review(
         data, findings, unknown
     )
@@ -316,6 +327,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         followup_from_round=followup_from_round,
         auto_extra_rounds=auto_extra_rounds,
         start_before_ci=start_before_ci,
+        pre_ready=pre_ready,
         max_holders_per_path=max_holders_per_path,
         exclusive_paths=exclusive_paths,
     )
@@ -392,20 +404,27 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, int, bool]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None, 0, False
+        return None, None, None, None, 0, False, None
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None, 0, False
+        return None, None, None, None, 0, False, None
     findings.extend(
         _unknown(
             review,
-            {"rounds", "verify", "followup_from_round", "auto_extra_rounds", "start_before_ci"},
+            {
+                "rounds",
+                "verify",
+                "followup_from_round",
+                "auto_extra_rounds",
+                "start_before_ci",
+                "pre_ready",
+            },
             "review",
             unknown,
         )
@@ -440,7 +459,34 @@ def _review(
         _followup_from_round(review, findings, unknown),
         _auto_extra_rounds(review, findings, unknown),
         _start_before_ci(review, findings, unknown),
+        _pre_ready(review, findings, unknown),
     )
+
+
+def _pre_ready(review: dict, findings: list[Finding], unknown: str) -> PreReady | None:
+    if "pre_ready" not in review:
+        return None
+    value = review["pre_ready"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "review.pre_ready must be a mapping"))
+        return None
+    findings.extend(_unknown(value, {"command", "timeout_seconds"}, "review.pre_ready", unknown))
+    command = value.get("command")
+    timeout = value.get("timeout_seconds")
+    ok = True
+    if not isinstance(command, str) or not command.strip():
+        findings.append(Finding("error", "review.pre_ready.command must be a non-empty string"))
+        ok = False
+    if not is_strict_int(timeout) or not 1 <= timeout <= PRE_READY_MAX_TIMEOUT:
+        findings.append(
+            Finding(
+                "error",
+                "review.pre_ready.timeout_seconds must be an integer from 1 to "
+                f"{PRE_READY_MAX_TIMEOUT}",
+            )
+        )
+        ok = False
+    return PreReady(command, int(timeout)) if ok else None
 
 
 def _start_before_ci(review: dict, findings: list[Finding], unknown: str) -> bool:

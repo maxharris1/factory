@@ -64,6 +64,8 @@ SLOTS_TABLE = "device_slots"
 PRIORITY_TABLE = "ticket_priority"
 _PRIORITY_COLUMNS = (("tier", "INTEGER"), ("unblocks", "INTEGER NOT NULL DEFAULT 0"))
 SUBMITTED_INVALID = "submitted-invalid"
+PRE_READY_FAILED = "pre-ready-failed"
+PRE_READY_PASSED = "pre-ready-passed"
 MAX_INVALID_HANDOFFS = 3
 
 
@@ -434,6 +436,7 @@ class SQLiteJobQueue:
         comment_id: str,
         detail: str,
         proof: Proof | None = None,
+        event: str = SUBMITTED_INVALID,
     ) -> tuple[int, Job]:
         """A running job's handoff did not fit it (#191): how many invalid
         handoffs it has now, and the job, failed once that is
@@ -462,7 +465,7 @@ class SQLiteJobQueue:
                 """,
                 (
                     job_id, str(row["repo"]).lower(), row["ticket_id"], row["action"],
-                    owner, SUBMITTED_INVALID, text, now,
+                    owner, event, text, now,
                 ),
             )
             attention.ensure_table(connection)
@@ -479,8 +482,8 @@ class SQLiteJobQueue:
             )
             count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = ?",
-                    (job_id, SUBMITTED_INVALID),
+                    "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event IN (?, ?)",
+                    (job_id, SUBMITTED_INVALID, PRE_READY_FAILED),
                 ).fetchone()[0]
             )
             if count >= MAX_INVALID_HANDOFFS:
@@ -495,6 +498,25 @@ class SQLiteJobQueue:
             updated = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             connection.commit()
         return count, _job(updated)
+
+    def record_pre_ready_passed(
+        self, job_id: str, *, comment_id: str, head: str, proof: Proof | None = None
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
+            _ensure_job_events(connection)
+            connection.execute(
+                """
+                INSERT INTO job_events (
+                    job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+                )
+                SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ?
+                FROM jobs WHERE id = ?
+                """,
+                (PRE_READY_PASSED, f"handoff {comment_id}: at {head}", self.now(), job_id),
+            )
+            connection.commit()
 
     def clear_invalid_handoff(self, job_id: str) -> None:
         """Drop the ticket's submitted-invalid flag once its job is done."""
