@@ -388,7 +388,8 @@ def _working(snapshot: dict) -> str:
     for device in devices:
         name, cap = device["name"], device["slot_max"]
         if cap is None:
-            rows.append(f'<div class="ef-dev">{_b(name)}{_span("ef-u", f"{device["used"]} slots")}</div>')
+            slots_text = f"{device['used']} slots"
+            rows.append(f'<div class="ef-dev">{_b(name)}{_span("ef-u", slots_text)}</div>')
             continue
         rows.append(
             f'<div class="ef-dev"><b>{_e(name)}</b>'
