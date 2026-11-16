@@ -54,10 +54,12 @@ from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import (
     SLOTS_TABLE,
     Job,
+    Proof,
     QueueError,
     SQLiteJobQueue,
     _job,
     claim_order,
+    require_proof,
     retire_requeued,
 )
 from lib.remote import new_tag
@@ -415,6 +417,7 @@ class DevicePool:
         start: str | None,
         alive: Callable[[int | None, str | None], bool],
         token_hash: str | None = None,
+        proof: Proof | None = None,
     ) -> Placement:
         """Record the box process (`orch job run`) that runs a placed job.
 
@@ -446,6 +449,7 @@ class DevicePool:
             "runner_pid = ?, runner_start = ?, run_token_hash = ?",
             (pid, start, token_hash),
             guard=guard,
+            proof=proof,
         )
         return replace(_placement(row), runner_pid=pid, runner_start=start)
 
@@ -610,12 +614,14 @@ class DevicePool:
         values: tuple[object, ...],
         *,
         guard: Callable[[sqlite3.Row], None] | None = None,
+        proof: Proof | None = None,
     ) -> sqlite3.Row:
         """Update one slot in its own transaction; returns the row read before the update."""
         if owner not in HARNESSES:
             raise QueueError(f"unknown owner {owner!r}")
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             row = connection.execute(
                 f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?",
                 (job_id,),

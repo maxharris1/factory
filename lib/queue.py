@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from lib import attention, lane_limit
+from lib import attention, job_token, lane_limit
 from lib.state_backup import RESTORED, RESTORED_CLAIM
 
 ACTIONS = (
@@ -69,6 +69,19 @@ MAX_INVALID_HANDOFFS = 3
 
 class QueueError(ValueError):
     """The requested queue operation is invalid."""
+
+
+class ClaimProofError(QueueError):
+    """A write to a running job whose current claim the caller cannot prove (#127)."""
+
+
+@dataclass(frozen=True)
+class Proof:
+    """The ORCH_JOB_PROOF a process presents. Each write that takes one checks
+    it against the job's current claim inside its own transaction (#127), so a
+    proof retired by a release and reclaim never writes to the later claim."""
+
+    token: str | None
 
 
 @dataclass(frozen=True)
@@ -115,7 +128,7 @@ class JobQueue(Protocol):
 
     def release(self, job_id: str, *, owner: str) -> Job: ...
 
-    def heartbeat(self, job_id: str, *, owner: str) -> Job: ...
+    def heartbeat(self, job_id: str, *, owner: str, proof: Proof | None = None) -> Job: ...
 
     def finish(
         self,
@@ -123,6 +136,7 @@ class JobQueue(Protocol):
         *,
         owner: str,
         handoff_comment_id: str | None,
+        proof: Proof | None = None,
     ) -> Job: ...
 
 
@@ -331,12 +345,13 @@ class SQLiteJobQueue:
             connection.commit()
         return _job(updated)
 
-    def heartbeat(self, job_id: str, *, owner: str) -> Job:
+    def heartbeat(self, job_id: str, *, owner: str, proof: Proof | None = None) -> Job:
         if owner not in RECIPIENTS:
             raise QueueError(f"unknown owner {owner!r}")
         now = self.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             changed = connection.execute(
                 """
                 UPDATE jobs SET last_activity_at = ?
@@ -370,6 +385,7 @@ class SQLiteJobQueue:
         *,
         owner: str,
         handoff_comment_id: str | None,
+        proof: Proof | None = None,
     ) -> Job:
         if owner not in RECIPIENTS:
             raise QueueError(f"unknown owner {owner!r}")
@@ -379,6 +395,7 @@ class SQLiteJobQueue:
             raise QueueError("handoff_comment_id must not be empty")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             changed = connection.execute(
                 """
                 UPDATE jobs
@@ -410,7 +427,13 @@ class SQLiteJobQueue:
         return _job(updated)
 
     def record_invalid_handoff(
-        self, job_id: str, *, owner: str, comment_id: str, detail: str
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        comment_id: str,
+        detail: str,
+        proof: Proof | None = None,
     ) -> tuple[int, Job]:
         """A running job's handoff did not fit it (#191): how many invalid
         handoffs it has now, and the job, failed once that is
@@ -422,6 +445,7 @@ class SQLiteJobQueue:
         text = f"handoff {comment_id}: {detail}"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise QueueError(f"unknown job {job_id!r}")
@@ -967,6 +991,31 @@ def _ensure_job_events(connection: sqlite3.Connection) -> None:
             recorded_at REAL NOT NULL
         )
         """
+    )
+
+
+def require_proof(connection: sqlite3.Connection, job_id: str, proof: Proof | None) -> None:
+    """Refuse, in the caller's transaction, a proof that matches neither the
+    running job's claim token nor its slot's run token (#96). None is an
+    internal caller's write. A job that is not running is left to the write."""
+    if proof is None:
+        return
+    row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None or row["state"] != "running":
+        return
+    if job_token.matches(proof.token, row["claim_token_hash"]):
+        return
+    if _has_table(connection, SLOTS_TABLE) and "run_token_hash" in _columns(
+        connection, SLOTS_TABLE
+    ):
+        slot = connection.execute(
+            f"SELECT run_token_hash FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if slot is not None and job_token.matches(proof.token, slot["run_token_hash"]):
+            return
+    raise ClaimProofError(
+        f"job {job_id} is running under a claim this process's ORCH_JOB_PROOF does "
+        "not prove (released and claimed again, or never this process's); nothing changed"
     )
 
 

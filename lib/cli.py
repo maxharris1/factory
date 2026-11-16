@@ -75,7 +75,15 @@ from lib.poll_source import IntakeRisks, LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
-from lib.queue import MAX_INVALID_HANDOFFS, SLOTS_TABLE, QueueError, SQLiteJobQueue, job_from_row
+from lib.queue import (
+    MAX_INVALID_HANDOFFS,
+    SLOTS_TABLE,
+    ClaimProofError,
+    Proof,
+    QueueError,
+    SQLiteJobQueue,
+    job_from_row,
+)
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
@@ -1223,6 +1231,7 @@ def _job(argv: list[str]) -> int:
     if refusal is not None:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return 2
+    proof = Proof(job_token.presented(os.environ))
     if args.command == "done" and args.handoff != "":
         try:
             settled = _done_settled(queue, args.job_id, args.handoff)
@@ -1233,13 +1242,15 @@ def _job(argv: list[str]) -> int:
             code, message = settled
             print(f"{prog}: {message}" if code else message, file=sys.stderr if code else sys.stdout)
             return code
-        refused = _check_handoff(queue, args, prog)
+        refused = _check_handoff(queue, args, prog, proof)
         if refused is not None:
             return refused
     try:
         if args.command == "heartbeat":
             retry_locked(
-                lambda: queue.heartbeat(args.job_id, owner=recipient_for(args.bot))
+                lambda: queue.heartbeat(
+                    args.job_id, owner=recipient_for(args.bot), proof=proof
+                )
             )
             print(f"heartbeat {args.job_id}")
             return 0
@@ -1251,10 +1262,14 @@ def _job(argv: list[str]) -> int:
                 args.job_id,
                 owner=recipient_for(args.bot),
                 handoff_comment_id=args.handoff,
+                proof=proof,
             )
         )
         if args.handoff is not None:
             queue.clear_invalid_handoff(job.id)
+    except ClaimProofError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
@@ -1262,7 +1277,9 @@ def _job(argv: list[str]) -> int:
     return 0
 
 
-def _check_handoff(queue: SQLiteJobQueue, args: argparse.Namespace, prog: str) -> int | None:
+def _check_handoff(
+    queue: SQLiteJobQueue, args: argparse.Namespace, prog: str, proof: Proof
+) -> int | None:
     """#191: the handoff comment must fit the job before it is done.
 
     None when it does. A read that fails (GitHub, orch.yml) exits 1 and
@@ -1294,8 +1311,12 @@ def _check_handoff(queue: SQLiteJobQueue, args: argparse.Namespace, prog: str) -
                 owner=recipient_for(args.bot),
                 comment_id=args.handoff,
                 detail="; ".join(found),
+                proof=proof,
             )
         )
+    except ClaimProofError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
     except (ReadError, ValueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
@@ -1646,7 +1667,9 @@ def _job_run_command(argv: list[str]) -> int:
     sessions: list[telemetry.Session] = []  # issue #93: the run's telemetry, once it starts
 
     def beat() -> object:
-        result = retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        result = retry_locked(
+            lambda: queue.heartbeat(args.job_id, owner=owner, proof=claim_proof)
+        )
         for session in sessions:
             session.flush()  # the summary moves with each heartbeat
         return result
@@ -1670,8 +1693,12 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return 2
     proof = run_token if checked_autostart is not None else job_token.presented(os.environ)
+    claim_proof = None if checked_autostart is not None else Proof(proof)
     try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
+    except ClaimProofError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
@@ -1689,6 +1716,7 @@ def _job_run_command(argv: list[str]) -> int:
             transport=SshTransport(),
             checked_autostart=checked_autostart,
             token_hash=token_hash,
+            proof=claim_proof,
         )
     except (placed_run.PlacementError, WaitError, ValueError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)

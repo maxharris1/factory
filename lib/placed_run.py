@@ -92,7 +92,7 @@ from lib.job_state import (
     requeue_unstarted,
 )
 from lib.machines_yml import Device, MachinesConfig
-from lib.queue import QueueError, SQLiteJobQueue
+from lib.queue import Proof, QueueError, SQLiteJobQueue
 from lib.remote import (
     ENV_FILE,
     GONE,
@@ -582,11 +582,14 @@ def prepare(
     parent_pid: int | None = None,
     checked_autostart: tuple[int, str | None] | None = None,
     token_hash: str | None = None,
+    proof: Proof | None = None,
 ) -> PlacedRun:
     """Record this process as the job's runner on its slot.
 
     token_hash (#96) is the hash of the token this run minted; it is
     recorded with the runner, so only this run can `orch job done` the job.
+    proof (#127) is the claim proof of a run no autostart waiter started; the
+    runner is recorded only while it still proves the job's current claim.
 
     checked_autostart is what check_autostart returned before the run's
     first heartbeat: this run's parent was then the claiming waiter. The
@@ -641,6 +644,7 @@ def prepare(
                 start=process_start(runner),
                 alive=alive,
                 token_hash=token_hash,
+                proof=proof,
             )
         )
     except QueueError as exc:
