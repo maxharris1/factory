@@ -13,7 +13,7 @@ from lib.github_actions import _created_at
 from lib.queue import JobRequest
 from lib.state_backup import backup, restore
 from tests.merge_queue_support import APPROVE, Board, sha
-from tests.test_dispatcher import READY
+from tests.test_dispatcher import ANSWERS, QUESTIONS, READY
 from tests.test_hold_merge_queue import APPROVER, OK, held_board
 
 
@@ -662,6 +662,34 @@ def test_an_earlier_fix_ready_does_not_cancel_the_fix_for_a_later_red_head(
         (sha(3), "queued"),
     ]
     assert board.state("42")["gate_count"] == 1
+
+
+@pytest.mark.job_bound
+def test_a_held_ci_fix_paused_for_questions_keeps_its_approval(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    approve = pr.comments[-1].id
+    fix = board.claim("claude")
+    board.post(pr, "fix-question", QUESTIONS, "claude-login")
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id="fix-question")
+    board.poll()
+    board.poll()
+    assert board.state("42")["workflow_state"] == "waiting-max"
+    assert board.outcome(approve) is None
+
+    board.post(pr, "fix-answer", ANSWERS, "grok-login")
+    board.poll()
+    resumed = board.claim("claude")
+    pr.push(sha(2), ci="success")
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(resumed.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) == "held-ci-fix-ready"
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert len(board.jobs("review")) == 1
 
 
 @pytest.mark.job_bound

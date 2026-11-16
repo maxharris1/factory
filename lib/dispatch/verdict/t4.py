@@ -67,7 +67,9 @@ class T4Mixin:
         ):
             return True, "superseded-approve"
         review_head = self._latest_review_head(ticket)
-        held_fix = state == "fixing" and self._held_ci_fix_out(ticket, comment.id)
+        held_fix = state in ("fixing", "waiting-max") and self._held_ci_fix_out(
+            ticket, comment.id
+        )
         if (
             state not in ("review", "awaiting-ok") and not held_fix
         ) or reported_round != review_round + 1:
@@ -77,6 +79,8 @@ class T4Mixin:
             return True, "stale-approve"
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
+        if state == "waiting-max":
+            return False, "approve-held-ci-fix-paused"
         if state == "awaiting-ok" or (
             held_fix and not self._open_job_at(ticket, current_head)
         ):
