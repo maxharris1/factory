@@ -69,8 +69,10 @@ class T4Mixin:
             return True, "stale-approve"
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
-        if state == "awaiting-ok" and ticket.mergeable_state in ("dirty", "behind"):
-            return self._hold_base_update(ticket, comment, current_head)
+        if state == "awaiting-ok":
+            held = self._held_approval_gate(ticket, comment, current_head)
+            if held is not None:
+                return held
         if not _is_full_sha(current_head):
             self._wake_ship_failed(
                 ticket,
@@ -82,7 +84,7 @@ class T4Mixin:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            if state == "awaiting-ok" or self._hold_in_play(ticket, current_head):
+            if self._hold_in_play(ticket, current_head):
                 return False, "approve-ci-red"
             if ticket.factory.start_before_ci:
                 return self._approve_ci_red_fix(
@@ -105,6 +107,18 @@ class T4Mixin:
         return self._ship_approval(
             ticket, comment, approved_head, current_head, reported_round
         )
+
+    def _held_approval_gate(
+        self, ticket: TrackedTicket, comment: Comment, head: str
+    ) -> tuple[bool, str] | None:
+        if ticket.mergeable_state in ("dirty", "behind"):
+            return self._hold_base_update(ticket, comment, head)
+        result = ticket.ci.get(head)
+        if result is None or result.status == "pending":
+            return False, "approve-ci-not-green"
+        if result.status == "failure":
+            return False, "approve-ci-red"
+        return None
 
     def _ship_approval(
         self,
@@ -200,6 +214,10 @@ class T4Mixin:
                 return self._replay_ship_intent(
                     ticket, approve, head, ticket.factory.ship, intent
                 )
+            if self._review_context(ticket)[0] == "awaiting-ok":
+                held = self._held_approval_gate(ticket, approve, head)
+                if held is not None:
+                    return held
             return self._ship_approval(
                 ticket, approve, approved_head, head, approved_round
             )

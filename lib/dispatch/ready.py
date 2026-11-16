@@ -90,6 +90,11 @@ class ReadyMixin:
             if reentry + 1 > self._effective_cap(ticket):
                 self._flag_ready_after_cap(ticket, comment, reported_head)
                 return True, "ready-after-cap"
+        if state == "awaiting-ok" and ticket.current_head is not None:
+            held = self._red_ci_approval_covering(ticket, reported_head)
+            if held is not None:
+                handled, shipped = self._ship_covered(ticket, *held, ticket.current_head)
+                return handled, f"approval-covers:{shipped}"
         head = _matching_head(reported_head, ticket.current_head)
         if head is None:
             try:
@@ -153,7 +158,7 @@ class ReadyMixin:
             ("pending", 0) if pending else self._record_ci_result(ticket, head, result.status)
         )
         generation = self._generation(ticket.repo, ticket.ticket_id)
-        if recorded_status in ("pending", "success"):
+        if covering is None and recorded_status in ("pending", "success"):
             queued, answered = self._queue_review(
                 ticket, comment, head=head, generation=generation, update=update
             )

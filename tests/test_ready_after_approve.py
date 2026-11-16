@@ -279,3 +279,91 @@ def test_a_retryable_covered_ship_error_retries_the_approve_on_the_next_poll(
     assert board.outcome(ready) == "approval-covers:merge-queue"
     assert ship_intents(board) == [("approve-red", "completed", None)]
     assert len(board.jobs("review")) == 1
+
+
+def held_at_the_gate(tmp_path: Path, finish_line: str | None = "merge") -> tuple[Board, PR, str]:
+    board, pr = approved_on_red_ci(tmp_path, hold=True)
+    board.factory = replace(board.factory, finish_line=finish_line)
+    pr.labels = ("factory:hold",)
+    pr.label_events = (relabel(board, "e1"),)
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-held")
+    board.poll()
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    return board, pr, ready
+
+
+def merge_only_fixes(board: Board) -> list[str]:
+    return [
+        job["head"]
+        for job in board.jobs("fix")
+        if json.loads(job["detail"]).get("kind") == "merge-only"
+    ]
+
+
+def test_red_ci_at_a_held_covered_head_keeps_the_hold_and_queues_no_review(
+    tmp_path: Path,
+) -> None:
+    board, pr, ready = held_at_the_gate(tmp_path)
+    pr.ci[pr.head] = "failure"
+    for _ in range(4):
+        board.poll()
+
+    assert board.outcome(ready) is None
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert len(board.jobs("review")) == 1
+    assert board.actions.handoffs == []
+
+
+def test_red_ci_after_a_retried_covered_ship_queues_no_review(tmp_path: Path) -> None:
+    board, pr = approved_on_red_ci(tmp_path)
+    pr.ci[pr.head] = "success"
+    board.ready(pr, pr.head, "ready-retry")
+    handoff = board.actions.handoff
+
+    def fail(ticket, head):
+        board.actions.handoff = handoff
+        raise RetryableShipError("temporary poll budget exhausted")
+
+    board.actions.handoff = fail
+    board.poll()
+    assert board.state("42")["workflow_state"] == "fixing"
+
+    pr.ci[pr.head] = "failure"
+    board.poll()
+    board.poll()
+
+    assert len(board.jobs("review")) == 1
+    assert board.actions.merges == []
+
+
+@pytest.mark.parametrize("finish_line", [None, "merge"])
+@pytest.mark.parametrize("mergeable_state", ["dirty", "behind"])
+def test_an_ok_on_a_dirty_or_behind_held_covered_pr_updates_the_base_first(
+    tmp_path: Path, finish_line: str | None, mergeable_state: str
+) -> None:
+    board, pr, ready = held_at_the_gate(tmp_path, finish_line)
+    pr.mergeable = mergeable_state != "dirty"
+    pr.mergeable_state = mergeable_state
+    board.post(pr, "ok-1", OK.format(head=pr.head), APPROVER)
+    board.poll()
+
+    assert board.actions.handoffs == []
+    assert board.actions.merges == []
+    assert merge_only_fixes(board) == [pr.head]
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert len(board.jobs("review")) == 1
+
+
+def test_a_held_covered_pr_moved_to_a_dirty_head_updates_the_base_there(
+    tmp_path: Path,
+) -> None:
+    board, pr, ready = held_at_the_gate(tmp_path)
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    for _ in range(4):
+        board.poll()
+
+    assert merge_only_fixes(board) == [sha(2)]
+    assert len(board.jobs("review")) == 1
+    assert board.actions.handoffs == []

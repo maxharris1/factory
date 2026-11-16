@@ -33,6 +33,7 @@ RULE_MODULE = {
     "_t3_repeat": "repeat",
     "_t4": "t4",
     "_approve_ci_red_fix": "t4",
+    "_held_approval_gate": "t4",
     "_ship_approval": "t4",
     "_ship_covered": "t4",
     "_t_blocked": "blocked",
