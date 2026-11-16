@@ -17,7 +17,7 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from lib import device_deploy, device_sync, skill_preflight
+from lib import device_deploy, device_sync, job_token, skill_preflight
 from lib.device_pool import DevicePool
 from lib.heal import Webhook
 from lib.machines_yml import Device, MachinesConfig
@@ -332,7 +332,8 @@ def test_a_lagging_preflight_during_a_busy_deploy_keeps_the_device_blocked(
         queue.enqueue(JobRequest(repo="o/r", ticket_id=harness, action="build",
                                  recipient=harness, source_comment_id=harness,
                                  timeout_seconds=60), dedupe_key=harness)
-    job, placement = pool.claim("claude", autostart=(12345, None))
+    proof, token_hash = job_token.mint()
+    job, placement = pool.claim("claude", autostart=(12345, None), token_hash=token_hash)
     deploying = threading.Event()
     resume = threading.Event()
 
@@ -359,7 +360,7 @@ def test_a_lagging_preflight_during_a_busy_deploy_keeps_the_device_blocked(
                                  pinned=Pinned("x", {}, {}), transport=transport)
         try:
             assert deploying.wait(10)
-            assert waiter._start(job, placement) is None
+            assert waiter._start(job, placement, proof) is None
             assert rows(queue)[("pc", "claude-bot")].state == "deploying"
             assert pool.claim("codex") is None
         finally:

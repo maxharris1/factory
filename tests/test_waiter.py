@@ -439,7 +439,7 @@ def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
         _wait_for(ready.exists, 10, runner)
         worker = int(ready.read_text())
         if replaced != "before-scratch":
-            waiter._children[job_id] = runner
+            waiter._children[job_id] = (runner, None)
         runner.kill()
         runner.wait(5)
         waiter.step()

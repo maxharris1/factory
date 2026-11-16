@@ -252,8 +252,131 @@ def test_a_run_retired_by_a_reclaim_never_runs_or_writes_for_the_later_claim(
     ])
 
     assert [successor(db, job_id)] == later
-    if stage != "started":
-        assert not marker.exists()
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("autostart", [False, True], ids=["plain", "autostart"])
+def test_retired_at_gate_does_not_execute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, autostart: bool
+) -> None:
+    from lib import cli, job_token, placed_run
+    from lib.queue import _ensure_job_events
+    from lib.worktrees import process_start
+    from tests.test_waiter import MACHINES, enqueue, local_pool, make_queue
+
+    db, queue = make_queue(tmp_path)
+    pool = local_pool(queue)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "retired-at-gate")
+    old, old_hash = job_token.mint()
+    _, new_hash = job_token.mint()
+    waiter = (os.getppid(), process_start(os.getppid())) if autostart else None
+    pool.claim("claude", token_hash=old_hash, autostart=waiter)
+    monkeypatch.setenv(PROOF_ENV, old)
+    original = placed_run.PlacedRun.started
+    marker = tmp_path / "retired-executed"
+
+    def after_worker_recorded(self, pid):
+        original(self, pid)
+        assert not marker.exists(), "command is still behind gate"
+        queue.release(job_id, owner="claude")
+        pool.claim("claude", token_hash=new_hash, autostart=waiter)
+
+    monkeypatch.setattr(placed_run.PlacedRun, "started", after_worker_recorded)
+    rc = cli.main([
+        "job", "run", "claude-bot", job_id, "--db", str(db),
+        "--machines", str(MACHINES), "--", sys.executable, "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ])
+    print("retired command exit", rc, "marker exists", marker.exists())
+    assert not marker.exists(), "retired runner opened gate and executed command for successor claim"
+
+
+def reclaim(queue, pool, job_id: str, waiter=None, *, finished: bool = False) -> None:
+    from lib import job_token
+    from lib.queue import Proof
+
+    queue.release(job_id, owner="claude")
+    token, hashed = job_token.mint()
+    assert pool.claim("claude", token_hash=hashed, autostart=waiter)[0].id == job_id
+    if finished:
+        queue.finish(job_id, owner="claude", handoff_comment_id=None, proof=Proof(token))
+
+
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
+def test_waiter_brief_failure_cannot_fail_later_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finished: bool
+) -> None:
+    from lib.brief import BriefError
+    from lib.queue import _ensure_job_events
+    from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
+
+    db, queue = make_queue(tmp_path)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "brief-failure")
+    waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+    later: list[tuple] = []
+
+    def changed_brief(*args, **kwargs):
+        reclaim(queue, waiter.pool, job_id, waiter._claimer, finished=finished)
+        later.append(successor(db, job_id))
+        raise BriefError("old claim brief failed after release and reclaim")
+
+    monkeypatch.setattr(waiter, "_brief", changed_brief)
+    assert waiter.step() is None
+    actual = successor(db, job_id)
+    print("brief-failure before", later[0], "after", actual)
+    assert actual == later[0], "retired waiter failed successor claim and removed its slot"
+
+
+@pytest.mark.parametrize("failure", ["lagging", "unreachable"])
+def test_a_preflight_failure_after_a_reclaim_leaves_the_later_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from lib.queue import _ensure_job_events
+    from lib.skill_preflight import CheckoutLagging, DeviceUnreachable
+    from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
+
+    db, queue = make_queue(tmp_path)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, failure)
+    waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+    later: list[tuple] = []
+
+    def changed_brief(*args, **kwargs):
+        reclaim(queue, waiter.pool, job_id, waiter._claimer)
+        later.append(successor(db, job_id))
+        if failure == "lagging":
+            raise CheckoutLagging("the box checkout is behind origin")
+        raise DeviceUnreachable("box", "box-alias")
+
+    monkeypatch.setattr(waiter, "_brief", changed_brief)
+    assert waiter.step() is None
+    assert successor(db, job_id) == later[0]
+
+
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
+def test_waiter_reap_cannot_fail_later_claim(tmp_path: Path, finished: bool) -> None:
+    from lib.queue import _ensure_job_events
+    from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
+
+    db, queue = make_queue(tmp_path)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "reap")
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path, queue, db, spawn)
+    assert waiter.step() == job_id
+    reclaim(queue, waiter.pool, job_id, waiter._claimer, finished=finished)
+    later = successor(db, job_id)
+    spawn.children[0].returncode = 1
+    waiter._reap()
+    actual = successor(db, job_id)
+    print("reap before", later, "after", actual)
+    assert actual == later, "retired waiter child failed successor claim and removed its slot"
 
 
 def test_the_autostart_waiter_hands_its_run_the_claims_proof(tmp_path: Path) -> None:

@@ -62,6 +62,7 @@ from lib.queue import (
     _job,
     claim_order,
     require_proof,
+    require_proof_while_slot_held,
     retire_requeued,
 )
 from lib.remote import new_tag
@@ -322,7 +323,7 @@ class DevicePool:
             raise QueueError(f"unknown owner {owner!r}")
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            require_proof(connection, job_id, proof)
+            require_proof_while_slot_held(connection, job_id, proof)
             row = connection.execute(
                 f"SELECT harness FROM {SLOTS_TABLE} WHERE job_id = ?",
                 (job_id,),
