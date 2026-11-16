@@ -1345,6 +1345,8 @@ def _approvals_sql(tables: set[str]) -> str:
     ]
     if "ship_holds" in tables:
         sources.append("SELECT repo, ticket_id, approve_comment_id, 1 FROM ship_holds")
+    if "verdict_acceptances" in tables:
+        sources.append("SELECT repo, ticket_id, comment_id, 1 FROM verdict_acceptances")
     return " UNION ALL ".join(sources)
 
 
@@ -1520,16 +1522,19 @@ def _verdicts_on_accepted_head(
     window: MetricWindow,
     verdicts: dict[tuple[str, str], list[_HeadVerdict]],
 ) -> int:
-    held = (
-        " UNION ALL SELECT approve_comment_id, held_at FROM ship_holds"
-        if "ship_holds" in tables
-        else ""
+    accepted_sources = "".join(
+        f" UNION ALL SELECT {columns} FROM {table}"
+        for table, columns in (
+            ("ship_holds", "approve_comment_id, held_at"),
+            ("verdict_acceptances", "comment_id, accepted_at"),
+        )
+        if table in tables
     )
     accepted_at: dict[str, float] = {}
     for comment_id, at in connection.execute(
         f"""
         SELECT a.comment_id, MIN(a.at) FROM (
-            SELECT comment_id, handled_at AS at FROM handled_times{held}
+            SELECT comment_id, handled_at AS at FROM handled_times{accepted_sources}
         ) a
         JOIN (
             SELECT comment_id FROM review_events

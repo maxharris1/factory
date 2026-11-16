@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from dataclasses import replace
 
 from lib import feeder
@@ -261,3 +262,71 @@ def test_a_go_resume_counts_and_an_answers_resume_does_not(tmp_path):
                     {"instruction": "x", "evidence": {"instructions": {"cause": cause}}},
                 )
     assert values(queue.path)["hand-written-gos"] == 2
+
+
+def test_a_replaced_hold_keeps_its_approval_accepted_from_the_first_hold(tmp_path):
+    board = held_board(tmp_path)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    board.build_and_approve(pr)
+    board.approve(pr, comment_id="later-on-accepted-head")
+    board.poll()
+
+    def count():
+        return dict(
+            build_metrics(
+                board.queue.path,
+                since="1970-01-01T00:02:20Z",
+                until="1970-01-01T00:02:24Z",
+            ).values
+        )["verdicts-on-accepted-head"]
+
+    assert count() == 1
+    pr.conflict()
+    board.poll()
+    board.finish("claude")
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    board.finish("codex")
+    board.approve(pr, comment_id="new-head-approve")
+    board.poll()
+    with board.queue.connect() as db:
+        assert [tuple(row) for row in db.execute("SELECT approve_comment_id FROM ship_holds")] == [
+            ("new-head-approve",)
+        ]
+    assert count() == 1
+
+
+
+def _accepted_head_count(path, posted):
+    def iso(at):
+        return datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    report = build_metrics(path, since=iso(posted - 1), until=iso(posted + 1))
+    return dict(report.values)["verdicts-on-accepted-head"]
+
+
+def test_a_held_approval_replaced_without_a_base_update_stays_accepted(tmp_path):
+    board = held_board(tmp_path)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    board.build_and_approve(pr)
+    board.approve(pr, comment_id="later-on-accepted-head")
+    board.poll()
+    with board.queue.connect() as db:
+        posted = db.execute(
+            "SELECT posted_at FROM verdict_heads WHERE comment_id = 'later-on-accepted-head'"
+        ).fetchone()[0]
+    assert _accepted_head_count(board.queue.path, posted) == 1
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    board.finish("codex")
+    board.approve(pr, comment_id="new-head-approve")
+    board.poll()
+    with board.queue.connect() as db:
+        assert [tuple(row) for row in db.execute("SELECT approve_comment_id FROM ship_holds")] == [
+            ("new-head-approve",)
+        ]
+    assert _accepted_head_count(board.queue.path, posted) == 1

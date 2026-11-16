@@ -249,6 +249,17 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS verdict_acceptances (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    accepted_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ship_intents (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
