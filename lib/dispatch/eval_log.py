@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from lib.eval_log import append_bytes, append_lines, erase_with_spaces
+from lib.eval_log import append_lines, erase_with_spaces
 from lib.eval_report import _PR, _REPO, _STATE, _TICKET, _TOKEN, _format_time
 from lib.handoff import HandoffError, parse_comment
 
@@ -45,15 +45,14 @@ def _finish_batch(log: Path, offset: int, batch: list[bytes]) -> None:
     for line in tail.splitlines(keepends=True):
         if done == len(batch):
             break
-        content = line.removesuffix(b"\n")
-        unterminated = content == line
         if line == batch[done]:
             done += 1
-        elif content and batch[done].startswith(content):
-            if unterminated:
-                append_bytes(log, batch[done][len(line) :] + b"".join(batch[done + 1 :]))
-                return
-            erase_with_spaces(log, position, len(content))
+        else:
+            content = line.removesuffix(b"\n")
+            body = content.lstrip(b" ")
+            k = len(content) - len(body)
+            if body and batch[done][k : len(content)] == body:
+                erase_with_spaces(log, position + k, len(body))
         position += len(line)
     if done < len(batch):
         append_lines(log, batch[done:])

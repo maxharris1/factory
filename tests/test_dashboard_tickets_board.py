@@ -13,6 +13,7 @@ import pytest
 
 import lib.dashboard_flow as flow
 import lib.dashboard_page as page
+from lib.dashboard_pages import tickets as tickets_page
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
@@ -191,6 +192,10 @@ def _placed(markup: str) -> list[str]:
 
 def _number(text: str) -> int:
     return int(re.search(r"\d+", text).group(0))
+
+
+def _job_link(node: dict) -> bool:
+    return node["tag"] == "a" and node["attrs"]["href"].startswith("job.html")
 
 
 def _card(markup: str, key: str) -> dict:
@@ -385,15 +390,15 @@ def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> 
     text = _text(fixing)
     for needle in ("fixing", "round 2/3", "claude", "@ box", "T+ 4m 06s", "github"):
         assert needle in text, needle
-    assert _one(fixing, lambda n: n["tag"] == "a")["attrs"]["href"] == "job.html#job-j-fix001"
+    assert _one(fixing, _job_link)["attrs"]["href"] == "job.html#job-j-fix001"
     assert "@ pc" in _text(_card(board, "#".join(tickets["review"])))
     planning = _card(board, "#".join(tickets["planning"]))
     assert "round —" in _text(planning) and not _all(planning, _cls("tk-pips"))
     queued = _card(board, "#".join(tickets[QUEUED[0]]))
-    assert _one(queued, lambda n: n["tag"] == "a")["attrs"]["href"] == f"job.html#job-{QUEUED[1]}"
+    assert _one(queued, _job_link)["attrs"]["href"] == f"job.html#job-{QUEUED[1]}"
     assert "queued" in _text(queued) and not _all(queued, lambda n: n["tag"] == "canvas")
     idle = _card(board, "#".join(tickets[VERDICT[0]]))
-    assert not _all(idle, lambda n: n["tag"] in ("a", "canvas"))
+    assert not _all(idle, lambda n: _job_link(n) or n["tag"] == "canvas")
     assert "no job running" not in _text(idle)
     assert _text(_one(idle, _cls("chip"))) == "routed" and VERDICT[1] in _text(idle)
     assert {_text(node) for node in _all(_dom(board), _cls("tk-tag"))} == {"github", "linear"}
@@ -534,6 +539,85 @@ def test_the_table_is_on_job_html_only(snapshot: dict) -> None:
     assert 'id="jobs"' not in pages["job.html"]
     assert re.search(r'<section class="panel" id="tickets" aria-label="Tickets" hidden>', pages["job.html"])
     assert "@media (scripting:none){#tickets[hidden]{display:block !important}}" in page.CSS
+
+
+def _gh_hrefs(node: dict) -> list[str]:
+    links = _all(node, lambda n: n["tag"] == "a" and n["attrs"].get("href", "").startswith("https://github.com/"))
+    assert all(a["attrs"]["rel"] == "noopener noreferrer" and a["attrs"]["target"] == "_blank" for a in links)
+    return [a["attrs"]["href"] for a in links]
+
+
+def _gh_snapshot(snapshot: dict) -> tuple[dict, list[str]]:
+    snap = json.loads(json.dumps(snapshot))
+    found = tickets_page.board(snap)
+    keys = [_key(c["ticket"]) for col in found["columns"] for c in col["cards"]][:4]
+    rows = {_key(row): row for row in snap["tickets"]}
+    issue, no_pr, linear, bad = (rows[key] for key in keys)
+    issue.update(source="#563", pr="601")
+    no_pr.update(source="#564", pr=None)
+    linear.update(source="ABC-12", pr="602")
+    bad.update(repo="evil/repo/x", source="#7", pr="603")
+    return snap, [_key(row) for row in (issue, no_pr, linear, bad)]
+
+
+def _check_gh(markup: str, keys: list[str], snap: dict) -> None:
+    rows = {_key(row): row for row in snap["tickets"]}
+    issue, no_pr, linear, bad = keys
+    assert _gh_hrefs(_card(markup, issue)) == [
+        f"https://github.com/{rows[issue]['repo']}/issues/563", f"https://github.com/{rows[issue]['repo']}/pull/601"]
+    assert _gh_hrefs(_card(markup, no_pr)) == [f"https://github.com/{rows[no_pr]['repo']}/issues/564"]
+    assert _gh_hrefs(_card(markup, linear)) == [f"https://github.com/{rows[linear]['repo']}/pull/602"]
+    assert _gh_hrefs(_card(markup, bad)) == []
+
+
+def test_cards_link_their_github_issue_and_pr(snapshot: dict) -> None:
+    snap, keys = _gh_snapshot(snapshot)
+    _check_gh(_server(snap)["pipeline"], keys, snap)
+
+
+@layout.needs_node
+def test_script_cards_link_github_like_the_server(tmp_path: Path, snapshot: dict) -> None:
+    snap, keys = _gh_snapshot(snapshot)
+    out = _script(tmp_path, snap, page_from=snap)
+    _check_gh(out["html"]["pipeline"], keys, snap)
+    assert out["html"]["pipeline"] == _server(snap)["pipeline"]
+
+
+SIGNED_IN = HARNESS.replace(
+    "  if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);",
+    "  if (url === '/api/session') return Promise.resolve({ok: true, status: 200, json: () =>\n"
+    "    Promise.resolve({signed_in: true, login: 'maxharris1', csrf: 'csrf-value'})});\n"
+    "  if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);",
+)
+
+
+@layout.needs_node
+def test_a_held_card_with_no_job_keeps_the_comment_and_ok_controls(tmp_path: Path, snapshot: dict) -> None:
+    assert SIGNED_IN != HARNESS
+    snap = json.loads(json.dumps(snapshot))
+    idle = [c["ticket"] for col in tickets_page.board(snap)["columns"] for c in col["cards"]
+            if not c.get("live") and not c.get("queued")]
+    held = next(row for row in snap["tickets"] if _key(row) == _key(idle[0]))
+    held.update(state="awaiting-ok", waiting_on="maxharris1", source="#563", pr="601")
+    html = render_pages(snap)["job.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    for name, text in (("page.js", script), ("status.json", json.dumps(snap)), ("harness.js", SIGNED_IN)):
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    result = subprocess.run(
+        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         "job", "", json.dumps(IDS), "[]"],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    card = _card(json.loads(result.stdout)["html"]["pipeline"], _key(held))
+    (panel,) = _all(card, lambda n: "jd-gh" in n["attrs"].get("class", "").split())
+    assert "signed in as maxharris1" in json.dumps(panel)
+    (form,) = _all(panel, lambda n: n["attrs"].get("class") == "gh-form")
+    assert "hidden" not in form["attrs"]
+    assert [o["kids"] for o in _all(form, lambda n: n["tag"] == "option")] == [["issue #563"], ["PR #601"]]
+    assert _all(form, lambda n: n["tag"] == "textarea")
+    (okbox,) = _all(panel, lambda n: "gh-okbox" in n["attrs"].get("class", "").split())
+    assert "hidden" not in okbox["attrs"]
 
 
 def _troubled(snapshot: dict) -> tuple[dict, dict[str, list[tuple[str, str]]]]:

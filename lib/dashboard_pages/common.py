@@ -66,6 +66,9 @@ transition:background-color .15s var(--ease)}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0}
 .row .label{min-width:92px;font:500 12px/1.2 var(--mono);color:var(--muted)}
 .empty{margin:4px 0;color:var(--muted);font:12px/1.5 var(--mono)}
+.gh{display:inline-flex;gap:8px}
+.gh a{font:500 11px/1.6 var(--mono);color:var(--accent);text-decoration:none;white-space:nowrap}
+.gh a:hover{text-decoration:underline}
 .fresh{animation:flash 2.4s ease-out}
 details summary{cursor:pointer;color:var(--text-2);font:500 12px/1.8 var(--mono)}
 details summary:hover{color:var(--text)}
@@ -201,6 +204,27 @@ SCRIPT_HEAD = r"""
     return repo + '#' + first + prOf(row, first);
   }
   function ticketOf(row) { return ticketIn(short(row.repo), row); }
+  function ghRefs(r) {
+    var repo = String(r.repo === null || r.repo === undefined ? '' : r.repo);
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return null;
+    var issue = /^#[0-9]+$/.test(String(r.source)) ? String(r.source).slice(1) : null;
+    var pr = r.pr !== null && r.pr !== undefined && /^[0-9]+$/.test(String(r.pr)) ? String(r.pr) : null;
+    return issue || pr ? {repo: repo, issue: issue, pr: pr} : null;
+  }
+  function ghLinks(r) {
+    var refs = ghRefs(r);
+    if (!refs) return null;
+    var box = el('span', 'gh');
+    [['issues', refs.issue, 'issue ↗'], ['pull', refs.pr, 'PR ↗']].forEach(function (g) {
+      if (!g[1]) return;
+      var a = add(box, link(null, 'https://github.com/' + refs.repo + '/' + g[0] + '/' + g[1]));
+      a.setAttribute('rel', 'noopener noreferrer');
+      a.setAttribute('target', '_blank');
+      a.textContent = g[2];
+    });
+    return box;
+  }
+  function addGh(parent, r) { var gh = ghLinks(r); if (gh) add(parent, gh); }
   function jobLabel(r) { return r.tracker === 'linear' ? String(r.ticket_id) + prOf(r, r.ticket_id) : ticketOf(r); }
   function tileLabel(r) {
     if (r.tracker === 'linear') return String(r.ticket_id);
@@ -354,7 +378,12 @@ SCRIPT_TAIL = r"""
       var box = locate(b.at).node;
       if (box) { box.scrollLeft = b.left; box.scrollTop = b.top; }
     });
-    if (!focus || active.isConnected) return;
+    if (!focus) return;
+    if (active.isConnected) {
+      // A kept node (the GitHub comment box) loses focus while it is detached.
+      if (document.activeElement !== active) active.focus({preventScroll: true});
+      return;
+    }
     var found = locate(focus);
     var target = found.node;
     if (!target) {
@@ -538,6 +567,34 @@ def _short(repo: object) -> str:
 def _ticket(row: dict, *, full: bool = False) -> str:
     repo = str(row["repo"]) if full else _short(row["repo"])
     return label(repo, str(row["ticket_id"]), row.get("source"), row.get("pr"))
+
+
+_GH_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_GH_NUMBER = re.compile(r"[0-9]+")
+
+
+def github_refs(row: dict) -> dict | None:
+    """The row's GitHub repo, issue and PR numbers (ghRefs in the script), or None."""
+    repo, source, pr = str(row.get("repo") or ""), row.get("source"), row.get("pr")
+    if not _GH_REPO.fullmatch(repo):
+        return None
+    issue = source[1:] if isinstance(source, str) and source.startswith("#") and _GH_NUMBER.fullmatch(source[1:]) else None
+    pr = str(pr) if pr is not None and _GH_NUMBER.fullmatch(str(pr)) else None
+    return {"repo": repo, "issue": issue, "pr": pr} if issue or pr else None
+
+
+def github_links(row: dict) -> str:
+    """The issue and PR links on github.com (ghLinks in the script)."""
+    refs = github_refs(row)
+    if refs is None:
+        return ""
+    links = "".join(
+        f'<a href="https://github.com/{_e(refs["repo"])}/{path}/{number}" rel="noopener noreferrer" '
+        f'target="_blank">{text}</a>'
+        for path, number, text in (("issues", refs["issue"], "issue ↗"), ("pull", refs["pr"], "PR ↗"))
+        if number
+    )
+    return f'<span class="gh">{links}</span>'
 
 
 def _job_label(row: dict) -> str:
