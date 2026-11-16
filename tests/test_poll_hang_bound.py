@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import socket
 import socketserver
 import subprocess
 import threading
@@ -501,3 +502,74 @@ def test_a_linear_read_stalled_before_its_request_is_cut_off_and_the_next_cycle_
 
     assert servers.posts == 1
     assert eventually(lambda: servers.open == 0), servers.open
+
+
+@pytest.fixture
+def unanswered_port():
+    listener = socket.socket()
+    listener.bind(("0.0.0.0", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    fillers = [socket.create_connection(("127.0.0.1", port), timeout=0.1) for _ in range(2)]
+    probe = socket.socket()
+    probe.settimeout(0.05)
+    try:
+        with pytest.raises(TimeoutError):
+            probe.connect(("127.0.0.1", port))
+        yield port
+    finally:
+        probe.close()
+        for sock in fillers:
+            sock.close()
+        listener.close()
+
+
+def test_a_linear_read_stalled_in_tcp_connects_frees_its_slot_for_the_next_cycle(
+    stalling_servers, unanswered_port
+) -> None:
+    real_getaddrinfo = socket.getaddrinfo
+
+    def eight_unanswered(host, port, *args, **kwargs):
+        if host == "unresponsive.invalid":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"127.0.0.{n}", unanswered_port))
+                for n in range(1, 9)
+            ]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    url = ["https://unresponsive.invalid/graphql"]
+    source = linear_source(lambda _url, headers, body, timeout: post_json(url[0], headers, body, timeout))
+
+    with patch("urllib.request.getproxies", return_value={}), patch(
+        "socket.getaddrinfo", side_effect=eight_unanswered
+    ):
+        source.begin_cycle()
+        for _ in range(HANG_STRIKES):
+            with pytest.raises(RetryablePollSourceError, match="timed out"):
+                source._linear_request(DOCUMENT)
+
+        url[0] = stalling_servers.proxy + "/graphql"
+        source.begin_cycle()
+        assert source._linear_request(DOCUMENT) == {"data": {"viewer": {"id": "me"}}}
+
+    assert stalling_servers.posts == 1
+
+
+def test_an_address_whose_socket_cannot_be_made_falls_through_to_the_next(
+    stalling_servers,
+) -> None:
+    port = int(stalling_servers.proxy.rsplit(":", 1)[1])
+    unsupported = 9999
+
+    def unsupported_then_local(host, requested_port, *args, **kwargs):
+        return [
+            (unsupported, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ]
+
+    with patch("urllib.request.getproxies", return_value={}), patch(
+        "socket.getaddrinfo", side_effect=unsupported_then_local
+    ):
+        result = post_json("http://dual-stack.invalid/graphql", {}, b"{}", DEADLINE)
+
+    assert result.status == 200

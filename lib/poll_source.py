@@ -209,10 +209,11 @@ class _Cutoff:
     """urllib's timeout is per socket operation, so a reply trickling bytes
     never times out."""
 
-    def __init__(self) -> None:
+    def __init__(self, timeout: float) -> None:
         self._lock = threading.Lock()
         self._sockets: list[socket.socket] = []
         self.fired = False
+        self.deadline = time.monotonic() + timeout
 
     def track(self, sock: socket.socket) -> None:
         with self._lock:
@@ -240,10 +241,36 @@ class _Tracked:
         self._cutoff = cutoff
         self._create_connection = self._open_tracked_before_tunnel
 
-    def _open_tracked_before_tunnel(self, *args: Any, **kwargs: Any) -> socket.socket:
-        sock = socket.create_connection(*args, **kwargs)
-        self._cutoff.track(sock)
-        return sock
+    def _open_tracked_before_tunnel(
+        self,
+        address: tuple[str, int],
+        _timeout: object = None,
+        source_address: tuple[str, int] | None = None,
+    ) -> socket.socket:
+        """socket.create_connection gives each resolved address the full
+        timeout and returns no socket to cut off until one connects."""
+        host, port = address
+        error = OSError("getaddrinfo returns an empty list")
+        for family, kind, proto, _, peer in socket.getaddrinfo(
+            host, port, 0, socket.SOCK_STREAM
+        ):
+            remaining = self._cutoff.deadline - time.monotonic()
+            if self._cutoff.fired or remaining <= 0:
+                raise TimeoutError
+            sock = None
+            try:
+                sock = socket.socket(family, kind, proto)
+                self._cutoff.track(sock)
+                sock.settimeout(remaining)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(peer)
+                return sock
+            except OSError as exc:
+                if sock is not None:
+                    sock.close()
+                error = exc
+        raise error
 
 
 class _TrackedHTTP(_Tracked, HTTPConnection):
@@ -293,7 +320,7 @@ def post_json(
     timeout: float,
 ) -> HTTPResult:
     """POST with timeout as the whole request's deadline, not per socket read."""
-    cutoff = _Cutoff()
+    cutoff = _Cutoff(timeout)
     timer = threading.Timer(timeout, cutoff.fire)
     timer.daemon = True
     timer.start()
