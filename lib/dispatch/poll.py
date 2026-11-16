@@ -427,12 +427,12 @@ class PollLoop:
         dispatcher: Dispatcher,
         source: PollSource,
         *,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
         interval_seconds: float | None = None,
     ):
         self.dispatcher = dispatcher
         self.source = source
-        self.sleep = sleep
+        self.sleep = sleep_on_either_clock if sleep is None else sleep
         if interval_seconds is None:
             # orch.yml poll_seconds (30 or 60) when the source carries it.
             config = getattr(source, "config", None)
@@ -463,7 +463,12 @@ class PollLoop:
         if max_polls is not None and max_polls < 1:
             raise ValueError("max_polls must be positive")
         polls = 0
+        if hasattr(after_poll, "cycle_clock"):
+            after_poll.cycle_clock = self.clock
         while True:
+            slow = self.clock.between(self.interval_seconds)
+            if slow is not None:
+                print(slow, flush=True)
             print(self.clock.start(), flush=True)
             self.dispatcher.cycle_clock = self.clock
             try:
@@ -484,6 +489,19 @@ class PollLoop:
             if max_polls is not None and polls >= max_polls:
                 return
             self.sleep(self.interval_seconds)
+
+
+def sleep_on_either_clock(
+    seconds: float,
+    *,
+    wall: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    wall_deadline = wall() + seconds
+    monotonic_deadline = monotonic() + seconds
+    while (left := min(wall_deadline - wall(), monotonic_deadline - monotonic())) > 0:
+        sleep(min(1.0, left))
 
 
 def _after_poll(hook: Callable[[], None]) -> None:

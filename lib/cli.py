@@ -15,7 +15,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
@@ -35,7 +35,9 @@ from lib import (
 )
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
+from lib.dispatch.poll import sleep_on_either_clock
 from lib.dispatcher import Dispatcher, PollCycleFailed, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import (
     EvalError,
@@ -829,13 +831,20 @@ class _AfterPoll:
         self.backup = backup
         self.pusher = pusher
         self.kick = kick
+        self.cycle_clock: CycleClock | None = None
 
     def __call__(self) -> None:
-        self.backup()
+        with self._step("backup"):
+            self.backup()
         if self.pusher is not None:
-            self.pusher()
+            with self._step("dashboard-push"):
+                self.pusher()
         if self.kick is not None:
-            self.kick()
+            with self._step("self-deploy"):
+                self.kick()
+
+    def _step(self, name: str) -> AbstractContextManager[None]:
+        return nullcontext() if self.cycle_clock is None else self.cycle_clock.step(name)
 
 
 def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
@@ -1171,7 +1180,7 @@ class StopAtBoundary:
     end, so no handoff or ship is cut in half; during the sleep between
     cycles, or a second SIGTERM, exits at once. Either way the exit is 143."""
 
-    def __init__(self, sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, sleep: Callable[[float], None] = sleep_on_either_clock):
         self._sleep = sleep
         self.cycling = True
         self.requested = False
