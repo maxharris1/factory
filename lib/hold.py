@@ -17,12 +17,15 @@ The hold clears on a comment from the approver, either kind=ok
 head=<40-char sha> or a first line of /ok <40-char sha>, whose
 head covers the current head by the ship rule (the same commit, or an
 equal git patch-id --stable), or, for a label-only hold, by the
-approver removing the label. An ok does not clear a label hold whose
-label was labeled at or after the latest covering ok: a label put back
-after the ok holds the PR again, and still holds it once someone other
-than the approver removes it. Neither clears unless the approver
-may approve: a trusted_logins key, or, once the GitHub App switch is on, a
-login in orch.yml's approver_logins (#122). Anything unread fails closed.
+approver removing the label. An ok also covers a head whose every later
+commit merges base in, when the PR owns no new file and no merge changes a
+hold-path file from git's own merge (ok_carries, issue #574). An ok does not
+clear a label hold whose label was labeled at or after the latest
+covering ok: a label put back after the ok holds the PR again, and
+still holds it once someone other than the approver removes it. Neither
+clears unless the approver may approve: a trusted_logins key, or, once the
+GitHub App switch is on, a login in orch.yml's approver_logins (#122).
+Anything unread fails closed.
 
 Globs are matched against repo-relative paths: ``*`` and ``?`` never
 cross ``/``; ``**`` matches any number of whole directories (``a/**``
@@ -125,6 +128,39 @@ def held_paths(patterns: Sequence[str], files: Iterable[str]) -> tuple[str, ...]
             }
         )
     )
+
+
+@dataclass(frozen=True)
+class MergeStep:
+    commit: str
+    parents: tuple[str, ...]
+    other_parents_on_base: bool
+    hand_merged: frozenset[str]
+
+
+@dataclass(frozen=True)
+class MergeUpdate:
+    approved_head: str
+    steps: tuple[MergeStep, ...]
+    approved_own_files: frozenset[str]
+    current_own_files: frozenset[str]
+
+
+def ok_carries(update: MergeUpdate, patterns: Sequence[str]) -> bool:
+    if not update.steps:
+        return False
+    previous = update.approved_head
+    for step in update.steps:
+        if (
+            len(step.parents) != 2
+            or step.parents[0] != previous
+            or not step.other_parents_on_base
+        ):
+            return False
+        previous = step.commit
+    if not update.current_own_files <= update.approved_own_files:
+        return False
+    return not any(held_paths(patterns, step.hand_merged) for step in update.steps)
 
 
 @dataclass(frozen=True)

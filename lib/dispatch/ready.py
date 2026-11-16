@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from lib.dispatch.constants import CI_WAIT_REASONS
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
     _acted_verdict,
@@ -17,9 +18,8 @@ from lib.dispatch.helpers import (
     _matching_head,
     _round_number,
     _scope,
+    failed_checks,
 )
-from lib.dispatch.constants import CI_WAIT_REASONS
-from lib.dispatch.detail import failed_checks
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment

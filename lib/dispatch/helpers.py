@@ -14,7 +14,7 @@ from lib.dispatch.constants import (
     _NO_QUESTIONS,
     _QUESTIONS_HEADING,
 )
-from lib.dispatch.types import Comment, ShipError, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, FailedCheck, ShipError, TrackedTicket
 from lib.factory_md import FactoryConfig, family_findings
 from lib.handoff import matching_head as _matching_head
 from lib.queue import Job
@@ -467,3 +467,20 @@ def _state_for_action(action: str) -> str:
         "update-from-main": "updating",
         "clarify": "questions",
     }[action]
+
+
+def failed_checks(result: CIResult) -> tuple[FailedCheck, ...]:
+    if result.failed:
+        return result.failed
+    return tuple(
+        FailedCheck(name)
+        for name in (result.log or "").removeprefix("failed: ").split(", ")
+        if name
+    )
+
+
+def red_checks(ticket: TrackedTicket, head: str | None) -> tuple[str, ...]:
+    result = ticket.ci.get(head) if head is not None else None
+    if result is None or result.status != "failure":
+        return ()
+    return tuple(check.name for check in failed_checks(result))

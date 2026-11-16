@@ -43,6 +43,17 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
         ]
     else:
         shown = [f"Read the findings in the verdict at {verdict}."]
+    ci_failure = detail.get("ci_failure")
+    checks = ci_failure.get("failed_checks") if isinstance(ci_failure, dict) else None
+    if isinstance(checks, list) and checks and all(isinstance(name, str) for name in checks):
+        head = facts["head"] or "the PR head"
+        shown.append(
+            f"CI is also red on {head}. These checks failed: "
+            + ", ".join(code_span(name) for name in checks)
+            + ". Fix them in this round too. If a failure is infrastructure rather than this PR, "
+            f"rerun it once with `{GH} run rerun <run-id> --failed`, with the run id from "
+            f"`{GH} run list --commit {head}`, and never wait on it."
+        )
     return [
         f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}. Follow the router in Skills above.",
         *shown,
