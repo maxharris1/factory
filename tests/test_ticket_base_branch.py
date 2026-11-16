@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
-from lib.dispatcher import CIResult, Dispatcher, ReviewShipper, ShipError, ShipRequest, TicketRef
+from lib.dispatcher import (
+    CIResult,
+    Dispatcher,
+    RetryableShipError,
+    ReviewShipper,
+    ShipError,
+    ShipRequest,
+    TicketRef,
+)
+from lib.github_actions import LinearReviewActions
 from lib.orch_yml import Intake, load_orch_yml
 from lib.poll_source import LivePollSource
 from lib.queue import SQLiteJobQueue
@@ -28,6 +37,8 @@ from tests.test_dispatcher import (
     setup,
     ticket,
 )
+from tests.test_github_actions import RecordedGh
+from tests.test_github_actions import pr as github_pr
 from tests.test_linear_multi_project import transport_for
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue
 from tests.test_waiter import FakeRun, contents
@@ -269,3 +280,181 @@ def test_a_conflicting_approved_pr_is_updated_from_the_tickets_base(tmp_path: Pa
     board.poll()
 
     assert board.classified == [("owner/repo", FEATURE, sha(1), sha(2))]
+
+
+def on_live_base(board: Board, live) -> None:
+    board.factory = replace(board.factory, base_branch=FEATURE)
+    snapshot = board.snapshot
+    board.snapshot = lambda pr, fresh=False: live(pr, snapshot(pr, fresh=fresh), fresh)
+
+
+def bases_of(board: Board) -> dict[str, str]:
+    bases: dict[str, str] = {}
+    on_live_base(
+        board, lambda pr, read, fresh: replace(read, pr_base=bases.get(pr.number, FEATURE))
+    )
+    return bases
+
+
+def poll_errors(tmp_path: Path) -> list[str]:
+    with sqlite3.connect(tmp_path / "d.db") as connection:
+        return [row[0] for row in connection.execute("SELECT error FROM poll_errors")]
+
+
+def approved_in_queue(board: Board, number: str):
+    pr = board.open(number, sha(int(number)))
+    board.build_and_approve(pr, mergeable=None)
+    assert board.state(number)["workflow_state"] == "merge-queue"
+    return pr
+
+
+@pytest.mark.usefixtures("every_wake_reaches_grok")
+def test_a_queued_pr_moved_to_another_base_merges_only_once_retargeted(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    bases = bases_of(board)
+    pr = approved_in_queue(board, "42")
+
+    bases["42"] = "dev"
+    pr.mergeable, pr.mergeable_state = True, "clean"
+    board.poll()
+
+    assert not pr.merged
+    assert attention(tmp_path)["base-mismatch"] == (
+        f"PR #42 targets dev; the ticket base is {FEATURE}"
+    )
+    assert poll_errors(tmp_path) == []
+
+    bases["42"] = FEATURE
+    board.poll()
+
+    assert pr.merged
+    assert "base-mismatch" not in attention(tmp_path)
+
+
+@pytest.mark.usefixtures("every_wake_reaches_grok")
+def test_a_conflicting_queued_pr_on_another_base_gets_no_update(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    bases = bases_of(board)
+    pr = approved_in_queue(board, "42")
+
+    bases["42"] = "dev"
+    pr.conflict()
+    board.poll()
+
+    assert board.jobs("update-from-main") == []
+    assert poll_errors(tmp_path) == []
+
+    bases["42"] = FEATURE
+    board.poll()
+
+    assert len(board.jobs("update-from-main")) == 1
+
+
+@pytest.mark.usefixtures("every_wake_reaches_grok")
+def test_an_entry_on_another_base_never_merges_ahead_of_a_waiting_head(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    bases = bases_of(board)
+    head = approved_in_queue(board, "1")
+    behind = approved_in_queue(board, "2")
+    head.conflict()
+    behind.mergeable, behind.mergeable_state = True, "clean"
+
+    bases["2"] = "dev"
+    board.poll()
+
+    assert board.actions.merges == []
+    assert board.state("2")["workflow_state"] == "merge-queue"
+    assert poll_errors(tmp_path) == []
+
+    bases["2"] = FEATURE
+    board.poll()
+
+    assert board.actions.merges == [(True, behind.head)]
+
+
+def test_a_ready_whose_fresh_read_shows_another_base_starts_no_review(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    live = ["dev"]
+
+    def lagging(pr, read, fresh):
+        if fresh:
+            return replace(read, pr_base=live[0])
+        return replace(read, pr_base=FEATURE, current_head=sha(1))
+
+    on_live_base(board, lagging)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go-42")
+    board.poll()
+    board.finish("claude")
+    pr.push(sha(2))
+    ready = board.ready(pr, sha(2))
+    board.poll()
+
+    assert board.jobs("review") == []
+    assert board.outcome(ready) is None
+    assert poll_errors(tmp_path) == []
+
+    live[0] = FEATURE
+    board.poll()
+
+    assert len(board.jobs("review")) == 1
+
+
+def job_events(tmp_path: Path, event: str) -> list[str]:
+    with sqlite3.connect(tmp_path / "d.db") as connection:
+        return [
+            row[0]
+            for row in connection.execute("SELECT job_id FROM job_events WHERE event = ?", (event,))
+        ]
+
+
+@pytest.mark.parametrize(("recipient", "action"), [("claude", "build"), ("codex", "review")])
+def test_a_failed_job_on_another_base_is_retried_only_once_retargeted(
+    tmp_path: Path, recipient: str, action: str
+) -> None:
+    board = Board(tmp_path)
+    bases = bases_of(board)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go-42")
+    board.poll()
+    if action == "review":
+        board.finish("claude")
+        board.ready(pr, pr.head)
+        board.poll()
+
+    bases["42"] = "dev"
+    failed = board.fail(recipient)
+    board.poll()
+    board.poll()
+
+    assert [job["attempt"] for job in board.jobs(action)] == [1]
+    assert job_events(tmp_path, "base-mismatch") == [failed.id]
+
+    bases["42"] = FEATURE
+    board.poll()
+
+    assert [job["attempt"] for job in board.jobs(action)] == [1, 2]
+
+
+def test_a_linear_handoff_whose_fresh_read_shows_another_base_writes_nothing() -> None:
+    gh = RecordedGh()
+    linear_writes: list[str] = []
+    linked = replace(
+        github_pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        pr_base="main",
+        linear_ready_for_review=True,
+        linear_state_phase="before-review",
+    )
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        fresh_ticket=lambda ref: replace(linked, pr_base="dev"),
+        runner=gh,
+    )
+
+    with pytest.raises(RetryableShipError, match="PR #42 targets dev; the ticket base is main"):
+        actions.handoff(linked, HEAD)
+
+    assert gh.calls == []
+    assert linear_writes == []

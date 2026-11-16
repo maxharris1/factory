@@ -299,6 +299,14 @@ class RouteError(RuntimeError):
         self.source_comment_id = source_comment_id
 
 
+class BaseMismatch(RuntimeError):
+    """A live read shows an open PR on another base than its ticket's."""
+
+    def __init__(self, message: str, ticket: TrackedTicket):
+        super().__init__(message)
+        self.ticket = ticket
+
+
 class PollCycleFailed(RuntimeError):
     pass
 

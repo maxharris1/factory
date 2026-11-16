@@ -21,7 +21,13 @@ from lib.dispatch.helpers import (
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, RetryableStateError, ShipError, TrackedTicket
+from lib.dispatch.types import (
+    BaseMismatch,
+    Comment,
+    RetryableStateError,
+    ShipError,
+    TrackedTicket,
+)
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     FAILED_UNSTARTED,
@@ -159,6 +165,8 @@ class MergeQueueMixin:
             return True, update_failed("the ready names the old head")
         try:
             fresh = self._fresh_ticket(ticket)
+        except BaseMismatch:
+            return False, "base-mismatch"
         except Exception:
             return False, "pr-head-unavailable"
         fresh = fresh or ticket
@@ -376,7 +384,10 @@ class MergeQueueMixin:
         polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
         if polled is None:
             return False
-        ticket = self._fresh_ticket(polled)
+        try:
+            ticket = self._fresh_ticket(polled)
+        except BaseMismatch:
+            return False
         if ticket is None:
             return False
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
@@ -449,6 +460,8 @@ class MergeQueueMixin:
                         f"#{head['ticket_id']}, which waits on its update or CI"
                     )
                 self._merge_queue_head(ticket, row, current)
+            except BaseMismatch:
+                continue
             except Exception as exc:
                 self._record_queue_error(row, exc)
             return

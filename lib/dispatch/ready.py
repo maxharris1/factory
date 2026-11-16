@@ -20,7 +20,7 @@ from lib.dispatch.helpers import (
     _scope,
     failed_checks,
 )
-from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.types import BaseMismatch, CIResult, Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
@@ -116,6 +116,8 @@ class ReadyMixin:
         if head is None:
             try:
                 fresh = self._fresh_ticket(ticket)
+            except BaseMismatch:
+                return False, "base-mismatch"
             except Exception:
                 return False, "pr-head-unavailable"
             if fresh is not None and fresh.merged:
