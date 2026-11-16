@@ -18,6 +18,9 @@ REQUIRED_PATHS = {
         "skills/figure-it-out/SKILL.md",
         "skills/poteto-mode/playbooks/opening-a-pr.md",
         "skills/poteto-mode/playbooks/feature.md",
+        "skills/poteto-mode/playbooks/bug-fix.md",
+        "skills/poteto-mode/playbooks/refactoring.md",
+        "skills/poteto-mode/playbooks/autopilot-full.md",
         "skills/principle-prove-it-works/SKILL.md",
         "skills/no-comments/SKILL.md",
         "agents/comment-sicko.md",
@@ -27,6 +30,8 @@ REQUIRED_PATHS = {
         "skills/poteto-mode/SKILL.md",
         "skills/interrogate/SKILL.md",
         "skills/blast-radius/SKILL.md",
+        "skills/poteto-mode/playbooks/autopilot-full.md",
+        "skills/poteto-mode/playbooks/shipping.md",
         "docs/harness/claude-code.md",
     },
     CODEX: {
@@ -37,6 +42,7 @@ REQUIRED_PATHS = {
 }
 
 PSTACK_REF = re.compile(r"<pstack>/([^\s`|]+)")
+KIT_REF = re.compile(r"<kit>/([^\s`|]+)")
 HEADER = re.compile(r"<!--\s*orch:v1\b.*?-->")
 TABLE_HEADER = "| pstack says | factory job does | why |"
 QUOTE = re.compile(r'"([^"]+)"')
@@ -121,3 +127,77 @@ def test_codex_adapter_follows_the_claude_adapter_shape() -> None:
     assert headings(CODEX) == headings(CLAUDE_ADAPTER)
     assert read(CODEX).startswith("# pstack in Codex\n")
     assert "Skipped in Codex: <step>. <reason>." in read(CODEX)
+
+
+ROUTERS_AND_ADAPTER = (BUILDER, REVIEWER, CODEX)
+
+STALE = {
+    "plan ticket id": r"\bT\d{1,3}\b",
+    "figure-it-out for every job": r"[Aa]lways[^.\n|]*figure-it-out|figure-it-out[^.\n|]*\balways\b|Careful playbook always",
+    "no force-push": r"no force-push",
+    "model map ticket": r"model map is",
+    "helpers on the reviewer's own model": r"\bown model\b",
+    "unclear intent sent to BLOCKED": r"intent[^.\n|]*BLOCKED|BLOCKED[^.\n|]*intent",
+    "a kit path outside the pinned tree": r"(?<!<kit>/)skills/cursor-team-kit/",
+    "a rule a later ticket will write": r"will spell this",
+    "a second title shape": r"Title is `#<issue>: type\(scope\): subject`, for example",
+}
+
+
+@pytest.mark.parametrize("rel", ROUTERS_AND_ADAPTER, ids=str)
+@pytest.mark.parametrize("name", sorted(STALE))
+def test_no_stale_phrase(rel: Path, name: str) -> None:
+    found = re.search(STALE[name], read(rel))
+    assert not found, f"{rel}: {name}: {found.group(0)!r}"
+
+
+def test_builder_gives_one_title_shape() -> None:
+    text = read(BUILDER)
+    assert "`#<issue>: type(scope): subject`" in text
+    shapes = set(re.findall(r"`#<issue>:[^`]*`", text))
+    assert shapes == {"`#<issue>: type(scope): subject`"}, shapes
+
+
+def test_builder_states_the_owner_duties() -> None:
+    text = collapse(read(BUILDER))
+    for phrase in (
+        "Feature step 4",
+        "Bug fix step 3",
+        "Autopilot-full step 2",
+        "`--force-with-lease`",
+        "<kit>/deslop/SKILL.md",
+        "<pstack>/skills/no-comments/SKILL.md",
+        "<pstack>/skills/principle-prove-it-works/SKILL.md",
+        "checks for the touched paths",
+    ):
+        assert phrase in text, f"builder does not say {phrase!r}"
+
+
+def test_builder_lets_poteto_mode_pick_the_playbook() -> None:
+    text = read(BUILDER)
+    for playbook in ("feature", "bug-fix", "refactoring"):
+        assert f"<pstack>/skills/poteto-mode/playbooks/{playbook}.md" in text
+    assert "<pstack>/skills/figure-it-out/SKILL.md" in text
+
+
+def test_reviewer_is_the_verifier_and_the_brief_owns_the_rules() -> None:
+    text = collapse(read(REVIEWER))
+    for phrase in ("Autopilot-full step 4", "Shipping step 1", "The brief decides what blocks"):
+        assert phrase in text, f"reviewer does not say {phrase!r}"
+    for restated in ("## Round 2", "## Same problem twice", "## BLOCKED", "repeat=", "unsat="):
+        assert restated not in text, f"reviewer restates the brief's rule: {restated!r}"
+
+
+@pytest.mark.parametrize("rel", [BUILDER, REVIEWER], ids=str)
+def test_routers_defer_models_and_unclear_intent_to_the_brief(rel: Path) -> None:
+    text = collapse(read(rel))
+    assert "models from the brief's model lines" in text, f"{rel}: helper models"
+    assert re.search(r"intent[^.]*`questions` handoff", text), f"{rel}: unclear intent"
+
+
+@pytest.mark.parametrize("rel", ROUTERS_AND_ADAPTER, ids=str)
+def test_every_named_kit_file_is_in_the_pin(rel: Path) -> None:
+    pinned = load_pin(ROOT).kit_hashes()
+    for ref in sorted({ref.rstrip(".,;:)") for ref in KIT_REF.findall(read(rel))}):
+        assert ref in pinned, f"{rel} names <kit>/{ref}, which is not in skills/skills.lock"
+        assert (ROOT / "skills" / "cursor-team-kit" / ref).is_file(), f"<kit>/{ref} is not on disk"
