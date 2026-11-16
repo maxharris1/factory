@@ -6,3 +6,6 @@ rejected	retry in _Chrome.run for every call	a one-shot run that hits a navigati
 rejected	Page.enable and wait for a navigation event	send discards events; more machinery than the poll the tests already use
 shared helper	the health.html load loop in test_dashboard_system uses wait_for too	same race after Page.navigate; one poll for both files
 proof	200 repeats at -n 24: 21 failed before, 0 after; 200 at -n 8: 3 failed before, 0 after; 50 at -n 8 after: 0 failed	scratch parametrized test calling the target 200 times, not committed
+second root cause (round 3)	_wait accepted the server-rendered canvas, which exists before the first status.json response starts the live journey; fixed 0.4 s sleeps then read a blank canvas and zero-size buttons	reproduced: the round-2 head failed 50/50 at -n 8 with Playwright Chromium 1234; a status.json delayed 1.5 s fails it every time
+readiness fix	_drawn polls each drawing check (journey painted, buttons sized, chart painted) up to 30 s; the stillness test waits for a painted journey before sampling	the page signals nothing else when the live journey starts; the observation itself is the readiness condition, and a page that never draws still fails at the deadline
+regression test	target parametrized over status.json served now and 1.5 s late	makes the race deterministic in CI instead of depending on load
