@@ -65,6 +65,37 @@ def _with_fields(detail: str | None, **fields: object) -> str | None:
     return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
 
+def _harness_job_active(connection: sqlite3.Connection, key: tuple[str, str]) -> bool:
+    return (
+        connection.execute(
+            """
+            SELECT 1 FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+              AND state IN ('queued', 'running')
+            LIMIT 1
+            """,
+            key,
+        ).fetchone()
+        is not None
+    )
+
+
+def _newest_harness_job(
+    connection: sqlite3.Connection, key: tuple[str, str]
+) -> Job | None:
+    row = connection.execute(
+        f"""
+        SELECT * FROM jobs
+        WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+          AND action IN ({", ".join("?" for _ in _HARNESS_ACTIONS)})
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (*key, *_HARNESS_ACTIONS),
+    ).fetchone()
+    return None if row is None else _job(row)
+
+
 class RetryMixin:
     def _t_retry(
         self,
@@ -118,33 +149,19 @@ class RetryMixin:
             return outcome, row["workflow_state"]
         reason = None if row is None else row["stuck_reason"]
         if row is None or not row["stuck"]:
+            if self._unlanded_plan(connection, ticket) is not None:
+                job = self._replan_in_transaction(connection, ticket, comment)
+                return self._record_retry(
+                    connection, ticket, comment, None, job, "queued-retry-plan"
+                ), "planning"
             return self._record_retry(
                 connection, ticket, comment, reason, None, "rejected-retry-not-stuck"
             ), None
-        active = connection.execute(
-            """
-            SELECT 1 FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
-              AND state IN ('queued', 'running')
-            LIMIT 1
-            """,
-            key,
-        ).fetchone()
-        if active is not None:
+        if _harness_job_active(connection, key):
             return self._record_retry(
                 connection, ticket, comment, reason, None, "rejected-retry-job-active"
             ), None
-        newest_row = connection.execute(
-            f"""
-            SELECT * FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
-              AND action IN ({", ".join("?" for _ in _HARNESS_ACTIONS)})
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT 1
-            """,
-            (*key, *_HARNESS_ACTIONS),
-        ).fetchone()
-        newest = None if newest_row is None else _job(newest_row)
+        newest = _newest_harness_job(connection, key)
         step = _retry_step(
             reason, row["workflow_state"], None if newest is None else newest.state
         )
@@ -230,6 +247,78 @@ class RetryMixin:
             job,
             f"queued-retry-{request.action}",
         ), state
+
+    def _unlanded_plan(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket
+    ) -> Job | None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        row = connection.execute(
+            "SELECT workflow_state, stuck FROM ticket_state"
+            " WHERE repo = ? AND ticket_id = ?",
+            key,
+        ).fetchone()
+        if (
+            row is None
+            or row["workflow_state"] != "planning"
+            or row["stuck"]
+            or _harness_job_active(connection, key)
+        ):
+            return None
+        newest = _newest_harness_job(connection, key)
+        if (
+            newest is None
+            or newest.request.action != "plan"
+            or newest.state != "done"
+            or any(item.id == newest.handoff_comment_id for item in ticket.comments)
+        ):
+            return None
+        return newest
+
+    def _replan_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> Job:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        generation = int(
+            connection.execute(
+                "SELECT generation FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                key,
+            ).fetchone()["generation"]
+        ) + 1
+        connection.execute(
+            """
+            UPDATE ticket_state
+            SET generation = ?, plan_gap_count = 0, plan_check_comment_id = NULL
+            WHERE repo = ? AND ticket_id = ?
+            """,
+            (generation, *key),
+        )
+        job, _ = self._enqueue_step(
+            connection,
+            ticket,
+            comment,
+            JobRequest(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                action="plan",
+                recipient=ticket.factory.builder_harness,
+                source_comment_id=comment.id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                generation=generation,
+                detail=self._job_detail(ticket, action="plan"),
+            ),
+            dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:plan:g{generation}",
+        )
+        connection.execute(
+            """
+            DELETE FROM needs_attention
+            WHERE repo = ? AND ticket_id = ? AND reason = 'unverified-handoff'
+            """,
+            key,
+        )
+        return job
 
     def _retry_request(
         self,

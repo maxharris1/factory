@@ -43,6 +43,17 @@ class T1Mixin:
             return True, "go-after-handoff"
         if not trusted:
             return True, "rejected-go-author"
+        if action == "plan":
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                replanned = self._unlanded_plan(connection, ticket) is not None
+                if replanned:
+                    self._replan_in_transaction(connection, ticket, comment)
+                connection.commit()
+            if replanned:
+                self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+                self._write_state_label(ticket, "planning")
+                return True, "queued-plan"
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
