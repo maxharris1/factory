@@ -151,7 +151,8 @@ def test_dashboard_shows_webhook_health_only_when_a_listener_ran(
     }
     page = render_html(snapshot)
     assert '<span class="ilabel">Linear webhook</span>' in page
-    assert f'<p class="muted">note: {QUIET}</p>' in page
+    assert f'<p class="muted">{QUIET}</p>' in page
+    assert page.count(QUIET) == 1
 
 
 def _poll_once(db: Path, *, at: float, webhook: bool) -> None:
@@ -200,7 +201,8 @@ def test_status_and_dashboard_note_when_webhook_polling_has_no_listener(
         "note": QUIET,
     }
     assert "last received never (listener has not started)" in page
-    assert f"note: {QUIET}" in page
+    assert f'<p class="muted">{QUIET}</p>' in page
+    assert f"note: {QUIET}" not in page
 
 
 def test_webhook_polling_without_a_listener_is_shown_but_not_warned_within_the_hour(
