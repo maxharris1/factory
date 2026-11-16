@@ -307,7 +307,7 @@ class RetryMixin:
                 source_comment_id=comment.id,
                 timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
-                detail=self._job_detail(ticket, action="plan", resume=True),
+                detail=self._job_detail(ticket, action="plan"),
             ),
             dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:plan:g{generation}",
         )

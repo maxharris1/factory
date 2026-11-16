@@ -22,6 +22,7 @@ from lib.dispatcher import (
     ship_mode,
 )
 from lib.dashboard import collect_snapshot
+from lib.brief import render_brief
 from lib.dispatch.helpers import _scope
 from lib.device_pool import DevicePool
 from lib.evidence.criteria import canonical_brief
@@ -7816,8 +7817,11 @@ def assert_fresh_plan_on_factory_pr(queue: SQLiteJobQueue, source: str) -> None:
     assert not {"instruction", "plan_round", "plan_text", "unmapped"} & detail.keys()
     assert detail["pr_number"] == FACTORY_PR
     assert detail["post_to"].startswith(f"PR #{FACTORY_PR} ")
-    assert "wrong-pr-plan" not in (plan.request.detail or "")
-    assert WRONG_PR not in (plan.request.detail or "")
+    brief = render_brief(plan, bot="claude-bot", context=None)
+    for text in (plan.request.detail or "", brief):
+        assert "wrong-pr-plan" not in text
+        assert WRONG_PR not in text
+        assert "previous plan" not in text
     row = ticket_row(queue)
     assert (row["workflow_state"], row["stuck"], row["generation"]) == ("planning", 0, 2)
     assert (row["plan_gap_count"], row["plan_check_comment_id"]) == (0, None)
@@ -7864,6 +7868,44 @@ def test_a_second_go_after_a_replan_dedupes(tmp_path: Path) -> None:
     assert handled_outcome(queue, "go-1") == "queued-plan"
     assert handled_outcome(queue, "go-2") == "deduped-plan"
     assert_fresh_plan_on_factory_pr(queue, "go-1")
+
+
+@pytest.mark.parametrize("kind", ["retry", "go"])
+def test_replan_after_a_lost_gap_plan_drops_the_gap_instruction(
+    tmp_path: Path, kind: str
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now=now)
+    seed_finished_plan(queue, handoff="plan-1")
+    first = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=101,
+        url=f"https://github.com/owner/repo/pull/{WRONG_PR}#issuecomment-101",
+    )
+    now[0] = 110
+    dispatcher.process(replace(factory_pr_ticket(first), pr_number=WRONG_PR))
+    gap = queue.claim("claude")
+    assert gap is not None
+    assert "round=2/2; previous plan" in (gap.request.detail or "")
+    now[0] = 120
+    queue.finish(gap.id, owner="claude", handoff_comment_id="missing-plan-2")
+    now[0] = 150
+    sent = (
+        retry(created_at=140)
+        if kind == "retry"
+        else comment(
+            "go-1", GO.format(state="planning"), author="grok-login", created_at=140
+        )
+    )
+
+    dispatcher.process(factory_pr_ticket(sent))
+
+    assert handled_outcome(queue, sent.id) == (
+        "queued-retry-plan" if kind == "retry" else "queued-plan"
+    )
+    assert_fresh_plan_on_factory_pr(queue, sent.id)
 
 
 def landed_plan_comment(queue: SQLiteJobQueue) -> tuple[Comment, ...]:
