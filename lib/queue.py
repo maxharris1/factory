@@ -1056,15 +1056,8 @@ def require_latest_claim(connection: sqlite3.Connection, job_id: str, proof: Pro
     if proof is None:
         return
     row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    if row is None or row["state"] == "running":
-        require_proof(connection, job_id, proof)
-        return
-    if not job_token.matches(proof.token, row["claim_token_hash"]):
-        raise ClaimProofError(
-            f"job {job_id} is {row['state']} after a claim this process's ORCH_JOB_PROOF "
-            "does not prove (released and claimed again, or never this process's); "
-            "nothing changed"
-        )
+    if row is not None:
+        _require_claim(connection, row, proof)
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
