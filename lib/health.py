@@ -213,8 +213,7 @@ class Uptime(NamedTuple):
 
 def read_uptime(clock: Callable[[], float] = time.time) -> Uptime | None:
     """This boot's id and monotonic clock, or None when the boot id is
-    unreadable or `clock` is not the real wall clock (a fixed test clock has
-    no monotonic clock to pair with)."""
+    unreadable or `clock` is not the real wall clock."""
     if clock is not time.time:
         return None
     try:
@@ -1071,8 +1070,6 @@ def classify(row: Heartbeat, now: float, uptime: Uptime | None = None) -> tuple[
 
 
 def _age(row: Heartbeat, now: float, uptime: Uptime | None) -> float:
-    """Seconds since the last beat, less any time the box was suspended: the
-    monotonic age when the beat and `uptime` share a boot, if it is smaller."""
     wall = max(0.0, now - row.last_seen)
     if uptime is None or row.seen_monotonic is None or row.seen_boot != uptime.boot:
         return wall
