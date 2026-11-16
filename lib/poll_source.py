@@ -39,6 +39,7 @@ from lib.dispatcher import (
     scrub_detail,
     trusted_bots,
 )
+from lib.dispatch.types import ci_on_base, no_ci_base
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.cycle_clock import CycleClock
@@ -1469,7 +1470,12 @@ class LivePollSource:
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={head: self.github.ci_status(project.repo, head)},
+            ci={
+                head: ci_on_base(
+                    self.github.ci_status(project.repo, head),
+                    no_ci_base(factory, _pr_base(pull)),
+                )
+            },
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -1680,6 +1686,7 @@ class LivePollSource:
         comments = linear_comments
         brief = canonical_brief(linear_comments, self._trusted)
         head = _latest_head(linear_comments)
+        factory = self._factory(project)
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
         pr_number = self._factory_pr_number(
@@ -1698,7 +1705,10 @@ class LivePollSource:
                 self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
             pr_title = _open_title(pull)
-            ci[head] = self.github.ci_status(project.repo, head)
+            ci[head] = ci_on_base(
+                self.github.ci_status(project.repo, head),
+                no_ci_base(factory, _pr_base(pull)),
+            )
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
                 sorted(
@@ -1712,7 +1722,6 @@ class LivePollSource:
                 identifier,
                 PollSourceError("Linear issue has no linked GitHub PR"),
             )
-        factory = self._factory(project)
         hold = (
             self._hold_inputs(project.repo, pr_number, factory, pull)
             if pr_number is not None
@@ -2326,7 +2335,13 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
         "closed": pull.get("state") == "closed" and not merged,
         "draft": pull["draft"] if isinstance(pull.get("draft"), bool) else None,
         "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
+        "pr_base": _pr_base(pull),
     }
+
+
+def _pr_base(pull: Mapping[str, Any]) -> str | None:
+    base = pull.get("base")
+    return _optional_string(base.get("ref")) if isinstance(base, Mapping) else None
 
 
 def _optional_string(value: object) -> str | None:

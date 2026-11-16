@@ -58,8 +58,30 @@ class CIResult:
     pending: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.status not in ("pending", "success", "failure"):
+        if self.status not in CI_STATUSES:
             raise ValueError(f"unknown CI status {self.status!r}")
+
+    @property
+    def clears(self) -> bool:
+        return self.status in ("success", "not-run")
+
+
+# #615: not-run is a head on a base CI never runs on (factory.md ci.branches)
+# that reported nothing. It clears the CI gates but is never a recorded green.
+CI_STATUSES = ("pending", "success", "failure", "not-run")
+
+
+def no_ci_base(factory: FactoryConfig, pr_base: str | None) -> str | None:
+    """The PR's base when factory.md lists CI branches and this base is not one."""
+    if factory.ci_branches is None or pr_base is None or pr_base in factory.ci_branches:
+        return None
+    return pr_base
+
+
+def ci_on_base(result: CIResult, base_without_ci: str | None) -> CIResult:
+    if base_without_ci is None or result.reported or result.status != "pending":
+        return result
+    return CIResult("not-run", reported=False)
 
 
 # Where a Linear issue stands relative to Ready for Review, read with the
@@ -135,6 +157,11 @@ class TrackedTicket:
     draft: bool | None = None
     intake_label: str | None = None
     changed_lines: int | None = None
+    pr_base: str | None = None
+
+    @property
+    def no_ci_base(self) -> str | None:
+        return no_ci_base(self.factory, self.pr_base)
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
