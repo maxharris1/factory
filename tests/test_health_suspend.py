@@ -259,6 +259,24 @@ def without_checked_boot(db: Path) -> None:
         connection.execute(f"ALTER TABLE {health.TABLE} DROP COLUMN checked_boot")
 
 
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_previous_release_failed_check_after_its_current_boot_success_stays_visible(
+        tmp_path: Path, component: str, device: str, interval: float) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat(component, device, pid=101, interval=interval)
+    clocks.advance(wall=1.0, monotonic=1.0)
+    store.checked(component, device, pid=202, interval=interval)
+    without_checked_boot(db)
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime())
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.pid) == ("stale", 202)
+    assert item.reason.endswith(" 1s ago")
+
+
 @pytest.mark.parametrize("written_before_upgrade", [False, True])
 @pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
 def test_a_current_boot_success_outranks_an_earlier_boot_failure_ahead_on_the_wall(

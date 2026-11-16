@@ -1299,7 +1299,9 @@ def _without_earlier_boots_once_this_boot_succeeded(
         group: list[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
     if uptime is None or all(r.seen_boot != uptime.boot for r in group):
         return group
-    return [r for r in group if (r.checked_boot or r.seen_boot) == uptime.boot]
+    bootless_rows_predate_a_check = any(r.checked_boot == uptime.boot for r in group)
+    kept_boots = {uptime.boot} if bootless_rows_predate_a_check else {uptime.boot, None}
+    return [r for r in group if (r.checked_boot or r.seen_boot) in kept_boots]
 
 
 def _checked(row: Heartbeat) -> float:
