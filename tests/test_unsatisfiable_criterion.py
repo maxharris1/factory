@@ -152,7 +152,7 @@ def test_an_approvers_building_go_queues_a_fix_round_at_the_parked_head(tmp_path
     detail = json.loads(fix.request.detail or "{}")
     assert (fix.request.head, detail["round"]) == (HEADS[1], "2/3")
     first, second = detail["instruction"].split("\n")
-    assert (first.endswith("revise-1"), second.endswith("go-2")) == (True, True)
+    assert first.endswith("revise-1") and second.endswith("go-2")
     state = flow.state()
     assert (state["workflow_state"], state["review_round"], state["cap_extra"], state["paused_action"]) == (
         "fixing",

@@ -216,9 +216,8 @@ def test_pr_580_building_go_on_an_unsat_park_fixes_then_reviews_the_new_head(tmp
             job = queue.claim(recipient)
             if job is None:
                 continue
-            claimed.append(
-                (job.request.action, recipient, job.request.head, json.loads(job.request.detail or "{}").get("round"))
-            )
+            detail = json.loads(job.request.detail or "{}")
+            claimed.append((job.request.action, recipient, job.request.head, detail.get("round")))
             answer = comments[shown].id if shown < len(comments) else None
             queue.finish(job.id, owner=recipient, handoff_comment_id=answer)
 
