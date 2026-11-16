@@ -474,8 +474,6 @@ class SchemaMixin:
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
             attention.ensure_table(connection)
-            # #615: the head a ready names on a CI base, and since when it has
-            # had no check run or status; past CI_SILENT_SECONDS it is ci-silent.
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ci_silence (
