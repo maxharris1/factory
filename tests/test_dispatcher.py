@@ -7853,6 +7853,19 @@ def test_go_planning_replans_a_plan_whose_handoff_never_landed(tmp_path: Path) -
     assert "dedupe-dropped" not in _attention(queue)
 
 
+def test_a_second_go_after_a_replan_dedupes(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_finished_plan(queue)
+    first = comment("go-1", GO.format(state="planning"), author="grok-login", created_at=60)
+    second = comment("go-2", GO.format(state="planning"), author="grok-login", created_at=70)
+
+    dispatcher.process(factory_pr_ticket(first, second))
+
+    assert handled_outcome(queue, "go-1") == "queued-plan"
+    assert handled_outcome(queue, "go-2") == "deduped-plan"
+    assert_fresh_plan_on_factory_pr(queue, "go-1")
+
+
 def landed_plan_comment(queue: SQLiteJobQueue) -> tuple[Comment, ...]:
     with queue.connect() as connection:
         connection.execute(
