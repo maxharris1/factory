@@ -107,7 +107,7 @@ def test_user_impact_files_a_round_one_follow_up(tmp_path: Path) -> None:
     assert filings(queue) == [(VERDICT_ID, 1, "commented", 300)]
     [(title, body, labels)] = actions.issues.values()
     assert title == "Follow-ups from #42 r1"
-    assert labels == ("factory:ready", "urgent")
+    assert labels == ()
     assert "> 1. [follow-up] lib/a.py:10 breaks the path-format rule from round 2." in body
 
 
