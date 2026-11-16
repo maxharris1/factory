@@ -152,26 +152,69 @@ def test_no_stale_phrase(rel: Path, name: str) -> None:
 
 
 TITLE = "#<issue>: type(scope): subject"
+SENTENCE = re.compile(r"(?<=[.!?])\s+|\n")
+TITLE_WORD = re.compile(r"\btitles?\b", re.I)
+TITLE_TEXT = re.compile(r"\btitles?\b(?:\s+is|\s*:)\s*(.+)", re.I)
+TEMPLATE = re.compile(r"[^`\n|]*(?:type\(scope\)|#<issue>:)[^`\n|]*")
+
+
+def instruction_text(text: str) -> str:
+    lines = (line.split("|", 2)[-1] if line.startswith("|") else line for line in text.splitlines())
+    return "\n".join(lines)
+
+
+def title_shapes(text: str) -> set[str]:
+    text = instruction_text(text)
+    shapes = {shape.strip() for shape in TEMPLATE.findall(text)}
+    for sentence in SENTENCE.split(text):
+        if not TITLE_WORD.search(sentence):
+            continue
+        spans = re.findall(r"`([^`]+)`", sentence)
+        if spans:
+            shapes.update(span.strip() for span in spans)
+        elif match := TITLE_TEXT.search(sentence):
+            shapes.add(match.group(1).strip().rstrip("."))
+    return shapes
 
 
 def other_title_shapes(text: str) -> set[str]:
-    return {shape.strip() for shape in re.findall(r"#<issue>:[^`\n|]*", text)} - {TITLE}
+    return title_shapes(text) - {TITLE}
+
+
+def before_table(rel: Path, line: str) -> str:
+    text = read(rel)
+    if rel == CODEX:
+        return f"{text}\n{line}\n"
+    start = text.rindex(TABLE_HEADER)
+    return f"{text[:start]}{line}\n\n{text[start:]}"
 
 
 def test_builder_gives_the_title_shape() -> None:
     assert f"`{TITLE}`" in read(BUILDER)
+    assert title_shapes(read(BUILDER)) == {TITLE}
 
 
 @pytest.mark.parametrize("rel", ROUTERS_AND_ADAPTER, ids=str)
-def test_one_title_shape(rel: Path) -> None:
+def test_every_title_shape_starts_with_the_issue_prefix(rel: Path) -> None:
     shapes = other_title_shapes(read(rel))
-    assert not shapes, f"{rel}: a second title shape: {sorted(shapes)}"
+    assert not shapes, f"{rel}: a title shape other than {TITLE!r}: {sorted(shapes)}"
 
 
 @pytest.mark.parametrize("rel", ROUTERS_AND_ADAPTER, ids=str)
-@pytest.mark.parametrize("line", ["The PR title is `#<issue>: subject`.", "Title: #<issue>: fix the bug"])
-def test_title_guard_catches_a_second_shape(rel: Path, line: str) -> None:
-    assert other_title_shapes(f"{read(rel)}\n{line}\n"), f"{rel}: guard missed {line!r}"
+@pytest.mark.parametrize(
+    "line",
+    [
+        "The PR title is `type(scope): subject`.",
+        "Use a Conventional Commits title, `fix(router): drop the stale row`.",
+        "Titles follow `type(scope): subject`, no trailing period.",
+        "Title: fix the bug",
+        "The PR title is `#<issue>: subject`.",
+        "Title: #<issue>: fix the bug",
+        "Write `type(scope): subject` for the PR.",
+    ],
+)
+def test_title_guard_rejects_a_shape_without_the_full_prefix(rel: Path, line: str) -> None:
+    assert other_title_shapes(before_table(rel, line)), f"{rel}: guard missed {line!r}"
 
 
 def test_builder_states_the_owner_duties() -> None:
