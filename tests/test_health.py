@@ -253,11 +253,11 @@ def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.Monkey
         "component", "device", "bot", "pid", "started_at", "last_seen",
         "version", "interval_seconds", "stopped_at", "checked_at",
         "cycle_started_at", "last_cycle_seconds", "seen_boot", "seen_monotonic",
-        "checked_boot",
+        "checked_boot", "down_since",
     ]
     for record in values:
         (component, device, bot, pid, started, seen, version, interval, stopped, checked,
-         cycle_started, last_cycle, seen_boot, seen_monotonic, checked_boot) = record
+         cycle_started, last_cycle, seen_boot, seen_monotonic, checked_boot, down_since) = record
         assert seen_boot is None or health._BOOT.fullmatch(seen_boot)
         assert checked_boot is None or health._BOOT.fullmatch(checked_boot)
         assert seen_monotonic is None or isinstance(seen_monotonic, float)
@@ -266,7 +266,8 @@ def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.Monkey
         assert bot in ("", "claude-bot", "codex-bot", "cursor-bot")
         assert isinstance(pid, int)
         assert health.VERSION.fullmatch(version)
-        for number in (started, seen, interval, stopped, checked, cycle_started, last_cycle):
+        for number in (started, seen, interval, stopped, checked, cycle_started, last_cycle,
+                       down_since):
             assert number is None or isinstance(number, float)
     path = health.health_path(db)
     wal = Path(f"{path}-wal")
@@ -2031,6 +2032,35 @@ def test_a_tunnel_never_reached_keeps_its_item_across_a_listener_restart(tmp_pat
     report = health.load_report(db, NOW, orch=orch(listener=True))
     assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 102)]
     assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+
+
+def test_a_tunnel_never_reached_keeps_its_item_when_the_restarted_listener_reuses_the_pid(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 31 * 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 30).stop("tunnel", "box", pid=101)
+    store(db, NOW).checked("tunnel", "box", pid=101, started_at=NOW - 29)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 101)]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+    store(db, NOW + 60).beat("tunnel", "box", pid=101, started_at=NOW - 29)
+    assert health.load_report(db, NOW + 61, orch=orch(listener=True)).attention == ()
+
+
+def test_a_tunnel_last_reached_before_a_reboot_keeps_its_item_when_the_pid_is_reused(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    before, after = "1" * 8 + "-1111-1111-1111-" + "1" * 12, "2" * 8 + "-2222-2222-2222-" + "2" * 12
+    health.HealthStore(db, devices=DEVICES, clock=lambda: NOW - 3600,
+                       uptime=lambda: health.Uptime(before, 50_000.0)).beat(
+        "tunnel", "box", pid=101, started_at=NOW - 4000)
+    health.HealthStore(db, devices=DEVICES, clock=lambda: NOW,
+                       uptime=lambda: health.Uptime(after, 40.0)).checked(
+        "tunnel", "box", pid=101, started_at=NOW - 40)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [c.state for c in _tunnel(report)] == ["down"]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 3600)]
 
 
 def test_a_held_record_written_again_does_not_restart_a_never_reached_tunnels_clock(

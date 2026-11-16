@@ -77,9 +77,10 @@ Needs attention (#581): a configured tunnel down longer than
 `linear_webhook.tunnel_alert_minutes` is a "tunnel-down" item, derived on
 every read, so it stays while the tunnel is down and is gone on the first
 read that finds it up. It is down since its last success, or, if it never
-succeeded, since the first listener that checked it started, so a listener
-restart does not reset the clock; while the tunnel loop holds, since the
-held record was written if that is earlier. A tunnel with none of these raises no item.
+succeeded, since the first listener that checked it started, so no
+listener restart (same or new PID) and no reboot resets the clock; while
+the tunnel loop holds, since the held record was written if that is
+earlier. A tunnel with none of these raises no item.
 The item makes `orch health` exit 3 and is `needs_attention` in its JSON,
 which the hourly momentum check reads.
 
@@ -194,15 +195,17 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     seen_boot TEXT,
     seen_monotonic REAL,
     checked_boot TEXT,
+    down_since REAL,
     PRIMARY KEY (component, device, bot, pid)
 )
 """
 _ADDED = {"cycle_started_at": "REAL", "last_cycle_seconds": "REAL",
-          "seen_boot": "TEXT", "seen_monotonic": "REAL", "checked_boot": "TEXT"}
+          "seen_boot": "TEXT", "seen_monotonic": "REAL", "checked_boot": "TEXT",
+          "down_since": "REAL"}
 _COLUMNS = (
     "component, device, bot, pid, started_at, last_seen, version, "
     "interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds, "
-    "seen_boot, seen_monotonic, checked_boot"
+    "seen_boot, seen_monotonic, checked_boot, down_since"
 )
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _BOOT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -442,7 +445,7 @@ class HealthStore:
             with connection:
                 connection.execute(
                     f"INSERT INTO {TABLE} ({_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL) "
                     "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
                     "started_at = excluded.started_at, last_seen = excluded.last_seen, "
                     "version = excluded.version, interval_seconds = excluded.interval_seconds, "
@@ -450,7 +453,7 @@ class HealthStore:
                     "cycle_started_at = excluded.cycle_started_at, "
                     "last_cycle_seconds = excluded.last_cycle_seconds, "
                     "seen_boot = excluded.seen_boot, seen_monotonic = excluded.seen_monotonic, "
-                    "checked_boot = excluded.checked_boot",
+                    "checked_boot = excluded.checked_boot, down_since = NULL",
                     (component, device, bot, pid, _real(started_at, now), now, version,
                      float(interval), now, _optional(cycle_started_at),
                      _optional(last_cycle_seconds), boot, monotonic, boot),
@@ -486,11 +489,12 @@ class HealthStore:
         boot = None if seen is None else seen.boot
         self._write(
             f"INSERT INTO {TABLE} ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?9) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?9, ?5) "
             "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
             "started_at = excluded.started_at, version = excluded.version, "
             "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
             "checked_at = excluded.checked_at, checked_boot = excluded.checked_boot, "
+            "down_since = COALESCE(down_since, last_seen, excluded.down_since), "
             f"{_FORGET_SUCCESS_FROM_ANOTHER_BOOT}",
             (component, device, bot, pid, _real(started_at, now), version,
              float(interval), now, boot),
@@ -1031,6 +1035,7 @@ class Heartbeat(NamedTuple):
     seen_boot: str | None = None
     seen_monotonic: float | None = None
     checked_boot: str | None = None
+    down_since: float | None = None
 
 
 def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
@@ -1125,7 +1130,7 @@ class Component:
     stale_code: bool = False
     last_cycle_seconds: float | None = None
     cycle_seconds: float | None = None
-    first_started_at: float | None = None
+    down_since: float | None = None
 
     @property
     def label(self) -> str:
@@ -1290,33 +1295,31 @@ def _better(a: Component, b: Component) -> bool:
     return (_RANK[a.state], a.last_seen or 0.0) > (_RANK[b.state], b.last_seen or 0.0)
 
 
-def _latest_checks(rows: Sequence[Heartbeat],
-                   uptime: Uptime | None) -> list[tuple[Heartbeat, float | None]]:
+def _latest_checks(rows: Sequence[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
     """A device probe, tunnel check or dashboard push is a fact about its
     target, not about the process that made it: across processes (a poller
     or listener that restarted), the newest check decides, with the newest
-    success as its last seen and the earliest process start as its first
-    check. Every other component keeps one row per process, paired with
-    its own start."""
+    success as its last seen and the earliest outage start as its down
+    since. Every other component keeps one row per process."""
     groups: dict[tuple[str, str, str], list[Heartbeat]] = {}
     others = []
     for row in rows:
         if row.component in CHECKS:
             groups.setdefault((row.component, row.device, row.bot), []).append(row)
         else:
-            others.append((row, row.started_at))
+            others.append(row)
     merged = []
     for group in groups.values():
         group = _without_earlier_boots_once_this_boot_succeeded(group, uptime)
         last_check = max(group, key=_checked)
         last_success = max(group, key=lambda r: -math.inf if r.last_seen is None else r.last_seen)
-        starts = [r.started_at for r in group if r.started_at is not None]
-        merged.append((last_check._replace(
+        merged.append(last_check._replace(
             last_seen=last_success.last_seen,
             seen_boot=last_success.seen_boot,
             seen_monotonic=last_success.seen_monotonic,
             checked_at=_checked(last_check),
-        ), min(starts, default=None)))
+            down_since=min((r.down_since for r in group if r.down_since is not None), default=None),
+        ))
     return others + merged
 
 
@@ -1366,7 +1369,7 @@ def build_report(
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
-    for row, first_started_at in _latest_checks(rows or (), uptime):
+    for row in _latest_checks(rows or (), uptime):
         state, reason = classify(row, now, uptime)
         item = Component(
             component=row.component,
@@ -1377,7 +1380,7 @@ def build_report(
             reason=reason,
             last_seen=row.last_seen,
             started_at=row.started_at,
-            first_started_at=first_started_at,
+            down_since=row.down_since,
             version=row.version,
             interval=row.interval_seconds,
             configured=registry.wants(row.component, row.device, row.bot),
@@ -1426,7 +1429,7 @@ def build_report(
 
 
 def _down_since(c: Component, held_since: float | None) -> float | None:
-    checked = c.last_seen if c.last_seen is not None else c.first_started_at
+    checked = c.last_seen if c.last_seen is not None else c.down_since
     return min((t for t in (held_since, checked) if t is not None), default=None)
 
 
