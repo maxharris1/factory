@@ -3,10 +3,12 @@
 A pure function: the caller reads the issue, its comments and the PR, and
 passes them in. The criteria text comes from the first source that has any:
 
-1. the canonical brief: the first `kind=brief` comment with `from=grok-bot`
-   whose author trusted_logins lets speak for grok-bot (with the four GitHub
-   Apps, the Factory App login). A brief from anyone else is skipped, even
-   when it comes first;
+1. the canonical brief: the latest `kind=brief` comment with `from=grok-bot`
+   and `role=orchestrator` whose author trusted_logins lets speak for
+   grok-bot (with the four GitHub Apps, the Factory App login). A brief from
+   anyone else is skipped, even when it comes last. The poll picks it once
+   (TrackedTicket.brief_comment), so the builder's brief and the reviewer's
+   criteria name the same comment (#495);
 2. the issue body;
 3. the PR description, only for a `ready_starts_review` project, whose PRs
    are built from a packet with no brief.
@@ -17,10 +19,16 @@ prose after it never supplies criteria.
 
 The source is parsed as CommonMark. When it has an "Acceptance criteria"
 heading outside any list, quote or code block, the text is the first such
-section, up to the next such heading of the same or a higher level. A code
+section, up to the next such heading of the same or a higher level. A
+top-level paragraph whose first line is only a bold "Acceptance criteria"
+label, as lib.orchestrate.brief_comment writes, counts as a heading below
+level 6: its section ends at the next heading of any level or the next bold
+label. A code
 example inside the section stays in the text. The criteria are the section's
-list items, each read from the first line of its leading paragraph; an item
-that opens with a code block, and any item inside a code block, is not one.
+list items, each read from the first line of its leading paragraph, or from
+its source line after the list marker when it opens with another block such
+as a quote, heading or nested list; an item that opens with a code block, and
+any item inside a code block, is not one, and a line yields one item at most.
 Without the heading, the text is the whole source and only its bulleted
 checkbox items are criteria. Criteria are numbered `ac-1`, `ac-2`, ... in
 order, so the same text always gets the same ids.
@@ -28,6 +36,8 @@ order, so the same text always gets the same ids.
 The text is capped at TEXT_LIMIT characters, the cap lib/brief.py holds.
 A longer text is cut from the end, at a line break when there is one, and
 ends with a note of how many characters and criteria were cut.
+
+When no source has any text, the source is "none" and the text is EMPTY.
 """
 
 from __future__ import annotations
@@ -50,8 +60,14 @@ _AC_HEADING = re.compile(r"^acceptance criteria\b", re.IGNORECASE)
 _TICKET_HEADING = re.compile(r"^ticket$", re.IGNORECASE)
 _CHECKBOX = re.compile(r"^\[[ xX]\]\s+(.+)$")
 _BULLETS = frozenset("-*+")
+_MARKER = re.compile(r"^(?:[ \t]*>)*[ \t]*(?:[-*+]|\d{1,9}[.)])")
 _MARKDOWN = MarkdownIt("commonmark")
 _NOTE_ROOM = 80
+_LABEL_LEVEL = 7
+EMPTY = (
+    "No acceptance criteria: no trusted brief, and the issue body and "
+    "PR description are empty or were not read."
+)
 
 
 @dataclass(frozen=True)
@@ -75,8 +91,7 @@ def criteria_evidence(
     *,
     issue_key: str,
     issue_url: str | None,
-    comments: Sequence[Comment],
-    trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
+    brief: Comment | None,
     issue_body: str | None,
     pr_body: str | None,
     ready_starts_review: bool,
@@ -85,7 +100,6 @@ def criteria_evidence(
 ) -> CriteriaEvidence:
     """The issue fields and acceptance criteria. See the module doc."""
     candidates: list[tuple[str, str | None, str | None]] = []
-    brief = canonical_brief(comments, trusted_logins)
     if brief is not None:
         candidates.append(("brief", brief.url, _quoted_ticket(parse_comment(brief.body).body)))
     candidates.append(("issue", issue_url, issue_body))
@@ -95,15 +109,16 @@ def criteria_evidence(
         if body is not None and body.strip():
             text, criteria, cut = _criteria(body, limit)
             return CriteriaEvidence(issue_key, issue_url, source, url, text, criteria, cut)
-    return CriteriaEvidence(issue_key, issue_url, "none", None, "", (), None)
+    return CriteriaEvidence(issue_key, issue_url, "none", None, EMPTY, (), None)
 
 
 def canonical_brief(
     comments: Sequence[Comment],
     trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
 ) -> Comment | None:
-    """The first brief a trusted orchestrator login posted, else None."""
-    for comment in sorted(comments, key=lambda item: item.created_at):
+    """The latest brief a trusted orchestrator login posted, else None."""
+    latest: Comment | None = None
+    for comment in sorted(comments, key=lambda item: (item.created_at, item.id)):
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
@@ -111,10 +126,11 @@ def canonical_brief(
         if (
             fields["kind"] == "brief"
             and fields.get("from") == ORCHESTRATOR
+            and fields.get("role") == "orchestrator"
             and ORCHESTRATOR in trusted_bots(trusted_logins, comment.author)
         ):
-            return comment
-    return None
+            latest = comment
+    return latest
 
 
 def _criteria(body: str, limit: int) -> tuple[str, tuple[Criterion, ...], str | None]:
@@ -175,8 +191,26 @@ def _quoted_ticket(body: str) -> str:
     return body
 
 
+def _labels(tokens: list[Token]) -> list[tuple[int, int, int, str]]:
+    """Each top-level paragraph whose first line is only one bold span, as a heading below level 6."""
+    labels = []
+    for index, token in enumerate(tokens[:-1]):
+        if token.type != "paragraph_open" or token.level != 0 or token.map is None:
+            continue
+        children = [
+            child
+            for child in tokens[index + 1].children or []
+            if child.type != "text" or child.content
+        ]
+        kinds = [child.type for child in children[:4]]
+        if kinds[:3] == ["strong_open", "text", "strong_close"] and kinds[3:] in ([], ["softbreak"]):
+            labels.append((index, token.map[0], _LABEL_LEVEL, children[1].content.strip()))
+    return labels
+
+
 def _section(lines: list[str]) -> list[str] | None:
-    headings = _headings(_parse(lines))
+    tokens = _parse(lines)
+    headings = sorted(_headings(tokens) + _labels(tokens), key=lambda item: item[1])
     starts = [(line, level) for _, line, level, title in headings if _AC_HEADING.match(title)]
     if not starts:
         return None
@@ -188,14 +222,23 @@ def _section(lines: list[str]) -> list[str] | None:
 
 
 def _items(text: str, checkboxes: bool) -> list[str]:
-    tokens = _parse(text.splitlines())
+    lines = text.splitlines()
+    tokens = _parse(lines)
     items = []
-    for index, token in enumerate(tokens[:-2]):
-        if token.type != "list_item_open" or tokens[index + 1].type != "paragraph_open":
+    seen = set()
+    for index, token in enumerate(tokens[:-1]):
+        block = tokens[index + 1]
+        if token.type != "list_item_open" or token.map is None or token.map[0] in seen:
+            continue
+        if block.type in ("list_item_close", "fence", "code_block"):
             continue
         if checkboxes and token.markup not in _BULLETS:
             continue
-        first = tokens[index + 2].content.split("\n", 1)[0].strip()
+        seen.add(token.map[0])
+        if block.type == "paragraph_open":
+            first = tokens[index + 2].content.split("\n", 1)[0].strip()
+        else:
+            first = _MARKER.sub("", lines[token.map[0]], count=1).strip()
         box = _CHECKBOX.match(first)
         if box is not None:
             items.append(box.group(1).strip())
