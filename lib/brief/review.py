@@ -156,13 +156,27 @@ def task_lines(facts: dict) -> list[str]:
         unchanged_tag = "`[minor]`, or `[follow-up]`."
     else:
         unchanged_tag = "`[minor]`."
-    gate = (
-        f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
-        "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
-        if verify and verify != "none"
-        else "factory.md names no verify skill (`none`): run interrogate and blast-radius, "
-        "and say which checks did not run."
-    )
+    if user_impact and later_round:
+        gate = (
+            f"Run the verify skill `{verify}` (UI and database checks). "
+            "A verify result you cannot read (unknown) is `verdict=BLOCKED`. "
+            if verify and verify != "none"
+            else "factory.md names no verify skill (`none`): say which checks did not run. "
+        ) + (
+            f"pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So run interrogate and "
+            "blast-radius only when the merge resolution or the commits after it are new behavior, a redesign or "
+            "a large new diff; otherwise say they were not run and why."
+        )
+    elif verify and verify != "none":
+        gate = (
+            f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
+            "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
+        )
+    else:
+        gate = (
+            "factory.md names no verify skill (`none`): run interrogate and blast-radius, "
+            "and say which checks did not run."
+        )
     steps = [
         "Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above "
         "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "

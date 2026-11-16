@@ -146,3 +146,30 @@ def test_round_two_checks_the_fix_only() -> None:
     assert "Close the earlier rounds first" not in brief
     assert "plus interrogate and blast-radius. A verify result" not in brief
     assert "[minor]" not in brief
+
+
+UNCONDITIONAL_PASS = ("plus interrogate and blast-radius.", "run interrogate and blast-radius, and say")
+MERGE = {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []}
+
+
+@pytest.mark.parametrize("verify", ["none", "verify-cleffy"])
+@pytest.mark.parametrize(
+    "update",
+    [None, MERGE, {**MERGE, "commits": ["c" * 40]}],
+    ids=["fix-round", "merge-update", "merge-update-with-commits"],
+)
+def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | None, verify: str) -> None:
+    facts = {
+        "base": "main",
+        "head": "d" * 40,
+        "verify": verify,
+        "round_number": 2,
+        "followup_from": None,
+        "block_on": "user-impact",
+        "update": update,
+        "rebase": None,
+        "start_before_ci": False,
+    }
+    text = "\n".join(review_brief.task_lines(facts))
+    assert not [phrase for phrase in UNCONDITIONAL_PASS if phrase in text]
+    assert "interrogate and blast-radius only when" in text
