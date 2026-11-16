@@ -1033,7 +1033,9 @@ class SkillReads:
 
     Fed the harness's own tool calls: Claude's Read and Skill, and the file
     operands of read commands (cat, sed, head ...) in Claude's Bash and
-    Codex's shell. A `test -f`, `ls` or `grep` is not a read."""
+    Codex's shell. A `test -f`, `ls` or `grep` is not a read. A call's files
+    count only once its result arrives without an error: a refused Skill or a
+    failed Read loaded nothing."""
 
     def __init__(self, root: str, locked: frozenset[str]):
         self.root = posixpath.normpath(root)
@@ -1044,44 +1046,61 @@ class SkillReads:
             if posixpath.basename(rel) == "SKILL.md"
         }
         self.read: set[str] = set()
+        self.pending: dict[str, set[str]] = {}
 
     @classmethod
     def pinned(cls, root: str, pin: Pin) -> SkillReads:
         trees = (("pstack", pin.files), ("factory", pin.factory), ("cursor-team-kit", pin.kit))
         return cls(root, frozenset(f"{tree}/{rel}" for tree, rows in trees for rel, _ in rows))
 
-    def claude_tool(self, name: str, data: dict) -> None:
+    def claude_tool(self, call_id: str, name: str, data: dict) -> None:
+        found: set[str] = set()
         if name == "Read":
-            self.path(_str(data.get("file_path")) or "", None)
+            self._path(found, _str(data.get("file_path")) or "", None)
         elif name == "Skill":
             rel = self.skills.get((_str(data.get("skill")) or "").rpartition(":")[2])
             if rel is not None:
-                self.read.add(rel)
+                found.add(rel)
         elif name == "Bash":
-            self.command(_command_text(data.get("command")))
+            self._command(found, _command_text(data.get("command")))
+        self._started(call_id, found)
 
-    def command(self, text: str) -> None:
+    def command(self, call_id: str, text: str) -> None:
+        found: set[str] = set()
+        self._command(found, text)
+        self._started(call_id, found)
+
+    def finished(self, call_id: str, error: bool) -> None:
+        found = self.pending.pop(call_id, set())
+        if not error:
+            self.read |= found
+
+    def row(self) -> str:
+        return json.dumps(sorted(self.read))
+
+    def _started(self, call_id: str, found: set[str]) -> None:
+        if found:
+            self.pending[call_id] = found
+
+    def _command(self, found: set[str], text: str) -> None:
         try:
-            self._script(text, None)
+            self._script(found, text, None)
         except ValueError:
             return
 
-    def path(self, path: str, base: str | None) -> None:
+    def _path(self, found: set[str], path: str, base: str | None) -> None:
         if _NOT_A_PATH.search(path) or not (base or posixpath.isabs(path)):
             return
         path = posixpath.normpath(posixpath.join(base or "", path))
         rel = path[len(self.root) + 1 :]
         if path.startswith(self.root + "/") and rel in self.locked:
-            self.read.add(rel)
+            found.add(rel)
 
-    def row(self) -> str:
-        return json.dumps(sorted(self.read))
-
-    def _script(self, script: str, base: str | None) -> None:
+    def _script(self, found: set[str], script: str, base: str | None) -> None:
         for words in _simple_commands(script):
-            base = self._cwd_after(words, base)
+            base = self._cwd_after(found, words, base)
 
-    def _cwd_after(self, words: list[str], base: str | None) -> str | None:
+    def _cwd_after(self, found: set[str], words: list[str], base: str | None) -> str | None:
         words = list(itertools.dropwhile(lambda word: word in _SHELL_WORDS or _ASSIGNMENT.match(word), words))
         if not words:
             return base
@@ -1092,11 +1111,11 @@ class SkillReads:
                 return None
             return posixpath.normpath(posixpath.join(base or "", target))
         if verb in _SHELLS and len(args) > 1 and args[0].startswith("-") and "c" in args[0]:
-            self._script(args[1], base)
+            self._script(found, args[1], base)
         elif verb in _READ_VERBS:
             for arg in args:
                 if not arg.startswith("-"):
-                    self.path(arg, base)
+                    self._path(found, arg, base)
         return base
 
 
@@ -1180,6 +1199,8 @@ class Summary:
         return True
 
     def _finished(self, call_id: str, error: bool, output: str) -> None:
+        if self.skills is not None:
+            self.skills.finished(call_id, error)
         entry = self._open.pop(call_id, None)
         if entry is None:
             return
@@ -1268,7 +1289,7 @@ class Summary:
             step = self._step(now, "tool", label, "running")
         self._open[call_id] = (step, command)
         if self.skills is not None:
-            self.skills.claude_tool(name, data)
+            self.skills.claude_tool(call_id, name, data)
         if self.live is not None:
             self.live.tool_use(name, call_id, data, now)
 
@@ -1346,7 +1367,7 @@ class Summary:
             command = _command_text(item.get("command"))
             self.commands += 1
             if self.skills is not None:
-                self.skills.command(command)
+                self.skills.command(ident, command)
             step = self._step(now, "command", "command", "running")
         elif item_type == "file_change":
             self._tool("file_change")

@@ -1738,6 +1738,18 @@ def _exec(command: str) -> dict:
     return {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command}}
 
 
+def _exec_done(exit_code: int) -> dict:
+    status = "completed" if exit_code == 0 else "failed"
+    item = {"id": "item_1", "type": "command_execution", "exit_code": exit_code, "status": status}
+    return {"type": "item.completed", "item": item}
+
+
+def _succeeded(event: dict) -> dict:
+    if event["type"] == "item.started":
+        return _exec_done(0)
+    return _result(event["message"]["content"][0]["id"])
+
+
 @pytest.mark.parametrize(
     "event, expected",
     [
@@ -1762,8 +1774,51 @@ def _exec(command: str) -> dict:
     ],
 )
 def test_only_reads_of_locked_files_under_the_skills_tree_count(event: dict, expected: list[str]) -> None:
-    summary = _feed(Summary("claude", Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), event)
+    summary = _feed(Summary("claude", Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), event, _succeeded(event))
     assert json.loads(summary.row()["skill_reads"]) == expected
+
+
+ARENA = f"{SKILLS}/pstack/skills/arena/SKILL.md"
+
+
+@pytest.mark.parametrize(
+    "harness, events, expected",
+    [
+        ("claude", [_use("t1", "Skill", {"skill": "pstack:unslop"})], []),
+        ("claude", [_use("t1", "Skill", {"skill": "pstack:unslop"}), _result("t1", "disable-model-invocation", error=True)], []),
+        ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t1", "File does not exist.", error=True)], []),
+        ("claude", [_use("t1", "Bash", {"command": f"cat {ARENA}"}), _result("t1", "Exit code 1", error=True)], []),
+        ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t2")], []),
+        ("codex", [_exec(f"cat {ARENA}")], []),
+        ("codex", [_exec(f"cat {ARENA}"), _exec_done(1)], []),
+        (
+            "claude",
+            [
+                _use("t1", "Read", {"file_path": ARENA}), _result("t1"),
+                _use("t2", "Bash", {"command": f"cat {ARENA}"}), _result("t2", "Exit code 1", error=True),
+            ],
+            ["pstack/skills/arena/SKILL.md"],
+        ),
+    ],
+    ids=[
+        "claude-no-result", "claude-skill-refused", "claude-read-failed", "claude-bash-failed",
+        "claude-other-call-result", "codex-not-completed", "codex-failed", "earlier-success-kept",
+    ],
+)
+def test_a_skill_file_counts_as_read_only_after_its_call_succeeds(
+    harness: str, events: list[dict], expected: list[str]
+) -> None:
+    summary = _feed(Summary(harness, Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), *events)
+    assert json.loads(summary.row()["skill_reads"]) == expected
+
+
+def test_a_refused_skill_tool_call_records_no_read(tmp_path: Path) -> None:
+    skills = SkillReads("/tmp/skill-probe/skills", frozenset({"pstack/skills/poteto-mode/SKILL.md"}))
+    session, db, _, _ = _session(tmp_path, skills=skills)
+    lines = (ROOT / "tests" / "fixtures" / "skill_probe" / "claude_skill_refused.jsonl").read_text(encoding="utf-8")
+    session.consume(io.BytesIO(lines.encode()))
+    session.finish(0)
+    assert json.loads(_row(db)["skill_reads"]) == []
 
 
 def test_skill_reads_are_null_without_a_tree_and_empty_when_nothing_was_read(tmp_path: Path, monkeypatch) -> None:
@@ -1781,10 +1836,10 @@ def test_skill_reads_are_null_without_a_tree_and_empty_when_nothing_was_read(tmp
         environ={"ORCH_TELEMETRY": "counters", "ORCH_JOB_STATE_DIR": str(tmp_path / "state")},
         stdout=io.BytesIO(),
     )
-    read = _use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/poteto-mode/SKILL.md"})
-    for job, root, event in (("none", None, read), ("tree", SKILLS, read), ("nothing", SKILLS, {"type": "turn.started"})):
+    read = [_use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/poteto-mode/SKILL.md"}), _result("t1")]
+    for job, root, events in (("none", None, read), ("tree", SKILLS, read), ("nothing", SKILLS, [{"type": "turn.started"}])):
         session = start_session(job_id=job, skills_root=root, **kwargs)
-        session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
+        session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
         session.finish(0)
     monkeypatch.setattr(telemetry, "FACTORY_CHECKOUT", tmp_path)
     session = start_session(job_id="no-lock", skills_root=SKILLS, **kwargs)
