@@ -155,7 +155,6 @@ SCRIPT = r"""
       });
     });
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
-    var focused = document.activeElement;
     var root = panel('relay', 'Relay', relayCount(shown));
     if (!root) return;
     var bar = add(root, el('div', 'rl-filter'));
@@ -167,7 +166,6 @@ SCRIPT = r"""
       b.setAttribute('aria-pressed', rlFilter === f[0] ? 'true' : 'false');
       b.setAttribute('data-relay', f[0]);
       b.addEventListener('click', function () { rlFilter = f[0]; if (latest) render(latest); });
-      if (focused && focused.getAttribute('data-relay') === f[0]) b.focus();
     });
     if (!all.length) add(root, el('p', 'empty', 'no handoffs or verdicts yet'));
     else if (!shown.length) add(root, el('p', 'empty', 'no ticket matches this filter'));

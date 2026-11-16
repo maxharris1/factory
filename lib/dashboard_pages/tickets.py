@@ -160,13 +160,12 @@ SCRIPT_TICKETS = r"""
     };
   }
 
-  function tkButton(parent, focused, text, attr, value, on, pick) {
+  function tkButton(parent, text, attr, value, on, pick) {
     var b = add(parent, el('button', 'tk-btn', text));
     b.setAttribute('type', 'button');
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
     b.setAttribute(attr, value);
     b.addEventListener('click', function () { pick(); if (latest) render(latest); });
-    if (focused && focused.getAttribute(attr) === value) b.focus();
   }
 
   function tkGroup(root, cls, label) {
@@ -262,19 +261,17 @@ SCRIPT_TICKETS = r"""
 
     var filter = byId('ticket-filter');
     if (filter) {
-      var focused = document.activeElement;
-      if (!focused || focused.className !== 'tk-btn') focused = null;
       filter.replaceChildren();
       var group = tkGroup(filter, 'tk-group', 'Project');
-      tkButton(group, focused, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; });
+      tkButton(group, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; });
       b.projects.forEach(function (p) {
-        tkButton(group, focused, p.short + ' ' + p.count, 'data-project', p.repo, tkProject === p.repo,
+        tkButton(group, p.short + ' ' + p.count, 'data-project', p.repo, tkProject === p.repo,
                  function () { tkProject = p.repo; });
       });
       add(filter, el('span', 'tk-grow'));
       var view = tkGroup(filter, 'tk-group tk-view', 'View');
       ['board', 'table'].forEach(function (name) {
-        tkButton(view, focused, name, 'data-view', name, tkView === name, function () { tkView = name; });
+        tkButton(view, name, 'data-view', name, tkView === name, function () { tkView = name; });
       });
     }
 
