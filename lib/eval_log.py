@@ -6,14 +6,27 @@ import os
 from pathlib import Path
 
 
-def append_lines(log: Path, lines: list[str]) -> None:
-    """Append whole lines and fsync, starting a new line if the log lacks one."""
-    text = "".join(f"{line}\n" for line in lines)
-    with log.open("a+b") as handle:
-        if handle.tell() > 0:
-            handle.seek(handle.tell() - 1)
-            if handle.read(1) != b"\n":
-                text = "\n" + text
-        handle.write(text.encode("utf-8"))
+def append_bytes(log: Path, data: bytes) -> None:
+    with log.open("ab") as handle:
+        handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def blank_bytes(log: Path, start: int, length: int) -> None:
+    with log.open("r+b") as handle:
+        handle.seek(start)
+        handle.write(b" " * length)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def append_lines(log: Path, lines: list[bytes]) -> None:
+    """Append newline-terminated lines, starting a new line if the log lacks one."""
+    data = b"".join(lines)
+    if log.exists() and log.stat().st_size > 0:
+        with log.open("rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                data = b"\n" + data
+    append_bytes(log, data)

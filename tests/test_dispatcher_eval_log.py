@@ -1,4 +1,6 @@
+import errno
 import json
+import resource
 import shutil
 from dataclasses import replace
 from itertools import count
@@ -145,19 +147,18 @@ def test_a_merge_absent_from_the_poll_keeps_the_projects_spelling(tmp_path: Path
     assert report.open_states == ()
 
 
+def restart(queue: SQLiteJobQueue) -> Dispatcher:
+    return Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+
+
 def test_a_crash_after_the_append_leaves_the_log_readable(tmp_path: Path) -> None:
-    clock = count(START, 1).__next__
-    queue = SQLiteJobQueue(tmp_path / "d.db", clock=clock)
-
-    def dispatcher() -> Dispatcher:
-        return Dispatcher(
-            queue.path,
-            queue,
-            trusted_logins=TRUSTED_LOGINS,
-            review_actions=FakeReviewActions(),
-            grok_delivery=FakeGrokDelivery(),
-        )
-
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=count(START, 1).__next__)
     first = cleffy(comment("101", GO.format(state="building"), author="grok-login"))
 
     def append_then_crash(path: Path, lines: list[str]) -> None:
@@ -166,14 +167,85 @@ def test_a_crash_after_the_append_leaves_the_log_readable(tmp_path: Path) -> Non
 
     with patch("lib.dispatch.eval_log.append_lines", append_then_crash):
         with pytest.raises(SystemExit):
-            dispatcher().poll_once(FakeSource(first, github=(first,)))
+            restart(queue).poll_once(FakeSource(first, github=(first,)))
     log = tmp_path / "dispatcher.log"
     exported = log.read_text(encoding="utf-8")
     assert len(exported.splitlines()) == 2
 
-    dispatcher().poll_once(FakeSource(first))
+    restart(queue).poll_once(FakeSource(first))
     assert log.read_text(encoding="utf-8") == exported, "recovery appends no line twice"
     assert build_report(bundle_from(tmp_path, tmp_path / "bundle")).report.runs == 1
+
+
+def busy_ticket():
+    return cleffy(
+        comment("101", GO.format(state="building"), author="grok-login"),
+        comment("102", CLARIFY, author="grok-login"),
+    )
+
+
+def one_batch(state_dir: Path) -> list[bytes]:
+    state_dir.mkdir()
+    queue = SQLiteJobQueue(state_dir / "d.db", clock=count(START, 1).__next__)
+    restart(queue).poll_once(FakeSource(busy_ticket(), github=(busy_ticket(),)))
+    return (state_dir / "dispatcher.log").read_bytes().splitlines(keepends=True)
+
+
+@pytest.mark.parametrize(
+    ("torn", "manual"),
+    [(0, True), (12, False), (12, True)],
+    ids=["whole-lines-then-manual", "torn", "torn-then-manual"],
+)
+def test_a_short_write_is_finished_once_around_later_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, torn: int, manual: bool
+) -> None:
+    batch = one_batch(tmp_path / "clean")
+    assert len(batch) >= 3
+    written = b"".join(batch[:2]) + batch[2][:torn]
+    state = tmp_path / "state"
+    state.mkdir()
+    queue = SQLiteJobQueue(state / "d.db", clock=count(START, 1).__next__)
+    log = state / "dispatcher.log"
+    failures: list[int | None] = []
+
+    def short_write(path: Path, lines: list[bytes]) -> None:
+        old = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (len(written), old[1]))
+        try:
+            append_lines(path, lines)
+        except OSError as error:
+            failures.append(error.errno)
+            raise
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, old)
+
+    with patch("lib.dispatch.eval_log.append_lines", short_write):
+        restart(queue).poll_once(FakeSource(busy_ticket(), github=(busy_ticket(),)))
+    assert failures == [errno.EFBIG]
+    assert log.read_bytes() == written
+
+    expected = b"".join(batch)
+    if manual:
+        monkeypatch.setenv("ORCH_DB", str(queue.path))
+        assert main(["log-message", "--repo", REPO, "--pr", "7", "--from", "grok-bot", "--to", "claude-bot"]) == 0
+        after = log.read_bytes()
+        assert after.startswith(written) and after.endswith(b"kind=handoff\n")
+        expected = b"".join(batch[:2]) + b" " * torn + after[len(written) :] + b"".join(batch[2:])
+
+    restart(queue).poll_once(FakeSource(busy_ticket()))
+    assert log.read_bytes() == expected
+    with queue.connect() as connection:
+        assert connection.execute("SELECT * FROM eval_log_pending").fetchall() == []
+        connection.execute(
+            "INSERT INTO eval_log_pending (id, offset, text) VALUES (1, 0, ?)",
+            (b"".join(batch).decode("utf-8"),),
+        )
+    restart(queue).poll_once(FakeSource(busy_ticket()))
+    assert log.read_bytes() == expected, "a second recovery repeats and drops no line"
+
+    capsys.readouterr()
+    assert main(["eval-report", "--input", str(bundle_from(state, tmp_path / "bundle"))]) == 0
+    assert "runs: 1" in capsys.readouterr().out
 
 
 def test_a_crash_before_the_append_appends_the_batch_once(tmp_path: Path) -> None:

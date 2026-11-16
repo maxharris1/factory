@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from lib.eval_log import append_lines
+from lib.eval_log import append_bytes, append_lines, blank_bytes
 from lib.eval_report import _PR, _REPO, _STATE, _TICKET, _TOKEN, _format_time
 from lib.handoff import HandoffError, parse_comment
 
@@ -34,12 +34,30 @@ def remember_repo(connection: sqlite3.Connection, repo: str) -> None:
     )
 
 
-def _appended_since(log: Path, offset: int, text: str) -> bool:
-    if not log.exists():
-        return False
-    with log.open("rb") as handle:
-        handle.seek(min(offset, log.stat().st_size))
-        return text.encode("utf-8") in handle.read()
+def _finish_batch(log: Path, offset: int, batch: list[bytes]) -> None:
+    """Append what the log after offset lacks of batch, keeping other writers' lines."""
+    tail = b""
+    if log.exists():
+        with log.open("rb") as handle:
+            handle.seek(offset)
+            tail = handle.read()
+    done = 0
+    position = offset
+    for line in tail.splitlines(keepends=True):
+        if done == len(batch):
+            break
+        content = line.removesuffix(b"\n")
+        if line == batch[done]:
+            done += 1
+        elif content and batch[done].startswith(content):
+            if content == line:
+                append_bytes(log, batch[done][len(line) :] + b"".join(batch[done + 1 :]))
+                return
+            # A writer ended this torn line; eval_report skips whitespace-only lines.
+            blank_bytes(log, position, len(content))
+        position += len(line)
+    if done < len(batch):
+        append_lines(log, batch[done:])
 
 
 class EvalLogMixin:
@@ -115,9 +133,8 @@ class EvalLogMixin:
             ).fetchone()
         if pending is None:
             return
-        text = str(pending["text"])
-        if not _appended_since(log, int(pending["offset"]), text):
-            append_lines(log, text.splitlines())
+        batch = str(pending["text"]).encode("utf-8").splitlines(keepends=True)
+        _finish_batch(log, int(pending["offset"]), batch)
         with self._connect() as connection:
             connection.execute("DELETE FROM eval_log_pending WHERE id = 1")
 
