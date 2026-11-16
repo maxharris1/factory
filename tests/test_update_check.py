@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from lib import update_check
-from lib.update_check import classify
+from lib.hold import ok_carries
+from lib.update_check import classify, merge_update
 
 BASE = "".join(f"line {n}\n" for n in range(1, 21))
 
@@ -30,7 +31,9 @@ class Repo:
         ).stdout.strip()
 
     def write(self, path: str, text: str) -> None:
-        (self.root / path).write_bytes(text.encode())
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(text.encode())
 
     def commit(self, message: str) -> str:
         self.git("add", "-A")
@@ -299,3 +302,125 @@ def test_a_pathspec_setting_in_the_environment_changes_nothing(
 
     result = run(repo, approved, head)
     assert result.trivial, result.reason
+
+
+HOLD_PATTERNS = ("src/view/**", "public/**", ".github/workflows/**")
+
+
+def held_pr(repo: Repo, pr_files: dict[str, str]) -> str:
+    """Seed main with lib/a.py and src/view/A.tsx, then branch pr with
+    pr_files written over it; the pr tip is the approved head."""
+    repo.write("lib/a.py", BASE)
+    repo.write("src/view/A.tsx", BASE)
+    repo.base = repo.commit("seed")
+    repo.git("checkout", "-q", "-b", "pr", repo.base)
+    for path, text in pr_files.items():
+        repo.write(path, text)
+    approved = repo.commit("pr")
+    repo.git("checkout", "-q", "main")
+    return approved
+
+
+def main_commit(repo: Repo, files: dict[str, str]) -> None:
+    repo.git("checkout", "-q", "main")
+    for path, text in files.items():
+        repo.write(path, text)
+    repo.commit("main moved")
+
+
+PR_FILES = {
+    "lib/a.py": BASE.replace("line 5\n", "line 5 pr\n"),
+    "src/view/A.tsx": BASE.replace("line 2\n", "line 2 pr\n"),
+}
+
+
+def carry(repo: Repo, approved: str, head: str, base_ref: str = "refs/heads/main"):
+    return merge_update(repo.gitdir, approved, head, base_ref, HOLD_PATTERNS)
+
+
+def test_an_ok_carries_over_two_merges_of_main_with_a_resolution_outside_the_hold(
+    repo: Repo,
+) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(
+        repo,
+        {
+            ".github/workflows/ci.yml": "on: push\n",
+            "lib/a.py": BASE.replace("line 5\n", "line 5 main\n"),
+        },
+    )
+    repo.merge_main(
+        lambda r: r.write("lib/a.py", BASE.replace("line 5\n", "line 5 pr and main\n"))
+    )
+    main_commit(repo, {"other.py": "x = 2\n"})
+    head = repo.merge_main()
+
+    assert ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
+
+
+def test_a_resolution_that_changes_a_hold_file_needs_a_fresh_ok(repo: Repo) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(repo, {"src/view/A.tsx": BASE.replace("line 2\n", "line 2 main\n")})
+    head = repo.merge_main(
+        lambda r: r.write("src/view/A.tsx", BASE.replace("line 2\n", "line 2 pr and main\n"))
+    )
+
+    assert not ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
+
+
+def test_a_head_that_does_not_descend_from_the_ok_head_does_not_carry(repo: Repo) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(repo, {"other.py": "x = 2\n"})
+    repo.git("checkout", "-q", "-b", "rebased", "main")
+    for path, text in PR_FILES.items():
+        repo.write(path, text)
+    head = repo.commit("pr, rebased")
+
+    assert not ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
+
+
+def test_a_binary_hold_file_has_no_identity_and_does_not_carry(repo: Repo) -> None:
+    approved = held_pr(repo, {**PR_FILES, "public/logo.png": "\x89PNG\x00\x01"})
+    main_commit(repo, {"other.py": "x = 2\n"})
+    head = repo.merge_main()
+
+    update = carry(repo, approved, head)
+
+    assert update.approved.identities["public/logo.png"] is None
+    assert update.current.identities["src/view/A.tsx"] is not None
+    assert not ok_carries(update, HOLD_PATTERNS)
+
+
+def test_an_unknown_ok_head_raises(repo: Repo) -> None:
+    held_pr(repo, PR_FILES)
+    main_commit(repo, {"other.py": "x = 2\n"})
+    head = repo.merge_main()
+
+    with pytest.raises(ValueError):
+        carry(repo, "f" * 40, head)
+
+
+def test_a_missing_base_ref_raises(repo: Repo) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(repo, {"other.py": "x = 2\n"})
+    head = repo.merge_main()
+
+    with pytest.raises(ValueError):
+        carry(repo, approved, head, "refs/remotes/origin/main")
+
+
+def test_a_failing_patch_id_raises(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(repo, {"other.py": "x = 2\n"})
+    head = repo.merge_main()
+    real_run = update_check._run
+
+    def failing_patch_id(clone, *args, **kwargs):
+        if args[0] == "patch-id":
+            return subprocess.CompletedProcess(args, 1, b"", b"boom")
+        return real_run(clone, *args, **kwargs)
+
+    monkeypatch.setattr(update_check, "_run", failing_patch_id)
+
+    with pytest.raises(ValueError):
+        carry(repo, approved, head)

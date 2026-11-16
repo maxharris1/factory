@@ -32,7 +32,7 @@ is everything under ``a/``, ``a/**/b`` includes ``a/b``).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -124,6 +124,61 @@ def held_paths(patterns: Sequence[str], files: Iterable[str]) -> tuple[str, ...]
                 if any(glob_matches(pattern, path) for pattern in patterns)
             }
         )
+    )
+
+
+@dataclass(frozen=True)
+class OwnDiff:
+    """A head's own changes: the files of its diff from its merge base with
+    base, and per hold-glob file the git patch-id --stable of that file's
+    diff (None when the diff has no patch id, such as a binary file)."""
+
+    files: frozenset[str]
+    identities: Mapping[str, str | None]
+
+
+@dataclass(frozen=True)
+class MergeStep:
+    """One commit on the first-parent chain from the ok head to the head.
+    other_parents_on_base: every parent after the first is on base."""
+
+    commit: str
+    parents: tuple[str, ...]
+    other_parents_on_base: bool
+
+
+@dataclass(frozen=True)
+class MergeUpdate:
+    """The commits after approved_head, oldest first, and both heads' own diffs."""
+
+    approved_head: str
+    steps: tuple[MergeStep, ...]
+    approved: OwnDiff
+    current: OwnDiff
+
+
+def ok_carries(update: MergeUpdate, patterns: Sequence[str]) -> bool:
+    """Issue #574: an ok at approved_head covers the head when every later
+    commit merges base into the PR, the PR owns no new file, and each
+    hold-glob file it owns has the same patch id on both sides."""
+    if not update.steps:
+        return False
+    previous = update.approved_head
+    for step in update.steps:
+        if (
+            len(step.parents) != 2
+            or step.parents[0] != previous
+            or not step.other_parents_on_base
+        ):
+            return False
+        previous = step.commit
+    approved, current = update.approved, update.current
+    if not current.files <= approved.files:
+        return False
+    return all(
+        approved.identities.get(path) is not None
+        and approved.identities.get(path) == current.identities.get(path)
+        for path in held_paths(patterns, approved.files | current.files)
     )
 
 

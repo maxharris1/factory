@@ -19,10 +19,12 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from lib.feeder_gates import path_matches
+from lib.hold import MergeStep, MergeUpdate, OwnDiff, held_paths
 
 MARKER_SIZE = 61
 _MARKER_RUN = re.compile(rb"([<|=>])\1*")
@@ -71,6 +73,75 @@ def rebase_scope(
     if ancestry != 1:
         raise ValueError("git merge-base --is-ancestor failed")
     return RebaseScope(last, _merge_base(clone, last, base_ref), _merge_base(clone, new, base_ref))
+
+
+_NO_DIFF = OwnDiff(frozenset(), {})
+
+
+def merge_update(
+    clone: Path, approved_head: str, head: str, base_ref: str, patterns: Sequence[str]
+) -> MergeUpdate:
+    """What lib.hold.ok_carries needs to judge whether an ok at
+    approved_head covers head (issue #574). Raises ValueError (or an
+    OSError or SubprocessError) when the clone cannot answer."""
+    approved = _resolve(clone, approved_head)
+    new = _resolve(clone, head)
+    ancestry = _run(clone, "merge-base", "--is-ancestor", approved, new).returncode
+    if ancestry == 1:
+        return MergeUpdate(approved, (), _NO_DIFF, _NO_DIFF)
+    if ancestry != 0:
+        raise ValueError("git merge-base --is-ancestor failed")
+    chain = _output(
+        clone, "rev-list", "--first-parent", "--parents", "--reverse", f"{approved}..{new}"
+    ).decode("ascii")
+    steps = []
+    for line in chain.splitlines():
+        commit, *parents = line.split()
+        steps.append(
+            MergeStep(
+                commit,
+                tuple(parents),
+                all(_on_base(clone, parent, base_ref) for parent in parents[1:]),
+            )
+        )
+    return MergeUpdate(
+        approved,
+        tuple(steps),
+        _own_diff(clone, approved, base_ref, patterns),
+        _own_diff(clone, new, base_ref, patterns),
+    )
+
+
+def _on_base(clone: Path, commit: str, base_ref: str) -> bool:
+    code = _run(clone, "merge-base", "--is-ancestor", commit, base_ref).returncode
+    if code not in (0, 1):
+        raise ValueError(f"git merge-base --is-ancestor {commit} failed")
+    return code == 0
+
+
+def _own_diff(clone: Path, head: str, base_ref: str, patterns: Sequence[str]) -> OwnDiff:
+    fork = _merge_base(clone, head, base_ref)
+    listed = _output(clone, "diff-tree", "-r", "--no-renames", "--name-only", "-z", fork, head)
+    files = frozenset(path.decode("utf-8") for path in listed.split(b"\0") if path)
+    return OwnDiff(
+        files,
+        {path: _file_patch_id(clone, fork, head, path) for path in held_paths(patterns, files)},
+    )
+
+
+def _file_patch_id(clone: Path, fork: str, head: str, path: str) -> str | None:
+    diff = _output(clone, "diff-tree", "-r", "-p", "--no-renames", fork, head, "--", path)
+    if any(line.startswith(b"Binary files ") for line in diff.splitlines()):
+        return None
+    fields = _output(clone, "patch-id", "--stable", stdin=diff).split()
+    return fields[0].decode("ascii") if fields else None
+
+
+def _output(clone: Path, *args: str, stdin: bytes | None = None) -> bytes:
+    result = _run(clone, *args, stdin=stdin)
+    if result.returncode != 0:
+        raise ValueError(f"git {args[0]} failed")
+    return result.stdout
 
 
 def _resolve(clone: Path, name: str) -> str:
@@ -355,9 +426,12 @@ def _git(clone: Path, *args: str) -> str:
     return result.stdout.decode("utf-8")
 
 
-def _run(clone: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+def _run(
+    clone: Path, *args: str, stdin: bytes | None = None
+) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         ["git", "--git-dir", str(clone), *args],
+        input=stdin,
         env=_environment(),
         capture_output=True,
         timeout=TIMEOUT_SECONDS,
