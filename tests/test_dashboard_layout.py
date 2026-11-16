@@ -544,7 +544,7 @@ def test_job_page_shows_the_path_and_current_state(tmp_path: Path) -> None:
     runlog = re.search(r'<ol class="runlog">(.*?)</ol>', article, re.S).group(1)
     assert re.findall(r'data-state="([^"]+)"', runlog) == [
         "intake", "building", "review", "fixing", "review"]
-    assert re.findall(r'data-state="([^"]+)"[^>]*class="now', runlog) == ["review"]
+    assert re.findall(r'class="[^"]*\bnow\b[^"]*"[^>]*data-state="([^"]+)"', runlog) == ["review"]
     text = _text(article)
     assert "round 2 of 3" in text
     assert "33m 20s in review" in text
@@ -578,7 +578,7 @@ def test_a_job_with_no_ticket_state_still_gets_a_run_log(tmp_path: Path) -> None
     assert job["flow"]["path"] == ["intake", "building"]
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-orphan-b")
     (runlog,) = re.findall(r'<ol class="runlog">.*?</ol>', article, re.S)
-    assert 'class="now' not in runlog
+    assert not re.search(r'class="[^"]*\bnow\b', runlog)
 
 
 # --- no-JS rendering ---------------------------------------------------------------------
@@ -875,7 +875,7 @@ def test_script_shows_the_selected_jobs_path(tmp_path: Path) -> None:
     runlog = view[view.index("ol.runlog"):view.index("ol.journey")]
     assert re.findall(r"button[.a-z]*\[data-state=([^\]]+)\]", runlog) == [
         "intake", "building", "review", "fixing", "review"]
-    assert re.findall(r"button\.now\[data-state=([^\]]+)\]", runlog) == ["review"]
+    assert re.findall(r"button\.visit\.now\[data-state=([^\]]+)\]", runlog) == ["review"]
     # Only the selected job is shown.
     assert "cleffy#13" not in out["text"]["jobview"]
     assert "a[href=job.html#job-r-codex-]" in out["dump"]["pipeline"]

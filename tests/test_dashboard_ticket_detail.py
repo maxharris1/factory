@@ -28,14 +28,15 @@ from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
 
 
-def _buttons(markup: str, cls: str) -> list[tuple[str, str, str]]:
-    """(data-visit, data-state, aria-pressed) of each button in `<ol class="{cls}">`."""
+def _rows(markup: str, cls: str) -> list[tuple[str, str, str]]:
+    """(data-visit, data-state, selected) of each visit in `<ol class="{cls}">`, a button or a plain row."""
     match = re.search(rf'<ol class="{cls}">(.*?)</ol>', markup, flags=re.S)
     assert match, f"no {cls} list"
     found = []
-    for tag in re.findall(r"<button[^>]*>", match.group(1)):
+    for tag in re.findall(r'<[a-z]+[^>]*\bdata-visit="[^>]*>', match.group(1)):
         attrs = dict(re.findall(r'([a-z-]+)="([^"]*)"', tag))
-        found.append((attrs["data-visit"], attrs["data-state"], attrs["aria-pressed"]))
+        selected = "true" in (attrs.get("aria-pressed"), attrs.get("aria-current"))
+        found.append((attrs["data-visit"], attrs["data-state"], "true" if selected else "false"))
     return found
 
 
@@ -55,16 +56,26 @@ def test_run_log_and_journey_render_from_one_list(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     path = _review(snapshot)["flow"]["path"]
     article = _article(snapshot)
-    log, bars = _buttons(article, "runlog"), _buttons(article, "journey")
+    log, bars = _rows(article, "runlog"), _rows(article, "journey")
     assert len(log) == len(bars) == len(path)
     assert [state for _, state, _ in log] == [state for _, state, _ in bars] == path
     assert [i for i, _, _ in log] == [i for i, _, _ in bars] == [str(i) for i in range(len(path))]
 
 
+def test_without_script_the_run_log_rows_are_plain_rows_not_buttons(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    path = _review(snapshot)["flow"]["path"]
+    log = re.search(r'<ol class="runlog">(.*?)</ol>', _article(snapshot), re.S).group(1)
+    assert "<button" not in log and "aria-pressed" not in log
+    rows = re.findall(r'<div class="visit[ "][^>]*>', log)
+    assert len(rows) == len(path)
+    assert [i for i, row in enumerate(rows) if 'aria-current="true"' in row] == [4]
+
+
 def test_default_selection_is_the_current_visit(tmp_path: Path) -> None:
     article = _article(_snapshot(tmp_path))
     for cls in ("runlog", "journey"):
-        assert [i for i, _, pressed in _buttons(article, cls) if pressed == "true"] == ["4"], cls
+        assert [i for i, _, pressed in _rows(article, cls) if pressed == "true"] == ["4"], cls
 
 
 @needs_node
@@ -74,7 +85,7 @@ def test_script_renders_the_same_one_list_and_selection(tmp_path: Path) -> None:
     out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
     view = out["html"]["jobview"]
     for cls in ("runlog", "journey"):
-        assert _buttons(view, cls) == _buttons(server, cls), cls
+        assert _rows(view, cls) == _rows(server, cls), cls
 
 
 @needs_node
@@ -83,11 +94,11 @@ def test_picking_a_log_row_selects_its_bar_and_the_reverse(tmp_path: Path) -> No
     row = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
                     actions=[["click", {"attr": {"data-visit": "1"}}]])
     for cls in ("runlog", "journey"):
-        assert [i for i, _, p in _buttons(row["html"]["jobview"], cls) if p == "true"] == ["1"], cls
+        assert [i for i, _, p in _rows(row["html"]["jobview"], cls) if p == "true"] == ["1"], cls
     bar = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
                     actions=[["click", {"attr": {"data-visit": "2", "aria-label": "Step 3 of 5: review, codex, 16m 40s"}}]])
     for cls in ("runlog", "journey"):
-        assert [i for i, _, p in _buttons(bar["html"]["jobview"], cls) if p == "true"] == ["2"], cls
+        assert [i for i, _, p in _rows(bar["html"]["jobview"], cls) if p == "true"] == ["2"], cls
 
 
 def test_to_scale_is_offered_only_when_every_duration_is_known(tmp_path: Path) -> None:
@@ -653,7 +664,7 @@ def test_the_script_hero_chips_only_trouble(tmp_path: Path, case, change, chip) 
 
 def _now_durs(markup: str) -> dict[str, str]:
     hero = re.search(r'<p class="line">.*?</p>', markup, re.S).group(0)
-    log = re.search(r'<button[^>]*class="now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
+    log = re.search(r'<(?:button|div)[^>]*class="visit now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
     cap = re.search(r'<div class="jd-cap now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
     return {"hero": re.search(r"(\d+m \d\ds) in review", hero).group(1), "log": log.group(1), "cap": cap.group(1)}
 
@@ -682,7 +693,7 @@ def test_in_progress_only_when_the_time_in_state_is_unknown(tmp_path: Path) -> N
     snapshot = _snapshot(tmp_path)
     _review(snapshot)["flow"]["state_age_seconds"] = None
     article = _article(snapshot)
-    assert re.search(r'<button[^>]*class="now"[^>]*>.*?<span class="dur">in progress</span>', article, re.S)
+    assert re.search(r'<(?:button|div)[^>]*class="visit now"[^>]*>.*?<span class="dur">in progress</span>', article, re.S)
     assert '<span class="dur">in progress</span><span class="note">' in _caption_html(article)
 
 
@@ -691,7 +702,7 @@ def test_the_script_says_in_progress_only_when_the_time_in_state_is_unknown(tmp_
     snapshot = _snapshot(tmp_path)
     _review(snapshot)["flow"]["state_age_seconds"] = None
     view = _script_view(tmp_path, snapshot, actions=[["advance", 5]])
-    assert re.search(r'<button class="now"[^>]*>.*?<span class="dur">in progress</span>', view, re.S)
+    assert re.search(r'<(?:button|div)[^>]*class="visit now"[^>]*>.*?<span class="dur">in progress</span>', view, re.S)
     assert '<span class="dur">in progress</span><span class="note">' in _caption_html(view)
 
 
@@ -749,6 +760,8 @@ NO_SCRIPT_VIEW = r"""
     canvases: [...art.querySelectorAll('canvas.jd-journey, canvas.jd-flowmap')].filter(shown).length,
     buttons: [...art.querySelectorAll('.jd-box button, .jd-ctl button, .jd-chart button')].filter(shown).length,
     steps: [...art.querySelectorAll('ol.journey .step')].filter(shown).map(s => s.textContent),
+    allButtons: [...art.querySelectorAll('button')].filter(shown).length,
+    logNames: [...art.querySelectorAll('ol.runlog .visit .name')].filter(shown).map(s => s.textContent),
   };
 })()"""
 
@@ -773,10 +786,12 @@ def test_with_scripting_off_the_journey_is_a_readable_list(tmp_path: Path) -> No
                 chrome.close()
     finally:
         server.shutdown()
-    assert views["off"]["canvases"] == 0 and views["off"]["buttons"] == 0
+    assert views["off"]["canvases"] == 0 and views["off"]["buttons"] == 0 and views["off"]["allButtons"] == 0
     assert [step.split(": ")[1].split(",")[0] for step in views["off"]["steps"]] == path
+    assert [name.removesuffix(" · now") for name in views["off"]["logNames"]] == path
     assert views["on"]["canvases"] == 2 and views["on"]["steps"] == []
     assert views["on"]["buttons"] == len(path) + 3
+    assert views["on"]["allButtons"] == 2 * len(path) + 3
 
 
 def test_a_queued_job_s_live_run_says_not_started_yet(tmp_path: Path) -> None:

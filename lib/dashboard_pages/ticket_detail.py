@@ -63,10 +63,11 @@ CSS = """\
 .jd-right{flex:0 1 1032px;min-width:0;display:flex;flex-direction:column;gap:16px}
 .runlog{margin:0;padding:0;list-style:none;font-family:var(--mono)}
 .runlog li{margin:0 -8px;border-bottom:1px solid var(--line)}
-.runlog button{display:flex;gap:10px;width:100%;box-sizing:border-box;padding:8px;border:0;text-align:left;font-family:inherit;cursor:pointer;background:transparent;color:var(--text)}
-.runlog button[aria-pressed="true"]{background:var(--sel);box-shadow:inset 0 0 0 1px var(--accent)}
+.runlog .visit{display:flex;gap:10px;width:100%;box-sizing:border-box;padding:8px;border:0;text-align:left;font-family:inherit;background:transparent;color:var(--text)}
+.runlog button{cursor:pointer}
+.runlog [aria-pressed="true"],.runlog [aria-current="true"]{background:var(--sel);box-shadow:inset 0 0 0 1px var(--accent)}
 .runlog .num{flex:0 0 20px;font-size:12px;line-height:1.5;color:var(--muted)}
-.runlog button[aria-pressed="true"] .num{color:var(--accent)}
+.runlog [aria-pressed="true"] .num,.runlog [aria-current="true"] .num{color:var(--accent)}
 .runlog .mark{flex:0 0 8px;height:8px;margin-top:5px;box-sizing:border-box;background:var(--m)}
 .runlog .mark.off{background:transparent;border:2px dotted var(--m)}
 .runlog .main{display:block;min-width:0}
@@ -309,21 +310,20 @@ def _reason(visit: dict) -> str:
 
 def _runlog_row(visit: dict, model: dict) -> str:
     tint = _who_tint(visit["who"])
-    cls = " ".join(c for c in ("now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
+    cls = " ".join(c for c in ("visit", "now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
     mark_tint = STOP_TINT if visit["stop"] else tint
     name = visit["state"] + (" · now" if visit["current"] else "")
     num = f"{visit['index'] + 1:02d}"
     return (
-        f'<li><button type="button" data-visit="{visit["index"]}" data-state="{_e(visit["state"])}" '
-        f'aria-pressed="{"true" if visit["index"] == model["selected"] else "false"}"'
-        + (f' class="{cls}"' if cls else "")
+        f'<li><div class="{cls}" data-visit="{visit["index"]}" data-state="{_e(visit["state"])}"'
+        + (' aria-current="true"' if visit["index"] == model["selected"] else "")
         + f' style="--m:{tint}">'
         f'{_span("num", num)}'
         f'<span class="mark{" off" if visit["off_chart"] else ""}" aria-hidden="true" style="--m:{mark_tint}"></span>'
         f'<span class="main"><span class="top">{_span("name", name)}{_span("who", visit["who"])}'
         f'{_span("dur", _visit_dur(visit, model))}'
         + (_span("offchip", "off-chart") if visit["off_chart"] else "")
-        + f'</span>{_span("note", _reason(visit))}</span></button></li>'
+        + f'</span>{_span("note", _reason(visit))}</span></div></li>'
     )
 
 
@@ -734,7 +734,7 @@ _SCRIPT = r"""
       var ol = add(sec, el('ol', 'runlog'));
       m.visits.forEach(function (v) {
         var tint = whoTint(v.who);
-        var btn = add(add(ol, el('li')), el('button', [v.current ? 'now' : '', v.stop ? 'stop' : ''].filter(Boolean).join(' ') || null));
+        var btn = add(add(ol, el('li')), el('button', ['visit', v.current ? 'now' : '', v.stop ? 'stop' : ''].filter(Boolean).join(' ')));
         buttons.push(btn);
         btn.setAttribute('type', 'button');
         btn.setAttribute('data-visit', String(v.index));
