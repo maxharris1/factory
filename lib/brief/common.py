@@ -8,7 +8,7 @@ from dataclasses import asdict
 
 from lib.brief.skills import skill_paths
 from lib.factory_md import (
-    _CHECK_LABEL,
+    CHECK_LABEL,
     DEFAULT_PLAN_MAX_CRITERIA,
     DEFAULT_PLAN_MAX_LINES,
     FactoryContext,
@@ -177,7 +177,7 @@ def _pr_number(value: object) -> int | None:
 def _check_labels(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
-    return tuple(item for item in value if isinstance(item, str) and _CHECK_LABEL.fullmatch(item))
+    return tuple(item for item in value if isinstance(item, str) and CHECK_LABEL.fullmatch(item))
 
 
 def _plain_repo(repo: str) -> str | None:

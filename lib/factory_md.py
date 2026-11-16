@@ -127,7 +127,7 @@ _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _APPROVER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _LABEL = re.compile(r"^(?=.{1,50}$)[^\s,](?:[^,\x00-\x1f\x7f]*[^\s,])?$")
-_CHECK_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/+-]{0,39}$")
+CHECK_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/+-]{0,39}$")
 _GLOB = re.compile(r"^[A-Za-z0-9._*?/@+=~-]+$")
 
 DEFAULT_HOLD_LABEL = "factory:hold"
@@ -859,7 +859,7 @@ def _ci(
         findings.append(Finding("error", "ci.local_checks must be a list"))
         checks = []
     for index, item in enumerate(checks):
-        if not isinstance(item, str) or _CHECK_LABEL.fullmatch(item) is None:
+        if not isinstance(item, str) or CHECK_LABEL.fullmatch(item) is None:
             findings.append(Finding("error", f"ci.local_checks[{index}] must be a short label"))
     return tuple(str(item) for item in branches), tuple(str(item) for item in checks)
 
