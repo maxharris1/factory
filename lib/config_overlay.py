@@ -30,7 +30,7 @@ from lib.load import Finding, load_yaml
 
 DISABLE_ENV = "ORCH_NO_LOCAL_OVERLAY"
 KEYED_LISTS = {"projects": "repo", "devices": "name"}
-OPAQUE = frozenset({"trusted_logins", "trusted_linear_users", "linear_assignees"})
+OPAQUE = frozenset({"trusted_logins", "trusted_linear_users", "linear_assignees", "base_branches"})
 
 
 class OverlayError(ValueError):

@@ -32,6 +32,7 @@ from lib.job_state import (
     JobStateConfig,
 )
 from lib.load import Finding, is_strict_int, load_yaml
+from lib.remote import RemoteError, plain_branch
 from lib.schema import HARNESSES
 
 # The seconds `orch poll` sleeps after each cycle. GitHub is read every
@@ -108,6 +109,7 @@ _INTAKE_KEYS = {
     "priority_from_linear",
     "critical_path_order",
     "linear_assignees",
+    "base_branches",
 }
 DEFAULT_INTAKE_LABEL = "factory:ready"
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/ -]{0,49}$")
@@ -125,6 +127,8 @@ class Intake:
     logins or Linear user ids); None means the keys of trusted_logins or
     trusted_linear_users. linear_assignees maps a Linear project id to the
     only assignees whose tickets the feeder takes from that project.
+    base_branches maps a Linear project id to the branch its tickets'
+    PRs open on, review against and ship to, in place of factory_ref.
     """
 
     label: str | None = None
@@ -136,6 +140,7 @@ class Intake:
     linear_assignees: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    base_branches: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,11 @@ class Project:
     ready_starts_review: bool = False
     # Backlog feeder intake (issue #85). None: the feeder ignores the project.
     intake: Intake | None = None
+
+    def base_for(self, linear_project_id: str | None) -> str | None:
+        if self.intake is not None and linear_project_id in self.intake.base_branches:
+            return self.intake.base_branches[linear_project_id]
+        return self.factory_ref
 
 
 @dataclass(frozen=True)
@@ -806,6 +816,13 @@ def _intake(
             ok = False
         else:
             assignees = parsed
+    base_branches: Mapping[str, str] = MappingProxyType({})
+    if "base_branches" in value:
+        branches = _base_branches(value["base_branches"], where, linear_project_ids, findings)
+        if branches is None:
+            ok = False
+        else:
+            base_branches = branches
     if not ok:
         return None
     return Intake(
@@ -816,6 +833,7 @@ def _intake(
         priority_from_linear=from_linear,
         critical_path_order=critical_path,
         linear_assignees=assignees,
+        base_branches=base_branches,
     )
 
 
@@ -852,6 +870,45 @@ def _linear_assignees(
         else:
             result[project_id] = frozenset(users)
     return MappingProxyType(result) if ok else None
+
+
+def _base_branches(
+    value: object,
+    where: str,
+    linear_project_ids: frozenset[str],
+    findings: list[Finding],
+) -> Mapping[str, str] | None:
+    if not linear_project_ids:
+        findings.append(Finding("error", f"{where}.base_branches needs linear_project_id"))
+        return None
+    if not isinstance(value, dict) or not value:
+        findings.append(Finding("error", f"{where}.base_branches must be a non-empty mapping"))
+        return None
+    result: dict[str, str] = {}
+    ok = True
+    for project_id, branch in value.items():
+        if project_id not in linear_project_ids:
+            findings.append(
+                Finding("error", f"{where}.base_branches names a project this entry does not watch")
+            )
+            ok = False
+        elif not _plain_branch(branch):
+            findings.append(
+                Finding("error", f"{where}.base_branches must map each project to a plain branch name")
+            )
+            ok = False
+        else:
+            result[project_id] = branch
+    return MappingProxyType(result) if ok else None
+
+
+def _plain_branch(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return bool(plain_branch(value))
+    except RemoteError:
+        return False
 
 
 def _linear(data: dict, findings: list[Finding]) -> LinearConfig | None:
