@@ -328,7 +328,6 @@ def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
     assert f'<span class="count">{shown}</span>' in out["html"]["no-waiter"]
 
 
-# (line, kind) in the order poller.log wrote them.
 CLASSIFIED_TAIL = [
     ("2026-11-13 13:08:59 EST poller exit rc=1", "bad"),
     ("2026-11-13 13:09:19 EST poller start", "start"),

@@ -328,8 +328,6 @@ _LOG_KINDS = (
 
 
 def _log_kinds(lines: list[str]) -> list[str | None]:
-    """Each line's kind, read in the order poller.log wrote them: the indented
-    frames under a Traceback line are bad too (logKinds in the script)."""
     kinds: list[str | None] = []
     traceback = False
     for line in lines:
