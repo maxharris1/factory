@@ -255,7 +255,7 @@ def test_an_emphasized_id_closes_its_finding(finding_id):
     assert [f.id for f in _bundle((R1, closed)).findings] == ["f-2"]
 
 
-@pytest.mark.parametrize("finding_id", ("f-1x", "_f-1_x", "f-1_2"))
+@pytest.mark.parametrize("finding_id", ("f-1x", "_f-1_x", "f-1_2", "f-1-x", "**f-1**-other", "__f-1__-x", "**f-1**_x", "`f-1`-x"))
 def test_an_id_running_into_a_word_is_not_a_finding(finding_id):
     raised = _verdict(f"1. [blocking] {finding_id} breaks.\n", round_="1/3", head=HEAD_1, at=1.0, cid="11")
     assert _bundle((raised,), round_=2).findings == ()

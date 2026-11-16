@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -253,17 +255,29 @@ class ResumeMixin:
             connection.commit()
         return "queued-blocked-review"
 
-    def _resume_unsatisfiable(
+    def _resume_for_max(
         self,
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        if self._unsat_parked(ticket):
+        parked = self._parked_for_max(ticket)
+        if parked is not None:
             if not self._may_lift_cap(comment.author):
                 self._wake_comment_problem(
                     ticket, comment, "go-not-from-approver", "go-not-from-approver"
                 )
                 return True, "go-not-from-approver"
+            if parked == "repeat":
+                with self._connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        """
+                        UPDATE ticket_state SET cap_extra = cap_extra + 1
+                        WHERE repo = ? AND ticket_id = ? AND review_round >= ?
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
+                    )
+                    connection.commit()
             return self._resume_paused(ticket, comment)
         with self._connect() as connection:
             resumed = connection.execute(
@@ -276,19 +290,19 @@ class ResumeMixin:
             ).fetchone()
         return None if resumed is None else self._resume_paused(ticket, comment)
 
-    def _unsat_parked(self, ticket: TrackedTicket) -> bool:
+    def _parked_for_max(self, ticket: TrackedTicket) -> Literal["unsat", "repeat"] | None:
         with self._connect() as connection:
             parked = connection.execute(
                 """
-                SELECT 1 FROM ticket_state
+                SELECT review_events.outcome FROM ticket_state
                 JOIN review_events
                   ON review_events.repo = ticket_state.repo
                  AND review_events.ticket_id = ticket_state.ticket_id
                  AND review_events.comment_id = ticket_state.paused_question_id
                 WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
                   AND ticket_state.workflow_state = 'waiting-max'
-                  AND review_events.outcome = 'waiting-max-unsat'
+                  AND review_events.outcome IN ('waiting-max-unsat', 'waiting-max-repeat')
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        return parked is not None
+        return None if parked is None else "unsat" if parked["outcome"] == "waiting-max-unsat" else "repeat"

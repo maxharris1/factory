@@ -83,7 +83,8 @@ def test_an_unsat_revise_at_the_cap_parks_instead_of_capping(tmp_path: Path) -> 
     flow.factory = replace(flow.factory, auto_extra_rounds=2)
     to_first_review(flow)
     for number in (1, 2):
-        assert revise(flow, f"{number}/3", f"revise-{number}") == "queued-review-fix"
+        body = f"- [blocking] f-{number}: the parser accepts prose.\n"
+        assert revise(flow, f"{number}/3", f"revise-{number}", body=body) == "queued-review-fix"
         flow.finish("claude")
         assert flow.ready(HEADS[number + 1]) == "queued-review"
         flow.finish("codex")

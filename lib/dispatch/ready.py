@@ -60,8 +60,9 @@ class ReadyMixin:
         if state == "capped":
             self._flag_ready_after_cap(ticket, comment, fields["head"])
             return True, "capped-ready"
-        if state == "waiting-max" and self._unsat_parked(ticket):
-            return True, "ready-while-unsat"
+        parked = self._parked_for_max(ticket) if state == "waiting-max" else None
+        if parked is not None:
+            return True, f"ready-while-{parked}"
         if state == "blocked":
             return True, "blocked-ready"
         reported_head = fields["head"]

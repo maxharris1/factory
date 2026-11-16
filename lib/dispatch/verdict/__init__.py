@@ -24,6 +24,7 @@ from lib.dispatch.verdict.coverage import ApprovalCoverageMixin
 from lib.dispatch.verdict.latest import LatestVerdictMixin
 from lib.dispatch.verdict.preview import PreviewedHeadMixin
 from lib.dispatch.verdict.record import ApprovalRecordMixin
+from lib.dispatch.verdict.repeat import RepeatBlockMixin
 from lib.dispatch.verdict.shipped import ShippedApprovalMixin
 from lib.dispatch.verdict.t3 import ReviseCIGate, T3Mixin
 from lib.dispatch.verdict.t4 import T4Mixin
@@ -33,6 +34,7 @@ from lib.queue import JobRequest
 
 class VerdictMixin(
     T3Mixin,
+    RepeatBlockMixin,
     T4Mixin,
     BlockedMixin,
     ApprovalRecordMixin,
