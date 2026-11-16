@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from lib.brief import render_brief  # noqa: E402
 from lib.dispatcher import Comment  # noqa: E402
 from lib.evidence import criteria_evidence  # noqa: E402
+from lib.evidence.criteria import canonical_brief  # noqa: E402
 from lib.evidence.findings import findings_evidence  # noqa: E402
 from lib.factory_md import parse_factory_context  # noqa: E402
 from lib.queue import Job, JobRequest  # noqa: E402
@@ -99,8 +100,7 @@ def evidence_bundle(current_round: int) -> dict[str, object]:
     criteria = criteria_evidence(
         issue_key="#42",
         issue_url="https://github.com/owner/repo/issues/42",
-        comments=[TICKET_BRIEF],
-        trusted_logins=TRUSTED,
+        brief=canonical_brief([TICKET_BRIEF], TRUSTED),
         issue_body=None,
         pr_body=None,
         ready_starts_review=False,
