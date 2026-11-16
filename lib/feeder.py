@@ -440,7 +440,7 @@ class GitHubIntake(Protocol):
 
 
 class LinearIntake(Protocol):
-    def linear_intake(self, project_id: str, state: str) -> Sequence[IntakeIssue]: ...
+    def linear_intake(self, project_ids: frozenset[str], state: str) -> Sequence[IntakeIssue]: ...
 
     def linear_comments(self, issue_id: str) -> Sequence[Comment]: ...
 
@@ -547,7 +547,7 @@ def intake_trusted(config: OrchConfig, project: Project) -> frozenset[str]:
     intake = project.intake
     if intake is not None and intake.trusted is not None:
         return intake.trusted
-    if project.linear_project_id is not None:
+    if project.linear_project_ids:
         # orch.yml keys Linear users as "linear:<user id>".
         return frozenset(key.removeprefix("linear:") for key in config.trusted_linear_users)
     return frozenset(config.trusted_logins)
@@ -780,10 +780,10 @@ class Feeder:
             assert intake is not None
             try:
                 context = self.factory_for(project)
-                if project.linear_project_id is not None:
+                if project.linear_project_ids:
                     if self.linear is None or intake.linear_state is None:
                         continue
-                    issues = self.linear.linear_intake(project.linear_project_id, intake.linear_state)
+                    issues = self.linear.linear_intake(project.linear_project_ids, intake.linear_state)
                 else:
                     if context.config.tickets != "github" or intake.label is None:
                         continue

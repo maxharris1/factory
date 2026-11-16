@@ -15,9 +15,9 @@ Reads:
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
   updated_at, which GitHub bumps on every label change;
-* linear_intake: issues in the project and workflow state, every page of
-  them, and for each, who moved it there: the actor of the latest history
-  entry whose toState is that state.
+* linear_intake: issues in any of a repo's projects and in the workflow
+  state, every page of them, and for each, who moved it there: the actor of
+  the latest history entry whose toState is that state.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -61,8 +61,8 @@ LINEAR_RELATIONS_QUERY = (
 # Linear's Issue field is branchName; it is read under the alias the poller
 # uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
 LINEAR_INTAKE_QUERY = (
-    "query($project: ID!, $state: String!, $after: String) { issues(first: 50, after: $after, "
-    "filter: { project: { id: { eq: $project } }, state: { name: { eq: $state } } }) "
+    "query($projects: [ID!]!, $state: String!, $after: String) { issues(first: 50, after: $after, "
+    "filter: { project: { id: { in: $projects } }, state: { name: { eq: $state } } }) "
     "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
     "labels(first: 20) { nodes { name } } "
     "history(first: 25) { nodes { createdAt actor { id } toState { name } } } "
@@ -478,13 +478,17 @@ class LinearIntakeClient:
             raise GitHubAdapterError("Linear returned no data")
         return data
 
-    def linear_intake(self, project_id: str, state: str) -> list[IntakeIssue]:
-        repo = self.repo_for_project[project_id]
+    def linear_intake(self, project_ids: frozenset[str], state: str) -> list[IntakeIssue]:
+        repos = {self.repo_for_project[project_id] for project_id in project_ids}
+        if len(repos) != 1:
+            raise GitHubAdapterError("Linear intake projects must belong to one repo")
+        (repo,) = repos
+        projects = sorted(project_ids)
         nodes: list[object] = []
         after: str | None = None
         for _ in range(LINEAR_INTAKE_MAX_PAGES):
             data = self._request(
-                LINEAR_INTAKE_QUERY, {"project": project_id, "state": state, "after": after}
+                LINEAR_INTAKE_QUERY, {"projects": projects, "state": state, "after": after}
             )
             connection = data.get("issues") or {}
             if not isinstance(connection, dict):

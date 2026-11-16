@@ -160,7 +160,7 @@ def config(*, linear: bool = False) -> OrchConfig:
             Project(
                 "acme/widgets",
                 factory_ref="main",
-                linear_project_id="project-1" if linear else None,
+                linear_project_ids=frozenset({"project-1"} if linear else ()),
             ),
         ),
         linear=LinearConfig("LINEAR_KEY"),
@@ -233,13 +233,13 @@ def test_review_actions_use_each_projects_linear_ready_flag() -> None:
                 Project(
                     "aut0-code/aut0",
                     factory_ref="dev",
-                    linear_project_id="aut0",
+                    linear_project_ids=frozenset({"aut0"}),
                     linear_ready_for_review=True,
                 ),
                 Project(
                     "acme/linear",
                     factory_ref="main",
-                    linear_project_id="linear",
+                    linear_project_ids=frozenset({"linear"}),
                 ),
                 Project("acme/github", factory_ref="main"),
             ),
@@ -855,7 +855,7 @@ def test_linear_failure_does_not_stop_tracked_github_or_reconcile(
                 Project(
                     "aut0/repo",
                     factory_ref="main",
-                    linear_project_id="linear-project",
+                    linear_project_ids=frozenset({"linear-project"}),
                 ),
                 Project("acme/widgets", factory_ref="main"),
             ),
