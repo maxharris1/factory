@@ -832,7 +832,7 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
 
 
 def _ticket_ref(
-    sources: dict[tuple[str, str], tuple[str, str | None]],
+    sources: dict[tuple[str, str], tuple[str | None, str | None]],
     repo: object,
     ticket_id: object,
     repo_limit: int = 100,
@@ -842,7 +842,7 @@ def _ticket_ref(
     ref = {"repo": _clean(repo, repo_limit), "ticket_id": _clean(ticket_id, 64)}
     found = sources.get((str(repo).casefold(), str(ticket_id)))
     if found is not None:
-        ref["source"] = found[0] if SOURCE.fullmatch(found[0]) else None
+        ref["source"] = found[0] if found[0] is not None and SOURCE.fullmatch(found[0]) else None
         ref["pr"] = _clean(found[1], 16) if found[1] is not None else None
     return ref
 
@@ -1024,6 +1024,11 @@ def _read_db(
     tables = _tables(connection)
     jobs = "jobs" in tables
     sources = read_sources(connection)
+    if "tracked_tickets" in tables:
+        for repo, ticket_id in connection.execute(
+            "SELECT repo, ticket_id FROM tracked_tickets WHERE tracker = 'github'"
+        ):
+            sources.setdefault((str(repo).casefold(), str(ticket_id)), (None, str(ticket_id)))
 
     totals = {state: 0 for state in STATES}
     groups: dict[tuple[str, str], dict] = {}

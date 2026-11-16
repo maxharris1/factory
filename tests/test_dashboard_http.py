@@ -252,6 +252,7 @@ APP_TOKEN = "ghs_LEAKCANARYinstallationTok3n000000000"
 BOT_TYPE_TOKEN = "gho_LEAKCANARYbotTypeTok3n00000000000000"
 BOT_LOGIN_TOKEN = "gho_LEAKCANARYbotLoginTok3n0000000000000"
 VIA_APP_TOKEN = "ghu_LEAKCANARYviaAppTok3n00000000000000"
+OAUTH_VIA_APP_TOKEN = "gho_LEAKCANARYoauthViaAppTok3n0000000000"
 DEVICE_CODE = "devcode_LEAKCANARY3584f1e2b0c9d7a6"
 USER_CODE = "LKCN-7Q2Z"
 REPO = "maxharris1/widgets"
@@ -272,6 +273,7 @@ IDENTITIES = {
     BOT_TYPE_TOKEN: (200, {"login": "maxharris1", "type": "Bot"}),
     BOT_LOGIN_TOKEN: (200, {"login": "maxharris1[bot]", "type": "User"}),
     VIA_APP_TOKEN: (200, {"login": "MaxHarris1", "type": "User"}),
+    OAUTH_VIA_APP_TOKEN: (200, {"login": "maxharris1", "type": "User"}),
 }
 
 
@@ -348,7 +350,7 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
             with fake.lock:
                 fake.posts.append((found[1], int(found[2]), body, login))
                 number = len(fake.posts)
-            app = {"slug": "some-app"} if token == VIA_APP_TOKEN else None
+            app = {"slug": "some-app"} if token in (VIA_APP_TOKEN, OAUTH_VIA_APP_TOKEN) else None
             self._reply(201, {
                 "html_url": f"https://github.com/{found[1]}/issues/{found[2]}#issuecomment-{number}",
                 "user": {"login": login}, "performed_via_github_app": app,
@@ -491,7 +493,7 @@ def test_the_approver_signs_in_and_comments_as_himself(max_client: Client, fake_
 
 
 @pytest.mark.parametrize("token", [OTHER_TOKEN, APP_TOKEN, BOT_TYPE_TOKEN, BOT_LOGIN_TOKEN,
-                                   "denied"])
+                                   VIA_APP_TOKEN, "denied"])
 def test_a_token_that_is_not_the_approver_is_refused(serve_actions, fake_github, token) -> None:
     client = serve_actions()
     assert client.sign_in(fake_github, token) == "refused"
@@ -501,10 +503,14 @@ def test_a_token_that_is_not_the_approver_is_refused(serve_actions, fake_github,
     assert fake_github.posts == []
 
 
-def test_a_post_github_attributes_to_an_app_is_an_error(serve_actions, fake_github) -> None:
+def test_a_post_github_attributes_to_an_app_ends_the_session(serve_actions, fake_github) -> None:
     client = serve_actions()
-    assert client.sign_in(fake_github, VIA_APP_TOKEN) == "signed-in"
+    assert client.sign_in(fake_github, OAUTH_VIA_APP_TOKEN) == "signed-in"
     assert comment(client) == (502, {"error": "wrong-author"})
+    assert client.session() == {"signed_in": False}
+    assert comment(client)[0] == 401
+    assert ok(client)[0] == 401
+    assert len(fake_github.posts) == 1
 
 
 def test_an_expired_device_flow_reports_expired(serve_actions, fake_github) -> None:
@@ -580,6 +586,23 @@ def test_comment_bodies_that_could_skip_the_head_check_are_400(
 ) -> None:
     assert comment(max_client, body)[0] == 400
     assert fake_github.posts == []
+
+
+@pytest.mark.parametrize("body", [
+    "/ok " + HEAD,
+    "<!-- orch:v1 kind=ok from=maxharris1 head=" + HEAD + " -->",
+    "`orch:v1 kind=ok from=maxharris1 head=" + HEAD + "`",
+    "  `orch:v1 kind=ok head=" + HEAD + "`\nthanks",
+])
+def test_no_comment_body_the_hold_reads_as_an_ok_is_posted(
+    max_client: Client, fake_github, body
+) -> None:
+    from lib.hold import _ok_head
+
+    assert _ok_head(body) == HEAD
+    before = list(fake_github.calls)
+    assert comment(max_client, body, kind="pull", number=34) == (400, {"error": "reserved-body"})
+    assert fake_github.posts == [] and fake_github.calls == before
 
 
 @pytest.mark.parametrize("target", [{"repo": "no-slash"}, {"number": "12x"}, {"number": True},

@@ -249,7 +249,8 @@ MAX_REQUEST = 512 * 1024
 GITHUB_TIMEOUT = 10
 REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
 SHA = re.compile(r"[0-9a-f]{40}")
-REFUSED_FIRST_LINE = re.compile(r"\s*(?:<!--\s*orch:v1\b|/ok\b)")
+REFUSED_FIRST_LINE = re.compile(r"\s*(?:<!--\s*orch:v1\b|`orch:v1\b|/ok\b)")
+OAUTH_APP_TOKEN = re.compile(r"gho_[A-Za-z0-9]+")
 DEVICE_ERRORS = {
     "authorization_pending": "pending",
     "slow_down": "pending",
@@ -435,6 +436,8 @@ class Actions:
         return state, session
 
     def _sign_in(self, token: str) -> tuple[str, Session | None]:
+        if OAUTH_APP_TOKEN.fullmatch(token) is None:
+            return "refused", None
         try:
             user = self.github.user(token)
         except GitHubError:
@@ -470,6 +473,7 @@ class Actions:
             or login.casefold() != self.config.approver.casefold()
             or comment.get("performed_via_github_app") is not None
         ):
+            self.sign_out()
             raise ApiError(502, "wrong-author")
         if not isinstance(url, str):
             raise ApiError(502, "github")

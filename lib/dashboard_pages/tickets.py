@@ -233,6 +233,7 @@ SCRIPT_TICKETS = r"""
       return card;
     }
     if (!waiting) add(main, el('div', 'tk-none', 'no job running'));
+    else if (GH.on && ghRefs(t)) add(main, ghPanel(t, t));
     if (c.verdict) {
       var said = add(main, el('div', 'tk-run'));
       add(said, chip(c.verdict.kind, VERDICT[c.verdict.kind] || 'muted'));

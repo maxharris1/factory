@@ -1805,10 +1805,12 @@ Threat model, in short:
 
 - Max signs in with GitHub's device flow: the page shows a code, he enters
   it on github.com with his own 2FA. The server then reads `GET /user` and
-  keeps the session only for a `User` whose login is the approver; another
-  login, a `Bot` type, a `[bot]` login or an App token is refused and the
-  token dropped. Each post's reply is checked again for the approver's login
-  and no `performed_via_github_app`.
+  keeps the session only for a `User` whose login is the approver and whose
+  token is an OAuth App token (`gho_`); another login, a `Bot` type, a
+  `[bot]` login or a GitHub App token (`ghu_`, `ghs_`) is refused before any
+  post and the token dropped. Each post's reply is checked again for the
+  approver's login and no `performed_via_github_app`; a reply that fails
+  that check ends the session.
 - The token lives only in the server's memory. The browser gets a random
   session id in an `HttpOnly; SameSite=Strict; Path=/api` cookie (12 hours,
   one session at a time). The user code appears once, in the sign-in reply;
@@ -1819,7 +1821,8 @@ Threat model, in short:
   Every POST needs `Content-Type: application/json` and the server's own
   `Origin`, and every POST after sign-in the session's `X-Factory-CSRF`.
 - Comments and OKs go only to tickets in the served `status.json`. A comment
-  whose first line is `/ok` or an `orch:v1` header is refused. The OK reads
+  whose first line is `/ok` or an `orch:v1` header, in the HTML or the
+  backtick form, is refused. The OK reads
   the PR head live (the snapshot never holds heads), and the server re-reads
   it right before posting `/ok <40-char sha>`: if it moved, nothing is
   posted and the page is told the new head. The OK is refused unless the
