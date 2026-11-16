@@ -309,8 +309,6 @@ class ReadyMixin:
     ) -> CIEvidence | None:
         """Runs outside the enqueue's transaction, so no network read holds the DB lock."""
         from lib.evidence.ci import ci_evidence
-        from lib.github_actions import GitHubAdapterError
-        from lib.poll_source import PollSourceError
 
         with self._connect() as connection:
             held = connection.execute(
@@ -325,7 +323,7 @@ class ReadyMixin:
             for run_id in dict.fromkeys(run_ids):
                 try:
                     run_logs = self.ci_logs(repo, run_id)
-                except (GitHubAdapterError, PollSourceError) as exc:
+                except Exception as exc:
                     run_logs = {}
                     if self.log is not None:
                         self.log(f"ci log: {repo} run {run_id} unavailable: {type(exc).__name__}")

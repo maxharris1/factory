@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from lib.dispatch.types import FailedCheck
 
 LOG_LINES = 150
+_ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
 
 
 @dataclass(frozen=True)
@@ -51,7 +53,8 @@ def _tail(text: str, limit: int) -> tuple[str, str | None]:
     from lib.dashboard import redact, redact_key_blocks
     from lib.dispatch.errors_text import _redact
 
-    blocks = redact_key_blocks(text.rstrip().splitlines())
+    unstamped = [_ACTIONS_TIMESTAMP.sub("", line) for line in text.rstrip().splitlines()]
+    blocks = redact_key_blocks(unstamped)
     lines = _redact(redact("\n".join(blocks))).splitlines()
     if len(lines) <= limit:
         return "\n".join(lines), None

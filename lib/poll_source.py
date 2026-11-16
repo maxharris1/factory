@@ -206,6 +206,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
+_GH_READ_SUBCOMMANDS = (("run", "view"),)
 
 
 class _Cutoff:
@@ -1928,10 +1929,8 @@ class LivePollSource:
         return self._gh_call(*args, _unconditional=True)
 
     def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
-        """Retry the poll adapter's reads (GETs and GraphQL queries); never repeat a write."""
         call = list(argv)
-        args = call[call.index("api") + 1 :]
-        if _is_read(args) or _is_graphql_query(args):
+        if _is_gh_read(call[call.index("gh") + 1 :] if "gh" in call else []):
             return self._run_gh_read(call)
         with self._timed(_gh_source(call)):
             return self.gh_runner(call, self.timeout_seconds)
@@ -2042,11 +2041,19 @@ def _is_graphql_query(args: Sequence[str]) -> bool:
     return len(documents) == 1 and documents[0].startswith(("query", "{"))
 
 
+def _is_gh_read(args: Sequence[str]) -> bool:
+    if tuple(args[:1]) == ("api",):
+        return _is_read(args[1:]) or _is_graphql_query(args[1:])
+    return tuple(args[:2]) in _GH_READ_SUBCOMMANDS
+
+
 def _gh_source(argv: Sequence[str]) -> str:
-    for part in argv:
+    for index, part in enumerate(argv):
         match = _REPO_ROUTE.match(part)
         if match:
             return match.group(1).lower()
+        if part == "--repo" and index + 1 < len(argv):
+            return argv[index + 1].lower()
     return "github"
 
 

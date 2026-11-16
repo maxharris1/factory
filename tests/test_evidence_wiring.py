@@ -10,6 +10,8 @@ from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
 from lib.queue import Job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
 from lib.github_actions import GhResult
+from lib.orch_yml import OrchConfig
+from lib.poll_source import LivePollSource
 from tests.test_github_actions import CHECKS, HEAD, REPO, STATUS, RecordedGh, adapter, served
 from tests.test_lifecycle import Flow as LifecycleFlow
 from tests.test_rounds_and_caps import HEADS, Flow
@@ -154,6 +156,39 @@ def test_a_log_that_cannot_be_read_still_queues_the_ci_fix(tmp_path: Path) -> No
     job = evidence(claim(flow, "claude"))["ci"]["jobs"][0]
     assert (job["run_url"], job["log_tail"]) == (RUN_URL, None)
     assert gh.count(RUN_LOG) == 1
+
+
+def test_the_poller_binding_reads_the_failed_run_once_and_queues_the_ci_fix(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def reader(argv: list[str], timeout: float) -> GhResult:
+        calls.append(list(argv))
+        return GhResult(0, "pytest\tRun tests\t2026-11-10T19:50:00Z FAILED x\n", "")
+
+    source = LivePollSource(OrchConfig(poll_seconds=60, projects=()), environ={}, gh_runner=reader)
+    flow, _ = actions_ci_fix(tmp_path)
+    flow.dispatcher.ci_logs = source.github.failed_run_logs
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+
+    assert [call[call.index("gh") + 1 :] for call in calls] == [list(RUN_LOG)]
+    jobs = evidence(claim(flow, "claude"))["ci"]["jobs"]
+    assert flow.queue.claim("claude") is None
+    assert [(job["check"], job["log_tail"]) for job in jobs] == [("pytest", "FAILED x"), ("lint", None)]
+
+
+def test_a_log_reader_that_raises_anything_still_queues_the_ci_fix(tmp_path: Path) -> None:
+    flow, _ = actions_ci_fix(tmp_path)
+
+    def broken(repo: str, run_id: str) -> dict[str, str]:
+        raise ValueError("substring not found")
+
+    flow.dispatcher.ci_logs = broken
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+
+    job = evidence(claim(flow, "claude"))["ci"]["jobs"][0]
+    assert (job["run_url"], job["log_tail"]) == (RUN_URL, None)
 
 
 def test_review_fix_carries_the_blocking_finding(tmp_path: Path) -> None:

@@ -115,6 +115,19 @@ def test_a_credential_value_on_the_line_after_its_name_is_redacted():
     assert tail.splitlines()[-1] == "FAILED x"
 
 
+def test_a_timestamped_credential_value_on_the_line_after_its_name_is_redacted():
+    log = (
+        "2026-11-10T19:50:00.1234567Z password:\n"
+        "\ufeff2026-11-10T19:50:01Z   synthetic-swordfish\n"
+        "2026-11-10T19:50:02Z FAILED x\n"
+    )
+
+    tail = _tail(log).log_tail or ""
+
+    assert "synthetic-swordfish" not in tail
+    assert tail.splitlines()[-1] == "FAILED x"
+
+
 def test_a_name_above_the_cut_still_hides_the_value_below_it():
     tail = _tail("password:\n  synthetic-swordfish\nFAILED x\n", limit=2).log_tail or ""
 
