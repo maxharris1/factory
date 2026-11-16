@@ -200,6 +200,7 @@ def _snapshot(
         db,
         log,
         now=time.time(),
+        uptime=health.read_uptime(),
         machines_path=machines,
         refresh_seconds=refresh if refresh is not None else config.refresh_seconds,
         last_cycle_at=last_cycle_at,
