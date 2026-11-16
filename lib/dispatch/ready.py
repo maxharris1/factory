@@ -18,6 +18,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
+from lib.dispatch.constants import CI_WAIT_REASONS
 from lib.dispatch.detail import failed_checks
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
@@ -34,6 +35,16 @@ _RERUN_STATES = (None, "building", "fixing", "review")
 
 class ReadyMixin:
     def _t2(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> tuple[bool, str]:
+        handled, outcome = self._ready(ticket, comment, fields)
+        self._record_ci_wait(ticket, comment, fields["head"], outcome)
+        return handled, outcome
+
+    def _ready(
         self,
         ticket: TrackedTicket,
         comment: Comment,
@@ -149,9 +160,9 @@ class ReadyMixin:
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
             if covering is not None:
-                return False, self._wait_on_ci(ticket, comment, head, result, "approved-ci-pending")
+                return False, "approved-ci-pending"
             if not ticket.factory.start_before_ci:
-                return False, self._wait_on_ci(ticket, comment, head, result, "ci-pending")
+                return False, "ci-pending"
         elif result.status == "success" and covering is not None:
             handled, shipped = self._ship_covered(ticket, *covering, head)
             return handled, f"approval-covers:{shipped}"
@@ -199,15 +210,21 @@ class ReadyMixin:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
 
-    def _wait_on_ci(
+    def _record_ci_wait(
         self,
         ticket: TrackedTicket,
         comment: Comment,
-        head: str,
-        result: CIResult | None,
-        reason: str,
-    ) -> str:
+        reported_head: str,
+        outcome: str,
+    ) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
+            if outcome not in CI_WAIT_REASONS:
+                connection.execute("DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key)
+                return
+            ticket = self._polled.get(key, ticket)
+            head = _matching_head(reported_head, ticket.current_head) or reported_head
+            result = ticket.ci.get(head) or ticket.ci.get(reported_head)
             connection.execute(
                 """
                 INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since)
@@ -221,16 +238,14 @@ class ReadyMixin:
                                  THEN ci_waits.since ELSE excluded.since END
                 """,
                 (
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
+                    *key,
                     comment.id,
                     head,
-                    reason,
+                    outcome,
                     json.dumps(list(result.pending) if result is not None else []),
                     self.queue.now(),
                 ),
             )
-        return reason
 
     def _review_after_green_rerun(self, ticket: TrackedTicket) -> None:
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)

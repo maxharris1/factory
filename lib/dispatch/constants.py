@@ -8,6 +8,8 @@ import re
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 # merged and done are absorbing (#108): no later write moves a ticket out.
 FINISHED_STATES = ("merged", "done")
+TERMINAL_STATES = frozenset({"merged", "done", "refused", "abandoned"})
+CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending")
 ORCHESTRATOR = "grok-bot"
 # #170: the kinds a worker bot's App login may post once the switch is on.
 WORKER_KINDS = frozenset({"plan", "questions", "ready", "verdict", "stuck"})

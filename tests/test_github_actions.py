@@ -724,7 +724,7 @@ def test_ci_status_names_the_checks_still_running() -> None:
     gh.route(STATUS, served("status-pending.json"))
 
     result = actions.ci_status("owner/repo", HEAD)
-    assert (result.status, result.pending) == ("pending", ("build", "commit status"))
+    assert (result.status, result.pending) == ("pending", ("build", "Vercel"))
 
 
 @pytest.mark.parametrize(

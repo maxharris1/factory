@@ -631,7 +631,7 @@ class GitHubReviewActions:
             if state in ("failure", "error"):
                 failed.append(FailedCheck("commit status"))
             elif state == "pending":
-                pending.append("commit status")
+                pending.extend(_pending_contexts(combined) or ["commit status"])
             elif state == "success":
                 passed = True
             else:
@@ -869,6 +869,17 @@ _ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
 _ACTIONS_JOB = re.compile(
     r"^(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/([0-9]+))/job/([0-9]+)(?:[/?#]|$)"
 )
+
+
+def _pending_contexts(combined: dict[str, Any]) -> list[str]:
+    statuses = combined.get("statuses")
+    if not isinstance(statuses, list):
+        return []
+    return [
+        str(status.get("context"))
+        for status in map(_object, statuses)
+        if status.get("state") == "pending"
+    ]
 
 
 def _failed_check(name: str, details: object) -> FailedCheck:

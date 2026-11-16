@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from lib.dashboard import collect_snapshot
+from lib.dashboard_pages import lanes, tickets
+from lib.dispatch.constants import BASE_UPDATE_GRACE_SECONDS
 from tests.merge_queue_support import APPROVE, sha
 from tests.test_ready_after_approve import approved_on_red_ci
 from tests.test_review_before_ci import (
@@ -216,3 +219,93 @@ def test_the_wait_clock_runs_from_the_first_ready_on_a_head_and_restarts_on_a_ne
     assert [(w["comment_id"], w["head"], w["since"]) for w in ci_waits(board)] == [
         ("ready-b", sha(2), board.now[0])
     ]
+
+
+def board_cards(board, tmp_path: Path) -> tuple[dict, str]:
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "log", now=board.now[0])
+    model = tickets.board(snapshot)
+    markup = "".join(tickets._card(card) for column in model["columns"] for card in column["cards"])
+    return snapshot, markup + "".join(lanes._ci_lane(snapshot))
+
+
+def test_a_green_ready_held_for_its_stack_is_no_longer_waiting_on_ci(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    assert [w["reason"] for w in ci_waits(board)] == ["ci-pending"]
+
+    class StackHold:
+        def feed_once(self):
+            return None
+
+        def hold_stacked_review(self, ticket, head):
+            return True
+
+    board.dispatcher.feeder = StackHold()
+    pr.ci[pr.head] = "success"
+    board.poll()
+
+    snapshot, markup = board_cards(board, tmp_path)
+    assert board.outcome(ready) is None
+    assert ci_waits(board) == []
+    assert not snapshot["running"] and not snapshot["queued"]
+    assert "waiting on CI" not in markup
+
+
+def test_a_deleted_ready_leaves_no_ci_wait(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    assert [w["comment_id"] for w in ci_waits(board)] == [ready]
+
+    pr.comments = [comment for comment in pr.comments if comment.id != ready]
+    board.poll()
+
+    assert ci_waits(board) == []
+    assert "waiting on CI" not in board_cards(board, tmp_path)[1]
+
+
+def test_a_merged_ticket_leaves_no_ci_wait(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head)
+    board.poll()
+    assert len(ci_waits(board)) == 1
+
+    pr.closed = True
+    pr.merged = True
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "merged"
+    assert ci_waits(board) == []
+    assert "waiting on CI" not in board_cards(board, tmp_path)[1]
+
+
+def test_a_conflicting_ready_in_its_base_update_grace_is_waiting_on_ci(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    naming_pending_checks(board)
+    pr = built_with_ci_pending(board, sha(1))
+    snapshot = board.snapshot
+
+    def unreported(pr, *, fresh: bool = False):
+        ticket = snapshot(pr, fresh=fresh)
+        return replace(ticket, ci={head: replace(ci, reported=False) for head, ci in ticket.ci.items()})
+
+    board.snapshot = unreported
+    pr.conflict()
+    ready = board.ready(pr, pr.head)
+    board.poll()
+
+    shown, markup = board_cards(board, tmp_path)
+    assert board.outcome(ready) is None
+    assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
+    assert not shown["running"] and not shown["queued"]
+    assert "waiting on CI" in markup
+    assert "no job running" not in markup
+
+    board.now[0] += BASE_UPDATE_GRACE_SECONDS
+    board.poll()
+    assert board.jobs("fix")
+    assert ci_waits(board) == []

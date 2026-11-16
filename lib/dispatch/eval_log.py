@@ -14,11 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from lib.dispatch.constants import TERMINAL_STATES
 from lib.eval_log import append_lines, erase_with_spaces
 from lib.eval_report import _PR, _REPO, _STATE, _TICKET, _TOKEN, _format_time
 from lib.handoff import HandoffError, parse_comment
-
-TERMINAL_STATES = frozenset({"merged", "done", "refused", "abandoned"})
 
 
 class _Line(NamedTuple):

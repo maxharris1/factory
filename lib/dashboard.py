@@ -63,6 +63,7 @@ from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_usage import read_usage
+from lib.dispatch.constants import CI_WAIT_REASONS
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
@@ -120,7 +121,6 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
-CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending")
 ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", "edited-comment", *FEEDER_ATTENTION_REASONS)
 
 HANDOFF_SAVINGS_DEFINITION = (
