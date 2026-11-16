@@ -74,6 +74,10 @@ class HoldsMixin:
                         self.queue.now(),
                     ),
                 )
+                connection.execute(
+                    "INSERT OR IGNORE INTO verdict_acceptances VALUES (?, ?, ?, ?)",
+                    (*scope, comment.id, self.queue.now()),
+                )
                 write_workflow_state(
                     connection,
                     ticket.repo,

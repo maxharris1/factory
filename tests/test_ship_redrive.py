@@ -18,6 +18,7 @@ from lib.dispatcher import (
     TrackedTicket,
     safe_ship_error,
 )
+from lib.eval_report import build_metrics
 from lib.github_actions import (
     GhResult,
     GitHubAdapterError,
@@ -1059,3 +1060,25 @@ def test_handoff_redrive_of_an_already_merged_pr_is_merge_confirmed(tmp_path: Pa
     assert [action for action, _ in grok_wakes(queue)] == ["ship-failed", "done"]
     with queue.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM needs_attention").fetchone()[0] == 0
+
+
+def test_a_re_driven_approval_stays_accepted_from_its_first_handling(tmp_path: Path) -> None:
+    dispatcher, queue, gh = github_setup(tmp_path)
+    now = [100.0]
+    queue.clock = lambda: now[0]
+    gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), draft_pull())
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    snapshot = approve_snapshot()
+    dispatcher.process(snapshot)
+    with sqlite3.connect(queue.path) as connection:
+        connection.execute(
+            "INSERT INTO verdict_heads VALUES ('owner/repo', '42', 'later', ?, 1, 150, NULL)",
+            (HEAD,),
+        )
+    now[0] = 200.0
+    dispatcher.process(snapshot)
+    assert intent(queue)["status"] == "completed"
+    report = build_metrics(
+        queue.path, since="1970-01-01T00:02:20Z", until="1970-01-01T00:02:40Z"
+    )
+    assert dict(report.values)["verdicts-on-accepted-head"] == 1
