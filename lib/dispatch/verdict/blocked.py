@@ -38,11 +38,9 @@ class BlockedMixin:
                 return True, "stale-blocked"
         head = _matching_head(reported_head, ticket.current_head) or reported_head
         self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason="blocked",
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=self._project_wake_detail(
                 ticket,
                 f"verdict=BLOCKED {_comment_link(comment)} from "

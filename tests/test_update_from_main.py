@@ -19,6 +19,9 @@ from tests.merge_queue_support import Board, sha
 from tests.test_dispatcher import READY
 
 
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+
+
 def conflicted(tmp_path: Path, **options) -> tuple[Board, object, str]:
     board = Board(tmp_path, **options)
     pr = board.open("42", sha(1))

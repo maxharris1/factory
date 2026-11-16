@@ -8,6 +8,8 @@ build again.
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from dataclasses import replace
 from datetime import datetime
@@ -17,6 +19,9 @@ from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.poll_source import IntakeRisks
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, factory
+
+
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
 FIXTURES = Path(__file__).parent / "fixtures" / "lifecycle"
 TRUSTED = {

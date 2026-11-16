@@ -37,6 +37,7 @@ from tests.test_ship_hold import (
     snapshot,
     workflow_state,
 )
+from tests.test_hooks import skip_facts
 
 MAX = "maxharris1"
 HANDOFF = hold_factory(ship="handoff")
@@ -204,7 +205,7 @@ def test_the_queue_merges_the_cleared_factory_repo_pr_at_the_head(tmp_path: Path
     assert board.actions.handoffs == [sha(1)]
     assert board.actions.merges == [(True, sha(1))]
     assert board.state("42")["workflow_state"] == "merged"
-    assert board.wakes("done"), "the done wake fires after the merge"
+    assert skip_facts(board.queue, "done"), "the done notice follows the merge"
 
 
 @pytest.mark.parametrize(

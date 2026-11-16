@@ -40,6 +40,7 @@ from tests.test_dispatcher import (
 )
 from tests.test_job_state import Poller
 from tests.test_remote_start import FakeTransport, config_of, machines_file
+from tests.test_hooks import skip_facts
 
 HEADS = [f"{n:x}" * 40 for n in range(1, 10)]
 APPROVE = (
@@ -502,7 +503,8 @@ def test_verdict_after_handoff_without_reentry_is_silent(tmp_path: Path) -> None
     assert flow.approve("2/3") == "after-handoff"
 
     grok_after = [row["action"] for row in jobs(flow.queue) if row["recipient"] == "grok"]
-    assert grok_after == grok_before == ["done"]
+    assert grok_after == grok_before == []
+    assert len(skip_facts(flow.queue, "done")) == 1
     assert flow.state()["workflow_state"] == "handed-off"
 
 

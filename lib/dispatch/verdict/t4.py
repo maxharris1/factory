@@ -86,11 +86,9 @@ class T4Mixin:
                     ticket, comment, current_head, result, review_round
                 )
             self.wake_grok_once(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
+                ticket,
                 reason="blocked",
                 source_comment_id=comment.id,
-                timeout_seconds=ticket.job_timeout_minutes * 60,
                 detail=self._project_wake_detail(
                     ticket,
                     f"APPROVE {_comment_link(comment)} landed on red CI at "

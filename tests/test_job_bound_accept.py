@@ -57,7 +57,8 @@ def _wakes(queue: SQLiteJobQueue) -> list[str]:
         return [
             str(row[0])
             for row in connection.execute(
-                "SELECT detail FROM jobs WHERE recipient = 'grok' ORDER BY rowid"
+                "SELECT detail FROM jobs WHERE recipient = 'grok'"
+                " UNION ALL SELECT body FROM skipped_wakes"
             )
         ]
 
