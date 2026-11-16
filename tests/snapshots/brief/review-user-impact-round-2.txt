@@ -1,7 +1,7 @@
 ===== box =====
 # Factory job brief: review
 
-You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Work only on this job, then finish it as the last sections say.
+You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: review
@@ -19,7 +19,7 @@ You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this jo
 - reviewer harness: codex
 - verify skill: verify-cleffy
 - attempt: 1
-- wall-clock budget: 60 minutes from the start of this run. Near it, push what you have and post `questions`. Past it, `orch job run` stops you and the job fails `wall-clock`.
+- wall-clock budget: 60 minutes from the start of this run. Near it, post the verdict you can support, or a `questions` handoff. Past it, `orch job run` stops you and the job fails `wall-clock`.
 - repo skills: `.claude/skills/verify-cleffy/SKILL.md`
 - working directory: this job's git worktree (`$ORCH_JOB_WORKTREE`); this brief is also at `$ORCH_JOB_BRIEF`
 
@@ -103,7 +103,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ## Finish the job
 - After the handoff comment is posted: `orch job done codex-bot 0123456789abcdef0123456789abcdef --handoff <comment-id>`.
-- If you cannot finish: `orch job done codex-bot 0123456789abcdef0123456789abcdef --failed` (T6 retries the job once).
+- If you cannot finish: `orch job done codex-bot 0123456789abcdef0123456789abcdef --failed` (the factory retries a failed job once, automatically).
 - `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_PROOF`, so run it from this environment. Never print, post, write down or commit that value.
 - `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job.
 
@@ -219,7 +219,7 @@ The reviewer runs `verify-cleffy`.
 ===== remote (mac) =====
 # Factory job brief: review
 
-You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Work only on this job, then finish it as the last sections say.
+You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: review
@@ -237,7 +237,7 @@ You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this jo
 - reviewer harness: codex
 - verify skill: verify-cleffy
 - attempt: 1
-- wall-clock budget: 60 minutes from the start of this run. Near it, push what you have and post `questions`. Past it, `orch job run` stops you and the job fails `wall-clock`.
+- wall-clock budget: 60 minutes from the start of this run. Near it, post the verdict you can support, or a `questions` handoff. Past it, `orch job run` stops you and the job fails `wall-clock`.
 - repo skills: `.claude/skills/verify-cleffy/SKILL.md`
 - working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`). It is not empty: the run's `.orch-worker*.pid` record is there, so clone into a subfolder with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone owner/repo repo`, then `cd repo` and check out the branch the task names. This brief is on your stdin only.
 
@@ -325,7 +325,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ORCH-HANDOFF: <comment-id>
 
-- If you cannot finish, make the very last line exactly this (T6 retries the job once):
+- If you cannot finish, make the very last line exactly this (the factory retries a failed job once, automatically):
 
 ORCH-HANDOFF: failed
 

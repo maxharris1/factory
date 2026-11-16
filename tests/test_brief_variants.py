@@ -291,17 +291,21 @@ def test_retry_text_appears_only_when_attempt_is_above_one(name: str):
 def test_a_t6_retry_says_attempt_one_ended_without_a_handoff():
     task = _task(_render(*T6_RETRY))
     assert f"Attempt 1 (job {'a' * 32}) ended without a valid handoff comment" in task
+    assert "The factory retries a failed job once on its own, and this is that retry" in task
 
 
 def test_a_max_retry_links_the_retry_comment():
     task = _task(_render(*MAX_RETRY))
-    assert "Attempt 1 ended with the ticket stuck" in task
-    assert "https://github.com/owner/repo/pull/42#issuecomment-9001" in task
+    assert (
+        "Attempt 1 ended with the ticket stuck, and a `retry` comment "
+        "(https://github.com/owner/repo/pull/42#issuecomment-9001) restarted it: read its reason there."
+    ) in task
+    assert "Max restarted" not in task
 
 
 def test_resume_quotes_max_answer():
     task = _task(_render(*RESUME))
-    assert "Max's answers" in task
+    assert "an `answers` comment from Max or the orchestrator" in task
     assert GO_URL in task
     assert "Use the v2 table." in task
 
@@ -494,7 +498,7 @@ def test_an_answered_ci_fix_stays_a_ci_fix_after_max_retries_it(tmp_path: Path):
     _answered_stuck_then_retried(flow, "1002", "1003", "1004")
     task = _claimed_task(flow)
     assert not _is_review_fix(task)
-    assert "This job resumes a paused step after Max's answers" in task
+    assert "This job resumes a paused step after an `answers` comment from Max or the orchestrator" in task
     assert "issuecomment-1003" in task
 
 
