@@ -1,0 +1,10 @@
+decision	choice	why
+playbook	figure-it-out at low rigor, one owner, no helpers	tests-only change in one file; risk low
+baseline	7 tests in test_prompt_contracts.py fail with the real gate	measured by marking the module job_bound before any change
+registration order	post_header posts, runs the poller, registers the job, runs the poller again	a real job posts then runs orch job done; the poller may read in between
+pre-registration check	assert no outcome before registration only for ready and verdict	_REGISTERING_ACTIONS gates only those kinds; plan and questions act at once
+job_bound scope	per test, not module-wide	the grok go/answers tests and to_cap register made-up comment ids; ac-3 keeps the default elsewhere
+enforced rules	rule-post-only, review-one-reviewer, review-agent-approval, review-high-risk-rounds, review-follow-ups-approve	each has a breaking handoff the dispatcher or parser refuses; mutating t4 author check and _may_approve_go fails the rows
+guidance rules	the other 23 rule ids	no refusal path, or a probe showed a breaking handoff accepted
+accepted breaking handoffs	APPROVE with a [blocking] finding merges; REVISE ac=met with no finding queues a fix; APPROVE naming a non-PR head merges	probed with Flow; out of scope to enforce per the ticket
+review-low-risk-rounds	guidance	the contract Flow is high risk; no cheap low-risk path in this file
