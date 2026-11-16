@@ -608,6 +608,14 @@ backup is one `poll_errors` row (`backup:<ErrorClass>`) and polling goes on.
 integrity_check`, with its queued plans, builds, fixes and reviews held
 until the poller reads their threads (section 4.2); `orch backup-db` takes
 one by hand.
+The same hook keeps a weekly snapshot beside the backup, in
+`weekly/orch-<Monday>.db` (issue #545): the first cycle of each week in
+America/New_York takes it with the same online backup, so a running poller
+has it soon after midnight Monday, and a poller down over Monday takes it
+on its first later cycle that week. Snapshots dated more than four weeks
+before the current Monday are deleted, and the newest is always kept. A
+failed snapshot is one `poll_errors` row (`weekly-snapshot:<ErrorClass>`).
+These are the `--baseline` inputs for `orch eval-report --db`.
 
 **Linear webhook (optional, issue #55).** `linear_webhook` turns on
 `orch linear-webhook serve`, a small stdlib HTTP server on `bind` (an IP
