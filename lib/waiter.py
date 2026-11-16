@@ -138,7 +138,7 @@ from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, 
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
-from lib import device_deploy
+from lib import device_deploy, job_token
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import ReadError, expected_for, gh_reader
 from lib.handoff_check import problems as handoff_problems
@@ -621,8 +621,8 @@ class Waiter:
         self._locked = 0
         if claimed is None:
             return None
-        job, placement = claimed
-        return self._start(job, placement)
+        job, placement, proof = claimed
+        return self._start(job, placement, proof)
 
     def _reconcile_home(self) -> None:
         if self.home is None:
@@ -763,7 +763,7 @@ class Waiter:
             )
         return 0
 
-    def _start(self, job: Job, placement: Placement | None) -> str | None:
+    def _start(self, job: Job, placement: Placement | None, proof: str) -> str | None:
         request = job.request
         label = f"job {job.id} ({request.repo}#{request.ticket_id} {request.action})"
         device = (
@@ -806,7 +806,7 @@ class Waiter:
                 offset = _size(job_dir / "run.log")
                 lock = _lock_for_runner(job_dir / RUN_LOCK)
             try:
-                child = self._spawn(argv, job_dir, brief_path, lock)
+                child = self._spawn(argv, job_dir, brief_path, lock, proof)
             finally:
                 if lock >= 0:
                     os.close(lock)
@@ -961,8 +961,11 @@ class Waiter:
         os.chmod(path, 0o700)
         return path
 
-    def _spawn(self, argv: list[str], job_dir: Path, brief_path: Path, lock: int) -> Child:
+    def _spawn(
+        self, argv: list[str], job_dir: Path, brief_path: Path, lock: int, proof: str
+    ) -> Child:
         env = dict(self.environ)
+        env[job_token.PROOF_ENV] = proof
         env[BRIEF_ENV] = str(brief_path)
         env[STATE_DIR_ENV] = str(job_dir)  # the run's raw telemetry log goes here (#93)
         log_fd = os.open(

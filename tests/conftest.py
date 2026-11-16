@@ -14,6 +14,7 @@ pinned skills, installed as install-skills does.
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import signal
@@ -40,8 +41,10 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
+    from lib.job_token import PROOF_ENV
+
     return {
-        **os.environ,
+        **{name: value for name, value in os.environ.items() if name != PROOF_ENV},
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_STATE_HOME": str(home / ".local/state"),
@@ -136,6 +139,26 @@ def _registration_gate(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
             "_registration",
             lambda self, ticket, comment, kind: Registration.REGISTERED,
         )
+
+
+@pytest.fixture(autouse=True)
+def _claim_proof(monkeypatch: pytest.MonkeyPatch):
+    from lib.device_pool import DevicePool
+    from lib.job_token import PROOF_ENV
+    from lib.queue import SQLiteJobQueue
+    from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
+
+    def proven(claim):
+        @functools.wraps(claim)
+        def wrapper(self, recipient, **kwargs):
+            kwargs.setdefault("token_hash", CLAIM_HASH)
+            return claim(self, recipient, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(DevicePool, "claim", proven(DevicePool.claim))
+    monkeypatch.setattr(SQLiteJobQueue, "claim", proven(SQLiteJobQueue.claim))
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
 
 
 @pytest.fixture(autouse=True)

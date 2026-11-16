@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from lib import job_token
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
 from lib.queue import Job, SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
+CLAIM_PROOF = "test-claim-proof"
+CLAIM_HASH = job_token.digest(CLAIM_PROOF)
 
 
 def pool_claim(queue: SQLiteJobQueue, recipient: str, machines: Path | None = None) -> Job:

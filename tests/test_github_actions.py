@@ -248,7 +248,7 @@ def test_the_subprocess_seam_is_one_function_with_no_shell() -> None:
             ):
                 callers.append(function.name)
                 assert all(keyword.arg != "shell" for keyword in node.keywords)
-    assert callers == ["run_gh"]
+    assert callers == ["run_gh", "git_patch_id"]
     imported = {
         alias.name
         for node in ast.walk(tree)
@@ -807,11 +807,8 @@ def test_recorded_gh_http_errors_map_to_a_safe_adapter_error(status: int) -> Non
     assert getattr(merge.value, "retryable", False) is False
 
 
-def test_stable_patch_id_fails_closed_and_handoff_marks_draft_ready() -> None:
+def test_handoff_marks_draft_ready() -> None:
     actions, gh = adapter()
-
-    with pytest.raises(GitHubAdapterError, match="stable_patch_id is not built"):
-        actions.stable_patch_id(pr(), HEAD)
     draft = served("pull-42-open.json")
     draft_body = draft.stdout.replace('"draft": false', '"draft": true')
     ready = MARK_READY

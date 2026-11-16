@@ -37,6 +37,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TextIO, TypeVar
 
+from lib import job_token
 from lib.device_pool import DevicePool, Placement
 from lib.queue import Job, JobQueue, QueueError, SQLiteJobQueue
 from lib.schema import HARNESSES
@@ -156,8 +157,8 @@ def wait_for_job(
             else:
                 locked = 0
             if claimed is not None:
-                job, placement = claimed
-                deliver(queue, job, out, pool=pool, placement=placement)
+                job, placement, proof = claimed
+                deliver(queue, job, out, pool=pool, placement=placement, proof=proof)
                 return job
             leaving = False
         finally:
@@ -218,6 +219,7 @@ def deliver(
     *,
     pool: DevicePool | None = None,
     placement: Placement | None = None,
+    proof: str | None = None,
 ) -> None:
     """Print a claimed job. If it does not reach the bot, fail it so T6 retries now.
 
@@ -225,7 +227,7 @@ def deliver(
     its device slot is released with it.
     """
     try:
-        out.write(format_job(job, placement=placement, pool=pool))
+        out.write(format_job(job, placement=placement, pool=pool, proof=proof))
         out.flush()
     except Exception as exc:
         reason = _one_line(exc)
@@ -246,12 +248,15 @@ def format_job(
     *,
     placement: Placement | None = None,
     pool: DevicePool | None = None,
+    proof: str | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "id": job.id,
         "bot": f"{job.request.recipient}-bot",
         **asdict(job.request),
     }
+    if proof is not None:
+        payload["proof"] = proof
     if placement is not None:
         device = pool.config.device(placement.device) if pool is not None else None
         remote = device is None or not device.local
@@ -290,7 +295,12 @@ def claim_once(
     pool: DevicePool | None,
     *,
     autostart: tuple[int, str | None] | None = None,
-) -> tuple[Job, Placement | None] | None:
+) -> tuple[Job, Placement | None, str] | None:
+    """Claim one job and mint its per-claim token (#127).
+
+    Only the token's hash is stored on the job; the token is returned so the
+    claimer can prove the claim on heartbeat, done and job run.
+    """
     if pool is None and recipient in HARNESSES:
         # Issue #90: a harness job always runs on a device and holds its
         # slot, so a claim with no device pool would run outside slot_max.
@@ -298,13 +308,16 @@ def claim_once(
             f"a {recipient} claim needs the device pool (machines.yml); "
             "a claim with no device placement is refused"
         )
+    token, token_hash = job_token.mint()
     try:
         if pool is not None:
             if autostart is not None:
-                return pool.claim(recipient, autostart=autostart)
-            return pool.claim(recipient)
-        job = queue.claim(recipient)
-        return None if job is None else (job, None)
+                placed = pool.claim(recipient, autostart=autostart, token_hash=token_hash)
+            else:
+                placed = pool.claim(recipient, token_hash=token_hash)
+            return None if placed is None else (*placed, token)
+        job = queue.claim(recipient, token_hash=token_hash)
+        return None if job is None else (job, None, token)
     except (*STORAGE_ERRORS, TypeError, ValueError) as exc:
         if is_locked(exc):
             raise Locked from exc

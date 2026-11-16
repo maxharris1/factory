@@ -7,7 +7,6 @@ from lib.dispatch.helpers import (
     _comment_link,
     _holds,
     _is_full_sha,
-    _is_patch_id,
     _matching_head,
     _round_number,
     _scope,
@@ -97,25 +96,7 @@ class T4Mixin:
             return True, "approve-ci-red"
         if ticket.factory.start_before_ci:
             self._record_ci_result(ticket, current_head, "success")
-        covered = _matching_head(approved_head, current_head) is not None
-        if not covered:
-            try:
-                actions = self._review_actions(ticket)
-                approved_patch = actions.stable_patch_id(
-                    ticket,
-                    approved_head,
-                )
-                current_patch = actions.stable_patch_id(
-                    ticket,
-                    current_head,
-                )
-            except Exception:
-                return self._queue_patch_review(ticket, comment, current_head)
-            covered = (
-                _is_patch_id(approved_patch)
-                and _is_patch_id(current_patch)
-                and approved_patch.lower() == current_patch.lower()
-            )
+        covered = self._approval_covers(ticket, approved_head, current_head)
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
         if _holds(ticket):

@@ -2,7 +2,7 @@
 
 Every process call is `env -u GH_TOKEN -u GITHUB_TOKEN -u
 GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh api ...`, built as an
-argv list and passed to run_gh, the one subprocess seam. gh therefore
+argv list and passed to run_gh, the one gh seam. gh therefore
 uses only the login stored on the device and ignores any of those four
 token variables in the environment. The adapter never reads, passes or
 logs a token.
@@ -41,7 +41,12 @@ clone and no cache.
   The Linear adapter then moves the issue to Ready for Review only when
   the fresh read shows it still before review; an unknown state fails
   before any write.
-- stable_patch_id is not built here and raises, so T4 queues a re-review.
+- stable_patch_id: GET pulls/<n> for base.ref, then compare/<base>...<head>
+  as a diff (the three-dot form diffs head against its merge base, so it
+  is the PR's own diff), piped to `git patch-id --stable`. It raises, so
+  T4 queues a re-review, on any gh error, an empty diff, a diff naming a
+  binary file (GitHub's diff omits binary content, so two heads differing
+  only there would match), or a git failure or timeout.
 - file_issue and comment_once (issue #259): GET issues?state=all&since=
   (the row's time less an hour, for clock skew) or the PR's comments, and
   return the earlier write when a body carries the marker line; only then
@@ -100,6 +105,7 @@ _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
 _NUMBER = re.compile(r"[1-9][0-9]{0,9}")
 _SHA = re.compile(r"[0-9a-f]{40}")
+_BINARY_DIFF = re.compile(r"^(?:Binary files |GIT binary patch)", re.MULTILINE)
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?")
 _APPROVER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 _STATE_LABEL = re.compile(r"orch:state/[a-z][a-z-]*")
@@ -173,6 +179,27 @@ def run_gh(argv: Sequence[str], timeout: float) -> GhResult:
     return GhResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+def git_patch_id(diff: str, timeout: float) -> str:
+    """`git patch-id --stable` of diff. It needs no repository."""
+    try:
+        completed = subprocess.run(
+            ["git", "patch-id", "--stable"],
+            input=diff,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitHubAdapterError(f"git patch-id timed out after {exc.timeout:g}s") from exc
+    except OSError as exc:
+        raise GitHubAdapterError(f"git could not run: {type(exc).__name__}") from exc
+    fields = completed.stdout.split()
+    if completed.returncode != 0 or not fields or _SHA.fullmatch(fields[0]) is None:
+        raise GitHubAdapterError(f"git patch-id exited {completed.returncode} with no id")
+    return fields[0]
+
+
 def review_actions_for(tickets: str) -> ReviewActions:
     """factory.md's tickets: picks the adapter, as ship: picks ship_mode."""
     if tickets == "github":
@@ -216,8 +243,20 @@ class GitHubReviewActions:
                 self._call("-X", "DELETE", f"{issue}/labels/{quote(name, safe='')}")
 
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
-        del ticket, head
-        raise GitHubAdapterError("stable_patch_id is not built in the GitHub adapter")
+        head = _sha(head, "head")
+        repo = _repo_path(ticket.repo)
+        pull = _object(self._json(f"{repo}/pulls/{_pr_number(ticket)}"))
+        base = _branch(_object(pull.get("base")).get("ref"))
+        diff = self._call(
+            "-H",
+            "Accept: application/vnd.github.diff",
+            f"{repo}/compare/{quote(base, safe='/')}...{head}",
+        )
+        if not diff.strip():
+            raise GitHubAdapterError("the PR diff is empty")
+        if _BINARY_DIFF.search(diff):
+            raise GitHubAdapterError("the PR diff names a binary file")
+        return git_patch_id(diff, self.timeout_seconds)
 
     def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
         head = _sha(head, "head")

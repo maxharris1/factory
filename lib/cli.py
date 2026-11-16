@@ -64,6 +64,7 @@ from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import (
     OrchConfig,
     approvals,
+    bot_approver_findings,
     hold_approver_findings,
     linear_approver_findings,
     load_approvals,
@@ -74,7 +75,16 @@ from lib.poll_source import IntakeRisks, LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
-from lib.queue import MAX_INVALID_HANDOFFS, SLOTS_TABLE, QueueError, SQLiteJobQueue, job_from_row
+from lib.queue import (
+    MAX_INVALID_HANDOFFS,
+    SLOTS_TABLE,
+    ClaimProofError,
+    Proof,
+    QueueError,
+    SQLiteJobQueue,
+    job_from_row,
+    require_proof,
+)
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
@@ -476,7 +486,11 @@ def _check_config(argv: list[str]) -> int:
         allow_placeholders=args.allow_placeholders,
     )
     if orch_config is not None:
-        orch_findings = orch_findings + linear_approver_findings(orch_config)
+        orch_findings = (
+            orch_findings
+            + linear_approver_findings(orch_config)
+            + bot_approver_findings(orch_config)
+        )
     failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:
@@ -1210,6 +1224,15 @@ def _job(argv: list[str]) -> int:
     except WaitError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 2
+    try:
+        refusal = _proof_refusal(queue, args.job_id)
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    if refusal is not None:
+        print(f"{prog}: {refusal}", file=sys.stderr)
+        return 2
+    proof = Proof(job_token.presented(os.environ))
     if args.command == "done" and args.handoff != "":
         try:
             settled = _done_settled(queue, args.job_id, args.handoff)
@@ -1220,13 +1243,15 @@ def _job(argv: list[str]) -> int:
             code, message = settled
             print(f"{prog}: {message}" if code else message, file=sys.stderr if code else sys.stdout)
             return code
-        refused = _check_handoff(queue, args, prog)
+        refused = _check_handoff(queue, args, prog, proof)
         if refused is not None:
             return refused
     try:
         if args.command == "heartbeat":
             retry_locked(
-                lambda: queue.heartbeat(args.job_id, owner=recipient_for(args.bot))
+                lambda: queue.heartbeat(
+                    args.job_id, owner=recipient_for(args.bot), proof=proof
+                )
             )
             print(f"heartbeat {args.job_id}")
             return 0
@@ -1238,10 +1263,14 @@ def _job(argv: list[str]) -> int:
                 args.job_id,
                 owner=recipient_for(args.bot),
                 handoff_comment_id=args.handoff,
+                proof=proof,
             )
         )
         if args.handoff is not None:
             queue.clear_invalid_handoff(job.id)
+    except ClaimProofError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
@@ -1249,7 +1278,9 @@ def _job(argv: list[str]) -> int:
     return 0
 
 
-def _check_handoff(queue: SQLiteJobQueue, args: argparse.Namespace, prog: str) -> int | None:
+def _check_handoff(
+    queue: SQLiteJobQueue, args: argparse.Namespace, prog: str, proof: Proof
+) -> int | None:
     """#191: the handoff comment must fit the job before it is done.
 
     None when it does. A read that fails (GitHub, orch.yml) exits 1 and
@@ -1281,8 +1312,12 @@ def _check_handoff(queue: SQLiteJobQueue, args: argparse.Namespace, prog: str) -
                 owner=recipient_for(args.bot),
                 comment_id=args.handoff,
                 detail="; ".join(found),
+                proof=proof,
             )
         )
+    except ClaimProofError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
     except (ReadError, ValueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
@@ -1449,12 +1484,6 @@ def _done_settled(
 
     (0, line) when the same outcome is already recorded: a repeat is a no-op.
     (1, error) when a different outcome is recorded: nothing changes.
-    (2, error) when the job is an autostart waiter's and this process does
-    not hold its current `orch job run`'s secret token (#96): a bot turn
-    must not finish it. The token comes from ORCH_JOB_PROOF
-    (lib/job_token.py), and only its hash is compared. There is no
-    process-tree check: a sandbox in its own PID namespace (Codex) cannot
-    see the run, but it inherits the token.
     None when the job may be finished here.
     """
     target = "done" if handoff is not None else "failed"
@@ -1462,13 +1491,6 @@ def _done_settled(
         row = connection.execute(
             "SELECT state, handoff_comment_id FROM jobs WHERE id = ?", (job_id,)
         ).fetchone()
-        slot = (
-            connection.execute(
-                f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            if _has_slots(connection)
-            else None
-        )
     if row is None:
         raise QueueError(f"unknown job {job_id!r}")
     state, recorded = str(row["state"]), row["handoff_comment_id"]
@@ -1480,32 +1502,67 @@ def _done_settled(
             f"job {job_id} is already {already}; refusing a different outcome, "
             "nothing changed"
         )
-    # Codex PR #82 r2 F2.4: this path never opens a DevicePool, so the slots
-    # table may predate the autostart columns (an update while a job runs).
-    # A missing column reads as NULL: no autostart waiter can have claimed a
-    # job in a table it could not record itself in.
-    # The same holds for run_token_hash (#96): a slot without the column has
-    # no token, and its autostart claim (if any) is refused below.
-    autostart = _slot_value(slot, "autostart_pid")
-    stored = _slot_value(slot, "run_token_hash")
-    if state != "running" or (autostart is None and stored is None):
+    return None
+
+
+def _proof_refusal(queue: SQLiteJobQueue, job_id: str) -> str | None:
+    """Why this process may not write to a running job, or None when it may (#127).
+
+    A running job takes heartbeat, done and job run only from a process
+    whose ORCH_JOB_PROOF (lib/job_token.py) matches the claim's token
+    (jobs.claim_token_hash) or its autostart run's token (the slot's
+    run_token_hash, #96). Only hashes are compared. There is no
+    process-tree check: a sandbox in its own PID namespace (Codex) cannot
+    see the run, but it inherits the token.
+    """
+    with queue.connect() as connection:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        slot = (
+            connection.execute(
+                f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if _has_slots(connection)
+            else None
+        )
+    if row is None:
+        raise QueueError(f"unknown job {job_id!r}")
+    if row["state"] != "running":
         return None
+    # Codex PR #82 r2 F2.4: this path never opens a DevicePool or an
+    # initializing queue, so a column may predate this code; it reads as NULL.
+    claim_hash = _slot_value(row, "claim_token_hash")
+    run_hash = _slot_value(slot, "run_token_hash")
     token = job_token.presented(os.environ)
-    if job_token.matches(token, stored):
+    if job_token.matches(token, claim_hash) or job_token.matches(token, run_hash):
         return None
-    if stored is None:
+    autostart = _slot_value(slot, "autostart_pid")
+    if autostart is not None:
+        if run_hash is None:
+            why = (
+                "its claim has no run token (claimed before run tokens, #96, or its "
+                "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
+            )
+        elif token is None:
+            why = "this process has no ORCH_JOB_PROOF from that run"
+        else:
+            why = "the ORCH_JOB_PROOF this process holds is not that run's"
+        return (
+            f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
+            "whose harness run finishes it; only that run may call orch job done, so a "
+            f"bot turn must not run or post for it; {why}. Nothing changed"
+        )
+    if claim_hash is None and run_hash is None:
         why = (
-            "its claim has no run token (claimed before run tokens, #96, or its "
-            "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
+            "its claim has no token (claimed before claim tokens, #127), "
+            "so no ORCH_JOB_PROOF can prove it; T6 ends it"
         )
     elif token is None:
-        why = "this process has no ORCH_JOB_PROOF from that run"
+        why = "this process has no ORCH_JOB_PROOF"
     else:
-        why = "the ORCH_JOB_PROOF this process holds is not that run's"
-    return 2, (
-        f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
-        "whose harness run finishes it; only that run may call orch job done, so a bot "
-        f"turn must not run or post for it; {why}. Nothing changed"
+        why = "the ORCH_JOB_PROOF this process holds is not this claim's"
+    return (
+        f"job {job_id} is running under a claim this process cannot prove; run it "
+        f"with ORCH_JOB_PROOF set to the proof orch wait printed; {why}. Nothing changed"
     )
 
 
@@ -1611,7 +1668,9 @@ def _job_run_command(argv: list[str]) -> int:
     sessions: list[telemetry.Session] = []  # issue #93: the run's telemetry, once it starts
 
     def beat() -> object:
-        result = retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        result = retry_locked(
+            lambda: queue.heartbeat(args.job_id, owner=owner, proof=claim_proof)
+        )
         for session in sessions:
             session.flush()  # the summary moves with each heartbeat
         return result
@@ -1623,15 +1682,24 @@ def _job_run_command(argv: list[str]) -> int:
         checked_autostart = placed_run.check_autostart(queue, job_id=args.job_id, bot=args.bot)
         # #96: an autostart run proves itself to `orch job done` with a
         # fresh secret token; only its hash goes on the slot (in prepare).
-        token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
+        run_token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
+        refusal = _proof_refusal(queue, args.job_id)
     except placed_run.PlacementError as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 2
-    except (sqlite3.Error, OSError) as exc:
+    except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
+    if refusal is not None:
+        print(f"{prog}: {refusal}", file=sys.stderr)
+        return 2
+    claim_proof = Proof(job_token.presented(os.environ))
+    proof = run_token if checked_autostart is not None else claim_proof.token
     try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
+    except ClaimProofError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
@@ -1649,6 +1717,7 @@ def _job_run_command(argv: list[str]) -> int:
             transport=SshTransport(),
             checked_autostart=checked_autostart,
             token_hash=token_hash,
+            proof=claim_proof,
         )
     except (placed_run.PlacementError, WaitError, ValueError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
@@ -1668,9 +1737,9 @@ def _job_run_command(argv: list[str]) -> int:
             **harness_env(owner),
         }
     )
-    if token is not None and not placed.remote:
+    if proof is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
-        environment[job_token.PROOF_ENV] = token
+        environment[job_token.PROOF_ENV] = proof
     # #100 r8: the summary's scrubber knows the harness's own environment,
     # the proof included.
     session = telemetry.start_session(
@@ -1846,7 +1915,7 @@ def _job_run_command(argv: list[str]) -> int:
         return 1
     finally:
         if budget.expired:
-            _record_wall_clock(queue, args.job_id, budget, placed.device.name, log)
+            _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
         if session is not None:
@@ -1864,7 +1933,7 @@ def _job_run_command(argv: list[str]) -> int:
         # once no worker of it runs (run reaped its own), so T6 never
         # retries it beside a live one.
         settle = (
-            (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker))
+            (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker, claim_proof))
             if (placed.autostart or budget.expired) and not placed.remote
             else None
         )
@@ -1884,6 +1953,7 @@ def _settle_box(
     owner: str,
     log: Callable[[str], None],
     live: Callable[[], int | None],
+    proof: Proof,
 ) -> None:
     """Fail an ended box run's job for T6, unless `live` names a worker that still runs.
 
@@ -1894,19 +1964,27 @@ def _settle_box(
     if pid is not None:
         log(f"worker pid {pid} still runs; job {job_id} not failed while it runs")
         return
-    _fail_unfinished(queue, job_id, owner, log)
+    _fail_unfinished(queue, job_id, owner, log, proof)
 
 
-def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
+def _fail_unfinished(
+    queue: SQLiteJobQueue,
+    job_id: str,
+    owner: str,
+    log: Callable[[str], None],
+    proof: Proof,
+) -> None:
     """An autostart run whose command ended without `orch job done` goes to T6 now (#80)."""
     try:
         with queue.connect() as connection:
             row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None or row["state"] != "running":
             return
-        retry_locked(lambda: queue.finish(job_id, owner=owner, handoff_comment_id=None))
+        retry_locked(
+            lambda: queue.finish(job_id, owner=owner, handoff_comment_id=None, proof=proof)
+        )
     except QueueError:
-        return  # finished between the read and the write
+        return
     except (sqlite3.Error, OSError) as exc:
         log(f"could not fail job {job_id}: {' '.join(str(exc).split())}")
         return
@@ -1919,6 +1997,7 @@ def _record_wall_clock(
     budget: job_run.Budget,
     device: str,
     log: Callable[[str], None],
+    proof: Proof,
 ) -> None:
     """#199: the `wall-clock` job event, while the job still runs. Never raises."""
     name = signal.Signals(budget.signum).name if budget.signum is not None else "a stop"
@@ -1931,6 +2010,7 @@ def _record_wall_clock(
     def write() -> None:
         with queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is not None and row["state"] == "running":
                 record_job_event(connection, job_id, job_run.WALL_CLOCK, detail, queue.now())

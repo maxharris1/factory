@@ -39,6 +39,7 @@ from tests.test_dispatcher import (
     setup,
     ticket,
 )
+from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
 from tests.test_waiter import (  # noqa: F401  (autostart is a fixture)
     MACHINES,
     ORCH,
@@ -69,6 +70,10 @@ def orch(
     )
 
 
+def plain(*args: str) -> subprocess.CompletedProcess:
+    return orch(*args, extra_env={"ORCH_JOB_PROOF": CLAIM_PROOF})
+
+
 def job_row(db: Path, job_id: str) -> tuple[str, str | None]:
     with sqlite3.connect(db) as connection:
         return connection.execute(
@@ -77,10 +82,9 @@ def job_row(db: Path, job_id: str) -> tuple[str, str | None]:
 
 
 def claimed(tmp_path: Path) -> tuple[Path, SQLiteJobQueue, str]:
-    """A job a plain (non-autostart) claim took through the device pool."""
     db, queue = make_queue(tmp_path)
     job_id = enqueue(queue, "a")
-    taken = local_pool(queue).claim("claude")
+    taken = local_pool(queue).claim("claude", token_hash=CLAIM_HASH)
     assert taken is not None and taken[0].id == job_id
     return db, queue, job_id
 
@@ -264,7 +268,7 @@ def test_a_second_run_of_a_running_job_is_refused(tmp_path: Path) -> None:
                 (first.pid, process_start(first.pid), job_id),
             )
         marker = tmp_path / "second-ran"
-        result = orch("job", "run", "claude-bot", job_id, "--db", str(db),
+        result = plain("job", "run", "claude-bot", job_id, "--db", str(db),
                       "--machines", str(MACHINES), "--", "touch", str(marker))
         assert result.returncode == 2
         assert f"already run by pid {first.pid}" in result.stderr
@@ -282,10 +286,10 @@ def test_a_second_run_of_a_running_job_is_refused(tmp_path: Path) -> None:
 def test_job_done_with_the_same_handoff_again_is_a_no_op_success(tmp_path: Path) -> None:
     db, _queue, job_id = claimed(tmp_path)
     serve_job(db, job_id, "1001", "1002", "1009")
-    first = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1001")
+    first = plain("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1001")
     assert first.returncode == 0, first.stderr
     assert first.stdout.strip() == f"done {job_id}"
-    again = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1001")
+    again = plain("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1001")
     assert again.returncode == 0, again.stderr
     assert again.stdout.startswith(f"done {job_id}")
     assert "nothing changed" in again.stdout
@@ -298,11 +302,11 @@ def test_a_conflicting_second_job_done_is_refused_and_changes_nothing(
 ) -> None:
     db, _queue, job_id = claimed(tmp_path)
     serve_job(db, job_id, "1001", "1002", "1009")
-    assert orch("job", "done", "claude-bot", job_id, "--db", str(db),
+    assert plain("job", "done", "claude-bot", job_id, "--db", str(db),
                 "--handoff", "1001").returncode == 0
     with sqlite3.connect(db) as connection:
         before = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *second)
+    result = plain("job", "done", "claude-bot", job_id, "--db", str(db), *second)
     assert result.returncode == 1
     assert f"job {job_id} is already done with handoff 1001" in result.stderr
     assert "nothing changed" in result.stderr
@@ -313,10 +317,10 @@ def test_a_conflicting_second_job_done_is_refused_and_changes_nothing(
 def test_a_repeated_failed_is_a_no_op_and_a_handoff_after_it_is_refused(tmp_path: Path) -> None:
     db, _queue, job_id = claimed(tmp_path)
     serve_job(db, job_id, "1001", "1002", "1009")
-    assert orch("job", "done", "claude-bot", job_id, "--db", str(db), "--failed").returncode == 0
-    again = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--failed")
+    assert plain("job", "done", "claude-bot", job_id, "--db", str(db), "--failed").returncode == 0
+    again = plain("job", "done", "claude-bot", job_id, "--db", str(db), "--failed")
     assert again.returncode == 0 and "nothing changed" in again.stdout
-    late = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1009")
+    late = plain("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1009")
     assert late.returncode == 1
     assert "already failed" in late.stderr
     assert job_row(db, job_id) == ("failed", None)
@@ -346,7 +350,7 @@ CREATE TABLE device_slots (
 def test_job_done_tolerates_a_round_1_slots_table(tmp_path: Path, outcome: list[str]) -> None:
     db, queue = make_queue(tmp_path)
     job_id = enqueue(queue, "a")
-    taken = queue.claim("claude")
+    taken = queue.claim("claude", token_hash=CLAIM_HASH)
     assert taken is not None and taken.id == job_id
     serve_job(db, job_id, "1001")
     with sqlite3.connect(db) as connection:
@@ -356,14 +360,14 @@ def test_job_done_tolerates_a_round_1_slots_table(tmp_path: Path, outcome: list[
             "runner_pid, runner_start) VALUES (?, 'box', 'claude', 'claude-bot', ?, ?, NULL)",
             (job_id, time.time(), os.getpid()),
         )
-    result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
+    result = plain("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
     assert result.returncode == 0, result.stderr
     expected = ("done", "1001") if outcome[0] == "--handoff" else ("failed", None)
     assert job_row(db, job_id) == expected
     with sqlite3.connect(db) as connection:  # read only: nothing was migrated
         columns = {row[1] for row in connection.execute("PRAGMA table_info(device_slots)")}
     assert "autostart_pid" not in columns
-    again = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
+    again = plain("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
     assert again.returncode == 0 and "nothing changed" in again.stdout
 
 

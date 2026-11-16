@@ -717,9 +717,9 @@ def _run_in_process(
     competing: list = []
     release, fail = DevicePool.release, cli._fail_unfinished
 
-    def released(pool, job, *, owner):
+    def released(pool, job, *, owner, proof=None):
         competing.append(("release", _tokenless_done(poller, job)))
-        return release(pool, job, owner=owner)
+        return release(pool, job, owner=owner, proof=proof)
 
     def failed(*args):
         competing.append(("fail", _tokenless_done(poller, job_id)))

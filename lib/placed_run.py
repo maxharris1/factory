@@ -92,7 +92,7 @@ from lib.job_state import (
     requeue_unstarted,
 )
 from lib.machines_yml import Device, MachinesConfig
-from lib.queue import QueueError, SQLiteJobQueue
+from lib.queue import Proof, QueueError, SQLiteJobQueue, require_proof
 from lib.remote import (
     ENV_FILE,
     GONE,
@@ -149,6 +149,7 @@ class PlacedRun:
     transport: Transport
     target: RemoteTarget | None = None
     autostart: bool = False
+    proof: Proof | None = None
     sleep: Callable[[float], None] = time.sleep
     alive: Callable[[int | None, str | None], bool] = pid_alive
     runner: int | None = None
@@ -224,7 +225,11 @@ class PlacedRun:
         assert self.runner is not None
         requeued = retry_locked(
             lambda: self.pool.requeue_unstarted(
-                self.placement.job_id, owner=self.owner, runner=self.runner, reason=reason
+                self.placement.job_id,
+                owner=self.owner,
+                runner=self.runner,
+                reason=reason,
+                proof=self.proof,
             )
         )
         self.requeued = bool(requeued)
@@ -329,6 +334,7 @@ class PlacedRun:
                     remote=True,
                     tag=target.tag,
                     runner=self.runner,
+                    proof=self.proof,
                 )
             )
             self.spawned = True
@@ -350,6 +356,7 @@ class PlacedRun:
                 pid=pid,
                 start=start,
                 runner=self.runner,
+                proof=self.proof,
             )
         )
 
@@ -381,6 +388,7 @@ class PlacedRun:
         def write() -> None:
             with self.pool.queue.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job_id, self.proof)
                 row = connection.execute(
                     "SELECT state FROM jobs WHERE id = ?", (job_id,)
                 ).fetchone()
@@ -474,7 +482,7 @@ class PlacedRun:
             return True
         _held(settle)
         released = retry_locked(
-            lambda: self.pool.release(self.placement.job_id, owner=self.owner)
+            lambda: self.pool.release(self.placement.job_id, owner=self.owner, proof=self.proof)
         )
         if released:
             self.log(f"released {self.device.name} slot of job {self.placement.job_id}")
@@ -499,6 +507,7 @@ class PlacedRun:
         def write() -> tuple[str, str] | None:
             with self.pool.queue.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job_id, self.proof)
                 result = requeue_unstarted(
                     connection,
                     job_id,
@@ -582,6 +591,7 @@ def prepare(
     parent_pid: int | None = None,
     checked_autostart: tuple[int, str | None] | None = None,
     token_hash: str | None = None,
+    proof: Proof | None = None,
 ) -> PlacedRun:
     """Record this process as the job's runner on its slot.
 
@@ -641,6 +651,7 @@ def prepare(
                 start=process_start(runner),
                 alive=alive,
                 token_hash=token_hash,
+                proof=proof,
             )
         )
     except QueueError as exc:
@@ -653,7 +664,7 @@ def prepare(
         try:
             retry_locked(
                 lambda: pool.forget_worker(
-                    job_id, owner=owner, runner=runner, earlier=placement
+                    job_id, owner=owner, runner=runner, earlier=placement, proof=proof
                 )
             )
         except QueueError as exc:
@@ -667,6 +678,7 @@ def prepare(
         transport=transport,
         target=target,
         autostart=placement.autostarted,
+        proof=proof,
         alive=alive,
         runner=runner,
     )
