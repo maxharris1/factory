@@ -77,6 +77,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
+    "review-followups": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-before-ci": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
     "review-rebased": ("review", "codex", 1, HEAD, {"round": "2/3", "rebase": {
         "last_reviewed_head": "a" * 40,
@@ -93,6 +94,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
 
 FACTORY_MDS = {
     "review-before-ci": FACTORY_MD.replace("  verify: verify-cleffy\n", "  verify: verify-cleffy\n  start_before_ci: true\n"),
+    "review-followups": FACTORY_MD.replace("review:\n", "review:\n  followup_from_round: 2\n"),
 }
 
 

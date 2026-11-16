@@ -109,6 +109,7 @@ RULE_PHRASES = {
     "review-high-risk-rounds": "Risk high: up to three rounds;",
     "review-gate-retries": "Gate retries (CI red, then fix) are not review rounds.",
     "review-follow-ups": "variants of an already-raised rule are follow-ups, not blockers.",
+    "review-follow-ups-approve": "A verdict whose only findings are `[follow-up]` or `[minor]` is `APPROVE` with `ac=met`;",
     "review-ship-pinned": "Ship is pinned to the covered head. A reviewer never merges.",
     "review-agent-approval": "Another agent's approval is never treated as Max's.",
     "review-ac-met": "`ac=met`: every acceptance criterion in the ticket is met at the reviewed head.",

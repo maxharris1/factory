@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import itertools
 import re
 import tempfile
 from collections.abc import Callable
@@ -12,11 +13,12 @@ import pytest
 
 import lib.brief.build as build_brief
 import lib.brief.review as review_brief
+import lib.brief.skills as brief_skills
 from lib.brief import render_brief
 from lib.brief.common import GH
 from lib.evidence.findings import blocking_ids, findings_evidence
 from lib.dispatcher import Comment
-from lib.handoff import parse_comment
+from lib.handoff import HandoffError, parse_comment
 from lib.orchestrate import APPROVAL_TOKEN_VARIABLES, answers_for, go_comment
 from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job
@@ -67,6 +69,17 @@ def filled(header: str, head: str, **choices: str) -> str:
     return header
 
 
+def every_choice(header: str) -> list[dict[str, str]]:
+    fields = {
+        header[: match.start()].rsplit(" ", 1)[-1].rstrip("="): match.group(1).split("|")
+        for match in CHOICE.finditer(header)
+    }
+    return [dict(zip(fields, combo)) for combo in itertools.product(*fields.values())]
+
+
+FORBIDDEN_BY_THE_RULES = ({"verdict": "APPROVE", "ac": "unmet"},)
+
+
 def claim(flow: Flow, recipient: str, action: str) -> Job:
     job = flow.queue.claim(recipient)
     assert job is not None and job.request.action == action
@@ -93,6 +106,20 @@ def to_review(flow: Flow) -> Job:
     return claim(flow, "codex", "review")
 
 
+def to_second_review(flow: Flow) -> Job:
+    review = to_review(flow)
+    revise = filled(handoff_header(brief_for(review)), flow.head, verdict="REVISE", ac="unmet")
+    assert post_header(flow, review, "verdict-1", revise, REVISE_BODY) == "queued-review-fix"
+    fix = claim(flow, "claude", "fix")
+    flow.head = HEADS[2]
+    assert post_header(flow, fix, "ready-2", filled(handoff_header(brief_for(fix)), HEADS[2])) == "queued-review"
+    return claim(flow, "codex", "review")
+
+
+REVISE_BODY = "1. [blocking] f-1. Rule: tests first. lib/x.py:1. Fails.\n"
+NEW_FINDING = "1. [blocking] f-2. Rule: docs match code. lib/y.py:2. Fails.\n"
+
+
 def test_the_build_ready_is_accepted_in_building(tmp_path: Path) -> None:
     flow = Flow(tmp_path)
     build = to_build(flow)
@@ -102,21 +129,28 @@ def test_the_build_ready_is_accepted_in_building(tmp_path: Path) -> None:
     assert post_header(flow, build, "ready-1", header) == "queued-review"
 
 
-@pytest.mark.parametrize(
-    ("verdict", "ac", "body", "outcome"),
-    [
-        ("REVISE", "unmet", "1. [blocking] f-1. Rule: tests first. lib/x.py:1. Fails.\n", "queued-review-fix"),
-        ("APPROVE", "met", "No findings.\n", "merged"),
-    ],
-)
-def test_the_review_verdict_is_accepted_in_review(
-    tmp_path: Path, verdict: str, ac: str, body: str, outcome: str
-) -> None:
-    flow = Flow(tmp_path)
-    review = to_review(flow)
-    assert flow.state()["workflow_state"] == "review"
-    header = filled(handoff_header(brief_for(review)), flow.head, verdict=verdict, ac=ac)
-    assert post_header(flow, review, "verdict-1", header, body).startswith(outcome)
+VERDICT_OUTCOMES = {
+    ("REVISE", "unmet"): (NEW_FINDING, "queued-review-fix"),
+    ("REVISE", "met"): (NEW_FINDING, "queued-review-fix"),
+    ("APPROVE", "met"): ("No findings.\n", "merged"),
+    ("BLOCKED", "met"): ("Need repo access.\n", "blocked-review"),
+    ("BLOCKED", "unmet"): ("Need repo access.\n", "blocked-review"),
+}
+
+
+@pytest.mark.parametrize("to_stage", [to_review, to_second_review], ids=["round-1", "round-2"])
+def test_every_advertised_verdict_is_accepted_in_review(tmp_path: Path, to_stage: Callable[[Flow], Job]) -> None:
+    template = handoff_header(brief_for(to_stage(Flow(tmp_path / "template"))))
+    choices = [choice for choice in every_choice(template) if choice not in FORBIDDEN_BY_THE_RULES]
+    assert {(choice["verdict"], choice["ac"]) for choice in choices} == set(VERDICT_OUTCOMES)
+    for index, choice in enumerate(choices):
+        flow = Flow(tmp_path / str(index))
+        review = to_stage(flow)
+        assert flow.state()["workflow_state"] == "review"
+        body, outcome = VERDICT_OUTCOMES[(choice["verdict"], choice["ac"])]
+        header = filled(handoff_header(brief_for(review)), flow.head, **choice)
+        got = post_header(flow, review, "verdict-x", header, body)
+        assert got.startswith(outcome), (got, choice)
 
 
 def test_the_fix_ready_is_accepted_in_fixing(tmp_path: Path) -> None:
@@ -158,8 +192,15 @@ def test_the_questions_header_pauses_the_job_that_rendered_it(tmp_path: Path, st
 def test_every_brief_kind_renders_only_headers_the_parser_accepts() -> None:
     for kind in CASES:
         for header in headers(render_snapshot(kind)):
-            fields = parse_comment(f"{filled(header, HEADS[0])}\nBody.\n").as_dict()
-            assert fields["from"] in ("claude-bot", "codex-bot"), header
+            for choice in every_choice(header):
+                comment = f"{filled(header, HEADS[0], **choice)}\nBody.\n"
+                if choice in FORBIDDEN_BY_THE_RULES:
+                    with pytest.raises(HandoffError):
+                        parse_comment(comment)
+                    continue
+                fields = parse_comment(comment).as_dict()
+                assert fields["from"] in ("claude-bot", "codex-bot"), header
+                assert all(fields[key] == value for key, value in choice.items()), (header, choice)
 
 
 def test_grok_go_is_accepted_on_a_new_ticket(tmp_path: Path) -> None:
@@ -189,6 +230,27 @@ def test_a_broken_ready_header_fails_the_contract(tmp_path: Path, monkeypatch: p
     )
     with pytest.raises(AssertionError):
         test_the_build_ready_is_accepted_in_building(tmp_path)
+
+
+def test_a_broken_verdict_choice_fails_the_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = review_brief.handoff
+    monkeypatch.setattr(
+        review_brief, "handoff", lambda bot, facts: tuple(part.replace("|BLOCKED>", "|BROKEN>") for part in real(bot, facts))
+    )
+    with pytest.raises(HandoffError):
+        test_every_brief_kind_renders_only_headers_the_parser_accepts()
+
+
+def test_a_broken_later_round_header_fails_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = review_brief.handoff
+
+    def builder_after_round_1(bot: str, facts: dict) -> tuple[str, str]:
+        header, example = real(bot, facts)
+        return (header.replace("role=reviewer", "role=builder") if facts["round_number"] > 1 else header), example
+
+    monkeypatch.setattr(review_brief, "handoff", builder_after_round_1)
+    with pytest.raises(AssertionError, match="rejected"):
+        test_every_advertised_verdict_is_accepted_in_review(tmp_path, to_second_review)
 
 
 
@@ -230,12 +292,26 @@ def enforce_post_only() -> None:
         assert flow.post("go-forged", go, "claude-login") == "rejected-go-author"
 
 
-def enforce_follow_ups() -> None:
+FOLLOW_UP_KINDS = ("review-followups",)
+
+
+def enforce_follow_up_rounds(rule_id: str) -> None:
     later = {"followup_from": 2, "round_number": 2, "auto_extra": 0}
     first = {"followup_from": 2, "round_number": 1, "auto_extra": 0}
-    phrase = brief_rules.RULE_PHRASES["review-follow-ups"]
+    phrase = brief_rules.RULE_PHRASES[rule_id]
     assert phrase in brief_rules.review_rules(later)
     assert phrase not in brief_rules.review_rules(first)
+    carried(rule_id, FOLLOW_UP_KINDS, side="box")
+
+
+def enforce_follow_ups_approve() -> None:
+    enforce_follow_up_rounds("review-follow-ups-approve")
+    only_follow_ups = "1. [follow-up] f-4. Rule: tests first. lib/x.py:9. Fails.\n2. [minor] f-5. Rule: names. lib/x.py:3. Odd.\n"
+    assert blocking_ids(only_follow_ups) == frozenset()
+    approve = f"<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=3/3 head={HEADS[0]} verdict=APPROVE"
+    assert parse_comment(f"{approve} ac=met -->\n{only_follow_ups}").as_dict()["verdict"] == "APPROVE"
+    with pytest.raises(HandoffError):
+        parse_comment(f"{approve} ac=unmet -->\n{only_follow_ups}")
 
 
 ENFORCERS: dict[str, Callable[[], None]] = {
@@ -252,7 +328,8 @@ ENFORCERS: dict[str, Callable[[], None]] = {
     "review-low-risk-rounds": enforce_everywhere("review-low-risk-rounds"),
     "review-high-risk-rounds": enforce_everywhere("review-high-risk-rounds"),
     "review-gate-retries": enforce_everywhere("review-gate-retries"),
-    "review-follow-ups": enforce_follow_ups,
+    "review-follow-ups": lambda: enforce_follow_up_rounds("review-follow-ups"),
+    "review-follow-ups-approve": enforce_follow_ups_approve,
     "review-ship-pinned": enforce_everywhere("review-ship-pinned"),
     "review-agent-approval": enforce_everywhere("review-agent-approval"),
     "review-ac-met": enforce_everywhere("review-ac-met"),
@@ -299,8 +376,8 @@ def test_a_broken_rule_fails_its_enforcing_test(monkeypatch: pytest.MonkeyPatch)
 
 
 BOX_ROOT = "/srv/orch/factory"
+ABSOLUTE = re.compile(r"`(/[^`\s]+)`")
 NAMED = re.compile(r"`([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+\.(?:md|py|yml|lock))(?::[0-9]+)?`")
-PINNED = {"files": PSTACK_DIR, "factory": FACTORY_DIR}
 
 
 def pinned_paths() -> set[str]:
@@ -311,15 +388,36 @@ def pinned_paths() -> set[str]:
     }
 
 
+def assert_pinned_under(text: str, root: str) -> list[str]:
+    pinned = pinned_paths()
+    named = ABSOLUTE.findall(text)
+    for path in named:
+        assert path.startswith(f"{root}/"), f"{path} is outside the deployment root {root}"
+        rel = path.removeprefix(f"{root}/")
+        assert rel in pinned, f"{path} is not in skills/skills.lock"
+        assert (ROOT / rel).is_file(), f"{path} is pinned but missing"
+    return named
+
+
 @pytest.mark.parametrize("kind", sorted(CASES))
 def test_every_absolute_path_a_brief_names_is_pinned_and_present(kind: str) -> None:
-    box = render_snapshot(kind).split("===== remote (")[0]
-    named = re.findall(rf"`{re.escape(BOX_ROOT)}/([^`]+)`", box)
+    box, remote = rendered((kind,))
+    remote_root = f"/home/{CASES[kind][1]}-bot/factory"
+    named = assert_pinned_under(box, BOX_ROOT) + assert_pinned_under(remote, remote_root)
     assert named or kind == "merge-only"
-    pinned = pinned_paths()
-    for rel in named:
-        assert rel in pinned, f"{rel} is not in skills/skills.lock"
-        assert (ROOT / rel).is_file(), f"{rel} is pinned but missing"
+
+
+def test_a_missing_remote_file_fails_the_pin_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = brief_skills.Pinned.under
+
+    def broken(self: brief_skills.Pinned, root: str) -> str:
+        path = real(self, root)
+        return path.replace("/harness/codex.md", "/harness/does-not-exist.md") if root.startswith("/home/codex-bot/") else path
+
+    monkeypatch.setattr(brief_skills.Pinned, "under", broken)
+    test_every_absolute_path_a_brief_names_is_pinned_and_present("build")
+    with pytest.raises(AssertionError, match="does-not-exist"):
+        test_every_absolute_path_a_brief_names_is_pinned_and_present("review")
 
 
 @pytest.mark.parametrize("kind", sorted(CASES))
@@ -327,7 +425,7 @@ def test_every_relative_file_a_brief_names_exists(kind: str) -> None:
     roots = (ROOT, ROOT / PSTACK_DIR, ROOT / FACTORY_DIR)
     for text in rendered((kind,)):
         for rel in NAMED.findall(text):
-            if rel.startswith(("/", ".claude/")):
+            if rel.startswith(".claude/"):
                 continue
             assert any((root / rel).is_file() for root in roots), f"{kind} names missing {rel}"
 
