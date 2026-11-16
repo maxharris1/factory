@@ -30,8 +30,9 @@ from lib.load import Finding, load_yaml
 
 DISABLE_ENV = "ORCH_NO_LOCAL_OVERLAY"
 KEYED_LISTS = {"projects": "repo", "devices": "name"}
-# Mappings keyed by identities (logins, Linear user ids): named as a whole.
-OPAQUE = frozenset({"trusted_logins", "trusted_linear_users"})
+# Mappings keyed by identities (logins, Linear user ids, Linear project ids),
+# at any depth: named as a whole.
+OPAQUE = frozenset({"trusted_logins", "trusted_linear_users", "linear_assignees"})
 
 
 class OverlayError(ValueError):
@@ -92,7 +93,8 @@ def merge(base: dict, overlay: dict) -> dict:
 def overlay_keys(overlay: dict) -> list[str]:
     """The dotted names an overlay sets, e.g. `linear_webhook.public_url`
     or `projects[owner/name].linear_project_ids`. Names only: never a value,
-    and never the logins or user ids that key the trusted_* mappings."""
+    and never the keys of an OPAQUE mapping (trusted_* logins and user ids,
+    linear_assignees project ids)."""
     names: list[str] = []
     for key, value in overlay.items():
         field = KEYED_LISTS.get(key)
@@ -121,7 +123,10 @@ def _dotted(prefix: str, value: object) -> list[str]:
     if isinstance(value, dict) and value:
         names: list[str] = []
         for key, inner in value.items():
-            names.extend(_dotted(f"{prefix}.{key}", inner))
+            if key in OPAQUE:
+                names.append(f"{prefix}.{key}")
+            else:
+                names.extend(_dotted(f"{prefix}.{key}", inner))
         return names
     return [prefix]
 

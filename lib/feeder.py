@@ -6,7 +6,8 @@ entry has an `intake` section and finds its eligible tickets:
 * a GitHub project (factory.md `tickets: github`): an open issue carrying
   the project's intake label, applied by a trusted login;
 * a Linear project: an issue in the project's intake workflow state, moved
-  there by a trusted Linear user.
+  there by a trusted Linear user and, when `linear_assignees` lists its
+  Linear project, assigned to one of the users listed for it.
 
 The signal (label or state) and the trusted appliers are per-project
 config (lib/orch_yml.py Intake). Nothing here names a project, a label or a
@@ -394,6 +395,8 @@ class IntakeIssue:
     priority: int | None = None  # Linear priority (1 is Urgent)
     # Linear blocks relations naming this issue: (blocker identifier, state type).
     blocked_by: tuple[tuple[str, str | None], ...] = ()
+    linear_project: str | None = None
+    assignee: str | None = None  # the assignee's Linear user id
 
     @property
     def urgent(self) -> bool:
@@ -440,7 +443,12 @@ class GitHubIntake(Protocol):
 
 
 class LinearIntake(Protocol):
-    def linear_intake(self, project_ids: frozenset[str], state: str) -> Sequence[IntakeIssue]: ...
+    def linear_intake(
+        self,
+        project_ids: frozenset[str],
+        state: str,
+        assignees: Mapping[str, frozenset[str]],
+    ) -> Sequence[IntakeIssue]: ...
 
     def linear_comments(self, issue_id: str) -> Sequence[Comment]: ...
 
@@ -551,6 +559,17 @@ def intake_trusted(config: OrchConfig, project: Project) -> frozenset[str]:
         # orch.yml keys Linear users as "linear:<user id>".
         return frozenset(key.removeprefix("linear:") for key in config.trusted_linear_users)
     return frozenset(config.trusted_logins)
+
+
+def assignee_allowed(project: Project, issue: IntakeIssue) -> bool:
+    """Whether the project's linear_assignees lets the feeder take `issue`."""
+    allowlists = project.intake.linear_assignees if project.intake is not None else {}
+    if not allowlists:
+        return True
+    if issue.linear_project not in project.linear_project_ids:
+        return False
+    allowed = allowlists.get(issue.linear_project)
+    return allowed is None or issue.assignee in allowed
 
 
 def ensure_tables(connection: sqlite3.Connection) -> None:
@@ -783,7 +802,9 @@ class Feeder:
                 if project.linear_project_ids:
                     if self.linear is None or intake.linear_state is None:
                         continue
-                    issues = self.linear.linear_intake(project.linear_project_ids, intake.linear_state)
+                    issues = self.linear.linear_intake(
+                        project.linear_project_ids, intake.linear_state, intake.linear_assignees
+                    )
                 else:
                     if context.config.tickets != "github" or intake.label is None:
                         continue
@@ -796,6 +817,8 @@ class Feeder:
             trusted = intake_trusted(self.config, project)
             for issue in issues:
                 if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
+                    continue
+                if not assignee_allowed(project, issue):
                     continue
                 if issue.applied_by is None or issue.applied_by not in trusted:
                     continue
