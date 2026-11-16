@@ -8,9 +8,10 @@ import pytest
 
 import tests.regenerate_brief_snapshots as snapshots
 from lib.brief import render_brief
+from lib.brief.review import task_lines as review_task_lines
 from lib.dispatcher import Comment
 from lib.evidence.findings import findings_evidence
-from lib.factory_md import parse_factory_context
+from lib.factory_md import parse_factory_context, parse_factory_md
 from lib.followups import followup_findings
 from lib.handoff import parse_header_line
 
@@ -137,3 +138,137 @@ def test_merge_conflict_and_unknown_verify() -> None:
     brief = review_brief("1/3")
     assert "A merge conflict with the base is `mergeable: no` in the verdict, not a finding." in brief
     assert "A verify result you cannot read (unknown) is `verdict=BLOCKED`." in brief
+
+
+UNREADABLE_BLOCKS = "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
+NOT_YET_REVIEW = (
+    "The reviewer runs `verify-cleffy` once that skill is on `dev`. Until then, list it in the PR as not run."
+)
+PROSE_ONLY_MD = snapshots.FACTORY_MD.replace("The reviewer runs `verify-cleffy`.", NOT_YET_REVIEW)
+UNAVAILABLE = "  verify: verify-cleffy\n  verify_unavailable: true\n"
+NOT_YET_MD = PROSE_ONLY_MD.replace("  verify: verify-cleffy\n", UNAVAILABLE)
+USER_IMPACT = "review:\n  block_on: user-impact\n"
+
+
+def brief_from(factory_md: str, round_text: str) -> str:
+    action, recipient, attempt, head, extra = snapshots.CASES["review"]
+    job = snapshots._job(action, recipient, attempt, head, {**extra, "round": round_text})
+    context, findings = parse_factory_context(factory_md)
+    assert context is not None, findings
+    return render_brief(
+        job, bot="codex-bot", context=context, context_ref="dev", factory_root=snapshots.BOX_FACTORY_ROOT
+    )
+
+
+def task(brief: str) -> str:
+    return brief.split("## What to do\n", 1)[1].split("\n## ", 1)[0]
+
+
+def merge_update_task(verify_unavailable: bool) -> str:
+    facts = {
+        "base": "dev",
+        "head": "d" * 40,
+        "verify": "verify-cleffy",
+        "verify_unavailable": verify_unavailable,
+        "round_number": 2,
+        "followup_from": None,
+        "block_on": "user-impact",
+        "update": {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []},
+        "rebase": None,
+        "start_before_ci": False,
+    }
+    return "\n".join(review_task_lines(facts))
+
+
+NOT_YET_TASKS = {
+    "round-one": lambda: task(brief_from(NOT_YET_MD, "1/3")),
+    "later-round": lambda: task(brief_from(NOT_YET_MD, "3/3")),
+    "user-impact-fix-round": lambda: task(brief_from(NOT_YET_MD.replace("review:\n", USER_IMPACT), "2/3")),
+    "user-impact-merge-update": lambda: merge_update_task(True),
+}
+
+
+@pytest.mark.parametrize("case", list(NOT_YET_TASKS))
+def test_verify_unavailable_lists_the_verify_skill_as_not_run(case: str) -> None:
+    text = NOT_YET_TASKS[case]()
+    assert UNREADABLE_BLOCKS not in text
+    assert "factory.md sets `review.verify_unavailable`, so `verify-cleffy` may not be available yet." in text
+    assert "If `verify-cleffy` is not on the reviewed base, list it in the verdict as not run." in text
+    assert "A missing or unreadable result from it is then not `verdict=BLOCKED`." in text
+    assert "If it is on the reviewed base, run it. A result you cannot read there is `verdict=BLOCKED`." in text
+
+
+def test_without_verify_unavailable_an_unreadable_verify_result_is_blocked() -> None:
+    assert UNREADABLE_BLOCKS in task(brief_from(snapshots.FACTORY_MD, "1/3"))
+    assert UNREADABLE_BLOCKS in task(brief_from(snapshots.FACTORY_MD.replace("review:\n", USER_IMPACT), "2/3"))
+    assert UNREADABLE_BLOCKS in merge_update_task(False)
+
+
+PROSE_ONLY = {
+    "original policy": NOT_YET_REVIEW,
+    "skill named twice": NOT_YET_REVIEW.replace("list it in", "list `verify-cleffy` in"),
+    "one sentence": "The reviewer must run `verify-cleffy`, and list optional browser checks as not run when no "
+    "browser is installed.",
+    "separate paragraph": "The reviewer must run `verify-cleffy`.\n\nList browser checks as not run.",
+}
+
+
+@pytest.mark.parametrize("shape", list(PROSE_ONLY))
+def test_review_prose_that_says_not_run_sets_nothing(shape: str) -> None:
+    md = PROSE_ONLY_MD.replace(NOT_YET_REVIEW, PROSE_ONLY[shape])
+    text = task(brief_from(md, "1/3"))
+    assert UNREADABLE_BLOCKS in text
+    assert "review.verify_unavailable" not in text
+
+
+
+def with_verify_unavailable(value: str) -> str:
+    return snapshots.FACTORY_MD.replace(
+        "  verify: verify-cleffy\n", f"  verify: verify-cleffy\n  verify_unavailable: {value}\n"
+    )
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_verify_unavailable_parses_a_boolean(value: bool) -> None:
+    config, findings = parse_factory_md(with_verify_unavailable(str(value).lower()))
+    assert findings == []
+    assert config is not None and config.verify_unavailable is value
+
+
+def test_verify_unavailable_is_off_when_absent() -> None:
+    config, findings = parse_factory_md(PROSE_ONLY_MD)
+    assert findings == []
+    assert config is not None and config.verify_unavailable is False
+
+
+@pytest.mark.parametrize("value", ["maybe", "1", '"true"'])
+def test_verify_unavailable_refuses_anything_but_a_boolean(value: str) -> None:
+    message = "review.verify_unavailable must be true or false"
+    config, findings = parse_factory_md(with_verify_unavailable(value))
+    assert config is None
+    assert [(f.severity, f.message) for f in findings] == [("error", message)]
+    lenient, lenient_findings = parse_factory_md(with_verify_unavailable(value), strict=False)
+    assert lenient is not None and lenient.verify_unavailable is False
+    assert [(f.severity, f.message) for f in lenient_findings] == [("warning", message)]
+
+LIVE_PROVIDER = (
+    "A criterion that needs a live provider (a hosted model or cloud service) this sandbox has no credentials "
+    "for is `unverified`, not `verdict=BLOCKED`."
+)
+
+
+@pytest.mark.parametrize("round_text", ["1/3", "3/3"])
+def test_a_live_provider_criterion_without_credentials_is_unverified_not_blocked(round_text: str) -> None:
+    first = steps(review_brief(round_text))[0]
+    assert LIVE_PROVIDER in first
+    assert "Name the missing environment." in first
+    assert "live-run evidence the builder posted on the PR" in first
+    assert "name the human step that would check it" in first
+    assert "Never read, request or look for credentials." in first
+    assert "An `unverified` criterion is not met. Count it as unmet for `ac`, so it never leads to `APPROVE`." in first
+
+
+def test_the_new_routing_names_no_project() -> None:
+    texts = [steps(review_brief("1/3"))[0], *(make() for make in NOT_YET_TASKS.values())]
+    for text in texts:
+        assert "aut0" not in text.lower()

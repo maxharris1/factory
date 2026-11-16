@@ -47,6 +47,12 @@ user-impact. user-impact gives the review brief pstack's blocking bar from
 round 1, files [follow-up] findings from round 1, and limits a later round
 to a check of the fix. Refused with tickets: linear, which has no filer.
 
+review.verify_unavailable is optional (issue #596): a boolean, default
+false. True says the review.verify skill may not be on the reviewed base
+yet: the review brief tells the reviewer to list it as not run there
+instead of returning BLOCKED for its missing result. The brief reads only
+this key, never the Review prose.
+
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It acts on ship: merge and ship:
@@ -190,6 +196,7 @@ class FactoryConfig:
     auto_extra_rounds: int = 0
     start_before_ci: bool = False
     block_on: str = "any-failure"
+    verify_unavailable: bool = False
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
     pre_ready: PreReady | None = None
@@ -290,6 +297,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         start_before_ci,
         pre_ready,
         block_on,
+        verify_unavailable,
     ) = _review(
         data, findings, unknown
     )
@@ -373,6 +381,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         start_before_ci=start_before_ci,
         pre_ready=pre_ready,
         block_on=block_on,
+        verify_unavailable=verify_unavailable,
         max_holders_per_path=max_holders_per_path,
         exclusive_paths=exclusive_paths,
         plan_max_lines=plan_max_lines,
@@ -451,16 +460,16 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None, str]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None, str, bool]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None, 0, False, None, "any-failure"
+        return None, None, None, None, 0, False, None, "any-failure", False
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None, 0, False, None, "any-failure"
+        return None, None, None, None, 0, False, None, "any-failure", False
     findings.extend(
         _unknown(
             review,
@@ -472,6 +481,7 @@ def _review(
                 "start_before_ci",
                 "pre_ready",
                 "block_on",
+                "verify_unavailable",
             },
             "review",
             unknown,
@@ -509,6 +519,7 @@ def _review(
         _start_before_ci(review, findings, unknown),
         _pre_ready(review, findings, unknown),
         _block_on(review, findings, unknown),
+        _verify_unavailable(review, findings, unknown),
     )
 
 
@@ -543,6 +554,14 @@ def _block_on(review: dict, findings: list[Finding], unknown: str) -> str:
     if not isinstance(value, str) or value not in BLOCK_ON:
         findings.append(Finding(unknown, "review.block_on must be any-failure or user-impact"))
         return "any-failure"
+    return value
+
+
+def _verify_unavailable(review: dict, findings: list[Finding], unknown: str) -> bool:
+    value = review.get("verify_unavailable", False)
+    if not isinstance(value, bool):
+        findings.append(Finding(unknown, "review.verify_unavailable must be true or false"))
+        return False
     return value
 
 
