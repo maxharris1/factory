@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from lib.dispatch.constants import CI_SILENT_REASON, CI_SILENT_SECONDS, CI_WAIT_REASONS
+from lib.dispatch.constants import CI_SILENT_REASON, CI_SILENT_SECONDS, CI_WAIT_REASONS, TERMINAL_STATES
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
     _acted_verdict,
@@ -231,8 +231,7 @@ class ReadyMixin:
                 return
             head = current or reported_head
             result = ticket.ci.get(head) or ticket.ci.get(reported_head)
-            now = self.queue.now()
-            since = connection.execute(
+            connection.execute(
                 """
                 INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -243,7 +242,6 @@ class ReadyMixin:
                     checks = excluded.checks,
                     since = CASE WHEN ci_waits.head = excluded.head
                                  THEN ci_waits.since ELSE excluded.since END
-                RETURNING since
                 """,
                 (
                     *key,
@@ -251,29 +249,73 @@ class ReadyMixin:
                     head,
                     outcome,
                     json.dumps(list(result.pending) if result is not None else []),
-                    now,
+                    self.queue.now(),
                 ),
-            ).fetchone()["since"]
-            ci_branches = ticket.factory.ci_branches
-            if (
-                (result is None or not result.reported)
-                and ci_branches is not None
-                and ticket.pr_base in ci_branches
-                and now - since >= CI_SILENT_SECONDS
-            ):
-                self._flag_attention_once(
-                    connection,
-                    ticket.repo,
-                    ticket.ticket_id,
-                    CI_SILENT_REASON,
-                    f"no check run or status on {head[:12]} after "
-                    f"{CI_SILENT_SECONDS / 60:.0f} minutes on CI base {ticket.pr_base}",
-                )
-            else:
+            )
+
+    def _watch_ci_silence(self, ticket: TrackedTicket) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._polled.get(key, ticket)
+        head = ticket.current_head
+        result = ticket.ci.get(head) if head is not None else None
+        ci_branches = ticket.factory.ci_branches
+        silent = (
+            head is not None
+            and (result is None or not result.reported)
+            and ci_branches is not None
+            and ticket.pr_base in ci_branches
+            and self._review_context(ticket)[0] not in TERMINAL_STATES
+            and self._ready_names(ticket, head)
+        )
+        now = self.queue.now()
+        with self._connect() as connection:
+            if not silent:
+                connection.execute("DELETE FROM ci_silence WHERE repo = ? AND ticket_id = ?", key)
                 connection.execute(
                     "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
                     (*key, CI_SILENT_REASON),
                 )
+                return
+            since = connection.execute(
+                """
+                INSERT INTO ci_silence (repo, ticket_id, head, since) VALUES (?, ?, ?, ?)
+                ON CONFLICT (repo, ticket_id) DO UPDATE SET
+                    head = excluded.head,
+                    since = CASE WHEN ci_silence.head = excluded.head
+                                 THEN ci_silence.since ELSE excluded.since END
+                RETURNING since
+                """,
+                (*key, head, now),
+            ).fetchone()["since"]
+            if now - since < CI_SILENT_SECONDS:
+                connection.execute(
+                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (*key, CI_SILENT_REASON),
+                )
+                return
+            self._flag_attention_once(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                CI_SILENT_REASON,
+                f"no check run or status on {head[:12]} after "
+                f"{CI_SILENT_SECONDS / 60:.0f} minutes on CI base {ticket.pr_base}",
+            )
+
+    def _ready_names(self, ticket: TrackedTicket, head: str) -> bool:
+        for comment in ticket.comments:
+            if comment.edited_at is not None:
+                continue
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if fields["kind"] != "ready" or _matching_head(fields["head"], head) is None:
+                continue
+            outcome = self._handled_outcome(ticket, comment.id)
+            if outcome is None or not outcome.startswith("rejected-"):
+                return True
+        return False
 
     def _review_after_green_rerun(self, ticket: TrackedTicket) -> None:
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)

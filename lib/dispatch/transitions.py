@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping, Sequence
 
-from lib.dispatch.constants import TERMINAL_STATES
+from lib.dispatch.constants import CI_SILENT_REASON, TERMINAL_STATES
 
 
 def write_workflow_state(
@@ -54,6 +54,11 @@ def write_workflow_state(
         prior = row[0]
     if state in TERMINAL_STATES:
         connection.execute("DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key)
+        connection.execute("DELETE FROM ci_silence WHERE repo = ? AND ticket_id = ?", key)
+        connection.execute(
+            "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+            (*key, CI_SILENT_REASON),
+        )
     if prior != state:
         connection.execute(
             """

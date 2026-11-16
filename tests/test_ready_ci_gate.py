@@ -503,3 +503,53 @@ def test_ci_silent_is_never_raised_without_ci_branches(tmp_path: Path) -> None:
 
     assert ci_silent(board) == []
     assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
+
+
+@pytest.mark.parametrize("verdict", ["approve", "revise"])
+def test_ci_silent_after_an_early_review_raises_one_flag_until_ci_reports(
+    tmp_path: Path, verdict: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    reported = on_base(board, "dev")
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    assert board.outcome(ready) == "queued-review"
+    board.finish("codex")
+    getattr(board, verdict)(pr, "1/3")
+    board.poll()
+    board.now[0] += CI_SILENT_SECONDS - 20
+    board.poll()
+    assert ci_silent(board) == []
+
+    board.now[0] += 20
+    for _ in range(3):
+        board.poll()
+    assert ci_silent(board) == [
+        ("42", f"no check run or status on {sha(1)[:12]} after 10 minutes on CI base dev")
+    ]
+
+    reported.add(pr.head)
+    board.poll()
+    assert ci_silent(board) == []
+
+
+def test_ci_silent_restarts_its_clock_on_a_new_head(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    on_base(board, "dev")
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head)
+    board.poll()
+    board.now[0] += CI_SILENT_SECONDS
+    board.poll()
+    assert len(ci_silent(board)) == 1
+
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, sha(2))
+    board.poll()
+    assert ci_silent(board) == []
+    board.now[0] += CI_SILENT_SECONDS
+    board.poll()
+    assert ci_silent(board) == [
+        ("42", f"no check run or status on {sha(2)[:12]} after 10 minutes on CI base dev")
+    ]

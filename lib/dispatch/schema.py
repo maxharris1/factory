@@ -474,26 +474,17 @@ class SchemaMixin:
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
             attention.ensure_table(connection)
-            # #615: a ci-silent flag lasts only as long as its ready's CI wait
-            # on the same head.
+            # #615: the head a ready names on a CI base, and since when it has
+            # had no check run or status; past CI_SILENT_SECONDS it is ci-silent.
             connection.execute(
                 """
-                CREATE TRIGGER IF NOT EXISTS ci_waits_clear_silent_on_delete
-                AFTER DELETE ON ci_waits BEGIN
-                    DELETE FROM needs_attention
-                    WHERE repo = old.repo AND ticket_id = old.ticket_id
-                      AND reason = 'ci-silent';
-                END
-                """
-            )
-            connection.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS ci_waits_clear_silent_on_new_head
-                AFTER UPDATE OF head ON ci_waits WHEN old.head != new.head BEGIN
-                    DELETE FROM needs_attention
-                    WHERE repo = old.repo AND ticket_id = old.ticket_id
-                      AND reason = 'ci-silent';
-                END
+                CREATE TABLE IF NOT EXISTS ci_silence (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    since REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
                 """
             )
             # #615: tracked tickets whose PR base gets no CI (factory.md
