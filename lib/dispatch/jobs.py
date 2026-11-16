@@ -68,6 +68,7 @@ from lib.job_state import (
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
+    PRE_READY_FAILED,
     SLOTS_TABLE,
     Job,
     JobRequest,
@@ -1165,6 +1166,8 @@ class JobsMixin:
                 or self._update_job_before(ticket, item) != job.id
             ):
                 continue
+            if kind == "ready" and self._pre_ready_refused(ticket, item.id):
+                continue
             unread = (
                 kind == "ready"
                 and outcome is None
@@ -1172,6 +1175,23 @@ class JobsMixin:
             )
             return HandoffCandidate(item, unread)
         return None
+
+    def _pre_ready_refused(self, ticket: TrackedTicket, comment_id: str) -> bool:
+        """A ready whose pre_ready check failed (#503) never settles a job.
+
+        Keyed on the comment, not the job, so a T6 retry of the job that
+        refused it cannot settle with it either."""
+        prefix = f"handoff {comment_id}:"
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM job_events
+                WHERE repo = ? AND ticket_id = ? AND event = ? AND substr(detail, 1, ?) = ?
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, PRE_READY_FAILED, len(prefix), prefix),
+            ).fetchone()
+        return row is not None
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
         """Mark a failed job done with the handoff it already posted."""
