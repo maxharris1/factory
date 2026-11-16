@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from markdown_it import MarkdownIt
 
 from lib.dispatcher import Comment
 from lib.orchestrate import brief_comment
@@ -479,3 +480,98 @@ def test_goal_that_opens_a_commonmark_block_keeps_every_criterion(goal):
     bundle = _bundle(comments=(_orchestrate_brief(criteria, ["lib/a.py"], goal=goal),))
     assert bundle.source == "brief"
     assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", criteria[0]), ("ac-2", criteria[1])]
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "<script> tags must be removed.",
+        "<pre> blocks keep their spacing.",
+        "<!-- an unclosed comment",
+        "<?php stays out.",
+        "<![CDATA[ stays out.",
+        "```sh make test",
+        "~~~",
+        "# Acceptance criteria are tracked here.",
+        "**Acceptance criteria**",
+        "Acceptance criteria\n===",
+        "- [ ] Not a criterion.",
+        "1. Not a criterion.",
+        "First line.\n\n   <script> again.\n\n**Acceptance criteria**\n- [ ] Not a criterion.",
+    ],
+)
+def test_f1_any_goal_keeps_the_brief_criteria(goal):
+    body = brief_comment(
+        risk="low",
+        goal=goal,
+        acceptance_criteria=["Scripts are removed.", "Safe HTML remains."],
+        likely_files=["lib/a.py"],
+        done_evidence="<script> Tests pass.",
+    )
+    bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Scripts are removed."), ("ac-2", "Safe HTML remains.")]
+
+
+def test_f1_an_html_goal_still_reads_as_written():
+    body = brief_comment(
+        risk="low",
+        goal="<script> tags must be removed.",
+        acceptance_criteria=["Scripts are removed."],
+        likely_files=[],
+        done_evidence="1. Tests pass.",
+    )
+    rendered = MarkdownIt("commonmark").render(body)
+    assert "<p><strong>Goal</strong>\n&lt;script&gt; tags must be removed.</p>" in rendered
+    assert "<p><strong>Done-evidence</strong>\n1. Tests pass.</p>" in rendered
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "`<!-- preserve-this-marker -->` comments must remain.",
+        "`![alt](image.png)` stays as code.",
+        "``<b>`` stays as code.",
+        "``` `<!-- x -->` ``` stays as code.",
+        "`keep\n[marker]` must remain.",
+        "`keep\n# marker` must remain.",
+        "`keep\n```\n` stays as code.",
+        "Code `a\n- b\n1. c` and `d\n> e`.",
+    ],
+)
+def test_f2_an_inline_code_goal_renders_as_written(goal):
+    body = brief_comment(
+        risk="low",
+        goal=goal,
+        acceptance_criteria=["Comments survive."],
+        likely_files=[],
+        done_evidence="Tests pass.",
+    )
+    markdown = MarkdownIt("commonmark")
+    assert f"<p><strong>Goal</strong>\n{markdown.renderInline(goal)}</p>" in markdown.render(body)
+    bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Comments survive.")]
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "See [x](https://example.com/`)\\\nnext `word`",
+        "See ![x](a.png \"t`\")  \nnext `word`",
+        "See [x](<https://example.com/`>)\\\n# next `word`",
+        "See [x](https://example.com/(`))\\\nnext `word`",
+    ],
+)
+def test_f2_a_backtick_in_a_link_destination_keeps_the_hard_break(goal):
+    body = brief_comment(
+        risk="low",
+        goal=goal,
+        acceptance_criteria=["Scripts are removed.", "Safe HTML remains."],
+        likely_files=[],
+        done_evidence="Tests pass.",
+    )
+    markdown = MarkdownIt("commonmark")
+    rendered_goal = markdown.renderInline(goal)
+    assert "<br />" in rendered_goal
+    assert f"<p><strong>Goal</strong>\n{rendered_goal}</p>" in markdown.render(body)
+    bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Scripts are removed."), ("ac-2", "Safe HTML remains.")]
