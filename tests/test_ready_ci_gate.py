@@ -9,7 +9,7 @@ import pytest
 from lib.dashboard import collect_snapshot
 from lib.dashboard_pages import lanes, tickets
 from lib.dispatch.constants import BASE_UPDATE_GRACE_SECONDS
-from tests.merge_queue_support import APPROVE, sha
+from tests.merge_queue_support import APPROVE, READY, sha
 from tests.test_ready_after_approve import approved_on_red_ci
 from tests.test_review_before_ci import (
     board_with,
@@ -311,13 +311,30 @@ def test_a_conflicting_ready_in_its_base_update_grace_is_waiting_on_ci(tmp_path:
     assert ci_waits(board) == []
 
 
-def test_stale_ready_does_not_hide_current_pending_ready(tmp_path: Path) -> None:
+def stale_head_ready(board, pr) -> None:
+    board.ready(pr, sha(1), "ready-other")
+
+
+def reviewer_ready(board, pr) -> None:
+    board.post(pr, "ready-other", READY.format(head=pr.head), "codex-login")
+
+
+@pytest.mark.parametrize(
+    ("post_other", "other_outcome"),
+    [
+        (stale_head_ready, "stale-ready-head"),
+        (reviewer_ready, "rejected-ready-author"),
+    ],
+)
+def test_a_handled_ready_does_not_hide_another_pending_ready(
+    tmp_path: Path, post_other, other_outcome: str
+) -> None:
     board = board_with(tmp_path, on=False)
     pr = built_with_ci_pending(board, sha(2))
     current = board.ready(pr, pr.head, "ready-current")
     board.poll()
     assert board.outcome(current) is None
-    board.ready(pr, sha(1), "ready-stale")
+    post_other(board, pr)
     outcomes = []
     original = board.dispatcher._t2
 
@@ -334,8 +351,9 @@ def test_stale_ready_does_not_hide_current_pending_ready(tmp_path: Path) -> None
     lane = "".join(lanes._ci_lane(snapshot))
     assert outcomes == [
         ("ready-current", (False, "ci-pending")),
-        ("ready-stale", (True, "stale-ready-head")),
+        ("ready-other", (True, other_outcome)),
     ]
+    assert [w["comment_id"] for w in ci_waits(board)] == ["ready-current"]
     assert not snapshot["running"] and not snapshot["queued"]
     assert "waiting on CI" in cards
     assert "no job running" not in cards
