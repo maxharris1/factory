@@ -1,0 +1,8 @@
+decision	choice	why
+f-string rewrite	bind the inner string to a local (slots_text, ticket)	swapping quotes cannot work: each inner f-string sits inside an outer f'...', so an inner ' would end the outer string on 3.11
+local name in efficiency	slots_text, not used	used is the running slot total read after the loop for the panel count; the golden test caught the shadowing (2 slots slots used)
+CI shape	separate py311-compile job, not steps in checks	a second setup-python in checks would put 3.11 first on PATH for the later check-config steps
+entry points	py_compile bin/orch bin/skill-probe beside compileall	compileall skips extensionless files, so the two entry points need their own line
+interpreter guard	assert sys.version_info is (3, 11) in the job	a runner that silently gives 3.12 would pass bad code
+proof of ac-2	a test runs the job's own run steps under 3.11 against a planted PEP 701 f-string, and the test shards install 3.11 so it runs in CI	a deliberate red push would be cancelled by the PR concurrency group before it finished, and the job may not poll CI
+deliberate failing CI run	skipped	superseded PR runs are cancelled (cancel-in-progress), and the brief forbids waiting on CI; the test plus the local base run show the failure
