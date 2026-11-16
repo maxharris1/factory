@@ -49,9 +49,11 @@ def test_repo_orch_yml_lists_projects_and_polls_github_every_30_seconds(
     ]
     assert config.projects[0].job_timeout == 150
     assert resolve_job_timeout(config, "aut0-code/aut0") == 150
-    for project in config.projects[1:]:
+    for project in config.projects[1:3]:
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 60
+    assert config.projects[3].job_timeout == 120
+    assert resolve_job_timeout(config, "maxharris1/factory") == 120
     assert config.projects[0].factory_ref == "dev"
     assert config.projects[0].linear_project_ids == frozenset({"test-linear-project-id"})
     assert config.projects[0].linear_ready_for_review is True
