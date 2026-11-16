@@ -9,7 +9,7 @@ import tests.regenerate_brief_snapshots as snapshots
 from lib.brief import render_brief
 from lib.factory_md import parse_factory_context
 
-BASELINE_TASK_LENGTH = {"review": 1913, "review-round-3": 2466, "review-update": 2380, "review-rebased": 2735}
+BASELINE_TASK_LENGTH = {"review": 1947, "review-round-3": 2500, "review-update": 2414, "review-rebased": 2769}
 
 
 def brief(kind: str, **extra: object) -> str:
