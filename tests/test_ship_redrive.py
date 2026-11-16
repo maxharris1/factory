@@ -44,6 +44,9 @@ from tests.test_github_actions import (
     served,
 )
 
+
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+
 SECRET_TOKEN = "ghp_" + "Z" * 36
 LEAKY_STDERR = (
     "gh: Resource not accessible by integration (HTTP 403)\n"

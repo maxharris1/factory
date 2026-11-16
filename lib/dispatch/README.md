@@ -64,7 +64,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Retry (TR) | `retry.py` (`RetryMixin`) | `_t_retry`, `_retry_step` (the resume table), `ticket_retries` rows |
 | Jobs (T6) | `jobs.py` (`JobsMixin`) | `_t6`, `reconcile_jobs`, abandoned and dead jobs, devices, failure waits, stuck wakes |
 | Follow-ups | `followups.py` (`FollowupsMixin`) | `_record_followups` (T3, T4), `_drain_followups`: park a verdict's `[follow-up]` findings once on the PR's one unlabelled follow-up issue and link them from the PR (issues #259, #492) |
-| Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_grok_request`, `_linked_wake_detail`, `_wake_link`, `_deliver_grok_jobs` |
+| Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_skips_wake`, `_drain_skipped_wakes`, `_grok_request`, `_linked_wake_detail`, `_wake_link`, `_deliver_grok_jobs`: a reason in `GROK_WAKE_SKIP` posts one PR notice instead of a Grok wake (issue #543) |
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
 | Poll | `poll.py` (`PollMixin`, `PollLoop`) | `poll_once`, handoff verification, poll-error streaks, attention |

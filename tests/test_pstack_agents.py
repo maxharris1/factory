@@ -30,10 +30,9 @@ def frontmatter_name(path: Path) -> str:
 
 
 def router_agent_names() -> set[str]:
-    rows = [line for line in BUILDER.read_text(encoding="utf-8").splitlines() if "pstack:poteto-agent" in line]
-    assert len(rows) == 1, "factory-builder needs one difference row for the adapter's agent names"
-    factory_cell = rows[0].strip().strip("|").split("|")[1]
-    return set(re.findall(r"`([a-z:-]+)`", factory_cell))
+    lines = [line for line in BUILDER.read_text(encoding="utf-8").splitlines() if "pstack:poteto-agent" in line]
+    assert len(lines) == 1, "factory-builder needs one line for the adapter's agent names"
+    return {name for name in re.findall(r"`([a-z:-]+)`", lines[0]) if not name.startswith("pstack:")}
 
 
 def install(home: Path) -> list[str]:
@@ -230,7 +229,8 @@ def test_note_records_the_path_the_evidence_the_license_and_the_revert() -> None
 
 def test_builder_no_longer_skips_deslop() -> None:
     text = BUILDER.read_text(encoding="utf-8")
-    assert "skills/cursor-team-kit/deslop/SKILL.md" in text
+    assert "<kit>/deslop/SKILL.md" in text
+    assert "`<kit>` is its `skills/cursor-team-kit`" in text
     assert "until T07" not in text
 
 

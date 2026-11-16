@@ -133,11 +133,9 @@ class FollowupsMixin:
             if parked is not None:
                 detail["followup_issue"] = parked
             self.wake_grok_once(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
+                ticket,
                 reason="done",
                 source_comment_id=str(wake["source_comment_id"]),
-                timeout_seconds=int(wake["timeout_seconds"]),
                 detail=json.dumps(detail, separators=(",", ":"), sort_keys=True),
                 head=wake["head"],
             )

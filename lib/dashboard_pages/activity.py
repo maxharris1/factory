@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 
-from lib.dashboard_pages.common import _BOTS, _chip, _e, _panel, _span, _ticket, anchor, duration
+from lib.dashboard_pages.common import (
+    _BOTS, _chip, _e, _job_hrefs, _panel, _span, _thread_key, _ticket, duration, ticket_href,
+)
 
 
 CSS = """\
@@ -53,19 +55,6 @@ SCRIPT = r"""
   var DONE_TINT = '#9ece6a';
   var RELAY_FILTERS = [['all', 'all'], ['scripted', 'scripted'], ['wakes', 'grok wakes'], ['shipped', 'shipped']];
   var rlFilter = 'all';
-
-  function threadKey(r) { return String(r.repo).toLowerCase() + '#' + r.ticket_id; }
-
-  function jobHrefs(d) {
-    var hrefs = {}, best = {};
-    (d.running || []).forEach(function (r) {
-      var key = threadKey(r);
-      if (!best[key] || (r.elapsed_seconds || 0) < (best[key].elapsed_seconds || 0)) best[key] = r;
-    });
-    (d.queued || []).forEach(function (r) { if (!best[threadKey(r)]) best[threadKey(r)] = r; });
-    Object.keys(best).forEach(function (key) { hrefs[key] = 'job.html#' + anchor(best[key].job); });
-    return hrefs;
-  }
 
   function cmpStep(a, b) {
     return b.at - a.at || (a.type === 'verdict') - (b.type === 'verdict') || a.tie - b.tie;
@@ -211,7 +200,7 @@ SCRIPT = r"""
       add(row, chip(x.kind, ATTENTION[x.kind] || 'muted'));
       add(row, el('span', 'at-subj', x.component || ticketOf(x)));
       add(row, el('span', 'at-what', x.detail));
-      add(row, link('at-go', x.component ? healthLink(x.link) : hrefs[threadKey(x)] || 'job.html')).textContent =
+      add(row, link('at-go', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
         x.component ? 'open in System' : 'open ticket';
       mark('attention', key, row);
     });
@@ -242,21 +231,6 @@ _HEALTH_LINK = re.compile(r"health\.html#[A-Za-z0-9_-]+")
 def _health_link(href: object) -> str:
     """Only a link into the Health tab (#92); anything else is the tab itself."""
     return str(href) if isinstance(href, str) and _HEALTH_LINK.fullmatch(href) else "health.html"
-
-
-def _thread_key(row: dict) -> str:
-    return f"{str(row['repo']).lower()}#{row['ticket_id']}"
-
-
-def _job_hrefs(snapshot: dict) -> dict[str, str]:
-    best: dict[str, dict] = {}
-    for row in snapshot["running"]:
-        key = _thread_key(row)
-        if key not in best or (row.get("elapsed_seconds") or 0) < (best[key].get("elapsed_seconds") or 0):
-            best[key] = row
-    for row in snapshot["queued"]:
-        best.setdefault(_thread_key(row), row)
-    return {key: f"job.html#{anchor(row['job'])}" for key, row in best.items()}
 
 
 def _place_untimed(ordered: list[dict], verdicts: list[dict]) -> None:
@@ -372,7 +346,7 @@ def _attention(snapshot: dict) -> str:
         component = row.get("component")
         key = _attention_key(row)
         strip = _px().px_strip(f"attention-{key}", effect="static", tint=_ATTENTION_TINT, cell=4, height=24)
-        href = _health_link(row.get("link")) if component else hrefs.get(_thread_key(row), "job.html")
+        href = _health_link(row.get("link")) if component else ticket_href(hrefs, row)
         return (
             f'<div class="at-row" data-attn="{_e(key)}"><span class="at-px" aria-hidden="true">{strip}</span>'
             + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))

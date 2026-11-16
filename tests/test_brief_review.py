@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
@@ -14,8 +13,6 @@ from lib.evidence.findings import findings_evidence
 from lib.factory_md import parse_factory_context
 from lib.followups import followup_findings
 from lib.handoff import parse_header_line
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def review_brief(round_text: str) -> str:
@@ -140,10 +137,3 @@ def test_merge_conflict_and_unknown_verify() -> None:
     brief = review_brief("1/3")
     assert "A merge conflict with the base is `mergeable: no` in the verdict, not a finding." in brief
     assert "A verify result you cannot read (unknown) is `verdict=BLOCKED`." in brief
-
-
-def test_reviewer_skill_puts_repeat_in_a_header_that_parses() -> None:
-    skill = (ROOT / "skills/factory/factory-reviewer/SKILL.md").read_text(encoding="utf-8")
-    example = next(line for line in skill.splitlines() if line.startswith("<!-- orch:v1 kind=verdict"))
-    assert parse_header_line(example)["repeat"] == "ac-2"
-    assert "`unsat=<id>` in the header" in skill

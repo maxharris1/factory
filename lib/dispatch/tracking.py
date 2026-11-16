@@ -326,6 +326,12 @@ class TrackingMixin:
                                WHERE notice.repo = LOWER(tracked.repo)
                                  AND notice.ticket_id = tracked.ticket_id
                                  AND notice.status = 'pending'
+                           ) OR EXISTS (
+                               SELECT 1
+                               FROM skipped_wakes AS skipped
+                               WHERE skipped.repo = LOWER(tracked.repo)
+                                 AND skipped.ticket_id = tracked.ticket_id
+                                 AND skipped.status = 'pending'
                            ) AS outbox
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state

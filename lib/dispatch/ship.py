@@ -510,11 +510,9 @@ class ShipMixin:
         detail: str,
     ) -> None:
         self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason="ship-failed",
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=self._project_wake_detail(ticket, detail),
         )
 
@@ -647,11 +645,9 @@ class ShipMixin:
                 )
             if failures >= SETTLE_FAILURES_TO_WAKE:
                 self.wake_grok_once(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
+                    ticket,
                     reason="ship-failed",
                     source_comment_id=source_comment_id,
-                    timeout_seconds=ticket.job_timeout_minutes * 60,
                     detail=self._project_wake_detail(
                         ticket,
                         (

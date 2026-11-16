@@ -1150,6 +1150,7 @@ def test_e2e_adapter_errors_fail_closed_with_ship_error_and_one_wake(
         ).fetchone()[0] == "ship-failed"
 
 
+@pytest.mark.usefixtures("every_wake_reaches_grok")
 @pytest.mark.parametrize("checks", ["check-runs-all-neutral.json", "check-runs-all-skipped.json"])
 def test_e2e_untested_head_never_reaches_t4_ship(tmp_path: Path, checks: str) -> None:
     for ship in ("after:tracy-site", "merge"):

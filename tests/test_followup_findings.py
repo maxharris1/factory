@@ -281,7 +281,9 @@ class FollowupActions(FakeReviewActions):
         return number
 
     def comment_once(self, ticket, body, marker) -> None:
-        del ticket
+        if marker.startswith("<!-- orch-wake-skip "):
+            super().comment_once(ticket, body, marker)
+            return
         if any(marker in existing.splitlines() for existing in self.pr_comments):
             return
         self.pr_comments.append(body)
@@ -510,10 +512,10 @@ def test_the_done_wake_names_the_parked_issue(tmp_path: Path) -> None:
     plain = FollowupActions()
     plain_dispatcher, plain_queue = at_round(tmp_path / "plain", plain, 4)
     plain_dispatcher.process(verdict_ticket("APPROVE", 4, (MINOR,)))
-    [plain_wake] = [
+    # With nothing parked, a done is a PR notice, not a Grok wake (issue #543).
+    assert [
         job for job in FakeBot(plain_queue, "grok").drain() if job.request.action == "done"
-    ]
-    assert "followup_issue" not in json.loads(str(plain_wake.request.detail))
+    ] == []
 
 
 class FailingCreates(FollowupActions):

@@ -1,0 +1,8 @@
+decision	choice	why
+step order	remote scrub, then config, then broker test	each step ended in its own failing-then-passing test; the dispatcher and broker already handled a partial App set
+grok-bot requirement	deleted from _app_switch	the only place that refused two Apps; the other switch-on checks still run for every configured App
+scrub place	unset in _START_ENTER after the cd and before the job env export loop	runs inside bash -lc after the profile, and the job's own token is exported after it
+scrub names	imported from lib.github_app_token.TOKEN_VARIABLES	one list, so the remote and local scrubs cannot drift; github_app_token imports lib.remote only inside a function
+170 decision file	left unchanged; 509-worker-apps.md names the line it changes	docs/decisions/README.md: do not edit another ticket's file
+GH_CONFIG_DIR from a profile	not scrubbed	outside the ticket
+readonly profile token (f-1)	unset failure exits START_REFUSED before the harness	the scrub cannot remove a readonly variable, so the start refuses rather than run with the profile credential

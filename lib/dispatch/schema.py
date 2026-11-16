@@ -342,6 +342,20 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS skipped_wakes (
+                    dedupe_key TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    once_key TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'posted')),
+                    skipped_at REAL NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS auto_extra_comments (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

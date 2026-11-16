@@ -1550,3 +1550,180 @@ def test_r1_gap_fake_ssh_joins_remote_arguments_like_ssh(tmp_path: Path) -> None
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "a b c\n"  # one string, re-split by the remote shell
+
+
+SCRUBBED = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+@pytest.mark.parametrize(
+    ("job_env", "expected"),
+    [
+        ({}, dict.fromkeys(SCRUBBED)),
+        ({"GH_TOKEN": "job-token"}, {**dict.fromkeys(SCRUBBED), "GH_TOKEN": "job-token"}),
+    ],
+)
+def test_remote_start_drops_profile_tokens_and_keeps_only_the_jobs_own(
+    tmp_path: Path, job_env: dict[str, str], expected: dict[str, str | None]
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        "".join(f"export {name}=profile-{name}\n" for name in SCRUBBED), encoding="utf-8"
+    )
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    report = tmp_path / "report.json"
+    dump = (
+        "import json, os\n"
+        f"json.dump({{k: os.environ.get(k) for k in {SCRUBBED!r}}}, open({str(report)!r}, 'w'))\n"
+    )
+    script = remote.start_script(target, [sys.executable, "-c", dump], job_env)
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(report.read_text(encoding="utf-8")) == expected
+
+
+PROFILE_SENTINEL = "ghp_SYNTHETIC_PROFILE_TOKEN"
+_BASH_HAS_NAMEREFS = subprocess.run(["bash", "-c", "declare -n r=x"], capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param("export {name}=" + PROFILE_SENTINEL, id="export"),
+        pytest.param("unset() {{ :; }}; export {name}=" + PROFILE_SENTINEL, id="unset-shadowed"),
+        pytest.param(
+            "declare -nrx {name}=" + PROFILE_SENTINEL,
+            id="nameref",
+            marks=pytest.mark.skipif(not _BASH_HAS_NAMEREFS, reason="this bash has no name references"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("job_env", [{}, {"GH_TOKEN": "job-token"}], ids=["no-job-token", "job-token"])
+def test_remote_harness_never_sees_a_profile_token_however_declared(
+    tmp_path: Path, declare: str, job_env: dict[str, str]
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        "".join(declare.format(name=name) + "\n" for name in SCRUBBED), encoding="utf-8"
+    )
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    report = tmp_path / "report.json"
+    dump = f"import json, os\njson.dump(dict(os.environ), open({str(report)!r}, 'w'))\n"
+    script = remote.start_script(target, [sys.executable, "-c", dump], job_env)
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    assert {name: seen.get(name) for name in SCRUBBED} == {**dict.fromkeys(SCRUBBED), **job_env}
+    assert PROFILE_SENTINEL not in seen.values()
+
+
+@pytest.mark.parametrize("name", SCRUBBED)
+def test_remote_start_refuses_when_a_profile_token_cannot_be_dropped(tmp_path: Path, name: str) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(f"export {name}=profile-sentinel; readonly {name}\n", encoding="utf-8")
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    ran = tmp_path / "ran"
+    script = remote.start_script(target, [sys.executable, "-c", f"open({str(ran)!r}, 'w')"], {})
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == remote.START_REFUSED, result.stderr
+    assert not ran.exists()
+
+
+JOB_SECRET = "ghs_SYNTHETIC_JOB_TOKEN"
+
+
+def _token_target(tmp_path: Path) -> remote.RemoteTarget:
+    return remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+
+
+def test_remote_start_runs_a_harness_whose_path_holds_an_equals_sign(tmp_path: Path) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    ran = tmp_path / "ran.json"
+    tool = tmp_path / "bin" / "tool=beta"
+    tool.parent.mkdir()
+    tool.write_text(
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        f"json.dump({{'argv': sys.argv[1:], 'token': os.environ.get('GH_TOKEN')}}, open({str(ran)!r}, 'w'))\n",
+        encoding="utf-8",
+    )
+    tool.chmod(0o755)
+    script = remote.start_script(_token_target(tmp_path), [str(tool), "x=1"], {"GH_TOKEN": JOB_SECRET})
+    result = subprocess.run(
+        remote.ssh_argv(_token_target(tmp_path), script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(ran.read_text(encoding="utf-8")) == {"argv": ["x=1"], "token": JOB_SECRET}
+    assert JOB_SECRET not in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not _BASH_HAS_NAMEREFS, reason="this bash has no name references")
+@pytest.mark.parametrize("report_env", [False, True], ids=["plain", "report-env"])
+@pytest.mark.parametrize("variable", ["e", "r", "k", "n", "a", "c", "names"])
+def test_a_profile_name_reference_never_puts_the_job_token_on_stderr(
+    tmp_path: Path, variable: str, report_env: bool
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        f"declare -n {variable}=GH_TOKEN\nexport GH_TOKEN=profile-token\n", encoding="utf-8"
+    )
+    report = tmp_path / "report.json"
+    dump = f"import json, os, sys\njson.dump([sys.argv[1:], os.environ.get('GH_TOKEN')], open({str(report)!r}, 'w'))\n"
+    target = _token_target(tmp_path)
+    script = remote.start_script(
+        target, [sys.executable, "-c", dump], {"GH_TOKEN": JOB_SECRET},
+        guarded_dirs=[str(tmp_path)], insert_at=3, report_env=report_env,
+    )
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert JOB_SECRET not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert json.loads(report.read_text(encoding="utf-8")) == [["--add-dir", str(tmp_path)], JOB_SECRET]
