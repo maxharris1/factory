@@ -39,9 +39,9 @@ def _component(component: str, device: str, *, bot: str = "", state: str = "up",
     return {
         "component": component, "device": device, "bot": bot, "pid": 10, "state": state,
         "reason": "never seen" if age is None else None,
-        "last_seen_et": None if age is None else "Nov 14 1:00:00 PM",
+        "last_seen_et": None if age is None else component_health.et(NOW - age),
         "last_seen_age_seconds": age, "interval_seconds": 15.0, "configured": True,
-        "started_at_et": None if started is None else f"started-{int(started)}",
+        "started_at_et": None if started is None else component_health.et(started),
         "started_at": started, "version": version, "stale_code": False, "label": label,
         "anchor": anchor or "health-" + re.sub(r"[^A-Za-z0-9_-]", "-", f"{component}-{bot}-{device}"),
     }
@@ -137,7 +137,7 @@ def test_drift_colours_newest_older_and_unknown(tmp_path: Path) -> None:
     assert blocks == ["ok"] * 4 + ["warn"] + ["bad"]
     text = _text(drift)
     assert "4 components" in text
-    assert f"waiter codex-bot @ box · started started-{int(NOW - 300)}" in text
+    assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in text
     assert "linear-listener" in text
 
 
@@ -194,6 +194,35 @@ def test_poller_log_lines_are_coloured_by_kind(tmp_path: Path) -> None:
     assert '<div class="warn">orch poll: another orch poll owns /tmp/orch.db.lock</div>' in log
     assert "<div>2026-11-13 13:09:20 EST poller exit rc=0</div>" in log
     assert "<div>cycle line</div>" in log
+
+
+def _cells(markup: str, anchor: str) -> list[str]:
+    row = re.search(rf'<tr id="{anchor}">(.*?)</tr>', markup, re.S)
+    assert row, anchor
+    return [_text(cell) for cell in re.findall(r"<td[^>]*>(.*?)</td>", row.group(1), re.S)]
+
+
+def _drift_meta(markup: str) -> list[str]:
+    return re.findall(r'<span class="meta">([^<]+)</span>', markup)
+
+
+def test_process_table_times_drop_the_et_their_header_already_names(tmp_path: Path) -> None:
+    html = _no_script(render_pages(_snapshot(tmp_path))["health.html"])
+    components = _section(html, "components")
+    assert re.findall(r"<th>([^<]+ \(ET\))</th>", components) == ["last seen (ET)", "started (ET)"]
+    cells = _cells(components, "health-poller--box")
+    assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
+    assert _cells(components, "health-linear-listener--box")[4::4] == ["never", "—"]
+    assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in _drift_meta(_section(html, "drift"))
+
+
+@needs_node
+def test_script_process_table_times_drop_the_et_their_header_already_names(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", *PANELS])
+    cells = _cells(out["html"]["components"], "health-poller--box")
+    assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
+    assert _cells(out["html"]["components"], "health-linear-listener--box")[4::4] == ["never", "—"]
+    assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
 
 
 def _with_no_waiters(snapshot: dict, count: int) -> dict:

@@ -229,15 +229,17 @@ SCRIPT_COMPONENTS = r"""
       if (c.reason) add(cell, el('span', 'muted', ' ' + c.reason));
       if (typeof c.last_cycle_seconds === 'number') add(cell, el('span', 'muted', ' last cycle ' + Math.floor(c.last_cycle_seconds) + 's'));
       if (c.configured === false) add(cell, el('span', 'muted', ' (not configured)'));
-      add(tr, el('td', null, c.last_seen_et || 'never'));
+      add(tr, el('td', null, etCell(c.last_seen_et) || 'never'));
       ticking(add(tr, el('td', 'num')), c.last_seen_age_seconds, '', '');
       add(tr, el('td', 'num', c.pid === null || c.pid === undefined ? '—' : c.pid));
       var ver = add(tr, el('td', null, c.version));
       if (c.stale_code) add(ver, el('span', 'warn', ' stale code'));
-      add(tr, el('td', null, c.started_at_et || '—'));
+      add(tr, el('td', null, etCell(c.started_at_et) || '—'));
       mark('components', c.anchor + ':' + c.state, tr);
     });
   }
+
+  function etCell(v) { return v ? String(v).replace(/ ET$/, '') : v; }
 
   function driftOf(h) {
     var rows = (h.components || []).filter(function (c) { return c.configured !== false; });
@@ -490,6 +492,10 @@ def _matrix_cell(row: dict) -> str:
     return f'<td><span class="sys-cell">{inner}</span></td>'
 
 
+def _et_cell(value: str | None) -> str | None:
+    return value.removesuffix(" ET") if value else value
+
+
 def _components(snapshot: dict) -> str:
     health = snapshot.get("health") or {"known": False, "components": []}
     rows = health.get("components") or []
@@ -530,12 +536,12 @@ def _components(snapshot: dict) -> str:
             + _td(row["bot"] or None)
             + _td(row["device"])
             + f"<td>{_chip(label, cls)}{reason}</td>"
-            + _td(row["last_seen_et"] or "never")
+            + _td(_et_cell(row["last_seen_et"]) or "never")
             + _td(duration(row["last_seen_age_seconds"]), "num")
             + _td(row["pid"], "num")
             + (f'<td>{_e(row["version"])}{_span("warn", " stale code")}</td>'
                if row.get("stale_code") else _td(row["version"]))
-            + _td(row["started_at_et"])
+            + _td(_et_cell(row["started_at_et"]))
             + "</tr>"
         )
     thresholds = health.get("thresholds") or {}
