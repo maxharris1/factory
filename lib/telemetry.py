@@ -1034,8 +1034,10 @@ class SkillReads:
     Fed the harness's own tool calls: Claude's Read and Skill, and the file
     operands of read commands (cat, sed, head ...) in Claude's Bash and
     Codex's shell. A `test -f`, `ls` or `grep` is not a read. A call's files
-    count only once its result arrives without an error: a refused Skill or a
-    failed Read loaded nothing."""
+    count only once its result arrives. A failed Read or refused Skill loaded
+    nothing. A failed shell call loses only the operands its output names,
+    as `cat: <path>: No such file` does, and all of them when it printed
+    nothing."""
 
     def __init__(self, root: str, locked: frozenset[str]):
         self.root = posixpath.normpath(root)
@@ -1046,7 +1048,7 @@ class SkillReads:
             if posixpath.basename(rel) == "SKILL.md"
         }
         self.read: set[str] = set()
-        self.pending: dict[str, set[str]] = {}
+        self.pending: dict[str, dict[str, str | None]] = {}
 
     @classmethod
     def pinned(cls, root: str, pin: Pin) -> SkillReads:
@@ -1054,53 +1056,56 @@ class SkillReads:
         return cls(root, frozenset(f"{tree}/{rel}" for tree, rows in trees for rel, _ in rows))
 
     def claude_tool(self, call_id: str, name: str, data: dict) -> None:
-        found: set[str] = set()
+        found: dict[str, str | None] = {}
         if name == "Read":
             self._path(found, _str(data.get("file_path")) or "", None)
+            found = dict.fromkeys(found)
         elif name == "Skill":
             rel = self.skills.get((_str(data.get("skill")) or "").rpartition(":")[2])
             if rel is not None:
-                found.add(rel)
+                found[rel] = None
         elif name == "Bash":
             self._command(found, _command_text(data.get("command")))
         self._started(call_id, found)
 
     def command(self, call_id: str, text: str) -> None:
-        found: set[str] = set()
+        found: dict[str, str | None] = {}
         self._command(found, text)
         self._started(call_id, found)
 
-    def finished(self, call_id: str, error: bool) -> None:
-        found = self.pending.pop(call_id, set())
+    def finished(self, call_id: str, error: bool, output: str) -> None:
+        found = self.pending.pop(call_id, {})
         if not error:
-            self.read |= found
+            self.read |= found.keys()
+        elif output:
+            self.read |= {rel for rel, operand in found.items() if operand is not None and operand not in output}
 
     def row(self) -> str:
         return json.dumps(sorted(self.read))
 
-    def _started(self, call_id: str, found: set[str]) -> None:
+    def _started(self, call_id: str, found: dict[str, str | None]) -> None:
         if found:
             self.pending[call_id] = found
 
-    def _command(self, found: set[str], text: str) -> None:
+    def _command(self, found: dict[str, str | None], text: str) -> None:
         try:
             self._script(found, text, None)
         except ValueError:
             return
 
-    def _path(self, found: set[str], path: str, base: str | None) -> None:
-        if _NOT_A_PATH.search(path) or not (base or posixpath.isabs(path)):
+    def _path(self, found: dict[str, str | None], operand: str, base: str | None) -> None:
+        if _NOT_A_PATH.search(operand) or not (base or posixpath.isabs(operand)):
             return
-        path = posixpath.normpath(posixpath.join(base or "", path))
+        path = posixpath.normpath(posixpath.join(base or "", operand))
         rel = path[len(self.root) + 1 :]
         if path.startswith(self.root + "/") and rel in self.locked:
-            found.add(rel)
+            found[rel] = operand
 
-    def _script(self, found: set[str], script: str, base: str | None) -> None:
+    def _script(self, found: dict[str, str | None], script: str, base: str | None) -> None:
         for words in _simple_commands(script):
             base = self._cwd_after(found, words, base)
 
-    def _cwd_after(self, found: set[str], words: list[str], base: str | None) -> str | None:
+    def _cwd_after(self, found: dict[str, str | None], words: list[str], base: str | None) -> str | None:
         words = list(itertools.dropwhile(lambda word: word in _SHELL_WORDS or _ASSIGNMENT.match(word), words))
         if not words:
             return base
@@ -1200,7 +1205,7 @@ class Summary:
 
     def _finished(self, call_id: str, error: bool, output: str) -> None:
         if self.skills is not None:
-            self.skills.finished(call_id, error)
+            self.skills.finished(call_id, error, output)
         entry = self._open.pop(call_id, None)
         if entry is None:
             return

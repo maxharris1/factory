@@ -1738,9 +1738,10 @@ def _exec(command: str) -> dict:
     return {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command}}
 
 
-def _exec_done(exit_code: int) -> dict:
+def _exec_done(exit_code: int, output: str = "") -> dict:
     status = "completed" if exit_code == 0 else "failed"
     item = {"id": "item_1", "type": "command_execution", "exit_code": exit_code, "status": status}
+    item["aggregated_output"] = output
     return {"type": "item.completed", "item": item}
 
 
@@ -1787,10 +1788,34 @@ ARENA = f"{SKILLS}/pstack/skills/arena/SKILL.md"
         ("claude", [_use("t1", "Skill", {"skill": "pstack:unslop"})], []),
         ("claude", [_use("t1", "Skill", {"skill": "pstack:unslop"}), _result("t1", "disable-model-invocation", error=True)], []),
         ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t1", "File does not exist.", error=True)], []),
-        ("claude", [_use("t1", "Bash", {"command": f"cat {ARENA}"}), _result("t1", "Exit code 1", error=True)], []),
+        ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t1", "EACCES", error=True)], []),
+        (
+            "claude",
+            [_use("t1", "Bash", {"command": f"cat {ARENA}"}), _result("t1", f"Exit code 1\ncat: {ARENA}: No such file or directory", error=True)],
+            [],
+        ),
+        (
+            "claude",
+            [_use("t1", "Bash", {"command": f"cat {ARENA}"}), _result("t1", f"Permission to use Bash with command cat {ARENA} has been denied.", error=True)],
+            [],
+        ),
+        (
+            "claude",
+            [_use("t1", "Bash", {"command": f"cat {ARENA} /tmp/gone.md"}), _result("t1", "# Arena\ncat: /tmp/gone.md: No such file or directory", error=True)],
+            ["pstack/skills/arena/SKILL.md"],
+        ),
+        (
+            "claude",
+            [
+                _use("t1", "Bash", {"command": f"cd {SKILLS} && cat pstack/skills/arena/SKILL.md pstack/skills/unslop/SKILL.md"}),
+                _result("t1", "# Arena\ncat: pstack/skills/unslop/SKILL.md: No such file or directory", error=True),
+            ],
+            ["pstack/skills/arena/SKILL.md"],
+        ),
         ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t2")], []),
         ("codex", [_exec(f"cat {ARENA}")], []),
         ("codex", [_exec(f"cat {ARENA}"), _exec_done(1)], []),
+        ("codex", [_exec(f"cat {ARENA} /tmp/gone.md"), _exec_done(1, "# Arena\ncat: /tmp/gone.md: No such file or directory\n")], ["pstack/skills/arena/SKILL.md"]),
         (
             "claude",
             [
@@ -1801,15 +1826,33 @@ ARENA = f"{SKILLS}/pstack/skills/arena/SKILL.md"
         ),
     ],
     ids=[
-        "claude-no-result", "claude-skill-refused", "claude-read-failed", "claude-bash-failed",
-        "claude-other-call-result", "codex-not-completed", "codex-failed", "earlier-success-kept",
+        "claude-no-result", "claude-skill-refused", "claude-read-failed", "claude-read-error-unnamed",
+        "claude-bash-failed", "claude-bash-denied", "claude-bash-other-operand-failed", "claude-bash-relative-operand-failed",
+        "claude-other-call-result", "codex-not-completed", "codex-failed", "codex-other-operand-failed", "earlier-success-kept",
     ],
 )
-def test_a_skill_file_counts_as_read_only_after_its_call_succeeds(
+def test_a_skill_file_counts_as_read_unless_its_call_failed_on_it(
     harness: str, events: list[dict], expected: list[str]
 ) -> None:
     summary = _feed(Summary(harness, Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), *events)
     assert json.loads(summary.row()["skill_reads"]) == expected
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_shell_read_that_fails_on_a_later_operand_keeps_the_file_it_printed(tmp_path: Path, harness: str) -> None:
+    root = tmp_path / "skills"
+    router = root / "factory" / "factory-builder" / "SKILL.md"
+    router.parent.mkdir(parents=True)
+    router.write_text("# Factory builder\n", encoding="utf-8")
+    command = f"cat {shlex.quote(str(router))} {shlex.quote(str(tmp_path / 'missing.md'))}"
+    run = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=False)
+    assert run.returncode == 1 and run.stdout == router.read_text(encoding="utf-8")
+    if harness == "claude":
+        events = [_use("t1", "Bash", {"command": command}), _result("t1", run.stdout + run.stderr, error=True)]
+    else:
+        events = [_exec(command), _exec_done(run.returncode, run.stdout + run.stderr)]
+    summary = _feed(Summary(harness, Scrubber({}), skills=SkillReads(str(root), LOCKED)), *events)
+    assert json.loads(summary.row()["skill_reads"]) == ["factory/factory-builder/SKILL.md"]
 
 
 def test_a_refused_skill_tool_call_records_no_read(tmp_path: Path) -> None:
