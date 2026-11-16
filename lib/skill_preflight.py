@@ -307,7 +307,8 @@ def box_behind_origin(device: str, bot: str, checkout: str,
     upstream = checkout_sha(Path(checkout), "refs/remotes/origin/main")
     if head is None or upstream is None or head == upstream:
         return None
-    if held is not None and (held.sha, held.target) == (head, upstream):
+    if held is not None and (held.sha, held.target) == (head, upstream) and \
+            Path(held.checkout).resolve() == Path(checkout).resolve():
         return None
     try:
         behind = subprocess.run(
@@ -322,15 +323,15 @@ def box_behind_origin(device: str, bot: str, checkout: str,
             f"origin/main at {upstream[:12]}")
 
 
-def refuse_configured_checkout_behind_box(name: str, bot: str, checkout: str, root: Path,
-                                          held: device_sync.Row | None = None) -> None:
-    if Path(checkout).resolve() == root.resolve():
-        return
-    lagging = box_behind_origin("box", bot, str(root.resolve()), held)
+def refuse_box_checkout_behind(name: str, bot: str, checkout: str, box: Path,
+                               held: device_sync.Row | None = None) -> None:
+    lagging = box_behind_origin(name, bot, str(box.resolve()), held)
     if lagging is not None:
         raise CheckoutLagging(lagging, box_behind_origin=True)
+    if Path(checkout).resolve() == box.resolve():
+        return
     head = Head(exists=Path(checkout).is_dir(), sha=checkout_sha(Path(checkout)), branch=None)
-    lagging = lag(name, bot, checkout, head, checkout_sha(root))
+    lagging = lag(name, bot, checkout, head, checkout_sha(box))
     if lagging is not None:
         raise CheckoutLagging(lagging)
 
@@ -381,10 +382,7 @@ def check(
     install_errors: list[str] = []
     if device is None or device.local or placement is None:
         name = device.name if device is not None else "box"
-        lagging = box_behind_origin(name, bot, checkout, held)
-        if lagging is not None:
-            raise CheckoutLagging(lagging, box_behind_origin=True)
-        refuse_configured_checkout_behind_box(name, bot, checkout, root, held)
+        refuse_box_checkout_behind(name, bot, checkout, root, held)
         found = local_hashes(home, paths)
         if home_install_stale(expected, found):
             install_errors = install_into_home(Path(checkout), home)
