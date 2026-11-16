@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -148,9 +149,9 @@ class ReadyMixin:
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
             if covering is not None:
-                return False, "approved-ci-pending"
+                return False, self._wait_on_ci(ticket, comment, head, result, "approved-ci-pending")
             if not ticket.factory.start_before_ci:
-                return False, "ci-pending"
+                return False, self._wait_on_ci(ticket, comment, head, result, "ci-pending")
         elif result.status == "success" and covering is not None:
             handled, shipped = self._ship_covered(ticket, *covering, head)
             return handled, f"approval-covers:{shipped}"
@@ -197,6 +198,43 @@ class ReadyMixin:
         if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _wait_on_ci(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        result: CIResult | None,
+        reason: str,
+    ) -> str:
+        # The clock follows the head, not the comment: two readies at one
+        # head would otherwise restart it on every poll.
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ci_waits (repo, ticket_id, comment_id, head, pr, reason, checks, since)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (repo, ticket_id) DO UPDATE SET
+                    comment_id = excluded.comment_id,
+                    head = excluded.head,
+                    pr = excluded.pr,
+                    reason = excluded.reason,
+                    checks = excluded.checks,
+                    since = CASE WHEN ci_waits.head = excluded.head
+                                 THEN ci_waits.since ELSE excluded.since END
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment.id,
+                    head,
+                    ticket.pr_number,
+                    reason,
+                    json.dumps(list(result.pending) if result is not None else []),
+                    self.queue.now(),
+                ),
+            )
+        return reason
 
     def _review_after_green_rerun(self, ticket: TrackedTicket) -> None:
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)

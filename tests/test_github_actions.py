@@ -718,6 +718,15 @@ def test_ci_status_reads_check_runs_and_statuses(
     assert gh.keys() == [CHECKS, STATUS]
 
 
+def test_ci_status_names_the_checks_still_running() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-in-progress.json"))
+    gh.route(STATUS, served("status-pending.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+    assert (result.status, result.pending) == ("pending", ("build", "commit status"))
+
+
 @pytest.mark.parametrize(
     "pages",
     [

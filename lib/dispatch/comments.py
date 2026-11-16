@@ -406,6 +406,10 @@ class CommentsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
+            connection.execute(
+                "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            )
             self._record_handled_time(connection, ticket, comment_id, self.queue.now())
 
     def _record_handled_time(

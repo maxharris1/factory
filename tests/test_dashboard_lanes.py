@@ -259,6 +259,42 @@ def test_queue_lane_is_still_when_empty_and_red_without_a_waiter(tmp_path: Path)
     assert 'href="health.html#no-waiter">no waiter for codex</a>' in lane
 
 
+def _held_for_ci(snapshot: dict) -> dict:
+    snapshot = copy.deepcopy(snapshot)
+    snapshot["tickets"][0]["ci_wait"] = {
+        "reason": "ci-pending", "checks": ["build", "lint"],
+        "pr": "13", "waiting_seconds": 125,
+    }
+    return snapshot
+
+
+def _assert_ci_lane(lanes: str, ticket: dict) -> None:
+    assert re.findall(r'data-device="([^"]+)"', lanes)[:2] == ["queue", "ci-wait"]
+    lane = re.split(r'<div class="lane[ "]', lanes.split('data-device="ci-wait"')[1])[0]
+    for needle in ("waiting on CI", "1 tickets", f"#{ticket['ticket_id']}", "build, lint",
+                   'href="https://github.com/aut0-code/aut0/pull/13/checks"', "waiting 2m 0"):
+        assert needle in lane, needle
+
+
+def test_a_ready_held_for_ci_gets_a_lane_after_the_queue(tmp_path: Path) -> None:
+    base = _base(tmp_path)
+    assert 'data-device="ci-wait"' not in render_pages(base)["index.html"]
+    snapshot = _held_for_ci(base)
+    _assert_ci_lane(_section(_no_script(render_pages(snapshot)["index.html"]), "lanes"), snapshot["tickets"][0])
+
+
+@needs_node
+def test_the_page_script_draws_the_ci_lane_like_the_server(tmp_path: Path) -> None:
+    base = _base(tmp_path)
+    snapshot = _held_for_ci(base)
+    server = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+    script = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
+    _assert_ci_lane(script, snapshot["tickets"][0])
+    assert _shape(script) == _shape(server[server.index(">") + 1 : server.rindex("<")])
+    bare = _run_page(tmp_path, base, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
+    assert 'data-device="ci-wait"' not in bare
+
+
 def test_probe_down_gives_a_still_red_meter(tmp_path: Path) -> None:
     snapshot = _tiles(tmp_path)
     snapshot["health"] = {"components": [{"component": "device-probe", "device": "box", "state": "down"}]}

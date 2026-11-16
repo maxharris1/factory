@@ -9,7 +9,7 @@ from lib.dashboard_flow import GLOSS, PHASE_OVERRIDES, PHASES, PIPELINE, SHIPPED
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.common import (
-    anchor, _bot, _chip, duration, _e, _panel, _short, _span, _td, _ticket,
+    anchor, _bot, checks_link, checks_named, _chip, duration, _e, _panel, _short, _span, _td, _ticket,
 )
 
 
@@ -48,7 +48,7 @@ font-family:var(--mono)}
 .tk-round{font-size:11px;color:var(--muted)}
 .tk-reason{font-size:12px;color:var(--text-2);overflow-wrap:anywhere}
 .tk-wait{font-size:12px;color:var(--warn);overflow-wrap:anywhere}
-.tk-run{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:12px}
+.tk-run,.tk-ci{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:12px}
 .tk-dev{color:var(--muted)}
 .tk-t{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums}
 .tk-out{color:var(--text-2)}
@@ -211,14 +211,25 @@ SCRIPT_TICKETS = r"""
     if (live.overdue) add(parent, chip(BOARD.chips.overdue[0], BOARD.chips.overdue[1]));
   }
 
+  function tkCi(parent, t, ci) {
+    var line = add(parent, el('div', 'tk-ci'));
+    add(line, chip('waiting on CI', 'warn'));
+    add(line, el('span', 'tk-out', checksNamed(ci)));
+    var href = checksHref(t);
+    if (href) add(line, link(null, href)).textContent = 'checks';
+    ticking(add(line, el('span', 'tk-t')), ci.waiting_seconds, 'waiting ');
+  }
+
   function tkCard(c) {
     var t = c.ticket, job = c.live || c.queued;
     var stop = c.phase === 'Stop', waiting = WAITING.hasOwnProperty(t.state);
+    var ci = stop || job ? null : t.ci_wait;
     var card = el('div', stop ? 'tk-card tk-stop' : 'tk-card');
     card.setAttribute('data-ticket', ticketKey(t));
+    if (ci) card.setAttribute('data-wait', 'ci');
     var key = 'ticket-' + ticketKey(t);
     var strip = stop ? PX.strip(key, {state: 'stuck', height: 8})
-      : waiting ? PX.strip(key, {effect: 'static', tint: WAIT_TINT, height: 8})
+      : waiting || ci ? PX.strip(key, {effect: 'static', tint: WAIT_TINT, height: 8})
       : c.live ? PX.jobStrip(c.live, 8) : null;
     if (strip) {
       var box = add(card, el('div', 'tk-strip'));
@@ -249,7 +260,8 @@ SCRIPT_TICKETS = r"""
       ticking(add(run, el('span', 'tk-t')), c.live ? job.elapsed_seconds : job.age_seconds, 'T+ ');
       return card;
     }
-    if (BOARD.idle.indexOf(c.phase) >= 0) add(main, el('div', 'tk-none', 'no job running'));
+    if (ci) tkCi(main, t, ci);
+    else if (BOARD.idle.indexOf(c.phase) >= 0) add(main, el('div', 'tk-none', 'no job running'));
     if (c.verdict && !(waitLine && c.verdict.kind === 'waiting')) {
       var said = add(main, el('div', 'tk-run'));
       add(said, chip(c.verdict.kind, VERDICT[c.verdict.kind] || 'muted'));
@@ -505,11 +517,12 @@ def _card(card: dict) -> str:
     job = live or card["queued"]
     stop = card["phase"] == "Stop"
     waiting = ticket["state"] in WAITING
+    ci = None if stop or job else ticket.get("ci_wait")
     key = f"ticket-{_key(ticket)}"
     px = _px()
     if stop:
         strip = px.px_strip(key, state="stuck", height=8)
-    elif waiting:
+    elif waiting or ci:
         strip = px.px_strip(key, effect="static", tint=_WAIT_TINT, height=8)
     else:
         strip = px.px_job_strip(live, height=8) if live else ""
@@ -532,7 +545,13 @@ def _card(card: dict) -> str:
             since = _span("tk-t", "T+ " + duration(job["elapsed_seconds"] if live else job.get("age_seconds")))
             lines += f'<div class="tk-run">{_bot(job["recipient"])}{where}{since}</div>'
         else:
-            lines += '<div class="tk-none">no job running</div>' if card["phase"] in IDLE else ""
+            if ci:
+                lines += (
+                    f'<div class="tk-ci">{_chip("waiting on CI", "warn")}{_span("tk-out", checks_named(ci))}'
+                    f'{checks_link(ticket)}{_span("tk-t", "waiting " + duration(ci["waiting_seconds"]))}</div>'
+                )
+            elif card["phase"] in IDLE:
+                lines += '<div class="tk-none">no job running</div>'
             verdict = card["verdict"]
             if verdict and not (wait_line and verdict["kind"] == "waiting"):
                 lines += (
@@ -540,7 +559,8 @@ def _card(card: dict) -> str:
                     f'{_span("tk-out", verdict["outcome"])}</div>'
                 )
     return (
-        f'<div class="{"tk-card tk-stop" if stop else "tk-card"}" data-ticket="{_e(_key(ticket))}">'
+        f'<div class="{"tk-card tk-stop" if stop else "tk-card"}" data-ticket="{_e(_key(ticket))}"'
+        + (' data-wait="ci">' if ci else ">")
         + (f'<div class="tk-strip" aria-hidden="true">{strip}</div>' if strip else "")
         + f'<div class="tk-body"><div class="tk-id">{ident}{_span("tk-tag", ticket["tracker"])}</div>'
         f'<div class="tk-state">{state}</div>{lines}</div></div>'

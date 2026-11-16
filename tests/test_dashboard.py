@@ -25,6 +25,8 @@ from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1_800_000_000.0
+# #591: the one outbound link, a held ready's PR checks; nothing loads from it.
+CHECKS_LINK = "'https://github.com/'"
 
 # Fake secrets, built at runtime so no literal token shape sits in the repo.
 WEBHOOK_SECRET = "Zx9Qp" * 6
@@ -704,6 +706,36 @@ def test_poller_reads_deferrals_table_when_present(tmp_path: Path) -> None:
         {"detail": "Linear poll budget deferred discovery", "age_seconds": 5}
     ]
     assert poller["last_activity_age_seconds"] == 5
+
+
+def test_a_ready_held_for_ci_marks_its_ticket(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.executemany(
+            "INSERT INTO ci_waits (repo, ticket_id, comment_id, head, pr, reason, checks, since) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("maxharris1/cleffy", "13", "c-ready", "a" * 40, "13", "ci-pending",
+                 json.dumps(["build", GH_CLASSIC]), NOW - 125),
+                ("aut0-code/aut0", "AUT-7", "c-ready-2", "b" * 40, None, "approved-ci-pending",
+                 "not json", NOW - 5),
+            ],
+        )
+    tickets = {
+        (row["repo"], row["ticket_id"]): row for row in collect_snapshot(db, log, now=NOW)["tickets"]
+    }
+    assert tickets[("maxharris1/cleffy", "13")]["ci_wait"] == {
+        "reason": "ci-pending",
+        "checks": ["build", "[redacted-token]"],
+        "pr": "13",
+        "waiting_seconds": 125,
+    }
+    assert tickets[("aut0-code/aut0", "AUT-7")]["ci_wait"] == {
+        "reason": "approved-ci-pending", "checks": [], "pr": None, "waiting_seconds": 5,
+    }
+    assert [key for key, row in tickets.items() if "ci_wait" in row] == [
+        ("aut0-code/aut0", "AUT-7"), ("maxharris1/cleffy", "13"),
+    ]
 
 
 def test_missing_log_degrades(tmp_path: Path) -> None:
@@ -1444,7 +1476,7 @@ def test_html_is_self_contained(tmp_path: Path) -> None:
     html = render_html(snapshot_for(tmp_path))
     assert html.startswith("<!doctype html>")
     for needle in ("<link", "src=", "http://", "https://"):
-        assert needle not in html
+        assert needle not in html.replace(CHECKS_LINK, "")
     # The live page polls its own status.json and makes no other request
     # (tests/test_dashboard_mission_control.py checks the poll itself).
     assert re.findall(r"fetch\(([^,)]+)", html) == ["STATUS_URL"]

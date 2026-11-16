@@ -456,6 +456,23 @@ class SchemaMixin:
                 )
                 """
             )
+            # #591: a ready T2 leaves unhandled while CI runs on its head, for
+            # the dashboard; _mark_handled ends it. checks is a JSON list.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_waits (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    pr TEXT,
+                    reason TEXT NOT NULL,
+                    checks TEXT NOT NULL,
+                    since REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.

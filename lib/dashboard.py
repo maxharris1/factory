@@ -120,6 +120,9 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
+CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending")
+_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_PR = re.compile(r"[1-9][0-9]{0,9}")
 ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", "edited-comment", *FEEDER_ATTENTION_REASONS)
 
 HANDOFF_SAVINGS_DEFINITION = (
@@ -836,6 +839,28 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
     return rows
 
 
+def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str], dict]:
+    """#591: each ready T2 holds until CI finishes on its head. pr is kept only
+    for a plain owner/name repo: the pages link github.com/<repo>/pull/<pr>/checks
+    themselves, since `redact` hides any URL or head in the snapshot."""
+    found = {}
+    for row in connection.execute(
+        "SELECT repo, ticket_id, pr, reason, checks, since FROM ci_waits"
+    ):
+        try:
+            names = json.loads(row["checks"])
+        except ValueError:
+            names = []
+        repo, pr = str(row["repo"]), str(row["pr"])
+        found[(repo.casefold(), str(row["ticket_id"]))] = {
+            "reason": _enum(row["reason"], CI_WAIT_REASONS),
+            "checks": [_clean(name, 80) for name in names] if isinstance(names, list) else [],
+            "pr": pr if _REPO.fullmatch(repo) and _PR.fullmatch(pr) else None,
+            "waiting_seconds": _age(now, row["since"]),
+        }
+    return found
+
+
 def _ticket_ref(
     sources: dict[tuple[str, str], tuple[str, str | None]],
     repo: object,
@@ -1170,6 +1195,7 @@ def _read_db(
     ticket_info: dict[tuple[str, str], TicketInfo] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
         approvers = _hold_approvers(connection)
+        ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
         for row in connection.execute(
             """
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -1198,6 +1224,7 @@ def _read_db(
                 else None
             )
             waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
+            ci_wait = ci_waits.get((str(row["repo"]).casefold(), str(row["ticket_id"])))
             ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = TicketInfo(
                 _enum(row["tracker"], TRACKERS), stuck, state
             )
@@ -1211,6 +1238,7 @@ def _read_db(
                     "stuck": stuck,
                     "paused_action": paused_action,
                     **waiting,
+                    **({"ci_wait": ci_wait} if ci_wait else {}),
                 }
             )
             if stuck:

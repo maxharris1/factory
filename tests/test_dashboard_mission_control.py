@@ -15,6 +15,7 @@ import lib.dashboard_page as page
 import lib.poll_source as poll_source
 from lib.dashboard import collect_snapshot, render_html, write_snapshot
 from tests.test_dashboard import (
+    CHECKS_LINK,
     FREE_TEXT_SECRETS,
     GH_CLASSIC,
     NOW,
@@ -324,7 +325,7 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
 def test_page_has_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
     html = _html(tmp_path)
     for needle in ("<link", "src=", "http://", "https://", "@import", "url(", "//cdn"):
-        assert needle not in html, needle
+        assert needle not in html.replace(CHECKS_LINK, ""), needle
     script = _script(html)
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert sink not in script, sink

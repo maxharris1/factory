@@ -222,6 +222,10 @@ SCRIPT_HEAD = r"""
   function ticketHref(hrefs, r) { return hrefs[threadKey(r)] || 'job.html'; }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
+  function checksNamed(ci) { return ci.checks.join(', ') || 'checks pending'; }
+  function checksHref(t) {
+    return t.ci_wait.pr ? 'https://github.com/' + t.repo + '/pull/' + t.ci_wait.pr + '/checks' : null;
+  }
   // #92: only a link into the Health tab, never a value used as a URL.
   function healthLink(href) { return /^health\.html#[A-Za-z0-9_-]+$/.test(String(href)) ? String(href) : 'health.html'; }
   // #75: lib/job_state.py's state of a running job, as a chip.
@@ -596,6 +600,15 @@ def _bot(name: object) -> str:
 
 def _chip(text: object, cls: str = "muted") -> str:
     return _span(f"chip {cls}", text)
+
+
+def checks_named(ci: dict) -> str:
+    return ", ".join(ci["checks"]) or "checks pending"
+
+
+def checks_link(ticket: dict) -> str:
+    pr = ticket["ci_wait"]["pr"]
+    return f'<a href="{_e(f"https://github.com/{ticket["repo"]}/pull/{pr}/checks")}">checks</a>' if pr else ""
 
 
 def _panel(

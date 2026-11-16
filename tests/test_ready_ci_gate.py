@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from tests.merge_queue_support import APPROVE, sha
+from tests.test_ready_after_approve import approved_on_red_ci
 from tests.test_review_before_ci import (
     board_with,
     built_with_ci_pending,
@@ -129,3 +132,87 @@ def test_a_red_ready_waits_while_a_failed_fixs_ready_is_unread(
     assert board.outcome("ready-b") == "stale-ready-head"
     assert board.outcome("ready-back-on-a") == "ci-red-in-flight"
     assert claims(board) == [(verdict_id, 2)]
+
+
+CHECKS = ("build", "lint")
+
+
+def naming_pending_checks(board) -> None:
+    snapshot = board.snapshot
+
+    def named(pr, *, fresh: bool = False):
+        ticket = snapshot(pr, fresh=fresh)
+        ci = {
+            head: replace(result, pending=CHECKS) if result.status == "pending" else result
+            for head, result in ticket.ci.items()
+        }
+        return replace(ticket, ci=ci)
+
+    board.snapshot = named
+
+
+def ci_waits(board) -> list[dict]:
+    with board.queue.connect() as connection:
+        rows = connection.execute("SELECT * FROM ci_waits").fetchall()
+    return [{**dict(row), "checks": json.loads(row["checks"])} for row in rows]
+
+
+def test_a_ready_held_for_pending_ci_is_recorded_until_it_is_handled(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    naming_pending_checks(board)
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    since = board.now[0]
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert ci_waits(board) == [{
+        "repo": "owner/repo", "ticket_id": "42", "comment_id": ready, "head": sha(1), "pr": "42",
+        "reason": "ci-pending", "checks": list(CHECKS), "since": since,
+    }]
+
+    pr.ci[pr.head] = "success"
+    board.poll()
+    assert board.outcome(ready) == "queued-review"
+    assert ci_waits(board) == []
+
+
+def test_a_covered_ready_held_for_pending_ci_is_recorded_until_it_ships(tmp_path: Path) -> None:
+    board, pr = approved_on_red_ci(tmp_path)
+    naming_pending_checks(board)
+    pr.ci[pr.head] = "pending"
+    ready = board.ready(pr, pr.head, "ready-pending")
+    board.poll()
+
+    assert [(w["comment_id"], w["reason"], w["checks"]) for w in ci_waits(board)] == [
+        (ready, "approved-ci-pending", list(CHECKS))
+    ]
+
+    pr.ci[pr.head] = "success"
+    board.poll()
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert ci_waits(board) == []
+
+
+def test_the_wait_clock_runs_from_the_first_ready_on_a_head_and_restarts_on_a_new_head(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head, "ready-a")
+    board.poll()
+    since = board.now[0]
+    board.ready(pr, pr.head, "ready-a-again")
+    board.poll()
+    board.poll()
+    assert [(w["comment_id"], w["since"], w["checks"]) for w in ci_waits(board)] == [
+        ("ready-a-again", since, [])
+    ]
+
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, pr.head, "ready-b")
+    board.poll()
+    assert [(w["comment_id"], w["head"], w["since"]) for w in ci_waits(board)] == [
+        ("ready-b", sha(2), board.now[0])
+    ]
