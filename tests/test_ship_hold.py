@@ -932,6 +932,8 @@ def test_orch_status_and_the_dashboard_show_waiting_on_the_approver(
             "kind": "paused",
             "repo": "owner/repo",
             "ticket_id": "42",
+            "source": None,
+            "pr": "42",
             "detail": f"awaiting-ok (waiting on {APPROVER})",
         }
     ]
