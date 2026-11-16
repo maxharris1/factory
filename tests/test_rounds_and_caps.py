@@ -41,7 +41,7 @@ from tests.test_hooks import skip_facts
 HEADS = [f"{n:x}" * 40 for n in range(1, 10)]
 APPROVE = (
     "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
-    "round={round} head={head} verdict=APPROVE risk=high -->\nApproved.\n"
+    "round={round} head={head} ac=met verdict=APPROVE risk=high -->\nApproved.\n"
 )
 
 

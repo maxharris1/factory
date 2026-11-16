@@ -285,7 +285,7 @@ def test_the_factory_repo_turns_it_on() -> None:
 
 
 def _facts(auto_extra: int) -> dict:
-    return {"followup_from": None, "round_number": 1, "auto_extra": auto_extra}
+    return {"followup_from": None, "round_number": 1, "auto_extra": auto_extra, "block_on": "any-failure"}
 
 
 def test_review_rules_name_the_policy_only_when_it_is_on() -> None:

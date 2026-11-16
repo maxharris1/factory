@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Mapping
 
 from lib import attention, project_rules
@@ -115,6 +116,15 @@ class SchemaMixin:
                     INSERT INTO verdict_heads_floor
                     SELECT COALESCE(MAX(rowid), 0) FROM handled_comments
                     """
+                )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS approve_rule_floor (since REAL NOT NULL)"
+            )
+            if connection.execute("SELECT 1 FROM approve_rule_floor").fetchone() is None:
+                in_use = connection.execute("SELECT 1 FROM handled_comments LIMIT 1").fetchone()
+                connection.execute(
+                    "INSERT INTO approve_rule_floor VALUES (?)",
+                    (time.time() if in_use else 0.0,),
                 )
             connection.execute(
                 """

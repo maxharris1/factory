@@ -21,7 +21,7 @@ import re
 from collections.abc import Mapping
 
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
-from lib.handoff import HandoffError, parse_comment
+from lib.handoff import HandoffError, UnmetApproveError, parse_comment
 
 STOP_STATES = ("blocked", "capped", "refused")
 _HEADER_SHAPED = re.compile(r"^\s*(?:<!--\s*|`)orch:v", re.MULTILINE)
@@ -81,6 +81,8 @@ class T7Hook:
             return True, "ticket-stuck"
         try:
             parse_comment(comment.body)
+        except UnmetApproveError:
+            return True, "rejected-approve-ac-unmet"
         except HandoffError as exc:
             error = str(exc)
         else:

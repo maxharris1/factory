@@ -1,0 +1,3 @@
+- **Decision:** A `verdict=APPROVE` ships only with `ac=met` and no open `[blocking]` list item. `orch job done` and T4 refuse the rest as `rejected-approve-no-ac` or `rejected-approve-open-blocking`, and an `ac=unmet` APPROVE is now `rejected-approve-ac-unmet`. The parser still accepts an APPROVE with no `ac`, and T4 applies the rule only to comments posted at or after the `approve_rule_floor` time, so an APPROVE accepted before the deploy still ships. This closes the "left for a follow-up" in [187-refused-verdict-keeps-the-review.md](187-refused-verdict-keeps-the-review.md).
+- **When:** 2026-11-16 10:45 AM ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/522#issuecomment-6920794814

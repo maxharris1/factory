@@ -34,7 +34,15 @@ TRUSTED_LOGINS = {
     },
     "linear": {},
 }
-VERDICT = (
+class VerdictTemplate(str):
+    def format(self, *args: object, **fields: object) -> str:
+        text = super().format(*args, **fields)
+        if fields.get("verdict") == "APPROVE" and " ac=" not in text:
+            return text.replace(" verdict=APPROVE", " ac=met verdict=APPROVE", 1)
+        return text
+
+
+VERDICT = VerdictTemplate(
     "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
     "round=1 head={head} verdict={verdict} -->\nVerdict.\n"
 )

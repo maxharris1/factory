@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import asdict, replace
 
 from lib.dispatch.constants import (
+    APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
     GROK_WAKE_SKIP,
     RETRY_REJECTION_NOTES,
@@ -560,8 +561,9 @@ class DetailMixin:
             "outcome": outcome,
             "comment": _comment_link(comment),
         }
-        if outcome in RETRY_REJECTION_NOTES:
-            detail["note"] = RETRY_REJECTION_NOTES[outcome]
+        note = RETRY_REJECTION_NOTES.get(outcome) or APPROVE_REJECTION_NOTES.get(outcome)
+        if note is not None:
+            detail["note"] = note
         self.wake_grok_once(
             ticket,
             reason=reason,
