@@ -652,8 +652,6 @@ def test_a_new_head_after_the_ok_needs_a_new_review_and_a_new_ok(
     assert actions.merges == [(True, NEW_HEAD)]
 
 
-# --- an ok carries across merges from base (issue #574) -------------------
-
 MAIN = "c" * 40
 PR_FILES = ("lib/a.py", "src/view/A.tsx")
 VIEW_PATCH = {"src/view/A.tsx": "d" * 40}

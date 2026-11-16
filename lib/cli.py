@@ -52,8 +52,8 @@ from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.handoff import format_header
-from lib.hold import MergeUpdate
 from lib.harness_env import harness_env
+from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
