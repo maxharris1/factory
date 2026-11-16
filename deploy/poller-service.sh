@@ -146,9 +146,6 @@ poll_lock_held() {
     ((status == 75))
 }
 
-# Serialize start/stop/restart/ensure/remove-autostart. Without flock(1)
-# (macOS) this is a no-op and ensure's re-check of the stop marker is the
-# only guard.
 service_lock() {
     command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$STATE"
@@ -223,9 +220,6 @@ ensure_db() (
     esac
 )
 
-# Start the poller unless it is running. Only `start` clears a stop. A launch
-# that misses START_WAIT is stopped before returning, so no failed launch can
-# become a poller after the service lock is released.
 launch() {
     local pid child i
     mkdir -p "$STATE"
