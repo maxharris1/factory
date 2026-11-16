@@ -124,6 +124,11 @@ PLAN_TEXT = """## Plan for #41: Add a Start free button to the pricing page
 - ac-2: `StartFree` links to `/signup?plan=free`. Proof: `e2e/start-free.spec.ts`.
 
 Skills read: /home/claude-bot/factory/skills/factory/factory-builder/SKILL.md"""
+FIRST_PLAN_TEXT = """## Plan for #41: Add a Start free button to the pricing page
+
+- ac-1: `app/pricing/page.tsx` renders `<StartFree />` above the plan grid. Proof: `tests/pricing.test.tsx`.
+
+Expected size: 60 lines."""
 
 GITHUB_BRIEF: dict[str, object] = {
     "brief": BRIEF_URL,
@@ -195,7 +200,12 @@ def evidence_bundle(current_round: int) -> dict[str, object]:
 # kind: (action, recipient, attempt, head, detail extras)
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
-    "plan-round-2": ("plan", "claude", 1, None, {"plan_round": 2}),
+    "plan-round-2": ("plan", "claude", 1, None, {
+        "plan_round": 2,
+        "instruction": "round=2/2; previous plan https://github.com/owner/repo/pull/42#issuecomment-5",
+        "plan_text": FIRST_PLAN_TEXT,
+        "unmapped": "ac-2",
+    }),
     "plan-github": ("plan", "claude", 1, None, {**GITHUB_BRIEF, "gitBranchName": "factory/issue-42"}),
     "build-github": ("build", "claude", 1, None, {
         **GITHUB_BRIEF,

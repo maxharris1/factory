@@ -551,7 +551,7 @@ def test_legacy_first_row_back_into_updating_leaves_the_older_update_to_its_visi
     assert [(v["who"], v["started_at"]) for v in job["flow"]["visits"] if v["state"] == "updating"] == expected
 
 
-PLAN = "<!-- orch:v1 kind=plan from=claude-bot role=builder round={round}/2 ac={ac} -->\nPlan.\n"
+PLAN = "<!-- orch:v1 kind=plan from=claude-bot role=builder round={round}/2 ac={ac} lines=40 -->\nPlan.\n"
 
 
 def test_legacy_plan_gap_first_row_leaves_the_old_plan_to_its_visit() -> None:

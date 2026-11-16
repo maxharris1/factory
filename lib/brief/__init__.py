@@ -155,7 +155,9 @@ def _quoted_sections(facts: dict) -> list[str]:
     if facts["brief_text"]:
         sections.append(quoted_section("Ticket brief", facts["brief_text"], facts["brief_url"], BRIEF_TEXT_LIMIT))
     if facts["plan_text"]:
-        sections.append(quoted_section("Plan", facts["plan_text"], facts["plan"], PLAN_TEXT_LIMIT))
+        sections.append(
+            quoted_section(facts["plan_title"], facts["plan_text"], facts["plan"], PLAN_TEXT_LIMIT)
+        )
     return sections
 
 

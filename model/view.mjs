@@ -47,6 +47,7 @@ export const step = (action, from, to) => {
   if (action === "T1PPlanGapOnce") return "an acceptance criterion is unmapped";
   if (action === "T1PPlanGapStuck") return "gaps a second time";
   if (action === "T1PPlanMapped") return "every acceptance criterion mapped";
+  if (action === "T1PPlanOverSize") return "plan over the size line, the split goes to Max";
   if (action === "T2ReadyGreen") return "ready, CI green";
   if (action === "T2CiRed") return "CI red, fix";
   if (action === "T2CiRedStuck") return "CI red three times";

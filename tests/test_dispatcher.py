@@ -43,7 +43,7 @@ GO = (
 )
 PLAN = (
     "<!-- orch:v1 kind=plan from=claude-bot role=builder "
-    "round={round}/2 ac={ac} -->\nPlan.\n"
+    "round={round}/2 ac={ac} lines=40 -->\nPlan.\n"
 )
 BRIEF = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nBrief.\n"
 READY = (
