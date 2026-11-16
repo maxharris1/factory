@@ -450,6 +450,69 @@ class ShipMixin:
             guard=_NOT_FINISHED,
         )
 
+    def _reconcile_handoff(
+        self,
+        ticket: TrackedTicket,
+        *,
+        handling: str | None = None,
+    ) -> bool:
+        """#587: a ship: handoff ticket already in external review (a
+        trusted APPROVE, or its Linear issue in Ready for Review) whose PR is
+        out of draft, left building with no open factory work, is handed-off.
+        A build or review whose handoff comment is still unread counts as
+        open work; handling names the comment being read now."""
+        if ticket.factory.ship != "handoff" or ticket.factory.finish_line == "merge":
+            return False
+        if ticket.draft is not False:
+            return False
+        if self._review_context(ticket)[0] != "building" or self._is_stuck(ticket):
+            return False
+        with self._connect() as connection:
+            open_work = connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+                  AND (
+                    state IN ('queued', 'running')
+                    OR (state = 'failed' AND failure_handled = 0)
+                    OR (
+                      handoff_comment_id IS NOT NULL AND handoff_comment_id != ?
+                      AND handoff_comment_id NOT IN (
+                        SELECT comment_id FROM handled_comments
+                        WHERE repo = ? AND ticket_id = ?
+                      )
+                    )
+                  )
+                LIMIT 1
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    handling or "",
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                ),
+            ).fetchone()
+        if open_work is not None:
+            return False
+        if ticket.linear_state_phase != "ready-for-review":
+            latest = self._latest_review_verdict(ticket)
+            if latest is None or latest[1].get("verdict") != "APPROVE":
+                return False
+        self._write_state_label(ticket, "handed-off")
+        with self._connect() as connection:
+            written = write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "handed-off",
+                source="handoff-reconcile",
+                at=self.queue.now(),
+                guard="workflow_state = 'building'",
+            )
+            connection.commit()
+        return written
+
     def _has_completed_ship_at(
         self,
         ticket: TrackedTicket,

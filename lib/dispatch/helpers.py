@@ -82,6 +82,7 @@ ACTED_VERDICT_OUTCOMES = frozenset(
         "merged",
         "merge-confirmed",
         "handed-off",
+        "handed-off-reconciled",
         "merge-queue",
         "waiting-external",
         "ship-unconfirmed",

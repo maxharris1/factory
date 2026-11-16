@@ -70,9 +70,10 @@ class T4Mixin:
         held_fix = state in ("fixing", "waiting-max") and self._held_ci_fix_out(
             ticket, comment.id
         )
-        if (
-            state not in ("review", "awaiting-ok") and not held_fix
-        ) or reported_round != review_round + 1:
+        stale_state = state not in ("review", "awaiting-ok") and not held_fix
+        if stale_state and self._reconcile_handoff(ticket, handling=comment.id):
+            return True, "handed-off-reconciled"
+        if stale_state or reported_round != review_round + 1:
             self._wake_comment_problem(
                 ticket, comment, "stale", "stale-approve"
             )

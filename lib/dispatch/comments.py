@@ -69,6 +69,9 @@ class CommentsMixin:
             self._requeue_unanswered_jobs(ticket)
             self._requeue_refused_reviews(ticket)
             self._review_after_green_rerun(ticket)
+            self._reconcile_handoff(
+                self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+            )
         except BaseException as error:
             try:
                 self._settle_external_ships(ticket)
