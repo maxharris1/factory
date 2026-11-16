@@ -44,9 +44,9 @@ RECOMMENDED_NEXT = {
     "refused": (
         "Fix factory.md so orch check-config accepts it, then hand the ticket back."
     ),
-    "stuck": "Read the evidence. Max decides whether to retry or abandon.",
+    "stuck": "Factory retries by cause and replans after two retries.",
     "blocked": "Read the evidence. Max decides the unblock.",
-    "capped": "An extra round needs Max's own words.",
+    "capped": "Factory splits or replans. No extra round is asked of Max.",
     "abandoned": "No further work unless Max reopens it.",
 }
 
