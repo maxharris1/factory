@@ -1267,15 +1267,11 @@ def test_a_merge_re_drive_waits_while_the_hold_applies_again(tmp_path: Path) -> 
     assert actions.merges == [(True, HEAD)]
 
 
-# --- #564: the poll source compares factory.md's trust front matter -----
-
 BASE_SHA = "b" * 40
 PROSE = "\n## Context\nProse.\n"
 
 
 class TrustGh(HoldGh):
-    """HoldGh whose diff names factory.md, serving factory.md per ref."""
-
     def __init__(self, base: str | None, head: str | None, *, files=("factory.md",)):
         super().__init__(HOLD_FACTORY.format(ship="handoff", hold=TRUST_HOLD))
         self.inner.pull = {"base": {"ref": "main", "sha": BASE_SHA}}

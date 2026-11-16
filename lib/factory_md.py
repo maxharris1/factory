@@ -195,9 +195,6 @@ class FactoryConfig:
 
 
 def trust_front_matter_changed(base_text: str | None, head_text: str | None) -> bool:
-    """Issue #564: whether a factory.md edit touches the front matter a hold
-    guards (TRUST_KEYS). A missing side or front matter that does not parse
-    counts as changed."""
     base = _trust_sections(base_text)
     head = _trust_sections(head_text)
     return base is None or head is None or base != head

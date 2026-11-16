@@ -10,9 +10,8 @@ with green CI does not ship while the PR is held:
   removal the approver did not make never clears the hold);
 - paths: the PR's diff against base touches a hold.paths glob, read at
   the current head on every poll, so a PR that grows into those files
-  gets held. The repo-root factory.md is the one exception (issue #564):
-  it holds only when its trust front matter (hold, ship, finish_line,
-  builder, reviewer) differs from base, so a prose-only edit is not held.
+  gets held. A matched repo-root factory.md holds only when its
+  factory_md.TRUST_KEYS front matter differs from base (issue #564).
 
 The hold clears on a comment from the approver, either kind=ok
 head=<40-char sha> or a first line of /ok <40-char sha>, whose

@@ -1548,8 +1548,6 @@ class LivePollSource:
         pull: Mapping[str, Any],
         changed_files: Sequence[str] | None,
     ) -> bool | None:
-        """Issue #564: whether the PR changes factory.md's trust front matter,
-        read once per head. None when the diff or a factory.md read failed."""
         if changed_files is None:
             return None
         if FACTORY_MD not in changed_files:
