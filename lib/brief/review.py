@@ -146,6 +146,7 @@ def task_lines(facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
     verify = facts["verify"]
+    not_run = facts["verify_not_run"]
     later_round = (facts["round_number"] or 1) > 1
     variant = followups_active(facts["followup_from"], facts["round_number"])
     user_impact = facts["block_on"] == "user-impact"
@@ -158,8 +159,7 @@ def task_lines(facts: dict) -> list[str]:
         unchanged_tag = "`[minor]`."
     if user_impact and later_round:
         gate = (
-            f"Run the verify skill `{verify}` (UI and database checks). "
-            "A verify result you cannot read (unknown) is `verdict=BLOCKED`. "
+            f"Run the verify skill `{verify}` (UI and database checks). {_unreadable_verify(verify, not_run)} "
             if verify and verify != "none"
             else "factory.md names no verify skill (`none`): say which checks did not run. "
         ) + (
@@ -170,7 +170,7 @@ def task_lines(facts: dict) -> list[str]:
     elif verify and verify != "none":
         gate = (
             f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
-            "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
+            + _unreadable_verify(verify, not_run)
         )
     else:
         gate = (
@@ -181,7 +181,11 @@ def task_lines(facts: dict) -> list[str]:
         "Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above "
         "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "
         "shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about "
-        "other PRs' state.",
+        "other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox "
+        "has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to "
+        "live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, "
+        "request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it "
+        "never leads to `APPROVE`.",
         *(
             _update_steps(facts["update"], base, head, facts["start_before_ci"], unchanged_tag)
             if facts["update"]
@@ -193,7 +197,7 @@ def task_lines(facts: dict) -> list[str]:
                 )
                 + _MERGEABLE,
                 *(
-                    [_fix_round_step(facts["rebase"], head, verify)]
+                    [_fix_round_step(facts["rebase"], head, verify, not_run)]
                     if fix_round
                     else [
                         "Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each "
@@ -253,17 +257,27 @@ def _bar_step(variant: bool) -> str:
     )
 
 
-def _fix_round_step(rebase: dict | None, head: str, verify: str | None) -> str:
+def _unreadable_verify(verify: str, not_run: bool) -> str:
+    if not not_run:
+        return "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
+    return (
+        f"factory.md's Review prose says `{verify}` may not be available yet and to list it as not run. "
+        f"If `{verify}` is not on the reviewed base, list it in the verdict as not run. A missing or unreadable "
+        "result from it is then not `verdict=BLOCKED`. If it is on the reviewed base, run it. A result you cannot "
+        "read there is `verdict=BLOCKED`."
+    )
+
+
+def _fix_round_step(rebase: dict | None, head: str, verify: str | None, not_run: bool) -> str:
     gates = (
-        f"the CI result and the verify skill `{verify}`; a verify result you cannot read (unknown) is "
-        "`verdict=BLOCKED`"
+        f"the CI result and the verify skill `{verify}`. {_unreadable_verify(verify, not_run)}"
         if verify and verify != "none"
-        else "the CI result (factory.md names no verify skill)"
+        else "the CI result (factory.md names no verify skill)."
     )
     return (
         "This is a fix round: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
         "above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as "
-        f"a `[closed]` item in the form below. (b) Confirm the gates pass on this head: {gates}. (c) Read the fix "
+        f"a `[closed]` item in the form below. (b) Confirm the gates pass on this head: {gates} (c) Read the fix "
         "delta for a bug the fix introduced. "
         + _delta_line(rebase, head)
         + f"(d) pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So rerun interrogate and "

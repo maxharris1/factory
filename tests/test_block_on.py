@@ -163,6 +163,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "base": "main",
         "head": "d" * 40,
         "verify": verify,
+        "verify_not_run": False,
         "round_number": 2,
         "followup_from": None,
         "block_on": "user-impact",
