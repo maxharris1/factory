@@ -15,7 +15,7 @@ review:
   auto_extra_rounds: 2
   start_before_ci: true
   pre_ready:
-    command: python3 bin/orch check-config --orch orch.yml --machines machines.yml --factory factory.md --allow-placeholders && python3 -m pytest -q -p no:cacheprovider tests/test_eval_report.py
+    command: '"$ORCH_PYTHON" bin/orch check-config --orch orch.yml --machines machines.yml --factory factory.md --allow-placeholders && "$ORCH_PYTHON" -m pytest -q -p no:cacheprovider tests/test_eval_report.py'
     timeout_seconds: 300
 ship: handoff
 finish_line: merge

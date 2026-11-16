@@ -1,2 +1,4 @@
 PyYAML==6.0.3
 markdown-it-py==3.0.0
+pytest==9.2.0
+pytest-timeout==2.4.0
