@@ -151,7 +151,9 @@ class SchemaMixin:
                 """
             )
             connection.commit()
-            _add_missing_columns(connection, "verdict_heads", {"posted_at": "REAL"})
+            _add_missing_columns(
+                connection, "verdict_heads", {"posted_at": "REAL", "changed_lines": "INTEGER"}
+            )
             _add_missing_columns(
                 connection,
                 "ticket_state",
@@ -245,6 +247,28 @@ class SchemaMixin:
                 )
                 """
             )
+            verdict_acceptances_existed = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_acceptances'"
+            ).fetchone()
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS verdict_acceptances (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    accepted_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            if verdict_acceptances_existed is None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO verdict_acceptances
+                    SELECT repo, ticket_id, approve_comment_id, held_at FROM ship_holds
+                    """
+                )
+                connection.commit()
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_intents (

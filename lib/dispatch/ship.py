@@ -414,6 +414,14 @@ class ShipMixin:
                 (*scope, comment_id),
             )
             connection.execute(
+                """
+                INSERT OR IGNORE INTO verdict_acceptances
+                SELECT repo, ticket_id, comment_id, handled_at FROM handled_times
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (*scope, comment_id),
+            )
+            connection.execute(
                 "DELETE FROM handled_times WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
                 (*scope, comment_id),
             )

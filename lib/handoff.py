@@ -197,6 +197,16 @@ def parse_comment(text: str) -> Handoff:
     return Handoff(fields=tuple(fields.items()), body=rest)
 
 
+def matching_head(reported: str, current: str | None) -> str | None:
+    """current when a handoff's head names it: either is a prefix of the
+    other, both at least 7 characters long."""
+    if current is None or min(len(reported), len(current)) < 7:
+        return None
+    if current.startswith(reported) or reported.startswith(current):
+        return current
+    return None
+
+
 def repeat_id(handoff: Handoff) -> str | None:
     """The verdict's repeat id: the header's repeat=, else a first body line
     that is exactly repeat=<ac-n|f-n>."""
