@@ -1,0 +1,11 @@
+decision	choice	why
+playbook	figure-it-out at low rigor, Feature steps, one owner, no helper for code	plan settled the shape; one module plus one dispatcher write; 60-minute budget
+value type	Unrecorded(reason) and a NO_RATIO singleton replace None	ac-5 needs a missing source and an empty ratio told apart; ac-1 needs the reason in the text
+Unrecorded reason text	unrecorded(no-<table>-table), one token	keeps each metric row three space-separated fields, as the existing renderer and tests read it
+NoRatio	frozen dataclass singleton, not Enum	test_eval_report pins the module's imports; enum is not on the list
+stored column	verdict_heads.changed_lines, COALESCE on conflict	only stored data the line bands need; first poll's size is the reviewed head's
+cohort	PRs whose first verdict_heads row is in the window	plan; one PR counts once per window
+first-round approval	an accepted APPROVE at round <= 1; band and risk from the first verdict	same rule shape as approved-by-round-2
+accepted verdict for ac-3	any review_events row, ship intent or ship hold	a verdict the dispatcher acted on, whatever the outcome
+tests file	tests/test_eval_metrics.py, not tests/test_eval_report.py	build_metrics is tested there; plan said so
+verification	touched test files plus test_cli and test_dispatch_ready_comments, 195 passed; real orch eval-report run on a state_backup copy	brief: touched tests plus smoke; CI runs the full suite

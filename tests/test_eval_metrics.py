@@ -11,9 +11,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib import cli, remote, telemetry
+from datetime import datetime, timezone
+
+from lib import cli, feeder, remote, telemetry
 from lib.device_pool import DevicePool
-from lib.eval_report import EvalError, Metrics, build_metrics, render_metrics
+from lib.eval_report import (
+    NO_RATIO,
+    WINDOWED_METRICS,
+    EvalError,
+    Metrics,
+    Unrecorded,
+    build_metrics,
+    render_metrics,
+)
 from lib.factory_md import HoldConfig
 from lib.queue import JobRequest
 from lib.state_backup import backup
@@ -79,6 +89,18 @@ def _telemetry(
         ) VALUES (?, 'bot', ?, 'owner/repo', 0, 0, ?, 0, 0, ?, 0, 0, 0, 0, 0, 0, '[]')
         """,
         (job_id, harness, elapsed, json.dumps(tools)),
+    )
+
+
+def _feeder_go(connection: sqlite3.Connection, issue: str, go_comment_id: str) -> None:
+    connection.execute(
+        f"""
+        INSERT INTO {feeder.FEEDER_TABLE} (
+            repo, issue, tracker, title, harness, state, risk, issue_created_at,
+            ticket_id, go_comment_id, first_seen_at, seen_at
+        ) VALUES ('owner/repo', ?, 'github', 't', 'claude', 'fed', 'low', 0, ?, ?, 0, 0)
+        """,
+        (issue, issue, go_comment_id),
     )
 
 
@@ -166,6 +188,26 @@ def _seeded(directory: Path) -> Path:
             (build_2, "checkout failed on pc: exited 1"),
         ):
             _job_event(connection, job_id, "requeued-unstarted", reason + requeued)
+        feeder.ensure_tables(connection)
+        for ticket_id, comment_id, outcome in (
+            ("1", "go-fed-1", "queued-build"),
+            ("2", "go-fed-2", "queued-plan"),
+            ("3", "go-hand", "answered-build"),
+        ):
+            connection.execute(
+                "INSERT INTO handled_comments VALUES ('owner/repo', ?, ?, ?)",
+                (ticket_id, comment_id, outcome),
+            )
+        _feeder_go(connection, "1", "go-fed-1")
+        _feeder_go(connection, "2", "go-fed-2")
+        for event in ("submitted-invalid", "submitted-invalid", "pre-ready-failed"):
+            _job_event(connection, build_1, event, "bad handoff")
+        connection.execute(
+            "INSERT INTO review_events VALUES ('owner/repo', '8', 'stop-r', 'waiting-max-repeat')"
+        )
+        connection.execute(
+            "INSERT INTO review_events VALUES ('owner/repo', '9', 'stop-u', 'waiting-max-unsat')"
+        )
     return queue.path
 
 
@@ -206,11 +248,24 @@ def test_metrics_read_a_read_only_backup_and_leave_it_untouched(tmp_path: Path) 
     assert values["helpers-per-job-max"] == 5
     assert values["preflight-failures"] == 2
     assert values["slot-hours-lost"] == pytest.approx(2.0)
-    assert values["hand-written-gos"] is None
+    assert values["hand-written-gos"] == 1
     assert values["refused-approvals"] == 3
-    assert values["submitted-invalid"] is None
-    assert values["repeat-block-stops"] is None
-    assert values["unsatisfiable-stops"] is None
+    assert values["submitted-invalid"] == 2
+    assert values["repeat-block-stops"] == 1
+    assert values["unsatisfiable-stops"] == 1
+
+
+def test_hand_written_gos_without_a_feeder_table_print_unrecorded_with_the_reason(
+    tmp_path: Path,
+) -> None:
+    db = _seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(f"DROP TABLE {feeder.FEEDER_TABLE}")
+    metrics = build_metrics(db)
+    assert _values(metrics)["hand-written-gos"] == Unrecorded("no-feeder_items-table")
+    assert "hand-written-gos unrecorded(no-feeder_items-table) " in render_metrics(
+        metrics, metrics
+    )
 
 
 def test_a_snapshot_without_a_source_table_reports_it_unrecorded(tmp_path: Path) -> None:
@@ -226,12 +281,13 @@ def test_a_snapshot_without_a_source_table_reports_it_unrecorded(tmp_path: Path)
         )
     values = _values(build_metrics(db))
     assert values["prs-reviewed"] == 1
-    assert values["first-round-revise-rate"] is None
-    assert values["first-pass-approve-rate"] is None
-    assert values["skills-read-per-job"] is None
-    assert values["preflight-failures"] is None
-    assert values["prs-dirty-after-approval"] is None
-    assert values["refused-approvals"] is None
+    assert values["first-round-revise-rate"] == Unrecorded("no-review_events-table")
+    assert values["first-pass-approve-rate"] == Unrecorded("no-review_events-table")
+    assert values["skills-read-per-job"] == Unrecorded("no-job_telemetry-table")
+    assert values["preflight-failures"] == Unrecorded("no-job_events-table")
+    assert values["prs-dirty-after-approval"] == Unrecorded("no-jobs-table")
+    assert values["refused-approvals"] == Unrecorded("no-approve_rule_floor-table")
+    assert values["approved-by-round-2-share"] == Unrecorded("no-verdict_heads-table")
 
 
 def test_each_metric_prints_beside_the_baseline(tmp_path: Path) -> None:
@@ -242,14 +298,20 @@ def test_each_metric_prints_beside_the_baseline(tmp_path: Path) -> None:
 
     lines = render_metrics(current, baseline).splitlines()
 
-    assert lines[0] == "eval metrics"
-    assert lines[1] == "metric current baseline"
-    rows = {line.split()[0]: line.split()[1:] for line in lines[2:]}
+    assert lines[:4] == [
+        "eval metrics",
+        "window - to -",
+        f"windowed {' '.join(WINDOWED_METRICS)}",
+        "metric current baseline",
+    ]
+    end = lines.index("merged PRs with follow-ups")
+    rows = {line.split()[0]: line.split()[1:] for line in lines[4:end]}
     assert set(rows) == {name for name, _value in current.values}
     assert all(len(row) == 2 for row in rows.values())
-    assert rows["prs-capped"] == ["2", "unrecorded"]
-    assert rows["rounds-per-pr"] == ["1.40", "unrecorded"]
-    assert rows["submitted-invalid"] == ["unrecorded", "unrecorded"]
+    assert rows["prs-capped"] == ["2", "unrecorded(no-ticket_state-table)"]
+    assert rows["rounds-per-pr"] == ["1.40", "unrecorded(no-ticket_state-table)"]
+    assert rows["submitted-invalid"] == ["2", "unrecorded(no-job_events-table)"]
+    assert lines[end + 1 :] == ["none"]
 
 
 def test_a_missing_or_corrupt_snapshot_is_an_eval_error(tmp_path: Path) -> None:
@@ -276,6 +338,7 @@ def test_cli_db_needs_a_baseline_and_excludes_input(tmp_path: Path, capsys) -> N
     db = _seeded(tmp_path)
     assert cli.main(["eval-report", "--db", str(db)]) == 2
     assert cli.main(["eval-report", "--db", str(db), "--baseline", str(db), "--input", "x"]) == 2
+    assert cli.main(["eval-report", "--db", str(db), "--baseline", str(db), "--json"]) == 2
     capsys.readouterr()
 
 
@@ -423,3 +486,197 @@ def test_a_checkout_failure_is_not_a_preflight_failure(tmp_path: Path) -> None:
         )
 
     assert _values(build_metrics(_requeued(tmp_path, fail)))["preflight-failures"] == 0
+
+
+def _day(day: int) -> float:
+    return datetime(2026, 11, day, tzinfo=timezone.utc).timestamp()
+
+
+SINCE, UNTIL = "2026-11-02T00:00:00Z", "2026-11-10T00:00:00Z"
+EMPTY = ("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+
+
+def _raw_job(
+    connection: sqlite3.Connection,
+    ticket_id: str,
+    action: str,
+    detail: dict[str, object],
+    *,
+    head: str = "",
+    created: int = 3,
+    handoff: str | None = None,
+) -> None:
+    job_id = f"{action}-{ticket_id}-{connection.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]}"
+    connection.execute(
+        """
+        INSERT INTO jobs (
+            id, dedupe_key, repo, ticket_id, action, recipient, source_comment_id,
+            timeout_seconds, generation, attempt, head, detail, state, created_at,
+            last_activity_at, handoff_comment_id
+        ) VALUES (?, ?, 'owner/repo', ?, ?, 'claude', 's', 60, 1, 1, ?, ?, 'done', ?, 0, ?)
+        """,
+        (job_id, job_id, ticket_id, action, head, json.dumps(detail), _day(created), handoff),
+    )
+
+
+def _head_verdict(
+    connection: sqlite3.Connection,
+    ticket_id: str,
+    comment_id: str,
+    outcome: str,
+    *,
+    day: int,
+    review_round: int | None,
+    lines: int | None,
+    head: str | None = None,
+) -> None:
+    connection.execute(
+        "INSERT INTO verdict_heads VALUES ('owner/repo', ?, ?, ?, ?, ?, ?)",
+        (ticket_id, comment_id, head or comment_id, review_round, _day(day), lines),
+    )
+    if outcome == "A":
+        connection.execute(
+            "INSERT INTO ship_intents (repo, ticket_id, comment_id, head, policy, status) "
+            "VALUES ('owner/repo', ?, ?, 'h', 'handoff', 'handed-off')",
+            (ticket_id, comment_id),
+        )
+    elif outcome == "R":
+        connection.execute(
+            "INSERT INTO review_events VALUES ('owner/repo', ?, ?, 'queued-review-fix')",
+            (ticket_id, comment_id),
+        )
+
+
+def _transition(connection: sqlite3.Connection, ticket_id: str, day: int) -> None:
+    connection.execute(
+        "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+        "VALUES ('owner/repo', ?, 'merge-queue', 'merged', ?, 'poll')",
+        (ticket_id, _day(day)),
+    )
+
+
+def _followup(connection: sqlite3.Connection, ticket_id: str, status: str, issue: int) -> None:
+    connection.execute(
+        """
+        INSERT INTO followup_filings (
+            repo, ticket_id, comment_id, round, title, body, labels, status,
+            issue_number, created_at
+        ) VALUES ('owner/repo', ?, ?, 4, 't', 'b', '[]', ?, ?, 0)
+        """,
+        (ticket_id, f"f{ticket_id}", status, issue),
+    )
+
+
+def _loop_db(directory: Path) -> Path:
+    _dispatcher, queue = setup(directory)
+    with sqlite3.connect(queue.path) as connection:
+        for ticket_id, lines, verdicts in (
+            ("10", 100, (("A", 1),)),
+            ("11", 150, (("R", 1), ("A", 2))),
+            ("12", 400, (("R", 1), ("R", 2), ("A", 3))),
+            ("13", 800, (("R", 1),)),
+            ("14", None, (("R", None), ("R", None), ("A", None))),
+        ):
+            for day, (outcome, review_round) in enumerate(verdicts, 2):
+                _head_verdict(
+                    connection,
+                    ticket_id,
+                    f"v{ticket_id}-{day}",
+                    outcome,
+                    day=day,
+                    review_round=review_round,
+                    lines=lines,
+                )
+        _head_verdict(connection, "15", "v15", "A", day=1, review_round=1, lines=10)
+        _raw_job(connection, "10", "review", {"risk": "high"}, created=2, handoff="v10-2")
+        _raw_job(connection, "10", "fix", {"risk": "low"}, created=4)
+        _raw_job(connection, "11", "build", {"risk": "low"})
+        _raw_job(connection, "12", "build", {"risk": "high"})
+        for ticket_id, day in (("14", 5), ("10", 6), ("15", 1)):
+            _transition(connection, ticket_id, day)
+        _followup(connection, "14", "filed", 901)
+        _followup(connection, "10", "pending", 902)
+        _followup(connection, "16", "filed", 903)
+    return queue.path
+
+
+def test_review_loop_measures_cover_the_prs_first_reviewed_in_the_window(
+    tmp_path: Path,
+) -> None:
+    metrics = build_metrics(_loop_db(tmp_path), since=SINCE, until=UNTIL)
+    values = _values(metrics)
+
+    assert values["approved-by-round-2-share"] == pytest.approx(2 / 5)
+    assert values["verdicts-per-merged-pr"] == pytest.approx(4 / 2)
+    assert values["first-round-approve-rate-high-risk"] == pytest.approx(1 / 2)
+    assert values["first-round-approve-rate-lines-under-150"] == pytest.approx(1.0)
+    assert values["first-round-approve-rate-lines-150-399"] == pytest.approx(0.0)
+    assert values["first-round-approve-rate-lines-400-799"] == pytest.approx(0.0)
+    assert values["first-round-approve-rate-lines-800-plus"] == pytest.approx(0.0)
+    assert values["first-round-approve-rate-lines-unknown"] == pytest.approx(0.0)
+    assert metrics.followups == (
+        ("owner/repo", "14", "https://github.com/owner/repo/issues/901"),
+    )
+    text = render_metrics(metrics, metrics)
+    assert "window 2026-11-02T00:00:00Z to 2026-11-10T00:00:00Z\n" in text
+    assert text.endswith(
+        "merged PRs with follow-ups\nowner/repo 14 https://github.com/owner/repo/issues/901\n"
+    )
+
+
+def test_without_a_window_the_earlier_pr_joins_the_cohort(tmp_path: Path) -> None:
+    values = _values(build_metrics(_loop_db(tmp_path)))
+    assert values["approved-by-round-2-share"] == pytest.approx(3 / 6)
+    assert values["verdicts-per-merged-pr"] == pytest.approx(5 / 3)
+    assert values["first-round-approve-rate-lines-under-150"] == pytest.approx(1.0)
+
+
+def test_ci_fixes_without_a_log_and_verdicts_on_an_accepted_head_are_counted(
+    tmp_path: Path,
+) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    with sqlite3.connect(queue.path) as connection:
+        _raw_job(connection, "20", "fix", {"instruction": "CI failed on h1"}, head="h1")
+        _raw_job(connection, "20", "fix", {"instruction": "E   assert 1 == 2"}, head="h2")
+        _raw_job(connection, "20", "fix", {"instruction": "address the review"}, head="h2")
+        _raw_job(connection, "20", "fix", {"instruction": "CI failed on h3"}, head="h3", created=1)
+        for day, outcome in ((2, "R"), (3, "-"), (4, "-")):
+            _head_verdict(
+                connection, "21", f"x{day}", outcome, day=day, review_round=1, lines=1, head="x"
+            )
+        for day in (2, 3):
+            _head_verdict(
+                connection, "22", f"y{day}", "-", day=day, review_round=1, lines=1, head="y"
+            )
+    values = _values(build_metrics(queue.path, since=SINCE, until=UNTIL))
+    assert values["ci-fix-without-log"] == 1
+    assert values["verdicts-on-accepted-head"] == 2
+
+
+@pytest.mark.parametrize("seed", [_seeded, _loop_db, lambda path: setup(path)[1].path])
+def test_an_empty_window_prints_zero_counts_and_no_ratio(seed, tmp_path: Path) -> None:
+    metrics = build_metrics(seed(tmp_path), since=EMPTY[0], until=EMPTY[1])
+    values = _values(metrics)
+    windowed = {name: values[name] for name in WINDOWED_METRICS}
+    counts = {"submitted-invalid", "repeat-block-stops", "unsatisfiable-stops"}
+    counts |= {"ci-fix-without-log", "verdicts-on-accepted-head", "hand-written-gos"}
+    for name, value in windowed.items():
+        if name in counts:
+            assert value in (0, Unrecorded("no-feeder_items-table")), name
+        else:
+            assert value is NO_RATIO, name
+    assert metrics.followups == ()
+    text = render_metrics(metrics, metrics)
+    assert "approved-by-round-2-share - -\n" in text
+    assert text.endswith("merged PRs with follow-ups\nnone\n")
+
+
+def test_cli_windows_both_snapshots(tmp_path: Path, capsys) -> None:
+    db = _loop_db(tmp_path)
+    args = ["eval-report", "--db", str(db), "--baseline", str(db)]
+    assert cli.main([*args, "--since", SINCE, "--until", UNTIL]) == 0
+    assert "approved-by-round-2-share 0.40 0.40\n" in capsys.readouterr().out
+    assert cli.main([*args, "--since", EMPTY[0], "--until", EMPTY[1]]) == 0
+    out = capsys.readouterr().out
+    assert "verdicts-per-merged-pr - -\n" in out
+    assert "ci-fix-without-log 0 0\n" in out
