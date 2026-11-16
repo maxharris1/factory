@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
-from lib.handoff import parse_comment
+from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 
 
@@ -37,6 +38,9 @@ class PlanMixin:
         settled = self._open_plan_check(ticket, comment, reported_round)
         if settled == "stale-plan":
             return True, settled
+        if settled == "waiting-max-size":
+            self._write_state_label(ticket, "waiting-max")
+            return True, settled
         if settled is not None:
             self._set_workflow_state(ticket, "plan-check")
             self._set_workflow_state(
@@ -46,6 +50,10 @@ class PlanMixin:
                 ),
             )
             return True, settled
+        plan_text = parse_comment(comment.body).body.strip()
+        lines = fields.get("lines")
+        mapped = ac == "met" and lines is not None
+        over_size = self._plan_over_size(ticket, int(lines)) if mapped else None
         self._write_state_label(ticket, "plan-check")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -67,7 +75,41 @@ class PlanMixin:
                 connection.commit()
                 return True, "stale-plan"
             gap_count = int(state["plan_gap_count"])
-            if ac == "met":
+            paused: dict[str, object] = {}
+            if mapped and over_size is not None:
+                next_state = "waiting-max"
+                outcome = "waiting-max-size"
+                paused = {
+                    "paused_action": "build",
+                    "paused_recipient": builder_harness,
+                    "paused_head": None,
+                    "paused_generation": generation,
+                    "paused_question_id": comment.id,
+                }
+                self.queue.enqueue_in_transaction(
+                    connection,
+                    self._grok_request(
+                        JobRequest(
+                            repo=ticket.repo,
+                            ticket_id=ticket.ticket_id,
+                            action="clarify",
+                            recipient="grok",
+                            source_comment_id=comment.id,
+                            timeout_seconds=ticket.job_timeout_minutes * 60,
+                            generation=generation,
+                            detail=self._project_wake_detail(
+                                ticket,
+                                f"plan-over-size: {over_size}, {_comment_link(comment)}\n"
+                                f"{_proposed_split(plan_text)}",
+                            ),
+                        )
+                    ),
+                    dedupe_key=(
+                        f"plan-size:{_scope(ticket.repo, ticket.ticket_id)}:"
+                        f"{comment.id}"
+                    ),
+                )
+            elif mapped:
                 next_state = "building"
                 outcome = "queued-plan-build"
                 request = JobRequest(
@@ -84,7 +126,7 @@ class PlanMixin:
                         round_number=int(state["review_round"]) + 1,
                         cap=self._effective_cap(ticket, connection),
                         instruction=_comment_link(comment),
-                        plan_text=parse_comment(comment.body).body.strip(),
+                        plan_text=plan_text,
                     ),
                 )
                 self._enqueue_step(
@@ -121,6 +163,8 @@ class PlanMixin:
                                 f"{_comment_link(comment)}"
                             ),
                             plan_round=2,
+                            plan_text=plan_text,
+                            unmapped=_unmapped(fields),
                         ),
                     ),
                     dedupe_key=(
@@ -165,7 +209,11 @@ class PlanMixin:
                 next_state,
                 source="plan-gap",
                 at=self.queue.now(),
-                also={"plan_gap_count": gap_count, "plan_check_comment_id": None},
+                also={
+                    "plan_gap_count": gap_count,
+                    "plan_check_comment_id": None,
+                    **paused,
+                },
             )
             connection.execute(
                 """
@@ -183,6 +231,30 @@ class PlanMixin:
             connection.commit()
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _plan_over_size(self, ticket: TrackedTicket, lines: int) -> str | None:
+        """Why the plan is over the line, or None when it is not."""
+        from lib.evidence.criteria import criteria_evidence
+
+        criteria = len(
+            criteria_evidence(
+                issue_key=ticket.source_issue or ticket.ticket_id,
+                issue_url=ticket.ticket_url,
+                brief=ticket.brief_comment,
+                issue_body=ticket.issue_body,
+                pr_body=ticket.pr_body,
+                ready_starts_review=ticket.ready_starts_review,
+                pr_url=ticket.ticket_url,
+            ).criteria
+        )
+        max_lines = ticket.factory.plan_max_lines
+        max_criteria = ticket.factory.plan_max_criteria
+        if lines <= max_lines and criteria <= max_criteria:
+            return None
+        return (
+            f"lines={lines} (line {max_lines}), "
+            f"criteria={criteria} (line {max_criteria})"
+        )
 
     def _open_plan_check(
         self,
@@ -286,3 +358,48 @@ class PlanMixin:
         if row is None:
             return None
         return str(row["recipient"]), int(row["generation"])
+
+
+SPLIT_LIMIT = 4_000
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+
+
+def gap_of(comment: Comment) -> tuple[str, str] | None:
+    """A plan comment's text and the item it left unmapped, or None when the
+    comment is not a plan."""
+    try:
+        handoff = parse_comment(comment.body)
+    except HandoffError:
+        return None
+    fields = handoff.as_dict()
+    if fields["kind"] != "plan":
+        return None
+    return handoff.body.strip(), _unmapped(fields)
+
+
+def _unmapped(fields: Mapping[str, str]) -> str:
+    if "unsat" in fields:
+        return fields["unsat"]
+    return "expected size" if "lines" not in fields else "not named"
+
+
+def _proposed_split(plan_text: str) -> str:
+    """The plan's "Proposed split" section, up to the next heading of its
+    level or higher, cut at SPLIT_LIMIT characters."""
+    section: list[str] = []
+    level = 0
+    for line in plan_text.splitlines():
+        heading = _HEADING.match(line.strip())
+        if level and heading and len(heading.group(1)) <= level:
+            break
+        if level:
+            section.append(line)
+        elif heading and heading.group(2).lower() == "proposed split":
+            level = len(heading.group(1))
+            section.append(line)
+    if not section:
+        return "no split proposed"
+    text = "\n".join(section).strip()
+    if len(text) > SPLIT_LIMIT:
+        return f"{text[:SPLIT_LIMIT]}\n[cut at {SPLIT_LIMIT} characters; read the rest in the plan]"
+    return text

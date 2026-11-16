@@ -687,3 +687,67 @@ def test_check_config_refuses_a_pre_ready_timeout_over_900(tmp_path: Path) -> No
     assert "review.pre_ready.timeout_seconds must be an integer from 1 to 900" in (
         result.stdout + result.stderr
     )
+
+
+def test_plan_thresholds_default_to_400_lines_and_5_criteria(tmp_path: Path) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, VALID))
+    assert findings == []
+    assert config is not None
+    assert (config.plan_max_lines, config.plan_max_criteria) == (400, 5)
+
+
+def test_plan_thresholds_are_read_from_factory_md(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["plan"] = {"max_lines": 250, "max_criteria": 3}
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert (config.plan_max_lines, config.plan_max_criteria) == (250, 3)
+
+
+@pytest.mark.parametrize("key", ["max_lines", "max_criteria"])
+@pytest.mark.parametrize("value", [0, -1, "x", True, 1.5])
+def test_plan_thresholds_that_are_not_positive_integers_are_refused(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    data = copy.deepcopy(VALID)
+    data["plan"] = {key: value}
+    path = write_factory(tmp_path, data)
+    config, findings = load_factory_md(path)
+    assert config is None
+    assert [(f.severity, f.message) for f in findings] == [
+        ("error", f"plan.{key} must be a positive integer")
+    ]
+    lenient, warnings = parse_factory_md(path.read_text(encoding="utf-8"), strict=False)
+    assert lenient is not None
+    assert (lenient.plan_max_lines, lenient.plan_max_criteria) == (400, 5)
+    assert [f.severity for f in warnings] == ["warning"]
+
+
+def test_plan_must_be_a_mapping_and_its_unknown_keys_warn_when_lenient(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["plan"] = 400
+    assert messages(write_factory(tmp_path, data)) == ["plan must be a mapping"]
+    data["plan"] = {"max_lines": 300, "max_files": 9}
+    config, findings = parse_factory_md(
+        write_factory(tmp_path, data).read_text(encoding="utf-8"), strict=False
+    )
+    assert config is not None and config.plan_max_lines == 300
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", "unknown field 'plan.max_files'")
+    ]
+
+
+def test_check_config_refuses_a_zero_plan_line(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["plan"] = {"max_lines": 0}
+    path = write_factory(tmp_path, data)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert result.returncode != 0
+    assert "plan.max_lines must be a positive integer" in result.stdout + result.stderr

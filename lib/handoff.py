@@ -4,7 +4,8 @@ The header is one HTML comment. Canonical key order is KEYS. v1 keys are
 the example keys plus state and builder, which GitHub-issue repos also
 show as labels and which Aut0 carries in the header instead, and reviewer.
 A go's builder and reviewer route that ticket (issue #206). A verdict may
-name repeat=<ac-n|f-n> and unsat=<ac-n>.
+name repeat=<ac-n|f-n> and unsat=<ac-n>. A plan may name lines=<n>, its
+expected changed lines, and unsat=<ac-n>, the criterion it left unmapped.
 
 labels_for returns the labels a later dispatcher would apply. It does
 not write anything. tickets linear, and the Aut0 repo, return no labels.
@@ -48,6 +49,7 @@ KEYS = (
     "reviewer",
     "repeat",
     "unsat",
+    "lines",
 )
 
 # Kebab-case forms of the section 4.1 states.
@@ -103,6 +105,7 @@ _ROUND = re.compile(r"^([1-9][0-9]*)(?:/([1-9][0-9]*))?$")
 _HEAD = re.compile(r"^[0-9a-f]{7,40}$")
 _REPEAT = re.compile(r"^(?:ac|f)-[1-9][0-9]*$")
 _UNSAT = re.compile(r"^ac-[1-9][0-9]*$")
+_LINES = re.compile(r"^(?:0|[1-9][0-9]*)$")
 
 
 class HandoffError(ValueError):
@@ -148,9 +151,12 @@ def parse_header_line(line: str) -> dict[str, str]:
         _check_value(key, value)
     if kind != "verdict" and "verdict" in found:
         raise HandoffError("verdict is only valid on kind=verdict")
-    for key in ("repeat", "unsat"):
-        if kind != "verdict" and key in found:
-            raise HandoffError(f"{key} is only valid on kind=verdict")
+    if kind != "verdict" and "repeat" in found:
+        raise HandoffError("repeat is only valid on kind=verdict")
+    if kind not in ("plan", "verdict") and "unsat" in found:
+        raise HandoffError("unsat is only valid on kind=plan or kind=verdict")
+    if kind != "plan" and "lines" in found:
+        raise HandoffError("lines is only valid on kind=plan")
     if kind not in ("plan", "verdict") and "ac" in found:
         raise HandoffError("ac is only valid on kind=plan or kind=verdict")
     for key in sorted(REQUIRED_BY_KIND[kind]):
@@ -289,6 +295,10 @@ def _check_value(key: str, value: str) -> None:
     if key == "repeat":
         if _REPEAT.fullmatch(value) is None:
             raise HandoffError(f"bad repeat {value!r}")
+        return
+    if key == "lines":
+        if _LINES.fullmatch(value) is None:
+            raise HandoffError(f"bad lines {value!r}")
         return
     if key == "unsat":
         if _UNSAT.fullmatch(value) is None:
