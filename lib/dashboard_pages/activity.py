@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from lib.dashboard_pages.common import (
-    _BOTS, _chip, _e, _job_hrefs, _panel, _span, _thread_key, _ticket, duration, ticket_href,
+    _BOTS, _chip, _e, github_links, _job_hrefs, _panel, _span, _thread_key, _ticket, duration, ticket_href,
 )
 
 
@@ -202,6 +202,7 @@ SCRIPT = r"""
       add(row, el('span', 'at-what', x.detail));
       add(row, link('at-go', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
         x.component ? 'open in System' : 'open ticket';
+      if (!x.component) addGh(row, x);
       mark('attention', key, row);
     });
   }
@@ -352,7 +353,9 @@ def _attention(snapshot: dict) -> str:
             + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
             + _span("at-subj", component or _ticket(row))
             + _span("at-what", row["detail"])
-            + f'<a class="at-go" href="{_e(href)}">{"open in System" if component else "open ticket"}</a></div>'
+            + f'<a class="at-go" href="{_e(href)}">{"open in System" if component else "open ticket"}</a>'
+            + ("" if component else github_links(row))
+            + "</div>"
         )
 
     items = attention["items"]

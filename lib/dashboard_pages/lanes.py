@@ -9,7 +9,7 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _num, _panel, _short, _span,
+    anchor, _bot, _chip, duration, _e, github_links, _job_kind, _job_label, _num, _panel, _short, _span,
     _ticket, _when,
 )
 
@@ -433,6 +433,7 @@ SCRIPT = r"""
         var wake = r.kind === 'bot_to_bot';
         add(li, bot(r.recipient));
         add(li, el('span', 'ticket', ticketOf(r)));
+        addGh(li, r);
         add(li, el('span', 'what', wake ? 'done' : r.action));
         if (wake) add(li, chip('grok wake', 'wake'));
         if (r.state === 'failed') add(li, chip('failed', 'bad'));
@@ -801,7 +802,7 @@ def _just_happened(snapshot: dict) -> str:
     for row in rows:
         wake = row["kind"] == "bot_to_bot"
         items.append(
-            "<li>" + _bot(row["recipient"]) + _span("ticket", _ticket(row))
+            "<li>" + _bot(row["recipient"]) + _span("ticket", _ticket(row)) + github_links(row)
             + _span("what", "done" if wake else row["action"])
             + (_chip("grok wake", "wake") if wake else "")
             + (_chip("failed", "bad") if row["state"] == "failed" else "")

@@ -522,3 +522,45 @@ def test_the_no_script_control_strip_holds_the_axis_replay_and_legend_in_one_row
     assert re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', strip) == [
         "script", "claude", "codex", "cursor", "grok", "stopped", "off-chart hop"]
     assert "jd-legend" not in journey
+
+
+GH_CASES = [
+    ("issue and PR", {"source": "#563", "pr": "601"},
+     ["https://github.com/maxharris1/cleffy/issues/563", "https://github.com/maxharris1/cleffy/pull/601"]),
+    ("no PR", {"source": "#563", "pr": None}, ["https://github.com/maxharris1/cleffy/issues/563"]),
+    ("linear source", {"source": "ABC-12", "pr": "601"}, ["https://github.com/maxharris1/cleffy/pull/601"]),
+    ("malformed repo", {"repo": "maxharris1/cleffy/../x", "source": "#563", "pr": "601"}, []),
+]
+
+
+def _gh_links(markup: str) -> list[str]:
+    hero = re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).group(0)
+    links = re.findall(r'<a href="(https://github\.com/[^"]*)" rel="noopener noreferrer" target="_blank">', hero)
+    assert len(links) == hero.count("https://github.com/")
+    return links
+
+
+@pytest.mark.parametrize(("case", "fields", "hrefs"), GH_CASES, ids=[c[0] for c in GH_CASES])
+def test_the_hero_links_the_github_issue_and_pr(tmp_path: Path, case, fields, hrefs) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot).update(fields)
+    assert _gh_links(_article(snapshot)) == hrefs, case
+
+
+@needs_node
+@pytest.mark.parametrize(("case", "fields", "hrefs"), GH_CASES, ids=[c[0] for c in GH_CASES])
+def test_the_script_hero_links_github_like_the_server(tmp_path: Path, case, fields, hrefs) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot).update(fields)
+    assert _gh_links(_run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")["html"]["jobview"]) == hrefs
+
+
+def test_the_page_carries_the_actions_api_and_no_credential(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot).update(source="#563", pr="601")
+    html = render_pages(snapshot)["job.html"]
+    for hook in ("/api/session", "/api/signin/poll", "/api/comment", "/api/head", "/api/ok", "X-Factory-CSRF",
+                 "Enter only this code on github.com."):
+        assert hook in html, hook
+    for secret in ("gho_", "ghp_", "github_pat_", "client_secret"):
+        assert secret not in html, secret

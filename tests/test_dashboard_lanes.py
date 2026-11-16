@@ -175,10 +175,13 @@ def test_just_happened_shows_six_newest_and_marks_grok_wakes(tmp_path: Path) -> 
         for i in range(8)
     ]
     rows[0].update(kind="bot_to_bot", recipient="grok")
+    rows[1].update(source="#1", pr="9")
     snapshot["handoff_savings"]["recent"] = rows
     panel = _section(_no_script(render_pages(snapshot)["index.html"]), "just-happened")
     items = re.findall(r"<li>.*?</li>", panel)
     assert len(items) == 6
+    assert re.findall(r'href="(https://github\.com/[^"]*)"', panel) == [
+        "https://github.com/o/factory/issues/1", "https://github.com/o/factory/pull/9"]
     assert "grok wake" in items[0] and "grok wake" not in items[1]
     assert "6 newest handoffs" in panel and 'href="activity.html"' in panel
 

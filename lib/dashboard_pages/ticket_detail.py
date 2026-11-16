@@ -9,7 +9,9 @@ import math
 
 from lib.dashboard_flow import FLOWMAP_SCRIPT, ticket_phases
 from lib.dashboard_telemetry import NO_DATA
-from lib.dashboard_pages.common import anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _span, _state_chip
+from lib.dashboard_pages.common import (
+    anchor, _bot, _chip, duration, _e, github_links, _job_kind, _job_label, _span, _state_chip,
+)
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
 from lib.dashboard_pages.tickets import WAITING, _active_jobs, _px
@@ -44,6 +46,15 @@ CSS = """\
 .jd-hero .device{font:12px var(--mono);color:var(--muted)}
 .jd-hero .line{margin:0;font-size:15px;line-height:1.5;color:var(--text-2)}
 .jd-hero .line b{font-family:var(--mono);font-weight:600;color:var(--accent)}
+.jd-gh{display:flex;flex-direction:column;gap:8px;font:12px/1.5 var(--mono);color:var(--text-2)}
+.jd-gh .gh-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.jd-gh button,.jd-gh select,.jd-gh textarea{font:12px var(--mono);color:var(--text);background:var(--field);border:1px solid var(--line-hi)}
+.jd-gh button{min-height:32px;padding:0 12px;cursor:pointer}
+.jd-gh button:focus-visible,.jd-gh select:focus-visible,.jd-gh textarea:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.jd-gh textarea{width:100%;min-height:72px;padding:6px 8px;resize:vertical}
+.jd-gh code{font:600 16px var(--mono);letter-spacing:.1em;color:var(--accent)}
+.jd-gh a{color:var(--accent)}
+.jd-gh .gh-ok{border-color:var(--ok);color:var(--ok)}
 .jd-verb{display:flex;align-items:center;gap:8px;font:14px/1.3 var(--mono);color:var(--text)}
 .jd-verb .glyph{display:grid;grid-template-columns:5px 5px;grid-template-rows:5px 5px;gap:1px}
 .jd-verb .glyph span{background:var(--line-hi)}.jd-verb .glyph span.lit{background:var(--px)}
@@ -274,6 +285,7 @@ def _hero(row: dict, model: dict, running: bool) -> str:
         + _state_chip(row)
         + (_chip("OVERDUE", "bad") if row.get("overdue") else "")
         + (_chip(f"retried {row['retries']}x") if row.get("retries") else "")
+        + github_links(row)
         + "</div>"
     )
     return (
@@ -651,7 +663,7 @@ _SCRIPT = r"""
   function holdsStill(motion) {
     return !PX.table.effects[(PX.table.states[motion] || PX.table.states.unknown).effect];
   }
-  function hero(r, m, running, motion) {
+  function hero(r, m, running, motion, ticket) {
     var sec = el('section', 'jd-hero');
     var action = String(r.action || '');
     add(sec, PX.strip('job-hero-' + r.job, {state: motion, bot: r.recipient, cell: 4, height: 40, seed: 2}));
@@ -668,6 +680,8 @@ _SCRIPT = r"""
     if (jobState) add(title, jobState);
     if (r.overdue) add(title, chip('OVERDUE', 'bad'));
     if (r.retries) add(title, chip('retried ' + r.retries + 'x'));
+    addGh(title, r);
+    if (GH.on && ghRefs(r)) add(who, ghPanel(r, ticket));
     var line = add(who, el('p', 'line'));
     var parts = 0;
     function sep() { if (parts++) line.appendChild(document.createTextNode(' · ')); }
@@ -701,6 +715,194 @@ _SCRIPT = r"""
     } else tile(tiles, 'no round', 'revise round');
     tile(tiles, m.hops + ' hops', m.off_chart_count + ' off-chart');
     return sec;
+  }
+  // GitHub actions: present only when the server answers /api/session. The
+  // session is an HttpOnly cookie; the page only ever holds the CSRF value.
+  var GH = {started: false, on: false, login: null, csrf: null, flow: null, note: '', panels: {}};
+  var SHA = /^[0-9a-f]{40}$/;
+
+  function ghPost(path, body, csrf) {
+    var headers = {'Content-Type': 'application/json'};
+    if (csrf) headers['X-Factory-CSRF'] = GH.csrf || '';
+    return fetch(path, {method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: headers,
+                        body: JSON.stringify(body)})
+      .then(function (res) {
+        return res.json().then(function (data) { return data; }, function () { return null; }).then(function (data) {
+          data = data && typeof data === 'object' ? data : {};
+          return {status: res.status, ok: res.ok, data: data, error: res.ok ? null : String(data.error || 'http-' + res.status)};
+        });
+      }, function () { return {status: 0, ok: false, data: {}, error: 'network'}; });
+  }
+  function ghSet(signedIn, data) {
+    GH.login = signedIn ? String(data.login || '') : null;
+    GH.csrf = signedIn ? String(data.csrf || '') : null;
+    Object.keys(GH.panels).forEach(function (k) { ghDraw(GH.panels[k]); });
+  }
+  function ghStart() {
+    var request;
+    try { request = fetch('/api/session', {cache: 'no-store', credentials: 'same-origin'}); } catch (err) { return; }
+    request.then(function (res) {
+      if (res.status !== 200) return null;
+      return res.json();
+    }).then(function (data) {
+      if (!data || typeof data.signed_in !== 'boolean') return;
+      GH.on = true;
+      ghSet(data.signed_in, data);
+      if (latest) render(latest);
+    }, function () {});
+  }
+  function ghSignIn() {
+    GH.note = '';
+    ghPost('/api/signin', {}, false).then(function (res) {
+      if (!res.ok) { GH.note = 'sign-in failed: ' + res.error; ghSet(false, {}); return; }
+      var d = res.data;
+      GH.flow = {code: String(d.user_code || ''), uri: String(d.verification_uri || ''),
+                 interval: Math.max(1, Number(d.interval) || 5)};
+      ghSet(false, {});
+      setTimeout(ghPoll, GH.flow.interval * 1000);
+    });
+  }
+  function ghPoll() {
+    if (!GH.flow) return;
+    ghPost('/api/signin/poll', {}, false).then(function (res) {
+      var state = res.ok ? res.data.state : null;
+      if (state === 'pending') { setTimeout(ghPoll, GH.flow.interval * 1000); return; }
+      GH.flow = null;
+      GH.note = state === 'signed-in' ? '' : 'sign-in ' + (state || 'failed: ' + res.error);
+      ghSet(state === 'signed-in', res.data);
+    });
+  }
+  function ghSignOut() {
+    ghPost('/api/signout', {}, true).then(function () { GH.note = ''; ghSet(false, {}); });
+  }
+  function ghButton(parent, text, onClick, cls) {
+    var b = add(parent, el('button', cls || null, text));
+    b.setAttribute('type', 'button');
+    b.addEventListener('click', onClick);
+    return b;
+  }
+  function ghResult(out, res, text) {
+    out.replaceChildren();
+    var url = res.ok ? String(res.data.url || '') : '';
+    if (/^https:\/\/github\.com\//.test(url)) {
+      add(out, document.createTextNode(text + ' '));
+      var a = add(out, link(null, url));
+      a.setAttribute('rel', 'noopener noreferrer');
+      a.setAttribute('target', '_blank');
+      a.textContent = url;
+    } else out.textContent = res.ok ? text : 'error: ' + res.error;
+  }
+  function ghBuild() {
+    var p = {root: el('div', 'jd-gh'), head: null, busy: false, sent: false};
+    p.auth = add(p.root, el('div', 'gh-row'));
+    p.form = add(p.root, el('div', 'gh-form'));
+    var row = add(p.form, el('div', 'gh-row'));
+    p.target = add(row, el('select'));
+    p.target.setAttribute('aria-label', 'Comment on');
+    p.post = ghButton(row, 'Post', function () { ghComment(p); });
+    p.text = add(p.form, el('textarea'));
+    p.text.setAttribute('aria-label', 'Comment');
+    p.out = add(p.form, el('div', 'gh-out'));
+    p.ok = add(p.root, el('details', 'gh-okbox'));
+    add(p.ok, el('summary', null, 'Give the hold OK'));
+    var okRow = add(p.ok, el('div', 'gh-row'));
+    p.okButton = ghButton(okRow, 'OK', function () { ghOk(p); }, 'gh-ok');
+    p.okOut = add(okRow, el('span', 'gh-out'));
+    p.ok.addEventListener('toggle', function () { if (p.ok.open) ghHead(p); });
+    return p;
+  }
+  function ghDraw(p) {
+    var signedIn = !!GH.login;
+    p.auth.replaceChildren();
+    if (signedIn) {
+      add(p.auth, el('span', null, 'signed in as ' + GH.login));
+      ghButton(p.auth, 'Sign out', ghSignOut);
+    } else if (GH.flow) {
+      add(p.auth, el('span', null, 'Code'));
+      add(p.auth, el('code', null, GH.flow.code));
+      if (/^https:\/\/github\.com\//.test(GH.flow.uri)) {
+        var a = add(p.auth, link(null, GH.flow.uri));
+        a.setAttribute('rel', 'noopener noreferrer');
+        a.setAttribute('target', '_blank');
+        a.textContent = GH.flow.uri;
+      }
+      add(p.auth, el('span', null, 'Enter only this code on github.com.'));
+    } else ghButton(p.auth, 'Sign in with GitHub', ghSignIn);
+    if (GH.note) add(p.auth, el('span', 'warn', GH.note));
+    var refs = ghRefs(p.r);
+    var options = refs ? [['issue', refs.issue, 'issue #'], ['pull', refs.pr, 'PR #']].filter(function (o) { return o[1]; }) : [];
+    var want = options.map(function (o) { return o[0] + ':' + o[1]; }).join(',');
+    if (p.options !== want) {
+      var keep = p.target.value;
+      p.target.replaceChildren();
+      options.forEach(function (o) {
+        var opt = add(p.target, el('option', null, o[2] + o[1]));
+        opt.value = o[0] + ':' + o[1];
+      });
+      if (want.split(',').indexOf(keep) >= 0) p.target.value = keep;
+      p.options = want;
+    }
+    p.form.hidden = !signedIn || !options.length;
+    var t = p.t;
+    var eligible = signedIn && !!t && t.state === 'awaiting-ok' && !!(refs && refs.pr) &&
+      String(t.waiting_on || '').toLowerCase() === GH.login.toLowerCase();
+    p.ok.hidden = !eligible;
+    if (!eligible) { p.ok.open = false; p.head = null; p.okOut.textContent = ''; }
+    p.okButton.disabled = !p.head || p.busy;
+    p.okButton.textContent = p.sent ? 'OK sent' : p.head ? 'OK ' + p.head.slice(0, 7) : 'OK (reading head…)';
+  }
+  function ghPanel(r, t) {
+    var key = threadKey(r);
+    var p = GH.panels[key] || (GH.panels[key] = ghBuild());
+    p.r = r;
+    p.t = t;
+    ghDraw(p);
+    return p.root;
+  }
+  function ghComment(p) {
+    var refs = ghRefs(p.r);
+    var pick = String(p.target.value).split(':');
+    var body = p.text.value;
+    if (!refs || pick.length !== 2 || !/^[0-9]+$/.test(pick[1]) || !body.trim()) return;
+    p.post.disabled = true;
+    ghPost('/api/comment', {repo: refs.repo, kind: pick[0], number: Number(pick[1]), body: body}, true).then(function (res) {
+      p.post.disabled = false;
+      if (res.ok) p.text.value = '';
+      ghResult(p.out, res, 'posted');
+    });
+  }
+  function ghHead(p) {
+    var refs = ghRefs(p.r);
+    if (!refs || !refs.pr || p.busy) return;
+    p.busy = true;
+    p.head = null;
+    p.sent = false;
+    ghDraw(p);
+    ghPost('/api/head', {repo: refs.repo, pr: Number(refs.pr)}, true).then(function (res) {
+      p.busy = false;
+      var head = String(res.data.head || '');
+      if (res.ok && SHA.test(head)) p.head = head;
+      else p.okOut.textContent = 'error: ' + (res.error || 'bad-head');
+      ghDraw(p);
+    });
+  }
+  function ghOk(p) {
+    var refs = ghRefs(p.r);
+    var head = p.head;
+    if (!refs || !refs.pr || !head || p.busy) return;
+    p.busy = true;
+    ghDraw(p);
+    ghPost('/api/ok', {repo: refs.repo, pr: Number(refs.pr), head: head}, true).then(function (res) {
+      p.busy = false;
+      if (res.status === 409 && res.data.error === 'head-changed') {
+        p.okOut.textContent = 'head changed to ' + String(res.data.head || '').slice(0, 7);
+        ghHead(p);
+        return;
+      }
+      if (res.ok) { p.head = null; p.sent = true; }
+      ghResult(p.okOut, res, 'OK posted');
+      ghDraw(p);
+    });
   }
   function jdPanel(cls, title, count) {
     var sec = el('section', 'jd-panel' + (cls ? ' ' + cls : ''));
@@ -1044,7 +1246,8 @@ _SCRIPT = r"""
     var art = el('article', 'jobpage');
     art.setAttribute('id', anchor(r.job));
     add(art, crumb(r));
-    add(art, hero(r, m, running, motion));
+    var ticket = (d.tickets || []).filter(function (t) { return threadKey(t) === threadKey(r); })[0] || null;
+    add(art, hero(r, m, running, motion, ticket));
     var cols = add(art, el('div', 'jd-cols'));
     var logButtons = [], hitButtons = [], scales = [];
     add(cols, runlog(r, m, logButtons));
@@ -1081,6 +1284,7 @@ _SCRIPT = r"""
   function renderJobView(d) {
     var root = byId('jobview');
     if (!root) return;
+    if (!GH.started) { GH.started = true; ghStart(); }
     root.replaceChildren();
     var jobs = activeJobs(d);
     var hash = String(location.hash || '');

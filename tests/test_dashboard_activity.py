@@ -446,3 +446,14 @@ def test_a_relay_filter_keeps_focus_when_pressed(tmp_path: Path, snapshot: dict)
     actions = [["focus", ["data-relay", "shipped"]], ["press", ["data-relay", "shipped"]], ["focused", "data-relay"]]
     steps = _script(tmp_path, _rich(snapshot), actions)["steps"]
     assert [step["focused"] for step in steps if "focused" in step] == [["button", "shipped"]]
+
+
+@layout.needs_node
+def test_attention_ticket_rows_link_github_in_both_renderers(tmp_path: Path, snapshot: dict) -> None:
+    snap = copy.deepcopy(snapshot)
+    item = next(row for row in snap["attention"]["items"] if not row.get("component"))
+    item.update(repo="maxharris1/cleffy", source="#14", pr="15")
+    server = _server(snap)["attention"]
+    assert re.findall(r'href="(https://github\.com/[^"]*)" rel="noopener noreferrer" target="_blank"', server) == [
+        "https://github.com/maxharris1/cleffy/issues/14", "https://github.com/maxharris1/cleffy/pull/15"]
+    assert _script(tmp_path, snap)["html"]["attention"] == server

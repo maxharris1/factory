@@ -12,6 +12,7 @@ import pytest
 
 import lib.dashboard_flow as flow
 import lib.dashboard_page as page
+from lib.dashboard_pages import tickets as tickets_page
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
@@ -533,3 +534,45 @@ def test_the_table_is_on_job_html_only(snapshot: dict) -> None:
     assert 'id="jobs"' not in pages["job.html"]
     assert re.search(r'<section class="panel" id="tickets" aria-label="Tickets" hidden>', pages["job.html"])
     assert "@media (scripting:none){#tickets[hidden]{display:block !important}}" in page.CSS
+
+
+def _gh_hrefs(node: dict) -> list[str]:
+    links = _all(node, lambda n: n["tag"] == "a" and n["attrs"].get("href", "").startswith("https://github.com/"))
+    assert all(a["attrs"]["rel"] == "noopener noreferrer" and a["attrs"]["target"] == "_blank" for a in links)
+    return [a["attrs"]["href"] for a in links]
+
+
+def _gh_snapshot(snapshot: dict) -> tuple[dict, list[str]]:
+    snap = json.loads(json.dumps(snapshot))
+    found = tickets_page.board(snap)
+    keys = [_key(c["ticket"]) for col in found["columns"] for c in col["cards"]][:4]
+    rows = {_key(row): row for row in snap["tickets"]}
+    issue, no_pr, linear, bad = (rows[key] for key in keys)
+    issue.update(source="#563", pr="601")
+    no_pr.update(source="#564", pr=None)
+    linear.update(source="ABC-12", pr="602")
+    bad.update(repo="evil/repo/x", source="#7", pr="603")
+    return snap, [_key(row) for row in (issue, no_pr, linear, bad)]
+
+
+def _check_gh(markup: str, keys: list[str], snap: dict) -> None:
+    rows = {_key(row): row for row in snap["tickets"]}
+    issue, no_pr, linear, bad = keys
+    assert _gh_hrefs(_card(markup, issue)) == [
+        f"https://github.com/{rows[issue]['repo']}/issues/563", f"https://github.com/{rows[issue]['repo']}/pull/601"]
+    assert _gh_hrefs(_card(markup, no_pr)) == [f"https://github.com/{rows[no_pr]['repo']}/issues/564"]
+    assert _gh_hrefs(_card(markup, linear)) == [f"https://github.com/{rows[linear]['repo']}/pull/602"]
+    assert _gh_hrefs(_card(markup, bad)) == []
+
+
+def test_cards_link_their_github_issue_and_pr(snapshot: dict) -> None:
+    snap, keys = _gh_snapshot(snapshot)
+    _check_gh(_server(snap)["pipeline"], keys, snap)
+
+
+@layout.needs_node
+def test_script_cards_link_github_like_the_server(tmp_path: Path, snapshot: dict) -> None:
+    snap, keys = _gh_snapshot(snapshot)
+    out = _script(tmp_path, snap, page_from=snap)
+    _check_gh(out["html"]["pipeline"], keys, snap)
+    assert out["html"]["pipeline"] == _server(snap)["pipeline"]
