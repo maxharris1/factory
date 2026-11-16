@@ -1892,6 +1892,8 @@ overlay is deep-merged into the parsed base file before validation:
 - `projects` merge by `repo`, and `devices` by `name`. A matching entry's
   fields override the base entry's, and any other entry is appended;
 - every other list, and every scalar, replaces the base value.
+- `linear_project_id` and `linear_project_ids` are one field: setting
+  either in an overlay entry drops the other from the base entry.
 
 A malformed overlay is an error that names the overlay file.
 `ORCH_NO_LOCAL_OVERLAY=1` turns overlays off; the test suite sets it.

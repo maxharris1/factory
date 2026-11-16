@@ -67,6 +67,43 @@ def test_scalars_override_mappings_merge_and_other_lists_replace() -> None:
                       "trusted_logins": {"max": ["grok-bot"]}}
 
 
+def test_either_linear_project_spelling_replaces_the_other() -> None:
+    base = {"projects": [{"repo": "a/b", "linear_project_id": "one"},
+                         {"repo": "c/d", "linear_project_ids": ["two"]}]}
+    overlay = {"projects": [{"repo": "a/b", "linear_project_ids": ["one", "three"]},
+                            {"repo": "c/d", "linear_project_id": "four"}]}
+
+    assert merge(base, overlay)["projects"] == [
+        {"repo": "a/b", "linear_project_ids": ["one", "three"]},
+        {"repo": "c/d", "linear_project_id": "four"}]
+
+
+def test_a_placeholder_project_id_moves_to_a_list_in_the_overlay(
+    overlay_on: None, tmp_path: Path
+) -> None:
+    digests = {}
+    for name in ("edited", "layered"):
+        folder = tmp_path / name
+        folder.mkdir()
+        orch, machines = folder / "orch.yml", folder / "machines.yml"
+        shutil.copy(ROOT / "machines.yml", machines)
+        text = (ROOT / "orch.yml").read_text(encoding="utf-8")
+        if name == "edited":
+            text = text.replace("linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID",
+                                "linear_project_ids:\n      - real-project")
+        orch.write_text(text, encoding="utf-8")
+        if name == "layered":
+            overlay_path(orch).write_text(
+                "projects:\n  - repo: aut0-code/aut0\n    linear_project_ids:\n"
+                "      - real-project\n", encoding="utf-8")
+        result = check_config(orch, machines, "--digest")
+        assert result.returncode == 0, result.stderr
+        digests[name] = [line for line in result.stdout.splitlines()
+                         if line.startswith("effective ")]
+
+    assert digests["edited"] == digests["layered"]
+
+
 def test_overlay_keys_name_fields_never_values() -> None:
     keys = overlay_keys({
         "linear_webhook": {"public_url": "https://secret.example.ts.net/hook"},

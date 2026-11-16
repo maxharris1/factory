@@ -37,6 +37,7 @@ DISABLE_ENV = "ORCH_NO_LOCAL_OVERLAY"
 GIT_TIMEOUT = 10
 KEYED_LISTS = {"projects": "repo", "devices": "name"}
 OPAQUE = frozenset({"trusted_logins", "trusted_linear_users", "linear_assignees"})
+SPELLINGS = {"linear_project_id": "linear_project_ids", "linear_project_ids": "linear_project_id"}
 
 
 class OverlayError(ValueError):
@@ -194,6 +195,9 @@ def _merge_mapping(base: dict, overlay: dict, *, top: bool = False) -> dict:
             merged[key] = _merge_mapping(held, value)
         else:
             merged[key] = value
+        other = SPELLINGS.get(key)
+        if other is not None and other not in overlay:
+            merged.pop(other, None)
     return merged
 
 
