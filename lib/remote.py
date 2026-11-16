@@ -173,22 +173,6 @@ START_REFUSED = 125
 # off first.
 _UNTRACE = "set +xvT; trap - DEBUG; "
 _DROP_PROFILE_TOKENS = f"unset {' '.join(TOKEN_VARIABLES)} || exit {START_REFUSED}; "
-_START_ENTER = (
-    f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
-    + _DROP_PROFILE_TOKENS
-    + f'e=(); while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; e+=("$1"); shift; done; '
-    f"shift; "
-)
-_START_EXEC = (
-    'command -v "$1" >/dev/null 2>&1 '
-    '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
-    f'printf "%s\\n" "${TAG_ENV}" > "$r" || exit {START_REFUSED}; '
-)
-_EXEC_WITHOUT_PROFILE_TOKENS = (
-    "exec /usr/bin/env "
-    + "".join(f"-u {name} " for name in TOKEN_VARIABLES)
-    + '"${e[@]}" "$@"'
-)
 _REPORT_ENV = (
     f'printf "%s " {WORKER_ENV_MARK}; '
     'names=$(compgen -e) && { for n in $names; do printf "%s=%s\\0" "$n" "${!n}"; done; '
@@ -211,12 +195,12 @@ def _report_env(env_file: str | None) -> str:
 
 
 # Factory, Nov 13: a harness's `--add-dir` directories are given only where
-# the device has them. After `--` come k (where the kept `--add-dir <dir>`
-# pairs go in the command), n, then n pairs of (path to test, directory as
-# given), then the command. Each path is tested with `test -d` on the device
-# at start time, after the profile ran; the command (still "$1") is then
-# found and exec'd as above. Paths and directories are positional
-# arguments, never spliced into the script text.
+# the device has them. The arguments start with k (where the kept
+# `--add-dir <dir>` pairs go in the command), n, then n pairs of (path to
+# test, directory as given), then the command and the job's environment.
+# Each path is tested with `test -d` on the device at start time, after the
+# profile ran. Paths and directories are positional arguments, never
+# spliced into the script text.
 _GUARD_DIRS = (
     'k=$1; n=$2; shift 2; a=(); '
     'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$2"); fi; '
@@ -505,13 +489,15 @@ def start_script(
     for name in env:
         if not _ENV_NAME.fullmatch(name) or name == TAG_ENV:
             raise RemoteError(f"environment name {name!r} is not plain")
-    assignments = " ".join(
-        f"{name}={shlex.quote(value)}" for name, value in sorted(env.items())
-    )
+    assignments = [f"{name}={shlex.quote(value)}" for name, value in sorted(env.items())]
+    assignments += ['ORCH_JOB_WORKDIR="$d"', f"{TAG_ENV}={tag}"]
+    count = len(assignments)
     argv = " ".join(shlex.quote(part) for part in command)
     # #94: the harness runs under the bot's login shell, so its own PATH (gh,
     # claude, codex) is loaded. #99 A6: the job's environment and directory
     # are applied after the profile ran, so a profile can change neither.
+    # #509: the `sh` hop ends env's NAME=value words before the command,
+    # whose first word may hold `=`.
     # Every step execs, so the start's pid and group are the harness's.
     guard = ""
     if guarded_dirs:
@@ -523,16 +509,22 @@ def start_script(
         guard = f"{insert_at} {len(guarded_dirs)} {pairs} "
     script = (
         ("exec 1>&3 3>&-; " if report_env else "")
-        + _START_ENTER
+        + f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; shift; '
+        + _DROP_PROFILE_TOKENS
+        + f'export "${{@:1:{count}}}" || exit {START_REFUSED}; '
+        + f'set -- "${{@:{count + 1}}}" "${{@:1:{count}}}"; '
         + (_GUARD_DIRS if guarded_dirs else "")
-        + _START_EXEC
+        + 'command -v "$1" >/dev/null 2>&1 '
+        + '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
+        + f"echo {tag} > {shlex.quote(launch_record(target))} || exit {START_REFUSED}; "
         + (_report_env(env_file) if report_env else "")
-        + _EXEC_WITHOUT_PROFILE_TOKENS
+        + "exec /usr/bin/env "
+        + "".join(f"-u {name} " for name in TOKEN_VARIABLES)
+        + f'"${{@: -{count}}}" /bin/sh -c \'exec "$@"\' sh "${{@:1:$#-{count}}}"'
     )
     login = (
         f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
-        f'"$d" {shlex.quote(launch_record(target))} {assignments} '
-        f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {guard}{argv}'
+        f'"$d" {" ".join(assignments)} {guard}{argv}'
         + (" 3>&1 1>&2" if report_env else "")
     )
     directory = shlex.quote(target.job_dir)
