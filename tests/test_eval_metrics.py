@@ -34,6 +34,7 @@ from tests.test_lifecycle import HEADS, Flow
 from tests.test_remote_start import config_of, machines_file
 
 AUT0 = "aut0-code/aut0"
+BUILDER_ROUTER = "factory/factory-builder/SKILL.md"
 
 
 def _ticket(
@@ -79,16 +80,17 @@ def _telemetry(
     *,
     harness: str = "claude",
     elapsed: float = 0.0,
+    skill_reads: str | None = None,
 ) -> None:
     connection.execute(
         f"""
         INSERT INTO {telemetry.TABLE} (
             job_id, bot, harness, repo, started_at, updated_at, elapsed_seconds,
             events, turns, tool_calls, files_touched, commands, test_runs,
-            tokens_in, tokens_cached, tokens_out, steps
-        ) VALUES (?, 'bot', ?, 'owner/repo', 0, 0, ?, 0, 0, ?, 0, 0, 0, 0, 0, 0, '[]')
+            tokens_in, tokens_cached, tokens_out, steps, skill_reads
+        ) VALUES (?, 'bot', ?, 'owner/repo', 0, 0, ?, 0, 0, ?, 0, 0, 0, 0, 0, 0, '[]', ?)
         """,
-        (job_id, harness, elapsed, json.dumps(tools)),
+        (job_id, harness, elapsed, json.dumps(tools), skill_reads),
     )
 
 
@@ -168,8 +170,15 @@ def _seeded(directory: Path) -> Path:
                 "INSERT INTO handled_comments VALUES ('owner/repo', '2', ?, ?)",
                 (comment_id, refused),
             )
-        _telemetry(connection, build_1, {"Skill": 2, "Agent": 1, "Bash": 9})
-        _telemetry(connection, build_2, {"Skill": 1, "Task": 4, "Agent": 1}, elapsed=5400)
+        _telemetry(
+            connection,
+            build_1,
+            {"Skill": 2, "Agent": 1, "Bash": 9},
+            skill_reads=json.dumps([BUILDER_ROUTER, "pstack/skills/poteto-mode/SKILL.md"]),
+        )
+        _telemetry(
+            connection, build_2, {"Skill": 1, "Task": 4, "Agent": 1}, elapsed=5400, skill_reads="[]"
+        )
         _telemetry(connection, build_3, {}, elapsed=1800)
         _telemetry(connection, review, {"exec": 3}, harness="codex")
         for ticket_id, verdicts in (
@@ -243,7 +252,9 @@ def test_metrics_read_a_read_only_backup_and_leave_it_untouched(tmp_path: Path) 
     assert values["duplicate-handoffs"] == 2
     assert values["blocked-stops"] == 1
     assert values["tickets-succeeded"] == 2
-    assert values["skills-read-per-job"] == pytest.approx(1.0)
+    assert values["router-read-share-build"] == pytest.approx(0.5)
+    assert values["skill-files-per-job-build"] == pytest.approx(1.0)
+    assert values["skill-reads-unrecorded-build"] == 0
     assert values["helpers-per-job"] == pytest.approx(2.0)
     assert values["helpers-per-job-max"] == 5
     assert values["preflight-failures"] == 2
@@ -283,7 +294,7 @@ def test_a_snapshot_without_a_source_table_reports_it_unrecorded(tmp_path: Path)
     assert values["prs-reviewed"] == 1
     assert values["first-round-revise-rate"] == Unrecorded("no-review_events-table")
     assert values["first-pass-approve-rate"] == Unrecorded("no-review_events-table")
-    assert values["skills-read-per-job"] == Unrecorded("no-job_telemetry-table")
+    assert values["router-read-share-build"] == Unrecorded("no-job_telemetry-table")
     assert values["preflight-failures"] == Unrecorded("no-job_events-table")
     assert values["prs-dirty-after-approval"] == Unrecorded("no-jobs-table")
     assert values["refused-approvals"] == Unrecorded("no-approve_rule_floor-table")
@@ -312,6 +323,64 @@ def test_each_metric_prints_beside_the_baseline(tmp_path: Path) -> None:
     assert rows["rounds-per-pr"] == ["1.40", "unrecorded(no-ticket_state-table)"]
     assert rows["submitted-invalid"] == ["2", "unrecorded(no-job_events-table)"]
     assert lines[end + 1 :] == ["none"]
+
+
+def test_skill_reads_per_job_kind_come_from_files_read_not_the_skill_tool(
+    tmp_path: Path,
+) -> None:
+    _dispatcher, queue = setup(tmp_path / "now")
+    pstack = "pstack/skills/poteto-mode/SKILL.md"
+    seeds = [
+        (_job(queue, key, action, key), tools, reads)
+        for key, action, tools, reads in (
+            ("b1", "build", {}, [BUILDER_ROUTER, pstack, "cursor-team-kit/deslop/SKILL.md"]),
+            ("b2", "build", {}, [pstack]),
+            ("f1", "fix", {"Skill": 9}, []),
+            ("f2", "fix", {}, "not json"),
+            ("r1", "review", {}, ["factory/factory-reviewer/SKILL.md"]),
+            ("r2", "review", {}, None),
+            ("r3", "review", None, None),
+            ("p1", "plan", None, None),
+            ("u1", "update-from-main", {}, [pstack]),
+        )
+    ]
+    _job(queue, "b3", "build", "b3", state="queued")
+    merge_only = _job(queue, "f3", "fix", "f3")
+    with sqlite3.connect(queue.path) as connection:
+        connection.execute(
+            "UPDATE jobs SET detail = ? WHERE id = ?", (json.dumps({"kind": "merge-only"}), merge_only)
+        )
+        telemetry.ensure_table(connection)
+        _telemetry(connection, merge_only, {}, skill_reads=json.dumps([BUILDER_ROUTER]))
+        for job_id, tools, reads in seeds:
+            if tools is not None:
+                raw = json.dumps(reads) if isinstance(reads, list) else reads
+                _telemetry(connection, job_id, tools, skill_reads=raw)
+    _dispatcher, old = setup(tmp_path / "o4")
+    with sqlite3.connect(old.path) as connection:
+        telemetry.ensure_table(connection)
+        connection.execute(f"ALTER TABLE {telemetry.TABLE} DROP COLUMN skill_reads")
+
+    lines = render_metrics(build_metrics(queue.path), build_metrics(old.path)).splitlines()
+
+    rows = {
+        line.split()[0]: line.split()[1:]
+        for line in lines
+        if line.startswith(("router-", "skill"))
+    }
+    none, old_none = "unrecorded(no-skill-reads)", "unrecorded(no-skill_reads-column)"
+    assert rows == {
+        f"{metric}-{kind}": [value, old_none]
+        for kind, values in (
+            ("plan", (none, none, "1")),
+            ("build", ("0.50", "2.00", "0")),
+            ("fix", ("0.00", "0.00", "1")),
+            ("review", ("1.00", "1.00", "2")),
+        )
+        for metric, value in zip(
+            ("router-read-share", "skill-files-per-job", "skill-reads-unrecorded"), values
+        )
+    }
 
 
 def test_a_missing_or_corrupt_snapshot_is_an_eval_error(tmp_path: Path) -> None:
