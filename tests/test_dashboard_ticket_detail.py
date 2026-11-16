@@ -231,6 +231,10 @@ SIZES = r"""
 (sel => [...document.querySelectorAll(sel + ' ol.journey button')].map(b => [b.offsetWidth, b.offsetHeight]))"""
 
 
+def _journey_drawn(article: str) -> str:
+    return f"{PAINTED}('{article} canvas.jd-journey') > 0"
+
+
 def _eventually(chrome: _Chrome, expression: str) -> bool:
     deadline = time.monotonic() + 30
     while not (shown := bool(chrome.run(expression))) and time.monotonic() < deadline:
@@ -240,7 +244,7 @@ def _eventually(chrome: _Chrome, expression: str) -> bool:
 
 def _drawn(chrome: _Chrome, article: str) -> dict:
     _wait(chrome, f"document.querySelector('{article} canvas.jd-journey')")
-    journey = _eventually(chrome, f"{PAINTED}('{article} canvas.jd-journey') > 0")
+    journey = _eventually(chrome, _journey_drawn(article))
     buttons = _eventually(chrome, f"(s => s.length > 0 && s.every(([w, h]) => w > 0 && h > 0))({SIZES}('{article}'))")
     chrome.run(f"document.querySelector('{article} details.jd-chart').open = true")
     chart = _eventually(chrome, f"{PAINTED}('{article} canvas.jd-flowmap') > 0")
@@ -294,7 +298,7 @@ def test_broken_jobs_and_human_waits_hold_the_journey_still(tmp_path: Path) -> N
     try:
         for name in cases:
             _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/{name}/job.html#job-h-review",
-                  f"{PAINTED}('#job-h-review canvas.jd-journey') > 0")
+                  _journey_drawn("#job-h-review"))
             still[name] = chrome.run(STILL_PIXELS)
     finally:
         chrome.close()
@@ -403,7 +407,7 @@ def test_the_journey_names_each_visit_up_to_now_on_its_bar(tmp_path: Path) -> No
         chrome.send("Page.enable", chrome.session)
         chrome.send("Page.addScriptToEvaluateOnNewDocument", chrome.session, source=DRAWN_NAMES)
         _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/job.html#job-h-review",
-              "document.querySelector('#job-h-review canvas.jd-journey')")
+              _journey_drawn("#job-h-review"))
         time.sleep(3.4)
         drawn = set(chrome.run("[...new Set(window.journeyTexts)]"))
     finally:
@@ -422,7 +426,7 @@ def test_a_rebuild_keeps_the_picked_scale_pressed(tmp_path: Path) -> None:
     pressed = "[...document.querySelectorAll('#job-h-review [data-scale]')].map(b => b.dataset.scale + '=' + b.getAttribute('aria-pressed'))"
     try:
         _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
-              "document.querySelector('#job-h-review [data-scale=\"scale\"]')")
+              _journey_drawn("#job-h-review"))
         chrome.run("document.querySelector('#job-h-review [data-scale=\"scale\"]').click()")
         chrome.run("location.hash = '#job-r-cursor'")
         _wait(chrome, "document.querySelector('#job-r-cursor canvas.jd-journey')")
@@ -461,8 +465,7 @@ def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_
         chrome.send("Emulation.setEmulatedMedia", chrome.session,
                     features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
         _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
-              "document.querySelector('#job-h-review canvas.jd-journey')")
-        time.sleep(0.4)
+              _journey_drawn("#job-h-review"))
         even = chrome.run(canvas)
         chrome.run("document.querySelector('#job-h-review [data-scale=scale]').click()")
         time.sleep(0.2)
