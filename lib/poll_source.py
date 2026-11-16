@@ -1713,6 +1713,13 @@ class LivePollSource:
                 PollSourceError("Linear issue has no linked GitHub PR"),
             )
         factory = self._factory(project)
+        linear_project = issue.get("project")
+        factory = replace(
+            factory,
+            base_branch=project.base_for(
+                linear_project.get("id") if isinstance(linear_project, dict) else None
+            ),
+        )
         hold = (
             self._hold_inputs(project.repo, pr_number, factory, pull)
             if pr_number is not None
@@ -2319,6 +2326,7 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
     merged = pull.get("merged") is True
     mergeable = pull.get("mergeable")
     sizes = (pull.get("additions"), pull.get("deletions"))
+    base = pull.get("base")
     return {
         "merged": merged and fresh,
         "mergeable": mergeable if isinstance(mergeable, bool) else None,
@@ -2326,6 +2334,7 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
         "closed": pull.get("state") == "closed" and not merged,
         "draft": pull["draft"] if isinstance(pull.get("draft"), bool) else None,
         "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
+        "pr_base": _optional_string(base.get("ref")) if isinstance(base, dict) else None,
     }
 
 

@@ -571,7 +571,10 @@ other project of the repo keeps `factory_ref`. `factory.md` is still read
 from `factory_ref`, and its `base_branch` must still equal `factory_ref`.
 An unwatched ID, a branch that is not a plain name, an empty mapping, and
 the key on a project with no Linear ID are errors. `check-config` names the
-key an `orch.local.yml` overlay sets, never its IDs or branches.
+key an `orch.local.yml` overlay sets, never its IDs or branches. A PR whose
+live base differs from its ticket's base is flagged `base-mismatch` in
+needs-attention and starts no job, and a ship refuses it, until someone
+retargets the PR. The factory never retargets a PR itself.
 
 The Grok webhook fields also contain environment-variable names, not values.
 Delivery sends one JSON object containing the job fields and `logical_key`,

@@ -121,7 +121,9 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
-ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", "edited-comment", *FEEDER_ATTENTION_REASONS)
+ATTENTION_REASONS = (
+    "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", *FEEDER_ATTENTION_REASONS
+)
 
 HANDOFF_SAVINGS_DEFINITION = (
     "scripted = jobs for claude, codex or cursor that `orch wait` claimed and "

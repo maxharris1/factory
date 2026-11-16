@@ -11,6 +11,7 @@ from lib.dispatch.constants import FINISHED_STATES, WATCHED_STATES
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
     _acted_verdict,
+    _base_mismatch,
     _comment_order,
     _holds,
     _matching_head,
@@ -61,6 +62,15 @@ class CommentsMixin:
         if ticket.closed and self._watched(ticket):
             self._abandon_closed(ticket)
             return
+        mismatch = _base_mismatch(ticket)
+        if mismatch is not None:
+            with self._connect() as connection:
+                self._flag_attention_once(
+                    connection, ticket.repo, ticket.ticket_id, "base-mismatch", mismatch
+                )
+            return
+        if ticket.pr_base is not None:
+            self.clear_attention(ticket.repo, ticket.ticket_id, "base-mismatch")
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._cancel_answered_jobs(ticket)

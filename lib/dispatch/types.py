@@ -135,6 +135,7 @@ class TrackedTicket:
     draft: bool | None = None
     intake_label: str | None = None
     changed_lines: int | None = None
+    pr_base: str | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:

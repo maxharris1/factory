@@ -13,6 +13,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
+    _base_mismatch,
     _comment_order,
     _is_full_sha,
     _round_number,
@@ -939,6 +940,10 @@ class ReviewShipper:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
         self.dispatcher._observed(found[0])
         try:
-            return self.dispatcher._routed(found[0])
+            ticket = self.dispatcher._routed(found[0])
         except RouteError as error:
             raise ShipError(str(error)) from error
+        mismatch = _base_mismatch(ticket)
+        if mismatch is not None:
+            raise ShipError(mismatch)
+        return ticket
