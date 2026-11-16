@@ -829,7 +829,8 @@ def main(
                 attention=reader.attention(),
                 lane_limits=reader.lane_limits,
                 health=lambda now, queued: component_health.load_report(
-                    path, now, queued=queued, machines=machines, orch=orch
+                    path, now, queued=queued, machines=machines, orch=orch,
+                    uptime=component_health.read_uptime(clock),
                 ),
             )
         )
