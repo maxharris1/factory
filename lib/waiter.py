@@ -147,7 +147,15 @@ from lib.heal import Webhook
 from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
-from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
+from lib.queue import (
+    ClaimProofError,
+    Job,
+    Proof,
+    QueueError,
+    SQLiteJobQueue,
+    job_from_row,
+    require_proof,
+)
 from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
@@ -583,7 +591,7 @@ class Waiter:
             raise WaiterError(str(exc)) from exc
         self.alive = alive
         self.gone = gone
-        self._children: dict[str, Child] = {}
+        self._children: dict[str, tuple[Child, Proof | None]] = {}
         # job id -> (its job directory, run.log size when the run started),
         # for runs placed on a remote device
         self._remote: dict[str, tuple[Path, int]] = {}
@@ -766,6 +774,7 @@ class Waiter:
     def _start(self, job: Job, placement: Placement | None, proof: str) -> str | None:
         request = job.request
         label = f"job {job.id} ({request.repo}#{request.ticket_id} {request.action})"
+        claim = Proof(proof)
         device = (
             self.pool.config.device(placement.device) if placement is not None else None
         )
@@ -811,16 +820,16 @@ class Waiter:
                 if lock >= 0:
                     os.close(lock)
         except CheckoutLagging as exc:
-            self._fail_lagging(job, placement, factory_root, exc, label)
+            self._fail_lagging(job, placement, factory_root, exc, label, claim)
             return None
         except DeviceUnreachable as exc:
-            self._requeue_unreachable(job, exc, label)
+            self._requeue_unreachable(job, exc, label, claim)
             return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
-            self._fail(job)
+            self._fail(job, claim)
             return None
-        self._children[job.id] = child
+        self._children[job.id] = (child, claim)
         if remote:
             self._remote[job.id] = (job_dir, offset)
             try:
@@ -852,11 +861,12 @@ class Waiter:
         checkout: str | None,
         exc: CheckoutLagging,
         label: str,
+        proof: Proof,
     ) -> None:
         reason = str(exc)
         if placement is None or checkout is None:
             self.log(f"{label}: not started: {reason}; failed it for T6")
-            self._fail(job)
+            self._fail(job, proof)
             return
         claimer, _ = self._claimer
         lagging = placement.device
@@ -868,6 +878,7 @@ class Waiter:
         def write() -> tuple[str, str] | None:
             with self.queue.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job.id, proof)
                 now = self.queue.now()
                 device_sync.upsert(
                     connection,
@@ -894,22 +905,27 @@ class Waiter:
 
         try:
             result = retry_locked(write)
+        except ClaimProofError:
+            result = None
         except (QueueError, sqlite3.Error, OSError) as error:
             self.log(f"{label}: not started: {reason}; could not record it ({_one_line(error)})")
-            self._fail(job)
+            self._fail(job, proof)
             return
         if result is None:
             self.log(f"{label}: not started: {reason}; its claim changed, left alone")
             return
         self.log(f"{label}: not started: {reason}; failed for T6 to requeue after a backoff")
 
-    def _requeue_unreachable(self, job: Job, exc: DeviceUnreachable, label: str) -> None:
+    def _requeue_unreachable(
+        self, job: Job, exc: DeviceUnreachable, label: str, proof: Proof
+    ) -> None:
         reason = str(exc)
         claimer, _ = self._claimer
 
         def write() -> tuple[str, str] | None:
             with self.queue.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job.id, proof)
                 result = requeue_unreachable(
                     connection, job.id, device=exc.device, now=self.queue.now(), reason=reason,
                     slot_guard=UNSTARTED_CLAIM, slot_params=(self.recipient, claimer),
@@ -919,9 +935,11 @@ class Waiter:
 
         try:
             result = retry_locked(write)
+        except ClaimProofError:
+            result = None
         except (QueueError, sqlite3.Error, OSError) as error:
             self.log(f"{label}: not started: {reason}; could not record it ({_one_line(error)})")
-            self._fail(job)
+            self._fail(job, proof)
             return
         if result is None:
             self.log(f"{label}: not started: {reason}; its claim changed, left alone")
@@ -992,12 +1010,18 @@ class Waiter:
             if log_fd >= 0:
                 os.close(log_fd)
 
-    def _fail(self, job: Job) -> None:
+    def _fail(self, job: Job, proof: Proof) -> None:
         try:
             retry_locked(
-                lambda: self.queue.finish(job.id, owner=self.recipient, handoff_comment_id=None)
+                lambda: self.queue.finish(
+                    job.id, owner=self.recipient, handoff_comment_id=None, proof=proof
+                )
             )
-            retry_locked(lambda: self.pool.release(job.id, owner=self.recipient))
+            retry_locked(lambda: self.pool.release(job.id, owner=self.recipient, proof=proof))
+        except ClaimProofError:
+            self.log(
+                f"job {job.id}: its claim was released and claimed again; left to the later claim"
+            )
         except (QueueError, sqlite3.Error, OSError) as exc:
             self.log(
                 f"job {job.id}: could not fail it ({_one_line(exc)}); "
@@ -1050,7 +1074,7 @@ class Waiter:
             if state != ("running", self.recipient):
                 path.unlink(missing_ok=True)
                 continue
-            self._children[job_id] = AdoptedRun(pid, start, job_dir, self.gone)
+            self._children[job_id] = (AdoptedRun(pid, start, job_dir, self.gone), None)
             self._remote[job_id] = (job_dir, offset)
             self.log(f"job {job_id}: adopted the remote run (pid {pid}) of an earlier waiter")
         self._recovered = True
@@ -1063,16 +1087,16 @@ class Waiter:
         return None if row is None else (str(row[0]), str(row[1]))
 
     def _reap(self) -> None:
-        for job_id, child in list(self._children.items()):
+        for job_id, (child, proof) in list(self._children.items()):
             code = child.poll()
             if code is not None:
                 del self._children[job_id]
                 self.log(f"job {job_id}: orch job run exited {code}")
                 remote = self._remote.pop(job_id, None)
                 if remote is not None:
-                    self._finish_remote(job_id, remote[0], code, offset=remote[1])
+                    self._finish_remote(job_id, remote[0], code, proof, offset=remote[1])
                 else:
-                    self._settle(job_id, child.pid, code)
+                    self._settle(job_id, child.pid, code, proof)
         self._remove_scratch_once_workers_exit()
 
     def _remove_scratch_once_workers_exit(self) -> None:
@@ -1100,7 +1124,9 @@ class Waiter:
                 failures[job_id] = failure
         self._scratch_failures = failures
 
-    def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
+    def _finish_remote(
+        self, job_id: str, job_dir: Path, code: int, proof: Proof | None, *, offset: int = 0
+    ) -> None:
         """`orch job done` on the box for a remote run, from its marker line.
 
         Done needs both: `orch job run` exited 0, and the marker that decides
@@ -1121,7 +1147,7 @@ class Waiter:
             tail = ""
         marker = handoff_marker(tail)
         handoff = None if code != 0 or marker in (None, "failed") else marker
-        refused = None if handoff is None else self._refused_handoff(job_id, handoff)
+        refused = None if handoff is None else self._refused_handoff(job_id, handoff, proof)
         if refused is not None:
             handoff = None
         if handoff is None:
@@ -1141,7 +1167,9 @@ class Waiter:
                 return
         try:
             job = retry_locked(
-                lambda: self.queue.finish(job_id, owner=self.recipient, handoff_comment_id=handoff)
+                lambda: self.queue.finish(
+                    job_id, owner=self.recipient, handoff_comment_id=handoff, proof=proof
+                )
             )
         except QueueError as exc:
             self.log(f"job {job_id}: not finished from the box ({_one_line(exc)})")
@@ -1166,7 +1194,7 @@ class Waiter:
             how = f"failed ({marker or 'no final ORCH-HANDOFF line'})"
         self.log(f"job {job_id}: ran orch job done on the box: {job.state}, {how}")
 
-    def _refused_handoff(self, job_id: str, comment_id: str) -> str | None:
+    def _refused_handoff(self, job_id: str, comment_id: str, proof: Proof | None) -> str | None:
         """Why a remote marker's handoff does not complete its job, or None
         when it fits (#192): T17a's checks (lib/handoff_check.py), as `orch
         job done --handoff` runs them on the box. A handoff that does not fit
@@ -1194,7 +1222,8 @@ class Waiter:
             detail = "; ".join(found)
             retry_locked(
                 lambda: self.queue.record_invalid_handoff(
-                    job_id, owner=self.recipient, comment_id=comment_id, detail=detail
+                    job_id, owner=self.recipient, comment_id=comment_id, detail=detail,
+                    proof=proof,
                 )
             )
         except (ReadError, ValueError, QueueError, sqlite3.Error, OSError) as exc:
@@ -1211,7 +1240,7 @@ class Waiter:
         except OSError as exc:
             self.log(f"could not remove {job_dir / REMOTE_RECORD}: {_one_line(exc)}")
 
-    def _settle(self, job_id: str, runner: int, code: int) -> None:
+    def _settle(self, job_id: str, runner: int, code: int, proof: Proof | None) -> None:
         """A run that ended while its job still runs hands the job to T6 now.
 
         `orch job run` does this itself when its command exits without `orch
@@ -1263,8 +1292,15 @@ class Waiter:
             return
         try:
             retry_locked(
-                lambda: self.queue.finish(job_id, owner=self.recipient, handoff_comment_id=None)
+                lambda: self.queue.finish(
+                    job_id, owner=self.recipient, handoff_comment_id=None, proof=proof
+                )
             )
+        except ClaimProofError:
+            self.log(
+                f"job {job_id}: its claim was released and claimed again; left to the later claim"
+            )
+            return
         except QueueError:
             return  # it was finished between the read and the write
         except (sqlite3.Error, OSError) as exc:
@@ -1283,7 +1319,7 @@ class Waiter:
         if any(pid is not None and self.alive(pid, start) for pid, start in workers):
             return  # the DeviceMonitor frees it once the worker is gone
         try:
-            retry_locked(lambda: self.pool.release(job_id, owner=self.recipient))
+            retry_locked(lambda: self.pool.release(job_id, owner=self.recipient, proof=proof))
         except (QueueError, sqlite3.Error, OSError) as exc:
             self.log(f"job {job_id}: could not free its slot ({_one_line(exc)})")
 

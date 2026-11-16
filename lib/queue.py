@@ -1017,6 +1017,25 @@ def require_proof(connection: sqlite3.Connection, job_id: str, proof: Proof | No
     row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if row is None or row["state"] != "running":
         return
+    _require_claim(connection, row, proof)
+
+
+def require_proof_while_slot_held(
+    connection: sqlite3.Connection, job_id: str, proof: Proof | None
+) -> None:
+    if proof is None or not _has_table(connection, SLOTS_TABLE):
+        return
+    row = connection.execute(
+        f"SELECT jobs.* FROM jobs JOIN {SLOTS_TABLE} ON {SLOTS_TABLE}.job_id = jobs.id "
+        "WHERE jobs.id = ?",
+        (job_id,),
+    ).fetchone()
+    if row is not None:
+        _require_claim(connection, row, proof)
+
+
+def _require_claim(connection: sqlite3.Connection, row: sqlite3.Row, proof: Proof) -> None:
+    job_id = row["id"]
     if job_token.matches(proof.token, row["claim_token_hash"]):
         return
     if _has_table(connection, SLOTS_TABLE) and "run_token_hash" in _columns(
@@ -1028,7 +1047,7 @@ def require_proof(connection: sqlite3.Connection, job_id: str, proof: Proof | No
         if slot is not None and job_token.matches(proof.token, slot["run_token_hash"]):
             return
     raise ClaimProofError(
-        f"job {job_id} is running under a claim this process's ORCH_JOB_PROOF does "
+        f"job {job_id} is held by a claim this process's ORCH_JOB_PROOF does "
         "not prove (released and claimed again, or never this process's); nothing changed"
     )
 

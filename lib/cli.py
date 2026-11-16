@@ -1888,6 +1888,7 @@ def _job_run_command(argv: list[str]) -> int:
                 setup=setup,
                 teardown=teardown,
                 started=placed.started,
+                open_gate=placed.open_gate,
                 output=session.consume if session is not None else None,
                 execed=placed.execed,
                 budget=budget,

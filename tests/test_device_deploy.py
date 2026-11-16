@@ -17,14 +17,13 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from lib import device_deploy, device_sync, skill_preflight
+from lib import device_deploy, device_sync, job_token, skill_preflight
 from lib.device_pool import DevicePool
 from lib.heal import Webhook
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
-from lib.wait import claim_once
 from lib.waiter import Waiter
 
 ORCH_SCRIPT = (
@@ -333,7 +332,8 @@ def test_a_lagging_preflight_during_a_busy_deploy_keeps_the_device_blocked(
         queue.enqueue(JobRequest(repo="o/r", ticket_id=harness, action="build",
                                  recipient=harness, source_comment_id=harness,
                                  timeout_seconds=60), dedupe_key=harness)
-    job, placement, proof = claim_once(queue, "claude", pool, autostart=(12345, None))
+    proof, token_hash = job_token.mint()
+    job, placement = pool.claim("claude", autostart=(12345, None), token_hash=token_hash)
     deploying = threading.Event()
     resume = threading.Event()
 
