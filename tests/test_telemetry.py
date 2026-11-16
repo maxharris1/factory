@@ -23,11 +23,13 @@ from pathlib import Path
 import pytest
 
 from lib import job_run, telemetry, waiter
+from lib.pstack_pin import load_pin
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.telemetry import (
     EventLog,
     Scrubber,
     Session,
+    SkillReads,
     Summary,
     count_tests,
     exit_reason,
@@ -327,7 +329,13 @@ def test_an_unwritable_raw_log_is_one_line_and_never_stops_the_run(tmp_path: Pat
 
 
 def _session(
-    tmp_path: Path, *, connect=None, max_bytes: int = telemetry.MAX_LOG_BYTES, environ=None, worker_env=False
+    tmp_path: Path,
+    *,
+    connect=None,
+    max_bytes: int = telemetry.MAX_LOG_BYTES,
+    environ=None,
+    worker_env=False,
+    skills=None,
 ):
     db = tmp_path / "orch.db"
     messages: list[str] = []
@@ -346,6 +354,7 @@ def _session(
         stdout=out,
         clock=lambda: float(next(clock)),
         worker_env=worker_env,
+        skills=skills,
     )
     return session, db, out, messages
 
@@ -1669,3 +1678,123 @@ def test_cli_job_run_writes_the_live_run_and_counters_only_writes_none(tmp_path:
     no_secret(rows["on"])
     assert all(rows["counters"][name] is None for name in LIVE_RUN)
     assert rows["counters"]["events"] == rows["on"]["events"] == 31
+    assert rows["on"]["skill_reads"] == rows["counters"]["skill_reads"] == "[]"
+
+
+# --- pinned skill reads, from the harness's own tool calls (#505) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "name, root, expected",
+    [
+        (
+            "claude_skill_reads_stream.jsonl",
+            "/home/claude-bot/factory/skills",
+            [
+                "cursor-team-kit/deslop/SKILL.md",
+                "factory/factory-builder/SKILL.md",
+                "pstack/agents/comment-sicko.md",
+                "pstack/agents/poteto-agent.md",
+                "pstack/docs/harness/claude-code.md",
+                "pstack/skills/figure-it-out/SKILL.md",
+                "pstack/skills/no-comments/SKILL.md",
+                "pstack/skills/poteto-mode/SKILL.md",
+                "pstack/skills/poteto-mode/playbooks/feature.md",
+                "pstack/skills/poteto-mode/playbooks/opening-a-pr.md",
+                "pstack/skills/principle-model-the-domain/SKILL.md",
+                "pstack/skills/principle-prove-it-works/SKILL.md",
+            ],
+        ),
+        (
+            "codex_skill_reads_exec.jsonl",
+            "/Users/codex-bot/factory/skills",
+            [
+                "factory/factory-reviewer/SKILL.md",
+                "factory/harness/codex.md",
+                "pstack/skills/arena/SKILL.md",
+                "pstack/skills/blast-radius/SKILL.md",
+                "pstack/skills/in-your-own-words/SKILL.md",
+                "pstack/skills/interrogate/SKILL.md",
+                "pstack/skills/poteto-mode/SKILL.md",
+                "pstack/skills/principle-prove-it-works/SKILL.md",
+                "pstack/skills/unslop/SKILL.md",
+            ],
+        ),
+    ],
+)
+def test_a_recorded_session_stores_the_pinned_skill_files_it_read(
+    tmp_path: Path, name: str, root: str, expected: list[str]
+) -> None:
+    session, db, _, messages = _session(tmp_path, skills=SkillReads.pinned(root, load_pin(ROOT)))
+    session.consume(io.BytesIO("".join(line + "\n" for line in fixture_lines(name)).encode()))
+    session.finish(0)
+    assert json.loads(_row(db)["skill_reads"]) == expected
+    assert messages == []
+
+
+SKILLS = "/r/factory/skills"
+LOCKED = frozenset({"pstack/skills/arena/SKILL.md", "pstack/skills/unslop/SKILL.md", "factory/factory-builder/SKILL.md"})
+
+
+def _exec(command: str) -> dict:
+    return {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command}}
+
+
+@pytest.mark.parametrize(
+    "event, expected",
+    [
+        (_use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/arena/SKILL.md"}), ["pstack/skills/arena/SKILL.md"]),
+        (_use("t1", "Read", {"file_path": "/elsewhere/skills/pstack/skills/arena/SKILL.md"}), []),
+        (_use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/arena/notes.md"}), []),
+        (_use("t1", "Skill", {"skill": "pstack:unslop"}), ["pstack/skills/unslop/SKILL.md"]),
+        (_use("t1", "Skill", {"skill": "claude-api"}), []),
+        (_use("t1", "Bash", {"command": f"test -f {SKILLS}/pstack/skills/arena/SKILL.md && ls {SKILLS}/pstack"}), []),
+        (_use("t1", "Bash", {"command": f"grep -n x {SKILLS}/pstack/skills/arena/SKILL.md | wc -l"}), []),
+        (_use("t1", "Bash", {"command": f"sed -n 1,9p {SKILLS}/pstack/skills/arena/SKILL.md"}), ["pstack/skills/arena/SKILL.md"]),
+        (_use("t1", "Bash", {"command": f"cd {SKILLS}/pstack/skills/unslop; head -n 3 ../arena/SKILL.md"}), ["pstack/skills/arena/SKILL.md"]),
+        (_use("t1", "Bash", {"command": "cat pstack/skills/arena/SKILL.md"}), []),
+        (_use("t1", "Bash", {"command": f"cat '{SKILLS}/pstack/skills/arena/SKILL.md"}), []),
+        (_exec(f"/bin/zsh -lc 'cd {SKILLS}\ncat factory/factory-builder/SKILL.md > /tmp/out'"), ["factory/factory-builder/SKILL.md"]),
+        (_exec(f"bash -lc 'cd $HOME && cat {SKILLS}/pstack/skills/*/SKILL.md'"), []),
+    ],
+    ids=[
+        "read", "read-outside-root", "read-not-locked", "skill-tool", "skill-not-locked", "test-f-probe",
+        "grep-is-no-read", "sed", "cd-base", "relative-without-cd", "unbalanced-quote",
+        "codex-multi-line", "codex-glob",
+    ],
+)
+def test_only_reads_of_locked_files_under_the_skills_tree_count(event: dict, expected: list[str]) -> None:
+    summary = _feed(Summary("claude", Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), event)
+    assert json.loads(summary.row()["skill_reads"]) == expected
+
+
+def test_skill_reads_are_null_without_a_tree_and_empty_when_nothing_was_read(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    messages: list[str] = []
+    kwargs = dict(
+        connect=lambda: sqlite3.connect(db),
+        database=db,
+        bot="claude-bot",
+        repo="acme/widgets",
+        command=["claude", "-p"],
+        log=messages.append,
+        environ={"ORCH_TELEMETRY": "counters", "ORCH_JOB_STATE_DIR": str(tmp_path / "state")},
+        stdout=io.BytesIO(),
+    )
+    read = _use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/poteto-mode/SKILL.md"})
+    for job, root, event in (("none", None, read), ("tree", SKILLS, read), ("nothing", SKILLS, {"type": "turn.started"})):
+        session = start_session(job_id=job, skills_root=root, **kwargs)
+        session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
+        session.finish(0)
+    monkeypatch.setattr(telemetry, "FACTORY_CHECKOUT", tmp_path)
+    session = start_session(job_id="no-lock", skills_root=SKILLS, **kwargs)
+    session.finish(0)
+    assert _row(db, "none")["skill_reads"] is None
+    assert _row(db, "tree")["skill_reads"] == '["pstack/skills/poteto-mode/SKILL.md"]'
+    assert _row(db, "nothing")["skill_reads"] == "[]"
+    assert _row(db, "no-lock")["skill_reads"] is None
+    assert [line for line in messages if "skill" in line] == [
+        "telemetry: skill reads not recorded (skills.lock: FileNotFoundError)"
+    ]
