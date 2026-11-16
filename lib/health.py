@@ -73,6 +73,15 @@ or stale) waiter for its bot on any device eligible for its harness as "no
 waiter for <harness>". The dashboard's Health tab, its needs-attention
 line, `orch status` and `orch health` all read the same report.
 
+Needs attention (#581): a configured tunnel down longer than
+`linear_webhook.tunnel_alert_minutes` is a "tunnel-down" item, derived on
+every read, so it stays while the tunnel is down and is gone on the first
+read that finds it up. It is down since its last success; while the tunnel
+loop holds, since the held record was written if that is earlier; with
+neither, since its first check. A tunnel with none of these raises no item.
+The item makes `orch health` exit 3 and is `needs_attention` in its JSON,
+which the hourly momentum check reads.
+
 Devices (#297): the report also lists each factory checkout's sync state,
 the box's own (HEAD against origin/main, `box_sync`) and every remote
 target's from orch.db's `device_sync` table (lib/device_sync.py). A remote
@@ -137,6 +146,7 @@ TUNNEL_TIMEOUT = 10.0
 TUNNEL_SEEN = 405
 TUNNEL_HELD = "linear-webhook-tunnel.held"
 PORT_HELD = "port held by another owner"
+TUNNEL_DOWN = "tunnel-down"
 _HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]*)")
 MIN_INTERVAL = 5.0
 MAX_INTERVAL = EVERY_MINUTES_MAX * 60.0
@@ -1170,6 +1180,17 @@ def box_sync(device: str, root: Path = ROOT) -> DeviceSync | None:
 
 
 @dataclass(frozen=True)
+class Attention:
+    """A needs-attention item derived from the report: a tunnel down past its alert."""
+
+    kind: str
+    label: str
+    reason: str
+    since: float
+    anchor: str
+
+
+@dataclass(frozen=True)
 class HealthReport:
     known: bool
     components: tuple[Component, ...] = ()
@@ -1178,6 +1199,7 @@ class HealthReport:
     code_version: str = "unknown"
     devices: tuple[DeviceSync, ...] = ()
     storage: tuple[Storage, ...] = ()
+    attention: tuple[Attention, ...] = ()
 
     @property
     def down(self) -> tuple[Component, ...]:
@@ -1318,6 +1340,8 @@ def build_report(
     checkout_version: str = "unknown",
     devices: Sequence[DeviceSync] = (),
     tunnel_held: str | None = None,
+    tunnel_held_since: float | None = None,
+    tunnel_alert_seconds: float | None = None,
     uptime: Uptime | None = None,
 ) -> HealthReport:
     """Classify every row and flag queued jobs no live waiter can take.
@@ -1328,7 +1352,9 @@ def build_report(
     on the box); `checkout_version` is the checkout's commit: a poller,
     waiter or listener whose row names another known commit runs stale
     code; `devices` are the factory checkouts' sync states; `tunnel_held`
-    is the `PORT on HOST` the tunnel loop gave up on, if any; `uptime` is
+    is the `PORT on HOST` the tunnel loop gave up on, if any, and
+    `tunnel_held_since` when it wrote that record; a tunnel down longer than
+    `tunnel_alert_seconds` needs attention (None: never); `uptime` is
     the reader's boot and monotonic clock at `now` (`_age`)."""
     checkout = checkout_version
     checkouts = tuple(devices)
@@ -1383,8 +1409,22 @@ def build_report(
         )
         if not live:
             flags.append(NoWaiter(harness, bot, tuple(jobs[harness])))
+    attention = []
+    for c in components:
+        if (tunnel_alert_seconds is None or c.component != TUNNEL or c.state != DOWN
+                or not c.configured):
+            continue
+        since = _down_since(c, tunnel_held_since)
+        if since is not None and now - since > tunnel_alert_seconds:
+            attention.append(Attention(TUNNEL_DOWN, c.label, c.reason, since, c.anchor))
     return HealthReport(known=True, components=tuple(components), no_waiter=tuple(flags),
-                        code_version=checkout, devices=checkouts)
+                        code_version=checkout, devices=checkouts, attention=tuple(attention))
+
+
+def _down_since(c: Component, held_since: float | None) -> float | None:
+    if held_since is not None:
+        return held_since if c.last_seen is None else min(held_since, c.last_seen)
+    return c.last_seen if c.last_seen is not None else c.started_at
 
 
 def _stale(component: str, version: str, checkout: str) -> bool:
@@ -1413,20 +1453,32 @@ def load_report(
     except (sqlite3.Error, OSError) as exc:
         return HealthReport(known=False, error=f"cannot read {health_path(db).name}: {type(exc).__name__}",
                             code_version=factory_version(), devices=devices)
+    held, held_since = _read_held(db) or (None, None)
+    webhook = orch.linear_webhook if orch is not None else None
     return build_report(rows, now, queued=queued, eligible=eligible_devices(machines),
                         expected=expected_components(machines, orch),
                         checkout_version=factory_version(), devices=devices,
-                        tunnel_held=read_tunnel_held(db), uptime=uptime)
+                        tunnel_held=held, tunnel_held_since=held_since,
+                        tunnel_alert_seconds=None if webhook is None else webhook.tunnel_alert_minutes * 60,
+                        uptime=uptime)
 
 
 def read_tunnel_held(db: Path) -> str | None:
     """`PORT on HOST` from the tunnel loop's held record beside orch.db, if any."""
+    held = _read_held(db)
+    return held[0] if held else None
+
+
+def _read_held(db: Path) -> tuple[str, float] | None:
+    """(`PORT on HOST`, when the record was written) from the held record, if any."""
     try:
-        text = (db.parent / TUNNEL_HELD).read_text(encoding="utf-8").strip()
+        with open(db.parent / TUNNEL_HELD, encoding="utf-8") as record:
+            text = record.read().strip()
+            written = os.fstat(record.fileno()).st_mtime
     except OSError:
         return None
     match = _HELD_RECORD.fullmatch(text)
-    return f"{match[1]} on {match[2]}" if match else None
+    return (f"{match[1]} on {match[2]}", written) if match else None
 
 
 def read_device_sync(db: Path) -> list[device_sync.Row]:
@@ -1622,6 +1674,8 @@ def render_lines(report: HealthReport, now: float) -> list[str]:
     for flag in report.no_waiter:
         count = len(flag.jobs)
         lines.append(f"  no waiter for {flag.harness}: {count} queued job{'' if count == 1 else 's'}")
+    for item in report.attention:
+        lines.append(f"  needs attention: {item.label} down {age_text(now - item.since)} ({item.reason})")
     return lines + storage + devices
 
 
@@ -1685,6 +1739,12 @@ def report_json(report: HealthReport, now: float) -> dict:
             for d in report.devices
         ],
         "devices_out_of_sync": len(report.devices_out_of_sync),
+        "needs_attention": [
+            {"kind": a.kind, "label": a.label, "reason": a.reason, "down_since_et": et(a.since),
+             "down_seconds": int(max(0.0, now - a.since)), "anchor": a.anchor}
+            for a in report.attention
+        ],
+        "attention": len(report.attention),
         "storage": [
             {"device": s.device, "path": s.path, "disk_percent": s.disk,
              "inode_percent": s.inodes, "alert": s.alert, "error": s.error}
@@ -1790,7 +1850,7 @@ def _report(argv: list[str], out: TextIO, clock: Callable[[], float],
         print("\n".join(render_lines(report, now)), file=out)
     if report.error is not None:
         return 1
-    return 3 if report.down or report.no_waiter or report.storage_alerts else 0
+    return 3 if report.down or report.no_waiter or report.storage_alerts or report.attention else 0
 
 
 def _orch(path: Path | None) -> OrchConfig | None:

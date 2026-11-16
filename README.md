@@ -569,6 +569,7 @@ linear_webhook:
   path: /linear-webhook           # default
   secret_file: ~/.config/factory/linear-webhook.secret
   reconcile_seconds: 900          # 60 to 3600, default 900
+  tunnel_alert_minutes: 30        # tunnel down this long needs attention (README "Health")
 ```
 
 `orch linear-webhook serve` is a small stdlib HTTP server. It opens the
@@ -1278,6 +1279,20 @@ tab mark it `stale code (running <commit>, checkout <commit>)`, and the
 header counts it (`Health (9 components, 0 down, 1 stale code)`). It is not
 down and needs no attention: self-heal restarts it. `orch health --json`
 adds `code_version`, and `stale_code` and `started_at` for each component.
+
+**Needs attention** (issue #581): a tunnel down longer than
+`linear_webhook.tunnel_alert_minutes` (default 30) is a `tunnel-down` item.
+The tunnel is down since it was last seen; while its port is held, since the
+held record was written if that is earlier; with neither, since its first
+check. The item is worked out again on every read and is not stored, so it
+stays while the tunnel is down and is gone on the first read that finds it
+up. `orch health` prints `  needs attention: tunnel @ box down 22h (port held
+by another owner: 8787 on pc-wsl-cursor-bot)` and exits 3. `orch health
+--json` lists it in `needs_attention` (`kind`, `label`, `reason`,
+`down_since_et`, `down_seconds`, `anchor`) and counts it in `attention`.
+`needs_attention` is the field the hourly momentum check surfaces. The item
+changes no component's state or reason, so self-heal still skips a held
+tunnel after its one alert.
 
 ## Self-heal
 

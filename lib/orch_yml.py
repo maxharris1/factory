@@ -49,6 +49,7 @@ DEFAULT_LINEAR_WEBHOOK_PATH = "/linear-webhook"
 DEFAULT_LINEAR_RECONCILE_SECONDS = 900
 LINEAR_RECONCILE_MIN_SECONDS = 60
 LINEAR_RECONCILE_MAX_SECONDS = 3600
+DEFAULT_TUNNEL_ALERT_MINUTES = 30
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -85,7 +86,9 @@ APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
 _USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
 _JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
-_LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds", "public_url"}
+_LINEAR_WEBHOOK_KEYS = {
+    "bind", "path", "secret_file", "reconcile_seconds", "public_url", "tunnel_alert_minutes",
+}
 _PROJECT_KEYS = {
     "repo",
     "job_timeout",
@@ -171,7 +174,8 @@ class LinearWebhookConfig:
     search and rereads every tracked ticket, so a missed webhook costs at
     most one interval. public_url is the Funnel URL of `path` that the
     listener's tunnel heartbeat GETs (issue #92); without it the tunnel
-    shows down.
+    shows down. A tunnel down longer than tunnel_alert_minutes is a
+    needs-attention item in `orch health` (issue #581).
     """
 
     host: str
@@ -180,6 +184,7 @@ class LinearWebhookConfig:
     path: str = DEFAULT_LINEAR_WEBHOOK_PATH
     reconcile_seconds: int = DEFAULT_LINEAR_RECONCILE_SECONDS
     public_url: str | None = None
+    tunnel_alert_minutes: int = DEFAULT_TUNNEL_ALERT_MINUTES
 
 
 @dataclass(frozen=True)
@@ -928,6 +933,11 @@ def _linear_webhook(
                 f"{LINEAR_RECONCILE_MAX_SECONDS}",
             )
         )
+    alert = value.get("tunnel_alert_minutes", DEFAULT_TUNNEL_ALERT_MINUTES)
+    if not is_strict_int(alert) or alert < 1:
+        findings.append(
+            Finding("error", "linear_webhook.tunnel_alert_minutes must be a positive integer")
+        )
     public_url = value.get("public_url")
     if public_url is not None and not _public_url_ok(public_url, path):
         findings.append(
@@ -946,6 +956,7 @@ def _linear_webhook(
         path=str(path),
         reconcile_seconds=int(reconcile),
         public_url=public_url,
+        tunnel_alert_minutes=int(alert),
     )
 
 
