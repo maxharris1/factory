@@ -130,6 +130,8 @@ class ReadyMixin:
             ticket, comment, head, review_round
         ):
             return True, "stale-ready-verdict"
+        if state in ("fixing", "awaiting-ok") and self._held_approve_covers(ticket, head):
+            return True, "held-ci-fix-ready"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         pending = result is None or result.status == "pending"
         covering = self._red_ci_approval_covering(ticket, head)

@@ -15,6 +15,7 @@ from tests.test_dispatcher import ANSWERS, QUESTIONS, RETRY, comment, fail_once_
 from tests.test_rounds_and_caps import HEADS, Flow
 
 GO_URL = "https://github.com/owner/repo/pull/42#issuecomment-501"
+PLAN_URL = "https://github.com/owner/repo/pull/42#issuecomment-5"
 VERDICT_URL = "https://github.com/owner/repo/pull/42#issuecomment-777"
 FINDING = {
     "id": "f-2",
@@ -181,6 +182,35 @@ def test_resume_quotes_max_answer():
     assert "Max's answers" in task
     assert GO_URL in task
     assert "Use the v2 table." in task
+
+
+def test_a_build_resumed_after_answers_keeps_its_plan_and_quotes_the_answer():
+    action, attempt, head, extra = RESUME
+    planned = dict(
+        extra,
+        plan_text="Add the v2 table, then the button.",
+        evidence=_evidence(
+            instructions=_instructions(
+                cause="answers", prose="Use the v2 table.", url=GO_URL, prior_instruction=PLAN_URL
+            )
+        ),
+    )
+    brief = _render(action, attempt, head, planned)
+    task = _task(brief)
+    assert f"The plan handoff is quoted in the Plan section below ({PLAN_URL}): it is the plan." in task
+    assert "## Plan\n" in brief
+    assert "Add the v2 table, then the button." in brief.split("## Plan\n", 1)[1]
+    assert "Use the v2 table." in task
+    assert "No plan handoff comment is linked" not in task
+
+
+@pytest.mark.parametrize("variant", [RESUME, BUILD], ids=["resume-without-prior-plan", "build-without-plan"])
+def test_a_build_without_a_plan_builds_from_the_ticket(variant):
+    brief = _render(*variant)
+    task = _task(brief)
+    assert "No plan handoff comment is linked: build from the ticket." in task
+    assert "Read the plan handoff comment at" not in task
+    assert "## Plan\n" not in brief
 
 
 def test_resume_without_prose_points_at_the_comment():

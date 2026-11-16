@@ -300,11 +300,14 @@ class RetryMixin:
             )
         else:
             action = "build"
+            prior = self._resumed_step_detail(connection, ticket, comment, action, None)
+            plan_text = (prior or {}).get("plan_text")
             detail = self._job_detail(
                 ticket,
                 action=action,
                 round_number=round_number,
                 cap=self._effective_cap(ticket, connection),
+                plan_text=plan_text if isinstance(plan_text, str) and plan_text else None,
                 resume=True,
             )
         return JobRequest(

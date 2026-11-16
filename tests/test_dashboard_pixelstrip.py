@@ -523,7 +523,7 @@ def test_broken_states_map_to_a_still_effect(state: str) -> None:
 
 def test_unknown_states_and_actions_never_animate() -> None:
     assert page.PX_EFFECTS[page.PX_STATE["unknown"]["effect"]] is False
-    row = {"job_state": "running", "action": "update-from-main", "overdue": False}
+    row = {"job_state": "running", "action": "no-such-action", "overdue": False}
     assert page.px_state(row) == "unknown"
     assert page.px_state({"job_state": "zombie", "action": "build"}) == "unknown"
     assert 'data-px="off"' in page.px_strip("x", state="no-such-state")

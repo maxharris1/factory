@@ -688,3 +688,19 @@ def test_remembering_verdict_heads_keeps_handled_comments_four_columns_wide(
             "INSERT INTO handled_comments VALUES ('owner/repo', '9', 'c9', 'handled')"
         )
     assert columns == ["repo", "ticket_id", "comment_id", "outcome"]
+
+
+def test_a_remembered_verdict_keeps_the_changed_lines_the_poll_saw(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    head = sha(1)
+    pr = built_with_ci_pending(board, head)
+    snapshot = board.snapshot
+    board.snapshot = lambda pr, **kwargs: replace(snapshot(pr, **kwargs), changed_lines=320)
+    reviewed_at_pending_ci(board, pr, head)
+    board.post(pr, "approve-sized", APPROVE.format(round="1/3", head=head), "codex-login")
+    board.poll()
+    with board.queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT comment_id, changed_lines FROM verdict_heads"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [("approve-sized", 320)]
