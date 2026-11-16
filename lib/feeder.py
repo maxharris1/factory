@@ -396,7 +396,7 @@ class IntakeIssue:
     # Linear blocks relations naming this issue: (blocker identifier, state type).
     blocked_by: tuple[tuple[str, str | None], ...] = ()
     linear_project: str | None = None
-    assignee: str | None = None  # the assignee's Linear user id
+    assignee: str | None = None
 
     @property
     def urgent(self) -> bool:
@@ -562,7 +562,6 @@ def intake_trusted(config: OrchConfig, project: Project) -> frozenset[str]:
 
 
 def assignee_allowed(project: Project, issue: IntakeIssue) -> bool:
-    """Whether the project's linear_assignees lets the feeder take `issue`."""
     allowlists = project.intake.linear_assignees if project.intake is not None else {}
     if not allowlists:
         return True

@@ -506,8 +506,8 @@ class LinearIntakeClient:
             nodes.extend(
                 self._intake_nodes(LINEAR_INTAKE_QUERY, {"projects": open_projects, "state": state})
             )
-        # One query per allowlisted project, so its allowlist never filters a sibling.
-        for project_id in sorted(project_id for project_id in project_ids if project_id in assignees):
+        allowlisted_projects = sorted(project_id for project_id in project_ids if project_id in assignees)
+        for project_id in allowlisted_projects:
             nodes.extend(
                 self._intake_nodes(
                     LINEAR_ASSIGNED_INTAKE_QUERY,
@@ -563,7 +563,6 @@ class LinearIntakeClient:
         return found
 
     def _intake_nodes(self, query: str, variables: dict[str, object]) -> list[object]:
-        """Every page of one intake query's issue nodes."""
         nodes: list[object] = []
         after: str | None = None
         for _ in range(LINEAR_INTAKE_MAX_PAGES):

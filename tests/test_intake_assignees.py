@@ -1,5 +1,3 @@
-"""Per-Linear-project assignee allowlist for feeder intake (issue #583)."""
-
 from __future__ import annotations
 
 import subprocess
@@ -70,9 +68,6 @@ def feeder_for(tmp_path: Path, *issues, orch: str = ALLOWLISTED):
 
 def fed(report) -> list[str]:
     return [ref.ticket_id for ref in report.fed]
-
-
-# --- ac-5: config ------------------------------------------------------------
 
 
 def test_the_allowlist_is_a_mapping_of_project_id_to_user_ids(tmp_path: Path) -> None:
@@ -161,9 +156,6 @@ def test_check_config_names_the_allowlist_overlay_and_prints_no_ids(
     assert "secret-project" not in output and OURS not in output
 
 
-# --- ac-1, ac-2, ac-3: the feeder ----------------------------------------------
-
-
 def test_an_issue_assigned_outside_the_allowlist_is_invisible(tmp_path: Path) -> None:
     broken = replace(in_project("AUT-8", "proj-1", THEIRS), body="No template at all.")
     feeder, github, _ = feeder_for(tmp_path, in_project("AUT-7", "proj-1", THEIRS), broken)
@@ -248,9 +240,6 @@ def test_an_issue_from_an_unwatched_project_is_dropped_when_an_allowlist_is_set(
 
     assert feeder.feed_once().fed == ()
     assert rows(tmp_path / "orch.db") == {}
-
-
-# --- ac-4: the GraphQL intake filter ---------------------------------------------
 
 
 def test_an_allowlisted_project_is_queried_with_its_assignees_alone() -> None:
