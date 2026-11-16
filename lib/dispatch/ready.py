@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from lib.dispatch.constants import CI_WAIT_REASONS
+from lib.dispatch.constants import CI_SILENT_REASON, CI_SILENT_SECONDS, CI_WAIT_REASONS
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
     _acted_verdict,
@@ -163,10 +163,10 @@ class ReadyMixin:
                 return False, "approved-ci-pending"
             if not ticket.factory.start_before_ci:
                 return False, "ci-pending"
-        elif result.status == "success" and covering is not None:
+        elif result.clears and covering is not None:
             handled, shipped = self._ship_covered(ticket, *covering, head)
             return handled, f"approval-covers:{shipped}"
-        elif result.status == "success" and self.feeder is not None:
+        elif result.clears and self.feeder is not None:
             if self.feeder.hold_stacked_review(ticket, head):
                 return False, "stacked-held"
         if reentry is not None:
@@ -174,10 +174,12 @@ class ReadyMixin:
                 return True, "stale-ready"
             review_round = reentry
         recorded_status, count = (
-            ("pending", 0) if pending else self._record_ci_result(ticket, head, result.status)
+            (result.status if result is not None else "pending", 0)
+            if pending or result.status == "not-run"
+            else self._record_ci_result(ticket, head, result.status)
         )
         generation = self._generation(ticket.repo, ticket.ticket_id)
-        if covering is None and recorded_status in ("pending", "success"):
+        if covering is None and recorded_status in ("pending", "success", "not-run"):
             queued, answered = self._queue_review(
                 ticket, comment, head=head, generation=generation, update=update
             )
@@ -229,7 +231,8 @@ class ReadyMixin:
                 return
             head = current or reported_head
             result = ticket.ci.get(head) or ticket.ci.get(reported_head)
-            connection.execute(
+            now = self.queue.now()
+            since = connection.execute(
                 """
                 INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -240,6 +243,7 @@ class ReadyMixin:
                     checks = excluded.checks,
                     since = CASE WHEN ci_waits.head = excluded.head
                                  THEN ci_waits.since ELSE excluded.since END
+                RETURNING since
                 """,
                 (
                     *key,
@@ -247,9 +251,29 @@ class ReadyMixin:
                     head,
                     outcome,
                     json.dumps(list(result.pending) if result is not None else []),
-                    self.queue.now(),
+                    now,
                 ),
-            )
+            ).fetchone()["since"]
+            ci_branches = ticket.factory.ci_branches
+            if (
+                (result is None or not result.reported)
+                and ci_branches is not None
+                and ticket.pr_base in ci_branches
+                and now - since >= CI_SILENT_SECONDS
+            ):
+                self._flag_attention_once(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    CI_SILENT_REASON,
+                    f"no check run or status on {head[:12]} after "
+                    f"{CI_SILENT_SECONDS / 60:.0f} minutes on CI base {ticket.pr_base}",
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (*key, CI_SILENT_REASON),
+                )
 
     def _review_after_green_rerun(self, ticket: TrackedTicket) -> None:
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)

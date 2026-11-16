@@ -8,12 +8,18 @@ import pytest
 
 from lib.dashboard import collect_snapshot
 from lib.dashboard_pages import lanes, tickets
-from lib.dispatch.constants import BASE_UPDATE_GRACE_SECONDS
+from lib.dispatch.constants import (
+    BASE_UPDATE_GRACE_SECONDS,
+    CI_SILENT_REASON,
+    CI_SILENT_SECONDS,
+)
+from lib.dispatch.types import ci_on_base
 from tests.merge_queue_support import APPROVE, READY, sha
 from tests.test_ready_after_approve import approved_on_red_ci
 from tests.test_review_before_ci import (
     board_with,
     built_with_ci_pending,
+    ci_failure,
     reviewed_at_pending_ci,
 )
 
@@ -358,3 +364,143 @@ def test_a_handled_ready_does_not_hide_another_pending_ready(
     assert "waiting on CI" in cards
     assert "no job running" not in cards
     assert "waiting on CI" in lane
+
+
+NO_CI_BASE = "feature/upload-only-intake"
+
+
+def on_base(board, base: str, *, ci_branches: tuple[str, ...] | None = ("dev", "main")) -> set[str]:
+    """The PR targets base. A pending head reports nothing until it is added to the returned set."""
+    board.factory = replace(board.factory, ci_branches=ci_branches)
+    reported: set[str] = set()
+    snapshot = board.snapshot
+
+    def based(pr, *, fresh: bool = False):
+        ticket = replace(snapshot(pr, fresh=fresh), pr_base=base)
+        ci = {
+            head: ci_on_base(
+                replace(result, reported=head in reported or result.status != "pending"),
+                ticket.no_ci_base,
+            )
+            for head, result in ticket.ci.items()
+        }
+        return replace(ticket, ci=ci)
+
+    board.snapshot = based
+    return reported
+
+
+def ci_events(board) -> list[tuple[str, str]]:
+    with board.queue.connect() as connection:
+        rows = connection.execute("SELECT head, status FROM ci_events").fetchall()
+    return [tuple(row) for row in rows]
+
+
+def ci_silent(board) -> list[tuple[str, str]]:
+    with board.queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT ticket_id, detail FROM needs_attention WHERE reason = ?", (CI_SILENT_REASON,)
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def test_a_ready_on_a_base_ci_never_runs_on_goes_to_review(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    on_base(board, NO_CI_BASE)
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    assert [(job["recipient"], job["head"]) for job in board.jobs("review")] == [("codex", sha(1))]
+    assert ci_waits(board) == []
+    assert ci_events(board) == []
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_a_revise_on_a_base_ci_never_runs_on_queues_a_plain_fix(tmp_path: Path, on: bool) -> None:
+    board = board_with(tmp_path, on=on)
+    on_base(board, NO_CI_BASE)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    revise = board.revise(pr, "1/3")
+    board.poll()
+
+    [fix] = [job for job in board.jobs("fix") if job["source_comment_id"] == revise]
+    assert ci_failure(fix) is None
+    assert ci_events(board) == []
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_an_approve_on_a_base_ci_never_runs_on_ships_without_recording_green(
+    tmp_path: Path, on: bool
+) -> None:
+    board = board_with(tmp_path, on=on)
+    on_base(board, NO_CI_BASE)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    approve = board.approve(pr)
+    board.poll()
+
+    assert board.outcome(approve) == "merge-queue"
+    assert ci_events(board) == []
+
+
+@pytest.mark.parametrize(
+    ("base", "ci_branches"),
+    [("dev", ("dev", "main")), (NO_CI_BASE, None)],
+    ids=["ci-base", "ci-branches-absent"],
+)
+def test_a_ready_with_unreported_ci_waits_where_ci_runs(
+    tmp_path: Path, base: str, ci_branches: tuple[str, ...] | None
+) -> None:
+    board = board_with(tmp_path, on=False)
+    on_base(board, base, ci_branches=ci_branches)
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert board.jobs("review") == []
+    assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
+
+
+@pytest.mark.parametrize("reports", ["pending", "success"])
+def test_ci_silent_on_a_ci_base_raises_one_flag_until_ci_reports(
+    tmp_path: Path, reports: str
+) -> None:
+    board = board_with(tmp_path, on=False)
+    reported = on_base(board, "dev")
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.now[0] += CI_SILENT_SECONDS - 20
+    board.poll()
+    assert ci_silent(board) == []
+
+    board.now[0] += 20
+    for _ in range(3):
+        board.poll()
+    assert ci_silent(board) == [
+        ("42", f"no check run or status on {sha(1)[:12]} after 10 minutes on CI base dev")
+    ]
+
+    reported.add(pr.head)
+    pr.ci[pr.head] = reports
+    board.poll()
+    assert ci_silent(board) == []
+    assert board.outcome(ready) == (None if reports == "pending" else "queued-review")
+
+
+def test_ci_silent_is_never_raised_without_ci_branches(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    on_base(board, "dev", ci_branches=None)
+    pr = built_with_ci_pending(board, sha(1))
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.now[0] += CI_SILENT_SECONDS * 3
+    for _ in range(3):
+        board.poll()
+
+    assert ci_silent(board) == []
+    assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]

@@ -147,7 +147,8 @@ class T4Mixin:
         reported_round: int | None,
     ) -> tuple[bool, str]:
         ship = ticket.factory.ship
-        if ticket.factory.start_before_ci:
+        result = ticket.ci.get(current_head)
+        if ticket.factory.start_before_ci and result is not None and result.status == "success":
             self._record_ci_result(ticket, current_head, "success")
         covered = self._approval_covers(ticket, approved_head, current_head)
         if not covered:
