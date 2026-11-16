@@ -84,9 +84,10 @@ def review_prose(context: FactoryContext) -> str:
 def verify_not_run(verify: str | None, context: FactoryContext | None) -> bool:
     if context is None or verify is None or verify == "none":
         return False
-    prose = review_prose(context)
-    names_skill = re.search(rf"(?<![a-z0-9-]){re.escape(verify)}(?![a-z0-9-])", prose) is not None
-    return names_skill and re.search(r"\bnot run\b", prose, re.IGNORECASE) is not None
+    skill = re.compile(rf"(?<![a-z0-9-]){re.escape(verify)}(?![a-z0-9-])")
+    not_run = re.compile(r"\bnot\s+run\b", re.IGNORECASE)
+    blocks = re.split(r"\n\s*\n|\n(?=\s*(?:[-*+]|\d+[.)])\s)", review_prose(context))
+    return any(skill.search(block) and not_run.search(block) for block in blocks)
 
 
 def _ship_line(context: FactoryContext) -> str:

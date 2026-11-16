@@ -224,3 +224,30 @@ def test_the_new_routing_names_no_project() -> None:
     texts = [steps(review_brief("1/3"))[0], *(make() for make in NOT_YET_TASKS.values())]
     for text in texts:
         assert "aut0" not in text.lower()
+
+
+POLICY_SHAPES = {
+    "one line": NOT_YET_REVIEW,
+    "soft wrapped": NOT_YET_REVIEW.replace("not run.", "not\nrun.").replace("on `dev`. ", "on\n`dev`.  "),
+    "list item": "- Run interrogate.\n- " + NOT_YET_REVIEW.replace(" Until", "\n  Until"),
+}
+
+
+@pytest.mark.parametrize("shape", list(POLICY_SHAPES))
+def test_the_not_yet_policy_is_recognized_however_the_markdown_wraps(shape: str) -> None:
+    md = NOT_YET_MD.replace(NOT_YET_REVIEW, POLICY_SHAPES[shape])
+    assert UNREADABLE_BLOCKS not in task(brief_from(md, "1/3"))
+
+
+REQUIRED_ELSEWHERE = {
+    "separate paragraph": "The reviewer must run `verify-cleffy`. If it is unavailable, stop.\n\n"
+    "List optional browser checks as not run when no browser is installed.",
+    "separate list item": "- The reviewer must run `verify-cleffy`. If it is unavailable, stop.\n"
+    "- List optional browser checks as not run when no browser is installed.",
+}
+
+
+@pytest.mark.parametrize("shape", list(REQUIRED_ELSEWHERE))
+def test_a_not_run_note_about_something_else_keeps_the_skill_required(shape: str) -> None:
+    md = NOT_YET_MD.replace(NOT_YET_REVIEW, REQUIRED_ELSEWHERE[shape])
+    assert UNREADABLE_BLOCKS in task(brief_from(md, "1/3"))
