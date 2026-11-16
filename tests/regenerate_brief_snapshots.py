@@ -59,6 +59,7 @@ UPDATE: dict[str, object] = {
 # kind: (action, recipient, attempt, head, detail extras)
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
+    "plan-round-2": ("plan", "claude", 1, None, {"plan_round": 2}),
     "build": ("build", "claude", 1, None, {
         "gitBranchName": "factory/issue-42",
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",

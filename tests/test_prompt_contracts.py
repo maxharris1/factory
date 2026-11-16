@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import lib.brief.build as build_brief
+import lib.brief.plan as plan_brief
 import lib.brief.review as review_brief
 import lib.brief.skills as brief_skills
 from lib.brief import render_brief
@@ -165,15 +166,44 @@ def test_the_fix_ready_is_accepted_in_fixing(tmp_path: Path) -> None:
     assert post_header(flow, fix, "ready-2", header) == "queued-review"
 
 
-def test_the_plan_is_accepted_in_planning(tmp_path: Path) -> None:
-    flow = Flow(tmp_path)
-    go = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=planning -->\nGo.\n"
-    assert flow.post("go-1", go, "grok-login") == "queued-plan"
-    plan = claim(flow, "claude", "plan")
-    assert flow.state()["workflow_state"] == "planning"
-    header = filled(handoff_header(brief_for(plan)), flow.head, ac="met")
-    assert post_header(flow, plan, "plan-1", header, "ac-1: the test.\n") == "queued-plan-build"
-    assert flow.state()["workflow_state"] == "building"
+PLAN_GO = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=planning -->\nGo.\n"
+
+
+def to_plan(flow: Flow) -> Job:
+    assert flow.post("go-1", PLAN_GO, "grok-login") == "queued-plan"
+    return claim(flow, "claude", "plan")
+
+
+def to_second_plan(flow: Flow) -> Job:
+    first = to_plan(flow)
+    unmet = filled(handoff_header(brief_for(first)), flow.head, ac="unmet")
+    assert post_header(flow, first, "plan-1", unmet, "ac-1: unmapped.\n") == "queued-plan-gap"
+    return claim(flow, "claude", "plan")
+
+
+PLAN_OUTCOMES = {
+    (1, "met"): "queued-plan-build",
+    (1, "unmet"): "queued-plan-gap",
+    (2, "met"): "queued-plan-build",
+    (2, "unmet"): "stuck-plan-gaps",
+}
+
+
+@pytest.mark.parametrize(("to_stage", "plan_round"), [(to_plan, 1), (to_second_plan, 2)], ids=["round-1", "round-2"])
+def test_every_advertised_plan_is_accepted_in_planning(
+    tmp_path: Path, to_stage: Callable[[Flow], Job], plan_round: int
+) -> None:
+    template = handoff_header(brief_for(to_stage(Flow(tmp_path / "template"))))
+    assert f"round={plan_round}/2" in template
+    choices = every_choice(template)
+    assert {choice["ac"] for choice in choices} == {"met", "unmet"}
+    for index, choice in enumerate(choices):
+        flow = Flow(tmp_path / str(index))
+        plan = to_stage(flow)
+        assert flow.state()["workflow_state"] == "planning"
+        header = filled(handoff_header(brief_for(plan)), flow.head, **choice)
+        got = post_header(flow, plan, "plan-x", header, f"ac-1: {choice['ac']}.\n")
+        assert got == PLAN_OUTCOMES[(plan_round, choice["ac"])], (got, choice)
 
 
 @pytest.mark.parametrize("stage", ["build", "review"])
@@ -252,6 +282,19 @@ def test_a_broken_later_round_header_fails_the_contract(tmp_path: Path, monkeypa
     with pytest.raises(AssertionError, match="rejected"):
         test_every_advertised_verdict_is_accepted_in_review(tmp_path, to_second_review)
 
+
+
+def test_a_broken_second_plan_header_fails_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = plan_brief.handoff
+
+    def reviewer_in_round_2(bot: str, facts: dict) -> tuple[str, str]:
+        header, example = real(bot, facts)
+        return (header.replace("role=builder", "role=reviewer") if facts["plan_round"] == 2 else header), example
+
+    monkeypatch.setattr(plan_brief, "handoff", reviewer_in_round_2)
+    test_every_advertised_plan_is_accepted_in_planning(tmp_path / "round-1", to_plan, 1)
+    with pytest.raises(AssertionError, match="rejected"):
+        test_every_advertised_plan_is_accepted_in_planning(tmp_path / "round-2", to_second_plan, 2)
 
 
 def rendered(kinds: tuple[str, ...] = tuple(CASES), *, side: str = "both") -> list[str]:
