@@ -94,6 +94,19 @@ class T4Mixin:
                 head=current_head,
             )
             return True, "approve-ci-red"
+        return self._ship_approval(
+            ticket, comment, approved_head, current_head, reported_round
+        )
+
+    def _ship_approval(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        approved_head: str,
+        current_head: str,
+        reported_round: int | None,
+    ) -> tuple[bool, str]:
+        ship = ticket.factory.ship
         if ticket.factory.start_before_ci:
             self._record_ci_result(ticket, current_head, "success")
         covered = self._approval_covers(ticket, approved_head, current_head)

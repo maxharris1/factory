@@ -312,7 +312,7 @@ def test_on_a_reentry_ready_with_pending_ci_queues_the_next_round(tmp_path: Path
     assert board.state("42")["workflow_state"] == "review"
 
 
-def test_on_a_ci_only_fix_at_the_same_head_reviews_the_round_again(tmp_path: Path) -> None:
+def test_on_a_ci_only_fix_at_the_same_head_ships_the_approval(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
     pr = built_with_ci_pending(board, sha(1))
     reviewed_at_pending_ci(board, pr, pr.head)
@@ -326,22 +326,13 @@ def test_on_a_ci_only_fix_at_the_same_head_reviews_the_round_again(tmp_path: Pat
     board.poll()
     board.poll()
 
-    assert board.outcome(ready) == "queued-review"
-    rereview = board.finish("codex")
-    assert rereview.request.head == pr.head
-    assert json.loads(rereview.request.detail)["round"].startswith("1/")
-
-    board.ready(pr, pr.head, "ready-ci-rerun-again")
-    board.poll()
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert len(board.jobs("review")) == 1
     assert board.queue.claim("codex") is None
-
-    approve = board.approve(pr, "1/3", "approve-after-ci-fix")
-    board.poll()
-    assert board.outcome(approve) == "merge-queue"
     assert board.actions.merges == [(True, pr.head)]
 
 
-def test_on_a_ci_only_fix_after_a_retried_review_reviews_the_round_again(
+def test_on_a_ci_only_fix_after_a_retried_review_ships_the_approval(
     tmp_path: Path,
 ) -> None:
     board = board_with(tmp_path, on=True)
@@ -364,11 +355,9 @@ def test_on_a_ci_only_fix_after_a_retried_review_reviews_the_round_again(
     board.poll()
     board.poll()
 
-    assert board.outcome(ready) == "queued-review"
-    rereview = board.queue.claim("codex")
-    assert rereview is not None
-    assert rereview.request.head == pr.head
-    assert json.loads(rereview.request.detail)["round"].startswith("1/")
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert board.queue.claim("codex") is None
+    assert board.actions.merges == [(True, pr.head)]
 
 
 def test_on_a_reposted_ready_after_a_red_revise_queues_no_second_fix(tmp_path: Path) -> None:
@@ -463,7 +452,7 @@ def test_on_a_red_ready_before_the_revise_leaves_one_combined_fix(tmp_path: Path
 
 
 @pytest.mark.parametrize("retried_review", [False, True])
-def test_on_each_red_approve_at_the_same_head_queues_a_runnable_ci_fix(
+def test_on_each_red_approve_queues_a_runnable_ci_fix(
     tmp_path: Path, retried_review: bool
 ) -> None:
     board = board_with(tmp_path, on=True)
@@ -485,7 +474,7 @@ def test_on_each_red_approve_at_the_same_head_queues_a_runnable_ci_fix(
         assert fix is not None, f"cycle {cycle}: the red APPROVE left no runnable CI fix"
         assert fix.request.source_comment_id == approve
         board.queue.finish(fix.id, owner="claude", handoff_comment_id=f"fix-handoff-{cycle}")
-        pr.ci[pr.head] = "success"
+        pr.push(sha(1 + cycle), ci="success")
         ready = board.ready(pr, pr.head, f"ready-cycle-{cycle}")
         board.poll()
         assert board.outcome(ready) == "queued-review"
@@ -519,34 +508,37 @@ def test_on_a_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
     assert CI_LOG in json.loads(fix.request.detail)["instruction"]
 
 
-def test_each_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
+def test_a_red_ready_back_at_an_older_approved_head_queues_a_runnable_ci_fix_and_no_review(
     tmp_path: Path,
 ) -> None:
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
-    for cycle in (1, 2, 3):
-        pr.push(older, ci="pending")
-        board.ready(pr, older, f"pending-review-{cycle}")
-        board.poll()
-        board.finish("codex")
-        pr.push(sha(2), ci="failure")
-        board.post(
-            pr, f"approve-older-{cycle}", APPROVE.format(round="1/3", head=older), "codex-login"
-        )
-        board.poll()
-        board.finish("claude")
+    pr.push(older, ci="pending")
+    board.ready(pr, older, "pending-review")
+    board.poll()
+    board.finish("codex")
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    board.finish("claude")
 
-        pr.push(older, ci="failure")
-        ready = board.ready(pr, older, f"ready-back-at-older-head-{cycle}")
-        board.poll()
+    pr.push(older, ci="failure")
+    ready = board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
 
-        assert board.outcome(ready) == "queued-ci-fix"
-        fix = board.queue.claim("claude")
-        assert fix is not None, f"return {cycle} left no runnable CI fix"
-        assert fix.request.head == older
-        assert CI_LOG in json.loads(fix.request.detail)["instruction"]
-        board.queue.finish(fix.id, owner="claude", handoff_comment_id=f"ci-fix-{cycle}")
+    assert board.outcome(ready) == "queued-ci-fix"
+    fix = board.queue.claim("claude")
+    assert fix is not None, "the return left no runnable CI fix"
+    assert fix.request.head == older
+    assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id="ci-fix")
+
+    pr.push(older, ci="pending")
+    waiting = board.ready(pr, older, "pending-ready-at-the-approved-head")
+    board.poll()
+    assert board.outcome(waiting) is None
+    assert len(board.jobs("review")) == 1
 
 
 def test_a_reposted_red_ready_after_a_finished_ci_fix_queues_no_second_fix(
@@ -629,27 +621,24 @@ def test_a_red_ready_after_an_edited_verdict_waits_for_the_corrected_verdicts_co
     assert CI_LOG in instruction(fix)
 
 
-def test_a_reposted_red_ready_after_two_returns_to_an_older_head_queues_no_extra_fix(
+def test_a_reposted_red_ready_after_a_return_to_the_approved_head_queues_no_extra_fix(
     tmp_path: Path,
 ) -> None:
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
-    for cycle in (1, 2):
-        pr.push(older, ci="pending")
-        board.ready(pr, older, f"pending-review-{cycle}")
-        board.poll()
-        board.finish("codex")
-        pr.push(sha(2), ci="failure")
-        board.post(
-            pr, f"approve-older-{cycle}", APPROVE.format(round="1/3", head=older), "codex-login"
-        )
-        board.poll()
-        board.finish("claude")
-        pr.push(older, ci="failure")
-        board.ready(pr, older, f"ready-back-at-older-head-{cycle}")
-        board.poll()
-        board.finish("claude")
+    pr.push(older, ci="pending")
+    board.ready(pr, older, "pending-review")
+    board.poll()
+    board.finish("codex")
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    board.finish("claude")
+    pr.push(older, ci="failure")
+    board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+    board.finish("claude")
     fixes = len(board.jobs("fix"))
 
     for repost in (1, 2, 3):

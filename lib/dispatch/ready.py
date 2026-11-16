@@ -127,6 +127,7 @@ class ReadyMixin:
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         pending = result is None or result.status == "pending"
+        covering = self._red_ci_approval_covering(ticket, head)
         if pending:
             if (
                 (result is None or not result.reported)
@@ -134,8 +135,16 @@ class ReadyMixin:
                 and not self._queue_owns_base_updates(ticket.repo, ticket.ticket_id)
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
+            if covering is not None:
+                return False, "approved-ci-pending"
             if not ticket.factory.start_before_ci:
                 return False, "ci-pending"
+        elif result.status == "success" and covering is not None:
+            approve, approved_head, approved_round = covering
+            handled, shipped = self._ship_approval(
+                ticket, approve, approved_head, head, approved_round
+            )
+            return handled, f"approval-covers:{shipped}"
         elif result.status == "success" and self.feeder is not None:
             if self.feeder.hold_stacked_review(ticket, head):
                 return False, "stacked-held"
