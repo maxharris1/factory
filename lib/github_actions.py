@@ -612,14 +612,14 @@ class GitHubReviewActions:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
         failed: list[FailedCheck] = []
-        pending = False
+        pending: list[str] = []
         passed = False
         for run in runs:
             name = str(run.get("name"))
             status = run.get("status")
             conclusion = run.get("conclusion")
             if status != "completed":
-                pending = True
+                pending.append(name)
             elif conclusion in _CHECK_FAILED:
                 failed.append(_failed_check(name, run.get("details_url")))
             elif conclusion == "success":
@@ -631,7 +631,7 @@ class GitHubReviewActions:
             if state in ("failure", "error"):
                 failed.append(FailedCheck("commit status"))
             elif state == "pending":
-                pending = True
+                pending.extend(_pending_contexts(combined) or ["commit status"])
             elif state == "success":
                 passed = True
             else:
@@ -642,7 +642,7 @@ class GitHubReviewActions:
                 "failed: " + ", ".join(check.name for check in failed),
                 failed=tuple(failed),
             )
-        return CIResult("success" if passed and not pending else "pending")
+        return CIResult("success" if passed and not pending else "pending", pending=tuple(pending))
 
     def failed_run_logs(self, repo: str, run_id: str) -> dict[str, str]:
         if not run_id.isdigit():
@@ -869,6 +869,17 @@ _ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
 _ACTIONS_JOB = re.compile(
     r"^(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/([0-9]+))/job/([0-9]+)(?:[/?#]|$)"
 )
+
+
+def _pending_contexts(combined: dict[str, Any]) -> list[str]:
+    statuses = combined.get("statuses")
+    if not isinstance(statuses, list):
+        return []
+    return [
+        str(status.get("context"))
+        for status in map(_object, statuses)
+        if status.get("state") == "pending"
+    ]
 
 
 def _failed_check(name: str, details: object) -> FailedCheck:

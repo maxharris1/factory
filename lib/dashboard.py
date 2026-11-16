@@ -63,6 +63,7 @@ from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_usage import read_usage
+from lib.dispatch.constants import CI_WAIT_REASONS
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
@@ -836,6 +837,23 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
     return rows
 
 
+def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str], dict]:
+    found = {}
+    for row in connection.execute(
+        "SELECT repo, ticket_id, reason, checks, since FROM ci_waits"
+    ):
+        try:
+            names = json.loads(row["checks"])
+        except ValueError:
+            names = []
+        found[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = {
+            "reason": _enum(row["reason"], CI_WAIT_REASONS),
+            "checks": [_clean(name, 80) for name in names] if isinstance(names, list) else [],
+            "waiting_seconds": _age(now, row["since"]),
+        }
+    return found
+
+
 def _ticket_ref(
     sources: dict[tuple[str, str], tuple[str | None, str | None]],
     repo: object,
@@ -1175,6 +1193,7 @@ def _read_db(
     ticket_info: dict[tuple[str, str], TicketInfo] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
         approvers = _hold_approvers(connection)
+        ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
         for row in connection.execute(
             """
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -1203,6 +1222,7 @@ def _read_db(
                 else None
             )
             waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
+            ci_wait = ci_waits.get((str(row["repo"]).casefold(), str(row["ticket_id"])))
             ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = TicketInfo(
                 _enum(row["tracker"], TRACKERS), stuck, state
             )
@@ -1216,6 +1236,7 @@ def _read_db(
                     "stuck": stuck,
                     "paused_action": paused_action,
                     **waiting,
+                    **({"ci_wait": ci_wait} if ci_wait else {}),
                 }
             )
             if stuck:

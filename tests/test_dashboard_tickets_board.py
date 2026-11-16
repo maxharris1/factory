@@ -819,3 +819,56 @@ def test_the_board_works_when_storage_throws(tmp_path: Path, snapshot: dict) -> 
     assert first["snap"]["pipeline"] == server["pipeline"] and first["hidden"]["pipeline"] is False
     assert _pressed(last["snap"]["ticket-filter"], "data-project") == [repo]
     assert last["hidden"] == {"ticket-filter": False, "pipeline": True, "tickets": False}
+
+
+CI_WAIT = ("maxharris1/factory", "591")
+CI_WAIT_LINEAR = ("aut0-code/aut0", "AUT-591")
+NO_JOB = ("maxharris1/factory", "592")
+
+
+def ci_wait_snapshot(tmp_path: Path) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, *CI_WAIT, state="building")
+        add_ticket(connection, *CI_WAIT_LINEAR, tracker="linear", state="building")
+        add_ticket(connection, *NO_JOB, state="building")
+        connection.executemany(
+            "INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since) "
+            "VALUES (?, ?, 'c-ready', ?, ?, ?, ?)",
+            [(*CI_WAIT, "a" * 40, "ci-pending", '["build", "lint"]', NOW - 125),
+             (*CI_WAIT_LINEAR, "b" * 40, "approved-ci-pending", "[]", NOW - 5)],
+        )
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+def test_a_ready_held_for_ci_shows_waiting_on_ci_instead_of_no_job(tmp_path: Path) -> None:
+    board = _server(ci_wait_snapshot(tmp_path))["pipeline"]
+    card = _card(board, "#".join(CI_WAIT))
+    assert card["attrs"]["data-wait"] == "ci"
+    assert "no job running" not in _text(card)
+    assert (_canvas(card)["data-px"], _canvas(card)["data-tint"]) == ("static", "#ff9e64")
+    line = _one(card, _cls("tk-ci"))
+    assert _text(_one(line, _cls("chip"))) == "waiting on CI"
+    for needle in ("build, lint", "checks", "waiting 2m 05s"):
+        assert needle in _text(line), needle
+    link = _one(line, lambda n: n["tag"] == "a")
+    assert link["attrs"]["href"] == "https://github.com/maxharris1/factory/pull/591/checks"
+
+    linear = _one(_card(board, "#".join(CI_WAIT_LINEAR)), _cls("tk-ci"))
+    assert "checks pending" in _text(linear) and not _all(linear, lambda n: n["tag"] == "a")
+
+    idle = _card(board, "#".join(NO_JOB))
+    assert "no job running" in _text(idle) and "waiting on CI" not in _text(idle)
+    assert "data-wait" not in idle["attrs"] and not _all(idle, lambda n: n["tag"] == "canvas")
+
+
+@layout.needs_node
+def test_script_draws_a_ready_held_for_ci_like_the_server(tmp_path: Path) -> None:
+    snapshot = ci_wait_snapshot(tmp_path)
+    out, server = _script(tmp_path, snapshot), _server(snapshot)
+    assert 'data-wait="ci"' in server["pipeline"]
+    for ident in BOARD:
+        assert out["html"][ident] == server[ident], ident

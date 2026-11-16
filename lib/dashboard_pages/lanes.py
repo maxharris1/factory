@@ -9,8 +9,8 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    anchor, _bot, _chip, duration, _e, github_links, _job_label, _num, _panel, _short, _span, _ticket,
-    _tile_label, _when,
+    anchor, _bot, checks_link, checks_named, _chip, duration, _e, github_links, _job_label, _num, _panel,
+    _short, _span, _ticket, _tile_label, _when,
 )
 
 
@@ -373,6 +373,24 @@ SCRIPT = r"""
     return lane;
   }
 
+  function ciLane(rows) {
+    var lane = el('div', 'lane');
+    lane.setAttribute('data-device', 'ci-wait');
+    var head = add(lane, el('div', 'lane-head'));
+    add(head, el('div', 'name', 'waiting on CI'));
+    add(head, el('div', 'sub', rows.length + (rows.length === 1 ? ' ticket' : ' tickets')));
+    var ul = add(add(lane, el('div', 'lane-body')), el('ul', 'qrail'));
+    rows.forEach(function (r) {
+      var li = add(ul, el('li'));
+      add(li, el('span', 'ticket', ticketOf(r)));
+      add(li, el('span', 'what', checksNamed(r.ci_wait)));
+      var href = checksHref(r);
+      if (href) add(li, link(null, href)).textContent = 'checks';
+      ticking(add(li, el('span', 'when')), r.ci_wait.waiting_seconds, 'waiting ');
+    });
+    return lane;
+  }
+
   function renderLanes(d) {
     var running = d.running || [];
     var lanes = laneDevices(d);
@@ -385,6 +403,8 @@ SCRIPT = r"""
     tileAnims = [];
     var box = add(root, el('div', 'lanes'));
     add(box, queueLane(d));
+    var held = (d.tickets || []).filter(function (t) { return t.ci_wait; });
+    if (held.length) add(box, ciLane(held));
     lanes.devices.forEach(function (dev, index) {
       var row = add(box, el('div', 'lane' + (dev.enabled ? '' : ' disabled')));
       row.setAttribute('data-device', dev.name);
@@ -735,13 +755,29 @@ def _queue_lane(snapshot: dict) -> str:
     )
 
 
+def _ci_lane(snapshot: dict) -> list[str]:
+    rows = [row for row in snapshot["tickets"] if row.get("ci_wait")]
+    if not rows:
+        return []
+    items = "".join(
+        f'<li>{_span("ticket", _ticket(row))}{_span("what", checks_named(row["ci_wait"]))}{checks_link(row)}'
+        f'{_when(row["ci_wait"]["waiting_seconds"], "waiting ")}</li>'
+        for row in rows
+    )
+    return [
+        '<div class="lane" data-device="ci-wait"><div class="lane-head"><div class="name">waiting on CI</div>'
+        f'<div class="sub">{len(rows)} ticket{"" if len(rows) == 1 else "s"}</div></div>'
+        f'<div class="lane-body"><ul class="qrail">{items}</ul></div></div>'
+    ]
+
+
 def _lanes(snapshot: dict) -> str:
     from lib.dashboard_pages.shell import px_strip
 
     devices, wakes = lane_devices(snapshot)
     used = sum(d["used"] for d in devices if d["enabled"] and not d["placeholder"] and d["slot_max"])
     total = sum(d["slot_max"] for d in devices if d["enabled"] and not d["placeholder"] and d["slot_max"])
-    rows = [_queue_lane(snapshot)]
+    rows = [_queue_lane(snapshot), *_ci_lane(snapshot)]
     for index, device in enumerate(devices):
         down = probe_down(snapshot, device["name"])
         cap = device["slot_max"]

@@ -706,6 +706,35 @@ def test_poller_reads_deferrals_table_when_present(tmp_path: Path) -> None:
     assert poller["last_activity_age_seconds"] == 5
 
 
+def test_a_ready_held_for_ci_marks_its_ticket(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.executemany(
+            "INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("maxharris1/cleffy", "13", "c-ready", "a" * 40, "ci-pending",
+                 json.dumps(["build", GH_CLASSIC]), NOW - 125),
+                ("aut0-code/aut0", "AUT-7", "c-ready-2", "b" * 40, "approved-ci-pending",
+                 "not json", NOW - 5),
+            ],
+        )
+    tickets = {
+        (row["repo"], row["ticket_id"]): row for row in collect_snapshot(db, log, now=NOW)["tickets"]
+    }
+    assert tickets[("maxharris1/cleffy", "13")]["ci_wait"] == {
+        "reason": "ci-pending",
+        "checks": ["build", "[redacted-token]"],
+        "waiting_seconds": 125,
+    }
+    assert tickets[("aut0-code/aut0", "AUT-7")]["ci_wait"] == {
+        "reason": "approved-ci-pending", "checks": [], "waiting_seconds": 5,
+    }
+    assert [key for key, row in tickets.items() if "ci_wait" in row] == [
+        ("aut0-code/aut0", "AUT-7"), ("maxharris1/cleffy", "13"),
+    ]
+
+
 def test_missing_log_degrades(tmp_path: Path) -> None:
     db, _ = seeded(tmp_path)
     poller = collect_snapshot(db, tmp_path / "nope.log", now=NOW)["poller"]
