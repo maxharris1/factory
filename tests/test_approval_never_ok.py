@@ -115,7 +115,7 @@ def test_the_skill_says_never_to_post_ok_as_max_and_states_the_go_limit() -> Non
     assert "approval_post_env" not in text
     assert "short-term" in text
     assert "Max's exact words" in text
-    assert "`approver_gh_config_dir` is removed once T02f (#173) lands and Max confirms its `/go`" in text
+    assert "`/go` (T02f, #173) is live, and `approver_gh_config_dir` stays while `lib.orch_yml` reads it" in text
 
 
 # --- AC 4: Max's own hold ok still clears a hold -----------------------------------
