@@ -15,6 +15,8 @@ def main(argv: list[str]) -> int:
         print("tests: real gh is disabled", file=sys.stderr)
         return 1
     rest = [part for part in argv if part not in ("-X", "GET")]
+    if rest[-2:-1] == ["-f"] and rest[-1].startswith("ref="):
+        rest = [*rest[:-3], f"{rest[-3]}?{rest[-1]}"]
     if rest[:1] != ["api"] or len(rest) != 2:
         print(f"fake gh: unsupported {argv}", file=sys.stderr)
         return 2

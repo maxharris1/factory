@@ -671,6 +671,7 @@ class Node {
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
   removeAttribute(k) { delete this.attrs[k]; }
   hasAttribute(k) { return k in this.attrs; }
+  get attributes() { return Object.keys(this.attrs).map(name => ({name, value: this.attrs[name]})); }
   closest(tag) { let n = this; while (n && n.tagName !== tag) n = n.parentNode; return n || null; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   cloneNode(deep) { const n = new Node(this.tagName); n.className = this.className;
