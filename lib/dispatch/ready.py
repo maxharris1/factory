@@ -207,8 +207,6 @@ class ReadyMixin:
         result: CIResult | None,
         reason: str,
     ) -> str:
-        # The clock follows the head, not the comment: two readies at one
-        # head would otherwise restart it on every poll.
         with self._connect() as connection:
             connection.execute(
                 """

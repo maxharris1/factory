@@ -121,8 +121,8 @@ WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending")
-_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-_PR = re.compile(r"[1-9][0-9]{0,9}")
+_LINKABLE_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_LINKABLE_PR = re.compile(r"[1-9][0-9]{0,9}")
 ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", "edited-comment", *FEEDER_ATTENTION_REASONS)
 
 HANDOFF_SAVINGS_DEFINITION = (
@@ -840,9 +840,6 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
 
 
 def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str], dict]:
-    """#591: each ready T2 holds until CI finishes on its head. pr is kept only
-    for a plain owner/name repo: the pages link github.com/<repo>/pull/<pr>/checks
-    themselves, since `redact` hides any URL or head in the snapshot."""
     found = {}
     for row in connection.execute(
         "SELECT repo, ticket_id, pr, reason, checks, since FROM ci_waits"
@@ -855,7 +852,7 @@ def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str
         found[(repo.casefold(), str(row["ticket_id"]))] = {
             "reason": _enum(row["reason"], CI_WAIT_REASONS),
             "checks": [_clean(name, 80) for name in names] if isinstance(names, list) else [],
-            "pr": pr if _REPO.fullmatch(repo) and _PR.fullmatch(pr) else None,
+            "pr": pr if _LINKABLE_REPO.fullmatch(repo) and _LINKABLE_PR.fullmatch(pr) else None,
             "waiting_seconds": _age(now, row["since"]),
         }
     return found

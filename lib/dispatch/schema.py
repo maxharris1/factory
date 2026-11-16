@@ -456,8 +456,6 @@ class SchemaMixin:
                 )
                 """
             )
-            # #591: a ready T2 leaves unhandled while CI runs on its head, for
-            # the dashboard; _mark_handled ends it. checks is a JSON list.
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ci_waits (

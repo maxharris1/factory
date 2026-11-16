@@ -25,7 +25,6 @@ from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1_800_000_000.0
-# #591: the one outbound link, a held ready's PR checks; nothing loads from it.
 CHECKS_LINK = "'https://github.com/'"
 
 # Fake secrets, built at runtime so no literal token shape sits in the repo.
