@@ -301,6 +301,13 @@ def fenced(text: str) -> str:
     return f"{fence}\n{text}\n{fence}"
 
 
+def code_span(text: str) -> str:
+    flat = " ".join(text.split())
+    longest = max((len(run) for run in re.findall(r"`+", flat)), default=0)
+    ticks = "`" * (longest + 1)
+    return f"{ticks} {flat} {ticks}" if longest else f"{ticks}{flat}{ticks}"
+
+
 def answers_lines(detail: dict[str, object]) -> list[str]:
     answers = detail.get("answers")
     if not isinstance(answers, list):

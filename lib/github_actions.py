@@ -76,6 +76,7 @@ from lib.dispatcher import (
     AlreadyMergedShip,
     CIResult,
     Comment,
+    FailedCheck,
     ReviewActions,
     RetryableShipError,
     RetryableStateError,
@@ -610,7 +611,7 @@ class GitHubReviewActions:
         if not runs and not total:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
-        failed: list[str] = []
+        failed: list[FailedCheck] = []
         pending = False
         passed = False
         for run in runs:
@@ -620,7 +621,7 @@ class GitHubReviewActions:
             if status != "completed":
                 pending = True
             elif conclusion in _CHECK_FAILED:
-                failed.append(name)
+                failed.append(_failed_check(name, run.get("details_url")))
             elif conclusion == "success":
                 passed = True
             elif conclusion not in _CHECK_NOT_RUN:
@@ -628,7 +629,7 @@ class GitHubReviewActions:
         if total:
             state = combined.get("state")
             if state in ("failure", "error"):
-                failed.append("commit status")
+                failed.append(FailedCheck("commit status"))
             elif state == "pending":
                 pending = True
             elif state == "success":
@@ -636,8 +637,26 @@ class GitHubReviewActions:
             else:
                 raise GitHubAdapterError(f"combined status is {state!r}")
         if failed:
-            return CIResult("failure", "failed: " + ", ".join(failed))
+            return CIResult(
+                "failure",
+                "failed: " + ", ".join(check.name for check in failed),
+                failed=tuple(failed),
+            )
         return CIResult("success" if passed and not pending else "pending")
+
+    def failed_run_logs(self, repo: str, run_id: str) -> dict[str, str]:
+        if not run_id.isdigit():
+            raise GitHubAdapterError("Actions run id is not a number")
+        _repo_path(repo)
+        text = self._gh(
+            ("run", "view", run_id, "--repo", repo, "--log-failed"), route="gh run view --log-failed"
+        )
+        logs: dict[str, list[str]] = {}
+        for line in text.splitlines():
+            job, _, rest = line.partition("\t")
+            _, _, entry = rest.partition("\t")
+            logs.setdefault(job, []).append(entry)
+        return {job: "\n".join(lines) for job, lines in logs.items()}
 
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
@@ -646,31 +665,34 @@ class GitHubReviewActions:
         GraphQL query (gh caches POSTs to graphql too), so pass it only for
         a read. partial_graphql returns GraphQL data that came back with
         errors (gh exits 1 then); the caller checks the errors."""
-        argv = [*self.gh, "api"]
+        argv = ["api"]
         if cache_ttl is not None:
             argv.extend(("--cache", cache_ttl))
         elif self.cache_ttl is not None and _is_read(args):
             argv.extend(("--cache", self.cache_ttl))
         argv.extend(args)
+        return self._gh(argv, route=f"gh api {_route(args)}", partial_graphql=partial_graphql)
+
+    def _gh(self, args: Sequence[str], *, route: str, partial_graphql: bool = False) -> str:
         try:
-            result = self.runner(argv, self.timeout_seconds)
+            result = self.runner([*self.gh, *args], self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             # The runner may use its own timeout (the poller runs writes at
             # 60 s), so report the one the timed-out call actually had.
             raise GitHubAdapterError(
                 f"gh api timed out after {exc.timeout:g}s",
-                safe_detail=f"gh api {_route(args)} timed out after {exc.timeout:g}s",
+                safe_detail=f"{route} timed out after {exc.timeout:g}s",
             ) from exc
         except OSError as exc:
             raise GitHubAdapterError(
                 f"gh could not run: {type(exc).__name__}",
-                safe_detail=f"gh api {_route(args)} could not run: {type(exc).__name__}",
+                safe_detail=f"{route} could not run: {type(exc).__name__}",
             ) from exc
         if result.returncode != 0 and partial_graphql and _has_graphql_data(result.stdout):
             return result.stdout
         if result.returncode != 0:
             detail = " ".join(f"{result.stderr} {result.stdout}".split())[:500]
-            safe = f"gh api {_route(args)} exited {result.returncode}"
+            safe = f"{route} exited {result.returncode}"
             status = _HTTP_STATUS.search(result.stderr)
             if status is not None:
                 safe += f" (HTTP {status.group(1)})"
@@ -844,6 +866,16 @@ def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 _ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
+_ACTIONS_JOB = re.compile(
+    r"^(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/([0-9]+))/job/([0-9]+)(?:[/?#]|$)"
+)
+
+
+def _failed_check(name: str, details: object) -> FailedCheck:
+    match = _ACTIONS_JOB.match(details) if isinstance(details, str) else None
+    if match is None:
+        return FailedCheck(name)
+    return FailedCheck(name, run_id=match.group(2), job_id=match.group(3), run_url=match.group(1))
 
 
 def _workflow_identity(run: dict[str, Any]) -> str:

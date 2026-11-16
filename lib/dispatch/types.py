@@ -40,12 +40,21 @@ class HandoffCandidate:
 
 
 @dataclass(frozen=True)
+class FailedCheck:
+    name: str
+    run_id: str | None = None
+    job_id: str | None = None
+    run_url: str | None = None
+
+
+@dataclass(frozen=True)
 class CIResult:
     status: str
     log: str | None = None
     # False when the head has no check run and no commit status at all:
     # GitHub ran nothing there (#255), as opposed to CI still running.
     reported: bool = True
+    failed: tuple[FailedCheck, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in ("pending", "success", "failure"):

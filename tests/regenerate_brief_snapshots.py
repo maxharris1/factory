@@ -19,6 +19,8 @@ from lib.brief import render_brief  # noqa: E402
 from lib.brief_comment import before_factory_md  # noqa: E402
 from lib.dispatcher import Comment  # noqa: E402
 from lib.evidence import criteria_evidence  # noqa: E402
+from lib.dispatch.types import FailedCheck  # noqa: E402
+from lib.evidence.ci import ci_evidence  # noqa: E402
 from lib.evidence.criteria import canonical_brief  # noqa: E402
 from lib.evidence.findings import findings_evidence  # noqa: E402
 from lib.factory_md import parse_factory_context  # noqa: E402
@@ -54,6 +56,23 @@ The reviewer runs `verify-cleffy`.
 """
 
 CI_LOG = "FAILED tests/test_pricing.py::test_start_free - AssertionError\n```\ntraceback\n```"
+
+RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
+CI_FAILED = (
+    FailedCheck("pytest", run_id="123456", job_id="31000000004", run_url=RUN_URL),
+    FailedCheck("check-config", run_id="123456", job_id="31000000005", run_url=RUN_URL),
+)
+PYTEST_LOG = (
+    "".join(f"tests/test_pricing.py::test_case_{n} PASSED\n" for n in range(1, 154))
+    + "FAILED tests/test_pricing.py::test_start_free - AssertionError\n"
+    + "export GH_TOKEN=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\n"
+    + "1 failed, 153 passed\n"
+)
+
+
+def ci_bundle(logs: dict[str, str | None]) -> dict[str, object]:
+    return {"ci": asdict(ci_evidence(failed=CI_FAILED, logs=logs))}
+
 
 BRIEF_URL = "https://github.com/owner/repo/pull/42#issuecomment-3"
 PLAN_URL = "https://github.com/owner/repo/pull/42#issuecomment-5"
@@ -221,7 +240,16 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-7",
         "round": "2/3",
     }),
-    "ci-fix": ("fix", "claude", 1, HEAD, {"instruction": CI_LOG, "round": "1/3"}),
+    "ci-fix": ("fix", "claude", 1, HEAD, {
+        "instruction": "failed: pytest, check-config",
+        "round": "1/3",
+        "evidence": ci_bundle({"31000000004": PYTEST_LOG, "31000000005": "check-config: ok\nerror: bad key\n"}),
+    }),
+    "ci-fix-log-unavailable": ("fix", "claude", 1, HEAD, {
+        "instruction": "failed: pytest, check-config",
+        "round": "1/3",
+        "evidence": ci_bundle({"31000000004": None}),
+    }),
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),

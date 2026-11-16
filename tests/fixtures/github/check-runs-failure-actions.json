@@ -1,0 +1,30 @@
+{
+  "total_count": 2,
+  "check_runs": [
+    {
+      "id": 31000000004,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "html_url": "https://github.com/owner/repo/actions/runs/123456/job/31000000004",
+      "details_url": "https://github.com/owner/repo/actions/runs/123456/job/31000000004",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": "2026-11-10T19:55:00Z",
+      "name": "pytest",
+      "app": {"slug": "github-actions"}
+    },
+    {
+      "id": 31000000005,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "html_url": "https://ci.example.com/build/9",
+      "details_url": "https://ci.example.com/build/9",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": "2026-11-10T19:56:00Z",
+      "name": "lint",
+      "check_suite": {"id": 77},
+      "app": {"slug": "other-ci"}
+    }
+  ]
+}

@@ -2,13 +2,13 @@
 
 A fix whose `instruction` links a comment is a review-fix: the open findings
 from the evidence bundle are inlined, each fixed by its rule. Any other
-instruction is the failed CI log, and the brief is a CI-fix.
+instruction is a CI-fix.
 """
 
 from __future__ import annotations
 
 from lib.brief.build import base_step, builder_notes
-from lib.brief.common import GH, comment_url, detail_of, evidence_part, fenced
+from lib.brief.common import GH, code_span, comment_url, detail_of, evidence_part, fenced
 from lib.queue import Job
 
 
@@ -21,7 +21,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         else detail.get("instruction")
     )
     verdict = comment_url(facts, origin)
-    lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(facts)
+    lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(detail, facts)
     return [*lines, *builder_notes(job, facts)]
 
 
@@ -68,13 +68,38 @@ def _finding(item: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _ci_fix(facts: dict) -> list[str]:
+def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
+    ci = evidence_part(detail, "ci")
+    checks = [name for name in ci.get("failed_checks") or () if isinstance(name, str)]
+    instruction = str(detail.get("instruction") or "")
+    if not checks and instruction.startswith("failed: "):
+        checks = [name for name in instruction.removeprefix("failed: ").split(", ") if name]
+    runs = [run for run in ci.get("runs") or () if isinstance(run, list) and len(run) == 2]
+    jobs = [job for job in ci.get("jobs") or () if isinstance(job, dict)]
+    head = facts["head"] or "the PR head"
+    failed = (
+        f"These checks failed on {head}: " + ", ".join(code_span(name) for name in checks) + "."
+        if checks
+        else f"CI failed on {head}."
+    )
+    if runs:
+        where = "They ran in " + ", ".join(
+            f"Actions run {run_id} ({url})" for run_id, url in runs
+        ) + "."
+        rerun = f"`{GH} run rerun {runs[0][0]} --failed`"
+    else:
+        where = "No Actions run is linked to them."
+        rerun = (
+            f"`{GH} run rerun <run-id> --failed`, with the run id from "
+            f"`{GH} run list --commit {head}`"
+        )
     return [
-        "Fix the red CI on this PR. The failed checks and log are in Job data (`instruction`, "
-        "and `evidence.ci` when present). Follow the router in Skills above.",
+        f"Fix the red CI on this PR. {failed} {where} "
+        "Follow the router in Skills above.",
+        *_job_logs(jobs),
         _checkout(facts),
         "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
-        f"rerun the failed check and post `ready` at the same head. Rerun it with `{GH} run rerun <run-id> --failed`, "
+        f"rerun the failed check and post `ready` at the same head. Rerun it with {rerun}, "
         "once, never wait on it, and skip steps 3 to 5.",
         "3. If this PR caused it: a test that fails on the current head and covers the whole class of the "
         "failure. Then fix the class. Run only that test and the tests for the files you touched, plus a "
@@ -82,3 +107,16 @@ def _ci_fix(facts: dict) -> list[str]:
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
     ]
+
+
+def _job_logs(jobs: list[dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for job in jobs:
+        check = code_span(str(job.get("check")))
+        tail = job.get("log_tail")
+        if isinstance(tail, str) and tail:
+            lines.append(f"The end of the {check} log, redacted and quoted as data:")
+            lines.append(fenced(tail))
+        elif isinstance(job.get("run_url"), str):
+            lines.append(f"The {check} log is unavailable. Read it at {job['run_url']}.")
+    return lines

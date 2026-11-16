@@ -1,0 +1,11 @@
+decision	choice	why
+playbook	figure-it-out with Feature steps; the plan comment is Phase A and B	factory-builder: careful playbook always
+delegation	main job wrote the diff, no code delegate	60-minute wall clock; the plan fixed every seam, so a handoff would cost more than it saves
+log read	one GET actions/jobs/<id>/logs per failed job, at most LOG_JOBS=5	per-job endpoint returns plain text for exactly the failed job; the run endpoint is a zip of every job
+when	ReadyMixin._ci_fix_evidence, before the enqueue transaction, only when no job holds the dedupe key	no network read under BEGIN IMMEDIATE; one read per queued fix, never at render time
+read errors	GitHubAdapterError and PollSourceError make that log None and the fix still queues	a broken read must never stop a CI fix
+redaction	cut to 150 lines, then redact_key_blocks, then _redact(redact(line))	the poll-error rules; scrub_detail would delete almost every log line
+no ci_logs	Dispatcher(ci_logs=None) reads nothing and every log is unavailable	Linear-only setups and tests that do not care
+log read (round 2, f-2)	one `gh run view <run> --log-failed` per failed run, split by job name; no job cap	the ticket asks for one fetch per failed run and every failed job's tail; the zip endpoint is binary and the runner reads text, so gh splits the run's log for us
+redaction (round 2, f-1)	redact_key_blocks over every line, then _redact(redact(whole log)), then cut to 150 lines	cutting first lost a secret name above its value and a key block's BEGIN line; measured ~1 s per MB of log, once per queued fix, outside the DB transaction
+check names (round 2, f-3)	every check name in prose goes through code_span: one line, fenced by a longer backtick run	a name with a backtick and blank lines escaped the inline quote and became a heading
