@@ -535,6 +535,18 @@ def _profile_env(tmp_path: Path) -> dict[str, str]:
     )
 
 
+def test_a_sandboxed_bot_shell_may_autostart_while_the_suite_holds_a_job_proof(
+    tmp_path: Path,
+) -> None:
+    assert os.environ.get("ORCH_JOB_PROOF")
+    result = subprocess.run(
+        ["sh", "-c", ". deploy/host-pidns.sh; factory_may_autostart"],
+        cwd=ROOT, env=sandbox_env(tmp_path), text=True,
+        capture_output=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> None:
     environment = _install_environment(tmp_path, "venv")
     assert _install(environment).returncode == 0

@@ -40,8 +40,10 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
+    from lib.job_token import PROOF_ENV
+
     return {
-        **os.environ,
+        **{name: value for name, value in os.environ.items() if name != PROOF_ENV},
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_STATE_HOME": str(home / ".local/state"),
