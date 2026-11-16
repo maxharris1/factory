@@ -164,7 +164,8 @@ TAG_ENV = "ORCH_WORKER_TAG"
 WORKER_ENV_MARK = "ORCH-WORKER-ENV"
 WORKER_ENV_END = "ORCH-WORKER-ENV-END"
 # The start script's own exit status when it cannot make or enter the job
-# directory, or record the worker: the harness never ran.
+# directory, drop a login profile's token variable, or record the worker:
+# the harness never ran.
 START_REFUSED = 125
 # The harness's own exit status says nothing about whether it ran (#99 A2).
 # The start writes its worker tag to the launch record (`launch_record`)
@@ -174,7 +175,7 @@ START_REFUSED = 125
 # job's and the worker's environment values to stderr, so the start turns it
 # off first.
 _UNTRACE = "set +xvT; trap - DEBUG; "
-_DROP_PROFILE_TOKENS = f"unset {' '.join(TOKEN_VARIABLES)}; "
+_DROP_PROFILE_TOKENS = f"unset {' '.join(TOKEN_VARIABLES)} || exit {START_REFUSED}; "
 _START_ENTER = (
     f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
     + _DROP_PROFILE_TOKENS

@@ -1591,3 +1591,27 @@ def test_remote_start_drops_profile_tokens_and_keeps_only_the_jobs_own(
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(report.read_text(encoding="utf-8")) == expected
+
+
+@pytest.mark.parametrize("name", SCRUBBED)
+def test_remote_start_refuses_when_a_profile_token_cannot_be_dropped(tmp_path: Path, name: str) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(f"export {name}=profile-sentinel; readonly {name}\n", encoding="utf-8")
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    ran = tmp_path / "ran"
+    script = remote.start_script(target, [sys.executable, "-c", f"open({str(ran)!r}, 'w')"], {})
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == remote.START_REFUSED, result.stderr
+    assert not ran.exists()
