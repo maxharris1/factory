@@ -16,7 +16,7 @@ def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
             "- After the handoff comment is posted, make the very last line of your output exactly this, "
             "with the id the post command printed in place of `<comment-id>`:\n\n"
             "ORCH-HANDOFF: <comment-id>\n\n"
-            "- If you cannot finish, make the very last line exactly this (T6 retries the job once):\n\n"
+            "- If you cannot finish, make the very last line exactly this (the factory retries a failed job once, automatically):\n\n"
             "ORCH-HANDOFF: failed\n\n"
             "- The waiter on the box reads that line when you exit and runs `orch job done` there.\n"
             "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job."
@@ -24,7 +24,7 @@ def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
     return (
         "## Finish the job\n"
         f"- After the handoff comment is posted: `orch job done {bot} {job.id} --handoff <comment-id>`.\n"
-        f"- If you cannot finish: `orch job done {bot} {job.id} --failed` (T6 retries the job once).\n"
+        f"- If you cannot finish: `orch job done {bot} {job.id} --failed` (the factory retries a failed job once, automatically).\n"
         "- `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_PROOF`, so run it "
         "from this environment. Never print, post, write down or commit that value.\n"
         "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job."
@@ -115,7 +115,7 @@ def rules(remote_device: str | None = None, *, follow_ups: bool = False) -> str:
 
 RULE_PHRASES = {
     "finish-done": "After the handoff comment is posted",
-    "finish-failed": "(T6 retries the job once)",
+    "finish-failed": "(the factory retries a failed job once, automatically)",
     "finish-proof": "Never print, post, write down or commit that value.",
     "finish-remote-handoff": "ORCH-HANDOFF: <comment-id>",
     "finish-remote-no-db": "has no orch database: do not run `orch job done`.",

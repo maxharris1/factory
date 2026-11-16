@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from lib.brief.common import TEST_SCOPE
 from tests.regenerate_brief_snapshots import render_snapshot
 
 DO_NOT_POLL = "Never poll, watch or wait on GitHub Actions or any other CI from inside this job."
@@ -23,10 +24,12 @@ def section(request: pytest.FixtureRequest) -> str:
     return what_to_do(text)
 
 
-def test_runs_only_affected_tests_plus_a_smoke_run(section: str) -> None:
-    assert "Run only the tests affected by the files you touched while resolving the merge" in section
-    assert "plus a short smoke run, in the foreground; never in the background or in chunks." in section
-    assert "Do not run the full suite unless those affected tests are the full suite." in section
+def test_runs_only_touched_tests_plus_a_smoke_set(section: str) -> None:
+    assert (
+        "4. Run only the tests for the files you touched while resolving the merge, plus a short "
+        f"smoke set, {TEST_SCOPE} With no conflicts to resolve, the smoke set is enough."
+    ) in section.splitlines()
+    assert "full suite unless" not in section
     assert "then run the tests." not in section
 
 

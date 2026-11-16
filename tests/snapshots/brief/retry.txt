@@ -1,7 +1,7 @@
 ===== box =====
 # Factory job brief: implement
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: implement
@@ -68,11 +68,11 @@ Build the ticket. Follow the router in Skills above.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
 4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
 5. Push, then post the ready handoff below with the head you pushed.
-The PR's title starts with its source issue: `#<issue>: <issue title>`, with the source issue's number (not the PR's); for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`). If you open the PR, title it so; if its title lacks the prefix, fix it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
+Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
-This is a retry. Attempt 1 ended without a valid handoff comment: it failed, was stopped, or ran past its wall-clock budget. A second failure marks the ticket stuck. The working directory, or the branch you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` before you start, and build on it rather than redo it.
+This is a retry. Attempt 1 ended without a valid handoff comment: it failed, was stopped, or ran past its wall-clock budget. The factory retries a failed job once on its own, and this is that retry; if it fails too, the ticket is marked stuck and waits for a person. The working directory, or the branch you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` before you start, and build on it rather than redo it.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
@@ -89,7 +89,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ## Finish the job
 - After the handoff comment is posted: `orch job done claude-bot 0123456789abcdef0123456789abcdef --handoff <comment-id>`.
-- If you cannot finish: `orch job done claude-bot 0123456789abcdef0123456789abcdef --failed` (T6 retries the job once).
+- If you cannot finish: `orch job done claude-bot 0123456789abcdef0123456789abcdef --failed` (the factory retries a failed job once, automatically).
 - `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_PROOF`, so run it from this environment. Never print, post, write down or commit that value.
 - `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job.
 
@@ -145,7 +145,7 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: implement
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: implement
@@ -212,11 +212,11 @@ Build the ticket. Follow the router in Skills above.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
 4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
 5. Push, then post the ready handoff below with the head you pushed.
-The PR's title starts with its source issue: `#<issue>: <issue title>`, with the source issue's number (not the PR's); for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`). If you open the PR, title it so; if its title lacks the prefix, fix it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
+Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never poll, watch or wait on GitHub Actions or any other CI from inside this job.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
-This is a retry. Attempt 1 ended without a valid handoff comment: it failed, was stopped, or ran past its wall-clock budget. A second failure marks the ticket stuck. The working directory, or the branch you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` before you start, and build on it rather than redo it.
+This is a retry. Attempt 1 ended without a valid handoff comment: it failed, was stopped, or ran past its wall-clock budget. The factory retries a failed job once on its own, and this is that retry; if it fails too, the ticket is marked stuck and waits for a person. The working directory, or the branch you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` before you start, and build on it rather than redo it.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
@@ -237,7 +237,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ORCH-HANDOFF: <comment-id>
 
-- If you cannot finish, make the very last line exactly this (T6 retries the job once):
+- If you cannot finish, make the very last line exactly this (the factory retries a failed job once, automatically):
 
 ORCH-HANDOFF: failed
 
