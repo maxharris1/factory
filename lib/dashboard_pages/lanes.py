@@ -9,8 +9,8 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _num, _panel, _short, _span,
-    _ticket, _when,
+    anchor, _bot, _chip, duration, _e, _job_label, _num, _panel, _short, _span, _ticket,
+    _tile_label, _when,
 )
 
 
@@ -49,17 +49,17 @@ a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
 .tile.bad{border-color:var(--bad)}
 .tile.claude{--bt:var(--claude)}.tile.codex{--bt:var(--codex)}.tile.cursor{--bt:var(--cursor)}.tile.grok{--bt:var(--grok)}
 .tile-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;container-type:inline-size}
-.tile-l1{display:flex;align-items:baseline;gap:6px;min-width:0}
-.tile-l1 .ticket{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 13px/1.25 var(--mono);color:var(--text)}
-.kind{padding:0 4px;color:var(--muted);font-size:10px}
+.tile-l1{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 6px;min-width:0}
+.tile-l1 .ticket{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 13px/1.25 var(--mono);color:var(--text)}
+.tile-l1 .chip{flex:none}
 .tile-l2{display:flex;align-items:center;gap:7px;min-height:18px}
 .glyph{display:grid;grid-template-columns:5px 5px;grid-template-rows:5px 5px;gap:1px}
 .glyph i{background:var(--line-hi)}.glyph i.on{background:var(--bt,var(--ok))}
 .verb{display:flex;white-space:pre;font:500 14px/1.25 var(--mono);color:var(--muted)}
 .verb.live{color:var(--text)}.verb.warn{color:var(--warn)}.verb.bad{color:var(--bad)}
 .verb .h{color:#ffffff}.verb .n{color:var(--bt,var(--ok))}
-.tile-l3{display:flex;align-items:center;gap:8px;color:var(--muted)}
-.tile-l3 .action{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+.tile-l3{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;color:var(--muted)}
+.tile-l3 .action{min-width:0;overflow-wrap:anywhere;color:var(--text-2)}
 .round{flex:none;display:flex;align-items:center;gap:6px;white-space:nowrap}
 .pips{display:flex;gap:2px}
 .pips i{width:6px;height:6px;background:var(--line-hi)}.pips i.done{background:var(--text)}.pips i.cur{background:var(--accent)}
@@ -105,6 +105,8 @@ TILE_STATE: dict[str, dict] = {
     "build": {"verbs": ["Assembling", "Stacking", "Forging"], "tone": "live", "hb": "live"},
     "review": {"verbs": ["Scrutinizing", "Combing", "Squinting"], "tone": "live", "hb": "live"},
     "fix": {"verbs": ["Patching", "Mending", "Tinkering"], "tone": "live", "hb": "live"},
+    "clarify": {"verbs": ["Clarifying", "Untangling", "Answering"], "tone": "live", "hb": "live"},
+    "update-from-main": {"verbs": ["Merging", "Syncing", "Reconciling"], "tone": "live", "hb": "live"},
     "claimed": {"text": "waiting to start", "tone": "", "chip": ["claimed", "warn"], "hb": "none"},
     "stale": {"text": "no heartbeat", "tone": "warn", "chip": ["stale", "warn"], "hb": "warn"},
     "dead": {"text": "runner dead", "tone": "bad", "chip": ["dead", "bad"], "hb": "bad", "bad": True},
@@ -224,10 +226,11 @@ SCRIPT = r"""
     });
   }
 
-  function deviceChip(dev) {
+  function deviceChip(dev, down) {
     if (!dev.enabled) return chip('DISABLED', 'muted');
     if (dev.placeholder) return chip('PLACEHOLDER', 'warn');
     if (!dev.listed) return chip('UNLISTED', 'warn');
+    if (down) return chip('PROBE DOWN', 'bad');
     return chip('ONLINE', 'ok');
   }
 
@@ -272,12 +275,9 @@ SCRIPT = r"""
     var bodyEl = add(tile, el('div', 'tile-body'));
     var l1 = add(bodyEl, el('div', 'tile-l1'));
     add(l1, bot(r.recipient));
-    var kind = jobKind(r);
-    if (kind) add(l1, el('span', 'kind', kind));
-    add(l1, el('span', 'ticket', jobLabel(r)));
+    add(l1, el('span', 'ticket', tileLabel(r)));
     var badge = name === 'overdue' ? (LANES.tiles[r.job_state] || {}).chip : spec.chip;
     if (badge) add(l1, chip(badge[0], badge[1]));
-    if (r.overdue) add(l1, chip('OVERDUE', 'bad'));
     var l2 = add(bodyEl, el('div', 'tile-l2'));
     var verb;
     if (spec.verbs) {
@@ -295,7 +295,7 @@ SCRIPT = r"""
       letters(verb, spec.text === null ? r.action : spec.text);
     }
     var l3 = add(bodyEl, el('div', 'tile-l3'));
-    add(l3, el('span', 'action', r.action));
+    if (spec !== LANES.tiles.unknown) add(l3, el('span', 'action', r.action));
     var m = /^(\d+)\s*\/\s*(\d+)$/.exec(String(r.round === null || r.round === undefined ? '' : r.round));
     if (m) {
       var rnd = add(l3, el('span', 'round'));
@@ -390,8 +390,8 @@ SCRIPT = r"""
       row.setAttribute('data-device', dev.name);
       var head = add(row, el('div', 'lane-head'));
       add(head, el('div', 'name', dev.name));
-      add(head, deviceChip(dev));
       var down = probeDown(d, dev.name);
+      add(head, deviceChip(dev, down));
       var slots = dev.slot_max === null || dev.slot_max === undefined ? Math.max(1, dev.used) : Math.max(1, dev.slot_max);
       var meter = add(head, el('div', 'lane-meter'));
       meter.setAttribute('aria-hidden', 'true');
@@ -478,7 +478,7 @@ SCRIPT = r"""
       add(hook, el('span', 'ilabel', 'Linear' + ' webhook'));
       add(hook, el('span', 'itext', 'last received ' + received + ' · dirty queue ' + w.dirty));
       if (w.warning !== null && w.warning !== undefined) add(hook, el('p', 'bad', 'warning: ' + w.warning));
-      if (w.note !== null && w.note !== undefined) add(hook, el('p', 'muted', 'note: ' + w.note));
+      if (w.note !== null && w.note !== undefined) add(hook, el('p', 'muted', w.note));
     }
     if (f) {
       var feed = add(box, el('div', 'irow'));
@@ -607,13 +607,15 @@ def probe_down(snapshot: dict, name: str) -> bool:
     )
 
 
-def _device_chip(device: dict) -> str:
+def _device_chip(device: dict, down: bool) -> str:
     if not device["enabled"]:
         return _chip("DISABLED", "muted")
     if device["placeholder"]:
         return _chip("PLACEHOLDER", "warn")
     if not device["listed"]:
         return _chip("UNLISTED", "warn")
+    if down:
+        return _chip("PROBE DOWN", "bad")
     return _chip("ONLINE", "ok")
 
 
@@ -631,18 +633,13 @@ def _slot(row: dict, seed: int = 1) -> str:
     name = px_state(row)
     spec = TILE_STATE.get(name, TILE_STATE["unknown"])
     who = row["recipient"] if row["recipient"] in ("claude", "codex", "cursor", "grok") else "other"
-    kind = _job_kind(row)
     title = (
         f"{_ticket(row, full=True)} · {row['action']}"
         + (f" · round {row['round']}" if row.get("round") else "")
         + f" (job {row['job']})"
     )
     badge = TILE_STATE.get(str(row.get("job_state")), {}).get("chip") if name == "overdue" else spec.get("chip")
-    line1 = (
-        _bot(row["recipient"]) + (_span("kind", kind) if kind else "") + _span("ticket", _job_label(row))
-        + (_chip(badge[0], badge[1]) if badge else "")
-        + (_chip("OVERDUE", "bad") if row["overdue"] else "")
-    )
+    line1 = _bot(row["recipient"]) + _span("ticket", _tile_label(row)) + (_chip(badge[0], badge[1]) if badge else "")
     if spec.get("verbs"):
         text = verb_at(name, 0, seed)
         cells = "".join(f'<i class="on"></i>' if q == GLYPH_ORDER[0] else "<i></i>" for q in range(4))
@@ -667,7 +664,7 @@ def _slot(row: dict, seed: int = 1) -> str:
             f"{_span(None, rnd)}</span>"
         )
     line3 = (
-        _span("action", row["action"]) + pips
+        ("" if name == "unknown" else _span("action", row["action"])) + pips
         + f'<span class="t">T+ <b>{duration(row["elapsed_seconds"])}</b></span>'
     )
     hb = spec["hb"]
@@ -773,7 +770,7 @@ def _lanes(snapshot: dict) -> str:
             tiles.append(_empty_tile(f"slot-{device['name']}-{seed}", "idle" if device["enabled"] else "off", seed))
         rows.append(
             f'<div class="lane{"" if device["enabled"] else " disabled"}" data-device="{_e(device["name"])}">'
-            f'<div class="lane-head"><div class="name">{_e(device["name"])}</div>{_device_chip(device)}'
+            f'<div class="lane-head"><div class="name">{_e(device["name"])}</div>{_device_chip(device, down)}'
             f'<div class="lane-meter" aria-hidden="true" style="width:{16 * slots}px">{meter}</div>'
             f'<div class="sub">{device["used"]} / {"?" if cap is None else cap} slots</div>{harness}</div>'
             f'<div class="tiles">{"".join(tiles)}</div></div>'
@@ -840,7 +837,7 @@ def _linear_webhook(snapshot: dict) -> str:
         received = "never"
     extra = f'<p class="bad">warning: {_e(webhook["warning"])}</p>' if webhook["warning"] is not None else ""
     if webhook.get("note") is not None:
-        extra += f'<p class="muted">note: {_e(webhook["note"])}</p>'
+        extra += f'<p class="muted">{_e(webhook["note"])}</p>'
     return (
         '<div class="irow" id="linear-webhook"><span class="ilabel">Linear webhook</span>'
         f'<span class="itext">last received {_e(received)} · dirty queue {_e(webhook["dirty"])}</span>'

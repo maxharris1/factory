@@ -1,0 +1,9 @@
+decision	choice	why
+playbook	figure-it-out with Feature steps, one owner, plan order 1-6	code-coupled change across poll, dispatch and brief; the plan already fixed the shape, so no arena
+helpers	built in the main job; comment-sicko ran over the diff	60-minute budget; the plan was concrete enough that delegation added handoff cost, not review separation
+cut	keep the head of each text, marker inside and after the fence	a brief or plan opens with its goal and criteria
+limits	brief 20,000 (TEXT_LIMIT, the feeder BODY_LIMIT); plan 60,000 (PLAN_HANDOFF_LIMIT)	a plan within its own cap is never cut
+factory.md strip	lib/brief_comment.py before_factory_md at poll time, fence-aware	feeder imports poll-free; the posted comment stays whole for people
+Linear	unchanged: brief_text only for GitHub tickets	the plan let Linear share the path, but overriding Linear's brief field broke test_latest_linear_brief_from_newest_first_comments and the ticket puts Linear out of scope
+old rows	no brief_text or plan_text renders exactly as before	queued rows outlive a deploy; existing snapshots are byte-identical
+Job data	brief_text and plan_text replaced by a placeholder	each text appears once in the brief

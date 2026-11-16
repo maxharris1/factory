@@ -13,7 +13,7 @@ from lib.github_actions import _created_at
 from lib.queue import JobRequest
 from lib.state_backup import backup, restore
 from tests.merge_queue_support import APPROVE, Board, sha
-from tests.test_dispatcher import READY
+from tests.test_dispatcher import ANSWERS, QUESTIONS, READY
 from tests.test_hold_merge_queue import APPROVER, OK, held_board
 
 
@@ -447,7 +447,7 @@ def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
 
 
@@ -477,7 +477,7 @@ def test_a_ready_github_dates_to_the_fixs_own_second_still_settles_it(
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
 
 
@@ -502,7 +502,7 @@ def test_a_ready_the_cached_read_missed_settles_the_failed_fix_without_a_retry(
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]
     assert board.queue.claim("claude") is None
 
@@ -527,5 +527,204 @@ def test_a_failed_fix_whose_ready_github_dates_to_its_own_second_is_done(
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]
+
+
+def _held_red(tmp_path: Path):
+    board = held_board(tmp_path)
+    board.factory = replace(board.factory, start_before_ci=True)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, sha(1))
+    board.poll()
+    board.finish("codex")
+    pr.ci[sha(1)] = "failure"
+    approve = board.approve(pr)
+    for _ in range(4):
+        board.poll()
+    return board, pr, approve
+
+
+def test_an_approve_on_red_ci_for_a_held_pr_queues_one_ci_fix(tmp_path: Path) -> None:
+    board, _pr, approve = _held_red(tmp_path)
+
+    [fix] = board.jobs("fix", "42")
+    assert fix["recipient"] == "claude"
+    assert fix["head"] == sha(1)
+    assert fix["source_comment_id"] == approve
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert board.outcome(approve) is None
+    assert board.actions.merges == []
+
+
+def test_a_held_ci_fix_at_the_same_patch_goes_to_awaiting_ok_without_a_review(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = _held_red(tmp_path)
+    board.actions.patch_ids = {sha(1): "a" * 40, sha(2): "a" * 40}
+    board.finish("claude")
+    pr.push(sha(2), ci="pending")
+    fix_ready = board.ready(pr, sha(2))
+    board.poll()
+    pr.ci[sha(2)] = "success"
+    board.poll()
+    board.poll()
+
+    assert len(board.jobs("review", "42")) == 1
+    assert board.outcome(fix_ready) == "held-ci-fix-ready"
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert _hold_head(board) == sha(2)
+    assert [wake["head"] for wake in board.wakes("awaiting-ok")] == [sha(2)]
+
+    board.post(pr, "ok-2", OK.format(head=sha(2)), APPROVER)
+    board.poll()
+
+    assert board.actions.merges == [(True, sha(2))]
+
+
+def test_a_held_ci_fix_that_changes_the_patch_is_reviewed(tmp_path: Path) -> None:
+    board, pr, approve = _held_red(tmp_path)
+    board.actions.patch_ids = {sha(1): "a" * 40, sha(2): "b" * 40}
+    board.finish("claude")
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    board.poll()
+
+    [_first, review] = board.jobs("review", "42")
+    assert review["head"] == sha(2)
+    assert board.state("42")["workflow_state"] == "review"
+    assert board.outcome(approve) == "queued-patch-review"
+    assert board.actions.merges == []
+
+
+def test_a_held_ci_fix_that_stays_red_queues_one_more_fix_at_its_head(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = _held_red(tmp_path)
+    board.actions.patch_ids = {sha(1): "a" * 40, sha(2): "a" * 40}
+    board.finish("claude")
+    pr.push(sha(2), ci="failure")
+    board.ready(pr, sha(2))
+    for _ in range(3):
+        board.poll()
+
+    assert [job["head"] for job in board.jobs("fix", "42")] == [sha(1), sha(2)]
+    assert len(board.jobs("review", "42")) == 1
+    assert board.state("42")["workflow_state"] == "fixing"
+
+
+def _held_fix_from_pending_ci(tmp_path: Path):
+    board = held_board(tmp_path)
+    board.factory = replace(board.factory, start_before_ci=True)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    pr.ci[sha(1)] = "pending"
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    ready = board.ready(pr, sha(1))
+    board.queue.finish(build.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    review = board.claim("codex")
+    pr.ci[sha(1)] = "failure"
+    approve = board.approve(pr)
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=approve)
+    board.poll()
+    assert board.state("42")["gate_count"] == 1
+    board.actions.patch_ids = {sha(i): "a" * 40 for i in (1, 2, 3)}
+    return board, pr
+
+
+@pytest.mark.job_bound
+def test_an_earlier_fix_ready_does_not_cancel_the_fix_for_a_later_red_head(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    fix = board.claim("claude")
+    pr.push(sha(2), ci="success")
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert board.state("42")["gate_count"] == 0
+
+    pr.push(sha(3), ci="failure")
+    for _ in range(4):
+        board.poll()
+
+    assert [(job["head"], job["state"]) for job in board.jobs("fix")] == [
+        (sha(1), "done"),
+        (sha(3), "queued"),
+    ]
+    assert board.state("42")["gate_count"] == 1
+
+
+@pytest.mark.job_bound
+def test_a_held_ci_fix_paused_for_questions_keeps_its_approval(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    approve = pr.comments[-1].id
+    fix = board.claim("claude")
+    board.post(pr, "fix-question", QUESTIONS, "claude-login")
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id="fix-question")
+    board.poll()
+    board.poll()
+    assert board.state("42")["workflow_state"] == "waiting-max"
+    assert board.outcome(approve) is None
+
+    board.post(pr, "fix-answer", ANSWERS, "grok-login")
+    board.poll()
+    resumed = board.claim("claude")
+    pr.push(sha(2), ci="success")
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(resumed.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) == "held-ci-fix-ready"
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert len(board.jobs("review")) == 1
+
+
+@pytest.mark.job_bound
+def test_a_held_ci_fix_ready_at_a_conflicting_head_without_ci_updates_the_base(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    fix = board.claim("claude")
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    for _ in range(4):
+        board.poll()
+
+    assert len(_merge_only_jobs(board)) == 1
+
+
+@pytest.mark.job_bound
+def test_an_earlier_fix_ready_does_not_cancel_a_later_held_base_update(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    fix = board.claim("claude")
+    pr.push(sha(2), ci="success")
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+
+    pr.push(sha(3), state="dirty")
+    del pr.ci[sha(3)]
+    for _ in range(4):
+        board.poll()
+
+    assert [(job["head"], job["state"]) for job in _merge_only_jobs(board)] == [
+        (sha(3), "queued")
+    ]

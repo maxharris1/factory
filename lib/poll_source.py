@@ -39,6 +39,7 @@ from lib.dispatcher import (
     scrub_detail,
     trusted_bots,
 )
+from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.cycle_clock import CycleClock
 from lib.factory_md import (
@@ -1462,7 +1463,7 @@ class LivePollSource:
                 _object(pull.get("head"), "GitHub pull request head").get("ref")
             ),
             pr_number=number,
-            brief=_brief_link(brief),
+            **_github_brief(brief),
             brief_comment=brief,
             issue_body=(
                 None
@@ -2652,8 +2653,14 @@ def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
     return None if page.get("hasNextPage") is not False else False
 
 
-def _brief_link(brief: Comment | None) -> str | None:
-    return None if brief is None else brief.url or brief.body.strip()
+def _github_brief(brief: Comment | None) -> dict[str, str | None]:
+    if brief is None:
+        return {"brief": None, "brief_text": None, "brief_url": None}
+    return {
+        "brief": brief.url or brief.body.strip(),
+        "brief_text": before_factory_md(parse_comment(brief.body).body).strip(),
+        "brief_url": brief.url,
+    }
 
 
 def _brief_body(brief: Comment | None) -> str | None:

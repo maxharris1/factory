@@ -50,6 +50,7 @@ export const step = (action, from, to) => {
   if (action === "T2ReadyGreen") return "ready, CI green";
   if (action === "T2CiRed") return "CI red, fix";
   if (action === "T2CiRedStuck") return "CI red three times";
+  if (action === "T2ReadyCovered") return "ready at the approved patch, CI green";
   if (action === "T6JobRetry") return "job dies, retry once";
   if (action === "T6JobStuck") return "job dies twice (T6)";
   if (action === "T6DeviceOffline") return "device offline 60 minutes";
@@ -58,6 +59,7 @@ export const step = (action, from, to) => {
   if (action === "T3Unsat") return "REVISE with unsat=, the criterion goes to Max";
   if (action === "T7Blocked") return "BLOCKED";
   if (action === "T4Approve") return "APPROVE on the current head";
+  if (action === "T4ApproveCiRed") return "APPROVE on red CI, CI fix";
   if (action === "T4HeadMoves") return "a new head is pushed";
   if (action === "T4PatchDiffers") return "head changed and the patch differs";
   if (action === "T4ShipMerge") return "ship = merge";

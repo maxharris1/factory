@@ -32,6 +32,7 @@ WRITERS = {
     "closed-unmerged": "lib/dispatch/merge_queue.py",
     "update-queued": "lib/dispatch/merge_queue.py",
     "update-failed": "lib/dispatch/merge_queue.py",
+    "update-conflicts-anew": "lib/dispatch/merge_queue.py",
     "plan-check": "lib/dispatch/plan.py",
     "plan-gap": "lib/dispatch/plan.py",
     "t3": "lib/dispatch/verdict/t3.py",
