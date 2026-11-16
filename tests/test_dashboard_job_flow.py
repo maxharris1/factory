@@ -56,10 +56,10 @@ def _successors(path: Path, state: str) -> set[str]:
 
 
 def _visits(markup: str, cls: str) -> list[str]:
-    """The data-state of each visit button in the `<ol class="{cls}">` list."""
+    """The data-state of each visit in the `<ol class="{cls}">` list."""
     match = re.search(rf'<ol class="{cls}">(.*?)</ol>', markup, flags=re.S)
     assert match, f"no {cls} list"
-    return re.findall(r'<button[^>]*data-state="([^"]+)"', match.group(1))
+    return re.findall(r'<[a-z]+[^>]*\bdata-state="([^"]+)"', match.group(1))
 
 
 def _next_cards(markup: str) -> list[str]:
@@ -103,7 +103,7 @@ def test_run_log_is_the_chronological_path_with_the_revisit_repeated(tmp_path: P
     assert job["flow"]["path"] == TICKET_40_PATH
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
     assert _visits(article, "runlog") == TICKET_40_PATH
-    assert re.findall(r'<button[^>]*data-visit="(\d+)"[^>]*class="now', article) == ["4"]
+    assert re.findall(r'<div class="visit now"[^>]*data-visit="(\d+)"', article) == ["4"]
 
 
 def test_next_steps_are_the_charts_direct_successors_of_the_current_state(tmp_path: Path) -> None:

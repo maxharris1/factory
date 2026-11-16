@@ -60,7 +60,7 @@ def test_every_chart_edge_has_a_route_that_crosses_no_node():
 
 
 def test_stop_states_sit_on_the_bottom_rail():
-    stops = {"refused", "abandoned", "stuck"}
+    stops = {"refused", "abandoned", "stuck", "blocked"}
     rail = LAYOUT["rail"]["y"]
     for name, node in NODES.items():
         assert node["stop"] == (name in stops), name
@@ -75,6 +75,27 @@ def test_artboard_places_kept_and_new_states_take_free_rows():
     assert (NODES["handed-off"]["col"], NODES["handed-off"]["row"]) == (5, 3)
     assert NODES["merge-queue"]["col"] == NODES["updating"]["col"] == 4
     assert NODES["merge-queue"]["row"] == 3
+
+
+PLACES_BEFORE_BLOCKED_MOVED = {
+    "intake": (0, 0), "questions": (0, 1), "waiting-max": (0, 2),
+    "planning": (1, 0), "plan-check": (1, 1),
+    "building": (2, 0), "fixing": (2, 1),
+    "review": (3, 0), "capped": (3, 1),
+    "ship": (4, 0), "awaiting-ok": (4, 1), "waiting-external": (4, 2),
+    "merge-queue": (4, 3), "updating": (4, 4),
+    "merged": (5, 0), "post-merge": (5, 1), "done": (5, 2), "handed-off": (5, 3),
+    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4),
+}
+
+
+def test_blocked_moves_to_the_stop_rail_and_nothing_else_moves():
+    blocked = NODES["blocked"]
+    assert (blocked["col"], blocked["row"]) == (3, 4)
+    assert blocked["stop"] and not blocked["end"]
+    assert blocked["y"] > LAYOUT["rail"]["y"]
+    others = {name: (node["col"], node["row"]) for name, node in NODES.items() if name != "blocked"}
+    assert others == PLACES_BEFORE_BLOCKED_MOVED
 
 
 STUB = r"""
