@@ -234,7 +234,7 @@ def _feeder_brief(ticket: str, prose: str) -> Comment:
         rounds_low=1, rounds_high=3, verify="none", ship="handoff", skills=(),
     )
     body = feeder_brief(
-        issue, FactoryContext(config=config, body=prose), number=7, branch="factory/issue-162",
+        issue, FactoryContext(config=config, body=prose), number=7, branch="factory/issue-162", base="main",
         risk="low", state="building", visible=False,
     )
     return Comment(id="1", author="factory-app[bot]", body=body, created_at=1)

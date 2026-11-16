@@ -574,7 +574,11 @@ the key on a project with no Linear ID are errors. `check-config` names the
 key an `orch.local.yml` overlay sets, never its IDs or branches. A PR whose
 live base differs from its ticket's base is flagged `base-mismatch` in
 needs-attention and starts no job, and a ship refuses it, until someone
-retargets the PR. The factory never retargets a PR itself.
+retargets the PR. The factory never retargets a PR itself. The feeder
+records a ticket's base while it is unfed and keeps it once fed, so a later
+config edit never moves an open PR. A base branch missing on GitHub, or a
+Linear issue with no project on a repo that sets `base_branches`, holds the
+ticket in `waiting-blocked` with that reason, and opens nothing.
 
 The Grok webhook fields also contain environment-variable names, not values.
 Delivery sends one JSON object containing the job fields and `logical_key`,
