@@ -1,0 +1,6 @@
+decision	choice	why
+header check	render each brief from the job the real Dispatcher queued, fill its header, post it back through Flow and assert the outcome	parsing alone would pass a header the state rejects (wrong role, wrong kind)
+helpers	go_comment on a new ticket, extra_round_go at the cap, answers_for at waiting-max	the three Grok helpers whose comments the dispatcher acts on; brief and stuck start no transition
+rule ids	RULE_PHRASES in rules.py maps each id to a phrase of its rendered text; rendering code unchanged	the ticket allows ids only; snapshots stay byte-identical
+enforcers	presence in every brief that must carry the rule, plus a behaviour check where one exists (forged go rejected, GH unsets every token var)	most rules are instructions to an agent with no code path to enforce them
+pin check	absolute paths must be in skills.lock and on disk; backticked relative paths must exist in the repo, pstack or factory skills	handoff.md is a draft the bot writes, so bare names are not checked
