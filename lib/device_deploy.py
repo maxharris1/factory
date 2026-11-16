@@ -17,11 +17,11 @@ One pass:
    (lib/skill_preflight.py's script and pinned set). Synced means HEAD is
    the target, on main, and every pinned file matches.
 2. In one orch.db write transaction: record each observation. A target that
-   needs a deploy is marked lagging (or missing), which keeps its harness
-   off the device so the device drains. When the device holds no slot,
-   every such target on it is marked deploying, which keeps every harness
-   off it; when it holds one, it is left for a later pass. A running job is
-   never touched, and a pass never waits on a busy device.
+   needs a deploy is marked deploying, which keeps every harness off its
+   device while the checkout moves, whatever jobs run there (#463). A
+   running job is never touched: it works in its own checkout under the
+   device's workdir, never in the factory checkout. A dry run marks it
+   lagging (or missing) and writes nothing.
 3. Deploy each deploying target in its own thread, one ssh call under the
    bot's login shell: clone a missing checkout, or fetch origin main and
    refuse (nothing written) on staged or modified tracked files, a merge or
@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, health
-from lib.device_pool import box_device, slots_in_use
+from lib.device_pool import box_device
 from lib.device_sync import Observed
 from lib.grok_delivery import send_webhook
 from lib.heal import ESCALATE, LOG_NAME, Action, Poster, Webhook, _webhook, escalate, stamp
@@ -285,9 +285,7 @@ def run_pass(
         connection.execute("BEGIN IMMEDIATE")
         device_sync.ensure(connection)
         device_sync.forget_except(connection, seen, (box_device(config),))
-        busy = slots_in_use(connection, config)
         when = now()
-        waiting: dict[str, list[Target]] = {}
         for target in found:
             observed = seen[target.key]
             action = device_sync.step(observed, sha)
@@ -295,18 +293,12 @@ def run_pass(
                 result = Result(target, device_sync.UNREACHABLE, "ssh failed", None)
             elif action == device_sync.KEEP_SYNCED:
                 result = Result(target, device_sync.SYNCED, "", observed.sha)
+            elif dry_run:
+                result = Result(target, device_sync.waiting_state(observed), "", observed.sha)
             else:
-                jobs = busy.get(target.device, 0)
-                note = f"busy ({jobs} jobs), retry next pass" if jobs else ""
-                result = Result(target, device_sync.waiting_state(observed), note, observed.sha)
-                waiting.setdefault(target.device, []).append(target)
+                result = Result(target, device_sync.DEPLOYING, "", observed.sha)
+                deploying.append(target)
             results[target.key] = result
-        for device, group in waiting.items():
-            if busy.get(device, 0) == 0 and not dry_run:
-                for target in group:
-                    old = results[target.key]
-                    results[target.key] = Result(target, device_sync.DEPLOYING, "", old.sha)
-                deploying.extend(group)
         for result in results.values():
             _write(connection, result, sha, when)
         if dry_run:

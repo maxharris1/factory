@@ -7,6 +7,7 @@ the device, so the clone, fetch, refusal and checkout paths all run for real.
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -254,10 +255,12 @@ def test_a_checkout_with_local_commits_is_refused(tmp_path: Path, fleet) -> None
     assert git(mac, "rev-parse", "HEAD") == local
 
 
-def test_a_busy_device_is_left_alone_drains_and_deploys_once_idle(tmp_path: Path, fleet) -> None:
-    origin, transport, config, queue, _home = fleet
+def test_a_busy_device_is_synced_and_its_running_job_left_alone(tmp_path: Path, fleet) -> None:
+    origin, transport, config, queue, home = fleet
+    pc = checkout(tmp_path, "pc")
+    clone_at(origin, pc, origin.old, detach=False)
     queue.enqueue(
-        JobRequest(repo="o/r", ticket_id="1", action="build", recipient="codex",
+        JobRequest(repo="o/r", ticket_id="1", action="build", recipient="claude",
                    source_comment_id="c1", timeout_seconds=60),
         dedupe_key="1",
     )
@@ -266,28 +269,29 @@ def test_a_busy_device_is_left_alone_drains_and_deploys_once_idle(tmp_path: Path
         job_id = connection.execute("SELECT id FROM jobs").fetchone()[0]
         connection.execute(
             "INSERT INTO device_slots (job_id, device, harness, os_user, placed_at) "
-            "VALUES (?, 'pc', 'codex', 'codex-bot', 1.0)", (job_id,))
+            "VALUES (?, 'pc', 'claude', 'claude-bot', 1.0)", (job_id,))
+    job_dir = tmp_path / "pc" / "claude-bot" / "work" / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "work.txt").write_text("in progress\n", encoding="utf-8")
 
-    run(origin, transport, config, queue)
+    results = run(origin, transport, config, queue)
 
-    pc = rows(queue)[("pc", "claude-bot")]
-    assert (pc.state, pc.detail) == ("missing", "busy (1 jobs), retry next pass")
-    assert not any(alias.startswith("pc-") for alias in transport.deploys())
-    assert states(queue)[("mac", "claude-bot")] == "synced"
-    queue.enqueue(
-        JobRequest(repo="o/r", ticket_id="2", action="build", recipient="claude",
-                   source_comment_id="c2", timeout_seconds=60),
-        dedupe_key="2",
-    )
-    claim = DevicePool(queue, MachinesConfig(devices=(config.device("pc"),))).claim("claude")
-    assert claim is None
-
+    row = rows(queue)[("pc", "claude-bot")]
+    assert (row.state, row.detail) == ("synced", "")
+    assert on_main_at(pc, origin.new)
+    assert f"{pc} install-skills" in (home / "install.log").read_text().splitlines()
     with queue.connect() as connection:
-        connection.execute("DELETE FROM device_slots")
-    run(origin, transport, config, queue)
+        assert connection.execute("SELECT state FROM jobs").fetchone()[0] == "running"
+        assert connection.execute(
+            "SELECT device FROM device_slots WHERE job_id = ?", (job_id,)).fetchone()[0] == "pc"
+    assert (job_dir / "work.txt").read_text() == "in progress\n"
 
-    assert states(queue)[("pc", "claude-bot")] == "synced"
-    assert on_main_at(checkout(tmp_path, "pc"), origin.new)
+    state = tmp_path / "state"
+    state.mkdir()
+    device_deploy.report(results, state, sha=origin.new, device="box",
+                         webhook=Webhook(url_env="HOOK_URL"), environ={}, now=1.0)
+    last = json.loads((state / device_deploy.STATE_NAME).read_text())["last"]
+    assert last["pc claude-bot"] == "synced"
 
 
 def test_a_target_left_deploying_by_a_dead_pass_is_reobserved(tmp_path: Path, fleet) -> None:

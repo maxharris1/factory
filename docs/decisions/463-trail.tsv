@@ -1,0 +1,5 @@
+decision	choice	why
+deploy rule	a target that needs a deploy goes deploying in the pass that saw it, whatever the device job count; the deploying mark still blocks placement during the move	same shape as #366 for the box; the device deploy restarts no service, so no step is left that needs the busy wait the ticket keeps for such steps
+running job safety	rely on remote jobs working in <workdir_root>/jobs/<id>, which machines_yml keeps outside factory_root	the deploy writes only factory_root and the bot home skills; the job checkout and its slot row are untouched
+dry run	keeps the lagging or missing state and writes nothing	it reports what would deploy without claiming deploying
+ac-3 proof	real git deploy script under the local fake ssh with a running job and its slot on pc, then report() reads device-deploy.state.json	the test failed on the old code (lagging, busy (1 jobs)) and passes on the new
