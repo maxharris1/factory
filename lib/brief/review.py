@@ -105,17 +105,25 @@ def _url(value: object) -> str | None:
     return value if isinstance(value, str) and _URL.fullmatch(value) else None
 
 
-def _update_steps(update: dict, base: str, head: str, start_before_ci: bool, unchanged_tag: str) -> list[str]:
+def _update_steps(facts: dict, base: str, head: str, unchanged_tag: str) -> list[str]:
+    update = facts["update"]
     last = update["last_reviewed_head"]
     merge = update["merge"]
     commits = update["commits"]
+    evidence = "read the ready's pasted local results" if facts["no_ci_base"] else "read the CI result on this head"
     steps = [
         f"The code at `{last}` was already reviewed and approved. This head brings `{base}` in by merge commit "
         f"`{merge}`. Review only how that merge resolved conflicts (`git show --remerge-diff {merge}`) and "
-        "whether the base changes break this PR: read the CI result on this head, and use `git range-diff` "
+        f"whether the base changes break this PR: {evidence}, and use `git range-diff` "
         f"where useful. A finding in code unchanged since `{last}` is not blocking: tag it "
         + unchanged_tag
-        + (" " + _CI_WHILE_RUNNING if start_before_ci else "")
+        + (
+            " " + _local_checks_required(facts)
+            if facts["no_ci_base"]
+            else " " + _CI_WHILE_RUNNING
+            if facts["start_before_ci"]
+            else ""
+        )
         + _MERGEABLE
     ]
     if commits:
@@ -185,7 +193,7 @@ def task_lines(facts: dict) -> list[str]:
         "request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it "
         "never leads to `APPROVE`.",
         *(
-            _update_steps(facts["update"], base, head, facts["start_before_ci"], unchanged_tag)
+            _update_steps(facts, base, head, unchanged_tag)
             if facts["update"]
             else [
                 (

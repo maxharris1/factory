@@ -540,7 +540,7 @@ def _no_ci(variant: tuple, **detail: object) -> str:
     return _task(_render(action, attempt, head, {**extra, **NO_CI, **detail}))
 
 
-@pytest.mark.parametrize("variant", [BUILD, REVIEW_FIX], ids=["build", "review-fix"])
+@pytest.mark.parametrize("variant", [BUILD, REVIEW_FIX, CI_FIX], ids=["build", "review-fix", "ci-fix"])
 def test_a_builder_on_a_base_without_ci_runs_the_local_checks_and_pastes_them(variant: tuple):
     task = _no_ci(variant)
     assert LOCAL_RUN in task
@@ -599,7 +599,17 @@ def test_the_job_detail_names_a_base_without_ci_and_its_local_checks(tmp_path: P
     assert LOCAL_RUN in task
 
 
-def test_a_ci_fix_on_a_base_without_ci_keeps_the_ci_gate_wording():
-    task = _no_ci(CI_FIX)
-    assert "CI runs the full suite and is the gate" in task
-    assert "CI does not run on" not in task
+def test_a_ci_fix_on_a_base_without_ci_still_names_the_red_checks():
+    assert f"Fix the red CI on this PR. These checks failed on {HEAD}: `pytest (shard 2)`." in _no_ci(CI_FIX)
+
+
+@pytest.mark.parametrize("commits", [[], ["c" * 40]], ids=["merge", "merge-with-commits"])
+def test_an_update_review_on_a_base_without_ci_requires_the_pasted_local_checks(commits: list[str]):
+    task = _no_ci(REVIEW, kind="update", last_reviewed_head="a" * 40, update_merge="b" * 40, update_commits=commits)
+    assert "whether the base changes break this PR: read the ready's pasted local results" in task
+    assert (
+        f"CI does not run on `{NO_CI_BASE}`. The ready must paste the commands and results of typecheck, Jest "
+        "and pgTAP run at this head. A ready without that paste is a `[blocking]` finding, so REVISE."
+    ) in task
+    assert "CI result on this head" not in task
+    assert "CI may still be running" not in task
