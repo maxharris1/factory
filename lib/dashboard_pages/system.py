@@ -56,10 +56,17 @@ font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
 SCRIPT_LOG = r"""
   // --- system page (#141) ------------------------------------------------------
 
-  var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/another orch poll owns/, 'warn'], [/poller start/, 'start']];
-  function logKind(line) {
-    for (var i = 0; i < LOG_KINDS.length; i++) if (LOG_KINDS[i][0].test(line)) return LOG_KINDS[i][1];
-    return null;
+  var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/another orch poll owns/, 'warn'], [/poller start/, 'start'],
+                   [/Traceback/, 'bad'], [/\b\w*(?:Error|Exception):/, 'bad'], [/\b(?:ERROR|CRITICAL)\b/, 'bad'],
+                   [/\b(?:WARNING|WARN)\b/, 'warn']];
+  function logKinds(lines) {
+    var traceback = false;
+    return lines.map(function (line) {
+      if (traceback && /^\s/.test(line)) return 'bad';
+      traceback = line.indexOf('Traceback') >= 0;
+      for (var i = 0; i < LOG_KINDS.length; i++) if (LOG_KINDS[i][0].test(line)) return LOG_KINDS[i][1];
+      return null;
+    });
   }
   function renderLog(d) {
     var log = d.poller.log;
@@ -67,7 +74,9 @@ SCRIPT_LOG = r"""
     if (!root) return;
     add(root, el('p', 'sys-note', 'last ' + log.tail.length + ' lines, newest first, redacted'));
     var box = add(root, el('div', 'sys-log'));
-    log.tail.slice().reverse().forEach(function (line) { add(box, el('div', logKind(line), line)); });
+    var kinds = logKinds(log.tail);
+    log.tail.map(function (line, i) { return [line, kinds[i]]; }).reverse()
+      .forEach(function (row) { add(box, el('div', row[1], row[0])); });
   }
 
   function renderRules(d) {
@@ -311,11 +320,25 @@ _LOG_KINDS = (
     (re.compile(r"exit rc=(?!0\b)\d+"), "bad"),
     (re.compile(r"another orch poll owns"), "warn"),
     (re.compile(r"poller start"), "start"),
+    (re.compile(r"Traceback"), "bad"),
+    (re.compile(r"\b\w*(?:Error|Exception):"), "bad"),
+    (re.compile(r"\b(?:ERROR|CRITICAL)\b"), "bad"),
+    (re.compile(r"\b(?:WARNING|WARN)\b"), "warn"),
 )
 
 
-def _log_kind(line: str) -> str | None:
-    return next((kind for pattern, kind in _LOG_KINDS if pattern.search(line)), None)
+def _log_kinds(lines: list[str]) -> list[str | None]:
+    """Each line's kind, read in the order poller.log wrote them: the indented
+    frames under a Traceback line are bad too (logKinds in the script)."""
+    kinds: list[str | None] = []
+    traceback = False
+    for line in lines:
+        if traceback and line[:1].isspace():
+            kinds.append("bad")
+            continue
+        traceback = "Traceback" in line
+        kinds.append(next((kind for pattern, kind in _LOG_KINDS if pattern.search(line)), None))
+    return kinds
 
 
 def _log(snapshot: dict) -> str:
@@ -325,9 +348,10 @@ def _log(snapshot: dict) -> str:
         if log["present"]
         else "absent"
     )
+    tail = log["tail"]
     lines = "".join(
-        f'<div class="{kind}">{_e(line)}</div>' if (kind := _log_kind(line)) else f"<div>{_e(line)}</div>"
-        for line in reversed(log["tail"])
+        f'<div class="{kind}">{_e(line)}</div>' if kind else f"<div>{_e(line)}</div>"
+        for line, kind in reversed(list(zip(tail, _log_kinds(tail))))
     )
     inner = (
         f'<p class="sys-note">last {len(log["tail"])} lines, newest first, redacted</p>'

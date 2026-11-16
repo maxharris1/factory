@@ -328,6 +328,43 @@ def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
     assert f'<span class="count">{shown}</span>' in out["html"]["no-waiter"]
 
 
+# (line, kind) in the order poller.log wrote them.
+CLASSIFIED_TAIL = [
+    ("2026-11-13 13:08:59 EST poller exit rc=1", "bad"),
+    ("2026-11-13 13:09:19 EST poller start", "start"),
+    ("orch poll: another orch poll owns /tmp/orch.db.lock", "warn"),
+    ("Traceback (most recent call last):", "bad"),
+    ('  File "lib/orch.py", line 9, in poll', "bad"),
+    ("    raise ValueError(x)", "bad"),
+    ("ValueError: x", "bad"),
+    ("cycle line after the traceback", ""),
+    ("    indented after a plain line", ""),
+    ("2026-11-13 13:10:00 EST ERROR linear: HTTP 500", "bad"),
+    ("2026-11-13 13:10:01 EST CRITICAL disk full", "bad"),
+    ("2026-11-13 13:10:02 EST WARNING slow cycle", "warn"),
+    ("2026-11-13 13:10:03 EST WARN retrying", "warn"),
+    ("lib.linear.RateLimitException: slow down", "bad"),
+    ("2026-11-13 13:10:04 EST poller exit rc=0", ""),
+]
+
+
+def _classified(tmp_path: Path) -> dict:
+    snapshot = _snapshot(tmp_path)
+    snapshot["poller"]["log"]["tail"] = [line for line, _ in CLASSIFIED_TAIL]
+    return snapshot
+
+
+def test_poller_log_colours_errors_tracebacks_and_warnings(tmp_path: Path) -> None:
+    log = _section(_no_script(render_pages(_classified(tmp_path))["health.html"]), "log")
+    assert _log_rows(log) == [(kind, line) for line, kind in reversed(CLASSIFIED_TAIL)]
+
+
+@needs_node
+def test_script_poller_log_colours_errors_tracebacks_and_warnings(tmp_path: Path) -> None:
+    log = _run_page(tmp_path, _classified(tmp_path), "health", BAR + ["hud", "log"])["html"]["log"]
+    assert _log_rows(log) == [(kind, line) for line, kind in reversed(CLASSIFIED_TAIL)]
+
+
 def _log_rows(markup: str) -> list[tuple[str, str]]:
     box = markup[markup.index('<div class="sys-log">') + len('<div class="sys-log">'):]
     return [(kind, htmllib.unescape(line)) for kind, line in re.findall(r'<div(?: class="(\w+)")?>([^<]*)</div>', box)]
