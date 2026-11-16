@@ -265,14 +265,15 @@ SCRIPT_TAIL = r"""
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
   function nodeKey(node) {
-    var cls = (node.getAttribute('class') || '').split(' ').filter(function (c) { return c && c !== 'fresh'; });
     var parts = [];
     var attrs = node.attributes;
     for (var i = 0; i < attrs.length; i++) {
       var name = attrs[i].name;
       if (name === 'id' || name === 'href' || name.slice(0, 5) === 'data-') parts.push(name + '=' + attrs[i].value);
     }
-    return node.tagName + '.' + (cls[0] || '') + '[' + parts.sort().join('][') + ']';
+    if (parts.length) return node.tagName + '[' + parts.sort().join('][') + ']';
+    var cls = (node.getAttribute('class') || '').split(' ').filter(function (c) { return c && c !== 'fresh'; });
+    return node.tagName + '.' + (cls[0] || '');
   }
   function locator(node) {
     var chain = [], keys = [];
@@ -294,7 +295,7 @@ SCRIPT_TAIL = r"""
     var hits = [];
     twins(at.chain[i], at.keys, i - 1, hits);
     var same = hits.filter(function (h) { return h.textContent === at.text; });
-    return {root: at.chain[i], node: same[0] || hits[0] || null};
+    return {root: at.chain[i], node: same[0] || (hits.length === 1 ? hits[0] : null)};
   }
   function scrolled(node, out) {
     var kids = node.children;
