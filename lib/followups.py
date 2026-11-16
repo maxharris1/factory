@@ -3,8 +3,10 @@
 From factory.md review.followup_from_round on, a reviewer tags a variant of
 an already-raised rule `[follow-up]` instead of `[blocking]`. The brief and
 the poller both ask followups_active, so they cannot disagree on the round.
-The poller files a trusted verdict's `[follow-up]` items as one new ticket
-(followup_issue) and links it from the PR (link_comment). Each write carries
+The poller parks a trusted verdict's `[follow-up]` items on one unlabelled
+issue per PR: the first verdict files it (followup_issue), later verdicts add
+a comment to it while it stays open and out of the queue (followup_addition),
+and each verdict links it from the PR (link_comment). Each write carries
 a hidden marker keyed on the verdict comment id, so a retry after a crash
 finds the earlier write instead of repeating it.
 """
@@ -77,6 +79,25 @@ def followup_issue(
         f"Plan first: no\nDepends on: #{pr}\nRisk: {risk}\nConflicts with: none\n{touches}\n"
         f"## Acceptance criteria\n\n{criteria}\n## Findings\n\n"
     )
+    return title, _with_findings(head, findings, comment_id)
+
+
+def followup_addition(
+    repo: str,
+    pr: int,
+    round_number: int,
+    verdict_url: str,
+    comment_id: str,
+    findings: tuple[str, ...],
+) -> str:
+    head = (
+        f"Follow-up findings from the round {round_number} review verdict on "
+        f"{repo}#{pr}: {verdict_url}\n\n## Findings\n\n"
+    )
+    return _with_findings(head, findings, comment_id)
+
+
+def _with_findings(head: str, findings: tuple[str, ...], comment_id: str) -> str:
     marker = followup_marker(comment_id)
     quoted = "\n\n".join(_defuse_gate_lines(finding) for finding in findings)
     room = ISSUE_BODY_LIMIT - len(head) - len(marker) - 2
@@ -84,12 +105,12 @@ def followup_issue(
         room -= len(_CUT_NOTE) + 2
         cut = quoted.rfind("\n", 0, room)
         quoted = quoted[: cut if cut > 0 else room].rstrip() + "\n\n" + _CUT_NOTE
-    return title, f"{head}{quoted}\n\n{marker}"
+    return f"{head}{quoted}\n\n{marker}"
 
 
 def link_comment(comment_id: str, issue_number: int, round_number: int) -> str:
     return (
-        f"Follow-ups from review round {round_number} are filed as "
+        f"Follow-ups from review round {round_number} are parked on "
         f"#{issue_number}; they do not block this PR.\n\n{link_marker(comment_id)}"
     )
 

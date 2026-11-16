@@ -530,6 +530,9 @@ class DetailMixin:
         }
         if note is not None:
             detail["note"] = note
+        parked = self._park_followups(ticket)
+        if parked is not None:
+            detail["followup_issue"] = parked
         self.wake_grok_once(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,

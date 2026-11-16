@@ -1,10 +1,15 @@
-"""Follow-up filings (issue #259): record at T3/T4, then file and link once.
+"""Follow-up filings (issues #259, #492): record at T3/T4, then park and link once.
 
 T3 and T4 record a pending row for a trusted verdict they accept whose
 `[follow-up]` items fall from factory.md review.followup_from_round on. The
-drain runs after the comment pass: pending -> filed (the issue exists) ->
-commented (the PR links it). Each tracker write first looks for its marker,
-so a crash between a write and its status update never writes twice.
+drain runs after the comment pass and before a done wake. A PR's first row
+files an unlabelled issue, so the findings wait outside the queue until the
+orchestrator promotes them. A later row adds its findings as a comment on the
+PR's newest parked issue (open, without the intake label); the row stores
+that issue number while still pending, so a retry adds to the same issue.
+Rows go pending -> filed (the issue holds the findings) -> commented (the PR
+links it). Each tracker write first looks for its marker, so a crash between
+a write and its status update never writes twice.
 """
 
 from __future__ import annotations
@@ -13,8 +18,9 @@ import json
 import sqlite3
 
 from lib.dispatch.helpers import _comment_link
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, ReviewActions, TrackedTicket
 from lib.followups import (
+    followup_addition,
     followup_findings,
     followup_issue,
     followup_marker,
@@ -40,22 +46,26 @@ class FollowupsMixin:
         findings = followup_findings(comment.body)
         if not findings:
             return
+        pr = int(ticket.pr_number or ticket.ticket_id)
+        verdict_url = _comment_link(comment)
         title, body = followup_issue(
             ticket.repo,
-            int(ticket.pr_number or ticket.ticket_id),
+            pr,
             round_number,
-            _comment_link(comment),
+            verdict_url,
             comment.id,
             findings,
             parse_comment(comment.body).as_dict().get("risk", ticket.risk),
         )
-        labels = [*([ticket.intake_label] if ticket.intake_label else []), "urgent"]
+        addition = followup_addition(
+            ticket.repo, pr, round_number, verdict_url, comment.id, findings
+        )
         connection.execute(
             """
             INSERT OR IGNORE INTO followup_filings (
                 repo, ticket_id, comment_id, round, title, body, labels,
-                status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                status, created_at, addition
+            ) VALUES (?, ?, ?, ?, ?, ?, '[]', 'pending', ?, ?)
             """,
             (
                 ticket.repo.lower(),
@@ -64,10 +74,17 @@ class FollowupsMixin:
                 round_number,
                 title,
                 body,
-                json.dumps(labels),
                 self.queue.now(),
+                addition,
             ),
         )
+
+    def _park_followups(self, ticket: TrackedTicket) -> int | None:
+        try:
+            self._drain_followups(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        return self._latest_followup_issue(ticket)
 
     def _drain_followups(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -75,7 +92,7 @@ class FollowupsMixin:
             rows = connection.execute(
                 """
                 SELECT comment_id, round, title, body, labels, status,
-                       issue_number, created_at
+                       issue_number, created_at, addition
                 FROM followup_filings
                 WHERE repo = ? AND ticket_id = ? AND status IN ('pending', 'filed')
                 ORDER BY created_at, comment_id
@@ -89,14 +106,26 @@ class FollowupsMixin:
             comment_id = str(row["comment_id"])
             issue_number = row["issue_number"]
             if row["status"] == "pending":
-                issue_number = actions.file_issue(
-                    ticket,
-                    str(row["title"]),
-                    str(row["body"]),
-                    tuple(json.loads(row["labels"])),
-                    followup_marker(comment_id),
-                    float(row["created_at"]),
-                )
+                if issue_number is None and row["addition"] is not None:
+                    issue_number = self._parked_issue(ticket, actions)
+                    if issue_number is not None:
+                        self._set_followup_status(key, comment_id, "pending", issue_number)
+                if issue_number is None:
+                    issue_number = actions.file_issue(
+                        ticket,
+                        str(row["title"]),
+                        str(row["body"]),
+                        tuple(json.loads(row["labels"])),
+                        followup_marker(comment_id),
+                        float(row["created_at"]),
+                    )
+                else:
+                    actions.comment_on_issue_once(
+                        ticket,
+                        int(issue_number),
+                        str(row["addition"]),
+                        followup_marker(comment_id),
+                    )
                 self._set_followup_status(key, comment_id, "filed", issue_number)
             actions.comment_once(
                 ticket,
@@ -104,6 +133,27 @@ class FollowupsMixin:
                 link_marker(comment_id),
             )
             self._set_followup_status(key, comment_id, "commented", issue_number)
+
+    def _parked_issue(self, ticket: TrackedTicket, actions: ReviewActions) -> int | None:
+        number = self._latest_followup_issue(ticket)
+        if number is None:
+            return None
+        labels = actions.open_issue_labels(ticket, number)
+        if labels is None or ticket.intake_label in labels:
+            return None
+        return number
+
+    def _latest_followup_issue(self, ticket: TrackedTicket) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT issue_number FROM followup_filings
+                WHERE repo = ? AND ticket_id = ? AND status != 'pending'
+                ORDER BY created_at DESC, comment_id DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        return None if row is None else int(row["issue_number"])
 
     def _set_followup_status(
         self,

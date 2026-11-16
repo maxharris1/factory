@@ -69,10 +69,7 @@ class CommentsMixin:
                 )
             raise
         self._settle_external_ships(ticket)
-        try:
-            self._drain_followups(ticket)
-        except Exception as exc:
-            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        self._park_followups(ticket)
         try:
             self._drain_auto_extra(ticket)
         except Exception as exc:

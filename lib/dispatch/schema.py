@@ -311,10 +311,12 @@ class SchemaMixin:
                         CHECK (status IN ('pending', 'filed', 'commented')),
                     issue_number INTEGER,
                     created_at REAL NOT NULL,
+                    addition TEXT,
                     PRIMARY KEY (repo, ticket_id, comment_id)
                 )
                 """
             )
+            _add_missing_columns(connection, "followup_filings", {"addition": "TEXT"})
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS auto_extra_comments (
