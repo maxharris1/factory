@@ -19,6 +19,8 @@ from lib.dashboard_pages.tickets import WAITING, _active_jobs, _px
 
 
 VERBS = {name: spec["verbs"] for name, spec in TILE_STATE.items() if "verbs" in spec}
+HB_TONE = {"live": "ok", "warn": "warn", "bad": "bad", "none": ""}
+HEARTBEAT_TONE = {name: HB_TONE[spec["hb"]] for name, spec in TILE_STATE.items()}
 NEXT_ORDER = {"normal": 0, "human": 1, "stop": 2}
 FIRST_REASON = "ticket arrives"
 STOP_TINT = journey_canvas.STOP
@@ -58,7 +60,7 @@ CSS = """\
 .jd-tiles{flex:1 1 420px;min-width:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr));gap:8px}
 .jd-tile{padding:8px 10px;background:var(--bg);box-shadow:var(--elev)}
 .jd-tile b{display:flex;align-items:center;gap:8px;font:600 18px/1.25 var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
-.jd-tile b.ok{color:var(--ok)}
+.jd-tile b.ok{color:var(--ok)}.jd-tile b.warn{color:var(--warn)}.jd-tile b.bad{color:var(--bad)}
 .jd-tile>span{font-size:12px;color:var(--muted)}
 .jd-pips{display:flex;gap:2px}.jd-pips span{width:6px;height:6px;background:var(--line-hi)}
 .jd-pips span.done{background:var(--text)}.jd-pips span.now{background:var(--accent)}
@@ -72,10 +74,11 @@ CSS = """\
 .jd-right{flex:0 1 1032px;min-width:0;display:flex;flex-direction:column;gap:16px}
 .runlog{margin:0;padding:0;list-style:none;font-family:var(--mono)}
 .runlog li{margin:0 -8px;border-bottom:1px solid var(--line)}
-.runlog button{display:flex;gap:10px;width:100%;box-sizing:border-box;padding:8px;border:0;text-align:left;font-family:inherit;cursor:pointer;background:transparent;color:var(--text)}
-.runlog button[aria-pressed="true"]{background:var(--sel);box-shadow:inset 0 0 0 1px var(--accent)}
+.runlog .visit{display:flex;gap:10px;width:100%;box-sizing:border-box;padding:8px;border:0;text-align:left;font-family:inherit;background:transparent;color:var(--text)}
+.runlog button{cursor:pointer}
+.runlog [aria-pressed="true"],.runlog [aria-current="true"]{background:var(--sel);box-shadow:inset 0 0 0 1px var(--accent)}
 .runlog .num{flex:0 0 20px;font-size:12px;line-height:1.5;color:var(--muted)}
-.runlog button[aria-pressed="true"] .num{color:var(--accent)}
+.runlog [aria-pressed="true"] .num,.runlog [aria-current="true"] .num{color:var(--accent)}
 .runlog .mark{flex:0 0 8px;height:8px;margin-top:5px;box-sizing:border-box;background:var(--m)}
 .runlog .mark.off{background:transparent;border:2px dotted var(--m)}
 .runlog .main{display:block;min-width:0}
@@ -93,6 +96,7 @@ CSS = """\
 .journey li{display:contents}
 .journey button{position:absolute;padding:0;border:0;background:transparent;cursor:pointer}
 .journey button:focus-visible{outline:2px solid var(--accent)}
+.journey .step{display:none}
 .jd-cap{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;padding:10px 12px;border-top:1px solid var(--line);font:12px/1.5 var(--mono)}
 .jd-cap .idx{color:var(--muted)}
 .jd-cap .st{font-size:13px;font-weight:600;color:var(--text)}
@@ -160,6 +164,7 @@ CSS = """\
 .lr-tile b{display:block;font-size:16px;line-height:1.25;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
 .lr-tile span{color:var(--muted)}
 @media (max-width:640px){.lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (scripting:none){.jd-box canvas,.journey button,.jd-ctl .axis,.jd-ctl [data-replay],.jd-chart .jd-box{display:none}.journey{position:static;width:auto;padding:8px 12px 8px 36px;list-style:decimal;font:12px/1.6 var(--mono);color:var(--text-2)}.journey li{display:list-item}.journey .step{display:inline}}
 """
 
 
@@ -251,7 +256,7 @@ def _tiles(row: dict, model: dict, running: bool) -> str:
     if running:
         first = _tile(duration(row.get("elapsed_seconds")), "T+ on this device")
         hb = row.get("heartbeat_age_seconds")
-        beat = _tile("not started" if hb is None else f"{duration(hb)} ago", "last heartbeat", "ok")
+        beat = _tile("not started" if hb is None else f"{duration(hb)} ago", "last heartbeat", HEARTBEAT_TONE[_px().px_state(row)])
     else:
         first = _tile(duration(row.get("age_seconds")), "waiting")
         beat = _tile("not started", "last heartbeat")
@@ -290,10 +295,23 @@ def _hero(row: dict, model: dict, running: bool) -> str:
     )
 
 
-def _visit_dur(visit: dict) -> str:
+def _now_dur(model: dict) -> str:
+    age = model["state_age_seconds"]
+    return "in progress" if age is None else f"{duration(age)} so far"
+
+
+def _visit_dur(visit: dict, model: dict) -> str:
     if visit["current"]:
-        return "in progress"
+        return _now_dur(model)
     return "—" if visit["duration_seconds"] is None else duration(visit["duration_seconds"])
+
+
+def _step_name(visit: dict, model: dict) -> str:
+    if visit["current"]:
+        took = _now_dur(model)
+    else:
+        took = "time unknown" if visit["duration_seconds"] is None else duration(visit["duration_seconds"])
+    return f"Step {visit['index'] + 1} of {len(model['visits'])}: {visit['state']}, {visit['who']}, {took}"
 
 
 def _reason(visit: dict) -> str:
@@ -302,28 +320,27 @@ def _reason(visit: dict) -> str:
     return FIRST_REASON if visit["index"] == 0 else ""
 
 
-def _runlog_row(visit: dict, selected: int) -> str:
+def _runlog_row(visit: dict, model: dict) -> str:
     tint = _who_tint(visit["who"])
-    cls = " ".join(c for c in ("now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
+    cls = " ".join(c for c in ("visit", "now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
     mark_tint = STOP_TINT if visit["stop"] else tint
     name = visit["state"] + (" · now" if visit["current"] else "")
     num = f"{visit['index'] + 1:02d}"
     return (
-        f'<li><button type="button" data-visit="{visit["index"]}" data-state="{_e(visit["state"])}" '
-        f'aria-pressed="{"true" if visit["index"] == selected else "false"}"'
-        + (f' class="{cls}"' if cls else "")
+        f'<li><div class="{cls}" data-visit="{visit["index"]}" data-state="{_e(visit["state"])}"'
+        + (' aria-current="true"' if visit["index"] == model["selected"] else "")
         + f' style="--m:{tint}">'
         f'{_span("num", num)}'
         f'<span class="mark{" off" if visit["off_chart"] else ""}" aria-hidden="true" style="--m:{mark_tint}"></span>'
         f'<span class="main"><span class="top">{_span("name", name)}{_span("who", visit["who"])}'
-        f'{_span("dur", _visit_dur(visit))}'
+        f'{_span("dur", _visit_dur(visit, model))}'
         + (_span("offchip", "off-chart") if visit["off_chart"] else "")
-        + f'</span>{_span("note", _reason(visit))}</span></button></li>'
+        + f'</span>{_span("note", _reason(visit))}</span></div></li>'
     )
 
 
 def _runlog(model: dict) -> str:
-    rows = "".join(_runlog_row(v, model["selected"]) for v in model["visits"])
+    rows = "".join(_runlog_row(v, model) for v in model["visits"])
     count = f"{len(model['visits'])} visits · oldest first"
     body = f'<ol class="runlog">{rows}</ol>' if rows else '<p class="empty">no visits recorded</p>'
     return (
@@ -441,12 +458,12 @@ def _lr_moving(row: dict) -> bool:
     return _px().px_state(row) in _px().PX_ACTIONS
 
 
-def live_run(row: dict) -> str:
+def live_run(row: dict, queued: bool = False) -> str:
     """The Live run panel's body (RunTape.dc.html)."""
     t = row.get("telemetry")
     mode = live_mode(t)
     if mode == "none":
-        return '<p class="empty">no telemetry</p>'
+        return f'<p class="empty">{"not started yet" if queued else "no telemetry"}</p>'
     tint = row.get("recipient") if row.get("recipient") in _px().PX_BOT_TINTS else None
     style = f' style="--lr:var(--{tint})"' if tint else ""
     if mode == "counters":
@@ -460,11 +477,11 @@ def live_run(row: dict) -> str:
     )
 
 
-def _liverun(row: dict) -> str:
+def _liverun(row: dict, running: bool) -> str:
     sub = f"{row.get('recipient')} · job {row['job']}"
     return (
         f'<section class="jd-panel" id="liverun-{_e(anchor(row["job"]))}">'
-        f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{live_run(row)}</section>'
+        f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{live_run(row, not running)}</section>'
     )
 
 
@@ -476,10 +493,14 @@ def _journey_label(model: dict) -> str:
 _LEGEND_WHO = ("script", "claude", "codex", "cursor", "grok")
 
 
+def _legend_who(model: dict) -> list[str]:
+    seen = {who if who in TINT else "script" for who in (str(v["who"]) for v in model["visits"])}
+    return [who for who in _LEGEND_WHO if who in seen]
+
+
 def _caption_dur(visit: dict, model: dict) -> str:
     if visit["current"]:
-        age = model["state_age_seconds"]
-        return "in progress" if age is None else f"{duration(age)} so far"
+        return _now_dur(model)
     return "—" if visit["duration_seconds"] is None else f"took {duration(visit['duration_seconds'])}"
 
 
@@ -501,8 +522,8 @@ def _caption(model: dict) -> str:
 def _journey(row: dict, model: dict) -> str:
     hits = "".join(
         f'<li><button type="button" data-visit="{v["index"]}" data-state="{_e(v["state"])}" '
-        f'aria-label="{_e(v["state"])}" aria-pressed="{"true" if v["index"] == model["selected"] else "false"}">'
-        "</button></li>"
+        f'aria-label="{_e(_step_name(v, model))}" aria-pressed="{"true" if v["index"] == model["selected"] else "false"}">'
+        f'</button>{_span("step", _step_name(v, model))}</li>'
         for v in model["visits"]
     )
     scale = (
@@ -510,7 +531,7 @@ def _journey(row: dict, model: dict) -> str:
         if model["all_durations_known"]
         else ""
     )
-    legend = "".join(f'<span class="key"><i style="--m:{TINT[w]}"></i>{w}</span>' for w in _LEGEND_WHO)
+    legend = "".join(f'<span class="key"><i style="--m:{TINT[w]}"></i>{w}</span>' for w in _legend_who(model))
     legend += f'<span class="key"><i style="--m:{STOP_TINT}"></i>stopped</span>'
     legend += f'<span class="key"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
     return (
@@ -555,7 +576,7 @@ def _chart(row: dict, model: dict, chart: dict | None) -> str:
     if chart is None:
         return '<details class="jd-chart"><summary>Full state chart</summary><p class="empty">statechart unavailable</p></details>'
     n = len(chart["states"])
-    legend = "".join(f'<span><i class="line" style="background:{TINT[w]}"></i>path taken · {w}</span>' for w in _LEGEND_WHO)
+    legend = "".join(f'<span><i class="line" style="background:{TINT[w]}"></i>path taken · {w}</span>' for w in _legend_who(model))
     legend += '<span><i class="line" style="background:#5386a6"></i>visited</span>'
     legend += f'<span><i class="off" style="--m:{TINT["script"]}"></i>off-chart jump</span>'
     legend += '<span><i class="now"></i>now</span><span><i class="next"></i>can come next</span>'
@@ -578,7 +599,7 @@ def _job_article(row: dict, state: str, chart: dict | None) -> str:
         + '<div class="jd-cols">'
         + _runlog(model)
         + '<div class="jd-right">'
-        + _liverun(row)
+        + _liverun(row, running)
         + _journey(row, model)
         + _next(model)
         + _chart(row, model, chart)
@@ -598,7 +619,7 @@ def _jobview(snapshot: dict) -> str:
 
 
 _SCRIPT = r"""
-  var DETAIL = {verbs: __VERBS__, order: {normal: 0, human: 1, stop: 2},
+  var DETAIL = {verbs: __VERBS__, hb: __HB__, order: {normal: 0, human: 1, stop: 2},
                 first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__};
   var SEL = {};
@@ -697,8 +718,9 @@ _SCRIPT = r"""
     if (running) {
       ticking(tile(tiles, '', 'T+ on this device'), r.elapsed_seconds);
       var hb = r.heartbeat_age_seconds;
-      if (hb === null || hb === undefined) tile(tiles, 'not started', 'last heartbeat', 'ok');
-      else ticking(tile(tiles, '', 'last heartbeat', 'ok'), hb, '', ' ago');
+      var tone = DETAIL.hb[PX.state(r)];
+      if (hb === null || hb === undefined) tile(tiles, 'not started', 'last heartbeat', tone);
+      else ticking(tile(tiles, '', 'last heartbeat', tone), hb, '', ' ago');
     } else {
       ticking(tile(tiles, '', 'waiting'), r.age_seconds);
       tile(tiles, 'not started', 'last heartbeat');
@@ -914,7 +936,7 @@ _SCRIPT = r"""
       var ol = add(sec, el('ol', 'runlog'));
       m.visits.forEach(function (v) {
         var tint = whoTint(v.who);
-        var btn = add(add(ol, el('li')), el('button', [v.current ? 'now' : '', v.stop ? 'stop' : ''].filter(Boolean).join(' ') || null));
+        var btn = add(add(ol, el('li')), el('button', ['visit', v.current ? 'now' : '', v.stop ? 'stop' : ''].filter(Boolean).join(' ')));
         buttons.push(btn);
         btn.setAttribute('type', 'button');
         btn.setAttribute('data-visit', String(v.index));
@@ -930,7 +952,7 @@ _SCRIPT = r"""
         span(top, 'name', v.state + (v.current ? ' · now' : ''));
         span(top, 'who', v.who);
         var d = span(top, 'dur');
-        if (v.current) d.textContent = 'in progress';
+        if (v.current) nowDur(m, d);
         else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : dur(v.duration_seconds);
         if (v.off_chart) span(top, 'offchip', 'off-chart');
         span(main, 'note', reasonOf(v));
@@ -1031,10 +1053,10 @@ _SCRIPT = r"""
     });
     return c.col;
   }
-  function liveRun(r) {
+  function liveRun(r, queued) {
     var t = r.telemetry;
     var mode = liveMode(t);
-    if (mode === 'none') return el('p', 'empty', 'no telemetry');
+    if (mode === 'none') return el('p', 'empty', queued ? 'not started yet' : 'no telemetry');
     var box = el('div', 'lr');
     if (PX.table.bots.hasOwnProperty(r.recipient)) box.setAttribute('style', '--lr:var(--' + r.recipient + ')');
     if (mode === 'live') {
@@ -1047,10 +1069,10 @@ _SCRIPT = r"""
     add(box, lrTiles(t));
     return box;
   }
-  function liverun(r) {
+  function liverun(r, running) {
     var sec = jdPanel(null, 'Live run', r.recipient + ' · job ' + r.job);
     sec.setAttribute('id', 'liverun-' + anchor(r.job));
-    add(sec, liveRun(r));
+    add(sec, liveRun(r, !running));
     return sec;
   }
   function legendItem(parent, cls, tint, text, bg) {
@@ -1060,6 +1082,22 @@ _SCRIPT = r"""
     if (bg) i.style.background = bg;
     s.appendChild(document.createTextNode(text));
     return s;
+  }
+  function nowDur(m, node) {
+    if (m.state_age_seconds === null) node.textContent = 'in progress';
+    else ticking(node, m.state_age_seconds, '', ' so far');
+    return node;
+  }
+  function stepName(v, m) {
+    var took;
+    if (v.current) took = m.state_age_seconds === null ? 'in progress' : dur(m.state_age_seconds) + ' so far';
+    else took = v.duration_seconds === null || v.duration_seconds === undefined ? 'time unknown' : dur(v.duration_seconds);
+    return 'Step ' + (v.index + 1) + ' of ' + m.visits.length + ': ' + v.state + ', ' + v.who + ', ' + took;
+  }
+  function legendWho(m) {
+    var seen = {};
+    m.visits.forEach(function (v) { seen[JOURNEY.tint.hasOwnProperty(v.who) ? v.who : 'script'] = true; });
+    return DETAIL.who.filter(function (w) { return seen[w]; });
   }
   function reasonOf(v) {
     return v.reason !== null && v.reason !== undefined ? v.reason : (v.index === 0 ? DETAIL.first : '');
@@ -1072,10 +1110,9 @@ _SCRIPT = r"""
     span(cap, 'idx', pad(v.index + 1) + ' of ' + m.visits.length);
     span(cap, 'st', v.state + (v.current ? ' · now' : ''));
     span(cap, 'who', v.who).style.setProperty('--m', JOURNEY.tint[v.who] || JOURNEY.tint.script);
-    var d;
-    if (v.current) d = m.state_age_seconds === null ? 'in progress' : dur(m.state_age_seconds) + ' so far';
-    else d = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : 'took ' + dur(v.duration_seconds);
-    span(cap, 'dur', d);
+    var d = span(cap, 'dur');
+    if (v.current) nowDur(m, d);
+    else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : 'took ' + dur(v.duration_seconds);
     span(cap, 'note', reasonOf(v));
   }
   function journeyPanel(r, m, hits, scales, scale) {
@@ -1089,13 +1126,15 @@ _SCRIPT = r"""
       '; now ' + (m.state || 'unknown'));
     var ol = add(box, el('ol', 'journey'));
     m.visits.forEach(function (v) {
-      var b = add(add(ol, el('li')), el('button'));
+      var li = add(ol, el('li'));
+      var b = add(li, el('button'));
       hits.push(b);
       b.setAttribute('type', 'button');
       b.setAttribute('data-visit', String(v.index));
       b.setAttribute('data-state', v.state);
-      b.setAttribute('aria-label', v.state);
+      b.setAttribute('aria-label', stepName(v, m));
       b.setAttribute('aria-pressed', v.index === m.selected ? 'true' : 'false');
+      span(li, 'step', stepName(v, m));
     });
     var cap = add(sec, el('div', 'jd-cap'));
     cap.setAttribute('aria-live', 'polite');
@@ -1115,7 +1154,7 @@ _SCRIPT = r"""
     if (m.all_durations_known) ctlButton(axis, 'to scale', 'data-scale', 'scale', scale === 'scale');
     ctlButton(ctl, 'replay', 'data-replay', '1', null);
     span(ctl, 'gap');
-    DETAIL.who.forEach(function (w) { legendItem(ctl, null, JOURNEY.tint[w], w).className = 'key'; });
+    legendWho(m).forEach(function (w) { legendItem(ctl, null, JOURNEY.tint[w], w).className = 'key'; });
     legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key';
     legendItem(ctl, 'off', DETAIL.hop, 'off-chart hop').className = 'key';
     return {sec: sec, canvas: canvas, cap: cap};
@@ -1154,7 +1193,7 @@ _SCRIPT = r"""
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', 'Full state chart; path: ' + m.visits.map(function (v) { return v.state; }).join(' → '));
     var legend = add(box, el('div', 'jd-legend'));
-    DETAIL.who.forEach(function (w) { legendItem(legend, 'line', null, 'path taken · ' + w, JOURNEY.tint[w]); });
+    legendWho(m).forEach(function (w) { legendItem(legend, 'line', null, 'path taken · ' + w, JOURNEY.tint[w]); });
     legendItem(legend, 'line', null, 'visited', '#5386a6');
     legendItem(legend, 'off', JOURNEY.tint.script, 'off-chart jump');
     legendItem(legend, 'now', null, 'now');
@@ -1200,11 +1239,6 @@ _SCRIPT = r"""
       st.left = b.x + 'px'; st.top = b.y + 'px'; st.width = Math.max(4, b.w) + 'px'; st.height = Math.max(4, b.h) + 'px';
     }
   }
-  function clock(epoch) {
-    if (epoch === null || epoch === undefined || !isFinite(epoch)) return '';
-    var d = new Date(epoch * 1000);
-    return pad(d.getHours()) + ':' + pad(d.getMinutes());
-  }
   function drawOne(j, now) {
     var s = SEL[j.r.job];
     if (j.canvas.getContext) {
@@ -1248,7 +1282,7 @@ _SCRIPT = r"""
     var logButtons = [], hitButtons = [], scales = [];
     add(cols, runlog(r, m, logButtons));
     var right = add(cols, el('div', 'jd-right'));
-    add(right, liverun(r));
+    add(right, liverun(r, running));
     var jp = journeyPanel(r, m, hitButtons, scales, s.scale);
     add(right, jp.sec);
     add(right, nextPanel(m));
@@ -1256,7 +1290,7 @@ _SCRIPT = r"""
     add(right, cp.sec);
     var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
     var j = {r: r, m: m, still: holdsStill(motion), logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
-             startClock: starts.length ? clock(Math.min.apply(null, starts)) : '', nowClock: clock(generated)};
+             startClock: starts.length ? journeyClock(Math.min.apply(null, starts)) : '', nowClock: journeyClock(generated)};
     art.addEventListener('click', function (ev) {
       var t = ev.target.closest('button');
       if (!t) return;
@@ -1296,7 +1330,7 @@ _SCRIPT = r"""
     if (!jobs.length) { add(root, el('p', 'empty', 'no running or queued jobs')); return; }
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
-""".replace("__VERBS__", json.dumps(VERBS)).replace(
+""".replace("__VERBS__", json.dumps(VERBS)).replace("__HB__", json.dumps(HEARTBEAT_TONE)).replace(
     "__CHARTSUB__", json.dumps(CHART_SUB)
 )
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

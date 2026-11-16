@@ -538,7 +538,7 @@ def test_the_table_is_on_job_html_only(snapshot: dict) -> None:
     assert 'id="tickets"' in pages["job.html"] and 'id="tickets"' not in pages["activity.html"]
     assert 'id="jobs"' not in pages["job.html"]
     assert re.search(r'<section class="panel" id="tickets" aria-label="Tickets" hidden>', pages["job.html"])
-    assert "@media (scripting:none){#tickets[hidden]{display:block !important}}" in page.CSS
+    assert "@media (scripting:none){#tickets[hidden]{display:block !important}#ticket-filter{display:none}}" in page.CSS
 
 
 def _gh_hrefs(node: dict) -> list[str]:

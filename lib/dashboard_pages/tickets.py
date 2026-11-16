@@ -64,7 +64,7 @@ font-family:var(--mono)}
 .tk-r{font-size:11px;color:var(--muted)}
 .tk-scroll{overflow-x:auto}
 .tk-stops{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(250px,100%),1fr));gap:8px;align-items:start}
-@media (scripting:none){#tickets[hidden]{display:block !important}}
+@media (scripting:none){#tickets[hidden]{display:block !important}#ticket-filter{display:none}}
 """
 
 
