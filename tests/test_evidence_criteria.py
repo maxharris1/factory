@@ -532,6 +532,10 @@ def test_f1_an_html_goal_still_reads_as_written():
         "`![alt](image.png)` stays as code.",
         "``<b>`` stays as code.",
         "``` `<!-- x -->` ``` stays as code.",
+        "`keep\n[marker]` must remain.",
+        "`keep\n# marker` must remain.",
+        "`keep\n```\n` stays as code.",
+        "Code `a\n- b\n1. c` and `d\n> e`.",
     ],
 )
 def test_f2_an_inline_code_goal_renders_as_written(goal):

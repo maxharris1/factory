@@ -42,6 +42,7 @@ JOBS = ("build", "plan")
 STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
 _ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
 _BACKTICK_FENCE = re.compile(r"^`{3,}[^`]*$")
+_BACKTICK_RUN = re.compile(r"`+")
 _OPENER_CHARACTERS = frozenset("-+*_=#>~<[")
 
 RECOMMENDED_NEXT = {
@@ -847,8 +848,43 @@ def _items(title: str, items: Sequence[str]) -> str:
 
 
 def _paragraph(title: str, text: str) -> str:
-    lines = (_escape_block_opener(line.lstrip()) for line in text.splitlines())
+    raw = [line.lstrip() for line in text.splitlines()]
+    lines: list[str] = []
+    open_run = 0
+    for index, line in enumerate(raw):
+        if open_run:
+            lines[-1] += f" {line}"
+        else:
+            line = _escape_block_opener(line)
+            lines.append(line)
+        open_run = _code_span_after(line, open_run, "\n".join(raw[index + 1 :]))
     return f"**{title}**\n" + "\n".join(lines) + "\n\n"
+
+
+def _code_span_after(line: str, open_run: int, following: str) -> int:
+    position = 0
+    while position < len(line):
+        if open_run:
+            close = _closing_run(line, position, open_run)
+            if close is None:
+                return open_run
+            position, open_run = close, 0
+        elif line[position] == "\\":
+            position += 2
+        elif line[position] == "`":
+            run = _BACKTICK_RUN.match(line, position)
+            paragraph_rest = f"{line[run.end():]}\n{following}".split("\n\n", 1)[0]
+            if _closing_run(paragraph_rest, 0, len(run.group())) is not None:
+                open_run = len(run.group())
+            position = run.end()
+        else:
+            position += 1
+    return open_run
+
+
+def _closing_run(text: str, start: int, width: int) -> int | None:
+    runs = _BACKTICK_RUN.finditer(text, start)
+    return next((run.end() for run in runs if len(run.group()) == width), None)
 
 
 def _escape_block_opener(line: str) -> str:
