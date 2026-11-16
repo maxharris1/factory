@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from lib.device_pool import DevicePool
+from lib.dispatch.types import RetryableStateError
 from lib.dispatcher import CIResult, Dispatcher, PollCycleFailed, TicketRef, TrackedTicket
 from lib.handoff import parse_comment
 from lib.job_state import record_job_event
@@ -884,6 +885,28 @@ def test_the_gap_report_that_queued_round_two_does_not_settle_its_failure(tmp_pa
     assert board.workflow_state() == "planning"
 
 
+@pytest.mark.parametrize("restored", [False, True])
+def test_a_plan_edited_before_it_was_handled_does_not_settle_a_failed_plan_job(
+    tmp_path: Path, restored: bool
+) -> None:
+    board = Board(tmp_path)
+    plan_job = board.start("planning")
+    if restored:
+        with board.queue.connect() as connection:
+            record_job_event(connection, plan_job, "restored-claim", "restored", board.now[0])
+            connection.commit()
+    cached = board.snapshot()
+    board.post("own-plan", PLAN.format(round=1, ac="met"))
+    board.comments[-1] = replace(board.comments[-1], edited_at=board.now[0] + 0.1)
+    board.fail(plan_job)
+    board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+    board.poll()
+    board.poll()
+    assert board.dispatcher._handled_outcome(board.snapshot(), "own-plan") == "rejected-edited"
+    assert "done-from-plan" not in board.events(plan_job)
+    assert board.rows("plan") == [("failed", 1), ("queued", 2)], board.rows("plan")
+
+
 def _claimed_review(board: Board) -> str:
     build = board.start("building")
     box = Device(
@@ -955,8 +978,11 @@ def test_a_resumed_round_two_plan_settles_its_failure_without_a_second_plan(
     assert board.workflow_state() == "building"
 
 
+@pytest.mark.parametrize(
+    ("answers_deleted", "label_write_fails"), [(False, False), (True, False), (True, True)]
+)
 def test_the_question_its_answers_answered_does_not_settle_a_resumed_review(
-    tmp_path: Path,
+    tmp_path: Path, answers_deleted: bool, label_write_fails: bool
 ) -> None:
     board = Board(tmp_path)
     first = _claimed_review(board)
@@ -969,9 +995,20 @@ def test_the_question_its_answers_answered_does_not_settle_a_resumed_review(
     board.now[0] = 200.25
     board.queue.finish(first, owner="codex", handoff_comment_id=None)
     snapshot = _green(board)
-    board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+    actions = board.dispatcher._review_actions(snapshot)
+    if label_write_fails:
+        actions.state_failures.add((snapshot.repo, "review"))
+        with pytest.raises(RetryableStateError):
+            board.dispatcher.process(snapshot)
+        actions.state_failures.clear()
+        assert board.dispatcher._handled_outcome(snapshot, "z-review-a") is None
+    else:
+        board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
     resumed = board.queue.claim("codex")
     assert resumed is not None and resumed.created_at == 200.25
+    if answers_deleted:
+        board.comments = [item for item in board.comments if item.id != "z-review-a"]
+        snapshot = _green(board)
     board.now[0] = 200.5
     board.queue.finish(resumed.id, owner="codex", handoff_comment_id=None)
     for at in (201.0, 202.0):

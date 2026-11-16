@@ -1093,7 +1093,13 @@ class JobsMixin:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
         queued_at = self._first_queued_at(job)
         for item in comments:
-            if not update and self._predates(ticket, item, queued_at):
+            if not update and (
+                self._predates(ticket, item, queued_at)
+                or (
+                    not after_source
+                    and self._handled_no_later_than(ticket, item.id, job.request.source_comment_id)
+                )
+            ):
                 continue
             try:
                 parsed = parse_comment(item.body)
@@ -1106,6 +1112,8 @@ class JobsMixin:
             if not self._trusted(ticket, item, fields, bot, role=role):
                 continue
             outcome = self._handled_outcome(ticket, item.id)
+            if outcome is None and item.edited_at is not None:
+                continue
             if kind == "questions":
                 if (
                     (update and not after_source)
