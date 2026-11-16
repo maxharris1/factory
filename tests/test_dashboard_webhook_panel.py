@@ -33,7 +33,8 @@ def test_status_json_carries_webhook_health_and_the_panel_sits_in_factory_status
     kpis = _section(_no_script((out / "index.html").read_text(encoding="utf-8")), "intake")
     assert '<div class="irow" id="linear-webhook"><span class="ilabel">Linear webhook</span>' in kpis
     assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in kpis
-    assert '<p class="muted">note: quiet: no Linear webhook for 1h' in kpis
+    assert '<p class="muted">quiet: no Linear webhook for 1h' in kpis
+    assert "note: quiet" not in kpis
     for name in ("activity.html", "efficiency.html", "job.html"):
         assert "Linear webhook" not in render_pages(snapshot)[name], name
 
@@ -54,7 +55,8 @@ def test_script_redraws_webhook_health_from_status_json(tmp_path: Path) -> None:
     )
     out = _run_page(tmp_path / "silent", silent, "main", BAR + ["hud", "kpis", "lanes", "intake"])
     assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in out["text"]["intake"]
-    assert "p.muted \"note: quiet: no Linear webhook for 1h" in out["dump"]["intake"]
+    assert "p.muted \"quiet: no Linear webhook for 1h" in out["dump"]["intake"]
+    assert "note: quiet" not in out["dump"]["intake"]
     assert "warning" not in out["text"]["intake"]
 
     waiting = _hooked(

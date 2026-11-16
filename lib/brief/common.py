@@ -78,10 +78,14 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     source = detail.get("source_issue")
     if not (isinstance(source, str) and SOURCE.fullmatch(source)):
         source = job.request.ticket_id if SOURCE.fullmatch(job.request.ticket_id) else None
-    # #158: a build queued by a plan handoff carries that comment's link as its instruction.
-    planned = job.request.action == "build" and not detail.get("resume")
-    plan = detail.get("instruction") if planned else None
-    plan_text = detail.get("plan_text") if planned else None
+    build = job.request.action == "build"
+    origin = (
+        evidence_part(detail, "instructions").get("prior_instruction")
+        if detail.get("resume")
+        else detail.get("instruction")
+    )
+    plan = origin if build else None
+    plan_text = detail.get("plan_text") if build else None
     implement = job.request.action in ("plan", "build")
     brief_text = detail.get("brief_text") if implement else None
     brief_url = detail.get("brief_url")

@@ -1,0 +1,21 @@
+decision	choice	why
+playbook	figure-it-out at low rigor, Feature steps, one owner, no helper for code	plan settled the shape; one module plus one dispatcher write; 60-minute budget
+value type	Unrecorded(reason) and a NO_RATIO singleton replace None	ac-5 needs a missing source and an empty ratio told apart; ac-1 needs the reason in the text
+Unrecorded reason text	unrecorded(no-<table>-table), one token	keeps each metric row three space-separated fields, as the existing renderer and tests read it
+NoRatio	frozen dataclass singleton, not Enum	test_eval_report pins the module's imports; enum is not on the list
+stored column	verdict_heads.changed_lines, COALESCE on conflict	only stored data the line bands need; first poll's size is the reviewed head's
+cohort	PRs whose first verdict_heads row is in the window	plan; one PR counts once per window
+first-round approval	an accepted APPROVE at round <= 1; band and risk from the first verdict	same rule shape as approved-by-round-2
+accepted verdict for ac-3	any review_events row, ship intent or ship hold	a verdict the dispatcher acted on, whatever the outcome
+tests file	tests/test_eval_metrics.py, not tests/test_eval_report.py	build_metrics is tested there; plan said so
+verification	touched test files plus test_cli and test_dispatch_ready_comments, 195 passed; real orch eval-report run on a state_backup copy	brief: touched tests plus smoke; CI runs the full suite
+round 2 playbook	figure-it-out at low rigor, reviewer repros as the harness, no code helper	seven repros already named; baseline taken by running the new tests against the reviewed head's lib/ (11 of 12 failed, the 12th is a positive control)
+stored size (f-2)	changed_lines only when the verdict's head matches ticket.current_head by prefix	the poll's size is the current head's; any other head stays NULL, new row or old
+CI fix without a log (f-1)	instruction "CI failed on <head>" or "failed: <checks>", and an empty evidence.ci.log_tail	ci_status writes check names as the log; ci_evidence never fetches a run log today
+accepted head (f-3, f-6)	acceptance time is handled_times.handled_at, else ship_holds.held_at; heads match by lib.handoff.matching_head	posting order cannot prove prior acceptance; the dispatcher accepts 7-character prefixes
+matching_head home	moved from lib/dispatch/helpers to lib/handoff, helpers imports it under its old name	test_eval_report pins eval_report's imports to lib.handoff and siblings; no dispatcher caller changes
+held approvals (f-4)	held-base-update review_events count as accepted APPROVEs in both rate families	ship_holds keeps only the latest hold; the displaced approval survives only there
+old snapshot (f-5)	verdict measures print unrecorded(no-verdict_heads-posted_at-column); ci-fix-without-log still reads jobs	one missing column must not abort the baseline
+hand-written gos (f-7)	add queued-fix, queued-blocked-review, and resumed-<action> whose job evidence cause is go or extra-round	answers share resumed-<action>; only the job's evidence tells them apart
+open	comment-sicko MUST KILL: store the resume cause in the outcome instead of reading job evidence	changes dispatcher outcome strings other code and tests match; out of scope for the final round
+accepted head (f-3 r3)	verdict_acceptances keeps the first acceptance time per verdict: the hold gate inserts it once per approval, and a ship redrive copies handled_times into it before deleting that row; the report and the approval sources read it	ship_holds keeps one row per ticket and resets held_at on a new head, and a redrive deletes handled_times, so both lost the original acceptance; an append-once table survives both without changing what the dispatcher reads

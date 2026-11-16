@@ -44,7 +44,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the ten rule mixins below and re-exports the old `verdict.py` names |
 | Verdicts: REVISE (T3) | `verdict/t3.py` (`T3Mixin`) | `ReviseCIGate`, `_t3`, `_revise_ci_gate` |
 | Verdicts: repeat block (T3) | `verdict/repeat.py` (`RepeatBlockMixin`) | `_repeat_trigger`, `_accepted_revises`, `_t3_repeat`: park a REVISE that blocks on the same rule again at waiting-max |
-| Verdicts: APPROVE (T4) | `verdict/t4.py` (`T4Mixin`) | `_t4`, `_approve_ci_red_fix`, `_ship_approval`: T4's ship tail, which T2 also runs for a covered ready |
+| Verdicts: APPROVE (T4) | `verdict/t4.py` (`T4Mixin`) | `_t4`, `_approve_ci_red_fix`, `_held_ci_red`, `_held_ci_fix_out`, `_held_approve_covers`, `_latest_fix_answer`, `_ship_approval`: T4's ship tail, which T2 also runs for a covered ready |
 | Verdicts: BLOCKED | `verdict/blocked.py` (`BlockedMixin`) | `_t_blocked`: stop the ticket and wake Grok once. `_blocked_by_another`: whether a verdict other than this comment blocked the ticket |
 | Verdicts: approval recording | `verdict/record.py` (`ApprovalRecordMixin`) | `_record_approval`: the covering APPROVE the merge queue orders and gates on |
 | Verdicts: approval coverage | `verdict/coverage.py` (`ApprovalCoverageMixin`) | `_approval_covers`: whether an APPROVE covers a head, by T4's rule |
@@ -70,4 +70,5 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
 | Poll | `poll.py` (`PollMixin`, `PollLoop`) | `poll_once`, handoff verification, poll-error streaks, attention |
+| Eval log | `eval_log.py` (`EvalLogMixin`) | `_export_eval_log`: append `dispatcher.log` beside the database from the rows each poll committed (#545) |
 | Cycle timing | `cycle_clock.py` (`CycleClock`) | per-phase cycle durations for poller.log and `orch status` |

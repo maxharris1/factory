@@ -12,7 +12,7 @@ from lib.factory_md import parse_factory_context
 from lib.feeder import IntakeIssue, _brief as feeder_brief
 from lib.poll_source import LivePollSource
 from tests.test_brief import FACTORY_ROOT, job
-from tests.test_dispatcher import GO, PLAN, comment, setup, ticket
+from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
 from tests.test_live_poll import FACTORY, FakeGh, config
 
 URL = "https://github.com/owner/repo/pull/42#issuecomment-3"
@@ -149,3 +149,33 @@ def test_a_met_plan_queues_a_build_that_carries_the_plan_text(tmp_path) -> None:
     detail = json.loads(raw)
     assert detail["plan_text"] == "Plan."
     assert detail["instruction"] == PLAN_URL
+
+
+def test_a_build_resumed_after_answers_keeps_the_plan_text_and_link(tmp_path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    dispatcher.process(ticket(go))
+    planning = queue.claim("claude")
+    assert planning is not None
+    queue.finish(planning.id, owner="claude", handoff_comment_id="plan-1")
+    plan = comment("plan-1", PLAN.format(round=1, ac="met"), author="claude-login", created_at=2, url=PLAN_URL)
+    dispatcher.process(ticket(go, plan))
+    building = queue.claim("claude")
+    assert building is not None and building.request.action == "build"
+    queue.finish(building.id, owner="claude", handoff_comment_id="q-1")
+    questions = comment("q-1", QUESTIONS, author="claude-login", created_at=3)
+    dispatcher.process(ticket(go, plan, questions))
+    answers_url = "https://github.com/owner/repo/pull/42#issuecomment-9"
+    answers = comment("a-1", ANSWERS, author="grok-login", created_at=4, url=answers_url)
+    dispatcher.process(ticket(go, plan, questions, answers))
+    assert handled_outcome(queue, "a-1") == "resumed-build"
+
+    resumed = queue.claim("claude")
+    assert resumed is not None and resumed.request.action == "build"
+    detail = json.loads(resumed.request.detail or "{}")
+    assert (detail["resume"], detail["instruction"], detail["plan_text"]) == (True, answers_url, "Plan.")
+    text = render_brief(resumed, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
+    assert f"The plan handoff is quoted in the Plan section below ({PLAN_URL}): it is the plan." in text
+    assert "Plan." in text.split("## Plan\n", 1)[1]
+    assert "Answers." in text
+    assert "No plan handoff comment is linked" not in text

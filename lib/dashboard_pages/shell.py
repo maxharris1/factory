@@ -899,6 +899,8 @@ PX_STATE: dict[str, dict[str, str | float]] = {
     "build": {"effect": "fill", "tint": "bot"},
     "review": {"effect": "scan", "tint": "bot"},
     "fix": {"effect": "patch", "tint": "bot"},
+    "clarify": {"effect": "field", "tint": "bot"},
+    "update-from-main": {"effect": "patch", "tint": "bot"},
     "claimed": {"effect": "spin3", "tint": "bot"},
     "stale": {"effect": "decay", "tint": "bot"},
     **{name: {"effect": "static", "tint": _PX_BAD} for name in PX_BROKEN},
@@ -913,7 +915,7 @@ PX_STATE: dict[str, dict[str, str | float]] = {
 }
 
 
-PX_ACTIONS = {"plan": "plan", "build": "build", "review": "review", "fix": "fix"}
+PX_ACTIONS = {name: name for name in ("plan", "build", "review", "fix", "clarify", "update-from-main")}
 
 
 _PX_HEX = re.compile(r"#[0-9a-f]{6}")

@@ -151,7 +151,9 @@ class SchemaMixin:
                 """
             )
             connection.commit()
-            _add_missing_columns(connection, "verdict_heads", {"posted_at": "REAL"})
+            _add_missing_columns(
+                connection, "verdict_heads", {"posted_at": "REAL", "changed_lines": "INTEGER"}
+            )
             _add_missing_columns(
                 connection,
                 "ticket_state",
@@ -245,6 +247,28 @@ class SchemaMixin:
                 )
                 """
             )
+            verdict_acceptances_existed = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_acceptances'"
+            ).fetchone()
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS verdict_acceptances (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    accepted_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            if verdict_acceptances_existed is None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO verdict_acceptances
+                    SELECT repo, ticket_id, approve_comment_id, held_at FROM ship_holds
+                    """
+                )
+                connection.commit()
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_intents (
@@ -453,6 +477,40 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eval_log_cursor (
+                    source TEXT PRIMARY KEY,
+                    last INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eval_log_pending (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    offset INTEGER NOT NULL,
+                    text TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eval_log_repos (
+                    repo_key TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL
+                )
+                """
+            )
+            # #545: an existing database starts dispatcher.log at its current
+            # rows rather than dumping its whole history into one cycle.
+            for source in ("ticket_transitions", "jobs", "handled_times"):
+                connection.execute(
+                    f"""
+                    INSERT OR IGNORE INTO eval_log_cursor (source, last)
+                    SELECT '{source}', COALESCE(MAX(rowid), 0) FROM {source}
+                    """
+                )
 
 
 def _add_missing_columns(

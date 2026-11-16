@@ -564,10 +564,13 @@ def _eval_report(argv: list[str]) -> int:
     if args.db is not None:
         if args.baseline is None:
             parser.error("--db needs --baseline")
-        if args.since is not None or args.until is not None or args.json:
-            parser.error("--since, --until and --json read --input only")
+        if args.json:
+            parser.error("--json reads --input only")
         try:
-            current, baseline = build_metrics(args.db), build_metrics(args.baseline)
+            current, baseline = (
+                build_metrics(path, since=args.since, until=args.until)
+                for path in (args.db, args.baseline)
+            )
         except EvalError as exc:
             print(str(exc), file=sys.stderr)
             return 1
