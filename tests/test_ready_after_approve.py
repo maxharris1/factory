@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from lib.dispatcher import RetryableShipError, ShipError
+from lib.factory_md import HoldConfig
 from tests.merge_queue_support import PR, Board, sha
+from tests.test_hold_merge_queue import APPROVER, OK, relabel
 from tests.test_review_before_ci import board_with, built_with_ci_pending
 
 
-def approved_on_red_ci(tmp_path: Path) -> tuple[Board, PR]:
+def approved_on_red_ci(tmp_path: Path, *, hold: bool = False) -> tuple[Board, PR]:
     board = board_with(tmp_path, on=True)
+    if hold:
+        board.factory = replace(board.factory, hold=HoldConfig(approver=APPROVER))
     pr = built_with_ci_pending(board, sha(1))
     board.ready(pr, pr.head, "ready-1")
     board.poll()
@@ -174,3 +180,102 @@ def test_a_shipped_covered_approval_keeps_its_round_for_reentry(tmp_path: Path) 
     assert board.outcome(ready) == "queued-review"
     assert json.loads(board.jobs("review")[-1]["detail"])["round"].startswith("2/")
 
+
+
+def test_a_held_covered_ready_waits_for_the_ok_then_ships_with_one_review(
+    tmp_path: Path,
+) -> None:
+    board, pr = approved_on_red_ci(tmp_path, hold=True)
+    pr.labels = ("factory:hold",)
+    pr.label_events = (relabel(board, "e1"),)
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-held")
+    board.poll()
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert board.outcome(ready) is None
+    assert len(board.jobs("review")) == 1
+
+    board.post(pr, "ok-1", OK.format(head=pr.head), APPROVER)
+    board.poll()
+
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert len(board.jobs("review")) == 1
+    assert board.actions.merges == [(True, pr.head)]
+
+
+def ship_intents(board: Board) -> list[tuple[str, str, str | None]]:
+    with board.queue.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.execute("SELECT comment_id, status, redrive FROM ship_intents")
+        ]
+
+
+def test_a_crash_after_a_covered_handoff_reconciles_the_approves_intent(
+    tmp_path: Path,
+) -> None:
+    board, pr = approved_on_red_ci(tmp_path)
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-crash")
+    board.actions.crash_after_handoff = True
+    with pytest.raises(SystemExit):
+        board.poll()
+    board.actions.crash_after_handoff = False
+    board.poll()
+
+    assert board.outcome(ready) == "approval-covers:ship-unconfirmed"
+    assert ship_intents(board) == [("approve-red", "unconfirmed", None)]
+    assert len(board.jobs("review")) == 1
+
+
+def test_a_failed_covered_handoff_is_redriven_once_under_the_approve(tmp_path: Path) -> None:
+    board, pr = approved_on_red_ci(tmp_path)
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-error")
+    handoff = board.actions.handoff
+    calls: list[str] = []
+
+    def fail_once(ticket, head):
+        calls.append(head)
+        if len(calls) == 1:
+            error = ShipError("handoff failed before write")
+            error.write_confirmed = False
+            raise error
+        return handoff(ticket, head)
+
+    board.actions.handoff = fail_once
+    board.poll()
+    assert board.outcome(ready) == "approval-covers:failed-ShipError"
+    assert ship_intents(board) == [("approve-red", "failed", "eligible")]
+
+    board.poll()
+    assert ship_intents(board) == [("approve-red", "completed", "spent")]
+    assert len(board.jobs("review")) == 1
+
+
+def test_a_retryable_covered_ship_error_retries_the_approve_on_the_next_poll(
+    tmp_path: Path,
+) -> None:
+    board, pr = approved_on_red_ci(tmp_path)
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-retry")
+    handoff = board.actions.handoff
+    calls: list[str] = []
+
+    def fail_once(ticket, head):
+        calls.append(head)
+        if len(calls) == 1:
+            raise RetryableShipError("temporary poll budget exhausted")
+        return handoff(ticket, head)
+
+    board.actions.handoff = fail_once
+    board.poll()
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert ship_intents(board) == []
+
+    board.poll()
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert ship_intents(board) == [("approve-red", "completed", None)]
+    assert len(board.jobs("review")) == 1

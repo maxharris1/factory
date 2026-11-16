@@ -11,7 +11,15 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.types import (
+    AlreadyMergedShip,
+    CIResult,
+    Comment,
+    Registration,
+    RetryableShipError,
+    RetryableStateError,
+    TrackedTicket,
+)
 
 
 class T4Mixin:
@@ -175,6 +183,34 @@ class T4Mixin:
         )
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _ship_covered(
+        self,
+        ticket: TrackedTicket,
+        approve: Comment,
+        approved_head: str,
+        approved_round: int,
+        head: str,
+    ) -> tuple[bool, str]:
+        """Ship the red-CI APPROVE a ready covers (T2, #493), with T4's
+        intent replay and failure handling kept on the APPROVE."""
+        intent = self._ship_intent(ticket, approve.id)
+        try:
+            if intent is not None:
+                return self._replay_ship_intent(
+                    ticket, approve, head, ticket.factory.ship, intent
+                )
+            return self._ship_approval(
+                ticket, approve, approved_head, head, approved_round
+            )
+        except RetryableShipError:
+            self._discard_pending_ship_intent(ticket, approve.id, "fixing")
+            raise
+        except RetryableStateError:
+            raise
+        except Exception as exc:
+            self._ship_raised(ticket, approve, exc)
+            return True, f"failed-{type(exc).__name__}"
 
     def _approve_ci_red_fix(
         self,

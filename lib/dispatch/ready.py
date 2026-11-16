@@ -140,10 +140,7 @@ class ReadyMixin:
             if not ticket.factory.start_before_ci:
                 return False, "ci-pending"
         elif result.status == "success" and covering is not None:
-            approve, approved_head, approved_round = covering
-            handled, shipped = self._ship_approval(
-                ticket, approve, approved_head, head, approved_round
-            )
+            handled, shipped = self._ship_covered(ticket, *covering, head)
             return handled, f"approval-covers:{shipped}"
         elif result.status == "success" and self.feeder is not None:
             if self.feeder.hold_stacked_review(ticket, head):

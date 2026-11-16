@@ -63,8 +63,8 @@ def test_fixture_visit_fields() -> None:
         "every acceptance criterion mapped",
         OFF_CHART,
         OFF_CHART,
-        "REVISE, under the round cap",
-        "device offline 60 minutes or job dies twice (T6) or CI red three times",
+        "APPROVE on red CI, CI fix or REVISE, under the round cap",
+        "device offline 60 minutes or CI red three times or job dies twice (T6)",
         OFF_CHART,
     ]
     assert [visit["current"] for visit in visits] == [False] * 8 + [True]
@@ -85,7 +85,7 @@ def test_fixture_times_are_known_only_where_a_job_backs_the_visit() -> None:
         (NOW - 1000, 1000, True),
     ]
     assert result["all_durations_known"] is False
-    assert result["hops_to_shipped"] == 3
+    assert result["hops_to_shipped"] == 2
 
 
 def test_telemetry_start_wins_over_created_at_and_finish_ends_a_visit() -> None:
@@ -161,9 +161,9 @@ HOPS = {
     "planning": 5,
     "plan-check": 4,
     "building": 3,
-    "fixing": 3,
+    "fixing": 2,
     "review": 2,
-    "capped": 4,
+    "capped": 3,
     "waiting-max": 3,
     "ship": 1,
     "updating": 2,
