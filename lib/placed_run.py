@@ -92,7 +92,7 @@ from lib.job_state import (
     requeue_unstarted,
 )
 from lib.machines_yml import Device, MachinesConfig
-from lib.queue import Proof, QueueError, SQLiteJobQueue, require_proof
+from lib.queue import SLOTS_TABLE, Proof, QueueError, SQLiteJobQueue, require_proof
 from lib.remote import (
     ENV_FILE,
     GONE,
@@ -359,6 +359,28 @@ class PlacedRun:
                 proof=self.proof,
             )
         )
+
+    def open_gate(self, pid: int, go: Callable[[], None]) -> None:
+        """Let the box command run only while this run still holds the job (#462)."""
+        job_id = self.placement.job_id
+
+        def check_then_go() -> None:
+            with self.pool.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                require_proof(connection, job_id, self.proof)
+                slot = connection.execute(
+                    f"SELECT runner_pid, worker_pid FROM {SLOTS_TABLE} WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                if slot is None or (slot["runner_pid"], slot["worker_pid"]) != (self.runner, pid):
+                    raise QueueError(
+                        f"job {job_id}'s slot no longer names runner {self.runner} "
+                        f"and worker {pid} (released and claimed again)"
+                    )
+                go()
+                connection.commit()
+
+        retry_locked(check_then_go)
 
     def ended(self, code: int | None) -> None:
         """#91: record how the command ended while the job still runs.

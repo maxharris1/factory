@@ -224,6 +224,7 @@ def run(
     setup: Callable[[], Path | None] | None = None,
     teardown: Callable[[], None] | None = None,
     started: Callable[[int], None] | None = None,
+    open_gate: Callable[[int, Callable[[], None]], None] | None = None,
     output: Callable[[IO[bytes]], None] | None = None,
     execed: Callable[[], None] | None = None,
     budget: Budget | None = None,
@@ -248,7 +249,11 @@ def run(
     command may run (the device pool records it as the job's worker): the
     process waits at a gate until `started` returns, so a command never runs
     unrecorded. If `started` raises, the gate is closed, the command never
-    runs, and 127 is returned. `execed` is called once the gated command was
+    runs, and 127 is returned. With `open_gate`, run hands it the pid and a
+    callable that writes "go" instead of writing it itself, so the caller can
+    check, under its own lock, that the command may still run (#462). If
+    `open_gate` raises, the command never runs and 127 is returned, as for
+    `started`. `execed` is called once the gated command was
     exec'd (or the gate ended without saying it could not exec), never for
     a command that did not start: its status alone cannot say (#99 A2).
 
@@ -330,28 +335,34 @@ def run(
             )
             reader.start()
         if gated:
-            if started is not None:
+            gate = write_end
+
+            def go() -> None:
                 try:
-                    started(child.pid)
-                except Exception as exc:
-                    os.close(write_end)  # the gate reads EOF: the command never runs
-                    os.close(report_read)
-                    log(
-                        f"not starting {argv[0]}: could not record worker pid "
-                        f"{child.pid}: {_one_line(exc)}"
-                    )
-                    child.wait()
-                    return 127
-                except BaseException:
-                    os.close(write_end)
-                    os.close(report_read)
-                    raise
+                    os.write(gate, b"go\n")
+                except BrokenPipeError:
+                    pass  # the gate already died (a forwarded signal); its status says so
+
+            step = "could not record worker pid"
             try:
-                os.write(write_end, b"go\n")
-            except BrokenPipeError:
-                pass  # the gate already died (a forwarded signal); its status says so
-            finally:
+                if started is not None:
+                    started(child.pid)
+                step = "gate not opened for worker pid"
+                if open_gate is not None:
+                    open_gate(child.pid, go)
+                else:
+                    go()
+            except Exception as exc:
+                os.close(write_end)  # the gate reads EOF: the command never runs
+                os.close(report_read)
+                log(f"not starting {argv[0]}: {step} {child.pid}: {_one_line(exc)}")
+                child.wait()
+                return 127
+            except BaseException:
                 os.close(write_end)
+                os.close(report_read)
+                raise
+            os.close(write_end)
             try:
                 failed = os.read(report_read, 1) != b""
             finally:
