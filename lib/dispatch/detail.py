@@ -221,6 +221,7 @@ class DetailMixin:
             request = self._grok_request(request)
         request = self._with_evidence(connection, ticket, comment, request)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
+        self._record_handled_time(connection, ticket, comment.id, self.queue.now())
         if request.action not in _ANSWERS:
             return job, None
         answered = self._answered_by(

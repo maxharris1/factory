@@ -346,6 +346,11 @@ def test_a_review_cancelled_by_a_rejected_verdict_waits_for_same_head_fix(tmp_pa
     newer = comment("ready-conflict", READY.format(head=HEAD), author="claude-login", created_at=2)
     conflicted = replace(ticket(ready, newer, head=HEAD, factory_config=config), mergeable_state="dirty")
     dispatcher.process(conflicted)
+    with queue.connect() as connection:
+        review = connection.execute(
+            "SELECT id FROM jobs WHERE action = 'review' AND state = 'queued'"
+        ).fetchone()
+    queue.cancel(str(review["id"]), "answered-by:101")
     edited = replace(
         comment("101", verdict(HEAD, ac="met", round_="1/3"), author="codex-login", created_at=101),
         edited_at=102,
