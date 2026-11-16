@@ -127,6 +127,7 @@ GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
 READ_DEADLINE_SECONDS = 30.0
 HANG_STRIKES = 2
+LINEAR_CUTOFF_MARGIN_SECONDS = 1.0
 LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
@@ -234,13 +235,18 @@ def _shut(sock: socket.socket) -> None:
 
 
 class _Tracked:
+    """Tracks the socket as soon as it exists, so the cutoff also covers a
+    proxy CONNECT and the TLS handshake."""
+
     def __init__(self, *args: Any, cutoff: _Cutoff, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._cutoff = cutoff
+        self._create_connection = self._tracked_connection
 
-    def connect(self) -> None:
-        super().connect()
-        self._cutoff.track(self.sock)
+    def _tracked_connection(self, *args: Any, **kwargs: Any) -> socket.socket:
+        sock = socket.create_connection(*args, **kwargs)
+        self._cutoff.track(sock)
+        return sock
 
 
 class _TrackedHTTP(_Tracked, HTTPConnection):
@@ -248,7 +254,15 @@ class _TrackedHTTP(_Tracked, HTTPConnection):
 
 
 class _TrackedHTTPS(_Tracked, HTTPSConnection):
-    pass
+    def connect(self) -> None:
+        HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(
+            self.sock,
+            server_hostname=self._tunnel_host or self.host,
+            do_handshake_on_connect=False,
+        )
+        self._cutoff.track(self.sock)
+        self.sock.do_handshake()
 
 
 class _CutoffHTTP(HTTPHandler):
@@ -1140,12 +1154,13 @@ class LivePollSource:
             "Content-Type": "application/json",
         }
         deadline = min(self.timeout_seconds, self.read_deadline_seconds)
+        cutoff = deadline - min(LINEAR_CUTOFF_MARGIN_SECONDS, deadline / 4)
         try:
             with self._timed("linear"):
                 result = self._linear_calls.run(
                     deadline,
                     lambda: self.linear_transport(
-                        LINEAR_ENDPOINT, headers, payload, deadline
+                        LINEAR_ENDPOINT, headers, payload, cutoff
                     ),
                 )
         except TimeoutError:

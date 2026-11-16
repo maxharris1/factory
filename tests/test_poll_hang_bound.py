@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+import socketserver
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -169,7 +170,8 @@ def test_a_hanging_linear_read_ends_the_cycle_within_the_bound_and_github_goes_o
     elapsed = time.monotonic() - began
 
     assert elapsed < BOUND, elapsed
-    assert linear_calls == [DEADLINE] * HANG_STRIKES
+    assert len(linear_calls) == HANG_STRIKES
+    assert all(0 < timeout < DEADLINE for timeout in linear_calls), linear_calls
     assert processed(dispatcher) == ["12"]
 
 
@@ -417,3 +419,85 @@ def _try_linear(source: LivePollSource):
         return source._linear_request(DOCUMENT)
     except RetryablePollSourceError:
         return None
+
+
+@pytest.fixture
+def stalling_servers():
+    state = SimpleNamespace(open=0, posts=0, lock=threading.Lock(), stop=threading.Event())
+
+    def trickle(write) -> None:
+        with state.lock:
+            state.open += 1
+        try:
+            while not state.stop.wait(0.02):
+                write(b".")
+        except OSError:
+            pass
+        finally:
+            with state.lock:
+                state.open -= 1
+
+    class Proxy(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_CONNECT(self):
+            self.wfile.write(b"HTTP/1.1 200 Connection established\r\nX-Still-Loading: ")
+            trickle(lambda data: (self.wfile.write(data), self.wfile.flush()))
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            with state.lock:
+                state.posts += 1
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(HEALTHY)))
+            self.end_headers()
+            self.wfile.write(HEALTHY)
+
+    class Handshake(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            self.request.sendall(b"\x16\x03\x03\x40\x00")
+            trickle(self.request.sendall)
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    tls = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handshake)
+    for server in (proxy, tls):
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    state.proxy = f"http://127.0.0.1:{proxy.server_address[1]}"
+    state.tls = f"https://127.0.0.1:{tls.server_address[1]}/graphql"
+    try:
+        yield state
+    finally:
+        state.stop.set()
+        for server in (proxy, tls):
+            server.shutdown()
+            server.server_close()
+
+
+@pytest.mark.parametrize("stall", ["proxy CONNECT", "TLS handshake"])
+def test_a_linear_read_stalled_before_its_request_is_cut_off_and_the_next_cycle_reads(
+    stalling_servers, stall
+) -> None:
+    servers = stalling_servers
+    url = ["https://linear-test.invalid/graphql" if stall == "proxy CONNECT" else servers.tls]
+    proxies = {"https": servers.proxy} if stall == "proxy CONNECT" else {}
+    source = linear_source(lambda _url, headers, body, timeout: post_json(url[0], headers, body, timeout))
+
+    with patch("urllib.request.getproxies", return_value=proxies), patch(
+        "urllib.request.proxy_bypass", return_value=False
+    ):
+        source.begin_cycle()
+        began = time.monotonic()
+        for _ in range(HANG_STRIKES):
+            with pytest.raises(RetryablePollSourceError, match="timed out"):
+                source._linear_request(DOCUMENT)
+        assert time.monotonic() - began < BOUND
+
+        url[0] = servers.proxy + "/graphql"
+        source.begin_cycle()
+        assert source._linear_request(DOCUMENT) == {"data": {"viewer": {"id": "me"}}}
+
+    assert servers.posts == 1
+    assert eventually(lambda: servers.open == 0), servers.open
