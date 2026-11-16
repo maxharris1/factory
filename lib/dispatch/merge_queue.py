@@ -38,6 +38,8 @@ from lib.queue import JobRequest
 from lib.update_check import UpdateClass, UpdateScope
 
 
+MERGES_BEFORE_OVERLAP_WAITS = 1
+
 _MEMBER = """
     workflow_state IN ('merge-queue', 'updating', 'waiting-external')
     AND approved_head IS NOT NULL
@@ -169,6 +171,10 @@ class MergeQueueMixin:
             return True, "stale-ready-head"
         self._polled[key] = fresh
         if fresh.mergeable_state == "dirty":
+            if failed["job_id"] is not None and self._merged_since_job(
+                ticket, str(failed["job_id"])
+            ):
+                return True, self._conflicts_anew(ticket, back_to)
             return True, update_failed("the PR still conflicts")
         if fresh.mergeable is None:
             return False, "update-mergeable-pending"
@@ -218,6 +224,48 @@ class MergeQueueMixin:
                     ticket.repo, ticket.ticket_id, f"carried-preview:{type(exc).__name__}"
                 )
         return True, f"approval-carried:{str(approved)[:12]}->{head[:12]}"
+
+    def _merged_since_job(self, ticket: TrackedTicket, job_id: str) -> bool:
+        with self._connect() as connection:
+            job = connection.execute(
+                "SELECT created_at FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        since = float(job["created_at"])
+        return self._other_merges_since(ticket.repo, ticket.ticket_id, since) > 0
+
+    def _other_merges_since(self, repo: str, ticket_id: str, since: float) -> int:
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT ticket_id) FROM ticket_transitions
+                    WHERE repo = ? AND ticket_id != ? AND to_state = 'merged'
+                      AND at >= ?
+                    """,
+                    (repo.lower(), ticket_id, since),
+                ).fetchone()[0]
+            )
+
+    def _conflicts_anew(self, ticket: TrackedTicket, back_to: str) -> str:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                back_to,
+                source="update-conflicts-anew",
+                at=self.queue.now(),
+                also={"update_from_head": None},
+                guard="workflow_state = 'updating'",
+            )
+            connection.commit()
+        if self.log is not None:
+            self.log(
+                f"update conflicts anew: {ticket.repo}#{ticket.ticket_id}: "
+                f"{ticket.factory.base_branch} moved after the update; one more update"
+            )
+        return "update-conflicts-anew"
 
     def _classify_update(
         self, ticket: TrackedTicket, approved_head: str, head: str
@@ -367,6 +415,10 @@ class MergeQueueMixin:
         return False
 
     def _merge_first_ready(self, head: sqlite3.Row, rows: list[sqlite3.Row]) -> None:
+        waiting = self._polled.get((str(head["repo"]), str(head["ticket_id"])))
+        merged_since_approval = self._other_merges_since(
+            str(head["repo"]), str(head["ticket_id"]), float(head["approved_at"])
+        )
         for row in rows:
             if row["workflow_state"] != "merge-queue":
                 continue
@@ -375,6 +427,16 @@ class MergeQueueMixin:
                 continue
             ci = polled.ci.get(polled.current_head)
             if ci is None or ci.status != "success":
+                continue
+            if merged_since_approval >= MERGES_BEFORE_OVERLAP_WAITS and _may_share_files(
+                waiting, polled
+            ):
+                self._log_queue_wait(
+                    polled,
+                    polled.current_head,
+                    f"behind #{head['ticket_id']}, which may share its files "
+                    "and was passed already",
+                )
                 continue
             try:
                 ticket = self._fresh_ticket(polled)
@@ -845,6 +907,12 @@ class MergeQueueMixin:
             ):
                 return True
         return False
+
+
+def _may_share_files(head: TrackedTicket | None, entry: TrackedTicket) -> bool:
+    if head is None or head.changed_files is None or entry.changed_files is None:
+        return True
+    return not set(head.changed_files).isdisjoint(entry.changed_files)
 
 
 def _waits_on_update_or_ci(ticket: TrackedTicket) -> bool:

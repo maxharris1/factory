@@ -150,8 +150,10 @@ def _queue_of(board: Board, *numbers: str) -> list:
 def test_ready_entries_merge_one_a_cycle_past_a_head_waiting_on_its_update(
     tmp_path: Path, head_waits: str
 ) -> None:
-    board = Board(tmp_path)
+    board = Board(tmp_path, hold=HoldConfig())
     head, *behind = _queue_of(board, "407", "418", "416", "391")
+    for pr in (head, *behind):
+        pr.changed_files = (f"lib/{pr.number}.py",)
     if head_waits == "update":
         head.conflict()
     else:
@@ -167,6 +169,36 @@ def test_ready_entries_merge_one_a_cycle_past_a_head_waiting_on_its_update(
             "updating" if head_waits == "update" else "merge-queue"
         )
     assert len(board.jobs("update-from-main")) == (head_waits == "update")
+
+
+@pytest.mark.parametrize("files_read", [True, False])
+def test_an_updating_head_is_passed_once_by_entries_that_share_its_files(
+    tmp_path: Path, files_read: bool
+) -> None:
+    board = Board(tmp_path, hold=HoldConfig() if files_read else None)
+    head, first, second, apart = _queue_of(board, "1", "2", "3", "4")
+    for pr in (head, first, second):
+        pr.changed_files = ("lib/dispatch/merge_queue.py",)
+    apart.changed_files = ("docs/other.md",)
+    head.conflict()
+
+    board.poll()
+    assert board.actions.merges == [(True, first.head)]
+    board.poll()
+    board.poll()
+
+    passed = [(True, first.head)] + ([(True, apart.head)] if files_read else [])
+    assert board.actions.merges == passed
+    assert board.state("3")["workflow_state"] == "merge-queue"
+    assert board.state("1")["workflow_state"] == "updating"
+    assert any("#3 waits at" in line and "behind #1" in line for line in board.log)
+
+    board.finish("claude")
+    head.push(sha(9))
+    board.ready(head, sha(9))
+    board.poll()
+    board.poll()
+    assert board.actions.merges[len(passed):] == [(True, sha(9)), (True, second.head)]
 
 
 def test_only_a_ready_entry_merges_out_of_turn(tmp_path: Path) -> None:
