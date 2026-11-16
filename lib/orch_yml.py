@@ -104,11 +104,13 @@ _INTAKE_KEYS = {
     "priority_labels",
     "priority_from_linear",
     "critical_path_order",
+    "linear_assignees",
 }
 DEFAULT_INTAKE_LABEL = "factory:ready"
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/ -]{0,49}$")
 _LINEAR_STATE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}$")
 _TRUSTED_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(?:\[bot\])?$")
+_LINEAR_USER_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,8 @@ class Intake:
     A GitHub project names the label (default factory:ready); a Linear
     project names the workflow state. trusted lists who may apply it (GitHub
     logins or Linear user ids); None means the keys of trusted_logins or
-    trusted_linear_users.
+    trusted_linear_users. linear_assignees maps a Linear project id to the
+    only assignees whose tickets the feeder takes from that project.
     """
 
     label: str | None = None
@@ -127,6 +130,9 @@ class Intake:
     priority_labels: tuple[str, ...] = ()
     priority_from_linear: bool = False
     critical_path_order: bool = True
+    linear_assignees: Mapping[str, frozenset[str]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True)
@@ -640,7 +646,7 @@ def _projects(
             continue
         intake = None
         if "intake" in item:
-            intake = _intake(item["intake"], index, bool(linear_project_ids), findings)
+            intake = _intake(item["intake"], index, linear_project_ids, findings)
             if intake is None:
                 ok = False
                 continue
@@ -714,10 +720,11 @@ def _linear_project_ids(
 def _intake(
     value: object,
     index: int,
-    linear: bool,
+    linear_project_ids: frozenset[str],
     findings: list[Finding],
 ) -> Intake | None:
     where = f"projects[{index}].intake"
+    linear = bool(linear_project_ids)
     if value is None:
         value = {}
     if not isinstance(value, dict):
@@ -787,6 +794,13 @@ def _intake(
     if from_linear is True and not linear:
         findings.append(Finding("error", f"{where}.priority_from_linear requires linear_project_id"))
         ok = False
+    assignees: Mapping[str, frozenset[str]] = MappingProxyType({})
+    if "linear_assignees" in value:
+        parsed = _linear_assignees(value["linear_assignees"], where, linear_project_ids, findings)
+        if parsed is None:
+            ok = False
+        else:
+            assignees = parsed
     if not ok:
         return None
     return Intake(
@@ -796,7 +810,43 @@ def _intake(
         priority_labels=priority_labels,
         priority_from_linear=from_linear,
         critical_path_order=critical_path,
+        linear_assignees=assignees,
     )
+
+
+def _linear_assignees(
+    value: object,
+    where: str,
+    linear_project_ids: frozenset[str],
+    findings: list[Finding],
+) -> Mapping[str, frozenset[str]] | None:
+    if not linear_project_ids:
+        findings.append(Finding("error", f"{where}.linear_assignees needs linear_project_id"))
+        return None
+    if not isinstance(value, dict) or not value:
+        findings.append(Finding("error", f"{where}.linear_assignees must be a non-empty mapping"))
+        return None
+    result: dict[str, frozenset[str]] = {}
+    ok = True
+    for project_id, users in value.items():
+        if project_id not in linear_project_ids:
+            findings.append(
+                Finding("error", f"{where}.linear_assignees names a project this entry does not watch")
+            )
+            ok = False
+        elif not isinstance(users, list) or not users or not all(
+            isinstance(user, str) and _LINEAR_USER_ID.fullmatch(user) for user in users
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    f"{where}.linear_assignees.{project_id} must be a non-empty list of Linear user ids",
+                )
+            )
+            ok = False
+        else:
+            result[project_id] = frozenset(users)
+    return MappingProxyType(result) if ok else None
 
 
 def _linear(data: dict, findings: list[Finding]) -> LinearConfig | None:

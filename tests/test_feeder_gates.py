@@ -735,7 +735,7 @@ def test_a_held_conflict_matches_the_candidates_existing_pr(tmp_path: Path) -> N
 
 def test_linear_cycle_across_projects_flags_both(tmp_path: Path) -> None:
     class CrossProject:
-        def linear_intake(self, project_ids: frozenset[str], state: str) -> list:
+        def linear_intake(self, project_ids: frozenset[str], state: str, assignees) -> list:
             if project_ids == frozenset({"proj-1"}):
                 return [replace(linear_issue("AUT-1"), blocked_by=(("AUT-2", "started"),))]
             return [replace(linear_issue("AUT-2"), repo="acme/other-app",
@@ -769,7 +769,7 @@ def test_linear_blocker_in_flight_in_another_project_counts_through_its_pr(
             super().__init__()
             self.second: list = []
 
-        def linear_intake(self, project_ids: frozenset[str], state: str) -> list:
+        def linear_intake(self, project_ids: frozenset[str], state: str, assignees) -> list:
             return self.issues if project_ids == frozenset({"proj-1"}) else self.second
 
     orch = LINEAR_ORCH + (
