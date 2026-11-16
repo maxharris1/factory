@@ -176,13 +176,18 @@ _DROP_PROFILE_TOKENS = f"unset {' '.join(TOKEN_VARIABLES)} || exit {START_REFUSE
 _START_ENTER = (
     f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
     + _DROP_PROFILE_TOKENS
-    + f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
+    + f'e=(); while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; e+=("$1"); shift; done; '
     f"shift; "
 )
 _START_EXEC = (
     'command -v "$1" >/dev/null 2>&1 '
     '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
     f'printf "%s\\n" "${TAG_ENV}" > "$r" || exit {START_REFUSED}; '
+)
+_EXEC_WITHOUT_PROFILE_TOKENS = (
+    "exec /usr/bin/env "
+    + "".join(f"-u {name} " for name in TOKEN_VARIABLES)
+    + '"${e[@]}" "$@"'
 )
 _REPORT_ENV = (
     f'printf "%s " {WORKER_ENV_MARK}; '
@@ -522,7 +527,7 @@ def start_script(
         + (_GUARD_DIRS if guarded_dirs else "")
         + _START_EXEC
         + (_report_env(env_file) if report_env else "")
-        + 'exec "$@"'
+        + _EXEC_WITHOUT_PROFILE_TOKENS
     )
     login = (
         f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "

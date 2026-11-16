@@ -1593,6 +1593,53 @@ def test_remote_start_drops_profile_tokens_and_keeps_only_the_jobs_own(
     assert json.loads(report.read_text(encoding="utf-8")) == expected
 
 
+PROFILE_SENTINEL = "ghp_SYNTHETIC_PROFILE_TOKEN"
+_BASH_HAS_NAMEREFS = subprocess.run(["bash", "-c", "declare -n r=x"], capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param("export {name}=" + PROFILE_SENTINEL, id="export"),
+        pytest.param("unset() {{ :; }}; export {name}=" + PROFILE_SENTINEL, id="unset-shadowed"),
+        pytest.param(
+            "declare -nrx {name}=" + PROFILE_SENTINEL,
+            id="nameref",
+            marks=pytest.mark.skipif(not _BASH_HAS_NAMEREFS, reason="this bash has no name references"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("job_env", [{}, {"GH_TOKEN": "job-token"}], ids=["no-job-token", "job-token"])
+def test_remote_harness_never_sees_a_profile_token_however_declared(
+    tmp_path: Path, declare: str, job_env: dict[str, str]
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        "".join(declare.format(name=name) + "\n" for name in SCRUBBED), encoding="utf-8"
+    )
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    report = tmp_path / "report.json"
+    dump = f"import json, os\njson.dump(dict(os.environ), open({str(report)!r}, 'w'))\n"
+    script = remote.start_script(target, [sys.executable, "-c", dump], job_env)
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    assert {name: seen.get(name) for name in SCRUBBED} == {**dict.fromkeys(SCRUBBED), **job_env}
+    assert PROFILE_SENTINEL not in seen.values()
+
+
 @pytest.mark.parametrize("name", SCRUBBED)
 def test_remote_start_refuses_when_a_profile_token_cannot_be_dropped(tmp_path: Path, name: str) -> None:
     ssh = Ssh(tmp_path)
