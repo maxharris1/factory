@@ -616,3 +616,87 @@ def test_a_held_ci_fix_that_stays_red_queues_one_more_fix_at_its_head(
     assert [job["head"] for job in board.jobs("fix", "42")] == [sha(1), sha(2)]
     assert len(board.jobs("review", "42")) == 1
     assert board.state("42")["workflow_state"] == "fixing"
+
+
+def _held_fix_from_pending_ci(tmp_path: Path):
+    board = held_board(tmp_path)
+    board.factory = replace(board.factory, start_before_ci=True)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    pr.ci[sha(1)] = "pending"
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    ready = board.ready(pr, sha(1))
+    board.queue.finish(build.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    review = board.claim("codex")
+    pr.ci[sha(1)] = "failure"
+    approve = board.approve(pr)
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=approve)
+    board.poll()
+    assert board.state("42")["gate_count"] == 1
+    board.actions.patch_ids = {sha(i): "a" * 40 for i in (1, 2, 3)}
+    return board, pr
+
+
+@pytest.mark.job_bound
+def test_an_earlier_fix_ready_does_not_cancel_the_fix_for_a_later_red_head(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    fix = board.claim("claude")
+    pr.push(sha(2), ci="success")
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert board.state("42")["gate_count"] == 0
+
+    pr.push(sha(3), ci="failure")
+    for _ in range(4):
+        board.poll()
+
+    assert [(job["head"], job["state"]) for job in board.jobs("fix")] == [
+        (sha(1), "done"),
+        (sha(3), "queued"),
+    ]
+    assert board.state("42")["gate_count"] == 1
+
+
+@pytest.mark.job_bound
+def test_a_held_ci_fix_ready_at_a_conflicting_head_without_ci_updates_the_base(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    fix = board.claim("claude")
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    for _ in range(4):
+        board.poll()
+
+    assert len(_merge_only_jobs(board)) == 1
+
+
+@pytest.mark.job_bound
+def test_an_earlier_fix_ready_does_not_cancel_a_later_held_base_update(
+    tmp_path: Path,
+) -> None:
+    board, pr = _held_fix_from_pending_ci(tmp_path)
+    fix = board.claim("claude")
+    pr.push(sha(2), ci="success")
+    ready = board.ready(pr, sha(2))
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+
+    pr.push(sha(3), state="dirty")
+    del pr.ci[sha(3)]
+    for _ in range(4):
+        board.poll()
+
+    assert [(job["head"], job["state"]) for job in _merge_only_jobs(board)] == [
+        (sha(3), "queued")
+    ]

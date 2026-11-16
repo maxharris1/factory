@@ -69,7 +69,10 @@ class T4Mixin:
             return True, "stale-approve"
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
-        if state == "awaiting-ok" and ticket.mergeable_state in ("dirty", "behind"):
+        if ticket.mergeable_state in ("dirty", "behind") and (
+            state == "awaiting-ok"
+            or (held_fix and not self._open_job_at(ticket, current_head))
+        ):
             return self._hold_base_update(ticket, comment, current_head)
         if not _is_full_sha(current_head):
             self._wake_ship_failed(
@@ -204,7 +207,7 @@ class T4Mixin:
                 return True, "stuck-ci-red-3"
             self._queue_ci_fix(
                 ticket,
-                comment,
+                self._latest_fix_answer(ticket, comment, head),
                 head,
                 result,
                 review_round,
@@ -214,6 +217,23 @@ class T4Mixin:
         if state == "review":
             self._set_workflow_state(ticket, "fixing")
         return False, "approve-ci-red-fix-held"
+
+    def _latest_fix_answer(
+        self, ticket: TrackedTicket, approve: Comment, head: str
+    ) -> Comment:
+        source = approve
+        while True:
+            answer = self._answered_by(
+                ticket,
+                source,
+                "fix",
+                ticket.factory.builder_harness,
+                queued_at=self.queue.now(),
+                head=head,
+            )
+            if answer is None:
+                return source
+            source = answer
 
     def _held_ci_fix_out(self, ticket: TrackedTicket, approve_id: str) -> bool:
         prefix = _held_ci_fix_key(ticket, approve_id, "")

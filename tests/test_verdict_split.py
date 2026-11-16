@@ -36,6 +36,7 @@ RULE_MODULE = {
     "_held_ci_red": "t4",
     "_held_ci_fix_out": "t4",
     "_held_approve_covers": "t4",
+    "_latest_fix_answer": "t4",
     "_approve_refusal": "t4",
     "_t_blocked": "blocked",
     "_blocked_by_another": "blocked",
