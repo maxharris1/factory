@@ -43,6 +43,7 @@ from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.cycle_clock import CycleClock
 from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
+from lib.evidence.criteria import canonical_brief
 from lib.github_actions import (
     GhResult,
     GitHubReviewActions,
@@ -99,6 +100,7 @@ query FactoryIssue($id: String!) {
     id
     identifier
     url
+    description
     gitBranchName: branchName
     project { id }
     state { id type position }
@@ -1437,6 +1439,8 @@ class LivePollSource:
                 raise _TerminalTicket()
         if comments is None:
             comments = self.github.list_comments(project.repo, number)
+        brief = canonical_brief(comments, self._trusted)
+        source_issue = github_source(pull, project.repo, number)
         ticket = TrackedTicket(
             **self._hold_inputs(project.repo, number, factory, pull),
             repo=project.repo,
@@ -1452,11 +1456,18 @@ class LivePollSource:
                 _object(pull.get("head"), "GitHub pull request head").get("ref")
             ),
             pr_number=number,
-            **_github_brief(_brief(comments, self._trusted)),
+            **_github_brief(brief),
+            brief_comment=brief,
+            issue_body=(
+                None
+                if brief is not None or source_issue is None
+                else self._source_issue_body(project.repo, number, source_issue, pull)
+            ),
+            pr_body=_optional_string(pull.get("body")),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
             intake_label=project.intake.label if project.intake else None,
-            source_issue=github_source(pull, project.repo, number),
+            source_issue=source_issue,
             pr_title=_open_title(pull),
             **_pull_facts(pull, fresh=fresh),
         )
@@ -1520,6 +1531,25 @@ class LivePollSource:
                 self._record(repo, number, exc)
                 found[name] = None
         return found
+
+    def _source_issue_body(
+        self, repo: str, number: str, source: str, pull: Mapping[str, Any]
+    ) -> str | None:
+        """#495: the source issue's body, read once per PR head and only for
+        a ticket with no brief. A read that fails is recorded and left None."""
+
+        def read() -> str | None:
+            issue = _json_object(
+                self._gh_call(f"repos/{repo}/issues/{source.removeprefix('#')}"),
+                "GitHub issue",
+            )
+            return _optional_string(issue.get("body")) or ""
+
+        try:
+            return self._per_head(f"issue{source}", repo, number, pull, read)
+        except Exception as exc:
+            self._record(repo, number, exc)
+            return None
 
     def _per_head(
         self,
@@ -1589,6 +1619,7 @@ class LivePollSource:
             )
         )
         comments = linear_comments
+        brief = canonical_brief(linear_comments, self._trusted)
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
@@ -1641,7 +1672,10 @@ class LivePollSource:
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
             pr_number=pr_number,
-            brief=_brief_body(_brief(linear_comments, self._trusted)),
+            brief=_brief_body(brief),
+            brief_comment=brief,
+            issue_body=_optional_string(issue.get("description")),
+            pr_body=_optional_string(pull.get("body")),
             grok_bot=project.grok_bot,
             linear_issue_id=_optional_string(issue.get("id")),
             linear_ready_state_id=_linear_ready_state_id(issue),
@@ -2586,26 +2620,6 @@ def _github_brief(brief: Comment | None) -> dict[str, str | None]:
 
 def _brief_body(brief: Comment | None) -> str | None:
     return None if brief is None else brief.body.strip()
-
-
-def _brief(
-    comments: Sequence[Comment],
-    trusted: Mapping[str, Mapping[str, frozenset[str]]],
-) -> Comment | None:
-    latest: Comment | None = None
-    for comment in comments:
-        try:
-            fields = parse_comment(comment.body).as_dict()
-        except HandoffError:
-            continue
-        if (
-            fields["kind"] == "brief"
-            and fields.get("from") == ORCHESTRATOR
-            and fields.get("role") == "orchestrator"
-            and ORCHESTRATOR in trusted_bots(trusted, comment.author)
-        ):
-            latest = comment
-    return latest
 
 
 def _pr_head(pull: Mapping[str, Any], repo: str, number: str) -> str:

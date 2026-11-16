@@ -248,7 +248,7 @@ def test_attention_strip_is_absent_when_all_clear(tmp_path: Path) -> None:
     snapshot = collect_snapshot(db, log, now=NOW)
     assert snapshot["attention"] == {"count": 0, "items": []}
     for name, html in render_pages(snapshot).items():
-        assert '<div class="attn" id="attention-strip" hidden></div>' in html, name
+        assert '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention" hidden></div>' in html, name
         assert "attention-count" not in _no_script(html), name
 
 
