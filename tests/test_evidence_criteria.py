@@ -523,3 +523,26 @@ def test_f1_an_html_goal_still_reads_as_written():
     rendered = MarkdownIt("commonmark").render(body)
     assert "<p><strong>Goal</strong>\n&lt;script&gt; tags must be removed.</p>" in rendered
     assert "<p><strong>Done-evidence</strong>\n1. Tests pass.</p>" in rendered
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "`<!-- preserve-this-marker -->` comments must remain.",
+        "`![alt](image.png)` stays as code.",
+        "``<b>`` stays as code.",
+        "``` `<!-- x -->` ``` stays as code.",
+    ],
+)
+def test_f2_an_inline_code_goal_renders_as_written(goal):
+    body = brief_comment(
+        risk="low",
+        goal=goal,
+        acceptance_criteria=["Comments survive."],
+        likely_files=[],
+        done_evidence="Tests pass.",
+    )
+    markdown = MarkdownIt("commonmark")
+    assert f"<p><strong>Goal</strong>\n{markdown.renderInline(goal)}</p>" in markdown.render(body)
+    bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Comments survive.")]

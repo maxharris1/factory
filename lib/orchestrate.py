@@ -41,7 +41,8 @@ QUESTION_CLASSES = ("observable", "default-able", "product")
 JOBS = ("build", "plan")
 STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
 _ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
-_OPENER_CHARACTERS = frozenset("-+*_=#>`~<[")
+_BACKTICK_FENCE = re.compile(r"^`{3,}[^`]*$")
+_OPENER_CHARACTERS = frozenset("-+*_=#>~<[")
 
 RECOMMENDED_NEXT = {
     "refused": (
@@ -854,7 +855,7 @@ def _escape_block_opener(line: str) -> str:
     number = _ORDERED_MARKER.match(line)
     if number is not None:
         return f"{line[: number.end()]}\\{line[number.end():]}"
-    if line[:1] in _OPENER_CHARACTERS:
+    if line[:1] in _OPENER_CHARACTERS or _BACKTICK_FENCE.match(line):
         return f"\\{line}"
     return line
 
