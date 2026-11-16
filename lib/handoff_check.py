@@ -216,8 +216,8 @@ def _bots_for(trusted_logins: Mapping[str, frozenset[str]], login: str) -> froze
 
 
 def ready_head(expected: Expected, comment_id: str, read: Read) -> str | None:
-    """The full head sha a fitting ready names (#503), or None when the
-    handoff is not a ready. Call it only once `problems` found nothing."""
+    """The head a ready names (#503), as the PR's full sha when they still
+    agree; None when the handoff is not a ready."""
     if expected.kind != "ready":
         return None
     comment = read(f"repos/{expected.repo}/issues/comments/{comment_id}")
@@ -231,4 +231,5 @@ def ready_head(expected: Expected, comment_id: str, read: Read) -> str | None:
     if match is None:
         return None
     pull = _pull(match.group(1), int(match.group(2)), read)
-    return pull.sha if pull is not None and pull.sha else None
+    named = str(fields.get("head") or "")
+    return pull.sha if pull is not None and _same_head(named, pull.sha) else named

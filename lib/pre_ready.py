@@ -1,11 +1,4 @@
-"""A project's `review.pre_ready` check, run before a builder's ready counts (#503).
-
-The command comes from factory.md at the repo's trusted factory_ref, never
-from the PR head. It runs with `sh -c` in a checkout at the ready's head,
-with the job's own environment rules: token variables dropped, and the
-job's proof and queue path dropped so the command cannot finish or touch
-its own job. Its merged output is cut to a tail before anyone prints it.
-"""
+"""A project's `review.pre_ready` check, run before a builder's ready counts (#503)."""
 
 from __future__ import annotations
 
@@ -27,7 +20,7 @@ if TYPE_CHECKING:
 
 TAIL_LINES = 40
 TAIL_CHARS = 4000
-DROPPED = frozenset({PROOF_ENV, "ORCH_DB"})
+JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB"})
 
 
 @dataclass(frozen=True)
@@ -42,8 +35,7 @@ class ContextUnavailable(Exception):
 
 
 def spec_for(source: GhContextSource, repo: str) -> PreReady | None:
-    """review.pre_ready from factory.md at the repo's factory_ref. A repo
-    orch.yml gives no factory_ref has no base factory.md, so no check."""
+    """review.pre_ready from factory.md at the repo's factory_ref."""
     config = source.config
     project = None if config is None else next(
         (item for item in config.projects if item.repo.lower() == repo.lower()), None
@@ -58,7 +50,7 @@ def spec_for(source: GhContextSource, repo: str) -> PreReady | None:
 
 def check_environ(environ: Mapping[str, str], approvals: Approvals | None) -> dict[str, str]:
     env = harness_environ(environ, approvals)
-    return {name: value for name, value in env.items() if name not in DROPPED}
+    return {name: value for name, value in env.items() if name not in JOB_CONTROL_VARIABLES}
 
 
 def cut(text: str) -> str:
