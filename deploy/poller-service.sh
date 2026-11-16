@@ -223,7 +223,9 @@ ensure_db() (
     esac
 )
 
-# Start the poller unless it is running. Only `start` clears a stop.
+# Start the poller unless it is running. Only `start` clears a stop. A launch
+# that misses START_WAIT is stopped before returning, so no failed launch can
+# become a poller after the service lock is released.
 launch() {
     local pid child i
     mkdir -p "$STATE"
@@ -250,7 +252,14 @@ launch() {
         fi
         sleep 0.1
     done
-    say "orch poll did not write ${PIDFILE} within ${START_WAIT}s; see ${LOG}" >&2
+    say "orch poll did not write ${PIDFILE} within ${START_WAIT}s; stopping it; see ${LOG}" >&2
+    kill -TERM "$child" 2>/dev/null || true
+    for ((i = 0; i < STOP_WAIT * 10; i++)); do
+        kill -0 "$child" 2>/dev/null || return 1
+        sleep 0.1
+    done
+    kill -KILL "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
     return 1
 }
 

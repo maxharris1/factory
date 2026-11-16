@@ -899,6 +899,49 @@ def test_remove_autostart_waits_for_an_ensure_already_launching_a_poller(
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_remove_autostart_leaves_no_poller_from_a_launch_that_timed_out(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    (home / ".config/factory/poller-autostart").touch()
+    starts = tmp_path / "poller-starts"
+    loop_pid = home / ".local/state/factory/poller-ensure-loop.pid"
+    slow = {"ORCH_POLL_START_WAIT": "1", "FAKE_ORCH_STARTS": str(starts),
+            "FAKE_ORCH_START_DELAY": "3"}
+    try:
+        started = _service(home, "ensure", service=service, ORCH_POLL_ENSURE_SEC="0.1", **slow)
+        assert started.returncode == 1
+        assert "did not write" in started.stderr
+        deadline = time.monotonic() + 15
+        while len(starts.read_text().splitlines()) < 2:
+            assert time.monotonic() < deadline, "the ensure loop never relaunched the poller"
+            time.sleep(0.05)
+        loop = int(loop_pid.read_text())
+
+        removed = _service(home, "remove-autostart", service=service)
+        assert removed.returncode == 0, removed.stderr
+        launched = [int(pid) for pid in starts.read_text().split()]
+        assert not any(alive(pid) for pid in launched), "a timed-out launch outlived remove-autostart"
+
+        deadline = time.monotonic() + 10
+        while alive(loop):
+            assert time.monotonic() < deadline, "ensure loop outlived poller-autostart"
+            time.sleep(0.05)
+        time.sleep(3.5)
+
+        assert not _pidfile(home).exists()
+        assert starts.read_text().split() == [str(pid) for pid in launched]
+    finally:
+        _stop_loop(home)
+        for pid in starts.read_text().split() if starts.exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
 def test_a_hand_started_ensure_loop_runs_without_poller_autostart(
     home: Path, tmp_path: Path
 ) -> None:
