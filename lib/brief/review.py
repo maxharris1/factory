@@ -11,6 +11,23 @@ _CI_WHILE_RUNNING = (
     "Do not wait for it, and do not block or REVISE on its status alone. The poller ships only on green CI."
 )
 _MERGEABLE = " A merge conflict with the base is `mergeable: no` in the verdict, not a finding."
+PSTACK_BAR = (
+    "A problem the PR's base already has, whether trunk or the PR below it in a stack, doesn't block unless "
+    "the PR copies it or newly reaches it. Only a bug a user would hit, a failed gate, or a wrong shipped doc "
+    "blocks, and everything else goes in a follow-up."
+)
+PSTACK_FIX_ROUND = (
+    "Another full swarm runs only for new behavior, a redesign, or a large new diff. A rebase, a "
+    "merge-conflict resolution, or a minor fix gets a single verifier at the new head"
+)
+
+
+def _tags(facts: dict) -> str:
+    if facts["block_on"] == "user-impact":
+        return "`[blocking]` or `[follow-up]`"
+    if followups_active(facts["followup_from"], facts["round_number"]):
+        return "`[blocking]`, `[follow-up]` or `[minor]`"
+    return "`[blocking]` or `[minor]`"
 
 
 def evidence_sections(detail: dict[str, object], facts: dict) -> list[str]:
@@ -83,9 +100,7 @@ def _url(value: object) -> str | None:
     return value if isinstance(value, str) and _URL.fullmatch(value) else None
 
 
-def _update_steps(
-    update: dict, base: str, head: str, start_before_ci: bool, followup: bool
-) -> list[str]:
+def _update_steps(update: dict, base: str, head: str, start_before_ci: bool, unchanged_tag: str) -> list[str]:
     last = update["last_reviewed_head"]
     merge = update["merge"]
     commits = update["commits"]
@@ -94,7 +109,7 @@ def _update_steps(
         f"`{merge}`. Review only how that merge resolved conflicts (`git show --remerge-diff {merge}`) and "
         "whether the base changes break this PR: read the CI result on this head, and use `git range-diff` "
         f"where useful. A finding in code unchanged since `{last}` is not blocking: tag it "
-        + ("`[minor]`, or `[follow-up]`." if followup else "`[minor]`.")
+        + unchanged_tag
         + (" " + _CI_WHILE_RUNNING if start_before_ci else "")
         + _MERGEABLE
     ]
@@ -127,14 +142,29 @@ def task_lines(facts: dict) -> list[str]:
     head = facts["head"] or "the PR head"
     verify = facts["verify"]
     later_round = (facts["round_number"] or 1) > 1
-    followup = followups_active(facts["followup_from"], facts["round_number"])
+    variant = followups_active(facts["followup_from"], facts["round_number"])
+    user_impact = facts["block_on"] == "user-impact"
+    fix_round = user_impact and later_round and not facts["update"]
+    if user_impact:
+        unchanged_tag = "`[follow-up]`."
+    elif variant:
+        unchanged_tag = "`[minor]`, or `[follow-up]`."
+    else:
+        unchanged_tag = "`[minor]`."
+    gate = (
+        f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
+        "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
+        if verify and verify != "none"
+        else "factory.md names no verify skill (`none`): run interrogate and blast-radius, "
+        "and say which checks did not run."
+    )
     steps = [
         "Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above "
         "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "
         "shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about "
         "other PRs' state.",
         *(
-            _update_steps(facts["update"], base, head, facts["start_before_ci"], followup)
+            _update_steps(facts["update"], base, head, facts["start_before_ci"], unchanged_tag)
             if facts["update"]
             else [
                 (
@@ -144,7 +174,9 @@ def task_lines(facts: dict) -> list[str]:
                 )
                 + _MERGEABLE,
                 *(
-                    [
+                    [_fix_round_step(facts["rebase"], head, verify)]
+                    if fix_round
+                    else [
                         "Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each "
                         "earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a "
                         "`[closed]` item in the form below. "
@@ -156,20 +188,17 @@ def task_lines(facts: dict) -> list[str]:
                 ),
             ]
         ),
-        f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
-        "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
-        if verify and verify != "none"
-        else "factory.md names no verify skill (`none`): run interrogate and blast-radius, "
-        "and say which checks did not run.",
+        *([] if fix_round else [gate]),
         "You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
         "and seen it fail, and give the repro.",
+        *([_bar_step(variant)] if user_impact else []),
         "Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same "
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "
         "not the same line."
         + (
             " When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the header "
             "with that earlier id, ask Max what to do, and stop."
-            if later_round and not followup
+            if later_round and not variant
             else ""
         ),
         "When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, "
@@ -180,7 +209,7 @@ def task_lines(facts: dict) -> list[str]:
                 "already raised (a variant of it), sits in code this PR did not change in the last round, or is "
                 "an edge case outside the acceptance criteria. Each finding names the rule it breaks."
             ]
-            if followup
+            if variant and not user_impact
             else []
         ),
         "Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` "
@@ -194,6 +223,37 @@ def task_lines(facts: dict) -> list[str]:
     ]
 
 
+def _bar_step(variant: bool) -> str:
+    return (
+        "Blocking bar (factory.md `review.block_on: user-impact`). pstack's `autopilot-full.md` step 4 says: "
+        f'"{PSTACK_BAR}" So REVISE only for an unmet acceptance criterion, a failed gate (a test, check or build '
+        "that fails on this head), a bug a user or the factory would hit in normal operation on a path this PR "
+        "changed, or a shipped doc this PR made wrong. Mark every other finding `[follow-up]`, not `[blocking]`. "
+        "A problem the base already has does not block unless the PR copies it or newly reaches it."
+        + (" A variant of a rule an earlier round already raised is also `[follow-up]`." if variant else "")
+    )
+
+
+def _fix_round_step(rebase: dict | None, head: str, verify: str | None) -> str:
+    gates = (
+        f"the CI result and the verify skill `{verify}`; a verify result you cannot read (unknown) is "
+        "`verdict=BLOCKED`"
+        if verify and verify != "none"
+        else "the CI result (factory.md names no verify skill)"
+    )
+    return (
+        "This is a fix round: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
+        "above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as "
+        f"a `[closed]` item in the form below. (b) Confirm the gates pass on this head: {gates}. (c) Read the fix "
+        "delta for a bug the fix introduced. "
+        + _delta_line(rebase, head)
+        + f"(d) pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So rerun interrogate and "
+        "blast-radius only when the fix is new behavior, a redesign or a large new diff; otherwise say they were "
+        "not rerun and why. A new finding in code the delta did not change is `[follow-up]` unless it fails a "
+        "criterion."
+    )
+
+
 def handoff(bot: str, facts: dict) -> tuple[str, str]:
     round_text = facts["round"] or (f"<n>/{facts['cap']}" if facts["cap"] else "<n>/<cap>")
     head = facts["head"] or "<reviewed-head-sha>"
@@ -203,11 +263,7 @@ def handoff(bot: str, facts: dict) -> tuple[str, str]:
         f"head={head} ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk={risk} "
         "repeat=<id> unsat=<id> -->"
     )
-    tags = (
-        "`[blocking]`, `[follow-up]` or `[minor]`"
-        if followups_active(facts["followup_from"], facts["round_number"])
-        else "`[blocking]` or `[minor]`"
-    )
+    tags = _tags(facts)
     closed = (
         " Close an earlier finding with an item in this form: `1. [closed] f-<n>. <what shows it closed>.`"
         if (facts["round_number"] or 1) > 1

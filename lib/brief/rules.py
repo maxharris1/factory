@@ -32,15 +32,35 @@ def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
 
 def review_rules(facts: dict) -> str:
     followup_from = facts["followup_from"]
-    followup = (
-        (
-            f"- From round {followup_from} (`review.followup_from_round`), variants of an already-raised "
-            "rule are follow-ups, not blockers. A real new failure still blocks at any round.\n"
+    user_impact = facts["block_on"] == "user-impact"
+    variant = (
+        f"- From round {followup_from} (`review.followup_from_round`), variants of an already-raised "
+        "rule are follow-ups, not blockers. A real new failure still blocks at any round.\n"
+        if followups_active(followup_from, facts["round_number"])
+        else ""
+    )
+    if user_impact:
+        followup = (
+            "- Blocking bar (`review.block_on: user-impact`): only an unmet acceptance criterion, a failed gate, "
+            "a bug a user or the factory would hit in normal operation on a path this PR changed, or a shipped "
+            "doc this PR made wrong blocks. Every other finding is `[follow-up]`, from round 1.\n"
+            f"{variant}"
+            "- A verdict whose only findings are `[follow-up]` is `APPROVE` with `ac=met`; "
+            "the poller files the `[follow-up]` findings as one ticket. Builders do not fix `[follow-up]` findings.\n"
+        )
+    elif variant:
+        followup = (
+            f"{variant}"
             "- A verdict whose only findings are `[follow-up]` or `[minor]` is `APPROVE` with `ac=met`; "
             "the poller files the `[follow-up]` findings as one ticket. Builders do not fix `[follow-up]` findings.\n"
         )
-        if followups_active(followup_from, facts["round_number"])
-        else ""
+    else:
+        followup = ""
+    adversarial = (
+        "plus interrogate and blast-radius in round 1 (in a later round only for new behavior, a redesign or "
+        "a large new diff),"
+        if user_impact
+        else "plus interrogate and blast-radius,"
     )
     auto_extra = facts["auto_extra"]
     high_risk = (
@@ -52,8 +72,8 @@ def review_rules(facts: dict) -> str:
     return (
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
-        "- That reviewer runs the project's verify skill when factory.md names one, plus interrogate and "
-        "blast-radius, and may run code in a throwaway copy. That reviewer marks a finding `[blocking]` "
+        f"- That reviewer runs the project's verify skill when factory.md names one, {adversarial} "
+        "and may run code in a throwaway copy. That reviewer marks a finding `[blocking]` "
         "only when they have run it and seen it fail.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "
@@ -110,6 +130,8 @@ RULE_PHRASES = {
     "review-gate-retries": "Gate retries (CI red, then fix) are not review rounds.",
     "review-follow-ups": "variants of an already-raised rule are follow-ups, not blockers.",
     "review-follow-ups-approve": "A verdict whose only findings are `[follow-up]` or `[minor]` is `APPROVE` with `ac=met`;",
+    "review-user-impact-bar": "Every other finding is `[follow-up]`, from round 1.",
+    "review-user-impact-approve": "A verdict whose only findings are `[follow-up]` is `APPROVE` with `ac=met`;",
     "review-ship-pinned": "Ship is pinned to the covered head. A reviewer never merges.",
     "review-agent-approval": "Another agent's approval is never treated as Max's.",
     "review-ac-met": "`ac=met`: every acceptance criterion in the ticket is met at the reviewed head.",

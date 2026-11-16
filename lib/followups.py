@@ -7,6 +7,10 @@ The poller files a trusted verdict's `[follow-up]` items as one new ticket
 (followup_issue) and links it from the PR (link_comment). Each write carries
 a hidden marker keyed on the verdict comment id, so a retry after a crash
 finds the earlier write instead of repeating it.
+
+With review.block_on: user-impact (issue #490) every finding below the
+blocking bar is `[follow-up]` from round 1, so followup_start moves the
+filing round to 1 while the variant rule keeps followup_from_round.
 """
 
 from __future__ import annotations
@@ -31,6 +35,10 @@ def followups_active(followup_from: int | None, round_number: int | None) -> boo
     if followup_from is None or round_number is None:
         return False
     return round_number >= followup_from
+
+
+def followup_start(followup_from: int | None, block_on: str) -> int | None:
+    return 1 if block_on == "user-impact" else followup_from
 
 
 def followup_findings(body: str) -> tuple[str, ...]:
