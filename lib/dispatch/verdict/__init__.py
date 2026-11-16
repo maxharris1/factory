@@ -22,6 +22,7 @@ from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, TrackedTick
 from lib.dispatch.verdict.blocked import BlockedMixin
 from lib.dispatch.verdict.coverage import ApprovalCoverageMixin
 from lib.dispatch.verdict.latest import LatestVerdictMixin
+from lib.dispatch.verdict.pending import PendingApprovalMixin
 from lib.dispatch.verdict.preview import PreviewedHeadMixin
 from lib.dispatch.verdict.record import ApprovalRecordMixin
 from lib.dispatch.verdict.repeat import RepeatBlockMixin
@@ -39,6 +40,7 @@ class VerdictMixin(
     BlockedMixin,
     ApprovalRecordMixin,
     ApprovalCoverageMixin,
+    PendingApprovalMixin,
     ShippedApprovalMixin,
     PreviewedHeadMixin,
     LatestVerdictMixin,

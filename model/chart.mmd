@@ -59,7 +59,7 @@ stateDiagram-v2
   s9 --> s11: BLOCKED
   s9 --> s14: APPROVE on the current head
   s9 --> s10: device offline 60 minutes or job dies twice (T6)
-  s9 --> s15: REVISE, under the round cap
+  s9 --> s15: APPROVE on red CI, CI fix or REVISE, under the round cap
   s9 --> s5: REVISE with unsat=, the criterion goes to Max
   s11 --> s9: approver's go, fresh review at the same round
   s13 --> s12: post-merge fails, follow-up filed or post-merge passes
@@ -69,9 +69,10 @@ stateDiagram-v2
   s14 --> s18: APPROVE, finish_line merge
   s14 --> s7: ship = merge
   s14 --> s19: ship = after an approver
-  s15 --> s5: a product question
   s15 --> s9: ready, CI green
-  s15 --> s10: device offline 60 minutes or job dies twice (T6) or CI red three times
+  s15 --> s14: ready at the approved patch, CI green
+  s15 --> s5: a product question
+  s15 --> s10: device offline 60 minutes or CI red three times or job dies twice (T6)
   s5 --> s9: answer, same step resumes
   s5 --> s15: answer, same step resumes
   s16 --> s9: head changed and the patch differs

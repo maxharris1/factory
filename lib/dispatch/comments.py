@@ -210,27 +210,7 @@ class CommentsMixin:
                     raise RetryableStateError("blocked") from exc
                 if kind not in ("verdict", "questions", "answers"):
                     raise
-                error = safe_ship_error(exc)
-                eligible = _redrive_eligible(exc, ticket.factory.ship)
-                if self._mark_ship_intent_failed(
-                    ticket,
-                    comment.id,
-                    error,
-                    redrive=eligible,
-                ):
-                    self._wake_ship_failed(
-                        ticket,
-                        comment,
-                        f"ship raised {error}",
-                    )
-                    if not eligible:
-                        # Issue #83: no retry is coming, so a person must look.
-                        self.flag_attention(
-                            ticket.repo,
-                            ticket.ticket_id,
-                            "ship-failed",
-                            f"{ticket.factory.ship} ship failed: {error}",
-                        )
+                self._ship_raised(ticket, comment, exc)
                 self._mark_handled(
                     ticket,
                     comment.id,
@@ -249,6 +229,23 @@ class CommentsMixin:
                 ):
                     self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
+
+    def _ship_raised(self, ticket: TrackedTicket, comment: Comment, exc: Exception) -> None:
+        """comment's pending ship intent failed with exc: mark it failed,
+        eligible for one re-drive where the policy allows it."""
+        error = safe_ship_error(exc)
+        eligible = _redrive_eligible(exc, ticket.factory.ship)
+        if not self._mark_ship_intent_failed(ticket, comment.id, error, redrive=eligible):
+            return
+        self._wake_ship_failed(ticket, comment, f"ship raised {error}")
+        if not eligible:
+            # Issue #83: no retry is coming, so a person must look.
+            self.flag_attention(
+                ticket.repo,
+                ticket.ticket_id,
+                "ship-failed",
+                f"{ticket.factory.ship} ship failed: {error}",
+            )
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
         if comment.edited_at is not None:

@@ -481,6 +481,7 @@ class ShipMixin:
         self,
         ticket: TrackedTicket,
         comment_id: str,
+        state: str = "review",
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -497,7 +498,7 @@ class ShipMixin:
                     connection,
                     ticket.repo,
                     ticket.ticket_id,
-                    "review",
+                    state,
                     source="ship-discard",
                     at=self.queue.now(),
                 )

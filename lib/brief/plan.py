@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import QUESTIONS_LINES, answers_lines, detail_of, resume_lines
+from lib.brief.common import QUESTIONS_LINES, answers_lines, detail_of, read_ticket_line, resume_lines
 from lib.queue import Job
 
 # The most a plan handoff carries: GitHub caps a comment at 65,536 characters.
@@ -12,7 +12,7 @@ PLAN_HANDOFF_LIMIT = 60_000
 def task_lines(job: Job, facts: dict) -> list[str]:
     return [
         "This is a plan job. Follow the router in Skills above.",
-        "1. Read the ticket and its brief (Job data). Start with an architect scaffold.",
+        f"1. {read_ticket_line(facts)} Start with an architect scaffold.",
         "2. Map every acceptance criterion to the work that meets it. The plan lives in the "
         "plan handoff comment, never in a file in the repo.",
         f"3. Post the plan handoff below with `round={facts['plan_round']}/2`: "
