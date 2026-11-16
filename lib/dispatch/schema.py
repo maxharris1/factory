@@ -319,6 +319,19 @@ class SchemaMixin:
             _add_missing_columns(connection, "followup_filings", {"addition": "TEXT"})
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS followup_wakes (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    source_comment_id TEXT NOT NULL,
+                    head TEXT,
+                    timeout_seconds INTEGER NOT NULL,
+                    detail TEXT NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, source_comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS auto_extra_comments (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

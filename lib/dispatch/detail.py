@@ -530,22 +530,8 @@ class DetailMixin:
         }
         if note is not None:
             detail["note"] = note
-        parked = self._park_followups(ticket)
-        if parked is not None:
-            detail["followup_issue"] = parked
-        self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
-            reason="done",
-            source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=json.dumps(
-                detail,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            head=ticket.current_head,
-        )
+        self._hold_done_wake(ticket, comment, detail)
+        self._park_followups(ticket)
 
 
 def _verdict_sources(

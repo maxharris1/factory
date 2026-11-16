@@ -516,6 +516,81 @@ def test_the_done_wake_names_the_parked_issue(tmp_path: Path) -> None:
     assert "followup_issue" not in json.loads(str(plain_wake.request.detail))
 
 
+class FailingCreates(FollowupActions):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def file_issue(self, *args) -> int:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("transient GitHub failure")
+        return super().file_issue(*args)
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+def test_the_done_wake_waits_for_a_failed_filing_and_names_its_issue(
+    tmp_path: Path, failures: int
+) -> None:
+    actions = FailingCreates(failures)
+    dispatcher, queue = at_round(tmp_path, actions, 4)
+    approve = verdict_ticket("APPROVE", 4, (FOLLOWUP_A,))
+    dispatcher.process(approve)
+    bot = FakeBot(queue, "grok")
+    if failures == 2:
+        assert [job for job in bot.drain() if job.request.action == "done"] == []
+        assert filings(queue) == [(VERDICT_ID, 4, "pending", None)]
+        dispatcher.process(approve)
+    dispatcher.process(approve)
+
+    [wake] = [job for job in bot.drain() if job.request.action == "done"]
+    assert list(actions.issues) == [300]
+    detail = json.loads(str(wake.request.detail))
+    assert (detail["outcome"], detail["followup_issue"]) == ("merged", 300)
+    assert handled_outcome(queue, VERDICT_ID) == "merged"
+
+
+def test_a_crash_after_filing_a_new_issue_never_adds_to_a_reopened_one(
+    tmp_path: Path,
+) -> None:
+    actions = FollowupActions()
+    dispatcher, queue, later = two_rounds(tmp_path, actions)
+    actions.closed.add(300)
+    actions.crash_after_create = True
+    with pytest.raises(SystemExit):
+        dispatcher.process(later)
+    assert list(actions.issues) == [300, 301]
+
+    actions.closed.clear()
+    actions.crash_after_create = False
+    restarted, _queue = setup(tmp_path, review_actions=actions)
+    restarted.process(later)
+
+    assert actions.issue_comments == {}
+    assert actions.creates == 2
+    assert filings(queue)[1] == (LATER_ID, 5, "commented", 301)
+
+
+def test_a_pending_row_from_before_the_park_files_an_unlabelled_issue(
+    tmp_path: Path,
+) -> None:
+    actions = FollowupActions()
+    dispatcher, queue = at_round(tmp_path, actions, 4)
+    approve = verdict_ticket("APPROVE", 4, (FOLLOWUP_A,))
+    with queue.connect() as connection:
+        dispatcher._record_followups(connection, approve, approve.comments[0], 4)
+        connection.execute(
+            "UPDATE followup_filings SET labels = ?",
+            (json.dumps(["factory:ready", "urgent"]),),
+        )
+        connection.execute("ALTER TABLE followup_filings DROP COLUMN addition")
+    restarted, _queue = setup(tmp_path, review_actions=actions)
+    restarted.process(approve)
+
+    assert actions.issues[300][2] == ()
+    assert filings(queue) == [(VERDICT_ID, 4, "commented", 300)]
+
+
 @pytest.mark.parametrize(
     ("review_round", "kwargs", "outcome"),
     [
