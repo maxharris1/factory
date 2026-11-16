@@ -30,6 +30,7 @@ from lib.dispatch.types import (
     Feeder,
     GrokDelivery,
     Hook,
+    HoldCarry,
     RebaseClassifier,
     Registration,
     RetryableStateError,
@@ -64,6 +65,7 @@ class DispatcherBase:
         rebase_classifier: RebaseClassifier | None = None,
         approvals: Approvals | None = None,
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
+        hold_carry: HoldCarry | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -89,6 +91,9 @@ class DispatcherBase:
         # or any error, sends the update back to review (fail closed).
         self.update_classifier = update_classifier
         self.rebase_classifier = rebase_classifier
+        # #574: None, or any error, means a held ok never carries past its head.
+        self.hold_carry = hold_carry
+        self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
         # #91: the tickets this poll read, so T6 can see a verdict a failed

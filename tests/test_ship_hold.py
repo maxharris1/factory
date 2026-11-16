@@ -10,6 +10,7 @@ label), and Grok Bot is woken once per held head.
 import base64
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig, HoldConfig, parse_factory_md
-from lib.hold import decide, glob_matches
+from lib.hold import MergeStep, MergeUpdate, OwnDiff, decide, glob_matches, ok_carries
 from lib.hook_t8 import T8Hook
 from lib.poll_source import IntakeRisks
 from lib.queue import SQLiteJobQueue
@@ -90,6 +91,7 @@ def setup(
     tmp_path: Path,
     actions: FakeReviewActions | None = None,
     hooks: tuple = (),
+    hold_carry=None,
 ) -> tuple[Dispatcher, SQLiteJobQueue, FakeReviewActions]:
     actions = actions or FakeReviewActions()
     path = tmp_path / "d.db"
@@ -101,6 +103,7 @@ def setup(
         review_actions=actions,
         grok_delivery=FakeGrokDelivery(),
         hooks=hooks,
+        hold_carry=hold_carry,
     )
     return dispatcher, queue, actions
 
@@ -647,6 +650,186 @@ def test_a_new_head_after_the_ok_needs_a_new_review_and_a_new_ok(
         )
     )
     assert actions.merges == [(True, NEW_HEAD)]
+
+
+# --- an ok carries across merges from base (issue #574) -------------------
+
+MAIN = "c" * 40
+PR_FILES = ("lib/a.py", "src/view/A.tsx")
+VIEW_PATCH = {"src/view/A.tsx": "d" * 40}
+MERGED_MAIN = MergeUpdate(
+    approved_head=HEAD,
+    steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), True),),
+    approved=OwnDiff(frozenset(PR_FILES), VIEW_PATCH),
+    current=OwnDiff(frozenset(PR_FILES), VIEW_PATCH),
+)
+VIEW_RESOLVED = replace(
+    MERGED_MAIN, current=OwnDiff(frozenset(PR_FILES), {"src/view/A.tsx": "e" * 40})
+)
+
+
+class FakeHoldCarry:
+    """Returns (or raises) each outcome in turn, then repeats the last."""
+
+    def __init__(self, *outcomes: MergeUpdate | Exception):
+        self.outcomes = list(outcomes)
+        self.calls: list[tuple[str, str, str, str, tuple[str, ...]]] = []
+
+    def __call__(
+        self, repo: str, base: str, approved: str, head: str, patterns: tuple[str, ...]
+    ) -> MergeUpdate:
+        self.calls.append((repo, base, approved, head, tuple(patterns)))
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def held_at_new_head(tmp_path: Path, hold_carry: FakeHoldCarry):
+    actions = FakeReviewActions({HEAD: "1" * 40, NEW_HEAD: "2" * 40})
+    dispatcher, queue, actions = setup(tmp_path, actions, hold_carry=hold_carry)
+    ready(dispatcher, queue, NEW_HEAD)
+    actions.states.clear()
+    return dispatcher, queue, actions
+
+
+def test_an_ok_carries_to_a_head_that_only_merged_main(tmp_path: Path) -> None:
+    hold_carry = FakeHoldCarry(MERGED_MAIN)
+    dispatcher, queue, actions = held_at_new_head(tmp_path, hold_carry)
+
+    dispatcher.process(
+        snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES)
+    )
+
+    assert actions.merges == [(True, NEW_HEAD)]
+    assert workflow_state(queue) == "merged"
+    assert hold_carry.calls[0] == ("owner/repo", "main", HEAD, NEW_HEAD, UI_PATHS)
+
+
+def test_an_ok_does_not_carry_when_a_resolution_changed_a_hold_file(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = held_at_new_head(tmp_path, FakeHoldCarry(VIEW_RESOLVED))
+
+    dispatcher.process(
+        snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES)
+    )
+    assert_held(queue, actions, NEW_HEAD)
+
+    new_ok = comment("ok-2", OK.format(head=NEW_HEAD), author=APPROVER, created_at=40)
+    dispatcher.process(
+        snapshot(approve(NEW_HEAD), ok(HEAD), new_ok, head=NEW_HEAD, files=PR_FILES)
+    )
+    assert actions.merges == [(True, NEW_HEAD)]
+
+
+@pytest.mark.parametrize("error", [ValueError("no commit"), OSError("git gone")])
+def test_an_unread_carry_keeps_the_hold_and_is_read_again_next_poll(
+    tmp_path: Path, error: Exception
+) -> None:
+    dispatcher, queue, actions = held_at_new_head(tmp_path, FakeHoldCarry(error, MERGED_MAIN))
+
+    dispatcher.process(
+        snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES)
+    )
+    assert_held(queue, actions, NEW_HEAD)
+
+    dispatcher.process(
+        snapshot(approve(NEW_HEAD), ok(HEAD), head=NEW_HEAD, files=PR_FILES)
+    )
+    assert actions.merges == [(True, NEW_HEAD)]
+
+
+def test_a_new_head_with_its_own_commit_after_the_ok_still_needs_a_new_ok(
+    tmp_path: Path,
+) -> None:
+    pushed = replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD,), True),))
+    actions = FakeReviewActions({HEAD: "1" * 40, NEW_HEAD: "2" * 40})
+    dispatcher, queue, actions = setup(tmp_path, actions, hold_carry=FakeHoldCarry(pushed))
+    ready(dispatcher, queue)
+    dispatcher.process(snapshot(approve(), files=PR_FILES))
+    assert workflow_state(queue) == "awaiting-ok"
+
+    dispatcher.process(snapshot(approve(), ok(HEAD), head=NEW_HEAD, files=PR_FILES))
+    assert actions.merges == []
+    assert workflow_state(queue) == "review"
+    review = queue.claim("codex")
+    assert review is not None and review.request.head == NEW_HEAD
+    queue.finish(review.id, owner="codex", handoff_comment_id="approve-2")
+
+    second = comment(
+        "approve-2",
+        VERDICT.format(round=1, head=NEW_HEAD, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=30,
+    )
+    dispatcher.process(
+        snapshot(approve(), ok(HEAD), second, head=NEW_HEAD, files=PR_FILES)
+    )
+    assert actions.merges == []
+    assert workflow_state(queue) == "awaiting-ok"
+    wakes = [row["head"] for row in grok_jobs(queue) if row["action"] == "awaiting-ok"]
+    assert wakes == [HEAD, NEW_HEAD]
+
+
+def test_the_merge_carry_rule_holds_for_a_merge_of_base() -> None:
+    assert ok_carries(MERGED_MAIN, UI_PATHS)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        pytest.param(
+            replace(
+                MERGED_MAIN,
+                current=OwnDiff(frozenset({*PR_FILES, "lib/b.py"}), VIEW_PATCH),
+            ),
+            id="new-pr-owned-file",
+        ),
+        pytest.param(
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD,), True),)),
+            id="non-merge-step",
+        ),
+        pytest.param(
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD, MAIN, "e" * 40), True),)),
+            id="octopus-merge",
+        ),
+        pytest.param(
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), False),)),
+            id="second-parent-not-on-base",
+        ),
+        pytest.param(
+            replace(
+                MERGED_MAIN,
+                steps=(
+                    MergeStep("e" * 40, (HEAD, MAIN), True),
+                    MergeStep(NEW_HEAD, ("f" * 40, MAIN), True),
+                ),
+            ),
+            id="broken-chain",
+        ),
+        pytest.param(
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (MAIN, HEAD), True),)),
+            id="base-as-first-parent",
+        ),
+        pytest.param(replace(MERGED_MAIN, steps=()), id="no-steps"),
+        pytest.param(
+            replace(
+                MERGED_MAIN,
+                approved=OwnDiff(frozenset(PR_FILES), {"src/view/A.tsx": None}),
+                current=OwnDiff(frozenset(PR_FILES), {"src/view/A.tsx": None}),
+            ),
+            id="no-identity",
+        ),
+        pytest.param(
+            replace(MERGED_MAIN, current=OwnDiff(frozenset(PR_FILES), {})),
+            id="missing-identity",
+        ),
+        pytest.param(VIEW_RESOLVED, id="hold-file-changed"),
+    ],
+)
+def test_the_merge_carry_rule_fails_closed(update: MergeUpdate) -> None:
+    assert not ok_carries(update, UI_PATHS)
 
 
 @pytest.mark.parametrize(

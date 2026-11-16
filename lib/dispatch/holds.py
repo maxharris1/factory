@@ -9,7 +9,7 @@ from lib.dispatch.constants import _NOT_FINISHED
 from lib.dispatch.helpers import _base_update_key, _is_full_sha, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
-from lib.hold import HoldDecision, decide
+from lib.hold import HoldDecision, decide, ok_carries
 
 _HELD_BASE_UPDATE = "held-base-update"
 
@@ -200,8 +200,31 @@ class HoldsMixin:
             factory_md_trust_changed=ticket.factory_md_trust_changed,
             comments=ticket.comments,
             approver_allowed=self._may_approve(hold.approver),
-            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
+            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head)
+            or self._ok_carries(ticket, ok_head, head),
         )
+
+    def _ok_carries(self, ticket: TrackedTicket, ok_head: str, head: str) -> bool:
+        hold = ticket.factory.hold
+        assert hold is not None
+        if self.hold_carry is None:
+            return False
+        base = ticket.factory.base_branch
+        key = (ticket.repo.lower(), base, ok_head, head, hold.paths)
+        if key in self._hold_carries:
+            return self._hold_carries[key]
+        try:
+            update = self.hold_carry(ticket.repo, base, ok_head, head, hold.paths)
+            carries = ok_carries(update, hold.paths)
+        except Exception as exc:
+            if self.log is not None:
+                self.log(
+                    f"hold ok carry unread: {ticket.repo}#{ticket.ticket_id}: "
+                    f"{type(exc).__name__}"
+                )
+            return False
+        self._hold_carries[key] = carries
+        return carries
 
     def _held(self, ticket: TrackedTicket, head: str) -> HoldDecision | None:
         if not ticket.factory.hold_applies:

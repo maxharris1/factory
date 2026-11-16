@@ -8,7 +8,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
 from lib.factory_md import FactoryConfig
-from lib.hold import LabelEvent
+from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
 from lib.update_check import RebaseScope, UpdateClass
@@ -389,3 +389,7 @@ UpdateClassifier = Callable[[str, str, str, str, tuple[str, ...]], UpdateClass]
 # (repo, base branch, last reviewed head, new head) -> None when the new head
 # descends from the last reviewed one, else both fork points (lib/update_check.py).
 RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]
+
+# (repo, base branch, ok head, current head, hold paths) -> the commits and own
+# diffs that say whether the ok carries to the current head (issue #574).
+HoldCarry = Callable[[str, str, str, str, tuple[str, ...]], MergeUpdate]
