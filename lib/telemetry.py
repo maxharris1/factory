@@ -1011,10 +1011,12 @@ _NOT_A_PATH = re.compile(r"[$*?\[`~]")
 _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 
 
-def _simple_commands(script: str) -> list[list[str]]:
+def _simple_commands(script: str) -> list[tuple[str, list[str]]]:
+    """Each simple command's words, after the operator that joined it to the
+    one before: "&&", "||", or "always"."""
     lexer = shlex.shlex(script, posix=True, punctuation_chars=_OPERATORS)
     lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
-    commands: list[list[str]] = [[]]
+    commands: list[tuple[str, list[str]]] = [("always", [])]
     redirect = False
     for token in lexer:
         if redirect:
@@ -1022,10 +1024,24 @@ def _simple_commands(script: str) -> list[list[str]]:
         elif token and not token.strip(_OPERATORS):
             redirect = "<" in token or ">" in token
             if not redirect:
-                commands.append([])
+                operator = token.strip("\n")
+                commands.append((operator if operator in ("&&", "||") else "always", []))
         else:
-            commands[-1].append(token)
-    return [list(itertools.takewhile(lambda word: not word.startswith("#"), words)) for words in commands]
+            commands[-1][1].append(token)
+    return [
+        (joined, list(itertools.takewhile(lambda word: not word.startswith("#"), words)))
+        for joined, words in commands
+    ]
+
+
+class _Step(NamedTuple):
+    """One simple command of a call: how it joined the one before, every file
+    operand of its reads, and the locked files among them by operand (None for
+    a Read or Skill call)."""
+
+    joined: str
+    operands: list[str]
+    found: dict[str, str | None]
 
 
 class SkillReads:
@@ -1035,9 +1051,10 @@ class SkillReads:
     operands of read commands (cat, sed, head ...) in Claude's Bash and
     Codex's shell. A `test -f`, `ls` or `grep` is not a read. A call's files
     count only once its result arrives. A failed Read or refused Skill loaded
-    nothing. A failed shell call loses only the operands its output names,
-    as `cat: <path>: No such file` does, and all of them when it printed
-    nothing."""
+    nothing. A failed shell call loses the operands its output names, as
+    `cat: <path>: No such file` does, and all of them when it printed
+    nothing. Its other commands are taken to have succeeded, so a read behind
+    a failed `&&`, or behind a `||` whose left side succeeded, did not run."""
 
     def __init__(self, root: str, locked: frozenset[str]):
         self.root = posixpath.normpath(root)
@@ -1048,7 +1065,7 @@ class SkillReads:
             if posixpath.basename(rel) == "SKILL.md"
         }
         self.read: set[str] = set()
-        self.pending: dict[str, dict[str, str | None]] = {}
+        self.pending: dict[str, list[_Step]] = {}
 
     @classmethod
     def pinned(cls, root: str, pin: Pin) -> SkillReads:
@@ -1065,33 +1082,37 @@ class SkillReads:
             if rel is not None:
                 found[rel] = None
         elif name == "Bash":
-            self._command(found, _command_text(data.get("command")))
-        self._started(call_id, found)
+            self.command(call_id, _command_text(data.get("command")))
+            return
+        self._started(call_id, [_Step("always", [], found)])
 
     def command(self, call_id: str, text: str) -> None:
-        found: dict[str, str | None] = {}
-        self._command(found, text)
-        self._started(call_id, found)
+        try:
+            steps = self._script(text, None)
+        except ValueError:
+            return
+        self._started(call_id, steps)
 
     def finished(self, call_id: str, error: bool, output: str) -> None:
-        found = self.pending.pop(call_id, {})
+        steps = self.pending.pop(call_id, [])
         if not error:
-            self.read |= found.keys()
-        elif output:
-            self.read |= {rel for rel, operand in found.items() if operand is not None and operand not in output}
+            self.read |= {rel for step in steps for rel in step.found}
+            return
+        if not output:
+            return
+        ok = True
+        for step in steps:
+            if (step.joined == "&&" and not ok) or (step.joined == "||" and ok):
+                continue
+            ok = not any(operand in output for operand in step.operands)
+            self.read |= {rel for rel, operand in step.found.items() if operand is not None and operand not in output}
 
     def row(self) -> str:
         return json.dumps(sorted(self.read))
 
-    def _started(self, call_id: str, found: dict[str, str | None]) -> None:
-        if found:
-            self.pending[call_id] = found
-
-    def _command(self, found: dict[str, str | None], text: str) -> None:
-        try:
-            self._script(found, text, None)
-        except ValueError:
-            return
+    def _started(self, call_id: str, steps: list[_Step]) -> None:
+        if any(step.found for step in steps):
+            self.pending[call_id] = steps
 
     def _path(self, found: dict[str, str | None], operand: str, base: str | None) -> None:
         if _NOT_A_PATH.search(operand) or not (base or posixpath.isabs(operand)):
@@ -1101,11 +1122,14 @@ class SkillReads:
         if path.startswith(self.root + "/") and rel in self.locked:
             found[rel] = operand
 
-    def _script(self, found: dict[str, str | None], script: str, base: str | None) -> None:
-        for words in _simple_commands(script):
-            base = self._cwd_after(found, words, base)
+    def _script(self, script: str, base: str | None) -> list[_Step]:
+        steps = []
+        for joined, words in _simple_commands(script):
+            steps.append(_Step(joined, [], {}))
+            base = self._cwd_after(steps[-1], words, base)
+        return steps
 
-    def _cwd_after(self, found: dict[str, str | None], words: list[str], base: str | None) -> str | None:
+    def _cwd_after(self, step: _Step, words: list[str], base: str | None) -> str | None:
         words = list(itertools.dropwhile(lambda word: word in _SHELL_WORDS or _ASSIGNMENT.match(word), words))
         if not words:
             return base
@@ -1116,11 +1140,14 @@ class SkillReads:
                 return None
             return posixpath.normpath(posixpath.join(base or "", target))
         if verb in _SHELLS and len(args) > 1 and args[0].startswith("-") and "c" in args[0]:
-            self._script(found, args[1], base)
+            for inner in self._script(args[1], base):
+                step.operands.extend(inner.operands)
+                step.found.update(inner.found)
         elif verb in _READ_VERBS:
             for arg in args:
                 if not arg.startswith("-"):
-                    self._path(found, arg, base)
+                    step.operands.append(arg)
+                    self._path(step.found, arg, base)
         return base
 
 
