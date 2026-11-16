@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import re
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -16,10 +17,17 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    Request,
+    build_opener,
+)
 
 from lib.dispatcher import (
     CIResult,
@@ -193,8 +201,74 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-_OPENER = build_opener(_NoRedirect)
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
+
+
+class _Cutoff:
+    """urllib's timeout is per socket operation, so a reply trickling bytes
+    never times out."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self.fired = False
+
+    def track(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sockets.append(sock)
+            if self.fired:
+                _shut(sock)
+
+    def fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            for sock in self._sockets:
+                _shut(sock)
+
+
+def _shut(sock: socket.socket) -> None:
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+class _Tracked:
+    def __init__(self, *args: Any, cutoff: _Cutoff, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._cutoff = cutoff
+
+    def connect(self) -> None:
+        super().connect()
+        self._cutoff.track(self.sock)
+
+
+class _TrackedHTTP(_Tracked, HTTPConnection):
+    pass
+
+
+class _TrackedHTTPS(_Tracked, HTTPSConnection):
+    pass
+
+
+class _CutoffHTTP(HTTPHandler):
+    def __init__(self, cutoff: _Cutoff) -> None:
+        super().__init__()
+        self._cutoff = cutoff
+
+    def http_open(self, req: Request) -> Any:
+        return self.do_open(_TrackedHTTP, req, cutoff=self._cutoff)
+
+
+class _CutoffHTTPS(HTTPSHandler):
+    def __init__(self, cutoff: _Cutoff) -> None:
+        super().__init__()
+        self._cutoff = cutoff
+
+    def https_open(self, req: Request) -> Any:
+        return self.do_open(
+            _TrackedHTTPS, req, context=self._context, cutoff=self._cutoff
+        )
 
 
 class _TerminalTicket(RuntimeError):
@@ -207,10 +281,16 @@ def post_json(
     body: bytes,
     timeout: float,
 ) -> HTTPResult:
+    """POST with timeout as the whole request's deadline, not per socket read."""
+    cutoff = _Cutoff()
+    timer = threading.Timer(timeout, cutoff.fire)
+    timer.daemon = True
+    timer.start()
+    opener = build_opener(_NoRedirect, _CutoffHTTP(cutoff), _CutoffHTTPS(cutoff))
     try:
         request = Request(url, data=body, method="POST", headers=dict(headers))
-        with _OPENER.open(request, timeout=timeout) as response:
-            return HTTPResult(
+        with opener.open(request, timeout=timeout) as response:
+            result = HTTPResult(
                 response.status,
                 response.read().decode("utf-8"),
                 dict(response.headers.items()),
@@ -220,15 +300,22 @@ def post_json(
     except TimeoutError:
         raise
     except URLError as exc:
-        if isinstance(exc.reason, TimeoutError):
+        if cutoff.fired or isinstance(exc.reason, TimeoutError):
             raise TimeoutError from None
         raise PollSourceError(
             f"Linear request failed: {type(exc).__name__}"
         ) from None
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, HTTPException) as exc:
+        if cutoff.fired:
+            raise TimeoutError from None
         raise PollSourceError(
             f"Linear request failed: {type(exc).__name__}"
         ) from None
+    finally:
+        timer.cancel()
+    if cutoff.fired:
+        raise TimeoutError
+    return result
 
 
 class IntakeRisks:
@@ -288,6 +375,7 @@ class LivePollSource:
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
         self.read_deadline_seconds = read_deadline_seconds
         self._hangs: dict[str, int] = {}
+        self._linear_calls = _Abandoning(HANG_STRIKES)
         self._trusted = {
             "github": config.trusted_logins,
             "linear": config.trusted_linear_users,
@@ -1054,7 +1142,7 @@ class LivePollSource:
         deadline = min(self.timeout_seconds, self.read_deadline_seconds)
         try:
             with self._timed("linear"):
-                result = _abandon_after(
+                result = self._linear_calls.run(
                     deadline,
                     lambda: self.linear_transport(
                         LINEAR_ENDPOINT, headers, payload, deadline
@@ -1766,15 +1854,15 @@ class LivePollSource:
         return self._gh_call(*args, _unconditional=True)
 
     def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
-        """Retry the poll adapter's GETs; never repeat a write."""
+        """Retry the poll adapter's reads (GETs and GraphQL queries); never repeat a write."""
         call = list(argv)
-        if _is_read(call[call.index("api") + 1 :]):
+        args = call[call.index("api") + 1 :]
+        if _is_read(args) or _is_graphql_query(args):
             return self._run_gh_read(call)
         with self._timed(_gh_source(call)):
             return self.gh_runner(call, self.timeout_seconds)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
-        """Every _gh_call is a GET, so a timed-out call is safe to repeat."""
         self._check_hangs("github")
         with self._timed(_gh_source(argv)):
             deadline = self.clock() + self.read_deadline_seconds
@@ -1831,23 +1919,53 @@ class LivePollSource:
         self.error_sink(repo, ticket_id, reason)
 
 
-def _abandon_after(seconds: float, call: Callable[[], HTTPResult]) -> HTTPResult:
-    done: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
+class _Abandoning:
+    def __init__(self, max_running: int) -> None:
+        self.max_running = max_running
+        self._running = 0
+        self._lock = threading.Lock()
 
-    def run() -> None:
+    def run(self, seconds: float, call: Callable[[], HTTPResult]) -> HTTPResult:
+        with self._lock:
+            if self._running >= self.max_running:
+                raise RetryablePollSourceError(
+                    f"{self._running} timed-out Linear requests are still running"
+                )
+            self._running += 1
+        done: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
+
+        def target() -> None:
+            try:
+                outcome: tuple[bool, Any] = (True, call())
+            except BaseException as exc:
+                outcome = (False, exc)
+            with self._lock:
+                self._running -= 1
+            done.put(outcome)
+
+        threading.Thread(target=target, daemon=True).start()
         try:
-            done.put((True, call()))
-        except BaseException as exc:
-            done.put((False, exc))
+            ok, value = done.get(timeout=seconds)
+        except queue.Empty:
+            raise TimeoutError from None
+        if ok:
+            return value
+        raise value
 
-    threading.Thread(target=run, daemon=True).start()
-    try:
-        ok, value = done.get(timeout=seconds)
-    except queue.Empty:
-        raise TimeoutError from None
-    if ok:
-        return value
-    raise value
+
+def _is_graphql_query(args: Sequence[str]) -> bool:
+    if "graphql" not in args or "--input" in args:
+        return False
+    fields: list[str] = []
+    for index, arg in enumerate(args):
+        if arg in ("-f", "-F", "--field", "--raw-field"):
+            fields.append(args[index + 1] if index + 1 < len(args) else "")
+        elif arg.startswith(("--field=", "--raw-field=")):
+            fields.append(arg.partition("=")[2])
+        elif arg.startswith(("-f", "-F")):
+            fields.append(arg[2:])
+    documents = [value[len("query="):].lstrip() for value in fields if value.startswith("query=")]
+    return len(documents) == 1 and documents[0].startswith(("query", "{"))
 
 
 def _gh_source(argv: Sequence[str]) -> str:
