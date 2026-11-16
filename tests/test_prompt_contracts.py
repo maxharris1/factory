@@ -17,6 +17,7 @@ import lib.brief.review as review_brief
 import lib.brief.skills as brief_skills
 from lib.brief import render_brief
 from lib.brief.common import GH
+from lib.brief.inline import quoted_section
 from lib.evidence.findings import blocking_ids, findings_evidence
 from lib.dispatcher import Comment
 from lib.handoff import HandoffError, parse_comment
@@ -420,6 +421,7 @@ def test_a_broken_rule_fails_its_enforcing_test(monkeypatch: pytest.MonkeyPatch)
 
 BOX_ROOT = "/srv/orch/factory"
 ABSOLUTE = re.compile(r"`(/[^`\s]+)`")
+FENCED = re.compile(r"^(`{3,})[^\n]*\n.*?^\1`*[ \t]*$", re.M | re.S)
 NAMED = re.compile(r"`([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+\.(?:md|py|yml|lock))(?::[0-9]+)?`")
 
 
@@ -433,7 +435,7 @@ def pinned_paths() -> set[str]:
 
 def assert_pinned_under(text: str, root: str) -> list[str]:
     pinned = pinned_paths()
-    named = ABSOLUTE.findall(text)
+    named = ABSOLUTE.findall(FENCED.sub("", text))
     for path in named:
         assert path.startswith(f"{root}/"), f"{path} is outside the deployment root {root}"
         rel = path.removeprefix(f"{root}/")
@@ -448,6 +450,14 @@ def test_every_absolute_path_a_brief_names_is_pinned_and_present(kind: str) -> N
     remote_root = f"/home/{CASES[kind][1]}-bot/factory"
     named = assert_pinned_under(box, BOX_ROOT) + assert_pinned_under(remote, remote_root)
     assert named or kind == "merge-only"
+
+
+def test_the_pin_check_skips_quoted_input_but_not_the_brief_text() -> None:
+    pinned = f"{BOX_ROOT}/{sorted(pinned_paths())[0]}"
+    quoted = quoted_section("Plan", "Link `/signup?plan=free`.\n````\n`/etc/x`\n````", None, 10_000)
+    assert assert_pinned_under(f"Read `{pinned}`.\n{quoted}\n", BOX_ROOT) == [pinned]
+    with pytest.raises(AssertionError, match="outside the deployment root"):
+        assert_pinned_under(f"{quoted}\nRead `/signup?plan=free`.\n", BOX_ROOT)
 
 
 def test_a_missing_remote_file_fails_the_pin_check(monkeypatch: pytest.MonkeyPatch) -> None:
