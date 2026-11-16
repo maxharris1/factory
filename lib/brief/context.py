@@ -69,28 +69,6 @@ def _filtered(context: FactoryContext, reviewer: bool) -> str:
     return "\n\n".join(part.strip() for part in parts if part.strip())
 
 
-def review_prose(context: FactoryContext) -> str:
-    lines: list[str] = []
-    inside = False
-    for line, heading in _lines(context.body):
-        if heading is not None and heading[1] == 2:
-            inside = heading[2].lower() == "review"
-            continue
-        if inside:
-            lines.append(line)
-    return "".join(lines)
-
-
-def verify_not_run(verify: str | None, context: FactoryContext | None) -> bool:
-    if context is None or verify is None or verify == "none":
-        return False
-    skill = re.compile(rf"(?<![a-z0-9-]){re.escape(verify)}(?![a-z0-9-])")
-    not_run = re.compile(r"\bnot\s+run\b", re.IGNORECASE)
-    blocks = re.split(r"\n\s*\n|\n(?=\s*(?:[-*+]|\d+[.)])\s)", review_prose(context))
-    sentences = (s for block in blocks for s in re.split(r"(?<=[.!?])\s+", " ".join(block.split())))
-    return any(skill.search(sentence) and not_run.search(sentence) for sentence in sentences)
-
-
 def _ship_line(context: FactoryContext) -> str:
     config = context.config
     keys = f"`ship: {config.ship}`, `finish_line: {config.finish_line}`"

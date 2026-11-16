@@ -6,7 +6,6 @@ import json
 import re
 from dataclasses import asdict
 
-from lib.brief.context import verify_not_run
 from lib.brief.skills import skill_paths
 from lib.factory_md import DEFAULT_PLAN_MAX_CRITERIA, DEFAULT_PLAN_MAX_LINES, FactoryContext
 from lib.github_actions import TOKEN_VARIABLES
@@ -109,7 +108,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
         "verify": verify,
-        "verify_not_run": verify_not_run(verify, context),
+        "verify_unavailable": context.config.verify_unavailable if context is not None else False,
         "reviewer": reviewer if isinstance(reviewer, str) and _HARNESS.fullmatch(reviewer) else None,
         "url": url if isinstance(url, str) and _URL.fullmatch(url) else None,
         "plan": plan if isinstance(plan, str) and _URL.fullmatch(plan) else None,
