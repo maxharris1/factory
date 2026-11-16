@@ -19,8 +19,9 @@ from lib.dispatch.helpers import (
     _detail_round_number,
     _grok_logical_key,
     _scope,
+    failed_checks,
 )
-from lib.dispatch.types import CIResult, Comment, FailedCheck, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest
@@ -473,6 +474,7 @@ class DetailMixin:
         update: UpdateScope | None = None,
         rebase: RebaseScope | None = None,
         plan_round: int | None = None,
+        ci_failure: tuple[str, ...] = (),
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -526,6 +528,8 @@ class DetailMixin:
             )
         if rebase is not None:
             context["rebase"] = asdict(rebase)
+        if ci_failure:
+            context["ci_failure"] = {"failed_checks": list(ci_failure)}
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
@@ -659,13 +663,3 @@ def _review_bases(details: list[str]) -> dict[int, str]:
         bases[number - 1] = str(rebase["reviewed_base"])
         bases[number] = str(rebase["base"])
     return bases
-
-
-def failed_checks(result: CIResult) -> tuple[FailedCheck, ...]:
-    if result.failed:
-        return result.failed
-    return tuple(
-        FailedCheck(name)
-        for name in (result.log or "").removeprefix("failed: ").split(", ")
-        if name
-    )

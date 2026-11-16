@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from lib.dispatch.helpers import _comment_link, _scope
+from lib.dispatch.helpers import _comment_link, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
@@ -114,6 +114,7 @@ class ResumeMixin:
                         cap=self._config_cap(ticket, connection) + cap_extra,
                         instruction=verdict,
                         resume=True,
+                        ci_failure=red_checks(ticket, ticket.current_head),
                     ),
                 ),
                 dedupe_key=f"t1:{scope}:fix:{comment.id}",

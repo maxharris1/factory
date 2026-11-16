@@ -5,8 +5,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.dispatch.detail import failed_checks
-from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope
+from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.queue import JobRequest
@@ -125,13 +124,8 @@ class T3Mixin:
                     round_number=round_number + 1,
                     cap=cap,
                     instruction=_comment_link(comment),
+                    ci_failure=ci_failure,
                 )
-                if ci_failure:
-                    detail = json.dumps(
-                        {**json.loads(detail), "ci_failure": {"failed_checks": list(ci_failure)}},
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    )
                 request = JobRequest(
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
@@ -322,6 +316,4 @@ class T3Mixin:
             return ReviseCIGate()
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return ReviseCIGate(outcome=(True, "stuck-ci-red-3"))
-        return ReviseCIGate(
-            ci_failure=tuple(check.name for check in failed_checks(result))
-        )
+        return ReviseCIGate(ci_failure=red_checks(ticket, head))

@@ -12,6 +12,7 @@ from lib.brief import render_brief
 from lib.dispatcher import CIResult, FailedCheck
 from lib.factory_md import load_factory_md, parse_factory_md
 from tests.merge_queue_support import APPROVE, PR, VERDICT, Board, sha
+from tests.test_dispatcher import ANSWERS, QUESTIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID = {
@@ -245,6 +246,83 @@ def test_on_a_revise_with_red_ci_the_fix_brief_keeps_the_findings_and_names_the_
     assert f"CI is also red on {pr.head}. These checks failed: `pytest`." in task
     assert "Fix the red CI" not in task
     assert "skip steps 3 to 5" not in task
+
+
+def fix_task(job) -> str:
+    brief = render_brief(job, bot="claude-bot", context=None, factory_root="/srv/orch/factory")
+    return brief.split("## What to do", 1)[1].split("## Handoff comment", 1)[0]
+
+
+def test_on_a_red_review_fix_resumed_by_answers_keeps_the_findings_and_the_failed_checks(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    board.post(pr, "7001", BLOCKING_REVISE.format(head=pr.head), "codex-login")
+    board.poll()
+    fix = board.claim("claude")
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id="q1")
+    board.post(pr, "q1", QUESTIONS, "claude-login")
+    board.poll()
+    board.post(pr, "a1", ANSWERS, "grok-login")
+    board.poll()
+
+    task = fix_task(board.claim("claude"))
+    assert "f-1 The poller writes the row directly." in task
+    assert "f-2 The cap ignores the stored risk." in task
+    assert f"CI is also red on {pr.head}. These checks failed: `pytest`." in task
+
+
+def test_on_a_review_fix_resumed_after_ci_went_green_drops_the_failed_checks(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    board.post(pr, "7001", BLOCKING_REVISE.format(head=pr.head), "codex-login")
+    board.poll()
+    fix = board.claim("claude")
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id="q1")
+    board.post(pr, "q1", QUESTIONS, "claude-login")
+    board.poll()
+    pr.ci[pr.head] = "success"
+    board.post(pr, "a1", ANSWERS, "grok-login")
+    board.poll()
+
+    task = fix_task(board.claim("claude"))
+    assert "f-1 The poller writes the row directly." in task
+    assert "CI is also red" not in task
+
+
+def test_on_a_red_revise_at_the_round_cap_the_granted_round_names_the_failed_checks(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    for number in (1, 2):
+        reviewed_at_pending_ci(board, pr, sha(number))
+        pr.ci[pr.head] = "success"
+        board.revise(pr, f"{number}/3")
+        board.poll()
+        board.finish("claude")
+    reviewed_at_pending_ci(board, pr, sha(3))
+    pr.ci[pr.head] = "failure"
+    revise = VERDICT.format(round="3/3", head=pr.head, verdict="REVISE", risk="high")
+    board.post(pr, "7003", revise, "codex-login")
+    board.poll()
+    assert board.outcome("7003") == "capped-review"
+
+    board.go(pr, "go-again")
+    board.dispatcher.process(board.snapshot(pr))
+    assert board.outcome("go-again") == "queued-fix"
+
+    [*_, fix] = board.jobs("fix")
+    assert instruction(fix) == "comment:7003"
+    assert ci_failure(fix) == {"failed_checks": ["pytest"]}
+    assert f"CI is also red on {pr.head}. These checks failed: `pytest`." in fix_task(board.claim("claude"))
 
 
 def test_on_a_revise_waits_for_pending_ci_then_queues_one_fix(tmp_path: Path) -> None:

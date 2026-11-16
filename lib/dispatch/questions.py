@@ -20,6 +20,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
     _state_for_action,
+    red_checks,
 )
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
@@ -252,6 +253,7 @@ class QuestionsMixin:
                 plan_round=(
                     int(paused["plan_gap_count"]) + 1 if action == "plan" else None
                 ),
+                ci_failure=red_checks(ticket, head) if action == "fix" else (),
             ),
         )
         with self._connect() as connection:

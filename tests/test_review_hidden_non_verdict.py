@@ -11,10 +11,9 @@ from lib.queue import JobRequest
 from tests.merge_queue_support import TRUSTED_LOGINS, VERDICT, sha
 from tests.test_dispatch_ready_comments import _restart
 from tests.test_review_before_ci import (
-    CI_LOG,
     board_with,
     built_with_ci_pending,
-    instruction,
+    ci_failure,
     reviewed_at_pending_ci,
 )
 from tests.test_retry_resume import REASON
@@ -64,7 +63,7 @@ def test_a_hidden_builder_blocked_report_never_answers_the_review(
 
     fixes = _active_fixes(board)
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 @pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
@@ -139,7 +138,7 @@ def test_a_hidden_unregistered_ready_never_answers_the_review(tmp_path: Path) ->
 
     fixes = _active_fixes(board)
     assert [job["source_comment_id"] for job in fixes] == ["verdict-real"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 @pytest.mark.job_bound
@@ -281,7 +280,7 @@ def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retrie
 
     fixes = _active_fixes(board)
     assert [job["source_comment_id"] for job in fixes] == ["654321"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 @pytest.mark.job_bound
