@@ -190,7 +190,7 @@ class GitHubApp:
 
 @dataclass(frozen=True)
 class GitHubApps:
-    """The four bots' Apps, keyed by the bot each speaks for (#170). enabled
+    """The configured bots' Apps, keyed by the bot each speaks for (#170). enabled
     is the switch: false keeps today's trusted_logins trust."""
 
     apps: Mapping[str, GitHubApp]
@@ -1102,11 +1102,9 @@ def _app_switch(
     projects: tuple[Project, ...] | None,
     findings: list[Finding],
 ) -> None:
-    """With the switch on, Factory must have its App, each App's login must
-    speak for its own bot alone, each App must be installed for every
-    project owner, and someone must be able to approve."""
-    if "grok-bot" not in github_app.apps:
-        findings.append(Finding("error", "github_app.enabled requires github_app.apps.grok-bot"))
+    """With the switch on, each App's login must speak for its own bot
+    alone, each App must be installed for every project owner, and someone
+    must be able to approve."""
     owners = sorted(
         {project.repo.split("/", 1)[0].casefold() for project in projects or ()}
     )
