@@ -32,14 +32,14 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 
 | Area | Module | Main contents |
 |---|---|---|
-| Data types | `types.py` | `Comment`, `CIResult`, `TrackedTicket`, `TicketRef`, the Protocols (`PollSource`, `ReviewActions`, `GrokDelivery`, `Hook`, `DeviceChecks`, `Feeder`), ship errors, `ShipRequest`, `LINEAR_STATE_PHASES` |
+| Data types | `types.py` | `Comment`, `CIResult`, `FailedCheck`, `TrackedTicket`, `TicketRef`, the Protocols (`PollSource`, `ReviewActions`, `GrokDelivery`, `Hook`, `DeviceChecks`, `Feeder`), ship errors, `ShipRequest`, `LINEAR_STATE_PHASES` |
 | Constants | `constants.py` | state sets, grace periods, wake reasons, poll and ship error limits |
 | Error text | `errors_text.py` | `_redact*`, `poll_error_detail`, `poll_error_text`, `safe_ship_error`, `scrub_detail` |
 | Shared functions | `helpers.py` | `trusted_bots`, `_spread`, `_scope`, rounds, `_matching_head`, `_holds`, `ship_mode`, `_comment_order`, questions text, state names |
 | State writes | `transitions.py` | `write_workflow_state`: the one writer of `ticket_state.workflow_state`, which appends a `ticket_transitions` row in the same transaction (#150) |
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
-| Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
+| Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context`, `_ci_fix_evidence` (reads the failed jobs' logs once, before a CI fix is queued) |
 | Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the nine rule mixins below and re-exports the old `verdict.py` names |
 | Verdicts: REVISE (T3) | `verdict/t3.py` (`T3Mixin`) | `ReviseCIGate`, `_t3`, `_revise_ci_gate` |
 | Verdicts: repeat block (T3) | `verdict/repeat.py` (`RepeatBlockMixin`) | `_repeat_trigger`, `_accepted_revises`, `_t3_repeat`: park a REVISE that blocks on the same rule again at waiting-max |

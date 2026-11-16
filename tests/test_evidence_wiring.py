@@ -9,7 +9,8 @@ import pytest
 from lib.dispatcher import CIResult, TrackedTicket
 from lib.queue import Job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
-from tests.test_github_actions import CHECKS, HEAD, STATUS, adapter, served
+from lib.github_actions import GhResult
+from tests.test_github_actions import CHECKS, HEAD, REPO, STATUS, RecordedGh, adapter, served
 from tests.test_lifecycle import Flow as LifecycleFlow
 from tests.test_rounds_and_caps import HEADS, Flow
 
@@ -77,10 +78,59 @@ def test_ci_fix_carries_the_failed_checks_github_actions_reports(tmp_path: Path)
 
     assert evidence(claim(flow, "claude"))["ci"] == {
         "failed_checks": ["typecheck"],
-        "run_url": None,
-        "log_tail": "",
-        "cut": None,
+        "runs": [],
+        "jobs": [
+            {"check": "typecheck", "run_id": None, "run_url": None, "log_tail": None, "cut": None}
+        ],
     }
+
+
+RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
+JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs",)
+
+
+def actions_ci_fix(tmp_path: Path, *log: GhResult | BaseException) -> tuple[CIFlow, RecordedGh]:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-failure-actions.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(JOB_LOG, *log)
+    flow = built(tmp_path)
+    flow.dispatcher.ci_logs = actions.failed_job_log
+    flow.ci_result = actions.ci_status("owner/repo", HEAD)
+    return flow, gh
+
+
+def test_ci_fix_carries_the_run_and_the_failed_jobs_log_tail_read_once(tmp_path: Path) -> None:
+    log = "".join(f"line {n}\n" for n in range(1, 201))
+    flow, gh = actions_ci_fix(tmp_path, GhResult(0, log, ""))
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+    flow.dispatcher.process(flow.snapshot())
+
+    ci = evidence(claim(flow, "claude"))["ci"]
+    assert ci["failed_checks"] == ["pytest", "lint"]
+    assert ci["runs"] == [["123456", RUN_URL]]
+    pytest_job, lint_job = ci["jobs"]
+    assert (pytest_job["check"], pytest_job["run_id"], pytest_job["run_url"]) == (
+        "pytest",
+        "123456",
+        RUN_URL,
+    )
+    tail = pytest_job["log_tail"].splitlines()
+    assert tail[0] == pytest_job["cut"] == "[cut 50 earlier lines]"
+    assert (tail[1], tail[-1], len(tail)) == ("line 51", "line 200", 151)
+    assert lint_job["log_tail"] is None
+    assert gh.count(JOB_LOG) == 1
+
+
+def test_a_log_that_cannot_be_read_still_queues_the_ci_fix(tmp_path: Path) -> None:
+    flow, gh = actions_ci_fix(tmp_path, GhResult(1, "", "gh: Not Found (HTTP 404)\n"))
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+
+    job = evidence(claim(flow, "claude"))["ci"]["jobs"][0]
+    assert (job["run_url"], job["log_tail"]) == (RUN_URL, None)
+    assert gh.count(JOB_LOG) == 1
 
 
 def test_review_fix_carries_the_blocking_finding(tmp_path: Path) -> None:

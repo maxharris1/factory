@@ -170,6 +170,7 @@ from lib.dispatch.types import (
     CIResult,
     Comment,
     DeviceChecks,
+    FailedCheck,
     Feeder,
     GrokDelivery,
     Hook,

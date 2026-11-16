@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
@@ -16,11 +17,15 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
+from lib.dispatch.detail import failed_checks
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 from lib.update_check import RebaseScope, UpdateScope
+
+if TYPE_CHECKING:
+    from lib.evidence.ci import CIEvidence
 
 _CI_RED_READY = frozenset({"queued-ci-fix", "ci-red-in-flight"})
 _RERUN_STATES = (None, "building", "fixing", "review")
@@ -285,7 +290,37 @@ class ReadyMixin:
                 ),
             ),
             dedupe_key=dedupe_key,
+            ci=self._ci_fix_evidence(ticket.repo, result, dedupe_key),
         )
+
+    def _ci_fix_evidence(
+        self, repo: str, result: CIResult, dedupe_key: str
+    ) -> CIEvidence | None:
+        """Runs outside the enqueue's transaction, so no network read holds the DB lock."""
+        from lib.evidence.ci import LOG_JOBS, ci_evidence
+        from lib.github_actions import GitHubAdapterError
+        from lib.poll_source import PollSourceError
+
+        with self._connect() as connection:
+            held = connection.execute(
+                "SELECT 1 FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
+            ).fetchone()
+        if held is not None:
+            return None
+        failed = failed_checks(result)
+        logs: dict[str, str | None] = {}
+        if self.ci_logs is not None:
+            job_ids = [check.job_id for check in failed if check.job_id is not None]
+            for job_id in dict.fromkeys(job_ids).keys():
+                if len(logs) == LOG_JOBS:
+                    break
+                try:
+                    logs[job_id] = self.ci_logs(repo, job_id)
+                except (GitHubAdapterError, PollSourceError) as exc:
+                    logs[job_id] = None
+                    if self.log is not None:
+                        self.log(f"ci log: {repo} job {job_id} unavailable: {type(exc).__name__}")
+        return ci_evidence(failed=failed, logs=logs)
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved

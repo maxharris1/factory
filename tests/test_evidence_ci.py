@@ -1,72 +1,108 @@
-"""Evidence bundle: the failed CI checks and the failed log's tail (#163)."""
-
 from __future__ import annotations
 
-from lib.evidence.ci import LOG_LINES, CIEvidence, ci_evidence
+from lib.dispatch.types import FailedCheck
+from lib.evidence.ci import LOG_LINES, CIEvidence, CIJobLog, ci_evidence
 
 RUN_URL = "https://github.com/o/r/actions/runs/42"
+PYTEST = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL)
 
 
 def _log(lines: int) -> str:
     return "\n".join(f"line {n}" for n in range(1, lines + 1)) + "\n"
 
 
-def test_ci_fix_fixture_carries_run_url_and_log_tail():
-    fetched = []
+def _tail(log: str, limit: int = LOG_LINES) -> CIJobLog:
+    return ci_evidence(failed=(PYTEST,), logs={"7": log}, limit=limit).jobs[0]
 
-    def fetch(url: str) -> str:
-        fetched.append(url)
-        return "setup\nFAILED tests/test_x.py::test_y - AssertionError\n1 failed\n"
 
-    bundle = ci_evidence(failed_checks=("pytest", "check-config"), run_url=RUN_URL, fetch_log=fetch)
+def test_a_fetched_log_reaches_the_bundle_with_its_run():
+    bundle = ci_evidence(
+        failed=(PYTEST, FailedCheck("commit status")),
+        logs={"7": "setup\nFAILED tests/test_x.py::test_y - AssertionError\n1 failed\n"},
+    )
 
-    assert fetched == [RUN_URL]
     assert bundle == CIEvidence(
-        failed_checks=("pytest", "check-config"),
-        run_url=RUN_URL,
-        log_tail="setup\nFAILED tests/test_x.py::test_y - AssertionError\n1 failed",
-        cut=None,
+        failed_checks=("pytest", "commit status"),
+        runs=(("42", RUN_URL),),
+        jobs=(
+            CIJobLog(
+                "pytest",
+                "42",
+                RUN_URL,
+                "setup\nFAILED tests/test_x.py::test_y - AssertionError\n1 failed",
+                None,
+            ),
+            CIJobLog("commit status", None, None, None, None),
+        ),
     )
 
 
+def test_two_jobs_of_one_run_list_the_run_once():
+    other = FailedCheck("lint", run_id="42", job_id="8", run_url=RUN_URL)
+
+    bundle = ci_evidence(failed=(PYTEST, other), logs={"7": "a", "8": None})
+
+    assert bundle.runs == (("42", RUN_URL),)
+    assert [job.log_tail for job in bundle.jobs] == ["a", None]
+
+
+def test_a_job_whose_log_was_not_fetched_is_unavailable():
+    bundle = ci_evidence(failed=(PYTEST,), logs={})
+
+    assert bundle.jobs == (CIJobLog("pytest", "42", RUN_URL, None, None),)
+
+
 def test_cap_keeps_last_lines_and_says_what_it_cut():
-    bundle = ci_evidence(failed_checks=("pytest",), run_url=RUN_URL, fetch_log=lambda _: _log(400))
+    job = _tail(_log(400))
 
     assert LOG_LINES == 150
-    assert bundle.cut == "[cut 250 earlier lines]"
-    lines = bundle.log_tail.splitlines()
-    assert lines[0] == bundle.cut
+    assert job.cut == "[cut 250 earlier lines]"
+    lines = (job.log_tail or "").splitlines()
+    assert lines[0] == job.cut
     assert lines[1] == "line 251"
     assert lines[-1] == "line 400"
     assert len(lines) == LOG_LINES + 1
 
 
 def test_log_at_the_cap_is_not_cut():
-    bundle = ci_evidence(failed_checks=("pytest",), run_url=RUN_URL, fetch_log=lambda _: _log(150))
+    job = _tail(_log(150))
 
-    assert bundle.cut is None
-    assert bundle.log_tail.splitlines() == [f"line {n}" for n in range(1, 151)]
+    assert job.cut is None
+    assert (job.log_tail or "").splitlines() == [f"line {n}" for n in range(1, 151)]
 
 
 def test_limit_can_be_lowered():
-    bundle = ci_evidence(failed_checks=("pytest",), run_url=RUN_URL, fetch_log=lambda _: _log(5), limit=2)
-
-    assert bundle.log_tail == "[cut 3 earlier lines]\nline 4\nline 5"
+    assert _tail(_log(5), limit=2).log_tail == "[cut 3 earlier lines]\nline 4\nline 5"
 
 
 def test_trailing_blank_lines_do_not_use_the_cap():
-    bundle = ci_evidence(
-        failed_checks=("pytest",), run_url=RUN_URL, fetch_log=lambda _: "a\nb\n\n\n", limit=2
+    job = _tail("a\nb\n\n\n", limit=2)
+
+    assert (job.log_tail, job.cut) == ("a\nb", None)
+
+
+TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+BEARER = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlc2lnbmF0dXJl"
+KEY_BODY = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"
+
+
+def test_secrets_in_the_log_tail_are_redacted():
+    log = "\n".join(
+        [
+            "collecting",
+            f"export GH_TOKEN={TOKEN}",
+            f"Authorization: Bearer {BEARER}",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            KEY_BODY,
+            "AAAA",
+            "-----END OPENSSH PRIVATE KEY-----",
+            "FAILED tests/test_x.py::test_y",
+        ]
     )
 
-    assert bundle.log_tail == "a\nb"
-    assert bundle.cut is None
+    tail = _tail(log).log_tail or ""
 
-
-def test_without_a_run_url_nothing_is_fetched():
-    def fetch(url: str) -> str:
-        raise AssertionError("fetched")
-
-    bundle = ci_evidence(failed_checks=("commit status",), run_url=None, fetch_log=fetch)
-
-    assert bundle == CIEvidence(failed_checks=("commit status",), run_url=None, log_tail="", cut=None)
+    for secret in (TOKEN, BEARER, KEY_BODY, "BEGIN OPENSSH"):
+        assert secret not in tail
+    assert tail.splitlines()[0] == "collecting"
+    assert tail.splitlines()[-1] == "FAILED tests/test_x.py::test_y"

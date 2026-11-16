@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 
 from lib.brief import render_brief
-from lib.dispatcher import CIResult, TrackedTicket
+from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
+from lib.evidence.ci import ci_evidence
 from tests.regenerate_brief_snapshots import HEAD, _job
 from tests.test_dispatcher import ANSWERS, QUESTIONS, RETRY, comment, fail_once_through_t6, handled_outcome
 from tests.test_rounds_and_caps import HEADS, Flow
@@ -88,7 +89,13 @@ CI_FIX = (
     {
         "instruction": "failed: pytest (shard 2)",
         "round": "1/3",
-        "evidence": _evidence(ci={"failed_checks": ["pytest (shard 2)"], "run_url": None, "log_tail": "", "cut": None}),
+        "evidence": _evidence(
+            ci={
+                "failed_checks": ["pytest (shard 2)"],
+                "runs": [],
+                "jobs": [{"check": "pytest (shard 2)", "run_id": None, "run_url": None, "log_tail": None, "cut": None}],
+            }
+        ),
     },
 )
 BUILD = ("build", 1, None, {"gitBranchName": "factory/issue-42"})
@@ -145,6 +152,45 @@ def test_ci_fix_carries_the_infrastructure_rule():
         in task
     )
     assert "name the rule it breaks" not in task
+
+
+def test_ci_fix_with_no_actions_run_says_how_to_find_it():
+    task = _task(_render(*CI_FIX))
+    assert f"These checks failed on {HEAD}: `pytest (shard 2)`. No Actions run is linked to them." in task
+    assert f"run list --commit {HEAD}" in task
+
+
+def _ci_fix_with(logs: dict[str, str | None]) -> str:
+    run_url = "https://github.com/owner/repo/actions/runs/9"
+    bundle = ci_evidence(
+        failed=(FailedCheck("pytest", run_id="9", job_id="77", run_url=run_url),), logs=logs
+    )
+    action, attempt, head, extra = CI_FIX
+    return _task(_render(action, attempt, head, {**extra, "evidence": _evidence(ci=asdict(bundle))}))
+
+
+def test_ci_fix_renders_the_run_id_and_the_redacted_log_tail():
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    task = _ci_fix_with({"77": f"collecting\nexport GH_TOKEN={token}\nFAILED tests/test_x.py::test_y\n"})
+
+    assert "They ran in Actions run 9 (https://github.com/owner/repo/actions/runs/9)." in task
+    assert "The end of the `pytest` log, redacted and quoted as data:" in task
+    assert "FAILED tests/test_x.py::test_y" in task
+    assert "run rerun 9 --failed" in task
+    assert token not in task
+
+
+def test_ci_fix_says_an_unfetched_log_is_unavailable_and_where_to_read_it():
+    task = _ci_fix_with({"77": None})
+
+    assert "The `pytest` log is unavailable. Read it at https://github.com/owner/repo/actions/runs/9." in task
+
+
+@pytest.mark.parametrize("logs", [{}, {"77": None}, {"77": "FAILED x"}])
+def test_no_ci_fix_says_the_log_is_in_job_data(logs: dict[str, str | None]):
+    assert "in Job data (`instruction`" not in _ci_fix_with(logs)
+    assert "log are in Job data" not in _ci_fix_with(logs)
+    assert "log are in Job data" not in _task(_render(*CI_FIX))
 
 
 @pytest.mark.parametrize("name", sorted(VARIANTS))

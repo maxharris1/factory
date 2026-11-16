@@ -63,6 +63,7 @@ class DispatcherBase:
         update_classifier: UpdateClassifier | None = None,
         rebase_classifier: RebaseClassifier | None = None,
         approvals: Approvals | None = None,
+        ci_logs: Callable[[str, str], str] | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -89,6 +90,7 @@ class DispatcherBase:
         self.update_classifier = update_classifier
         self.rebase_classifier = rebase_classifier
         self.approvals = approvals if approvals is not None else Approvals()
+        self.ci_logs = ci_logs
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}

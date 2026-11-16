@@ -76,6 +76,7 @@ from lib.dispatcher import (
     AlreadyMergedShip,
     CIResult,
     Comment,
+    FailedCheck,
     ReviewActions,
     RetryableShipError,
     RetryableStateError,
@@ -599,7 +600,7 @@ class GitHubReviewActions:
         if not runs and not total:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
-        failed: list[str] = []
+        failed: list[FailedCheck] = []
         pending = False
         passed = False
         for run in runs:
@@ -609,7 +610,7 @@ class GitHubReviewActions:
             if status != "completed":
                 pending = True
             elif conclusion in _CHECK_FAILED:
-                failed.append(name)
+                failed.append(_failed_check(name, run.get("details_url")))
             elif conclusion == "success":
                 passed = True
             elif conclusion not in _CHECK_NOT_RUN:
@@ -617,7 +618,7 @@ class GitHubReviewActions:
         if total:
             state = combined.get("state")
             if state in ("failure", "error"):
-                failed.append("commit status")
+                failed.append(FailedCheck("commit status"))
             elif state == "pending":
                 pending = True
             elif state == "success":
@@ -625,8 +626,17 @@ class GitHubReviewActions:
             else:
                 raise GitHubAdapterError(f"combined status is {state!r}")
         if failed:
-            return CIResult("failure", "failed: " + ", ".join(failed))
+            return CIResult(
+                "failure",
+                "failed: " + ", ".join(check.name for check in failed),
+                failed=tuple(failed),
+            )
         return CIResult("success" if passed and not pending else "pending")
+
+    def failed_job_log(self, repo: str, job_id: str) -> str:
+        if not job_id.isdigit():
+            raise GitHubAdapterError("Actions job id is not a number")
+        return self._call(f"{_repo_path(repo)}/actions/jobs/{job_id}/logs")
 
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
@@ -833,6 +843,16 @@ def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 _ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
+_ACTIONS_JOB = re.compile(
+    r"^(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/([0-9]+))/job/([0-9]+)(?:[/?#]|$)"
+)
+
+
+def _failed_check(name: str, details: object) -> FailedCheck:
+    match = _ACTIONS_JOB.match(details) if isinstance(details, str) else None
+    if match is None:
+        return FailedCheck(name)
+    return FailedCheck(name, run_id=match.group(2), job_id=match.group(3), run_url=match.group(1))
 
 
 def _workflow_identity(run: dict[str, Any]) -> str:

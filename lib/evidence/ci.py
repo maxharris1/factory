@@ -1,43 +1,64 @@
-"""The failed CI checks and the failed log, for the evidence bundle (#163).
+"""The failed CI checks, their Actions runs and each failed job's log tail.
 
-The caller passes the failed check names, the run URL and a fetch callable
-that returns the run's failed log for that URL; lib/github_actions.py is not
-read here. Without a run URL nothing is fetched and the log tail is empty.
-
-The log tail is the last `limit` lines of the log (LOG_LINES by default),
-not counting blank lines at the end. A longer log is cut from the start, and
-the tail opens with a note of how many lines were cut.
+The tail is cut before it is redacted, so redaction never scans a whole log.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from lib.dispatch.types import FailedCheck
+
 LOG_LINES = 150
+LOG_JOBS = 5
+
+
+@dataclass(frozen=True)
+class CIJobLog:
+    check: str
+    run_id: str | None
+    run_url: str | None
+    log_tail: str | None
+    cut: str | None
 
 
 @dataclass(frozen=True)
 class CIEvidence:
     failed_checks: tuple[str, ...]
-    run_url: str | None
-    log_tail: str
-    cut: str | None
+    runs: tuple[tuple[str, str], ...]
+    jobs: tuple[CIJobLog, ...]
 
 
 def ci_evidence(
     *,
-    failed_checks: Sequence[str],
-    run_url: str | None,
-    fetch_log: Callable[[str], str],
+    failed: Sequence[FailedCheck],
+    logs: Mapping[str, str | None],
     limit: int = LOG_LINES,
 ) -> CIEvidence:
-    """The failed checks, the run URL and the log tail. See the module doc."""
-    if run_url is None:
-        return CIEvidence(tuple(failed_checks), None, "", None)
-    lines = fetch_log(run_url).rstrip().splitlines()
+    runs: dict[str, str] = {}
+    jobs: list[CIJobLog] = []
+    for check in failed:
+        if check.run_id is not None and check.run_url is not None:
+            runs.setdefault(check.run_id, check.run_url)
+        text = logs.get(check.job_id) if check.job_id is not None else None
+        tail, cut = _tail(text, limit) if text is not None else (None, None)
+        jobs.append(CIJobLog(check.name, check.run_id, check.run_url, tail, cut))
+    return CIEvidence(
+        failed_checks=tuple(check.name for check in failed),
+        runs=tuple(runs.items()),
+        jobs=tuple(jobs),
+    )
+
+
+def _tail(text: str, limit: int) -> tuple[str, str | None]:
+    from lib.dashboard import redact, redact_key_blocks
+    from lib.dispatch.errors_text import _redact
+
+    lines = text.rstrip().splitlines()
     cut = None
     if len(lines) > limit:
         cut = f"[cut {len(lines) - limit} earlier lines]"
-        lines = [cut, *lines[len(lines) - limit :]]
-    return CIEvidence(tuple(failed_checks), run_url, "\n".join(lines), cut)
+        lines = lines[len(lines) - limit :]
+    kept = [_redact(redact(line)) for line in redact_key_blocks(lines)]
+    return "\n".join([cut, *kept] if cut else kept), cut

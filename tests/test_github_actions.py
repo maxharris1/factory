@@ -12,6 +12,7 @@ import pytest
 from lib.dispatcher import (
     CIResult,
     Dispatcher,
+    FailedCheck,
     RetryableShipError,
     RetryableStateError,
     ReviewShipper,
@@ -1260,7 +1261,38 @@ def test_ci_result_feeds_the_dispatcher_as_a_ci_result() -> None:
 
     result = actions.ci_status("owner/repo", HEAD)
 
-    assert result == CIResult("failure", "failed: typecheck")
+    assert result == CIResult(
+        "failure", "failed: typecheck", failed=(FailedCheck("typecheck"),)
+    )
+
+
+def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-failure-actions.json"))
+    gh.route(STATUS, served("status-failure.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.log == "failed: pytest, lint, commit status"
+    assert result.failed == (
+        FailedCheck(
+            "pytest",
+            run_id="123456",
+            job_id="31000000004",
+            run_url="https://github.com/owner/repo/actions/runs/123456",
+        ),
+        FailedCheck("lint"),
+        FailedCheck("commit status"),
+    )
+
+
+def test_failed_job_log_reads_one_actions_job_log_as_text() -> None:
+    actions, gh = adapter()
+    gh.route((f"{REPO}/actions/jobs/31000000004/logs",), GhResult(0, "a\nFAILED x\n", ""))
+
+    assert actions.failed_job_log("owner/repo", "31000000004") == "a\nFAILED x\n"
+    with pytest.raises(GitHubAdapterError):
+        actions.failed_job_log("owner/repo", "../secrets")
 
 
 def draft_pull() -> GhResult:

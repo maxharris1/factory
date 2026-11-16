@@ -1,0 +1,8 @@
+decision	choice	why
+playbook	figure-it-out with Feature steps; the plan comment is Phase A and B	factory-builder: careful playbook always
+delegation	main job wrote the diff, no code delegate	60-minute wall clock; the plan fixed every seam, so a handoff would cost more than it saves
+log read	one GET actions/jobs/<id>/logs per failed job, at most LOG_JOBS=5	per-job endpoint returns plain text for exactly the failed job; the run endpoint is a zip of every job
+when	ReadyMixin._ci_fix_evidence, before the enqueue transaction, only when no job holds the dedupe key	no network read under BEGIN IMMEDIATE; one read per queued fix, never at render time
+read errors	GitHubAdapterError and PollSourceError make that log None and the fix still queues	a broken read must never stop a CI fix
+redaction	cut to 150 lines, then redact_key_blocks, then _redact(redact(line))	the poll-error rules; scrub_detail would delete almost every log line
+no ci_logs	Dispatcher(ci_logs=None) reads nothing and every log is unavailable	Linear-only setups and tests that do not care
