@@ -3,9 +3,8 @@
 The lines come from rows already committed: ticket_transitions (enter,
 then end for a terminal state), Grok jobs (wake) and handled_times
 (comment, when this poll read the comment and it parses as a handoff).
-eval_log_cursor holds the last rowid exported per table. The log is
-appended and fsynced before the cursor moves, so a crash repeats lines
-and never drops them. The grammar is lib.eval_report's.
+eval_log_cursor holds the last rowid exported per table. The grammar is
+lib.eval_report's.
 """
 
 from __future__ import annotations
@@ -27,7 +26,25 @@ class _Line(NamedTuple):
     text: str
 
 
+def remember_repo(connection: sqlite3.Connection, repo: str) -> None:
+    connection.execute(
+        "INSERT INTO eval_log_repos (repo_key, repo) VALUES (?, ?) "
+        "ON CONFLICT (repo_key) DO UPDATE SET repo = excluded.repo",
+        (repo.lower(), repo),
+    )
+
+
+def _appended_since(log: Path, offset: int, text: str) -> bool:
+    if not log.exists():
+        return False
+    with log.open("rb") as handle:
+        handle.seek(min(offset, log.stat().st_size))
+        return text.encode("utf-8") in handle.read()
+
+
 class EvalLogMixin:
+    _eval_repos: dict[str, str]
+
     def _export_eval_log(self) -> None:
         try:
             self._append_eval_log()
@@ -36,8 +53,15 @@ class EvalLogMixin:
 
     def _append_eval_log(self) -> None:
         log = self.state_path.with_name("dispatcher.log")
+        self._flush_eval_log(log)
         with self._connect() as connection:
-            connection.execute("BEGIN")
+            connection.execute("BEGIN IMMEDIATE")
+            for ticket in self._polled.values():
+                remember_repo(connection, ticket.repo)
+            self._eval_repos = {
+                str(row["repo_key"]): str(row["repo"])
+                for row in connection.execute("SELECT repo_key, repo FROM eval_log_repos")
+            }
             cursor = {
                 str(row["source"]): int(row["last"])
                 for row in connection.execute("SELECT source, last FROM eval_log_cursor")
@@ -57,30 +81,49 @@ class EvalLogMixin:
                 "WHERE rowid > ? ORDER BY rowid",
                 (cursor["handled_times"],),
             ).fetchall()
-            connection.commit()
-        lines: list[_Line] = []
-        for row in transitions:
-            lines.extend(self._transition_lines(row))
-        for row in jobs:
-            lines.extend(self._wake_lines(row))
-        for row in handled:
-            lines.extend(self._comment_lines(log.parent, row))
-        if lines:
-            append_lines(log, [line.text for line in sorted(lines, key=lambda line: line.at)])
-        advanced = {
-            "ticket_transitions": transitions,
-            "jobs": jobs,
-            "handled_times": handled,
-        }
-        with self._connect() as connection:
+            lines: list[_Line] = []
+            for row in transitions:
+                lines.extend(self._transition_lines(row))
+            for row in jobs:
+                lines.extend(self._wake_lines(row))
+            for row in handled:
+                lines.extend(self._comment_lines(log.parent, row))
+            if lines:
+                text = "".join(
+                    f"{line.text}\n" for line in sorted(lines, key=lambda line: line.at)
+                )
+                connection.execute(
+                    "INSERT INTO eval_log_pending (id, offset, text) VALUES (1, ?, ?)",
+                    (log.stat().st_size if log.exists() else 0, text),
+                )
+            advanced = {
+                "ticket_transitions": transitions,
+                "jobs": jobs,
+                "handled_times": handled,
+            }
             connection.executemany(
                 "UPDATE eval_log_cursor SET last = ? WHERE source = ?",
                 [(int(rows[-1]["seq"]), source) for source, rows in advanced.items() if rows],
             )
+            connection.commit()
+        self._flush_eval_log(log)
+
+    def _flush_eval_log(self, log: Path) -> None:
+        with self._connect() as connection:
+            pending = connection.execute(
+                "SELECT offset, text FROM eval_log_pending WHERE id = 1"
+            ).fetchone()
+        if pending is None:
+            return
+        text = str(pending["text"])
+        if not _appended_since(log, int(pending["offset"]), text):
+            append_lines(log, text.splitlines())
+        with self._connect() as connection:
+            connection.execute("DELETE FROM eval_log_pending WHERE id = 1")
 
     def _run_prefix(self, at: float, repo: str, ticket_id: str) -> str | None:
         ticket = self._polled.get((repo.lower(), ticket_id))
-        spelled = ticket.repo if ticket is not None else repo
+        spelled = ticket.repo if ticket is not None else self._eval_repos.get(repo.lower(), repo)
         if _REPO.fullmatch(spelled) is None or _TICKET.fullmatch(ticket_id) is None:
             return None
         when = _format_time(datetime.fromtimestamp(at, timezone.utc))
