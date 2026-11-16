@@ -8,6 +8,7 @@ import pytest
 
 from lib.brief import render_brief
 from lib.dispatch.plan import _proposed_split
+from lib.evidence import TEXT_LIMIT
 from lib.queue import Job
 from tests.test_approver_credential import APP_BOT, MAX, grok_wakes
 from tests.test_brief import FACTORY_ROOT
@@ -22,16 +23,18 @@ def plan_header(fields: str, plan_round: int = 1) -> str:
     return f"<!-- orch:v1 kind=plan from=claude-bot role=builder round={plan_round}/2 {fields} -->\n"
 
 
-def brief(criteria: int) -> str:
-    items = "".join(f"- Criterion {n}.\n" for n in range(1, criteria + 1))
+def brief(criteria: int, pad: str = "") -> str:
+    items = "".join(f"- Criterion {n}.{pad}\n" for n in range(1, criteria + 1))
     return f"<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\n## Acceptance criteria\n{items}"
 
 
 class SizeFlow(ResumeFlow):
-    def __init__(self, tmp_path: Path, *, criteria: int = 2, max_lines: int = 400, max_criteria: int = 5):
+    def __init__(
+        self, tmp_path: Path, *, criteria: int = 2, max_lines: int = 400, max_criteria: int = 5, pad: str = ""
+    ):
         super().__init__(tmp_path, enabled=True)
         self.factory = replace(self.factory, plan_max_lines=max_lines, plan_max_criteria=max_criteria)
-        self.comments.append(comment("brief-1", brief(criteria), author="grok-login", created_at=self.now[0]))
+        self.comments.append(comment("brief-1", brief(criteria, pad), author="grok-login", created_at=self.now[0]))
         assert self.say("1", GO.format(state="planning"), "grok-login") == "queued-plan"
 
     def plan(self, comment_id: str, fields: str, body: str = PLAN_BODY, plan_round: int = 1) -> str:
@@ -78,6 +81,15 @@ def test_more_than_five_criteria_waits_at_any_size(tmp_path: Path, criteria: int
 
     assert flow.plan("500", "ac=met lines=10") == outcome
     assert job_count(flow.queue, "build") == (outcome == "queued-plan-build")
+
+
+def test_criteria_cut_from_a_long_brief_still_count(tmp_path: Path) -> None:
+    flow = SizeFlow(tmp_path, criteria=6, pad=" " + "x" * (TEXT_LIMIT // 5))
+
+    assert flow.plan("500", "ac=met lines=40") == "waiting-max-size"
+    assert job_count(flow.queue, "build") == 0
+    [wake] = size_wakes(flow)
+    assert "criteria=6 (line 5)" in wake["detail"]
 
 
 def test_the_project_sets_its_own_line(tmp_path: Path) -> None:

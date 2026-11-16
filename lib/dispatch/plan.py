@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
@@ -245,6 +246,7 @@ class PlanMixin:
                 pr_body=ticket.pr_body,
                 ready_starts_review=ticket.ready_starts_review,
                 pr_url=ticket.ticket_url,
+                limit=sys.maxsize,
             ).criteria
         )
         max_lines = ticket.factory.plan_max_lines
