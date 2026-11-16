@@ -33,6 +33,11 @@ default 0. A trusted REVISE at the cap gets an extra round from the poller
 itself while ticket_state.cap_extra is below it; after that the ticket
 waits for a person as before.
 
+plan.max_lines and plan.max_criteria are optional (issue #502): positive
+integers, default 400 and 5. A plan that expects more changed lines, or a
+ticket with more builder criteria, waits for Max instead of queuing the
+build.
+
 review.start_before_ci is optional (issue #262): a boolean, default false.
 True queues the review as soon as a trusted ready lands while CI is still
 running on that head. Ship still needs green CI on the approved head.
@@ -133,7 +138,11 @@ _TOP_KEYS = {
     "finish_line",
     "shared_paths",
     "feeder",
+    "plan",
 }
+_PLAN_KEYS = {"max_lines", "max_criteria"}
+DEFAULT_PLAN_MAX_LINES = 400
+DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
 TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths"}
@@ -184,6 +193,8 @@ class FactoryConfig:
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
     pre_ready: PreReady | None = None
+    plan_max_lines: int = DEFAULT_PLAN_MAX_LINES
+    plan_max_criteria: int = DEFAULT_PLAN_MAX_CRITERIA
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -291,6 +302,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     finish_line = _finish_line(data, ship, findings)
     shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
     max_holders_per_path, exclusive_paths = _feeder(data, findings, unknown)
+    plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -363,6 +375,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         block_on=block_on,
         max_holders_per_path=max_holders_per_path,
         exclusive_paths=exclusive_paths,
+        plan_max_lines=plan_max_lines,
+        plan_max_criteria=plan_max_criteria,
     )
     return config, findings
 
@@ -774,6 +788,28 @@ def _feeder(data: dict, findings: list[Finding], unknown: str) -> tuple[int, tup
         limit = 1
     exclusive = _path_list(value.get("exclusive_paths"), "feeder.exclusive_paths", findings)
     return int(limit), exclusive
+
+
+def _plan(data: dict, findings: list[Finding], unknown: str) -> tuple[int, int]:
+    value = data.get("plan", {})
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "plan must be a mapping"))
+        return DEFAULT_PLAN_MAX_LINES, DEFAULT_PLAN_MAX_CRITERIA
+    findings.extend(_unknown(value, _PLAN_KEYS, "plan", unknown))
+    return (
+        _positive(value, "max_lines", DEFAULT_PLAN_MAX_LINES, findings, unknown),
+        _positive(value, "max_criteria", DEFAULT_PLAN_MAX_CRITERIA, findings, unknown),
+    )
+
+
+def _positive(
+    plan: dict, key: str, default: int, findings: list[Finding], severity: str
+) -> int:
+    value = plan.get(key, default)
+    if not is_strict_int(value) or value < 1:
+        findings.append(Finding(severity, f"plan.{key} must be a positive integer"))
+        return default
+    return int(value)
 
 
 def _path_list(value: object, name: str, findings: list[Finding]) -> tuple[str, ...]:

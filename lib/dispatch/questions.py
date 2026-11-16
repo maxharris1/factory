@@ -21,6 +21,7 @@ from lib.dispatch.helpers import (
     _scope,
     _state_for_action,
 )
+from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -228,7 +229,18 @@ class QuestionsMixin:
             prior = self._resumed_step_detail(
                 connection, ticket, comment, action, paused["paused_question_id"]
             )
-        plan_text = (prior or {}).get("plan_text") if action == "build" else None
+        question = next(
+            (item for item in ticket.comments if item.id == paused["paused_question_id"]),
+            None,
+        )
+        paused_plan = gap_of(question) if question is not None else None
+        if action == "build" and paused_plan is not None:
+            plan_text = paused_plan[0]
+        elif action in ("build", "plan"):
+            plan_text = (prior or {}).get("plan_text")
+        else:
+            plan_text = None
+        unmapped = (prior or {}).get("unmapped") if action == "plan" else None
         request = JobRequest(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -252,6 +264,7 @@ class QuestionsMixin:
                 plan_round=(
                     int(paused["plan_gap_count"]) + 1 if action == "plan" else None
                 ),
+                unmapped=unmapped if isinstance(unmapped, str) and unmapped else None,
             ),
         )
         with self._connect() as connection:

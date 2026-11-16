@@ -16,8 +16,9 @@ Reads:
   that label (`issues/<n>/events`). That lookup is cached on the issue's
   updated_at, which GitHub bumps on every label change;
 * linear_intake: issues in any of a repo's projects and in the workflow
-  state, every page of them, and for each, who moved it there: the actor of
-  the latest history entry whose toState is that state.
+  state (assigned to a listed user, for a project with linear_assignees),
+  every page of them, and for each, who moved it there: the actor of the
+  latest history entry whose toState is that state.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -27,7 +28,7 @@ the branch ref, the draft PR, the PR labels, PR comments, Linear comments.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -60,14 +61,25 @@ LINEAR_RELATIONS_QUERY = (
 )
 # Linear's Issue field is branchName; it is read under the alias the poller
 # uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
-LINEAR_INTAKE_QUERY = (
-    "query($projects: [ID!]!, $state: String!, $after: String) { issues(first: 50, after: $after, "
-    "filter: { project: { id: { in: $projects } }, state: { name: { eq: $state } } }) "
+_LINEAR_INTAKE_SELECTION = (
     "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
+    "project { id } assignee { id } "
     "labels(first: 20) { nodes { name } } "
     "history(first: 25) { nodes { createdAt actor { id } toState { name } } } "
     f"inverseRelations(first: {LINEAR_INTAKE_RELATIONS}) {_RELATION_FIELDS} }} "
-    "pageInfo { hasNextPage endCursor } } }"
+    "pageInfo { hasNextPage endCursor } }"
+)
+LINEAR_INTAKE_QUERY = (
+    "query($projects: [ID!]!, $state: String!, $after: String) { issues(first: 50, after: $after, "
+    "filter: { project: { id: { in: $projects } }, state: { name: { eq: $state } } }) "
+    f"{_LINEAR_INTAKE_SELECTION} }}"
+)
+LINEAR_ASSIGNED_INTAKE_QUERY = (
+    "query($projects: [ID!]!, $state: String!, $assignees: [ID!]!, $after: String) "
+    "{ issues(first: 50, after: $after, "
+    "filter: { project: { id: { in: $projects } }, state: { name: { eq: $state } }, "
+    "assignee: { id: { in: $assignees } } }) "
+    f"{_LINEAR_INTAKE_SELECTION} }}"
 )
 # One aliased read per blocker repo per poll (#156), cached like the poller's
 # reads, so a long chain costs one GraphQL call per repo, not one per ticket.
@@ -478,32 +490,33 @@ class LinearIntakeClient:
             raise GitHubAdapterError("Linear returned no data")
         return data
 
-    def linear_intake(self, project_ids: frozenset[str], state: str) -> list[IntakeIssue]:
+    def linear_intake(
+        self,
+        project_ids: frozenset[str],
+        state: str,
+        assignees: Mapping[str, frozenset[str]],
+    ) -> list[IntakeIssue]:
         repos = {self.repo_for_project[project_id] for project_id in project_ids}
         if len(repos) != 1:
             raise GitHubAdapterError("Linear intake projects must belong to one repo")
         (repo,) = repos
-        projects = sorted(project_ids)
         nodes: list[object] = []
-        after: str | None = None
-        for _ in range(LINEAR_INTAKE_MAX_PAGES):
-            data = self._request(
-                LINEAR_INTAKE_QUERY, {"projects": projects, "state": state, "after": after}
+        open_projects = sorted(project_id for project_id in project_ids if project_id not in assignees)
+        if open_projects:
+            nodes.extend(
+                self._intake_nodes(LINEAR_INTAKE_QUERY, {"projects": open_projects, "state": state})
             )
-            connection = data.get("issues") or {}
-            if not isinstance(connection, dict):
-                raise GitHubAdapterError("Linear issues is not an object")
-            nodes.extend(connection.get("nodes") or [])
-            page = connection.get("pageInfo") or {}
-            if not isinstance(page, dict) or page.get("hasNextPage") is not True:
-                break
-            cursor = page.get("endCursor")
-            if not isinstance(cursor, str) or not cursor:
-                raise GitHubAdapterError("Linear intake has a next page but no endCursor")
-            after = cursor
-        else:
-            raise GitHubAdapterError(
-                f"Linear intake has over {LINEAR_INTAKE_MAX_PAGES} pages; not fed"
+        allowlisted_projects = sorted(project_id for project_id in project_ids if project_id in assignees)
+        for project_id in allowlisted_projects:
+            nodes.extend(
+                self._intake_nodes(
+                    LINEAR_ASSIGNED_INTAKE_QUERY,
+                    {
+                        "projects": [project_id],
+                        "state": state,
+                        "assignees": sorted(assignees[project_id]),
+                    },
+                )
             )
         found: list[IntakeIssue] = []
         for node in nodes:
@@ -522,6 +535,8 @@ class LinearIntakeClient:
             moves.sort(key=lambda entry: _text(entry.get("createdAt")))
             actor = ((moves[-1].get("actor") or {}).get("id")) if moves else None
             priority = node.get("priority")
+            project = (node.get("project") or {}).get("id")
+            assignee = (node.get("assignee") or {}).get("id")
             found.append(
                 IntakeIssue(
                     repo=repo,
@@ -541,9 +556,31 @@ class LinearIntakeClient:
                     branch=_text(node.get("gitBranchName")) or None,
                     priority=priority if isinstance(priority, int) else None,
                     blocked_by=_linear_blockers(self._relations(issue_id, node)),
+                    linear_project=project if isinstance(project, str) else None,
+                    assignee=assignee if isinstance(assignee, str) else None,
                 )
             )
         return found
+
+    def _intake_nodes(self, query: str, variables: dict[str, object]) -> list[object]:
+        nodes: list[object] = []
+        after: str | None = None
+        for _ in range(LINEAR_INTAKE_MAX_PAGES):
+            data = self._request(query, {**variables, "after": after})
+            connection = data.get("issues") or {}
+            if not isinstance(connection, dict):
+                raise GitHubAdapterError("Linear issues is not an object")
+            nodes.extend(connection.get("nodes") or [])
+            page = connection.get("pageInfo") or {}
+            if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+                return nodes
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubAdapterError("Linear intake has a next page but no endCursor")
+            after = cursor
+        raise GitHubAdapterError(
+            f"Linear intake has over {LINEAR_INTAKE_MAX_PAGES} pages; not fed"
+        )
 
     def _relations(self, issue_id: str, node: dict[str, Any]) -> list[object]:
         """Every inverse relation of the issue: the intake page, then the rest."""

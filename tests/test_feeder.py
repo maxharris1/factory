@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -250,10 +251,14 @@ class FakeLinear:
         self.issues: list[IntakeIssue] = []
         self.posted: dict[str, list[Comment]] = {}
         self.queries: list[tuple[frozenset[str], str]] = []
+        self.assignees: list[dict[str, frozenset[str]]] = []
         self._next = 0
 
-    def linear_intake(self, project_ids: frozenset[str], state: str) -> list[IntakeIssue]:
+    def linear_intake(
+        self, project_ids: frozenset[str], state: str, assignees: Mapping[str, frozenset[str]]
+    ) -> list[IntakeIssue]:
         self.queries.append((project_ids, state))
+        self.assignees.append(dict(assignees))
         return list(self.issues)
 
     def linear_comments(self, issue_id: str) -> list[Comment]:

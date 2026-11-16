@@ -10,6 +10,7 @@ from typing import Literal
 
 from lib.dispatch.constants import UPDATE_FAILURES_TO_STOP
 from lib.dispatch.helpers import _comment_link, _queue_state, _scope
+from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import parse_comment
@@ -287,6 +288,7 @@ class RetryMixin:
             )
         elif step == "plan":
             action = "plan"
+            gap = self._previous_plan_gap(ticket, row) if gaps else None
             detail = self._job_detail(
                 ticket,
                 action=action,
@@ -297,6 +299,8 @@ class RetryMixin:
                 ),
                 resume=True,
                 plan_round=2 if gaps else None,
+                plan_text=gap[0] if gap else None,
+                unmapped=gap[1] if gap else None,
             )
         else:
             action = "build"
@@ -322,6 +326,13 @@ class RetryMixin:
             head=head,
             detail=_with_fields(detail, retry_comment=comment.id),
         )
+
+    def _previous_plan_gap(
+        self, ticket: TrackedTicket, row: sqlite3.Row
+    ) -> tuple[str, str] | None:
+        source = row["stuck_source_comment_id"]
+        found = next((item for item in ticket.comments if item.id == source), None)
+        return None if found is None else gap_of(found)
 
     def _previous_plan_link(self, ticket: TrackedTicket, row: sqlite3.Row) -> str:
         source = row["stuck_source_comment_id"]

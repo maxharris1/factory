@@ -45,7 +45,7 @@ def test_kinds_and_example_keys_match_spec_section_5() -> None:
     key_line = next(line for line in spec.splitlines() if "header keys in the example" in line)
     example_keys = tuple(re.findall(r"`([a-z]+)`", key_line))
     assert example_keys == KEYS[:8]
-    assert KEYS[8:] == ("state", "builder", "reviewer", "repeat", "unsat")
+    assert KEYS[8:] == ("state", "builder", "reviewer", "repeat", "unsat", "lines")
     assert set(REQUIRED_BY_KIND) == set(KINDS)
 
 
@@ -241,7 +241,12 @@ def test_labels_for_does_not_call_process_or_network(monkeypatch: pytest.MonkeyP
         ("<!-- orch:v1 kind=decline ac=partial -->", "bad ac 'partial'"),
         ("<!-- orch:v1 -->", "missing required key 'kind'"),
         ("<!-- orch:v1 kind=ready head=3f9c2ab repeat=f-1 -->", "repeat is only valid on kind=verdict"),
-        ("<!-- orch:v1 kind=plan round=1/2 ac=met unsat=ac-1 -->", "unsat is only valid on kind=verdict"),
+        ("<!-- orch:v1 kind=ready head=3f9c2ab unsat=ac-1 -->", "unsat is only valid on kind=plan or kind=verdict"),
+        ("<!-- orch:v1 kind=ready head=3f9c2ab lines=12 -->", "lines is only valid on kind=plan"),
+        ("<!-- orch:v1 kind=verdict verdict=REVISE lines=12 -->", "lines is only valid on kind=plan"),
+        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=-1 -->", "bad lines '-1'"),
+        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=12a -->", "bad lines '12a'"),
+        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=012 -->", "bad lines '012'"),
         ("<!-- orch:v1 kind=verdict verdict=REVISE repeat=same -->", "bad repeat 'same'"),
         ("<!-- orch:v1 kind=verdict verdict=REVISE repeat=f-0 -->", "bad repeat 'f-0'"),
         ("<!-- orch:v1 kind=verdict verdict=REVISE unsat=f-2 -->", "bad unsat 'f-2'"),
@@ -250,6 +255,20 @@ def test_labels_for_does_not_call_process_or_network(monkeypatch: pytest.MonkeyP
 def test_parser_rejects_bad_headers(line: str, message: str) -> None:
     with pytest.raises(HandoffError, match=re.escape(message)):
         parse_header_line(line)
+
+
+def test_plan_carries_lines_and_unsat() -> None:
+    text = (
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=unmet "
+        "unsat=ac-2 lines=760 -->\nThe plan.\n"
+    )
+    parsed = parse_comment(text)
+    assert parsed.as_dict()["lines"] == "760"
+    assert parsed.as_dict()["unsat"] == "ac-2"
+    assert format_comment(parsed) == (
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=unmet "
+        "unsat=ac-2 lines=760 -->\nThe plan.\n"
+    )
 
 
 def test_decline_without_a_head_parses() -> None:
