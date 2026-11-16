@@ -34,6 +34,7 @@ from tests.test_dispatcher import (
     job_count,
 )
 from tests.test_job_bound_accept import _claim, _reviewing, _verdict_ticket
+from tests.test_hooks import skipped_keys
 from tests.test_rounds_and_caps import APPROVE, HEADS, Flow, round_of
 
 
@@ -386,7 +387,8 @@ def test_blocked_at_the_wrong_round_or_head_is_stale(
     )
     assert flow.state()["workflow_state"] == "review"
     assert flow.wakes("blocked") == []
-    assert [row["source_comment_id"] for row in flow.wakes("stale")] == ["blocked-1"]
+    assert flow.wakes("stale") == []
+    assert skipped_keys(flow.queue) == [("stale", "blocked-1")]
 
 
 

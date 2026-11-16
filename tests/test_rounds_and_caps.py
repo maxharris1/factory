@@ -36,6 +36,7 @@ from tests.test_dispatcher import (
 )
 from tests.test_job_state import Poller
 from tests.test_remote_start import Ssh, orch
+from tests.test_hooks import skip_facts
 
 HEADS = [f"{n:x}" * 40 for n in range(1, 10)]
 APPROVE = (
@@ -193,13 +194,13 @@ def test_verdict_over_the_effective_cap_is_rejected_over_cap(
 ) -> None:
     flow = Flow(tmp_path)
     flow.to_cap()
-    wakes_before = job_count(flow.queue, "rejected")
+    wakes_before = len(skip_facts(flow.queue, "rejected"))
     body = (VERDICT if verdict == "REVISE" else APPROVE).format(
         round="4/3", head=flow.head, verdict=verdict, risk="high"
     )
     assert flow.post("over-cap", body, "codex-login") == "rejected-over-cap"
     assert job_count(flow.queue, "fix") == 2
-    assert job_count(flow.queue, "rejected") == wakes_before + 1
+    assert len(skip_facts(flow.queue, "rejected")) == wakes_before + 1
     assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("capped", 3)
 
 

@@ -36,6 +36,9 @@ from tests.test_dispatcher import (
 )
 from tests.test_live_poll import FACTORY, FakeGh, config
 
+
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+
 ROOT = Path(__file__).resolve().parents[1]
 FACTORY_REPO = "maxharris1/factory"
 HEAD_1 = "1" * 40

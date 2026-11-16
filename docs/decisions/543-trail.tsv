@@ -1,0 +1,9 @@
+decision	choice	why
+where the skip happens	inside wake_grok_once, the one place every Grok wake reason goes through	the ticket names it; every caller and the once-key rules stay in one place
+how the notice posts	an outbox table (skipped_wakes) that the comment pass drains with comment_once, like auto_extra_comments	wake_grok_once runs inside hooks and the merge queue, where a GitHub write can fail; the row keeps the notice until it posts, and the marker stops a second post
+durable count	one skipped_wakes row per once-key: reason, repo, ticket, once_key, skipped_at, status	the eval reads the table; the row survives a restart (test_skipped_wakes_are_counted_across_a_restart)
+done with something to triage	a done wake still goes to Grok when the ticket has any followup_filings row	#492 parks follow-ups on that table; the field #492 adds to the done wake does not exist yet, and the table is there today
+signature	wake_grok_once takes the TrackedTicket instead of repo, ticket_id and timeout_seconds	the skip needs the ticket's PR; every caller already passed ticket.repo, ticket.ticket_id and ticket.job_timeout_minutes * 60
+Linear ticket with no PR	wake Grok as before	there is no GitHub thread to post the notice on
+once-key dedupe both ways	a skipped once-key never becomes a Grok wake later, and a once-key Grok already had is never also skipped	ac-5; the check runs in one BEGIN IMMEDIATE transaction with the insert or enqueue
+existing tests on the old wakes	converted to assert the skip row or notice; ship and merge flow modules opt out with the every_wake_reaches_grok fixture	those modules test shipping and exact gh calls, not the wake policy, which tests/test_wake_skip.py covers

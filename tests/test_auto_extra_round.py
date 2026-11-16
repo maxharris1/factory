@@ -348,8 +348,8 @@ def test_a_pending_notice_posts_once_after_the_pr_merges(tmp_path: Path) -> None
     board.outage = False
     board.poll()
     board.poll()
-    assert len(board.posted) == 1
-    assert board.posted[0].startswith("Auto extra round 1 of 2 ")
+    [notice] = [body for body in board.posted if "orch-auto-extra" in body]
+    assert notice.startswith("Auto extra round 1 of 2 ")
     assert board.notices() == ["posted"]
     board.poll()
     assert board.dispatcher._tracked_refs() == ()

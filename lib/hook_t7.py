@@ -55,11 +55,9 @@ class T7Hook:
             return True, "ticket-stuck"
         head = fields.get("head") or ticket.current_head
         dispatcher.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason=reason,
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=dispatcher._project_wake_detail(
                 ticket,
                 detail if head is None else f"{detail} on {head}",
@@ -88,11 +86,9 @@ class T7Hook:
         else:
             error = "unparsed"
         dispatcher.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason="unparsed",
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=dispatcher._project_wake_detail(
                 ticket,
                 f"unparsed orch header from {comment.author}: {error}",

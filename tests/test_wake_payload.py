@@ -18,6 +18,7 @@ from tests.test_hooks import (
     approve,
     factory,
     in_review,
+    park_followup,
     say,
     setup,
     stop,
@@ -64,9 +65,9 @@ def test_unparsed_wake_links_the_unparsed_comment(tmp_path: Path) -> None:
 
     dispatcher.process(on_pr(bad))
 
-    [wake] = FakeBot(queue, "grok").drain()
-    assert wake.request.action == "unparsed"
-    assert detail(wake)["link"] == bad.url
+    assert FakeBot(queue, "grok").drain() == []
+    [notice] = dispatcher.review_actions.notices
+    assert f"- link: {bad.url}" in notice.splitlines()
 
 
 def test_stuck_wake_links_the_stuck_comment(tmp_path: Path) -> None:
@@ -86,11 +87,9 @@ def test_wake_with_no_known_comment_still_carries_a_link(tmp_path: Path) -> None
     dispatcher, queue = setup(tmp_path)
 
     dispatcher.wake_grok_once(
-        repo="owner/repo",
-        ticket_id="42",
-        reason="refused",
+        ticket(),
+        reason="capped",
         source_comment_id="factory.md@abc1234",
-        timeout_seconds=5400,
         detail="missing required field 'ship'",
     )
 
@@ -130,6 +129,7 @@ def test_done_wake_links_the_approve_and_names_the_follow_up_owner(
 ) -> None:
     dispatcher, queue = setup(tmp_path)
     in_review(queue, HEAD_A)
+    park_followup(queue)
     verdict = linked(approve("905", HEAD_A, 1))
 
     dispatcher.process(on_pr(verdict, ship="merge"))
@@ -277,6 +277,7 @@ def test_done_wake_on_linear_falls_back_to_the_ticket_url(tmp_path: Path) -> Non
         }
     )
     in_review(queue, HEAD_A, ticket_id="AUT-42")
+    park_followup(queue, "AUT-42")
     linear = ticket(approval, ship="merge", ticket_id="AUT-42")
     linear = replace(
         linear,

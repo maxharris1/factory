@@ -17,6 +17,9 @@ from tests.merge_queue_support import Board, sha
 from tests.test_remote_start import config_of, machines_file
 
 
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+
+
 def test_approve_on_a_handoff_repo_enters_the_merge_queue_and_merges(tmp_path: Path) -> None:
     board = Board(tmp_path)
     pr = board.open("42", sha(1))

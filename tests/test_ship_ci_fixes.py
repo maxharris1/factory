@@ -46,6 +46,9 @@ from tests.test_ship_redrive import (
     intent,
 )
 
+
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+
 NOT_MERGEABLE_405 = GhResult(
     1, '{"message": "Pull Request is not mergeable"}', "gh: Pull Request is not mergeable (HTTP 405)\n"
 )
