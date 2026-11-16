@@ -645,8 +645,13 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   adding `--orch "$ORCH_CONFIG"` when `ORCH_CONFIG` is set. It
   starts `serve` only while nothing listens on `127.0.0.1:PORT`, and logs one
   line per streak while the port is taken.
-- `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
-  127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
+- `_tunnel-loop` runs `ssh -n -o ExitOnForwardFailure=yes -R
+  127.0.0.1:PORT:127.0.0.1:PORT HOST CLAIM`. CLAIM is a short remote command.
+  It writes the pid of the sshd session that holds the forward to
+  `~/.cache/factory/linear-webhook-tunnel.ID` on the tunnel host, and it
+  runs as long as that session. ID is a random name kept in this state
+  directory's `linear-webhook-tunnel.id`, so each device that uses the same
+  ssh user on the tunnel host has its own claim. A refused forward is logged as
   `forward refused: port PORT already forwarded on HOST; retry in Ns`.
   After `LINEAR_WEBHOOK_REFUSED_LIMIT` refusals in a row (default 3), the
   loop writes `linear-webhook-tunnel.held` (`PORT HOST`) beside `ORCH_DB`
@@ -657,11 +662,13 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
 - A held tunnel recovers by itself (issue #581). At once, and then every
   `LINEAR_WEBHOOK_HELD_RETRY_SEC` (default 300, whole seconds), the loop
   reclaims and probes. The reclaim is one ssh to the tunnel host that runs
-  `ss -Hltnp "sport = :PORT"`, logs each listener as the holder, and sends
-  SIGTERM to those named `sshd` or `sshd-session`. These are the tunnel's
-  own stale sessions: sshd on the tunnel host can keep a dead tunnel's
-  forward for hours, and ss names only the ssh user's own processes. Any
-  other holder is left alone and logged as `held by <users>`. The probe is
+  `ss -Hltnp "sport = :PORT"` and logs each listener as the holder. It
+  sends SIGTERM only to the `sshd` or `sshd-session` whose pid this device's
+  claim names. That is this device's own stale session: sshd on the tunnel
+  host can keep a dead tunnel's forward for hours. Any other holder is left
+  alone and logged as `held by <users>`. This includes another device's
+  live tunnel on the same port, so two devices never end each other's
+  tunnels. The probe is
   `ssh -o ExitOnForwardFailure=yes -R 127.0.0.1:PORT:127.0.0.1:PORT HOST true`.
   When it succeeds, the loop removes the held record and starts the tunnel.
   Until then the record stays as written, so health never sees a gap.

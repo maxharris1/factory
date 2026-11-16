@@ -25,7 +25,12 @@
 # Two loops run, each a singleton per state directory (issue #134):
 #   _listener-loop runs `orch linear-webhook serve --bind 127.0.0.1:PORT`
 #   (with `--orch "$ORCH_CONFIG"` when ORCH_CONFIG is set);
-#   _tunnel-loop runs `ssh -N -R 127.0.0.1:PORT:127.0.0.1:PORT HOST`.
+#   _tunnel-loop runs `ssh -n -R 127.0.0.1:PORT:127.0.0.1:PORT HOST CLAIM`.
+#   CLAIM writes the remote shell's parent, the sshd session that holds the
+#   forward, to ~/.cache/factory/linear-webhook-tunnel.ID on HOST and lives
+#   as long as that session. ID is this state directory's own random name
+#   (linear-webhook-tunnel.id), so devices sharing an ssh user on HOST each
+#   claim only their own sessions (issue #581).
 # Each loop holds an exclusive flock(1) on its own lock file for its whole
 # life (linear-webhook-listener.lock, linear-webhook-tunnel.lock) and exits 0
 # at once when the lock is already held. Locks belong to the open file, not
@@ -64,10 +69,11 @@
 # LINEAR_WEBHOOK_HELD_RETRY_SEC it reclaims and probes (issue #581):
 #   reclaim: one ssh to HOST runs `ss -Hltnp "sport = :PORT"`, logs each
 #     listener as the holder (kept in linear-webhook-tunnel.holder for
-#     status), and sends SIGTERM to those named sshd or sshd-session. ss names
-#     only the ssh user's own processes, so this ends only the tunnel's own
-#     stale sessions (sshd there may keep a dead tunnel's forward for hours);
-#     any other holder is left alone and logged as `held by <users>`.
+#     status), and sends SIGTERM to the sshd or sshd-session whose pid this
+#     state directory's CLAIM recorded: the tunnel's own stale session (sshd
+#     there may keep a dead tunnel's forward for hours). Any other holder,
+#     another device's live tunnel included, is left alone and logged as
+#     `held by <users>`.
 #   probe: `ssh -o ExitOnForwardFailure=yes -R ... HOST true`. Exit 0 removes
 #     the record and the loop starts the tunnel again; otherwise the record
 #     stays as written.
@@ -144,6 +150,8 @@ fi
 PORT="${PORT:-8787}"
 HELD="$(dirname "${ORCH_DB:-${STATE}/orch.db}")/linear-webhook-tunnel.held"
 HOLDER="${STATE}/linear-webhook-tunnel.holder"
+TUNNEL_ID_FILE="${STATE}/linear-webhook-tunnel.id"
+TUNNEL_ID=""
 HELD_RETRY="${LINEAR_WEBHOOK_HELD_RETRY_SEC:-300}"
 REFUSED_LIMIT="${LINEAR_WEBHOOK_REFUSED_LIMIT:-3}"
 TUNNEL_HOST="${LINEAR_WEBHOOK_TUNNEL_HOST-pc-wsl-cursor-bot}"
@@ -324,17 +332,25 @@ held_here() {
     [[ "$(cat "$HELD" 2>/dev/null)" == "${PORT} ${TUNNEL_HOST}" ]]
 }
 
+read -r -d '' CLAIM_ON_HOST <<'EOF' || true
+umask 077
+mkdir -p "$HOME/.cache/factory" &&
+    echo "$PPID" >"$HOME/.cache/factory/linear-webhook-tunnel.@ID@" || exit 1
+while kill -0 "$PPID" 2>/dev/null; do sleep 30; done
+EOF
+
 read -r -d '' RECLAIM_ON_HOST <<'EOF' || true
 listeners=$(ss -Hltnp "sport = :@PORT@") || exit 1
 [ -n "$listeners" ] || exit 0
-own='\("sshd(-session)?",pid=[0-9]+'
+mine=$(cat "$HOME/.cache/factory/linear-webhook-tunnel.@ID@" 2>/dev/null)
+case $mine in '' | *[!0-9]*) mine=0 ;; esac
+own="\(\"sshd(-session)?\",pid=${mine},"
 printf '%s\n' "$listeners" | sed 's/^/holder: /'
 printf '%s\n' "$listeners" | grep -vE "$own" |
     sed -E -e 's/.*(users:.*)/held by \1/' -e t -e 's/.*/held by another user/'
-pids=$(printf '%s\n' "$listeners" | grep -oE "$own" | sed 's/.*=//')
-[ -n "$pids" ] || exit 0
-echo "ending sshd" $pids
-kill -TERM $pids
+printf '%s\n' "$listeners" | grep -qE "$own" || exit 0
+echo "ending sshd $mine"
+kill -TERM "$mine"
 i=0
 while [ "$i" -lt 10 ] && [ -n "$(ss -Hltn "sport = :@PORT@")" ]; do
     sleep 1
@@ -342,10 +358,25 @@ while [ "$i" -lt 10 ] && [ -n "$(ss -Hltn "sport = :@PORT@")" ]; do
 done
 EOF
 
+on_host() {
+    local script="${1//@PORT@/$PORT}"
+    printf '%s' "${script//@ID@/$TUNNEL_ID}"
+}
+
+load_tunnel_id() {
+    local id
+    id="$(cat "$TUNNEL_ID_FILE" 2>/dev/null || true)"
+    if ! [[ "$id" =~ ^[0-9a-f]{16}$ ]]; then
+        id="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+        printf '%s\n' "$id" >"$TUNNEL_ID_FILE"
+    fi
+    TUNNEL_ID="$id"
+}
+
 reclaim() {
     local errors="$1" line
     run_child ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 \
-        -o ServerAliveCountMax=3 "$TUNNEL_HOST" "${RECLAIM_ON_HOST//@PORT@/$PORT}" \
+        -o ServerAliveCountMax=3 "$TUNNEL_HOST" "$(on_host "$RECLAIM_ON_HOST")" \
         >"${HOLDER}.tmp" 2>"$errors"
     cat "$errors" >&2 2>/dev/null || true
     while IFS= read -r line; do
@@ -382,6 +413,7 @@ tunnel_loop() {
     }
     become_loop tunnel
     errors="${STATE}/linear-webhook-tunnel.stderr"
+    load_tunnel_id
     held_here || rm -f "$HELD"
     while ! stopping; do
         if held_here; then
@@ -399,9 +431,10 @@ tunnel_loop() {
         fi
         started="$SECONDS"
         say "starting ssh -R 127.0.0.1:${PORT}:127.0.0.1:${PORT} ${TUNNEL_HOST}"
-        if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        if ! run_locked tunnel ssh -n -o BatchMode=yes -o ExitOnForwardFailure=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-            -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"; then
+            -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" "$(on_host "$CLAIM_ON_HOST")" \
+            2>"$errors"; then
             cat "$errors" >&2 2>/dev/null || true
             say "ssh from an earlier loop may still run; not starting ssh"
             pause "$delay"

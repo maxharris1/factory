@@ -42,11 +42,14 @@ time.sleep(300)
 # Like OpenSSH it closes every inherited descriptor, so the loop's child lock
 # (fd 7) does not outlive the loop. The remote forward is an exclusive flock
 # on $HOME/remote-forward.lock; its holder's pid is in $HOME/forward-owner.
+# The tunnel ssh plays the remote sshd session too: it runs the remote
+# command, up to its keep-alive loop, as its own child, so that command's
+# $PPID is the forward's holder.
 FAKE_SSH = """#!/usr/bin/env python3
 import fcntl, os, subprocess, sys, time
 os.closerange(3, 1024)
 home = os.environ["HOME"]
-tunnel = "-N" in sys.argv
+tunnel = "-R" in sys.argv and sys.argv[-1] != "true"
 with open(os.path.join(home, "ssh-calls.log" if tunnel else "ssh-command-calls.log"), "a") as log:
     log.write(" ".join(sys.argv[1:]).replace("\\n", " ") + "\\n")
 if not tunnel and "ss -H" in sys.argv[-1]:
@@ -67,6 +70,10 @@ if not tunnel:
     raise SystemExit(0)
 with open(os.path.join(home, "forward-owner"), "w") as owner:
     owner.write(str(os.getpid()))
+with open(os.path.join(home, "forward-owner-kind"), "w") as kind:
+    kind.write("sshd")
+if sys.argv[-1] != "test-host":
+    subprocess.run(["sh", "-c", sys.argv[-1].partition("while ")[0]], check=True)
 time.sleep(300)
 """
 
@@ -957,7 +964,11 @@ HELD_SETTINGS = dict(LINEAR_WEBHOOK_REFUSED_LIMIT="2", LINEAR_WEBHOOK_RETRY_SEC=
                      LINEAR_WEBHOOK_HELD_RETRY_SEC=str(HELD_RETRY))
 
 
-def _remote_holder(home: Path, process_name: str) -> subprocess.Popen:
+TUNNEL_ID = "0123456789abcdef"
+
+
+def _remote_holder(home: Path, process_name: str, claimed_by: str | None = None) -> subprocess.Popen:
+    claim = home / ".cache" / "factory" / f"linear-webhook-tunnel.{claimed_by}"
     script = (
         "import fcntl, os, time\n"
         "home = os.environ['HOME']\n"
@@ -967,6 +978,10 @@ def _remote_holder(home: Path, process_name: str) -> subprocess.Popen:
         "    owner.write(str(os.getpid()))\n"
         "with open(os.path.join(home, 'forward-owner-kind'), 'w') as name:\n"
         f"    name.write({process_name!r})\n"
+        f"if {claimed_by is not None!r}:\n"
+        f"    os.makedirs({str(claim.parent)!r}, exist_ok=True)\n"
+        f"    with open({str(claim)!r}, 'w') as claim:\n"
+        "        claim.write(f'{os.getpid()}\\n')\n"
         "print('ready', flush=True)\n"
         "time.sleep(300)\n"
     )
@@ -980,7 +995,8 @@ def _remote_holder(home: Path, process_name: str) -> subprocess.Popen:
 
 def _tunnel_holds_the_forward(home: Path) -> bool:
     owner = _forward_owner(home)
-    return owner is not None and alive(owner) and "-N" in _argv(owner)
+    argv = _argv(owner) if owner is not None else []
+    return alive(owner) and "-R" in argv and argv[-1] != "true" if owner else False
 
 
 def _probes(home: Path) -> list[str]:
@@ -991,11 +1007,17 @@ def _tunnel_log(home: Path) -> str:
     return (_state(home) / "linear-webhook-tunnel.log").read_text()
 
 
+def _own_tunnel_id(home: Path, state: Path) -> None:
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "linear-webhook-tunnel.id").write_text(f"{TUNNEL_ID}\n")
+
+
 def test_a_held_tunnel_ends_its_own_stale_sshd_session_and_comes_back_without_start(
     home: Path,
 ) -> None:
     port = _port_of(home)
-    stale = _remote_holder(home, "sshd")
+    _own_tunnel_id(home, _state(home))
+    stale = _remote_holder(home, "sshd", claimed_by=TUNNEL_ID)
     assert _service(home, "ensure", **HELD_SETTINGS).returncode == 0
 
     assert stale.wait(timeout=20) == -signal.SIGTERM
@@ -1012,19 +1034,26 @@ def test_a_held_tunnel_ends_its_own_stale_sshd_session_and_comes_back_without_st
     assert "held by another owner" not in _service(home, "status").stdout
 
 
+@pytest.mark.parametrize("process_name, claimed_by", [
+    ("python3", None),
+    ("sshd", None),
+    ("sshd", "fedcba9876543210"),
+])
 def test_a_foreign_holder_is_left_alone_and_the_tunnel_returns_within_the_held_retry(
-    home: Path,
+    home: Path, process_name: str, claimed_by: str | None,
 ) -> None:
     port = _port_of(home)
     held = _state(home) / "linear-webhook-tunnel.held"
-    foreign = _remote_holder(home, "python3")
-    users = f'users:(("python3",pid={foreign.pid},fd=3))'
+    _own_tunnel_id(home, _state(home))
+    foreign = _remote_holder(home, process_name, claimed_by=claimed_by)
+    users = f'users:(("{process_name}",pid={foreign.pid},fd=3))'
     assert _service(home, "ensure", **HELD_SETTINGS).returncode == 0
 
     _wait_for(lambda: len(_probes(home)) >= 1, timeout=20, what="a refused probe")
     entered = held.stat().st_mtime_ns
     _wait_for(lambda: len(_probes(home)) >= 3, timeout=20, what="three refused probes")
-    assert foreign.poll() is None, "a holder that is not sshd was signalled"
+    assert foreign.poll() is None, "a holder this device never claimed was signalled"
+    assert "ending sshd" not in _tunnel_log(home)
     assert held.read_text() == f"{port} test-host\n"
     assert held.stat().st_mtime_ns == entered, "a held retry rewrote the record health dates from"
     assert f"held by {users}" in _tunnel_log(home)
@@ -1065,3 +1094,23 @@ def test_the_held_record_stays_until_a_probe_succeeds(home: Path) -> None:
         sampler.join()
     runs = [held for held, _ in itertools.groupby(sample is not None for sample in samples)]
     assert runs == [False, True, False], "health saw the held record vanish before the probe won"
+
+
+def test_two_devices_sharing_the_tunnel_user_never_end_each_others_live_tunnel(
+    home: Path, tmp_path: Path,
+) -> None:
+    other = tmp_path / "other-device-state"
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: _tunnel_holds_the_forward(home), timeout=20, what="device A's tunnel")
+    first = _forward_owner(home)
+
+    assert _service(home, "ensure", ORCH_STATE_DIR=str(other), **HELD_SETTINGS).returncode == 0
+    other_log = other / "linear-webhook-tunnel.log"
+    _wait_for(lambda: other_log.exists() and other_log.read_text().count("next reclaim and probe") >= 3,
+              timeout=20, what="three held retries on device B")
+    assert _forward_owner(home) == first and alive(first), "device B ended device A's live tunnel"
+    assert "ending sshd" not in other_log.read_text()
+    assert f'held by users:(("sshd",pid={first},fd=3))' in other_log.read_text()
+    assert "ending sshd" not in _tunnel_log(home)
+    assert (other / "linear-webhook-tunnel.held").exists()
+    assert not (_state(home) / "linear-webhook-tunnel.held").exists()
