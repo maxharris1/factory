@@ -330,3 +330,33 @@ def test_a_held_approval_replaced_without_a_base_update_stays_accepted(tmp_path)
             ("new-head-approve",)
         ]
     assert _accepted_head_count(board.queue.path, posted) == 1
+
+
+def test_a_hold_from_before_the_acceptance_table_keeps_its_acceptance(tmp_path):
+    board = held_board(tmp_path)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    board.build_and_approve(pr)
+    with board.queue.connect() as db:
+        held = db.execute("SELECT approve_comment_id, held_at FROM ship_holds").fetchone()
+        db.execute("DROP TABLE verdict_acceptances")
+    board.dispatcher._initialize()
+    with board.queue.connect() as db:
+        assert [
+            tuple(row) for row in db.execute("SELECT comment_id, accepted_at FROM verdict_acceptances")
+        ] == [tuple(held)]
+    board.poll()
+    board.approve(pr, comment_id="later-on-accepted-head")
+    board.poll()
+    with board.queue.connect() as db:
+        posted = db.execute(
+            "SELECT posted_at FROM verdict_heads WHERE comment_id = 'later-on-accepted-head'"
+        ).fetchone()[0]
+    assert _accepted_head_count(board.queue.path, posted) == 1
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    board.finish("codex")
+    board.approve(pr, comment_id="new-head-approve")
+    board.poll()
+    assert _accepted_head_count(board.queue.path, posted) == 1

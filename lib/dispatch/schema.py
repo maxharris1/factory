@@ -247,6 +247,9 @@ class SchemaMixin:
                 )
                 """
             )
+            verdict_acceptances_existed = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_acceptances'"
+            ).fetchone()
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS verdict_acceptances (
@@ -258,6 +261,14 @@ class SchemaMixin:
                 )
                 """
             )
+            if verdict_acceptances_existed is None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO verdict_acceptances
+                    SELECT repo, ticket_id, approve_comment_id, held_at FROM ship_holds
+                    """
+                )
+                connection.commit()
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_intents (
