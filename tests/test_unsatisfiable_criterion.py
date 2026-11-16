@@ -151,8 +151,7 @@ def test_an_approvers_building_go_queues_a_fix_round_at_the_parked_head(tmp_path
     assert fix is not None
     detail = json.loads(fix.request.detail or "{}")
     assert (fix.request.head, detail["round"]) == (HEADS[1], "2/3")
-    first, second = detail["instruction"].split("\n")
-    assert first.endswith("revise-1") and second.endswith("go-2")
+    assert detail["instruction"].endswith("revise-1")
     state = flow.state()
     assert (state["workflow_state"], state["review_round"], state["cap_extra"], state["paused_action"]) == (
         "fixing",
@@ -268,6 +267,33 @@ def test_an_approvers_building_go_carries_the_rewrite_into_the_fix_brief(tmp_pat
     fix = flow.queue.claim("claude")
     assert fix is not None
     assert rewrite in render_brief(fix, bot="claude-bot", context=None)
+
+
+@pytest.mark.job_bound
+def test_a_building_go_fix_brief_targets_the_revise_and_quotes_the_go(tmp_path: Path) -> None:
+    flow = park_with_ready_starts_review(tmp_path, text=WITHOUT_MAX_GROK_TRUST)
+    snapshot = flow.snapshot
+    flow.snapshot = lambda: replace(
+        snapshot(),
+        pr_number=42,
+        comments=tuple(
+            replace(item, url=f"https://github.com/owner/repo/pull/42#issuecomment-{100 + index}")
+            for index, item in enumerate(flow.comments)
+        ),
+    )
+    revise_url = flow.snapshot().comments[[item.id for item in flow.comments].index("unsat-1")].url
+    rewrite = "ac-1 now reads: the CLI exits 2."
+    assert flow.ci == "success"
+
+    assert flow.post("go-fix", GO.format(state="building") + "\n" + rewrite, MAX) == "queued-fix"
+
+    fix = flow.queue.claim("claude")
+    assert fix is not None
+    brief = render_brief(fix, bot="claude-bot", context=None, factory_root="/srv/orch/factory")
+    task = next(line for line in brief.splitlines() if line.startswith("Fix the "))
+    assert task.startswith(f"Fix the `[blocking]` findings of the REVISE verdict at {revise_url}.")
+    assert "f-1: the parser accepts prose." in brief
+    assert rewrite in brief
 
 
 def test_f2_an_unsat_id_keeps_the_meaning_the_review_was_given(tmp_path: Path) -> None:

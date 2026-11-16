@@ -294,11 +294,10 @@ class ResumeMixin:
                 counted_round = int(row["review_round"]) + 1
                 at_cap = counted_round >= self._effective_cap(ticket, connection)
                 cap_extra = int(row["cap_extra"]) + (1 if at_cap else 0)
-                links = [
-                    _comment_link(item)
-                    for item in ticket.comments
-                    if item.id == row["paused_question_id"]
-                ]
+                verdict = next(
+                    (_comment_link(item) for item in ticket.comments if item.id == row["paused_question_id"]),
+                    f"comment:{row['paused_question_id']}",
+                )
                 self._enqueue_step(
                     connection,
                     ticket,
@@ -318,7 +317,7 @@ class ResumeMixin:
                             head=ticket.current_head,
                             round_number=counted_round + 1,
                             cap=self._config_cap(ticket, connection) + cap_extra,
-                            instruction="\n".join([*links, _comment_link(comment)]),
+                            instruction=verdict,
                             resume=True,
                             ci_failure=red_checks(ticket, ticket.current_head),
                         ),
