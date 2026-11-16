@@ -61,6 +61,7 @@ from lib.queue import (
     SQLiteJobQueue,
     _job,
     claim_order,
+    require_latest_claim,
     require_proof,
     retire_requeued,
 )
@@ -322,7 +323,7 @@ class DevicePool:
             raise QueueError(f"unknown owner {owner!r}")
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            require_proof(connection, job_id, proof)
+            require_latest_claim(connection, job_id, proof)
             row = connection.execute(
                 f"SELECT harness FROM {SLOTS_TABLE} WHERE job_id = ?",
                 (job_id,),
@@ -648,7 +649,7 @@ class DevicePool:
             raise QueueError(f"unknown owner {owner!r}")
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            require_proof(connection, job_id, proof)
+            require_latest_claim(connection, job_id, proof)
             row = connection.execute(
                 f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?",
                 (job_id,),
