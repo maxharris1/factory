@@ -60,4 +60,4 @@ Codex has no Cursor Automations, Bugbot, Cursor cloud agents, or built-in PR too
 | Cursor Automations: routines, `update_state` routine calls, `api2.cursor.sh/automations` webhooks, routine wakes, and `SendToUser` secret requests | Skip with the line. |
 | Bugbot | Bugbot comments on a GitHub PR are ordinary review threads, so triage them with the forge command that the step gives. Skip a step that starts, waits for, or configures Bugbot when the PR has no Bugbot check or comment. |
 | Cursor cloud agents | `environment: "cloud"` maps to a worktree, as in Subagent fields. Skip a step that needs the cloud agent itself, such as its dashboard status or its own machine. |
-| A built-in PR tool | Use the forge command that the step gives, run as the brief says (`env -u GH_TOKEN gh`). That is not a skip, so write no line. |
+| A built-in PR tool | Use the forge command that the step gives, with the `gh` command the brief gives. That is not a skip, so write no line. |
