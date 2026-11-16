@@ -229,3 +229,24 @@ def test_a_failed_current_boot_check_leaves_a_previous_boot_success_down(
     reboot_with_wall_behind(clocks)
     store.checked(component, device, pid=202, interval=interval)
     assert state(db, clocks, component, device)[0] == "down"
+
+
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_failed_check_on_a_pid_reused_from_an_earlier_boot_stays_visible(
+        tmp_path: Path, component: str, device: str, interval: float) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat(component, device, pid=303, interval=interval)
+    clocks.boot = REBOOT
+    clocks.wall += 30.0
+    clocks.monotonic = 10.0
+    store.beat(component, device, pid=202, interval=interval)
+    clocks.advance(wall=1.0, monotonic=1.0)
+    store.checked(component, device, pid=303, interval=interval)
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime())
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.pid) == ("stale", 303)
+    assert item.reason.endswith(" 1s ago")

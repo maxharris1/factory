@@ -197,6 +197,10 @@ _COLUMNS = (
 )
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _BOOT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_FORGET_SUCCESS_FROM_ANOTHER_BOOT = ", ".join(
+    f"{column} = CASE WHEN seen_boot <> ?9 THEN NULL ELSE {column} END"
+    for column in ("last_seen", "seen_monotonic", "seen_boot")
+)
 Cycle = Callable[[], "tuple[float | None, float | None]"]
 
 
@@ -468,15 +472,17 @@ class HealthStore:
         """A failed check (an unreachable device or tunnel): recorded, never seen."""
         _check(component, device, bot, pid, version, interval, self.devices)
         now = float(self.clock())
+        seen = self.uptime()
+        boot = None if seen is None else seen.boot
         self._write(
             f"INSERT INTO {TABLE} ({_COLUMNS}) "
             "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL) "
             "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
             "started_at = excluded.started_at, version = excluded.version, "
             "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
-            "checked_at = excluded.checked_at",
+            f"checked_at = excluded.checked_at, {_FORGET_SUCCESS_FROM_ANOTHER_BOOT}",
             (component, device, bot, pid, _real(started_at, now), version,
-             float(interval), now),
+             float(interval), now, boot),
             busy,
         )
 
