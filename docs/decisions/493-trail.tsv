@@ -1,0 +1,8 @@
+decision	choice	why
+root cause	T4's approve-ci-red-fix records no approval, and T2 counts only verdicts posted after the ready, so a no-change ready at the approved head queued the same round again	read in lib/dispatch/verdict/t4.py and lib/dispatch/ready.py; the old tests encoded it on purpose (#262)
+shape	derive the pending APPROVE from the thread each time (latest counted verdict, handled approve-ci-red-fix, round review_round + 1, latest review job at its head); store nothing	writing approved_head in fixing would add a state the merge queue, T1, TU and re-entry do not expect
+reuse	extract T4's ship tail as _ship_approval and call it from T2 on green	holds, follow-ups, ship intents and the merge queue behave as for a direct T4 ship; the T4 tests passed unchanged after the extraction
+red path	a covered ready on red CI keeps today's red path unchanged	ac-2: the red count, stuck rule and CI fix already queue no review; a green rerun ships through _review_after_green_rerun
+later review	coverage ends once a review job is queued at another head	a ready back at the old head after a differing patch was sent to review must not ship around that review
+tests replaced	the #262 tests that re-reviewed the same head now assert the ship; tests that needed a same-head re-review to reach their own point now re-review at a differing patch	their own assertions (stale verdicts, posted_at backfill, fix dedupe) still run
+model	TLC and the statechart check pass on both configs; chart.mmd, SPEC 4.1, CHART_TRANSITIONS and one dashboard label follow the new edge	run locally with model/check.sh on a temporary JRE
