@@ -153,7 +153,9 @@ class AdapterPatchIds(FakeReviewActions):
         return self.github.stable_patch_id(ticket, head)
 
 
-def approve_then_move(tmp_path: Path, actions: AdapterPatchIds, approved: str, current: str):
+def approve_then_move(
+    tmp_path: Path, actions: AdapterPatchIds, approved: str, current: str, *, named: int = 40
+):
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     seed_review_job(dispatcher, queue, approved)
     actions.states.clear()
@@ -161,7 +163,7 @@ def approve_then_move(tmp_path: Path, actions: AdapterPatchIds, approved: str, c
         ticket(
             comment(
                 "approve-1",
-                VERDICT.format(round=1, head=approved, verdict="APPROVE", risk="high"),
+                VERDICT.format(round=1, head=approved[:named], verdict="APPROVE", risk="high"),
                 author="codex-login",
             ),
             head=current,
@@ -171,10 +173,13 @@ def approve_then_move(tmp_path: Path, actions: AdapterPatchIds, approved: str, c
     return queue.claim("codex")
 
 
-def test_an_approve_carries_across_a_pure_rebase(tmp_path: Path, heads) -> None:
+@pytest.mark.parametrize("named", [40, 7], ids=["full-head", "abbreviated-head"])
+def test_an_approve_carries_across_a_pure_rebase(tmp_path: Path, heads, named: int) -> None:
     actions = AdapterPatchIds(RepoGh(heads["repo"]))
 
-    review = approve_then_move(tmp_path, actions, heads["original"], heads["rebased"])
+    review = approve_then_move(
+        tmp_path, actions, heads["original"], heads["rebased"], named=named
+    )
 
     assert review is None
     assert actions.merges == [(True, heads["rebased"])]

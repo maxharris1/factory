@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lib.dispatch.helpers import _is_patch_id, _matching_head
+from lib.dispatch.helpers import _is_full_sha, _is_patch_id, _matching_head
 from lib.dispatch.types import TrackedTicket
 
 
@@ -18,7 +18,9 @@ class ApprovalCoverageMixin:
             return True
         try:
             actions = self._review_actions(ticket)
-            approved_patch = actions.stable_patch_id(ticket, approved_head)
+            approved_patch = actions.stable_patch_id(
+                ticket, self._registered_review_head(ticket, approved_head)
+            )
             current_patch = actions.stable_patch_id(ticket, head)
         except Exception:
             return False
@@ -27,3 +29,24 @@ class ApprovalCoverageMixin:
             and _is_patch_id(current_patch)
             and approved_patch.lower() == current_patch.lower()
         )
+
+    def _registered_review_head(self, ticket: TrackedTicket, approved_head: str) -> str:
+        if _is_full_sha(approved_head):
+            return approved_head
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT head FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                  AND head IS NOT NULL
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        named = {
+            str(row["head"])
+            for row in rows
+            if _is_full_sha(str(row["head"])) and str(row["head"]).startswith(approved_head)
+        }
+        if len(named) != 1:
+            raise ValueError(f"APPROVE head {approved_head} names {len(named)} review heads")
+        return named.pop()
