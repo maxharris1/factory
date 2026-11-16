@@ -188,6 +188,28 @@ def test_the_script_hero_strip_follows_the_state_table(tmp_path: Path, case, cha
     assert ('<span class="verb">' in view) is verb, case
 
 
+NEW_ACTIONS = [("clarify", "field", "Clarifying"), ("update-from-main", "patch", "Merging")]
+
+
+@pytest.mark.parametrize(("action", "effect", "verb"), NEW_ACTIONS)
+def test_clarify_and_update_from_main_heroes_draw_like_plan_and_fix(tmp_path: Path, action, effect, verb) -> None:
+    snapshot = _snapshot(tmp_path)
+    _hero_case(snapshot, _set(action=action))
+    article = _article(snapshot)
+    assert (_hero_px(article)["data-px"], _hero_px(article)["data-tint"]) == (effect, "codex")
+    assert f'<span class="verb">{verb}…</span>' in article
+
+
+@needs_node
+@pytest.mark.parametrize(("action", "effect", "verb"), NEW_ACTIONS)
+def test_the_script_draws_clarify_and_update_from_main_heroes(tmp_path: Path, action, effect, verb) -> None:
+    snapshot = _snapshot(tmp_path)
+    _hero_case(snapshot, _set(action=action))
+    view = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")["html"]["jobview"]
+    assert (_hero_px(view)["data-px"], _hero_px(view)["data-tint"]) == (effect, "codex")
+    assert f'<span class="verb">{verb}…</span>' in view
+
+
 def _serve(tmp_path: Path, sites: dict[str, dict]) -> http.server.ThreadingHTTPServer:
     for name, snapshot in sites.items():
         site = tmp_path / "site" / name

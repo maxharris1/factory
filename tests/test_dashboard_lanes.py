@@ -590,9 +590,17 @@ def browser():
     chrome.close()
 
 
+def _one_row(snapshot: dict) -> dict:
+    for row in snapshot["running"]:
+        if row["job_state"] != "running" or row["overdue"] or row["action"] not in ("plan", "build", "review", "fix"):
+            row.update(STATES["build"], overdue=False, stuck=False)
+    return snapshot
+
+
 @needs_chrome
 def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: Browser) -> None:
-    browser.open(_page_with_status_stub(fifteen_slot_snapshot(tmp_path), "index.html"), 1440)
+    board = fifteen_slot_snapshot(tmp_path)
+    browser.open(_page_with_status_stub(_one_row(copy.deepcopy(board)), "index.html"), 1440)
     rows = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
       return {device: lane.getAttribute('data-device'), tiles: [].map.call(lane.querySelectorAll('.tile'),
         function (t) { var b = t.getBoundingClientRect(); return [b.top, b.bottom]; })};
@@ -600,6 +608,13 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     assert {row["device"]: len(row["tiles"]) for row in rows} == {"box": 5, "pc": 6, "mac": 4}
     for row in rows:
         assert len({top for top, _ in row["tiles"]}) <= 2, f"{row['device']} wraps onto a second row"
+    wrapped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes a.tile .tile-l1, #lanes a.tile .tile-l3'),
+      function (line) {
+        var boxes = [].map.call(line.children, function (c) { return c.getBoundingClientRect(); });
+        return Math.max.apply(null, boxes.map(function (b) { return b.top; }))
+          >= Math.min.apply(null, boxes.map(function (b) { return b.bottom; }));
+      }).map(function (line) { return line.closest('a.tile').getAttribute('href') + ' ' + line.className; })""")
+    assert not wrapped, f"the fold holds only for one-row tiles, and these wrap: {wrapped}"
     assert browser.eval("innerHeight") == FOLD
     visible = browser.eval("""(function () {
       var floor = document.getElementById('statusline').getBoundingClientRect().top;
@@ -612,6 +627,7 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     })()""")
     hidden = [t for t in visible if t["bottom"] > t["floor"] or not t["own"]]
     assert not hidden, f"slots under the status line or off screen at 1440x{FOLD}: {hidden}"
+    browser.open(_page_with_status_stub(board, "index.html"), 1440)
     clipped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes .tile-l3 .action, #lanes .tile-l3 .t'),
       function (e) { return e.scrollWidth > e.clientWidth; }).map(function (e) { return e.textContent; })""")
     assert not clipped, f"line 3 cuts the job's action or elapsed time: {clipped}"
