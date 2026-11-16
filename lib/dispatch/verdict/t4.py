@@ -59,7 +59,10 @@ class T4Mixin:
         ):
             return True, "superseded-approve"
         review_head = self._latest_review_head(ticket)
-        if state not in ("review", "awaiting-ok") or reported_round != review_round + 1:
+        held_fix = state == "fixing" and self._held_ci_fix_out(ticket, comment.id)
+        if (
+            state not in ("review", "awaiting-ok") and not held_fix
+        ) or reported_round != review_round + 1:
             self._wake_comment_problem(
                 ticket, comment, "stale", "stale-approve"
             )
@@ -79,8 +82,12 @@ class T4Mixin:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            if state == "awaiting-ok" or self._hold_in_play(ticket, current_head):
-                return False, "approve-ci-red"
+            if state in ("awaiting-ok", "fixing") or self._hold_in_play(
+                ticket, current_head
+            ):
+                return self._held_ci_red(
+                    ticket, comment, current_head, result, state, review_round
+                )
             if ticket.factory.start_before_ci:
                 return self._approve_ci_red_fix(
                     ticket, comment, current_head, result, review_round
@@ -177,6 +184,59 @@ class T4Mixin:
             return None
         return approve_refusal(fields, parse_comment(comment.body).body)
 
+    def _held_ci_red(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        result: CIResult,
+        state: str,
+        review_round: int,
+    ) -> tuple[bool, str]:
+        if not ticket.factory.start_before_ci:
+            return False, "approve-ci-red"
+        key = _held_ci_fix_key(ticket, comment.id, head)
+        with self._connect() as connection:
+            queued = connection.execute(
+                "SELECT 1 FROM jobs WHERE dedupe_key = ?", (key,)
+            ).fetchone()
+        if queued is None:
+            _status, count = self._record_ci_result(ticket, head, "failure")
+            if self._mark_stuck_on_third_red(ticket, comment, head, count):
+                return True, "stuck-ci-red-3"
+            self._queue_ci_fix(
+                ticket,
+                comment,
+                head,
+                result,
+                review_round,
+                self._generation(ticket.repo, ticket.ticket_id),
+                dedupe_key=key,
+            )
+        if state == "review":
+            self._set_workflow_state(ticket, "fixing")
+        return False, "approve-ci-red-fix-held"
+
+    def _held_ci_fix_out(self, ticket: TrackedTicket, approve_id: str) -> bool:
+        prefix = _held_ci_fix_key(ticket, approve_id, "")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM jobs WHERE substr(dedupe_key, 1, ?) = ?",
+                (len(prefix), prefix),
+            ).fetchone()
+        return row is not None
+
+    def _held_approve_covers(self, ticket: TrackedTicket, head: str) -> bool:
+        for comment in ticket.comments:
+            if self._is_handled(ticket, comment.id):
+                continue
+            if not self._held_ci_fix_out(ticket, comment.id):
+                continue
+            approved = parse_comment(comment.body).as_dict().get("head")
+            if approved and self._approval_covers(ticket, approved, head):
+                return True
+        return False
+
     def _approve_ci_red_fix(
         self,
         ticket: TrackedTicket,
@@ -199,3 +259,7 @@ class T4Mixin:
         )
         self._set_workflow_state(ticket, "fixing")
         return True, "approve-ci-red-fix"
+
+
+def _held_ci_fix_key(ticket: TrackedTicket, approve_id: str, head: str) -> str:
+    return f"t4-held:{_scope(ticket.repo, ticket.ticket_id)}:{approve_id}:{head}"

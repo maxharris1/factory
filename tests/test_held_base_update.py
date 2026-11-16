@@ -529,3 +529,90 @@ def test_a_failed_fix_whose_ready_github_dates_to_its_own_second_is_done(
 
     assert board.outcome("ready-rollback") == "queued-review"
     assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]
+
+
+def _held_red(tmp_path: Path):
+    board = held_board(tmp_path)
+    board.factory = replace(board.factory, start_before_ci=True)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, sha(1))
+    board.poll()
+    board.finish("codex")
+    pr.ci[sha(1)] = "failure"
+    approve = board.approve(pr)
+    for _ in range(4):
+        board.poll()
+    return board, pr, approve
+
+
+def test_an_approve_on_red_ci_for_a_held_pr_queues_one_ci_fix(tmp_path: Path) -> None:
+    board, _pr, approve = _held_red(tmp_path)
+
+    [fix] = board.jobs("fix", "42")
+    assert fix["recipient"] == "claude"
+    assert fix["head"] == sha(1)
+    assert fix["source_comment_id"] == approve
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert board.outcome(approve) is None
+    assert board.actions.merges == []
+
+
+def test_a_held_ci_fix_at_the_same_patch_goes_to_awaiting_ok_without_a_review(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = _held_red(tmp_path)
+    board.actions.patch_ids = {sha(1): "a" * 40, sha(2): "a" * 40}
+    board.finish("claude")
+    pr.push(sha(2), ci="pending")
+    fix_ready = board.ready(pr, sha(2))
+    board.poll()
+    pr.ci[sha(2)] = "success"
+    board.poll()
+    board.poll()
+
+    assert len(board.jobs("review", "42")) == 1
+    assert board.outcome(fix_ready) == "held-ci-fix-ready"
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert _hold_head(board) == sha(2)
+    assert [wake["head"] for wake in board.wakes("awaiting-ok")] == [sha(2)]
+
+    board.post(pr, "ok-2", OK.format(head=sha(2)), APPROVER)
+    board.poll()
+
+    assert board.actions.merges == [(True, sha(2))]
+
+
+def test_a_held_ci_fix_that_changes_the_patch_is_reviewed(tmp_path: Path) -> None:
+    board, pr, approve = _held_red(tmp_path)
+    board.actions.patch_ids = {sha(1): "a" * 40, sha(2): "b" * 40}
+    board.finish("claude")
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    board.poll()
+
+    [_first, review] = board.jobs("review", "42")
+    assert review["head"] == sha(2)
+    assert board.state("42")["workflow_state"] == "review"
+    assert board.outcome(approve) == "queued-patch-review"
+    assert board.actions.merges == []
+
+
+def test_a_held_ci_fix_that_stays_red_queues_one_more_fix_at_its_head(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = _held_red(tmp_path)
+    board.actions.patch_ids = {sha(1): "a" * 40, sha(2): "a" * 40}
+    board.finish("claude")
+    pr.push(sha(2), ci="failure")
+    board.ready(pr, sha(2))
+    for _ in range(3):
+        board.poll()
+
+    assert [job["head"] for job in board.jobs("fix", "42")] == [sha(1), sha(2)]
+    assert len(board.jobs("review", "42")) == 1
+    assert board.state("42")["workflow_state"] == "fixing"
