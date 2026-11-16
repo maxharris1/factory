@@ -197,7 +197,19 @@ def successor(db: Path, job_id: str) -> tuple:
         events = connection.execute(
             "SELECT event, detail FROM job_events WHERE job_id = ?", (job_id,)
         ).fetchall()
-    return tuple(job), tuple(slot) if slot else None, [tuple(row) for row in events]
+        telemetry = connection.execute(
+            "SELECT tokens_in, updated_at, finished_at, exit_code FROM job_telemetry "
+            "WHERE job_id = ?",
+            (job_id,),
+        ).fetchone() if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'job_telemetry'"
+        ).fetchone() else None
+    return (
+        tuple(job),
+        tuple(slot) if slot else None,
+        [tuple(row) for row in events],
+        tuple(telemetry) if telemetry else None,
+    )
 
 
 @pytest.mark.parametrize("autostart", [False, True], ids=["plain", "autostart"])
@@ -377,6 +389,142 @@ def test_waiter_reap_cannot_fail_later_claim(tmp_path: Path, finished: bool) -> 
     actual = successor(db, job_id)
     print("reap before", later, "after", actual)
     assert actual == later, "retired waiter child failed successor claim and removed its slot"
+
+
+@pytest.mark.parametrize("later_state", ["running", "done", "failed", "queued"])
+def test_a_retired_run_leaves_the_later_claims_telemetry_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, later_state: str
+) -> None:
+    from lib import cli, job_token, placed_run, telemetry
+    from lib.queue import Proof, _ensure_job_events
+    from tests.test_waiter import MACHINES, enqueue, local_pool, make_queue
+
+    db, queue = make_queue(tmp_path)
+    pool = local_pool(queue)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "telemetry-reclaim")
+    old, old_hash = job_token.mint()
+    pool.claim("claude", token_hash=old_hash)
+    monkeypatch.setenv(PROOF_ENV, old)
+    prepare = placed_run.prepare
+    later: list[tuple] = []
+
+    def prepare_then_reclaim(*args, **kwargs):
+        placed = prepare(*args, **kwargs)
+        queue.release(job_id, owner="claude")
+        new, new_hash = job_token.mint()
+        pool.claim("claude", token_hash=new_hash)
+        session = telemetry.start_session(
+            connect=queue.connect, database=db, job_id=job_id, bot="claude-bot",
+            repo="o/r", command=["true"], log=lambda _: None, environ={},
+        )
+        assert session is not None
+        session.summary.tokens_in = 123
+        if later_state == "running":
+            session.flush()
+        else:
+            session.finish(0)
+        if later_state == "queued":
+            queue.release(job_id, owner="claude")
+        elif later_state != "running":
+            queue.finish(
+                job_id, owner="claude", proof=Proof(new),
+                handoff_comment_id="12345" if later_state == "done" else None,
+            )
+        later.append(successor(db, job_id))
+        return placed
+
+    monkeypatch.setattr(placed_run, "prepare", prepare_then_reclaim)
+    marker = tmp_path / "retired-command-ran"
+
+    cli.main([
+        "job", "run", "claude-bot", job_id, "--db", str(db), "--machines", str(MACHINES),
+        "--", sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ])
+
+    assert not marker.exists()
+    assert [successor(db, job_id)] == later
+    assert later[0][3][0] == 123
+    assert (later[0][3][2] is None) == (later_state == "running")
+
+
+@pytest.mark.parametrize("later_state", ["running", "done", "failed"])
+def test_a_run_retired_before_prepare_leaves_the_later_claims_slot_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, later_state: str
+) -> None:
+    from lib import cli, job_token, placed_run
+    from lib.queue import Proof, _ensure_job_events
+    from tests.test_waiter import MACHINES, enqueue, local_pool, make_queue
+
+    db, queue = make_queue(tmp_path)
+    pool = local_pool(queue)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "retired-before-prepare")
+    old, old_hash = job_token.mint()
+    pool.claim("claude", token_hash=old_hash)
+    monkeypatch.setenv(PROOF_ENV, old)
+    prepare = placed_run.prepare
+    later: list[tuple] = []
+
+    def reclaim_then_prepare(*args, **kwargs):
+        queue.release(job_id, owner="claude")
+        new, new_hash = job_token.mint()
+        pool.claim("claude", token_hash=new_hash)
+        if later_state != "running":
+            queue.finish(
+                job_id, owner="claude", proof=Proof(new),
+                handoff_comment_id="12345" if later_state == "done" else None,
+            )
+        later.append(successor(db, job_id))
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(placed_run, "prepare", reclaim_then_prepare)
+    marker = tmp_path / "retired-command-ran"
+    rc = cli.main([
+        "job", "run", "claude-bot", job_id, "--db", str(db), "--machines", str(MACHINES),
+        "--", sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ])
+
+    assert not marker.exists()
+    assert rc == 2
+    assert [successor(db, job_id)] == later, "retired runner mutated the later claim's slot"
+
+
+@pytest.mark.parametrize("ending", ["done", "failed"])
+def test_the_current_claim_still_writes_its_final_telemetry_after_job_done(
+    tmp_path: Path, ending: str
+) -> None:
+    from lib import job_token, telemetry
+    from lib.queue import Proof, _ensure_job_events, require_latest_claim
+    from tests.test_waiter import enqueue, local_pool, make_queue
+
+    db, queue = make_queue(tmp_path)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "telemetry-final")
+    token, token_hash = job_token.mint()
+    local_pool(queue).claim("claude", token_hash=token_hash)
+    session = telemetry.start_session(
+        connect=queue.connect, database=db, job_id=job_id, bot="claude-bot",
+        repo="o/r", command=["true"], log=lambda _: None, environ={},
+        guard=lambda connection: require_latest_claim(connection, job_id, Proof(token)),
+    )
+    assert session is not None
+    queue.finish(
+        job_id, owner="claude", proof=Proof(token),
+        handoff_comment_id="12345" if ending == "done" else None,
+    )
+    session.summary.tokens_in = 456
+    session.finish(0)
+
+    with sqlite3.connect(db) as connection:
+        row = connection.execute(
+            "SELECT tokens_in, exit_code, finished_at FROM job_telemetry WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert row[:2] == (456, 0) and row[2] is not None
 
 
 def test_the_autostart_waiter_hands_its_run_the_claims_proof(tmp_path: Path) -> None:
