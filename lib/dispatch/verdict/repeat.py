@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from lib.dispatch.helpers import _comment_link, _comment_order, _round_number, _scope
@@ -30,11 +31,8 @@ class _EarlierRevise:
     blocking: frozenset[str]
 
 
-def _handoff_round(comment: Comment) -> int | None:
-    try:
-        return _round_number(parse_comment(comment.body).as_dict().get("round"))
-    except HandoffError:
-        return None
+def _stopped_rule(wake: str) -> str:
+    return str(json.loads(wake)["detail"]).split(", ", 1)[0].removeprefix("repeat-block: ")
 
 
 class RepeatBlockMixin:
@@ -92,23 +90,16 @@ class RepeatBlockMixin:
 
     def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
         with self._connect() as connection:
-            parked = {
-                str(row["comment_id"])
-                for row in connection.execute(
-                    """
-                    SELECT comment_id FROM review_events
-                    WHERE repo = ? AND ticket_id = ? AND outcome = 'waiting-max-repeat'
-                    """,
-                    (ticket.repo.lower(), ticket.ticket_id),
-                )
-            }
-        stops = 1
-        for item in ticket.comments:
-            number = _handoff_round(item) if item.id in parked and item.id != comment.id else None
-            earlier = None if number is None else self._repeat_trigger(ticket, item, number)
-            if earlier is not None and earlier.rule_id == rule_id:
-                stops += 1
-        return stops
+            wakes = connection.execute(
+                """
+                SELECT jobs.detail FROM review_events AS stop
+                JOIN jobs ON jobs.dedupe_key = 't3-repeat:' || ? || ':' || stop.comment_id
+                WHERE stop.repo = ? AND stop.ticket_id = ? AND stop.comment_id != ?
+                  AND stop.outcome = 'waiting-max-repeat'
+                """,
+                (_scope(ticket.repo, ticket.ticket_id), ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchall()
+        return 1 + sum(_stopped_rule(str(row["detail"])) == rule_id for row in wakes)
 
     def _repeat_detail(self, ticket: TrackedTicket, comment: Comment, block: RepeatBlock) -> str:
         earlier = "no earlier verdict" if block.earlier is None else _comment_link(block.earlier)

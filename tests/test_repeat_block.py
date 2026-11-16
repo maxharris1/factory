@@ -483,3 +483,36 @@ def test_a_stop_on_another_id_counts_from_one(tmp_path: Path) -> None:
     assert revise(flow, "3/3", "revise-3", " repeat=f-2", body=F2) == "waiting-max-repeat"
 
     assert repeat_wakes(flow)[-1].endswith(f"{PR_URL}revise-3, stops=1, for=factory")
+
+
+def edit(flow: AppFlow, comment_id: str, body: str) -> None:
+    flow.comments = [
+        replace(item, body=body, edited_at=flow.now[0]) if item.id == comment_id else item
+        for item in flow.comments
+    ]
+
+
+@pytest.mark.parametrize(
+    ("comment_id", "body"),
+    [
+        ("revise-1", None),
+        ("revise-1", "Withdrawn.\n"),
+        ("revise-2", None),
+        ("revise-2", "Withdrawn.\n"),
+    ],
+    ids=["earlier-id-edited", "earlier-withdrawn", "stopped-id-edited", "stopped-withdrawn"],
+)
+def test_an_edited_history_keeps_the_count_of_accepted_stops(
+    tmp_path: Path, comment_id: str, body: str | None
+) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=7)
+    flow.factory = replace(flow.factory, auto_extra_rounds=2)
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+    release_and_review(flow, 2)
+    original = next(item.body for item in flow.comments if item.id == comment_id)
+    edit(flow, comment_id, body or original.replace("f-1", "f-2"))
+    flow.restart()
+
+    assert revise(flow, "3/3", "revise-3", " repeat=f-1", body=F1) == "waiting-max-repeat"
+
+    assert repeat_wakes(flow)[-1].endswith(f"{PR_URL}revise-3, stops=2, for=max, changed_lines=7")
