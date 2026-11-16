@@ -12,7 +12,13 @@ from lib.dispatch.constants import (
     _NOT_FINISHED,
 )
 from lib.dispatch.errors_text import safe_ship_error
-from lib.dispatch.helpers import _comment_order, _is_full_sha, _ship_state, ship_mode
+from lib.dispatch.helpers import (
+    _comment_order,
+    _is_full_sha,
+    _round_number,
+    _ship_state,
+    ship_mode,
+)
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     AlreadyMergedShip,
@@ -464,12 +470,28 @@ class ShipMixin:
             return False
         if self._has_open_factory_work(ticket, reading_comment_id):
             return False
-        if ticket.linear_state_phase != "ready-for-review":
-            latest = self._latest_review_verdict(ticket)
-            if latest is None or latest[1].get("verdict") != "APPROVE":
+        approve = self._standing_approval(ticket)
+        if approve is None and ticket.linear_state_phase != "ready-for-review":
+            return False
+        head = ticket.current_head
+        if approve is not None:
+            if head is None:
+                return False
+            intent = self._ship_intent(ticket, approve.id)
+            if intent is not None and intent[2] != "completed":
                 return False
         self._write_state_label(ticket, "handed-off")
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if approve is not None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ship_intents (
+                        repo, ticket_id, comment_id, head, policy, status
+                    ) VALUES (?, ?, ?, ?, 'handoff', 'completed')
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, approve.id, head),
+                )
             written = write_workflow_state(
                 connection,
                 ticket.repo,
@@ -479,8 +501,27 @@ class ShipMixin:
                 at=self.queue.now(),
                 guard="workflow_state = 'building'",
             )
-            connection.commit()
+            if written:
+                connection.commit()
+            else:
+                connection.rollback()
         return written
+
+    def _standing_approval(self, ticket: TrackedTicket) -> Comment | None:
+        latest = self._latest_review_verdict(ticket)
+        if latest is None:
+            return None
+        comment, fields = latest
+        if fields.get("verdict") != "APPROVE" or comment.edited_at is not None:
+            return None
+        outcome = self._handled_outcome(ticket, comment.id)
+        if outcome is not None and outcome.startswith(("rejected-", "superseded-")):
+            return None
+        if self._approve_refusal(comment, fields) is not None:
+            return None
+        if self._over_cap(ticket, _round_number(fields.get("round"))):
+            return None
+        return comment
 
     def _has_open_factory_work(
         self, ticket: TrackedTicket, reading_comment_id: str | None

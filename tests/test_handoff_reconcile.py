@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from pathlib import Path
+
+import pytest
 
 from lib.dispatcher import TrackedTicket
 from lib.queue import JobRequest
 from tests.test_dispatcher import GO, READY, factory
-from tests.test_lifecycle import HEADS, Flow, jobs, outcome
+from tests.test_lifecycle import APPROVE, HEADS, Flow, jobs, outcome, round_of
 
 
 class ReviewFlow(Flow):
@@ -214,3 +217,87 @@ def test_an_unhandled_failed_build_keeps_the_ticket_building(tmp_path: Path) -> 
     flow.poll()
 
     assert flow.workflow_state() == "building"
+
+
+class ExternalFlow(ReviewFlow):
+    def snapshot(self) -> TrackedTicket:
+        return dataclasses.replace(super().snapshot(), ready_starts_review=True)
+
+
+REGISTERED = "approve-1/3"
+
+
+def _no_ac(flow: ReviewFlow) -> None:
+    body = APPROVE.format(round="1/3", head=flow.head).replace(" ac=met", "")
+    flow.add(REGISTERED, body, "codex-login")
+
+
+def _open_blocking(flow: ReviewFlow) -> None:
+    body = APPROVE.format(round="1/3", head=flow.head) + "\n1. [blocking] f-1. Defect.\n"
+    flow.add(REGISTERED, body, "codex-login")
+
+
+def _edited(flow: ReviewFlow) -> None:
+    flow.add(REGISTERED, APPROVE.format(round="1/3", head=flow.head), "codex-login")
+    flow.comments[-1] = dataclasses.replace(flow.comments[-1], edited_at=flow.now[0] + 1)
+
+
+def _over_cap(flow: ReviewFlow) -> None:
+    flow.add(REGISTERED, APPROVE.format(round="4/3", head=flow.head), "codex-login")
+
+
+@pytest.mark.parametrize("post", [_no_ac, _open_blocking, _edited, _over_cap])
+def test_a_refused_approve_never_hands_off_a_building_ticket(
+    tmp_path: Path, post: Callable[[ReviewFlow], None]
+) -> None:
+    flow = ReviewFlow(tmp_path)
+    flow.reviewed_then_drifted()
+    post(flow)
+
+    flow.poll()
+    flow.poll()
+
+    assert outcome(flow.queue, REGISTERED).startswith("rejected-")
+    assert flow.workflow_state() == "building"
+
+
+def test_a_ready_at_the_reconciled_head_is_already_shipped(tmp_path: Path) -> None:
+    flow = ExternalFlow(tmp_path)
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex", "approve-1/3")
+    flow.drift_to_building()
+    assert flow.approve("1/3") == "handed-off-reconciled"
+    reviews = len(jobs(flow.queue, "review"))
+
+    assert flow.post("ready-again", READY.format(head=flow.head), "claude-login") == (
+        "ready-already-shipped"
+    )
+    assert len(jobs(flow.queue, "review")) == reviews
+
+
+def test_a_reentry_after_a_reconciled_approve_counts_its_round(tmp_path: Path) -> None:
+    flow = ExternalFlow(tmp_path)
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex", "approve-1/3")
+    assert flow.approve("1/3") == "handed-off"
+    assert flow.ready(HEADS[2]) == "queued-review"
+    flow.finish("codex", "approve-2/3")
+    flow.drift_to_building()
+    assert flow.approve("2/3") == "handed-off-reconciled"
+
+    assert flow.ready(HEADS[3]) == "queued-review"
+    assert round_of(jobs(flow.queue, "review")[-1]) == "3/3"
+
+
+def test_a_stale_approve_reconciled_by_the_poll_counts_its_round(tmp_path: Path) -> None:
+    flow = ReviewFlow(tmp_path)
+    flow.reviewed_then_drifted()
+    flow.stale_approve()
+    flow.poll()
+    assert flow.workflow_state() == "handed-off"
+
+    assert flow.post("ready-again", READY.format(head=flow.head), "claude-login") == (
+        "ready-already-shipped"
+    )
+    assert flow.ready(HEADS[2]) == "queued-review"
+    assert round_of(jobs(flow.queue, "review")[-1]) == "2/3"
