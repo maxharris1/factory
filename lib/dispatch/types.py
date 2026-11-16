@@ -80,6 +80,8 @@ class TrackedTicket:
     git_branch_name: str | None = None
     pr_number: str | None = None
     brief: str | None = None
+    brief_text: str | None = None
+    brief_url: str | None = None
     # #495: the trusted brief the poll picked once (canonical_brief); brief
     # and the reviewer's criteria both come from it. issue_body and pr_body
     # are the source issue's text and the PR description, None when unread.
@@ -244,6 +246,16 @@ class ReviewActions(Protocol):
 
     def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
         """Post body on the PR unless a comment carrying marker exists."""
+        ...
+
+    def open_issue_labels(self, ticket: TrackedTicket, number: int) -> tuple[str, ...] | None:
+        """The labels of issue `number` in the ticket's repo, or None once it is closed."""
+        ...
+
+    def comment_on_issue_once(
+        self, ticket: TrackedTicket, number: int, body: str, marker: str
+    ) -> None:
+        """Post body on issue `number` unless a comment carrying marker exists."""
         ...
 
 

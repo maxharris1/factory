@@ -633,6 +633,7 @@ def collect_snapshot(
     poll_seconds: int = POLL_SECONDS,
     orch: OrchConfig | None = None,
     publish_seconds: float | None = None,
+    uptime: component_health.Uptime | None = None,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
@@ -646,7 +647,9 @@ def collect_snapshot(
     dashboard writer are expected to heartbeat (lib/health.py).
     `publish_seconds` is how often a pushing writer publishes the snapshot
     (None for a one-off snapshot): the page keeps the component states it
-    observed until a newer snapshot is overdue (lib/dashboard_page.py)."""
+    observed until a newer snapshot is overdue (lib/dashboard_page.py).
+    `uptime` is the boot and monotonic clock at `now`, so a heartbeat's age
+    leaves out time the box was suspended (lib/health.py)."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -714,6 +717,7 @@ def collect_snapshot(
         queued=[(item["job"], item["recipient"]) for item in db["queued"]],
         machines=machines,
         orch=orch,
+        uptime=uptime,
     )
     for item in db["queued"]:
         flag = report.no_waiter_for(item["recipient"])

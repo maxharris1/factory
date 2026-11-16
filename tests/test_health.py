@@ -251,11 +251,13 @@ def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.Monkey
     assert columns == [
         "component", "device", "bot", "pid", "started_at", "last_seen",
         "version", "interval_seconds", "stopped_at", "checked_at",
-        "cycle_started_at", "last_cycle_seconds",
+        "cycle_started_at", "last_cycle_seconds", "seen_boot", "seen_monotonic",
     ]
     for record in values:
         (component, device, bot, pid, started, seen, version, interval, stopped, checked,
-         cycle_started, last_cycle) = record
+         cycle_started, last_cycle, seen_boot, seen_monotonic) = record
+        assert seen_boot is None or health._BOOT.fullmatch(seen_boot)
+        assert seen_monotonic is None or isinstance(seen_monotonic, float)
         assert component in health.COMPONENTS
         assert health.TOKEN.fullmatch(device)
         assert bot in ("", "claude-bot", "codex-bot", "cursor-bot")

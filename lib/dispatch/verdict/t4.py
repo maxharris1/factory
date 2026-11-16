@@ -12,7 +12,15 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.types import (
+    AlreadyMergedShip,
+    CIResult,
+    Comment,
+    Registration,
+    RetryableShipError,
+    RetryableStateError,
+    TrackedTicket,
+)
 from lib.handoff import parse_comment
 
 
@@ -59,15 +67,26 @@ class T4Mixin:
         ):
             return True, "superseded-approve"
         review_head = self._latest_review_head(ticket)
-        if state not in ("review", "awaiting-ok") or reported_round != review_round + 1:
+        held_fix = state in ("fixing", "waiting-max") and self._held_ci_fix_out(
+            ticket, comment.id
+        )
+        if (
+            state not in ("review", "awaiting-ok") and not held_fix
+        ) or reported_round != review_round + 1:
             self._wake_comment_problem(
                 ticket, comment, "stale", "stale-approve"
             )
             return True, "stale-approve"
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
-        if state == "awaiting-ok" and ticket.mergeable_state in ("dirty", "behind"):
-            return self._hold_base_update(ticket, comment, current_head)
+        if state == "waiting-max":
+            return False, "approve-held-ci-fix-paused"
+        if state == "awaiting-ok" or (
+            held_fix and not self._open_job_at(ticket, current_head)
+        ):
+            held = self._held_approval_gate(ticket, comment, current_head)
+            if held is not None:
+                return held
         if not _is_full_sha(current_head):
             self._wake_ship_failed(
                 ticket,
@@ -79,8 +98,12 @@ class T4Mixin:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            if state == "awaiting-ok" or self._hold_in_play(ticket, current_head):
-                return False, "approve-ci-red"
+            if state in ("awaiting-ok", "fixing") or self._hold_in_play(
+                ticket, current_head
+            ):
+                return self._held_ci_red(
+                    ticket, comment, current_head, result, state, review_round
+                )
             if ticket.factory.start_before_ci:
                 return self._approve_ci_red_fix(
                     ticket, comment, current_head, result, review_round
@@ -97,6 +120,32 @@ class T4Mixin:
                 head=current_head,
             )
             return True, "approve-ci-red"
+        return self._ship_approval(
+            ticket, comment, approved_head, current_head, reported_round
+        )
+
+    def _held_approval_gate(
+        self, ticket: TrackedTicket, comment: Comment, head: str
+    ) -> tuple[bool, str] | None:
+        if ticket.mergeable_state in ("dirty", "behind"):
+            return self._hold_base_update(ticket, comment, head)
+        result = ticket.ci.get(head)
+        if result is None or result.status == "pending":
+            return False, "approve-ci-not-green"
+        if result.status == "failure":
+            state, review_round = self._review_context(ticket)
+            return self._held_ci_red(ticket, comment, head, result, state, review_round)
+        return None
+
+    def _ship_approval(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        approved_head: str,
+        current_head: str,
+        reported_round: int | None,
+    ) -> tuple[bool, str]:
+        ship = ticket.factory.ship
         if ticket.factory.start_before_ci:
             self._record_ci_result(ticket, current_head, "success")
         covered = self._approval_covers(ticket, approved_head, current_head)
@@ -166,6 +215,38 @@ class T4Mixin:
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
 
+    def _ship_covered(
+        self,
+        ticket: TrackedTicket,
+        approve: Comment,
+        approved_head: str,
+        approved_round: int,
+        head: str,
+    ) -> tuple[bool, str]:
+        """Ship the red-CI APPROVE a ready covers (T2, #493), with T4's
+        intent replay and failure handling kept on the APPROVE."""
+        intent = self._ship_intent(ticket, approve.id)
+        try:
+            if intent is not None:
+                return self._replay_ship_intent(
+                    ticket, approve, head, ticket.factory.ship, intent
+                )
+            if self._review_context(ticket)[0] == "awaiting-ok":
+                held = self._held_approval_gate(ticket, approve, head)
+                if held is not None:
+                    return held
+            return self._ship_approval(
+                ticket, approve, approved_head, head, approved_round
+            )
+        except RetryableShipError:
+            self._discard_pending_ship_intent(ticket, approve.id, "fixing")
+            raise
+        except RetryableStateError:
+            raise
+        except Exception as exc:
+            self._ship_raised(ticket, approve, exc)
+            return True, f"failed-{type(exc).__name__}"
+
     def _approve_refusal(
         self, comment: Comment, fields: Mapping[str, str]
     ) -> ApproveRefusal | None:
@@ -174,6 +255,76 @@ class T4Mixin:
         if comment.created_at < since:
             return None
         return approve_refusal(fields, parse_comment(comment.body).body)
+
+    def _held_ci_red(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        result: CIResult,
+        state: str,
+        review_round: int,
+    ) -> tuple[bool, str]:
+        if not ticket.factory.start_before_ci:
+            return False, "approve-ci-red"
+        key = _held_ci_fix_key(ticket, comment.id, head)
+        with self._connect() as connection:
+            queued = connection.execute(
+                "SELECT 1 FROM jobs WHERE dedupe_key = ?", (key,)
+            ).fetchone()
+        if queued is None:
+            _status, count = self._record_ci_result(ticket, head, "failure")
+            if self._mark_stuck_on_third_red(ticket, comment, head, count):
+                return True, "stuck-ci-red-3"
+            self._queue_ci_fix(
+                ticket,
+                self._latest_fix_answer(ticket, comment, head),
+                head,
+                result,
+                review_round,
+                self._generation(ticket.repo, ticket.ticket_id),
+                dedupe_key=key,
+            )
+        if state == "review":
+            self._set_workflow_state(ticket, "fixing")
+        return False, "approve-ci-red-fix-held"
+
+    def _latest_fix_answer(
+        self, ticket: TrackedTicket, approve: Comment, head: str
+    ) -> Comment:
+        source = approve
+        while True:
+            answer = self._answered_by(
+                ticket,
+                source,
+                "fix",
+                ticket.factory.builder_harness,
+                queued_at=self.queue.now(),
+                head=head,
+            )
+            if answer is None:
+                return source
+            source = answer
+
+    def _held_ci_fix_out(self, ticket: TrackedTicket, approve_id: str) -> bool:
+        prefix = _held_ci_fix_key(ticket, approve_id, "")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM jobs WHERE substr(dedupe_key, 1, ?) = ?",
+                (len(prefix), prefix),
+            ).fetchone()
+        return row is not None
+
+    def _held_approve_covers(self, ticket: TrackedTicket, head: str) -> bool:
+        for comment in ticket.comments:
+            if self._is_handled(ticket, comment.id):
+                continue
+            if not self._held_ci_fix_out(ticket, comment.id):
+                continue
+            approved = parse_comment(comment.body).as_dict().get("head")
+            if approved and self._approval_covers(ticket, approved, head):
+                return True
+        return False
 
     def _approve_ci_red_fix(
         self,
@@ -197,3 +348,7 @@ class T4Mixin:
         )
         self._set_workflow_state(ticket, "fixing")
         return True, "approve-ci-red-fix"
+
+
+def _held_ci_fix_key(ticket: TrackedTicket, approve_id: str, head: str) -> str:
+    return f"t4-held:{_scope(ticket.repo, ticket.ticket_id)}:{approve_id}:{head}"

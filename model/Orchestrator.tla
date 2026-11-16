@@ -226,7 +226,7 @@ T2ReadyGreen ==
   /\ state' = "review"
   /\ paused' = "none"
   /\ configOk' = configOk
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0]
   /\ \/ /\ cap = 0
         /\ cap' \in {1, 3}
@@ -250,6 +250,15 @@ T2CiRedStuck ==
   /\ keep
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.gate = 3, !.deaths = 0]
+
+T2ReadyCovered ==
+  /\ "T2" \notin Omit
+  /\ state = "fixing"
+  /\ flags.covered
+  /\ state' = "ship"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0]
 
 \* T6. No handoff, or the job timeout. Retry once. Second time: stuck.
 \* Section 4.1 draws that edge from Planning, Review, and Fixing, and from Building.
@@ -340,6 +349,15 @@ T4Approve ==
   /\ keep
   /\ flags' = [flags EXCEPT !.covered = TRUE]
   /\ counts' = [counts EXCEPT !.deaths = 0]
+
+T4ApproveCiRed ==
+  /\ "T4" \notin Omit
+  /\ state = "review"
+  /\ counts.gate < 2
+  /\ state' = "fixing"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = TRUE]
+  /\ counts' = [counts EXCEPT !.gate = @ + 1, !.deaths = 0]
 
 T4PatchDiffers ==
   /\ "T4" \notin Omit
@@ -668,10 +686,10 @@ Next ==
   \/ T5Ask \/ T5Answer \/ T5Abandon
   \/ T1KindGoPlan \/ T1KindGoBuild
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
-  \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck
+  \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck \/ T2ReadyCovered
   \/ T6JobRetry \/ T6JobStuck \/ T6DeviceOffline
   \/ T3Revise \/ T3Unsat \/ T7Blocked
-  \/ T4Approve \/ T4HeadMoves \/ T4PatchDiffers
+  \/ T4Approve \/ T4ApproveCiRed \/ T4HeadMoves \/ T4PatchDiffers
   \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
   \/ T4Hold \/ T4HoldOk \/ T4HoldOkQueue \/ T4HoldOkHandoff
   \/ T4HoldPatchDiffers \/ T4HoldBaseUpdate
@@ -744,12 +762,14 @@ T2Decided ==
   /\ state \in {"building", "fixing"} => ENABLED T2ReadyGreen
   /\ state \in {"building", "fixing"} /\ counts.gate < 2 => ENABLED T2CiRed
   /\ state \in {"building", "fixing"} /\ counts.gate = 2 => ENABLED T2CiRedStuck
+  /\ state = "fixing" /\ flags.covered => ENABLED T2ReadyCovered
 
 T3Decided ==
   state \in {"review", "awaiting-ok"} => ENABLED T3Revise /\ ENABLED T3Unsat
 
 T4Decided ==
   /\ state = "review" => ENABLED T4Approve
+  /\ state = "review" /\ counts.gate < 2 => ENABLED T4ApproveCiRed
   /\ state = "ship" => ENABLED T4PatchDiffers
   /\ state = "ship" /\ flags.covered =>
        ENABLED T4ShipMerge /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter

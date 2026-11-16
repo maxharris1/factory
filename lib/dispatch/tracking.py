@@ -319,6 +319,11 @@ class TrackingMixin:
                                  AND filing.status IN ('pending', 'filed')
                            ) OR EXISTS (
                                SELECT 1
+                               FROM followup_wakes AS wake
+                               WHERE wake.repo = LOWER(tracked.repo)
+                                 AND wake.ticket_id = tracked.ticket_id
+                           ) OR EXISTS (
+                               SELECT 1
                                FROM auto_extra_comments AS notice
                                WHERE notice.repo = LOWER(tracked.repo)
                                  AND notice.ticket_id = tracked.ticket_id

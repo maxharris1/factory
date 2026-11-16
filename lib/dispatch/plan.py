@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
+from lib.handoff import parse_comment
 from lib.queue import JobRequest
 
 
@@ -83,6 +84,7 @@ class PlanMixin:
                         round_number=int(state["review_round"]) + 1,
                         cap=self._effective_cap(ticket, connection),
                         instruction=_comment_link(comment),
+                        plan_text=parse_comment(comment.body).body.strip(),
                     ),
                 )
                 self._enqueue_step(

@@ -231,7 +231,7 @@ def test_factory_md_is_appended_as_an_additional_context_section() -> None:
     assert "base_branch: dev" not in text[section:]
 
 
-def test_without_factory_md_the_brief_says_so_and_points_at_the_base_branch() -> None:
+def test_before_factory_md_the_brief_says_so_and_points_at_the_base_branch() -> None:
     text = render_brief(job(), bot="claude-bot", factory_root=FACTORY_ROOT, context=None, context_note="gh api failed")
     section = text[text.index("## Additional context from factory.md") :]
     assert "not loaded (gh api failed)" in section

@@ -124,9 +124,10 @@ class HoldsMixin:
     ) -> tuple[bool, str]:
         _state, review_round = self._review_context(ticket)
         base = ticket.factory.base_branch
+        source = self._latest_fix_answer(ticket, comment, head)
         request = self._base_update_request(
             ticket,
-            comment,
+            source,
             head,
             review_round,
             f"The approved PR is {ticket.mergeable_state} against {base} while "
@@ -140,7 +141,7 @@ class HoldsMixin:
                 job, _answered = self._enqueue_step(
                     connection,
                     ticket,
-                    comment,
+                    source,
                     request,
                     dedupe_key=_base_update_key(ticket, head),
                 )
