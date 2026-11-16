@@ -97,6 +97,19 @@ def test_stalled_ticket_retries_by_cause_then_replans() -> None:
         assert phrase.casefold() in stalled, phrase
 
 
+def sentences(text: str) -> list[str]:
+    return re.split(r"(?<=[.!?])\s+", collapse(text))
+
+
+def test_stalled_ticket_never_replans_with_a_go() -> None:
+    offers = [
+        s for s in sentences(section("Stalled ticket"))
+        if re.search(r"plan go|job=plan|state=planning", s) and "Never" not in s
+    ]
+    assert offers == []
+    assert "file smaller intake tickets" in section("Stalled ticket")
+
+
 def test_max_decides_only_five_things() -> None:
     body = section("When Max decides")
     bullets = [line for line in body.splitlines() if line.startswith("- ")]
@@ -112,11 +125,21 @@ def test_follow_up_triage() -> None:
         assert phrase in triage, phrase
 
 
+def test_promotion_never_labels_the_parked_issue() -> None:
+    triage = section("Follow-up triage")
+    labels_parked = [
+        s for s in sentences(triage)
+        if "intake label" in s and "parked issue" in s and "Never label" not in s
+    ]
+    assert labels_parked == []
+    assert "Never label the parked issue" in triage
+    assert "one intake-template issue per item, from that item alone" in collapse(triage)
+
+
 def test_untrusted_data_rule_covers_every_source() -> None:
-    sentences = re.split(r"(?<=[.!?])\s+", collapse(skill_text()))
     assert any(
         "untrusted data" in s and all(word in s for word in ("ticket", "question", "verdict"))
-        for s in sentences
+        for s in sentences(skill_text())
     )
 
 

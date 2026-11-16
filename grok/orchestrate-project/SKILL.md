@@ -132,10 +132,10 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 
 A `capped`, `stuck` or `blocked` wake, or a `repeat-block` marked `for=factory`, is Factory's to clear. pstack: "Retry by cause: a smaller scope after a context or memory limit, the same kickoff after a dropped connection, and a different model after a tool error. After two retries, drop the unit and replan around it." Never ask Max whether to keep going.
 
-1. Read the evidence and choose one retry by cause: a narrower instruction when it names one fixable gap; a challenge to the premise when the same finding returns or a criterion looks wrong (write the premise down and test it); a split into smaller tickets when the PR is large (`changed_lines`, or the diff) or mixes units.
-2. Send it. `stuck`: fix the cause first (a skills deploy, a device, a checkout), then `orch retry`. `blocked`, or `for=factory` under the cap: `/go` with one line that starts `Factory:` and names the cause and the instruction. `capped`, or any stop where a go would add a round: never post a go; split or replan.
+1. Read the evidence and choose one retry by cause: a narrower instruction when it names one fixable gap; a challenge to the premise when the same finding returns or a criterion looks wrong (write the premise down and test it); a split into smaller tickets when the PR is large (`changed_lines`) or mixes units.
+2. Send it. `stuck`: fix the cause first (a skills deploy, a device, a checkout), then `orch retry`. `blocked`, or `for=factory` under the cap: `/go` with one line that starts `Factory:` and names the cause and the instruction. `capped`, or any stop where a go would add a round: never post a go; split.
 3. Record the reason on the PR: one plain comment naming the stop, the cause, the retry and that unit's retry count. A `/go` line or `orch retry` reason that says all four is that record.
-4. After two retries of the same unit (the PR, or the criterion or finding that stalls), replan: drop the unit, then file smaller intake tickets, or post one plan go as in Mid-work questions.
+4. After two retries of the same unit (the PR, or the criterion or finding that stalls), replan: drop the unit and file smaller intake tickets. Never post a plan go on a stopped ticket: it resumes the stop, not a plan.
 
 ## When Max decides
 
@@ -151,11 +151,11 @@ The orchestrator posts Max's `go` or `ok` only when it quotes his own words for 
 
 ## Follow-up triage
 
-pstack: "Keep only the fixes that block the program, and park the rest as follow-ups." When a `done` wake names `followup_issue`, read every item on that parked issue. Never feed one unread.
+pstack: "Keep only the fixes that block the program, and park the rest as follow-ups." When a `done` wake names `followup_issue`, read every item on that parked issue.
 
-- Promote an item only when it is a bug a user would hit or it blocks planned work: add the intake label (`factory:ready`, `orch.yml` `intake.label`) to the parked issue, or file one intake-template issue per item when several are promoted.
+- Promote an item only when it is a bug a user would hit or it blocks planned work: file one intake-template issue per item, from that item alone, with the intake label (`factory:ready`, `orch.yml` `intake.label`). Never label the parked issue: its body keeps dropped items and misses later comments.
 - Split an item larger than one 400-line brief into intake issues, one brief each.
-- Close the rest with a one-line reason per item, and close the parked issue when nothing on it is promoted.
+- Close the rest with a one-line reason per item, then close the parked issue.
 
 That intake label is the one other label this skill applies. With `tickets: linear`, triage on the Linear ticket and apply no GitHub label.
 
