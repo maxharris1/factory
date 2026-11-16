@@ -12,7 +12,15 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.types import (
+    AlreadyMergedShip,
+    CIResult,
+    Comment,
+    Registration,
+    RetryableShipError,
+    RetryableStateError,
+    TrackedTicket,
+)
 from lib.handoff import parse_comment
 
 
@@ -66,8 +74,10 @@ class T4Mixin:
             return True, "stale-approve"
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
-        if state == "awaiting-ok" and ticket.mergeable_state in ("dirty", "behind"):
-            return self._hold_base_update(ticket, comment, current_head)
+        if state == "awaiting-ok":
+            held = self._held_approval_gate(ticket, comment, current_head)
+            if held is not None:
+                return held
         if not _is_full_sha(current_head):
             self._wake_ship_failed(
                 ticket,
@@ -79,7 +89,7 @@ class T4Mixin:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            if state == "awaiting-ok" or self._hold_in_play(ticket, current_head):
+            if self._hold_in_play(ticket, current_head):
                 return False, "approve-ci-red"
             if ticket.factory.start_before_ci:
                 return self._approve_ci_red_fix(
@@ -97,6 +107,31 @@ class T4Mixin:
                 head=current_head,
             )
             return True, "approve-ci-red"
+        return self._ship_approval(
+            ticket, comment, approved_head, current_head, reported_round
+        )
+
+    def _held_approval_gate(
+        self, ticket: TrackedTicket, comment: Comment, head: str
+    ) -> tuple[bool, str] | None:
+        if ticket.mergeable_state in ("dirty", "behind"):
+            return self._hold_base_update(ticket, comment, head)
+        result = ticket.ci.get(head)
+        if result is None or result.status == "pending":
+            return False, "approve-ci-not-green"
+        if result.status == "failure":
+            return False, "approve-ci-red"
+        return None
+
+    def _ship_approval(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        approved_head: str,
+        current_head: str,
+        reported_round: int | None,
+    ) -> tuple[bool, str]:
+        ship = ticket.factory.ship
         if ticket.factory.start_before_ci:
             self._record_ci_result(ticket, current_head, "success")
         covered = self._approval_covers(ticket, approved_head, current_head)
@@ -165,6 +200,38 @@ class T4Mixin:
         )
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _ship_covered(
+        self,
+        ticket: TrackedTicket,
+        approve: Comment,
+        approved_head: str,
+        approved_round: int,
+        head: str,
+    ) -> tuple[bool, str]:
+        """Ship the red-CI APPROVE a ready covers (T2, #493), with T4's
+        intent replay and failure handling kept on the APPROVE."""
+        intent = self._ship_intent(ticket, approve.id)
+        try:
+            if intent is not None:
+                return self._replay_ship_intent(
+                    ticket, approve, head, ticket.factory.ship, intent
+                )
+            if self._review_context(ticket)[0] == "awaiting-ok":
+                held = self._held_approval_gate(ticket, approve, head)
+                if held is not None:
+                    return held
+            return self._ship_approval(
+                ticket, approve, approved_head, head, approved_round
+            )
+        except RetryableShipError:
+            self._discard_pending_ship_intent(ticket, approve.id, "fixing")
+            raise
+        except RetryableStateError:
+            raise
+        except Exception as exc:
+            self._ship_raised(ticket, approve, exc)
+            return True, f"failed-{type(exc).__name__}"
 
     def _approve_refusal(
         self, comment: Comment, fields: Mapping[str, str]
