@@ -235,15 +235,12 @@ def _shut(sock: socket.socket) -> None:
 
 
 class _Tracked:
-    """Tracks the socket as soon as it exists, so the cutoff also covers a
-    proxy CONNECT and the TLS handshake."""
-
     def __init__(self, *args: Any, cutoff: _Cutoff, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._cutoff = cutoff
-        self._create_connection = self._tracked_connection
+        self._create_connection = self._open_tracked_before_tunnel
 
-    def _tracked_connection(self, *args: Any, **kwargs: Any) -> socket.socket:
+    def _open_tracked_before_tunnel(self, *args: Any, **kwargs: Any) -> socket.socket:
         sock = socket.create_connection(*args, **kwargs)
         self._cutoff.track(sock)
         return sock
