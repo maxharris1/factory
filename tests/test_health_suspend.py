@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import health
+from lib import heal, health
 
 NOW = 1_800_000_000.0
 BOOT = "8cd10924-c547-44ff-9fc4-1decdc2c833e"
@@ -171,3 +171,61 @@ def test_beats_from_the_real_clocks_record_this_boot(tmp_path: Path) -> None:
     assert row.seen_boot == uptime.boot
     assert 0 <= uptime.monotonic - row.seen_monotonic < 5
     assert abs(row.last_seen - time.time()) < 5
+
+
+CHECK_CASES = [
+    ("tunnel", "box", health.BEAT_SECONDS),
+    ("device-probe", "pc", health.PROBE_SECONDS),
+    ("dashboard-push", "box", 60.0),
+]
+
+
+def reboot_with_wall_behind(clocks: Clocks) -> None:
+    clocks.boot = REBOOT
+    clocks.wall -= 60.0
+    clocks.monotonic = 10.0
+
+
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_current_boot_check_outranks_a_previous_boot_row_ahead_on_the_wall(
+        tmp_path: Path, component: str, device: str, interval: float) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat(component, device, pid=101, interval=interval)
+    reboot_with_wall_behind(clocks)
+    store.beat(component, device, pid=202, interval=interval)
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime())
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.reason, item.pid) == ("up", "", 202)
+
+
+def test_a_current_boot_tunnel_check_requests_no_restart(tmp_path: Path) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat("tunnel", "box", pid=101, interval=health.BEAT_SECONDS)
+    reboot_with_wall_behind(clocks)
+    store.beat("tunnel", "box", pid=202, interval=health.BEAT_SECONDS)
+    expected = health.Expected((health.Slot("tunnel", ("box",)),), frozenset({"tunnel"}))
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime(), expected=expected)
+    actions = heal.decide(health.report_json(report, clocks.wall), {},
+                          heal.Facts("box", frozenset({"linear-webhook"})), clocks.wall)
+    assert actions == []
+
+
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_failed_current_boot_check_leaves_a_previous_boot_success_down(
+        tmp_path: Path, component: str, device: str, interval: float) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat(component, device, pid=101, interval=interval)
+    reboot_with_wall_behind(clocks)
+    store.checked(component, device, pid=202, interval=interval)
+    assert state(db, clocks, component, device)[0] == "down"

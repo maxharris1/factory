@@ -1261,32 +1261,38 @@ def _better(a: Component, b: Component) -> bool:
     return (_RANK[a.state], a.last_seen or 0.0) > (_RANK[b.state], b.last_seen or 0.0)
 
 
-def _latest_checks(rows: Sequence[Heartbeat]) -> list[Heartbeat]:
+def _latest_checks(rows: Sequence[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
     """A device probe, tunnel check or dashboard push is a fact about its
     target, not about the process that made it: across processes (a poller
     or listener that restarted), the newest check decides, with the newest
     success as its last seen. Every other component keeps one row per
     process."""
-    merged: dict[tuple[str, str, str], Heartbeat] = {}
+    groups: dict[tuple[str, str, str], list[Heartbeat]] = {}
     others = []
     for row in rows:
-        if row.component not in CHECKS:
+        if row.component in CHECKS:
+            groups.setdefault((row.component, row.device, row.bot), []).append(row)
+        else:
             others.append(row)
-            continue
-        key = (row.component, row.device, row.bot)
-        held = merged.get(key)
-        if held is None:
-            merged[key] = row
-            continue
-        newer = row if _checked(row) > _checked(held) else held
-        seen = max((row, held), key=lambda r: -math.inf if r.last_seen is None else r.last_seen)
-        merged[key] = newer._replace(
-            last_seen=seen.last_seen,
-            seen_boot=seen.seen_boot,
-            seen_monotonic=seen.seen_monotonic,
-            checked_at=max(_checked(row), _checked(held)),
-        )
-    return others + list(merged.values())
+    merged = []
+    for group in groups.values():
+        group = _without_earlier_boots_once_this_boot_succeeded(group, uptime)
+        last_check = max(group, key=_checked)
+        last_success = max(group, key=lambda r: -math.inf if r.last_seen is None else r.last_seen)
+        merged.append(last_check._replace(
+            last_seen=last_success.last_seen,
+            seen_boot=last_success.seen_boot,
+            seen_monotonic=last_success.seen_monotonic,
+            checked_at=_checked(last_check),
+        ))
+    return others + merged
+
+
+def _without_earlier_boots_once_this_boot_succeeded(
+        group: list[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
+    if uptime is None or all(r.seen_boot != uptime.boot for r in group):
+        return group
+    return [r for r in group if r.seen_boot in (None, uptime.boot)]
 
 
 def _checked(row: Heartbeat) -> float:
@@ -1322,7 +1328,7 @@ def build_report(
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
-    for row in _latest_checks(rows or ()):
+    for row in _latest_checks(rows or (), uptime):
         state, reason = classify(row, now, uptime)
         item = Component(
             component=row.component,
