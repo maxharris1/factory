@@ -1443,11 +1443,14 @@ def test_failed_first_snapshot_write_leaves_no_half_pair(tmp_path: Path, monkeyp
 def test_html_is_self_contained(tmp_path: Path) -> None:
     html = render_html(snapshot_for(tmp_path))
     assert html.startswith("<!doctype html>")
-    for needle in ("<link", "src=", "http://", "https://"):
+    for needle in ("<link", "src=", "http://"):
         assert needle not in html
-    # The live page polls its own status.json and makes no other request
-    # (tests/test_dashboard_mission_control.py checks the poll itself).
-    assert re.findall(r"fetch\(([^,)]+)", html) == ["STATUS_URL"]
+    # #563: the only https:// text is a link to github.com, never an asset.
+    assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
+    # The live page polls its own status.json, and otherwise calls only its own
+    # /api (tests/test_dashboard_mission_control.py checks the poll itself).
+    assert re.findall(r"fetch\(([^,)]+)", html) == ["path", "'/api/session'", "STATUS_URL"]
+    assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", html))
     assert "var STATUS_URL = 'status.json';" in html
 
 

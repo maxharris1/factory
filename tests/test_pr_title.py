@@ -347,3 +347,18 @@ def test_each_long_repo_keeps_its_own_source_when_the_shown_names_match(tmp_path
     assert "#115 (PR #116)" in page
     assert "#114 (PR #116)" in page
     assert "r" * 93 + "…#116" not in page
+
+
+def test_a_github_pr_with_no_source_issue_still_links_its_pr(tmp_path: Path) -> None:
+    dispatcher, _ = setup(tmp_path, now=[1_800_000_000.0])
+    go = comment("c1", GO.format(state="building"), author="grok-login")
+    github = titled_ticket(comments=(go,), source=None, repo="maxharris1/cleffy", ticket_id="12", pr_number="12")
+    dispatcher.poll_once(FakeSource(github, github=(github,)))
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+    snapshot = collect_snapshot(tmp_path / "d.db", log, now=1_800_000_100.0)
+
+    assert sources(tmp_path / "d.db") == []
+    (tracked,) = snapshot["tickets"]
+    assert (tracked["tracker"], tracked["ticket_id"], tracked["source"], tracked["pr"]) == ("github", "12", None, "12")
+    assert 'href="https://github.com/maxharris1/cleffy/pull/12"' in render_pages(snapshot)["job.html"]

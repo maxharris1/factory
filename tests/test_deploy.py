@@ -335,6 +335,29 @@ def test_dashboard_server_guard_checks_the_port(tmp_path: Path, port: str, ok: b
     assert (result.returncode == 0) is ok, result.stderr
 
 
+@pytest.mark.parametrize(
+    "extra,needle",
+    [
+        ({"USER": "cursor-bot"}, "bot account"),
+        ({"USER": "factory-dash", "DASHBOARD_ACTION_CLIENTS": ""}, "DASHBOARD_ACTION_CLIENTS"),
+        ({"USER": "factory-dash", "DASHBOARD_ACTION_CLIENTS": "100.101.102.103"},
+         "DASHBOARD_ACTION_CLIENTS"),
+    ],
+)
+def test_dashboard_server_guard_refuses_unsafe_github_actions(
+    tmp_path: Path, extra: dict[str, str], needle: str
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    env = {"TAILNET_IP": "100.101.102.103", "DASHBOARD_DIR": str(site),
+           "HOME": str(tmp_path / "home"), "DASHBOARD_GITHUB_CLIENT_ID": "Ov23liTESTCLIENT",
+           "DASHBOARD_APPROVER": "maxharris1", "DASHBOARD_ACTION_CLIENTS": "100.64.0.7", **extra}
+    result = _check(env)
+    assert result.returncode != 0
+    # On a host whose own user is a bot account (the box), that refusal comes first.
+    assert needle in result.stderr or "bot account" in result.stderr
+
+
 def test_dashboard_server_unit_is_documented_not_installed() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "deploy/factory-dashboard-http.service" in readme
