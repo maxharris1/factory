@@ -569,7 +569,10 @@ class SQLiteJobQueue:
         beside a remote worker that may still run. It leaves running only
         through the poller's dead path, once its runner is gone and the
         device confirms its worker gone (lib/job_state.py), or as stuck when
-        the device stays offline for an hour. The check is in the same
+        the device stays offline for an hour. An autostart claim with no runner
+        and no heartbeat since its placement is never timed out either (#460):
+        its waiter may still be in preflight, and the poller's claimed release
+        requeues it with no attempt charged. The checks are in the same
         UPDATE, so a start recorded after the sweep read the job wins. A box
         job keeps the plain timeout.
         """
@@ -587,7 +590,7 @@ class SQLiteJobQueue:
             return False
         with self._connect() as connection:
             if job.state == "running":
-                predicate += _no_remote_start(connection)
+                predicate += _no_remote_start(connection) + _not_claimed(connection)
             changed = connection.execute(
                 f"""
                 UPDATE jobs
@@ -813,18 +816,29 @@ def claim_order(
     return sorted(rows, key=key)
 
 
+def _slot_columns(connection: sqlite3.Connection) -> set[str]:
+    if not _has_table(connection, SLOTS_TABLE):
+        return set()
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")}
+
+
+def _not_claimed(connection: sqlite3.Connection) -> str:
+    if not {"job_id", "placed_at", "runner_pid", "autostart_pid"} <= _slot_columns(connection):
+        return ""
+    return (
+        f" AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} AS slot"
+        " WHERE slot.job_id = jobs.id AND slot.autostart_pid IS NOT NULL"
+        " AND slot.runner_pid IS NULL AND jobs.last_activity_at <= slot.placed_at)"
+    )
+
+
 def _no_remote_start(connection: sqlite3.Connection) -> str:
     """SQL that holds when the job's slot records no remote start.
 
     Empty when there is no slot table, or one from before F2-02 with no
     remote_started column (no remote start was ever recorded in it).
     """
-    if not _has_table(connection, SLOTS_TABLE):
-        return ""
-    columns = {
-        str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")
-    }
-    if not {"job_id", "remote_started"} <= columns:
+    if not {"job_id", "remote_started"} <= _slot_columns(connection):
         return ""
     return (
         f" AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} AS slot"

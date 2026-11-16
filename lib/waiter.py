@@ -17,7 +17,11 @@ runs as the owning bot's own user and login, starts the job itself:
   for a box behind origin/main) lagging in device_sync and fails the job
   unhandled with a preflight-lagging event (#357). T6 requeues that same row
   after a backoff, charging no round, attempt or free requeue, and marks the
-  ticket stuck device-lagging if it still lags past the bound;
+  ticket stuck device-lagging if it still lags past the bound. A device
+  the preflight's ssh cannot reach (`preflight-unreachable`, #460) requeues
+  the job at once with no round, attempt or free requeue charged, and backs
+  that device off for UNREACHABLE_BACKOFF_SECONDS so the next claim goes to
+  a reachable device;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -130,7 +134,7 @@ from typing import Protocol
 import yaml
 
 from lib.brief import BriefError, render_brief
-from lib.device_pool import DevicePool, Placement, box_device
+from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, box_device
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
@@ -147,9 +151,9 @@ from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
 from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
-from lib.skill_preflight import CheckoutLagging, PreflightError
+from lib.skill_preflight import CheckoutLagging, DeviceUnreachable, PreflightError
 from lib import device_sync
-from lib.job_state import fail_lagging
+from lib.job_state import fail_lagging, requeue_unreachable
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -184,6 +188,10 @@ REMOTE_RECORD = "remote.json"
 STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
 HOME_RETRY_SECONDS = 60.0
+UNSTARTED_CLAIM = (
+    "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
+    "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
+)
 
 Log = Callable[[str], None]
 
@@ -805,6 +813,9 @@ class Waiter:
         except CheckoutLagging as exc:
             self._fail_lagging(job, placement, factory_root, exc, label)
             return None
+        except DeviceUnreachable as exc:
+            self._requeue_unreachable(job, exc, label)
+            return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
             self._fail(job)
@@ -875,10 +886,7 @@ class Waiter:
                     job.id,
                     now=now,
                     reason=reason,
-                    slot_guard=(
-                        "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
-                        "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
-                    ),
+                    slot_guard=UNSTARTED_CLAIM,
                     slot_params=(self.recipient, claimer),
                 )
                 connection.commit()
@@ -894,6 +902,32 @@ class Waiter:
             self.log(f"{label}: not started: {reason}; its claim changed, left alone")
             return
         self.log(f"{label}: not started: {reason}; failed for T6 to requeue after a backoff")
+
+    def _requeue_unreachable(self, job: Job, exc: DeviceUnreachable, label: str) -> None:
+        reason = str(exc)
+        claimer, _ = self._claimer
+
+        def write() -> tuple[str, str] | None:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                result = requeue_unreachable(
+                    connection, job.id, device=exc.device, now=self.queue.now(), reason=reason,
+                    slot_guard=UNSTARTED_CLAIM, slot_params=(self.recipient, claimer),
+                )
+                connection.commit()
+                return result
+
+        try:
+            result = retry_locked(write)
+        except (QueueError, sqlite3.Error, OSError) as error:
+            self.log(f"{label}: not started: {reason}; could not record it ({_one_line(error)})")
+            self._fail(job)
+            return
+        if result is None:
+            self.log(f"{label}: not started: {reason}; its claim changed, left alone")
+            return
+        self.log(f"{label}: not started: {reason}; requeued, {exc.device} backed off "
+                 f"for {UNREACHABLE_BACKOFF_SECONDS}s")
 
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.

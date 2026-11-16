@@ -6546,6 +6546,73 @@ def test_queued_job_times_out_when_a_slot_is_free(tmp_path: Path) -> None:
     assert state == "failed"
 
 
+@pytest.mark.parametrize("timeout_minutes", [1, 5])
+def test_a_device_backoff_never_counts_toward_the_queue_wait(
+    tmp_path: Path, timeout_minutes: int
+) -> None:
+    from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, back_off
+
+    now = [0.0]
+    dispatcher, queue = _busy_dispatcher(tmp_path, now, slot_max=1)
+    waiting = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="1",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=timeout_minutes * 60,
+        ),
+        dedupe_key="build:1",
+    )
+    with queue.connect() as connection:
+        back_off(connection, "box", until=UNREACHABLE_BACKOFF_SECONDS, reason="preflight-unreachable")
+
+    for second in range(60, UNREACHABLE_BACKOFF_SECONDS + 60, 60):
+        now[0] = second + 1
+        dispatcher.reconcile_jobs()
+        assert [job.state for job in queue.outstanding()] == ["queued"], f"timed out at {second + 1}s"
+
+    claimed = queue.claim("claude")
+    assert claimed is not None and claimed.id == waiting.id
+    assert claimed.request.attempt == 1
+
+
+def test_a_queued_job_times_out_a_full_wait_after_its_device_backoff_ends(
+    tmp_path: Path,
+) -> None:
+    from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, back_off
+
+    now = [0.0]
+    dispatcher, queue = _busy_dispatcher(tmp_path, now, slot_max=1)
+    waiting = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="1",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build:1",
+    )
+    with queue.connect() as connection:
+        back_off(connection, "box", until=UNREACHABLE_BACKOFF_SECONDS, reason="preflight-unreachable")
+
+    def state() -> str:
+        with queue.connect() as connection:
+            return connection.execute(
+                "SELECT state FROM jobs WHERE id = ?", (waiting.id,)
+            ).fetchone()[0]
+
+    now[0] = UNREACHABLE_BACKOFF_SECONDS + 59
+    dispatcher.reconcile_jobs()
+    assert state() == "queued"
+    now[0] = UNREACHABLE_BACKOFF_SECONDS + 60
+    dispatcher.reconcile_jobs()
+    assert state() == "failed"
+
+
 ABANDONED = (
     "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->\n"
     "Max dropped it.\n"

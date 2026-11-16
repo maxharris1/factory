@@ -109,8 +109,7 @@ from markdown_it.token import Token
 
 from lib import attention
 from lib.branch_stack import stack_wait, stacked_pulls
-from lib.device_pool import free_slots, slots_in_use
-from lib.device_sync import blocked as sync_blocked
+from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
@@ -1046,7 +1045,7 @@ class Feeder:
         with self.queue.connect() as connection:
             # Held slots, plus running jobs with no placement on the box (#90).
             used = slots_in_use(connection, self.machines)
-            blocked = sync_blocked(connection)
+            blocked = placement_blocked(connection, now)
             for harness in harnesses:
                 free = free_slots(self.machines, harness, used, blocked) if self.machines else 0
                 queued = connection.execute(
