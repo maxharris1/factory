@@ -98,11 +98,12 @@ TUNNEL_URL = "https://box.example.ts.net/linear-webhook"
 
 
 def orch(*, listener: bool = False, push: bool = False, public_url: str | None = TUNNEL_URL,
-         refused: tuple[str, ...] = ()) -> SimpleNamespace:
+         refused: tuple[str, ...] = (), alert_minutes: int = 30) -> SimpleNamespace:
     """What lib/health.py, and the snapshot's projects (#152), read of an OrchConfig."""
     return SimpleNamespace(
         projects=(),
-        linear_webhook=SimpleNamespace(public_url=public_url) if listener else None,
+        linear_webhook=SimpleNamespace(public_url=public_url, tunnel_alert_minutes=alert_minutes)
+        if listener else None,
         dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
         refused_harnesses=refused,
     )
@@ -252,11 +253,11 @@ def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.Monkey
         "component", "device", "bot", "pid", "started_at", "last_seen",
         "version", "interval_seconds", "stopped_at", "checked_at",
         "cycle_started_at", "last_cycle_seconds", "seen_boot", "seen_monotonic",
-        "checked_boot",
+        "checked_boot", "down_since",
     ]
     for record in values:
         (component, device, bot, pid, started, seen, version, interval, stopped, checked,
-         cycle_started, last_cycle, seen_boot, seen_monotonic, checked_boot) = record
+         cycle_started, last_cycle, seen_boot, seen_monotonic, checked_boot, down_since) = record
         assert seen_boot is None or health._BOOT.fullmatch(seen_boot)
         assert checked_boot is None or health._BOOT.fullmatch(checked_boot)
         assert seen_monotonic is None or isinstance(seen_monotonic, float)
@@ -265,7 +266,8 @@ def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.Monkey
         assert bot in ("", "claude-bot", "codex-bot", "cursor-bot")
         assert isinstance(pid, int)
         assert health.VERSION.fullmatch(version)
-        for number in (started, seen, interval, stopped, checked, cycle_started, last_cycle):
+        for number in (started, seen, interval, stopped, checked, cycle_started, last_cycle,
+                       down_since):
             assert number is None or isinstance(number, float)
     path = health.health_path(db)
     wal = Path(f"{path}-wal")
@@ -1955,3 +1957,173 @@ def test_a_held_port_shows_before_any_component_has_reported(tmp_path: Path) -> 
     assert report.known
     assert [(c.state, c.reason) for c in _tunnel(report)] == [
         ("down", "port held by another owner: 8787 on pc-wsl-cursor-bot")]
+
+
+HELD_REASON = "port held by another owner: 8787 on pc-wsl-cursor-bot"
+TUNNEL_SLOT = health.Expected((health.Slot("tunnel", ("box",)),), frozenset({"tunnel"}))
+
+
+def hold_port(db: Path, since: float) -> None:
+    held = db.parent / "linear-webhook-tunnel.held"
+    held.write_text("8787 pc-wsl-cursor-bot\n")
+    os.utime(held, (since, since))
+
+
+@pytest.mark.parametrize("minutes, attention", [
+    (29, []),
+    (31, [health.Attention("tunnel-down", "tunnel @ box", "unreachable, last reached 31m ago",
+                           NOW - 31 * 60, "health-tunnel-box")]),
+])
+def test_a_tunnel_down_longer_than_the_alert_minutes_needs_attention(minutes: int, attention) -> None:
+    rows = (row(component="tunnel", bot="", last_seen=NOW - minutes * 60, checked_at=NOW - 5),)
+    report = health.build_report(rows, NOW, expected=TUNNEL_SLOT, tunnel_alert_seconds=30 * 60)
+    assert [c.state for c in _tunnel(report)] == ["down"]
+    assert list(report.attention) == attention
+
+
+def test_a_tunnel_needs_attention_on_every_read_until_it_is_up(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 3600).beat("tunnel", "box", pid=7)
+    store(db, NOW - 5).checked("tunnel", "box", pid=7)
+    for now in (NOW, NOW + 600, NOW + 7200):
+        report = health.load_report(db, now, orch=orch(listener=True))
+        assert [(a.kind, a.label, a.since) for a in report.attention] == [
+            ("tunnel-down", "tunnel @ box", NOW - 3600)], now
+    store(db, NOW + 7201).beat("tunnel", "box", pid=7)
+    report = health.load_report(db, NOW + 7205, orch=orch(listener=True))
+    assert [c.state for c in _tunnel(report)] == ["up"]
+    assert report.attention == ()
+
+
+def test_a_held_tunnel_never_seen_is_down_since_its_held_record(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    hold_port(db, NOW - 31 * 60)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(a.kind, a.reason, a.since) for a in report.attention] == [
+        ("tunnel-down", HELD_REASON, NOW - 31 * 60)]
+    hold_port(db, NOW - 29 * 60)
+    assert health.load_report(db, NOW, orch=orch(listener=True)).attention == ()
+
+
+def test_a_held_tunnel_down_past_the_alert_keeps_its_reason_on_the_item(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 7200).beat("tunnel", "box", pid=7)
+    store(db, NOW - 5).checked("tunnel", "box", pid=7)
+    hold_port(db, NOW - 7000)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.reason) for c in _tunnel(report)] == [("down", HELD_REASON)]
+    assert [(a.reason, a.since) for a in report.attention] == [(HELD_REASON, NOW - 7200)]
+
+
+def test_a_held_tunnel_that_still_answers_is_down_since_the_held_record(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 1).beat("tunnel", "box", pid=7)
+    hold_port(db, NOW - 3600)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(a.reason, a.since) for a in report.attention] == [(HELD_REASON, NOW - 3600)]
+
+
+def test_a_tunnel_never_reached_keeps_its_item_across_a_listener_restart(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 31 * 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 30).stop("tunnel", "box", pid=101)
+    store(db, NOW).checked("tunnel", "box", pid=102, started_at=NOW - 29)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 102)]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+
+
+def test_a_tunnel_never_reached_keeps_its_item_when_the_restarted_listener_reuses_the_pid(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 31 * 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 30).stop("tunnel", "box", pid=101)
+    store(db, NOW).checked("tunnel", "box", pid=101, started_at=NOW - 29)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 101)]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+    store(db, NOW + 60).beat("tunnel", "box", pid=101, started_at=NOW - 29)
+    assert health.load_report(db, NOW + 61, orch=orch(listener=True)).attention == ()
+
+
+def test_a_tunnel_down_in_a_database_from_before_down_since_keeps_its_item_through_the_upgrade(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 31 * 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    with sqlite3.connect(health.health_path(db)) as connection:
+        connection.execute(f"ALTER TABLE {health.TABLE} DROP COLUMN down_since")
+    assert [(a.kind, a.since) for a in health.load_report(
+        db, NOW - 30, orch=orch(listener=True)).attention] == [("tunnel-down", NOW - 31 * 60)]
+    store(db, NOW - 30).stop("tunnel", "box", pid=101)
+    store(db, NOW).checked("tunnel", "box", pid=101, started_at=NOW - 29)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 101)]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+
+
+def test_a_tunnel_last_reached_before_a_reboot_keeps_its_item_when_the_pid_is_reused(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    before, after = "1" * 8 + "-1111-1111-1111-" + "1" * 12, "2" * 8 + "-2222-2222-2222-" + "2" * 12
+    health.HealthStore(db, devices=DEVICES, clock=lambda: NOW - 3600,
+                       uptime=lambda: health.Uptime(before, 50_000.0)).beat(
+        "tunnel", "box", pid=101, started_at=NOW - 4000)
+    health.HealthStore(db, devices=DEVICES, clock=lambda: NOW,
+                       uptime=lambda: health.Uptime(after, 40.0)).checked(
+        "tunnel", "box", pid=101, started_at=NOW - 40)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [c.state for c in _tunnel(report)] == ["down"]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 3600)]
+
+
+def test_a_held_record_written_again_does_not_restart_a_never_reached_tunnels_clock(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW).checked("tunnel", "box", pid=7, started_at=NOW - 2 * 3600)
+    hold_port(db, NOW - 5 * 60)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(a.reason, a.since) for a in report.attention] == [(HELD_REASON, NOW - 2 * 3600)]
+
+
+def test_a_tunnel_never_checked_and_never_held_has_no_item() -> None:
+    report = health.build_report([], NOW, expected=TUNNEL_SLOT, tunnel_alert_seconds=60)
+    assert [c.state for c in _tunnel(report)] == ["down"]
+    assert report.attention == ()
+
+
+def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db, _ = make_db(tmp_path)
+    store(db, NOW).beat("poller", "box", pid=101, version="unknown")
+    hold_port(db, NOW - 22 * 3600)
+    config = tmp_path / "orch.yml"
+    config.write_text(
+        "poll_seconds: 60\nlinear:\n  api_key_env: LINEAR_KEY\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_linear_users:\n  user-1: [grok-bot]\n"
+        "projects:\n  - repo: owner/repo\n    factory_ref: main\n"
+        "    linear_project_id: p1\n"
+        "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+        f"  public_url: {TUNNEL_URL}\n  tunnel_alert_minutes: 30\n"
+    )
+    args = ["--db", str(db), "--orch", str(config)]
+
+    out = io.StringIO()
+    assert health.main([*args, "--json"], stdout=out, clock=lambda: NOW,
+                       transport=DfTransport({})) == 3
+    data = json.loads(out.getvalue())
+    assert data["attention"] == 1
+    assert data["needs_attention"] == [{
+        "kind": "tunnel-down", "label": "tunnel @ box", "reason": HELD_REASON,
+        "down_since_et": "Nov 5 6:20:00 PM ET", "down_seconds": 22 * 3600,
+        "anchor": "health-tunnel-box",
+    }]
+
+    out = io.StringIO()
+    assert health.main(args, stdout=out, clock=lambda: NOW, transport=DfTransport({})) == 3
+    assert f"  needs attention: tunnel @ box down 22h ({HELD_REASON})" in out.getvalue().splitlines()

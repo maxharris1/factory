@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import heal
+from lib import heal, health
 from lib.grok_delivery import WebhookResult
 from lib.heal import DEFER, ESCALATE, RESTART, SKIP, Facts, KeyState, Webhook
 
@@ -446,3 +446,25 @@ def test_an_unknown_report_does_not_end_a_port_held_episode(tmp_path: Path) -> N
     sent = [len(run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + later)[2].calls)
             for later in (120, 3600)]
     assert sent == [0, 0]
+
+
+def held_tunnel_health(now: float) -> dict:
+    report = health.build_report(
+        [], now, expected=health.Expected((health.Slot("tunnel", ("box",)),), frozenset({"tunnel"})),
+        tunnel_held="8787 on pc-wsl-cursor-bot", tunnel_held_since=NOW - 3600,
+        tunnel_alert_seconds=30 * 60)
+    return health.report_json(report, now)
+
+
+def test_a_held_tunnel_that_needs_attention_alerts_once_and_is_never_restarted(
+    tmp_path: Path,
+) -> None:
+    passes = []
+    for now in range(int(NOW), int(NOW) + 2 * 3600 + 1, 120):
+        data = held_tunnel_health(now)
+        assert [item["kind"] for item in data["needs_attention"]] == ["tunnel-down"]
+        actions, runs, _ = run_heal(tmp_path, data, now=now)
+        assert runs.calls == []
+        passes.append(kinds(actions))
+    assert passes[0] == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert all(actions == [(SKIP, "tunnel @ box")] for actions in passes[1:])

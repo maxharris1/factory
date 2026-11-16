@@ -111,6 +111,7 @@ projects:
 #   path: /linear-webhook
 #   secret_file: ~/.config/factory/linear-webhook.secret
 #   reconcile_seconds: 900
+#   tunnel_alert_minutes: 30
 # Optional read-only dashboard (README "Dashboard"). Push is off unless
 # dashboard.push.transport is ssh; then `orch poll` (deploy/poller-service.sh)
 # pushes after every poll cycle, or every `every_minutes`, and with

@@ -4,6 +4,7 @@ state directory, however many times `ensure` runs (issue #134)."""
 from __future__ import annotations
 
 import fcntl
+import itertools
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,11 +43,18 @@ time.sleep(300)
 # (fd 7) does not outlive the loop. The remote forward is an exclusive flock
 # on $HOME/remote-forward.lock; its holder's pid is in $HOME/forward-owner.
 FAKE_SSH = """#!/usr/bin/env python3
-import fcntl, os, sys, time
+import fcntl, os, subprocess, sys, time
 os.closerange(3, 1024)
 home = os.environ["HOME"]
-with open(os.path.join(home, "ssh-calls.log"), "a") as log:
-    log.write(" ".join(sys.argv[1:]) + "\\n")
+tunnel = "-R" in sys.argv and sys.argv[-1] != "true"
+with open(os.path.join(home, "ssh-calls.log" if tunnel else "ssh-command-calls.log"), "a") as log:
+    log.write(" ".join(sys.argv[1:]).replace("\\n", " ") + "\\n")
+if not tunnel and "ss -H" in sys.argv[-1]:
+    path = os.path.join(home, "remote-bin") + os.pathsep + os.environ["PATH"]
+    run = subprocess.run(["sh", "-c", sys.argv[-1]], env={**os.environ, "PATH": path})
+    raise SystemExit(run.returncode)
+if not tunnel and sys.argv[-1] != "true":
+    raise SystemExit(f"fake ssh: unexpected remote command {sys.argv[-1]!r}")
 forward = open(os.path.join(home, "remote-forward.lock"), "a")
 try:
     if os.environ.get("FAKE_SSH_FORWARD_FAIL"):
@@ -54,9 +63,36 @@ try:
 except BlockingIOError:
     print("Error: remote port forwarding failed for listen port 8787", file=sys.stderr)
     raise SystemExit(255)
+if not tunnel:
+    raise SystemExit(0)
 with open(os.path.join(home, "forward-owner"), "w") as owner:
     owner.write(str(os.getpid()))
+with open(os.path.join(home, "forward-owner-kind"), "w") as kind:
+    kind.write("sshd")
+if sys.argv[-1] != "test-host":
+    subprocess.run(["sh", "-c", sys.argv[-1].partition("while ")[0]], check=True)
 time.sleep(300)
+"""
+
+FAKE_SS = """#!/usr/bin/env python3
+import fcntl, os, sys
+home = os.environ["HOME"]
+with open(os.path.join(home, "remote-forward.lock"), "a") as forward:
+    try:
+        fcntl.flock(forward, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        raise SystemExit(0)
+port = sys.argv[-1].rpartition(":")[2]
+line = f"LISTEN 0      128      127.0.0.1:{port}      0.0.0.0:*"
+if "p" in sys.argv[1]:
+    with open(os.path.join(home, "forward-owner")) as owner:
+        pid = owner.read().strip()
+    with open(os.path.join(home, "forward-owner-kind")) as kind:
+        name = kind.read().strip()
+    line += f'    users:(("{name}",pid={pid},fd=3))'
+print(line)
 """
 
 MODES = ("_listener-loop", "_tunnel-loop")
@@ -146,9 +182,11 @@ def home(tmp_path: Path):
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
     bin_dir.mkdir(parents=True)
-    for name, source in (("orch", FAKE_ORCH), ("ssh", FAKE_SSH)):
-        (bin_dir / name).write_text(source, encoding="utf-8")
-        (bin_dir / name).chmod(0o755)
+    for path, source in ((bin_dir / "orch", FAKE_ORCH), (bin_dir / "ssh", FAKE_SSH),
+                         (home / "remote-bin" / "ss", FAKE_SS)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        path.chmod(0o755)
     yield home
     _service(home, "stop")
     for pid in _processes_of(home):
@@ -481,6 +519,8 @@ def test_an_unreadable_crontab_changes_nothing(home: Path, tmp_path: Path) -> No
     {"LINEAR_WEBHOOK_TUNNEL_HOST": "-oProxyCommand=evil"},
     {"port": "87a"},
     {"LINEAR_WEBHOOK_RETRY_SEC": "soon"},
+    {"LINEAR_WEBHOOK_HELD_RETRY_SEC": "0"},
+    {"LINEAR_WEBHOOK_HELD_RETRY_SEC": "0.5"},
 ])
 def test_ensure_refuses_bad_settings(home: Path, extra: dict[str, str]) -> None:
     result = _service(home, "ensure", **extra)
@@ -853,7 +893,8 @@ def test_a_refused_forward_gives_up_after_the_limit_as_port_held_by_another_owne
 ) -> None:
     port = _port_of(home)
     settings = dict(FAKE_SSH_FORWARD_FAIL="1", LINEAR_WEBHOOK_REFUSED_LIMIT="2",
-                    LINEAR_WEBHOOK_RETRY_SEC="0.1", LINEAR_WEBHOOK_RETRY_MAX_SEC="0.2")
+                    LINEAR_WEBHOOK_RETRY_SEC="0.1", LINEAR_WEBHOOK_RETRY_MAX_SEC="0.2",
+                    LINEAR_WEBHOOK_HELD_RETRY_SEC="3600")
     held = _state(home) / "linear-webhook-tunnel.held"
     assert _service(home, "ensure", **settings).returncode == 0
 
@@ -912,3 +953,161 @@ def test_the_held_record_lands_where_health_reads_it_under_an_orch_db_override(
     assert health.read_tunnel_held(db) == f"{_port_of(home)} on test-host"
     assert _service(home, "start", **settings).returncode == 0
     _wait_for(lambda: len(_calls(home, "ssh")) > 1, timeout=20, what="ssh after start")
+
+
+HELD_RETRY = 1
+HELD_SETTINGS = dict(LINEAR_WEBHOOK_REFUSED_LIMIT="2", LINEAR_WEBHOOK_RETRY_SEC="0.1",
+                     LINEAR_WEBHOOK_RETRY_MAX_SEC="0.2",
+                     LINEAR_WEBHOOK_HELD_RETRY_SEC=str(HELD_RETRY))
+
+
+TUNNEL_ID = "0123456789abcdef"
+
+
+def _remote_holder(home: Path, process_name: str, claimed_by: str | None = None) -> subprocess.Popen:
+    claim = home / ".cache" / "factory" / f"linear-webhook-tunnel.{claimed_by}"
+    script = (
+        "import fcntl, os, time\n"
+        "home = os.environ['HOME']\n"
+        "forward = open(os.path.join(home, 'remote-forward.lock'), 'a')\n"
+        "fcntl.flock(forward, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "with open(os.path.join(home, 'forward-owner'), 'w') as owner:\n"
+        "    owner.write(str(os.getpid()))\n"
+        "with open(os.path.join(home, 'forward-owner-kind'), 'w') as name:\n"
+        f"    name.write({process_name!r})\n"
+        f"if {claimed_by is not None!r}:\n"
+        f"    os.makedirs({str(claim.parent)!r}, exist_ok=True)\n"
+        f"    with open({str(claim)!r}, 'w') as claim:\n"
+        "        claim.write(f'{os.getpid()}\\n')\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(300)\n"
+    )
+    holder = subprocess.Popen(
+        [sys.executable, "-c", script], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert holder.stdout.readline() == "ready\n"
+    return holder
+
+
+def _tunnel_holds_the_forward(home: Path) -> bool:
+    owner = _forward_owner(home)
+    argv = _argv(owner) if owner is not None else []
+    return alive(owner) and "-R" in argv and argv[-1] != "true" if owner else False
+
+
+def _probes(home: Path) -> list[str]:
+    return [call for call in _calls(home, "ssh-command") if call.endswith(" true")]
+
+
+def _tunnel_log(home: Path) -> str:
+    return (_state(home) / "linear-webhook-tunnel.log").read_text()
+
+
+def _own_tunnel_id(home: Path, state: Path) -> None:
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "linear-webhook-tunnel.id").write_text(f"{TUNNEL_ID}\n")
+
+
+def test_a_held_tunnel_ends_its_own_stale_sshd_session_and_comes_back_without_start(
+    home: Path,
+) -> None:
+    port = _port_of(home)
+    _own_tunnel_id(home, _state(home))
+    stale = _remote_holder(home, "sshd", claimed_by=TUNNEL_ID)
+    assert _service(home, "ensure", **HELD_SETTINGS).returncode == 0
+
+    assert stale.wait(timeout=20) == -signal.SIGTERM
+    _wait_for(lambda: _tunnel_holds_the_forward(home), timeout=20,
+              what="the tunnel to hold the forward")
+    assert health.read_tunnel_held(_state(home) / "orch.db") is None
+    log = _tunnel_log(home)
+    assert f"forward refused 2 times: port {port} on test-host is held by another owner" in log
+    assert f'users:(("sshd",pid={stale.pid},fd=3))' in log
+    reclaim, probe = _calls(home, "ssh-command")
+    assert "ss -Hltnp" in reclaim
+    assert probe.endswith(f"-R 127.0.0.1:{port}:127.0.0.1:{port} test-host true")
+    assert "ExitOnForwardFailure=yes" in probe
+    assert "held by another owner" not in _service(home, "status").stdout
+
+
+@pytest.mark.parametrize("process_name, claimed_by", [
+    ("python3", None),
+    ("sshd", None),
+    ("sshd", "fedcba9876543210"),
+])
+def test_a_foreign_holder_is_left_alone_and_the_tunnel_returns_within_the_held_retry(
+    home: Path, process_name: str, claimed_by: str | None,
+) -> None:
+    port = _port_of(home)
+    held = _state(home) / "linear-webhook-tunnel.held"
+    _own_tunnel_id(home, _state(home))
+    foreign = _remote_holder(home, process_name, claimed_by=claimed_by)
+    users = f'users:(("{process_name}",pid={foreign.pid},fd=3))'
+    assert _service(home, "ensure", **HELD_SETTINGS).returncode == 0
+
+    _wait_for(lambda: len(_probes(home)) >= 1, timeout=20, what="a refused probe")
+    entered = held.stat().st_mtime_ns
+    _wait_for(lambda: len(_probes(home)) >= 3, timeout=20, what="three refused probes")
+    assert foreign.poll() is None, "a holder this device never claimed was signalled"
+    assert "ending sshd" not in _tunnel_log(home)
+    assert held.read_text() == f"{port} test-host\n"
+    assert held.stat().st_mtime_ns == entered, "a held retry rewrote the record health dates from"
+    assert f"held by {users}" in _tunnel_log(home)
+    assert f"next reclaim and probe in {HELD_RETRY}s" in _tunnel_log(home)
+    status = _service(home, "status", **HELD_SETTINGS)
+    assert f"port {port} on test-host held by another owner" in status.stdout
+    assert users in status.stdout
+
+    foreign.kill()
+    foreign.wait()
+    _wait_for(lambda: _tunnel_holds_the_forward(home), timeout=HELD_RETRY + 3,
+              what="the tunnel back within the held retry")
+    assert not held.exists()
+
+
+def test_the_held_record_stays_until_a_probe_succeeds(home: Path) -> None:
+    db = _state(home) / "orch.db"
+    foreign = _remote_holder(home, "python3")
+    samples: list[str | None] = []
+    done = threading.Event()
+
+    def sample() -> None:
+        while not done.is_set():
+            samples.append(health.read_tunnel_held(db))
+            time.sleep(0.002)
+
+    sampler = threading.Thread(target=sample)
+    sampler.start()
+    try:
+        assert _service(home, "ensure", **HELD_SETTINGS).returncode == 0
+        _wait_for(lambda: len(_probes(home)) >= 3, timeout=20, what="three refused probes")
+        foreign.kill()
+        foreign.wait()
+        _wait_for(lambda: _tunnel_holds_the_forward(home), timeout=20,
+                  what="the tunnel to hold the forward")
+    finally:
+        done.set()
+        sampler.join()
+    runs = [held for held, _ in itertools.groupby(sample is not None for sample in samples)]
+    assert runs == [False, True, False], "health saw the held record vanish before the probe won"
+
+
+def test_two_devices_sharing_the_tunnel_user_never_end_each_others_live_tunnel(
+    home: Path, tmp_path: Path,
+) -> None:
+    other = tmp_path / "other-device-state"
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: _tunnel_holds_the_forward(home), timeout=20, what="device A's tunnel")
+    first = _forward_owner(home)
+
+    assert _service(home, "ensure", ORCH_STATE_DIR=str(other), **HELD_SETTINGS).returncode == 0
+    other_log = other / "linear-webhook-tunnel.log"
+    _wait_for(lambda: other_log.exists() and other_log.read_text().count("next reclaim and probe") >= 3,
+              timeout=20, what="three held retries on device B")
+    assert _forward_owner(home) == first and alive(first), "device B ended device A's live tunnel"
+    assert "ending sshd" not in other_log.read_text()
+    assert f'held by users:(("sshd",pid={first},fd=3))' in other_log.read_text()
+    assert "ending sshd" not in _tunnel_log(home)
+    assert (other / "linear-webhook-tunnel.held").exists()
+    assert not (_state(home) / "linear-webhook-tunnel.held").exists()

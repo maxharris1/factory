@@ -572,6 +572,7 @@ linear_webhook:
   path: /linear-webhook           # default
   secret_file: ~/.config/factory/linear-webhook.secret
   reconcile_seconds: 900          # 60 to 3600, default 900
+  tunnel_alert_minutes: 30        # tunnel down this long needs attention (README "Health")
 ```
 
 `orch linear-webhook serve` is a small stdlib HTTP server. It opens the
@@ -647,16 +648,36 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   adding `--orch "$ORCH_CONFIG"` when `ORCH_CONFIG` is set. It
   starts `serve` only while nothing listens on `127.0.0.1:PORT`, and logs one
   line per streak while the port is taken.
-- `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
-  127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
+- `_tunnel-loop` runs `ssh -n -o ExitOnForwardFailure=yes -R
+  127.0.0.1:PORT:127.0.0.1:PORT HOST CLAIM`. CLAIM is a short remote command.
+  It writes the pid of the sshd session that holds the forward to
+  `~/.cache/factory/linear-webhook-tunnel.ID` on the tunnel host, and it
+  runs as long as that session. ID is a random name kept in this state
+  directory's `linear-webhook-tunnel.id`, so each device that uses the same
+  ssh user on the tunnel host has its own claim. A refused forward is logged as
   `forward refused: port PORT already forwarded on HOST; retry in Ns`.
   After `LINEAR_WEBHOOK_REFUSED_LIMIT` refusals in a row (default 3), the
   loop writes `linear-webhook-tunnel.held` (`PORT HOST`) beside `ORCH_DB`
-  (default: the state directory's `orch.db`) and starts no more ssh for that
-  port and host (issue #427). `orch health` then shows the tunnel down, whatever
+  (default: the state directory's `orch.db`) and starts no tunnel while it
+  stays (issue #427). `orch health` then shows the tunnel down, whatever
   answers the public URL, with `port held by another owner: PORT on HOST`, and self-heal
-  raises one alert and does not restart it. Free the port and run `start`,
-  or move this device to another port and run `restart`.
+  raises one alert and does not restart it.
+- A held tunnel recovers by itself (issue #581). At once, and then every
+  `LINEAR_WEBHOOK_HELD_RETRY_SEC` (default 300, whole seconds), the loop
+  reclaims and probes. The reclaim is one ssh to the tunnel host that runs
+  `ss -Hltnp "sport = :PORT"` and logs each listener as the holder. It
+  sends SIGTERM only to the `sshd` or `sshd-session` whose pid this device's
+  claim names. That is this device's own stale session: sshd on the tunnel
+  host can keep a dead tunnel's forward for hours. Any other holder is left
+  alone and logged as `held by <users>`. This includes another device's
+  live tunnel on the same port, so two devices never end each other's
+  tunnels. The probe is
+  `ssh -o ExitOnForwardFailure=yes -R 127.0.0.1:PORT:127.0.0.1:PORT HOST true`.
+  When it succeeds, the loop removes the held record and starts the tunnel.
+  Until then the record stays as written, so health never sees a gap.
+  `status` shows the last holder. `start` removes the record and the loop
+  retries at once; `restart` keeps it. To move this device to another port,
+  set it and run `restart`.
 - After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`
   (default 5), doubling up to `LINEAR_WEBHOOK_RETRY_MAX_SEC` (default 60). A
   longer run resets the wait.
@@ -1268,6 +1289,21 @@ tab mark it `stale code (running <commit>, checkout <commit>)`, and the
 header counts it (`Health (9 components, 0 down, 1 stale code)`). It is not
 down and needs no attention: self-heal restarts it. `orch health --json`
 adds `code_version`, and `stale_code` and `started_at` for each component.
+
+**Needs attention** (issue #581): a tunnel down longer than
+`linear_webhook.tunnel_alert_minutes` (default 30) is a `tunnel-down` item.
+The tunnel is down since it was last seen, or, if it was never seen, since
+the first listener that checked it started, so a listener restart does not
+reset the clock; while its port is held, since the held record was written
+if that is earlier. The item is worked out again on every read and is not stored, so it
+stays while the tunnel is down and is gone on the first read that finds it
+up. `orch health` prints `  needs attention: tunnel @ box down 22h (port held
+by another owner: 8787 on pc-wsl-cursor-bot)` and exits 3. `orch health
+--json` lists it in `needs_attention` (`kind`, `label`, `reason`,
+`down_since_et`, `down_seconds`, `anchor`) and counts it in `attention`.
+`needs_attention` is the field the hourly momentum check surfaces. The item
+changes no component's state or reason, so self-heal still skips a held
+tunnel after its one alert.
 
 ## Self-heal
 

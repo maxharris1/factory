@@ -354,6 +354,7 @@ def test_linear_webhook_section_parses_bind_secret_path_and_defaults(
     )
     assert webhook.path == "/linear-webhook"
     assert webhook.reconcile_seconds == 900
+    assert webhook.tunnel_alert_minutes == 30
 
 
 def test_linear_webhook_accepts_overrides_and_expands_home(
@@ -367,7 +368,8 @@ def test_linear_webhook_accepts_overrides_and_expands_home(
         "  bind: '[::1]:9000'\n"
         "  path: /hooks/linear\n"
         "  secret_file: ~/.config/factory/linear-webhook.secret\n"
-        "  reconcile_seconds: 600\n",
+        "  reconcile_seconds: 600\n"
+        "  tunnel_alert_minutes: 90\n",
     )
 
     assert findings == []
@@ -377,6 +379,7 @@ def test_linear_webhook_accepts_overrides_and_expands_home(
     assert webhook.path == "/hooks/linear"
     assert webhook.secret_file == tmp_path / ".config/factory/linear-webhook.secret"
     assert webhook.reconcile_seconds == 600
+    assert webhook.tunnel_alert_minutes == 90
 
 
 def test_linear_webhook_public_url_is_the_funnel_url_of_its_path(tmp_path: Path) -> None:
@@ -476,6 +479,16 @@ def test_linear_webhook_check_does_not_read_the_secret_file(tmp_path: Path) -> N
             "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
             "  reconcile_seconds: true\n",
             "linear_webhook.reconcile_seconds must be an integer from 60 to 3600",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  tunnel_alert_minutes: 0\n",
+            "linear_webhook.tunnel_alert_minutes must be a positive integer",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  tunnel_alert_minutes: true\n",
+            "linear_webhook.tunnel_alert_minutes must be a positive integer",
         ),
         (
             "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
