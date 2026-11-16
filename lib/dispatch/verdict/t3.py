@@ -311,6 +311,8 @@ class T3Mixin:
         result = ticket.ci.get(head)
         if result is None or result.status == "pending":
             return ReviseCIGate(outcome=(False, "revise-ci-pending"))
+        if result.status == "not-run":
+            return ReviseCIGate()
         _status, count = self._record_ci_result(ticket, head, result.status)
         if result.status == "success":
             return ReviseCIGate()
