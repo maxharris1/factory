@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import html as htmllib
 import http.server
 import json
 import os
@@ -218,7 +219,7 @@ def test_script_draws_the_same_matrix_drift_and_log(tmp_path: Path) -> None:
         r'<td class="sys-kind">([^<]+)</td>', _section(server, "components"))
     log_kinds = re.findall(r'<div class="(\w+)">', out["html"]["log"])
     assert log_kinds == re.findall(r'<div class="(\w+)">', _section(server, "log"))
-    assert log_kinds == ["bad", "start", "warn"]
+    assert log_kinds == ["warn", "start", "bad"]
 
 
 
@@ -325,6 +326,33 @@ def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
     snapshot = _with_no_waiters(_snapshot(tmp_path), count)
     out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "no-waiter"])
     assert f'<span class="count">{shown}</span>' in out["html"]["no-waiter"]
+
+
+def _log_rows(markup: str) -> list[tuple[str, str]]:
+    box = markup[markup.index('<div class="sys-log">') + len('<div class="sys-log">'):]
+    return [(kind, htmllib.unescape(line)) for kind, line in re.findall(r'<div(?: class="(\w+)")?>([^<]*)</div>', box)]
+
+
+NEWEST_FIRST = [
+    "cycle line",
+    "2026-11-13 13:09:20 EST poller exit rc=0",
+    "orch poll: another orch poll owns /tmp/orch.db.lock",
+    "2026-11-13 13:09:19 EST poller start",
+    "2026-11-13 13:08:59 EST poller exit rc=1",
+]
+
+
+def test_poller_log_shows_the_newest_line_first(tmp_path: Path) -> None:
+    log = _section(_no_script(render_pages(_snapshot(tmp_path))["health.html"]), "log")
+    assert [line for _, line in _log_rows(log)] == NEWEST_FIRST
+    assert '<p class="sys-note">last 5 lines, newest first, redacted</p>' in log
+
+
+@needs_node
+def test_script_poller_log_shows_the_newest_line_first(tmp_path: Path) -> None:
+    log = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", "log"])["html"]["log"]
+    assert [line for _, line in _log_rows(log)] == NEWEST_FIRST
+    assert '<p class="sys-note">last 5 lines, newest first, redacted</p>' in log
 
 
 def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:

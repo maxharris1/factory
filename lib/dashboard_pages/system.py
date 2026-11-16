@@ -65,9 +65,9 @@ SCRIPT_LOG = r"""
     var log = d.poller.log;
     var root = panel('log', 'poller.log', log.present ? 'written ' + dur(log.age_seconds) + ' before the snapshot' : 'absent');
     if (!root) return;
-    add(root, el('p', 'sys-note', 'last ' + log.tail.length + ' lines, redacted'));
+    add(root, el('p', 'sys-note', 'last ' + log.tail.length + ' lines, newest first, redacted'));
     var box = add(root, el('div', 'sys-log'));
-    log.tail.forEach(function (line) { add(box, el('div', logKind(line), line)); });
+    log.tail.slice().reverse().forEach(function (line) { add(box, el('div', logKind(line), line)); });
   }
 
   function renderRules(d) {
@@ -327,10 +327,10 @@ def _log(snapshot: dict) -> str:
     )
     lines = "".join(
         f'<div class="{kind}">{_e(line)}</div>' if (kind := _log_kind(line)) else f"<div>{_e(line)}</div>"
-        for line in log["tail"]
+        for line in reversed(log["tail"])
     )
     inner = (
-        f'<p class="sys-note">last {len(log["tail"])} lines, redacted</p>'
+        f'<p class="sys-note">last {len(log["tail"])} lines, newest first, redacted</p>'
         f'<div class="sys-log">{lines}</div>'
     )
     return _panel("log", "poller.log", inner, count=count)
