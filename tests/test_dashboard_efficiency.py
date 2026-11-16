@@ -138,7 +138,7 @@ def _rows(table: str) -> dict[str, list[str]]:
 def test_headroom_shows_the_fixture_readings_and_no_number_without_one(tmp_path: Path) -> None:
     rows = _rows(_inner(_page(_snapshot(tmp_path)), "headroom"))
     assert rows["claude-bot box"] == ["42% used", "30% used", "in 2h 10m", "58%"]
-    assert rows["codex-bot box"] == ["10% used", "stale", "in 1h 00m", "90%"]
+    assert rows["codex-bot box"] == ["10% used", "stale", "in 1h 00m", "90% (5-hour only)"]
     assert rows["claude-bot pc"] == ["no reading", "no reading", "—", "no reading yet"]
     assert rows["codex-bot pc"] == ["stale", "stale", "—", "reading 3h 00m old"]
     assert rows["cursor-bot"] == ["not tracked"] * 4
@@ -150,7 +150,33 @@ def test_headroom_shows_the_fixture_readings_and_no_number_without_one(tmp_path:
 def test_headroom_colours_follow_the_page_thresholds(tmp_path: Path) -> None:
     headroom = _inner(_page(_snapshot(tmp_path)), "headroom")
     assert '<td class="ef-v ok">58%</td>' in headroom
-    assert '<td class="ef-v ok">90%</td>' in headroom
+    assert '<td class="ef-v">90% (5-hour only)</td>' in headroom
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_headroom_header_has_no_proposed_chip(tmp_path: Path, render: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    headroom = (_inner(_page(snapshot), "headroom") if render == "server"
+                else _run_page(tmp_path, snapshot, "efficiency", ["headroom"])["html"]["headroom"])
+    assert headroom.startswith("<h2><span>Subscription headroom</span></h2>"), headroom[:120]
+    assert "proposed" not in headroom
+
+
+def _seven_day_only(tmp_path: Path) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        usage_readings.store(connection, harness="claude", bot="claude-bot", device="box", job_id="j",
+                             readings=[Reading("seven_day", 0.26, int(NOW + 86400), NOW - 60)])
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_headroom_on_one_window_is_neutral_and_names_it(tmp_path: Path, render: str) -> None:
+    snapshot = _seven_day_only(tmp_path)
+    headroom = (_inner(_page(snapshot), "headroom") if render == "server"
+                else _run_page(tmp_path, snapshot, "efficiency", ["headroom"])["html"]["headroom"])
+    assert _rows(headroom)["claude-bot box"] == ["no reading", "26% used", "in 1d 0h", "74% (7-day only)"]
+    assert '<td class="ef-v">74% (7-day only)</td>' in headroom
 
 
 def test_headroom_without_the_table_says_no_telemetry(tmp_path: Path) -> None:
