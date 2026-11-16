@@ -213,3 +213,23 @@ def _bots_for(trusted_logins: Mapping[str, frozenset[str]], login: str) -> froze
         if key.casefold() == wanted:
             return frozenset(bots)
     return frozenset()
+
+
+def ready_head(expected: Expected, comment_id: str, read: Read) -> str | None:
+    """The head a ready names (#503), as the PR's full sha when they still
+    agree; None when the handoff is not a ready."""
+    if expected.kind != "ready":
+        return None
+    comment = read(f"repos/{expected.repo}/issues/comments/{comment_id}")
+    try:
+        fields = parse_comment(str(comment.get("body") or "")).as_dict()
+    except HandoffError:
+        return None
+    if fields.get("kind") != "ready":
+        return None
+    match = _ISSUE_URL.fullmatch(str(comment.get("issue_url") or ""))
+    if match is None:
+        return None
+    pull = _pull(match.group(1), int(match.group(2)), read)
+    named = str(fields.get("head") or "")
+    return pull.sha if pull is not None and _same_head(named, pull.sha) else named

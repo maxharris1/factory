@@ -25,7 +25,9 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 import urllib.parse
 from collections.abc import Callable, Iterator
@@ -175,6 +177,30 @@ def fetched_clone(root: Path, repo: str, heads: tuple[str, ...], template: str) 
         for head in heads:
             _target(clone, head)
     return clone
+
+
+@contextmanager
+def detached_checkout(root: Path, repo: str, head: str, template: str) -> Iterator[Path]:
+    """A throwaway detached worktree of the repo's shared clone at head (#503).
+
+    It has no job record, so gc never sees it; it is deleted on exit.
+    """
+    if not _SHA.match(head):
+        raise WorktreeError(f"head {head!r} is not a commit SHA")
+    clone = fetched_clone(root, repo, (head,), template)
+    with tempfile.TemporaryDirectory(prefix="orch-checkout-") as scratch:
+        path = Path(scratch) / "checkout"
+        with _clone_lock(clone):
+            _git(clone, "worktree", "add", "--detach", "--quiet", str(path), head)
+        try:
+            yield path
+        finally:
+            shutil.rmtree(path, ignore_errors=True)
+            with _clone_lock(clone):
+                try:
+                    _git(clone, "worktree", "prune")
+                except WorktreeError:
+                    pass  # the next prepare or finish prunes it
 
 
 def _adopt_kept(
@@ -623,6 +649,7 @@ __all__ = [
     "JobCheckout",
     "WorktreeError",
     "check_remote_url",
+    "detached_checkout",
     "finish",
     "gc",
     "keep_reason",
