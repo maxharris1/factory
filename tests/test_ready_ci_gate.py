@@ -309,3 +309,34 @@ def test_a_conflicting_ready_in_its_base_update_grace_is_waiting_on_ci(tmp_path:
     board.poll()
     assert board.jobs("fix")
     assert ci_waits(board) == []
+
+
+def test_stale_ready_does_not_hide_current_pending_ready(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(2))
+    current = board.ready(pr, pr.head, "ready-current")
+    board.poll()
+    assert board.outcome(current) is None
+    board.ready(pr, sha(1), "ready-stale")
+    outcomes = []
+    original = board.dispatcher._t2
+
+    def traced(*args):
+        result = original(*args)
+        outcomes.append((args[1].id, result))
+        return result
+
+    board.dispatcher._t2 = traced
+    board.poll()
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "log", now=board.now[0])
+    model = tickets.board(snapshot)
+    cards = "".join(tickets._card(c) for col in model["columns"] for c in col["cards"])
+    lane = "".join(lanes._ci_lane(snapshot))
+    assert outcomes == [
+        ("ready-current", (False, "ci-pending")),
+        ("ready-stale", (True, "stale-ready-head")),
+    ]
+    assert not snapshot["running"] and not snapshot["queued"]
+    assert "waiting on CI" in cards
+    assert "no job running" not in cards
+    assert "waiting on CI" in lane

@@ -218,12 +218,21 @@ class ReadyMixin:
         outcome: str,
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._polled.get(key, ticket)
+        current = _matching_head(reported_head, ticket.current_head)
         with self._connect() as connection:
             if outcome not in CI_WAIT_REASONS:
-                connection.execute("DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key)
+                if current is None:
+                    connection.execute(
+                        "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+                        (*key, comment.id),
+                    )
+                else:
+                    connection.execute(
+                        "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key
+                    )
                 return
-            ticket = self._polled.get(key, ticket)
-            head = _matching_head(reported_head, ticket.current_head) or reported_head
+            head = current or reported_head
             result = ticket.ci.get(head) or ticket.ci.get(reported_head)
             connection.execute(
                 """
