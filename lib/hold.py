@@ -22,9 +22,10 @@ commit merges base in, when the PR owns no new file and each hold-path
 file it owns keeps its patch id (ok_carries, issue #574). An ok does not
 clear a label hold whose label was labeled at or after the latest
 covering ok: a label put back after the ok holds the PR again, and
-still holds it once someone other than the approver removes it. Neither clears unless the approver
-may approve: a trusted_logins key, or, once the GitHub App switch is on, a
-login in orch.yml's approver_logins (#122). Anything unread fails closed.
+still holds it once someone other than the approver removes it. Neither
+clears unless the approver may approve: a trusted_logins key, or, once the
+GitHub App switch is on, a login in orch.yml's approver_logins (#122).
+Anything unread fails closed.
 
 Globs are matched against repo-relative paths: ``*`` and ``?`` never
 cross ``/``; ``**`` matches any number of whole directories (``a/**``

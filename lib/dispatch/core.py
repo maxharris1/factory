@@ -91,7 +91,6 @@ class DispatcherBase:
         # or any error, sends the update back to review (fail closed).
         self.update_classifier = update_classifier
         self.rebase_classifier = rebase_classifier
-        # #574: None, or any error, means a held ok never carries past its head.
         self.hold_carry = hold_carry
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()

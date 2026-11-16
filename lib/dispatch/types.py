@@ -390,6 +390,8 @@ UpdateClassifier = Callable[[str, str, str, str, tuple[str, ...]], UpdateClass]
 # descends from the last reviewed one, else both fork points (lib/update_check.py).
 RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]
 
-# (repo, base branch, ok head, current head, hold paths) -> the commits and own
-# diffs that say whether the ok carries to the current head (issue #574).
-HoldCarry = Callable[[str, str, str, str, tuple[str, ...]], MergeUpdate]
+
+class HoldCarry(Protocol):
+    def __call__(
+        self, repo: str, base: str, approved: str, head: str, patterns: tuple[str, ...]
+    ) -> MergeUpdate: ...

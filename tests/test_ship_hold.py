@@ -667,8 +667,6 @@ VIEW_RESOLVED = replace(
 
 
 class FakeHoldCarry:
-    """Returns (or raises) each outcome in turn, then repeats the last."""
-
     def __init__(self, *outcomes: MergeUpdate | Exception):
         self.outcomes = list(outcomes)
         self.calls: list[tuple[str, str, str, str, tuple[str, ...]]] = []

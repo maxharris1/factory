@@ -308,8 +308,6 @@ HOLD_PATTERNS = ("src/view/**", "public/**", ".github/workflows/**")
 
 
 def held_pr(repo: Repo, pr_files: dict[str, str]) -> str:
-    """Seed main with lib/a.py and src/view/A.tsx, then branch pr with
-    pr_files written over it; the pr tip is the approved head."""
     repo.write("lib/a.py", BASE)
     repo.write("src/view/A.tsx", BASE)
     repo.base = repo.commit("seed")
