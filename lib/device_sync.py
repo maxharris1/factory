@@ -166,6 +166,7 @@ def upsert(
     state: str,
     detail: str,
     now: float,
+    replaces_deploying: bool = False,
 ) -> None:
     """Write one row in the caller's transaction; `since` restarts only when the state changes."""
     if state not in STATES:
@@ -187,8 +188,9 @@ def upsert(
             state = excluded.state,
             detail = excluded.detail,
             checked_at = excluded.checked_at
+        WHERE {TABLE}.state != '{DEPLOYING}' OR ?
         """,
-        (device, bot, harness, checkout, target, sha, state, detail, now, now),
+        (device, bot, harness, checkout, target, sha, state, detail, now, now, replaces_deploying),
     )
 
 

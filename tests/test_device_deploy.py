@@ -10,24 +10,28 @@ import hashlib
 import json
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from lib import device_deploy, device_sync
+from lib import device_deploy, device_sync, skill_preflight
 from lib.device_pool import DevicePool
 from lib.heal import Webhook
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
+from lib.waiter import Waiter
 
 ORCH_SCRIPT = (
     "import os, sys\n"
     "with open(os.path.expanduser('~/install.log'), 'a') as log:\n"
     "    log.write(os.getcwd() + ' ' + ' '.join(sys.argv[1:]) + '\\n')\n"
 )
+REAL_PREFLIGHT = skill_preflight.preflight
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -292,6 +296,77 @@ def test_a_busy_device_is_synced_and_its_running_job_left_alone(tmp_path: Path, 
                          webhook=Webhook(url_env="HOOK_URL"), environ={}, now=1.0)
     last = json.loads((state / device_deploy.STATE_NAME).read_text())["last"]
     assert last["pc claude-bot"] == "synced"
+
+
+@pytest.mark.parametrize("state", ["lagging", "synced", "refused"])
+def test_only_the_deployer_replaces_a_deploying_row(fleet, state: str) -> None:
+    _origin, _transport, _config, queue, _home = fleet
+
+    def write(state: str, now: float, *, replaces_deploying: bool = False) -> None:
+        with queue.connect() as connection:
+            device_sync.upsert(connection, device="pc", bot="claude-bot", harness="claude",
+                               checkout="/c", target=None, sha=None, state=state,
+                               detail=state, now=now, replaces_deploying=replaces_deploying)
+
+    write("deploying", 1.0, replaces_deploying=True)
+    write(state, 2.0)
+    assert rows(queue)[("pc", "claude-bot")].state == "deploying"
+    with queue.connect() as connection:
+        assert device_sync.blocked(connection).devices == {"pc"}
+    write(state, 3.0, replaces_deploying=True)
+    assert rows(queue)[("pc", "claude-bot")].state == state
+
+
+def test_a_lagging_preflight_during_a_busy_deploy_keeps_the_device_blocked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    origin = Origin(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    config = MachinesConfig(devices=(device(tmp_path, "pc", "claude", "codex"),))
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    pool = DevicePool(queue, config)
+    clone_at(origin, checkout(tmp_path, "pc"), origin.old, detach=False)
+    clone_at(origin, checkout(tmp_path, "pc", "codex-bot"), origin.new, detach=False)
+    for harness in ("claude", "codex"):
+        queue.enqueue(JobRequest(repo="o/r", ticket_id=harness, action="build",
+                                 recipient=harness, source_comment_id=harness,
+                                 timeout_seconds=60), dedupe_key=harness)
+    job, placement = pool.claim("claude", autostart=(12345, None))
+    deploying = threading.Event()
+    resume = threading.Event()
+
+    class PausingTransport(LocalTransport):
+        def call(self, argv, **kwargs):
+            if "orch-sync" in argv[-1]:
+                deploying.set()
+                assert resume.wait(10)
+            return super().call(argv, **kwargs)
+
+    transport = PausingTransport(home)
+    monkeypatch.setattr(skill_preflight, "preflight", REAL_PREFLIGHT)
+    monkeypatch.setattr(skill_preflight, "ROOT", origin.work)
+    monkeypatch.setattr(skill_preflight, "pinned_files", lambda _root: Pinned("x", {}, {}))
+    monkeypatch.setattr(skill_preflight, "SshTransport", lambda: transport)
+    waiter = object.__new__(Waiter)
+    waiter.queue, waiter.pool = queue, pool
+    waiter.bot, waiter.recipient = "claude-bot", "claude"
+    waiter._claimer = (12345, None)
+    waiter.log = lambda _line: None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(device_deploy.run_pass, queue, config,
+                                 sha=origin.new, url=origin.url,
+                                 pinned=Pinned("x", {}, {}), transport=transport)
+        try:
+            assert deploying.wait(10)
+            assert waiter._start(job, placement) is None
+            assert rows(queue)[("pc", "claude-bot")].state == "deploying"
+            assert pool.claim("codex") is None
+        finally:
+            resume.set()
+            future.result(timeout=20)
+    assert states(queue)[("pc", "claude-bot")] == "synced"
+    assert pool.claim("codex") is not None
 
 
 def test_a_target_left_deploying_by_a_dead_pass_is_reobserved(tmp_path: Path, fleet) -> None:

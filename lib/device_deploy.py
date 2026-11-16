@@ -339,6 +339,7 @@ def _write(connection: sqlite3.Connection, result: Result, sha: str, now: float)
         state=result.state,
         detail=result.detail,
         now=now,
+        replaces_deploying=True,
     )
 
 
