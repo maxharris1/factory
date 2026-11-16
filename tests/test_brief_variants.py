@@ -140,6 +140,26 @@ def test_review_fix_carries_the_rule_first_instruction_and_inlines_the_findings(
     assert "infrastructure" not in task
 
 
+def test_review_fix_on_red_ci_inlines_every_finding_and_names_the_failed_checks():
+    action, attempt, head, extra = REVIEW_FIX
+    second = {**FINDING, "id": "f-3", "text": "f-3: the cap ignores the stored risk. Rule: read the risk from the row."}
+    findings = {"findings": [FINDING, second], "reviewed_head": HEAD, "reviewed_base": None, "verdict_url": VERDICT_URL}
+    task = _task(
+        _render(
+            action,
+            attempt,
+            head,
+            {**extra, "evidence": _evidence(findings=findings), "ci_failure": {"failed_checks": ["pytest", "check-config"]}},
+        )
+    )
+    assert f"Fix the `[blocking]` findings of the REVISE verdict at {VERDICT_URL}." in task
+    assert "f-2: the poller writes the row directly." in task
+    assert "f-3: the cap ignores the stored risk." in task
+    assert f"CI is also red on {HEAD}. These checks failed: `pytest`, `check-config`." in task
+    assert f"run list --commit {HEAD}" in task
+    assert "Fix the red CI" not in task
+
+
 def test_review_fix_without_evidence_points_at_the_verdict():
     action, attempt, head, extra = REVIEW_FIX
     task = _task(_render(action, attempt, head, {"instruction": VERDICT_URL, "round": "2/3"}))

@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib.dispatcher import CIResult
+from lib.brief import render_brief
+from lib.dispatcher import CIResult, FailedCheck
 from lib.factory_md import load_factory_md, parse_factory_md
 from tests.merge_queue_support import APPROVE, PR, VERDICT, Board, sha
 
@@ -73,7 +74,11 @@ def board_with(tmp_path: Path, *, on: bool) -> Board:
     def with_logs(pr: PR, *, fresh: bool = False):
         ticket = snapshot(pr, fresh=fresh)
         ci = {
-            head: CIResult(result.status, CI_LOG if result.status == "failure" else None)
+            head: (
+                CIResult("failure", CI_LOG, failed=(FailedCheck("pytest"),))
+                if result.status == "failure"
+                else CIResult(result.status)
+            )
             for head, result in ticket.ci.items()
         }
         return replace(ticket, ci=ci)
@@ -104,6 +109,10 @@ def reviewed_at_pending_ci(board: Board, pr: PR, head: str, verdict_id: str | No
 
 def instruction(job) -> str:
     return json.loads(job["detail"])["instruction"]
+
+
+def ci_failure(job) -> object:
+    return json.loads(job["detail"]).get("ci_failure")
 
 
 def test_off_a_ready_with_pending_ci_waits(tmp_path: Path) -> None:
@@ -202,13 +211,40 @@ def test_on_a_revise_with_red_ci_queues_one_fix_carrying_both(tmp_path: Path) ->
     board.poll()
 
     [fix] = board.jobs("fix")
-    text = instruction(fix)
-    assert "#issuecomment-revise-42-1/3" in text or "revise-42-1/3" in text
-    assert f"CI failed on {pr.head}" in text
-    assert CI_LOG in text
+    assert instruction(fix) == "comment:revise-42-1/3"
+    assert ci_failure(fix) == {"failed_checks": ["pytest"]}
     assert board.outcome("revise-42-1/3") == "queued-review-fix"
     assert board.state("42")["review_round"] == 1
     assert board.state("42")["gate_count"] == 1
+
+
+BLOCKING_REVISE = (
+    "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
+    "round=1/3 head={head} verdict=REVISE ac=met risk=high -->\n"
+    "- [blocking] f-1 The poller writes the row directly. Rule: every write goes through the queue.\n"
+    "- [blocking] f-2 The cap ignores the stored risk. Rule: read the risk from the row.\n"
+)
+
+
+def test_on_a_revise_with_red_ci_the_fix_brief_keeps_the_findings_and_names_the_failed_checks(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    board.post(pr, "7001", BLOCKING_REVISE.format(head=pr.head), "codex-login")
+    board.poll()
+    assert board.outcome("7001") == "queued-review-fix"
+
+    brief = render_brief(board.claim("claude"), bot="claude-bot", context=None, factory_root="/srv/orch/factory")
+    task = brief.split("## What to do", 1)[1].split("## Handoff comment", 1)[0]
+    assert "Fix the `[blocking]` findings of the REVISE verdict at" in task
+    assert "f-1 The poller writes the row directly." in task
+    assert "f-2 The cap ignores the stored risk." in task
+    assert f"CI is also red on {pr.head}. These checks failed: `pytest`." in task
+    assert "Fix the red CI" not in task
+    assert "skip steps 3 to 5" not in task
 
 
 def test_on_a_revise_waits_for_pending_ci_then_queues_one_fix(tmp_path: Path) -> None:
@@ -394,7 +430,7 @@ def test_on_a_ready_reposted_during_the_review_leaves_red_ci_to_the_verdict(
     board.poll()
     [fix] = board.jobs("fix")
     assert fix["source_comment_id"] == "revise-42-1/3"
-    assert CI_LOG in instruction(fix)
+    assert ci_failure(fix) == {"failed_checks": ["pytest"]}
 
 
 def test_on_the_third_red_at_the_round_cap_marks_the_ticket_stuck(tmp_path: Path) -> None:
@@ -448,7 +484,7 @@ def test_on_a_red_ready_before_the_revise_leaves_one_combined_fix(tmp_path: Path
     board.poll()
     [fix] = board.jobs("fix")
     assert fix["source_comment_id"] == "revise-42-1/3"
-    assert CI_LOG in instruction(fix)
+    assert ci_failure(fix) == {"failed_checks": ["pytest"]}
 
 
 @pytest.mark.parametrize("retried_review", [False, True])
@@ -589,7 +625,7 @@ def test_a_red_ready_before_a_finished_reviews_verdict_is_read_waits_for_one_com
 
     [fix] = [job for job in board.jobs("fix") if job["state"] != "cancelled"]
     assert fix["source_comment_id"] == "revise-older"
-    assert CI_LOG in instruction(fix)
+    assert ci_failure(fix) == {"failed_checks": ["pytest"]}
     board.queue.finish(board.claim("claude").id, owner="claude", handoff_comment_id="fix")
     assert board.queue.claim("claude") is None
 
@@ -618,7 +654,7 @@ def test_a_red_ready_after_an_edited_verdict_waits_for_the_corrected_verdicts_co
 
     [fix] = [job for job in board.jobs("fix") if job["state"] != "cancelled"]
     assert fix["source_comment_id"] == "revise-corrected"
-    assert CI_LOG in instruction(fix)
+    assert ci_failure(fix) == {"failed_checks": ["pytest"]}
 
 
 def test_a_reposted_red_ready_after_a_return_to_the_approved_head_queues_no_extra_fix(
