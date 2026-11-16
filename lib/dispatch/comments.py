@@ -59,6 +59,7 @@ class CommentsMixin:
             self._process_comments(ticket, comments)
             self._requeue_unanswered_jobs(ticket)
             self._requeue_refused_reviews(ticket)
+            self._review_after_green_rerun(ticket)
         except BaseException as error:
             try:
                 self._settle_external_ships(ticket)
@@ -415,6 +416,16 @@ class CommentsMixin:
             "INSERT OR IGNORE INTO handled_times VALUES (?, ?, ?, ?)",
             (ticket.repo.lower(), ticket.ticket_id, comment_id, handled_at),
         )
+
+    def _rehandle(self, ticket: TrackedTicket, comment_id: str, outcome: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE handled_comments SET outcome = ?
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (outcome, ticket.repo.lower(), ticket.ticket_id, comment_id),
+            )
 
     def _remember_verdicts(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
