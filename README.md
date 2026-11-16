@@ -38,15 +38,41 @@ still ship `enabled: false` until Max turns them on.
   merged some other way is refused and wakes Grok Bot. `ship: merge` repos
   still squash-merge with `--match-head-commit`; `ship: handoff` repos are
   never merged by the factory.
-- A `ship: merge` repo may add `hold:` to `factory.md` (issue #86,
-  [`lib/hold.py`](lib/hold.py)). A PR carrying `hold.label` (default
-  `factory:hold`), or whose diff touches a `hold.paths` glob, is not merged on
-  APPROVE: it waits in `orch:state/awaiting-ok` ("waiting on <approver>" in
-  `orch status` and the dashboard) until `hold.approver` posts
-  `<!-- orch:v1 kind=ok head=<sha> -->` for the current head, or removes the
-  label on a label-only hold. Grok Bot is woken once per held head. The OK
-  carries to a moved head only on an equal patch-id, and `stable_patch_id` is
-  not built (below), so today a moved head needs a new OK.
+- A `ship: merge` or `ship: handoff` repo may add `hold:` to `factory.md`
+  (issues #86 and #183, [`lib/hold.py`](lib/hold.py)). A PR carrying
+  `hold.label` (default `factory:hold`), or whose diff touches a `hold.paths`
+  glob, does not ship on APPROVE: it waits in `orch:state/awaiting-ok`
+  ("waiting on <approver>" in `orch status` and the dashboard) until
+  `hold.approver` posts `<!-- orch:v1 kind=ok head=<sha> -->` for the current
+  head, or removes the label on a label-only hold. The OK may also be a
+  comment whose first line is `/ok <40-char sha>`. Grok Bot is woken once per
+  held head. The OK carries to a moved head with an equal
+  `git patch-id --stable`, which `stable_patch_id` computes (below).
+- Approver commands (#173). Max may post two plain PR comments in place of
+  `orch:v1` ones.
+  - `/go` is a comment whose first non-empty line is `/go`, with at most one
+    more line ([`lib/approver_commands.py`](lib/approver_commands.py)). Only a
+    login in orch.yml `approver_logins` (today `maxharris1`) may post it,
+    whether or not `github_app.enabled` is true. On a tracked PR it resumes
+    the first of these that applies. That is a `repeat=` or `unsat=` park in
+    waiting-max, then a BLOCKED review, then a capped ticket (one more round),
+    then a paused step. The resumed job's evidence carries the second line as
+    its instruction. An edited `/go` is refused. A `/go` from another
+    `trusted_logins` login wakes Grok Bot with `go-not-from-approver`, and one
+    from anyone else is ignored. On a stuck ticket it only makes sure Grok Bot
+    has the stuck wake. With nothing to resume it is handled as
+    `slash-go-no-target` and changes nothing.
+  - `/ok <sha>` is a comment whose first line is `/ok` and the full
+    40-character lowercase head SHA. On a held PR (the hold label, or a diff
+    that touches `hold.paths`) it does what
+    `<!-- orch:v1 kind=ok head=<sha> -->` does. Only `hold.approver`
+    (`maxharris1` here) counts, and only while that login may approve. That
+    is a `trusted_logins` key while `github_app.enabled` is false, and a
+    login in `approver_logins` once it is true
+    ([`lib/dispatch/holds.py`](lib/dispatch/holds.py) `_may_approve`). It
+    clears the hold for that head, or for a moved head with an equal
+    `git patch-id --stable`, so the poller can ship once the rest of the
+    ship rule holds. An edited `/ok` does not count.
 - A repo may list shared docs in `factory.md` `shared_paths` (issue #261),
   paths or globs such as `docs/SPEC.md` or `docs/decisions/` (a trailing `/`
   is a directory). A `Touches:` path that matches never makes the feeder hold
@@ -83,7 +109,7 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or runs received that do not match `total_count` on every page is `pending`. A short read is `pending` even with a failure in view, since a rerun on an unread page may supersede it |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
-| `stable_patch_id` | none | Not built; a moved head queues a re-review |
+| `stable_patch_id` | `GET pulls/<n>` for `base.ref`, then `GET compare/<base>...<head>` as a diff | `git patch-id --stable` of that diff, run with no repository. An empty diff, a diff that names a binary file, or a `git patch-id` that fails or times out raises `GitHubAdapterError` |
 | `handoff` | `GET pulls/<n>`, then, when draft, `gh api -X POST graphql` with `markPullRequestReadyForReview` on the pull's `node_id` (GitHub has no REST route for this; it is what `gh pr ready` sends) | Confirms the linked PR is unmerged and still at the approved head, and that GitHub reports `isDraft: false` at that head; never merges or requests a reviewer |
 
 SHAs must be 40 lowercase hex, and owner, repo, branch and PR number must
