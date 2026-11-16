@@ -941,10 +941,7 @@ def _runtime(
         raise ValueError("trusted_logins is required for polling")
     if (
         not create
-        and any(
-            project.linear_project_id is not None
-            for project in config.projects
-        )
+        and any(project.linear_project_ids for project in config.projects)
         and not config.trusted_linear_users
     ):
         raise ValueError("trusted_linear_users is required for Linear polling")
@@ -1044,9 +1041,9 @@ def _feeder(
         linear = LinearIntakeClient(
             source,
             {
-                project.linear_project_id: project.repo
+                project_id: project.repo
                 for project in config.projects
-                if project.linear_project_id is not None
+                for project_id in project.linear_project_ids
             },
         )
     return Feeder(
@@ -2033,9 +2030,9 @@ def _linear_webhook(argv: list[str]) -> int:
         app = linear_webhook.WebhookApp(
             secret=linear_webhook.read_secret(webhook.secret_file),
             project_ids=frozenset(
-                project.linear_project_id
+                project_id
                 for project in config.projects
-                if project.linear_project_id is not None
+                for project_id in project.linear_project_ids
             ),
             db_path=path,
             path=webhook.path,

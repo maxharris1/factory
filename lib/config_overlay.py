@@ -91,7 +91,7 @@ def merge(base: dict, overlay: dict) -> dict:
 
 def overlay_keys(overlay: dict) -> list[str]:
     """The dotted names an overlay sets, e.g. `linear_webhook.public_url`
-    or `projects[owner/name].linear_project_id`. Names only: never a value,
+    or `projects[owner/name].linear_project_ids`. Names only: never a value,
     and never the logins or user ids that key the trusted_* mappings."""
     names: list[str] = []
     for key, value in overlay.items():

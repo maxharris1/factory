@@ -53,7 +53,7 @@ def test_repo_orch_yml_lists_projects_and_polls_github_every_30_seconds(
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 60
     assert config.projects[0].factory_ref == "dev"
-    assert config.projects[0].linear_project_id == "test-linear-project-id"
+    assert config.projects[0].linear_project_ids == frozenset({"test-linear-project-id"})
     assert config.projects[0].linear_ready_for_review is True
     assert config.projects[0].grok_bot == "offer-brief-project"
 
@@ -79,8 +79,8 @@ def test_placeholder_linear_project_id_can_be_allowed_for_validation() -> None:
     ]
     assert config is not None
     assert (
-        config.projects[0].linear_project_id
-        == "REPLACE_WITH_LINEAR_PROJECT_ID"
+        config.projects[0].linear_project_ids
+        == frozenset({"REPLACE_WITH_LINEAR_PROJECT_ID"})
     )
 
 

@@ -22,6 +22,9 @@ from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 from lib.update_check import RebaseScope, UpdateScope
 
+_CI_RED_READY = frozenset({"queued-ci-fix", "ci-red-in-flight"})
+_RERUN_STATES = (None, "building", "fixing", "review")
+
 
 class ReadyMixin:
     def _t2(
@@ -176,6 +179,61 @@ class ReadyMixin:
         if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _review_after_green_rerun(self, ticket: TrackedTicket) -> None:
+        ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+        head = ticket.current_head
+        result = ticket.ci.get(head) if head is not None else None
+        if (
+            result is None
+            or result.status != "success"
+            or self._is_stuck(ticket)
+            or self._review_context(ticket)[0] not in _RERUN_STATES
+        ):
+            return
+        latest = self._latest_ready_at(ticket, head)
+        if latest is None or self._open_job_at(ticket, head):
+            return
+        comment, fields = latest
+        handled, outcome = self._t2(ticket, comment, fields)
+        if not handled:
+            return
+        self._rehandle(ticket, comment.id, outcome)
+        if self.log is not None:
+            self.log(
+                f"green rerun at {head[:12]}: ready {comment.id} {outcome} "
+                f"({ticket.repo}#{ticket.ticket_id})"
+            )
+
+    def _latest_ready_at(
+        self, ticket: TrackedTicket, head: str
+    ) -> tuple[Comment, dict[str, str]] | None:
+        for comment in sorted(ticket.comments, key=_comment_order, reverse=True):
+            if comment.edited_at is not None:
+                continue
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if fields["kind"] != "ready" or _matching_head(fields["head"], head) is None:
+                continue
+            outcome = self._handled_outcome(ticket, comment.id)
+            if outcome is None or outcome.startswith("rejected-"):
+                continue
+            return (comment, fields) if outcome in _CI_RED_READY else None
+        return None
+
+    def _open_job_at(self, ticket: TrackedTicket, head: str) -> bool:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT head FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action IN ('review', 'fix')
+                  AND (state IN ('queued', 'running') OR (state = 'failed' AND failure_handled = 0))
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        return any(_matching_head(str(row["head"] or ""), head) is not None for row in rows)
 
     def _mark_stuck_on_third_red(
         self, ticket: TrackedTicket, comment: Comment, head: str, count: int
