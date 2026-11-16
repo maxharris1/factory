@@ -449,7 +449,9 @@ def test_a_released_slot_takes_the_next_job(tmp_path: Path) -> None:
     claimed = pool.claim("claude")
     assert claimed is not None
     timed_out, _ = claimed
-    now[0] = 100.0 + 5400
+    now[0] = 101.0
+    queue.heartbeat(timed_out.id, owner="claude")
+    now[0] = 101.0 + 5400
     (running,) = [job for job in queue.outstanding() if job.state == "running"]
     assert queue.mark_timed_out(running)
     assert pool.claim("claude") is None
@@ -461,6 +463,25 @@ def test_a_released_slot_takes_the_next_job(tmp_path: Path) -> None:
     assert reused[0].id != timed_out.id
     assert reused[1].device == "box"
     assert pool.used() == {"box": 1}
+
+
+def test_the_timeout_sweep_never_fails_a_claim_that_has_not_started(tmp_path: Path) -> None:
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, device("box", 1, "claude"), now=now)
+    enqueue(queue, "claude", "1")
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    now[0] = 100.0 + 5400
+    (running,) = queue.outstanding()
+
+    assert queue.mark_timed_out(running) is False
+    assert queue.outstanding()[0].state == "running"
+
+    now[0] += 1
+    queue.heartbeat(running.id, owner="claude")
+    now[0] += 5400
+    (started,) = queue.outstanding()
+    assert queue.mark_timed_out(started) is True, "once it heartbeats, its timeout applies"
 
 
 def test_pool_refuses_two_devices_on_one_tailscale_host(tmp_path: Path) -> None:

@@ -530,6 +530,55 @@ def test_an_unreachable_start_waits_out_its_backoff_with_the_dispatcher_reconcil
         assert connection.execute("SELECT COUNT(*) FROM ticket_state WHERE stuck = 1").fetchone()[0] == 0
 
 
+def test_reconciling_during_an_unreachable_preflight_never_charges_an_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    from lib.dispatcher import Dispatcher
+    from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
+
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    deploy(device.checkout)
+    now = [1_800_000_000.0]
+    device.queue.clock = lambda: now[0]
+    pool = device.waiter.pool
+
+    class Devices:
+        config = pool.config
+
+        def reconcile(self, now, on_offline):
+            return None
+
+    dispatcher = Dispatcher(
+        device.db, device.queue, trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(), grok_delivery=FakeGrokDelivery(), devices=Devices(),
+    )
+    device.ssh.offline("fakepc-claude-bot").touch()
+    original_call = SshTransport.call
+    in_flight: list[str] = []
+
+    def slow_unreachable(transport, *args, **kwargs):
+        now[0] += 61
+        dispatcher.reconcile_jobs()
+        in_flight.append(state(device.db, job_id))
+        return original_call(transport, *args, **kwargs)
+
+    monkeypatch.setattr(SshTransport, "call", slow_unreachable)
+    job_id = enqueue(device.queue, "a", timeout_seconds=60)
+
+    for _ in range(2):
+        assert device.waiter.step() is None
+        now[0] += UNREACHABLE_BACKOFF_SECONDS
+
+    assert in_flight == ["running", "running"], "the sweep never fails a claim still in preflight"
+    assert state(device.db, job_id) == "queued"
+    assert attempt_of(device.db, job_id) == 1
+    assert device.spawn.calls == []
+    with sqlite3.connect(device.db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM ticket_state WHERE stuck = 1").fetchone()[0] == 0
+
+
 def placed_on(db: Path, job_id: str) -> str:
     with sqlite3.connect(db) as connection:
         return str(connection.execute(
