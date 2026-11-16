@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.brief import render_brief  # noqa: E402
+from lib.dispatcher import Comment  # noqa: E402
+from lib.evidence import criteria_evidence  # noqa: E402
+from lib.evidence.findings import findings_evidence  # noqa: E402
 from lib.factory_md import parse_factory_context  # noqa: E402
 from lib.queue import Job, JobRequest  # noqa: E402
 
@@ -56,6 +60,61 @@ UPDATE: dict[str, object] = {
     "update_commits": [],
 }
 
+TRUSTED = {"github": {"factory-app[bot]": frozenset({"grok-bot"}), "codex-app[bot]": frozenset({"codex-bot"})}}
+TICKET_BRIEF = Comment(
+    id="1",
+    author="factory-app[bot]",
+    created_at=1.0,
+    url="https://github.com/owner/repo/pull/42#issuecomment-1",
+    body="""<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=high -->
+**Brief for #42: Start free button**
+
+### Ticket
+```
+## Why
+New visitors cannot try the product without a card.
+
+## Acceptance criteria
+- ac-1: The pricing page shows a `Start free` button above the plans.
+- ac-2: The button opens sign-up with no card field.
+```
+""",
+)
+ROUND_ONE_VERDICT = Comment(
+    id="2",
+    author="codex-app[bot]",
+    created_at=2.0,
+    url="https://github.com/owner/repo/pull/42#issuecomment-2",
+    body=f"""<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head={"a" * 40} ac=unmet verdict=REVISE risk=high -->
+**Review round 1 of 3: REVISE**
+
+1. [blocking] f-1. Rule: sign-up never asks for a card on the free plan. `app/signup.tsx:40`. Open /signup?plan=free and see the card field.
+2. [blocking] f-2. Rule: every new route has a test. `app/pricing.tsx:12`. No test covers the button.
+3. [minor] f-3. Rule: button labels use sentence case. `app/pricing.tsx:14`. Reads `Start Free`.
+""",
+)
+
+
+def evidence_bundle(current_round: int) -> dict[str, object]:
+    criteria = criteria_evidence(
+        issue_key="#42",
+        issue_url="https://github.com/owner/repo/issues/42",
+        comments=[TICKET_BRIEF],
+        trusted_logins=TRUSTED,
+        issue_body=None,
+        pr_body=None,
+        ready_starts_review=False,
+    )
+    findings = findings_evidence(
+        comments=[TICKET_BRIEF, ROUND_ONE_VERDICT],
+        trusted_logins=TRUSTED,
+        reviewer="codex-bot",
+        current_round=current_round,
+        bases={1: "e" * 40},
+    )
+    return {"criteria": asdict(criteria), "findings": asdict(findings), "ci": None}
+
+
 # kind: (action, recipient, attempt, head, detail extras)
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
@@ -78,6 +137,8 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
+    "review-evidence": ("review", "codex", 1, HEAD, {"round": "1/3", "evidence": evidence_bundle(1)}),
+    "review-round-2-evidence": ("review", "codex", 1, HEAD, {"round": "2/3", "evidence": evidence_bundle(2)}),
     "review-followups": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-before-ci": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
     "review-rebased": ("review", "codex", 1, HEAD, {"round": "2/3", "rebase": {

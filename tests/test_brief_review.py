@@ -40,7 +40,7 @@ def header(brief: str) -> str:
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
 def test_criteria_come_first_with_four_states(round_text: str) -> None:
     first = steps(review_brief(round_text))[0]
-    assert first.startswith("1. Requirements first. Before the diff, list the ticket's acceptance criteria by `ac-<n>`")
+    assert first.startswith("1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above")
     for state in ("`met`", "`unmet`", "`unverified`", "`unsatisfiable`"):
         assert state in first
     assert "evidence" in first
