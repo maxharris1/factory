@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import re
 import shutil
@@ -46,6 +47,7 @@ SPEC_STATE = {
 EXPECTED = """\
 weekly eval report
 runs: 5
+skipped dispatcher.log lines: 0
 
 time in each state
 intake 70
@@ -95,6 +97,7 @@ token savings: not measured (no per-message token count in the input)
 WINDOW = """\
 weekly eval report
 runs: 1
+skipped dispatcher.log lines: 0
 
 time in each state
 intake 10
@@ -538,13 +541,41 @@ def test_ticket_without_pr_is_reported_under_ticket_id(tmp_path: Path) -> None:
     assert "review rounds per PR\nmaxharris1/Cleffy 9 0\nmaxharris1/Cleffy ENG-42 0\n" in text
 
 
-def test_row_without_ticket_is_refused(tmp_path: Path) -> None:
+def test_row_without_ticket_is_skipped_and_counted(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
         "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake\n",
     )
-    with pytest.raises(EvalError, match="missing repo or ticket"):
-        build_report(tmp_path)
+    built = build_report(tmp_path)
+    assert built.report.skipped_lines == 1
+    assert built.warnings == ("dispatcher.log:1: missing repo or ticket; line skipped",)
+
+
+def test_torn_log_lines_are_skipped_and_counted(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("09:00:05", "enter state=building"),
+            row("09:00:06", "wake role=grok-bot reason=nobody"),
+            "2026-11-02T0",
+            "2026-11-03T09:00:06Z repo=maxharris1/Cleffy message from=a to=b",
+            "9:00:07Z repo=maxharris1/Cleffy ticket=4 enter state=review",
+            "      1-02T0" + row("09:00:08", "end"),
+            row("09:00:09", "end"),
+        ),
+    )
+    result = run(["eval-report", "--input", str(tmp_path)])
+    assert result.returncode == 0, result.stderr
+    assert "runs: 1\nskipped dispatcher.log lines: 3\n" in result.stdout
+    assert "wasted agent wakes\ncount: 1\n" in result.stdout
+    assert "maxharris1/Cleffy 2026-W45 manual=1 scripted=0\n" in result.stdout
+    assert result.stderr.splitlines() == [
+        "dispatcher.log:3: bad timestamp; line skipped",
+        "dispatcher.log:5: bad timestamp; line skipped",
+        "dispatcher.log:6: bad timestamp; line skipped",
+    ]
+    report = json.loads(run(["eval-report", "--input", str(tmp_path), "--json"]).stdout)
+    assert report["skipped_lines"] == 3
 
 
 def test_window_clips_state_straddling_both_ends(tmp_path: Path) -> None:
@@ -622,7 +653,6 @@ def test_top_level_input_symlinked_outside_is_refused(tmp_path: Path, name: str)
 @pytest.mark.parametrize(
     ("where", "args"),
     [
-        ("log", []),
         ("since", ["--since", "2026-02-30T00:00:00Z"]),
         ("until", ["--until", "2026-02-30T00:00:00Z"]),
         ("findings", []),
@@ -633,14 +663,6 @@ def test_impossible_date_is_bad_timestamp(
 ) -> None:
     root = tmp_path / "week"
     shutil.copytree(WEEK, root)
-    if where == "log":
-        path = root / "dispatcher.log"
-        path.write_text(
-            path.read_text(encoding="utf-8").replace(
-                "2026-11-03T15:00:00Z", "2026-02-30T15:00:00Z", 1
-            ),
-            encoding="utf-8",
-        )
     if where == "findings":
         path = root / "model-findings.txt"
         path.write_text(
@@ -651,6 +673,22 @@ def test_impossible_date_is_bad_timestamp(
     assert result.returncode == 1
     assert "bad timestamp '2026-02-30T" in result.stderr
     assert result.stdout == ""
+
+
+def test_impossible_log_date_is_a_skipped_line(tmp_path: Path) -> None:
+    root = tmp_path / "week"
+    shutil.copytree(WEEK, root)
+    path = root / "dispatcher.log"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "2026-11-03T15:00:00Z", "2026-02-30T15:00:00Z", 1
+        ),
+        encoding="utf-8",
+    )
+    result = run(["eval-report", "--input", str(root)])
+    assert result.returncode == 0, result.stderr
+    assert "skipped dispatcher.log lines: 1\n" in result.stdout
+    assert "bad timestamp '2026-02-30T15:00:00Z'; line skipped" in result.stderr
 
 
 def test_missing_model_findings_is_none_supplied(tmp_path: Path) -> None:

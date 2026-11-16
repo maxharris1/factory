@@ -191,7 +191,7 @@ def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) 
     card = re.search(r'<a class="tile [^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
     assert card, lanes
     text = _text(card.group(0))
-    assert "PR" in text and "cleffy#40" in text  # a GitHub ticket is a PR
+    assert "cleffy#40" in text and "PR" not in text.split()
     assert "codex" in text  # bot
     assert "review" in text  # step
     assert "2/3" in text  # the job's detail.round, not the ticket's count
@@ -207,7 +207,7 @@ def test_a_linear_slot_shows_its_ticket_not_a_pr(tmp_path: Path) -> None:
     card = re.search(r'<a class="tile [^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
     assert card
     text = _text(card.group(0))
-    assert "AUT-7" in text and "ticket" in text and "PR" not in text.split()
+    assert "AUT-7" in text and "ticket" not in text.split() and "PR" not in text.split()
 
 
 def test_queue_items_open_their_job_page(tmp_path: Path) -> None:
@@ -680,7 +680,8 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   html() { const attrs = (this.className ? ' class="' + esc(this.className) + '"' : '') +
-      Object.keys(this.attrs).map(k => ' ' + k + '="' + esc(this.attrs[k]) + '"').join('') + (this.hidden ? ' hidden' : '');
+      Object.keys(this.attrs).map(k => ' ' + k + '="' + esc(this.attrs[k]) + '"').join('') +
+      (this.title ? ' title="' + esc(this.title) + '"' : '') + (this.hidden ? ' hidden' : '');
     return '<' + this.tagName + attrs + '>' + esc(this._text) + this.children.map(c => c.html()).join('') +
       '</' + this.tagName + '>'; }
   dump(depth) { const pad = ' '.repeat(depth || 0);
@@ -835,7 +836,7 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
     assert "a.tile.codex[href=job.html#job-r-codex-]" in lanes
-    for needle in ("cleffy#13", "codex", "review", "3/3", "T+ ", "OVERDUE", "DISABLED",
+    for needle in ("cleffy#13", "codex", "review", "3/3", "T+ ", "overdue", "DISABLED",
                    "stale"):
         assert needle in out["text"]["lanes"], (needle, lanes)
     # #63 FU-1: pc holds 2 slots with 1 job running; the lane is full.

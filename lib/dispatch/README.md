@@ -70,4 +70,5 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
 | Poll | `poll.py` (`PollMixin`, `PollLoop`) | `poll_once`, handoff verification, poll-error streaks, attention |
+| Eval log | `eval_log.py` (`EvalLogMixin`) | `_export_eval_log`: append `dispatcher.log` beside the database from the rows each poll committed (#545) |
 | Cycle timing | `cycle_clock.py` (`CycleClock`) | per-phase cycle durations for poller.log and `orch status` |

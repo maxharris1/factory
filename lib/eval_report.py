@@ -35,6 +35,9 @@ the window or a dwell that overlaps it. Chart comparison uses the
 section 4.1 edges. post-merge is on the chart and is still reported,
 because Phase 1 configures no post_merge.
 
+A line that does not parse is skipped. The report counts the skipped
+lines, and each one is a warning naming its line number and fault.
+
 A message line is one manual bot-to-bot handoff and belongs to no run.
 Message lines in the window are counted against comment lines in the
 window, per repo and ISO week.
@@ -65,14 +68,18 @@ Metrics (issue #209, SF-10) come from an orch.db snapshot, not from this
 directory: build_metrics opens a backup (lib.state_backup) read-only, so
 it writes nothing to it or beside it, and render_metrics prints each
 metric beside O4's baseline snapshot. A metric whose source is not in a
-snapshot prints as unrecorded:
+snapshot prints as unrecorded(<reason>). A ratio with nothing to divide
+prints as -. --since and --until (inclusive, UTC) filter the rows that
+carry a time, for the metrics named in WINDOWED_METRICS and the follow-up
+list. The rest are lifetime counts:
 
 - rounds per PR: a PR is reviewed once it has a REVISE round
   (ticket_state.review_round) or an approval; its rounds are its REVISE
   rounds plus the approving one
 - first-round REVISE and first-pass APPROVE rates: each PR's first acted-on
   verdict, in handled_comments order: a REVISE recorded in review_events,
-  or an APPROVE recorded as a ship intent or ship hold. They read verdict
+  or an APPROVE recorded as a ship intent, a ship hold, or a held APPROVE
+  a base update displaced (held-base-update review_events). They read verdict
   history only, so a re-entry after handoff or an update-from-main
   re-review does not change them. A held APPROVE stays unhandled until its
   hold clears, so it counts as that PR's latest verdict until then
@@ -91,8 +98,32 @@ snapshot prints as unrecorded:
   lib.remote.preflight raises (PREFLIGHT_FAILURE). An unreachable device
   counts: preflight is a job's first ssh call
 - slot-hours lost: telemetry elapsed time of failed and cancelled jobs
-- hand-written gos, submitted-invalid, repeat-block and unsatisfiable
-  stops: nothing records these yet
+- hand-written gos: gos the dispatcher acted on that the feeder did not
+  post (feeder_items.go_comment_id), timed by handled_times: a queued,
+  answered or deduped plan or build, a go that lifts a cap (queued-fix) or
+  resumes a BLOCKED review (queued-blocked-review), and a resumed-<action>
+  whose job's evidence names a go as its cause
+- submitted-invalid: submitted-invalid job events
+- repeat-block and unsatisfiable stops: waiting-max-repeat and
+  waiting-max-unsat review_events, timed by handled_times
+- review-loop measures read verdict_heads. A PR's cohort is the window
+  holding its first verdict. A verdict's round is its review_round, else
+  its place in the PR's verdicts. An APPROVE counts once it is a ship
+  intent, ship hold or held-base-update. Risk is the review job's
+  (jobs.handoff_comment_id), else the PR's latest job's. Line bands read the first verdict's
+  changed_lines, stored from the PR's additions plus deletions when the
+  verdict names the PR's current head; older rows fall in unknown. A
+  snapshot whose verdict_heads has no posted_at prints them unrecorded
+- verdicts per merged PR: verdicts of PRs merged in the window
+- CI fixes without a log: CI-fix jobs (instruction "CI failed on <head>"
+  or the failed check names, "failed: <checks>") whose evidence carries no
+  CI log tail
+- verdicts on an accepted head: verdicts posted after another verdict on
+  the same head, matched as the dispatcher matches a sha prefix, was
+  accepted (review_events, ship intent or ship hold), timed by
+  handled_times or the hold's held_at
+- merged PRs with follow-ups: followup_filings filed or commented on a PR
+  merged in the window, with the issue link
 
 This module does not correct, reflect, run blinded evals, or maintain.
 """
@@ -109,7 +140,7 @@ from pathlib import Path
 from typing import Literal, assert_never
 
 from lib.factory_md import FactoryConfig, load_factory_md
-from lib.handoff import STATES, HandoffError, parse_comment
+from lib.handoff import STATES, HandoffError, matching_head, parse_comment
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
 from lib.schema import AUT0_REPO
@@ -262,6 +293,7 @@ class Handoffs:
 @dataclass(frozen=True)
 class Report:
     runs: int
+    skipped_lines: int
     seconds: tuple[tuple[str, int], ...]
     open_states: tuple[tuple[str, str, str], ...]
     wakes: tuple[Wake, ...]
@@ -273,8 +305,56 @@ class Report:
 
 
 @dataclass(frozen=True)
+class Unrecorded:
+    reason: str
+
+
+@dataclass(frozen=True)
+class NoRatio:
+    pass
+
+
+NO_RATIO = NoRatio()
+MetricValue = int | float | Unrecorded | NoRatio
+FollowUp = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class MetricWindow:
+    since: float | None = None
+    until: float | None = None
+
+    def sql(self, column: str) -> tuple[str, tuple[float, ...]]:
+        clauses: list[str] = []
+        params: list[float] = []
+        if self.since is not None:
+            clauses.append(f"{column} >= ?")
+            params.append(self.since)
+        if self.until is not None:
+            clauses.append(f"{column} <= ?")
+            params.append(self.until)
+        return " AND ".join(clauses) or "1", tuple(params)
+
+    def contains(self, at: float | None) -> bool:
+        if at is None:
+            return self.since is None and self.until is None
+        if self.since is not None and at < self.since:
+            return False
+        return self.until is None or at <= self.until
+
+    def text(self) -> str:
+        start, end = (
+            "-" if at is None else _format_time(datetime.fromtimestamp(at, timezone.utc))
+            for at in (self.since, self.until)
+        )
+        return f"window {start} to {end}"
+
+
+@dataclass(frozen=True)
 class Metrics:
-    values: tuple[tuple[str, int | float | None], ...]
+    values: tuple[tuple[str, MetricValue], ...]
+    followups: tuple[FollowUp, ...] | Unrecorded = ()
+    window: MetricWindow = MetricWindow()
 
 
 @dataclass(frozen=True)
@@ -361,7 +441,8 @@ def build_report(
 
     warnings: list[str] = []
     repos = _load_orch(_top_level(root, "orch.yml"), warnings)
-    events, messages = _load_log(_top_level(root, "dispatcher.log"))
+    events, messages, skipped = _load_log(_top_level(root, "dispatcher.log"))
+    warnings.extend(f"{fault}; line skipped" for fault in skipped)
     for item in [*events, *messages]:
         if item.repo not in repos:
             raise EvalError(f"{item.repo} is not a project in orch.yml")
@@ -377,7 +458,7 @@ def build_report(
     manual = [item for item in messages if window.contains(item.at)]
 
     return Built(
-        report=_assemble(runs, findings, configs, _handoffs(manual, scripted)),
+        report=_assemble(runs, len(skipped), findings, configs, _handoffs(manual, scripted)),
         warnings=tuple(warnings),
     )
 
@@ -416,7 +497,12 @@ def render_json(report: Report) -> str:
 
 def render(report: Report) -> str:
     """Plain text. Section titles are the F1-14 measures."""
-    lines = ["weekly eval report", f"runs: {report.runs}", ""]
+    lines = [
+        "weekly eval report",
+        f"runs: {report.runs}",
+        f"skipped dispatcher.log lines: {report.skipped_lines}",
+        "",
+    ]
     lines.append("time in each state")
     if not report.seconds:
         lines.append("none")
@@ -504,6 +590,7 @@ def _handoffs(manual: list[_Handoff], scripted: list[_Handoff]) -> tuple[Handoff
 
 def _assemble(
     runs: list[_Run],
+    skipped_lines: int,
     findings: list[ModelBreak] | None,
     configs: dict[str, FactoryConfig],
     handoffs: tuple[Handoffs, ...],
@@ -568,6 +655,7 @@ def _assemble(
         )
     return Report(
         runs=len(runs),
+        skipped_lines=skipped_lines,
         seconds=seconds,
         open_states=open_states,
         wakes=wakes,
@@ -832,18 +920,23 @@ def _warning_lines(path: Path, findings: list[Finding]) -> list[str]:
     ]
 
 
-def _load_log(path: Path) -> tuple[list[_Event], list[_Handoff]]:
+def _load_log(path: Path) -> tuple[list[_Event], list[_Handoff], list[str]]:
     if not path.is_file():
         raise EvalError("dispatcher.log not found")
     events: list[_Event] = []
     messages: list[_Handoff] = []
+    skipped: list[str] = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        parsed = _parse_log_line(raw, number)
+        try:
+            parsed = _parse_log_line(raw, number)
+        except EvalError as fault:
+            skipped.append(str(fault))
+            continue
         if isinstance(parsed, _Event):
             events.append(parsed)
         elif isinstance(parsed, _Handoff):
             messages.append(parsed)
-    return events, messages
+    return events, messages, skipped
 
 
 def _parse_message(at: datetime, fields: dict[str, str], where: str) -> _Handoff:
@@ -1002,17 +1095,49 @@ PREFLIGHT_FAILURE = re.compile(
     r"|bash not found on |preflight on \S+ exited "
 )
 REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
-UNRECORDED_METRICS = (
+HELPER_TOOLS = ("Agent", "Task")
+GO_OUTCOMES = (
+    *(
+        f"{verb}-{action}"
+        for verb in ("queued", "answered", "deduped")
+        for action in ("plan", "build")
+    ),
+    "queued-fix",
+    "queued-blocked-review",
+)
+GO_CAUSES = ("go", "extra-round")
+HELD_APPROVE_OUTCOME = "held-base-update"
+LINE_BANDS: tuple[tuple[str, int, int | None], ...] = (
+    ("under-150", 0, 150),
+    ("150-399", 150, 400),
+    ("400-799", 400, 800),
+    ("800-plus", 800, None),
+)
+_STOP_NAMES = (
     "hand-written-gos",
     "submitted-invalid",
     "repeat-block-stops",
     "unsatisfiable-stops",
 )
-HELPER_TOOLS = ("Agent", "Task")
+WINDOWED_METRICS = (
+    *_STOP_NAMES,
+    "approved-by-round-2-share",
+    "verdicts-per-merged-pr",
+    "first-round-approve-rate-high-risk",
+    *(f"first-round-approve-rate-lines-{band}" for band, _low, _high in LINE_BANDS),
+    "first-round-approve-rate-lines-unknown",
+    "ci-fix-without-log",
+    "verdicts-on-accepted-head",
+)
 
 
-def build_metrics(db: Path) -> Metrics:
-    """Read an orch.db snapshot read-only; None marks a metric it does not record."""
+def build_metrics(db: Path, *, since: str | None = None, until: str | None = None) -> Metrics:
+    window = MetricWindow(
+        *(
+            None if bound is None else bound.timestamp()
+            for bound in (_bound(since, "--since"), _bound(until, "--until"))
+        )
+    )
     if not db.is_file():
         raise EvalError(f"database not found: {db}")
     try:
@@ -1020,7 +1145,15 @@ def build_metrics(db: Path) -> Metrics:
     except sqlite3.Error as exc:
         raise EvalError(f"{db}: {exc}") from exc
     try:
-        return Metrics(values=_metric_values(connection))
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        return Metrics(
+            values=_metric_values(connection, tables, window),
+            followups=_followups(connection, tables, window),
+            window=window,
+        )
     except sqlite3.DatabaseError as exc:
         raise EvalError(f"{db} is not a readable SQLite database: {exc}") from exc
     finally:
@@ -1029,28 +1162,44 @@ def build_metrics(db: Path) -> Metrics:
 
 def render_metrics(current: Metrics, baseline: Metrics) -> str:
     base = dict(baseline.values)
-    lines = ["eval metrics", "metric current baseline"]
+    lines = [
+        "eval metrics",
+        current.window.text(),
+        f"windowed {' '.join(WINDOWED_METRICS)}",
+        "metric current baseline",
+    ]
     for name, value in current.values:
-        lines.append(f"{name} {_metric_text(value)} {_metric_text(base.get(name))}")
+        lines.append(f"{name} {_metric_text(value)} {_metric_text(base[name])}")
+    lines.append("merged PRs with follow-ups")
+    if isinstance(current.followups, Unrecorded):
+        lines.append(_metric_text(current.followups))
+    else:
+        lines.extend(" ".join(row) for row in current.followups)
+        if not current.followups:
+            lines.append("none")
     return "\n".join(lines) + "\n"
 
 
-def _metric_text(value: int | float | None) -> str:
-    if value is None:
-        return "unrecorded"
+def _metric_text(value: MetricValue) -> str:
+    if isinstance(value, Unrecorded):
+        return f"unrecorded({value.reason})"
+    if isinstance(value, NoRatio):
+        return "-"
     if isinstance(value, float):
         return f"{value:.2f}"
     return str(value)
 
 
+def _missing(table: str) -> Unrecorded:
+    return Unrecorded(f"no-{table}-table")
+
+
 def _metric_values(
     connection: sqlite3.Connection,
-) -> tuple[tuple[str, int | float | None], ...]:
-    tables = {
-        str(row[0])
-        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    values: list[tuple[str, int | float | None]] = list(_review_metrics(connection, tables))
+    tables: set[str],
+    window: MetricWindow,
+) -> tuple[tuple[str, MetricValue], ...]:
+    values: list[tuple[str, MetricValue]] = list(_review_metrics(connection, tables))
     values.append(("prs-capped", _capped(connection, tables)))
     values.append(
         (
@@ -1119,8 +1268,9 @@ def _metric_values(
         "SELECT COALESCE(SUM(t.elapsed_seconds), 0) FROM job_telemetry t "
         "JOIN jobs j ON j.id = t.job_id WHERE j.state IN ('failed', 'cancelled')",
     )
-    values.append(("slot-hours-lost", None if lost is None else lost / 3600))
-    values.extend((name, None) for name in UNRECORDED_METRICS)
+    values.append(("slot-hours-lost", lost if isinstance(lost, Unrecorded) else lost / 3600))
+    values.extend(_stop_metrics(connection, tables, window))
+    values.extend(_loop_metrics(connection, tables, window))
     return tuple(values)
 
 
@@ -1130,9 +1280,10 @@ def _scalar(
     needs: tuple[str, ...],
     query: str,
     params: tuple[object, ...] = (),
-) -> int | float | None:
-    if not set(needs) <= tables:
-        return None
+) -> MetricValue:
+    for table in needs:
+        if table not in tables:
+            return _missing(table)
     return connection.execute(query, params).fetchone()[0]
 
 
@@ -1143,10 +1294,11 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 def _review_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
-) -> list[tuple[str, int | float | None]]:
+) -> list[tuple[str, MetricValue]]:
     rates = _first_verdict_rates(connection, tables)
     if "ticket_state" not in tables:
-        return [("prs-reviewed", None), ("rounds-per-pr", None), *rates]
+        missing = _missing("ticket_state")
+        return [("prs-reviewed", missing), ("rounds-per-pr", missing), *rates]
     has_approval = "approve_comment_id" in _columns(connection, "ticket_state")
     approval = "approve_comment_id IS NOT NULL OR " if has_approval else ""
     marks = ", ".join("?" for _ in APPROVED_STATES)
@@ -1157,28 +1309,27 @@ def _review_metrics(
     reviewed = [(int(rounds or 0), bool(approved)) for rounds, approved in rows]
     reviewed = [(rounds, approved) for rounds, approved in reviewed if rounds or approved]
     count = len(reviewed)
-    if count == 0:
-        return [("prs-reviewed", 0), ("rounds-per-pr", None), *rates]
     total = sum(rounds + int(approved) for rounds, approved in reviewed)
     return [
         ("prs-reviewed", count),
-        ("rounds-per-pr", total / count),
+        ("rounds-per-pr", _ratio(total, count)),
         *rates,
     ]
+
+
+def _ratio(part: float, whole: int) -> float | NoRatio:
+    return part / whole if whole else NO_RATIO
 
 
 def _first_verdict_rates(
     connection: sqlite3.Connection,
     tables: set[str],
-) -> list[tuple[str, float | None]]:
+) -> list[tuple[str, MetricValue]]:
     names = ("first-round-revise-rate", "first-pass-approve-rate")
-    if not {"handled_comments", "review_events", "ship_intents"} <= tables:
-        return [(name, None) for name in names]
-    approvals = ["SELECT repo, ticket_id, comment_id, 'APPROVE', 0 FROM ship_intents"]
-    if "ship_holds" in tables:
-        approvals.append(
-            "SELECT repo, ticket_id, approve_comment_id, 'APPROVE', 1 FROM ship_holds"
-        )
+    for table in ("handled_comments", "review_events", "ship_intents"):
+        if table not in tables:
+            return [(name, _missing(table)) for name in names]
+    approvals = _approvals_sql(tables)
     marks = ", ".join("?" for _ in REVISE_OUTCOMES)
     first: dict[tuple[str, str], str] = {}
     for repo, ticket_id, verdict in connection.execute(
@@ -1186,7 +1337,7 @@ def _first_verdict_rates(
         SELECT v.repo, v.ticket_id, v.verdict FROM (
             SELECT repo, ticket_id, comment_id, 'REVISE' AS verdict, 0 AS held
             FROM review_events WHERE outcome IN ({marks})
-            UNION ALL {" UNION ALL ".join(approvals)}
+            UNION ALL SELECT repo, ticket_id, comment_id, 'APPROVE', held FROM ({approvals})
         ) v
         LEFT JOIN handled_comments h
           ON lower(h.repo) = lower(v.repo) AND h.ticket_id = v.ticket_id
@@ -1197,18 +1348,334 @@ def _first_verdict_rates(
         REVISE_OUTCOMES,
     ):
         first.setdefault((str(repo).lower(), str(ticket_id)), str(verdict))
-    if not first:
-        return [(name, None) for name in names]
     verdicts = list(first.values())
     return [
-        ("first-round-revise-rate", verdicts.count("REVISE") / len(verdicts)),
-        ("first-pass-approve-rate", verdicts.count("APPROVE") / len(verdicts)),
+        ("first-round-revise-rate", _ratio(verdicts.count("REVISE"), len(verdicts))),
+        ("first-pass-approve-rate", _ratio(verdicts.count("APPROVE"), len(verdicts))),
     ]
 
 
-def _preflight_failures(connection: sqlite3.Connection, tables: set[str]) -> int | None:
+def _approvals_sql(tables: set[str]) -> str:
+    sources = [
+        "SELECT repo, ticket_id, comment_id, 0 AS held FROM ship_intents",
+        "SELECT repo, ticket_id, comment_id, 1 FROM review_events "
+        f"WHERE outcome = '{HELD_APPROVE_OUTCOME}'",
+    ]
+    if "ship_holds" in tables:
+        sources.append("SELECT repo, ticket_id, approve_comment_id, 1 FROM ship_holds")
+    if "verdict_acceptances" in tables:
+        sources.append("SELECT repo, ticket_id, comment_id, 1 FROM verdict_acceptances")
+    return " UNION ALL ".join(sources)
+
+
+def _handled_count(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+    source: str,
+    where: str,
+    params: tuple[object, ...],
+    needs: tuple[str, ...] = (),
+) -> MetricValue:
+    clause, bounds = window.sql("t.handled_at")
+    return _scalar(
+        connection,
+        tables,
+        (source, "handled_times", *needs),
+        f"""
+        SELECT COUNT(*) FROM {source} s
+        LEFT JOIN handled_times t
+          ON lower(t.repo) = lower(s.repo) AND t.ticket_id = s.ticket_id
+         AND t.comment_id = s.comment_id
+        WHERE {where} AND {clause}
+        """,
+        (*params, *bounds),
+    )
+
+
+def _stop_metrics(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+) -> list[tuple[str, MetricValue]]:
+    marks = ", ".join("?" for _ in GO_OUTCOMES)
+    gos = (
+        _handled_count(
+            connection,
+            tables,
+            window,
+            "handled_comments",
+            f"""
+            (s.outcome IN ({marks}) OR (s.outcome LIKE 'resumed-%' AND EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE lower(j.repo) = lower(s.repo) AND j.ticket_id = s.ticket_id
+                  AND j.source_comment_id = s.comment_id AND json_valid(j.detail)
+                  AND json_extract(j.detail, '$.evidence.instructions.cause') IN (?, ?)
+            )))
+            AND s.comment_id NOT IN
+                (SELECT go_comment_id FROM feeder_items WHERE go_comment_id IS NOT NULL)
+            """,
+            (*GO_OUTCOMES, *GO_CAUSES),
+            ("jobs",),
+        )
+        if "feeder_items" in tables
+        else _missing("feeder_items")
+    )
+    clause, bounds = window.sql("recorded_at")
+    return [
+        ("hand-written-gos", gos),
+        (
+            "submitted-invalid",
+            _scalar(
+                connection,
+                tables,
+                ("job_events",),
+                f"SELECT COUNT(*) FROM job_events WHERE event = 'submitted-invalid' AND {clause}",
+                bounds,
+            ),
+        ),
+        *(
+            (
+                name,
+                _handled_count(
+                    connection, tables, window, "review_events", "s.outcome = ?", (outcome,)
+                ),
+            )
+            for name, outcome in (
+                ("repeat-block-stops", "waiting-max-repeat"),
+                ("unsatisfiable-stops", "waiting-max-unsat"),
+            )
+        ),
+    ]
+
+
+@dataclass(frozen=True)
+class _HeadVerdict:
+    comment_id: str
+    head: str
+    round: int
+    posted_at: float | None
+    changed_lines: int | None
+
+
+def _loop_metrics(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+) -> list[tuple[str, MetricValue]]:
+    measures = _verdict_measures(connection, tables, window)
+    measures["ci-fix-without-log"] = (
+        _ci_fixes_without_log(connection, window) if "jobs" in tables else _missing("jobs")
+    )
+    return [(name, measures[name]) for name in WINDOWED_METRICS if name not in _STOP_NAMES]
+
+
+def _verdict_measures(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+) -> dict[str, MetricValue]:
+    names = [
+        name
+        for name in WINDOWED_METRICS
+        if name not in _STOP_NAMES and name != "ci-fix-without-log"
+    ]
+    for table in ("verdict_heads", "review_events", "ship_intents", "jobs", "ticket_transitions"):
+        if table not in tables:
+            return {name: _missing(table) for name in names}
+    if "posted_at" not in _columns(connection, "verdict_heads"):
+        return {name: Unrecorded("no-verdict_heads-posted_at-column") for name in names}
+    approvals = {
+        str(row[0])
+        for row in connection.execute(f"SELECT comment_id FROM ({_approvals_sql(tables)})")
+    }
+    verdicts = _head_verdicts(connection)
+    cohort = {key: rows for key, rows in verdicts.items() if window.contains(rows[0].posted_at)}
+    risks = _risks(connection, {key: rows[0].comment_id for key, rows in cohort.items()})
+    by_round_2 = sum(
+        any(row.comment_id in approvals and row.round <= 2 for row in rows)
+        for rows in cohort.values()
+    )
+    first_approved = {
+        key: any(row.comment_id in approvals and row.round <= 1 for row in rows)
+        for key, rows in cohort.items()
+    }
+    high = [key for key in cohort if risks[key] == "high"]
+    clause, bounds = window.sql("at")
+    merged = {
+        (str(repo), str(ticket_id))
+        for repo, ticket_id in connection.execute(
+            "SELECT DISTINCT lower(repo), ticket_id FROM ticket_transitions "
+            f"WHERE to_state = 'merged' AND {clause}",
+            bounds,
+        )
+    }
+    measures: dict[str, MetricValue] = {
+        "approved-by-round-2-share": _ratio(by_round_2, len(cohort)),
+        "verdicts-per-merged-pr": _ratio(
+            sum(len(verdicts.get(key, ())) for key in merged), len(merged)
+        ),
+        "first-round-approve-rate-high-risk": _ratio(
+            sum(first_approved[key] for key in high), len(high)
+        ),
+    }
+    for band, low, high_edge in (*LINE_BANDS, ("unknown", None, None)):
+        members = [
+            key for key, rows in cohort.items() if _in_band(rows[0].changed_lines, low, high_edge)
+        ]
+        measures[f"first-round-approve-rate-lines-{band}"] = _ratio(
+            sum(first_approved[key] for key in members), len(members)
+        )
+    measures["verdicts-on-accepted-head"] = (
+        _verdicts_on_accepted_head(connection, tables, window, verdicts)
+        if "handled_times" in tables
+        else _missing("handled_times")
+    )
+    return measures
+
+
+def _verdicts_on_accepted_head(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+    verdicts: dict[tuple[str, str], list[_HeadVerdict]],
+) -> int:
+    accepted_sources = "".join(
+        f" UNION ALL SELECT {columns} FROM {table}"
+        for table, columns in (
+            ("ship_holds", "approve_comment_id, held_at"),
+            ("verdict_acceptances", "comment_id, accepted_at"),
+        )
+        if table in tables
+    )
+    accepted_at: dict[str, float] = {}
+    for comment_id, at in connection.execute(
+        f"""
+        SELECT a.comment_id, MIN(a.at) FROM (
+            SELECT comment_id, handled_at AS at FROM handled_times{accepted_sources}
+        ) a
+        JOIN (
+            SELECT comment_id FROM review_events
+            UNION SELECT comment_id FROM ({_approvals_sql(tables)})
+        ) v ON v.comment_id = a.comment_id
+        GROUP BY a.comment_id
+        """
+    ):
+        accepted_at[str(comment_id)] = float(at)
+    return sum(
+        window.contains(later.posted_at)
+        and any(
+            earlier.comment_id != later.comment_id
+            and earlier.comment_id in accepted_at
+            and accepted_at[earlier.comment_id] < later.posted_at
+            and matching_head(earlier.head, later.head) is not None
+            for earlier in rows
+        )
+        for rows in verdicts.values()
+        for later in rows
+        if later.posted_at is not None
+    )
+
+
+def _in_band(lines: int | None, low: int | None, high: int | None) -> bool:
+    if low is None:
+        return lines is None
+    return lines is not None and lines >= low and (high is None or lines < high)
+
+
+def _head_verdicts(
+    connection: sqlite3.Connection,
+) -> dict[tuple[str, str], list[_HeadVerdict]]:
+    sized = "changed_lines" in _columns(connection, "verdict_heads")
+    lines = "changed_lines" if sized else "NULL"
+    verdicts: dict[tuple[str, str], list[_HeadVerdict]] = defaultdict(list)
+    for repo, ticket_id, comment_id, head, review_round, posted_at, changed in connection.execute(
+        f"""
+        SELECT lower(repo), ticket_id, comment_id, head, review_round, posted_at, {lines}
+        FROM verdict_heads ORDER BY posted_at IS NULL, posted_at, rowid
+        """
+    ):
+        rows = verdicts[(str(repo), str(ticket_id))]
+        rows.append(
+            _HeadVerdict(
+                comment_id=str(comment_id),
+                head=str(head or ""),
+                round=int(review_round) if review_round is not None else len(rows) + 1,
+                posted_at=posted_at,
+                changed_lines=changed,
+            )
+        )
+    return verdicts
+
+
+def _risks(
+    connection: sqlite3.Connection,
+    first_comment: dict[tuple[str, str], str],
+) -> dict[tuple[str, str], str]:
+    by_comment: dict[str, str] = {}
+    latest: dict[tuple[str, str], str] = {}
+    for repo, ticket_id, comment_id, risk in connection.execute(
+        """
+        SELECT lower(repo), ticket_id, handoff_comment_id, risk FROM (
+            SELECT repo, ticket_id, handoff_comment_id, created_at, rowid AS id,
+                   CASE WHEN json_valid(detail) THEN json_extract(detail, '$.risk') END AS risk
+            FROM jobs
+        ) WHERE risk IS NOT NULL ORDER BY created_at, id
+        """
+    ):
+        latest[(str(repo), str(ticket_id))] = str(risk)
+        if comment_id is not None:
+            by_comment[str(comment_id)] = str(risk)
+    return {
+        key: by_comment.get(comment_id) or latest.get(key, "unknown")
+        for key, comment_id in first_comment.items()
+    }
+
+
+def _ci_fixes_without_log(connection: sqlite3.Connection, window: MetricWindow) -> int:
+    clause, bounds = window.sql("created_at")
+    return connection.execute(
+        f"""
+        SELECT COUNT(*) FROM jobs WHERE action = 'fix' AND {clause}
+          AND CASE WHEN json_valid(detail) THEN
+              (json_extract(detail, '$.instruction') = 'CI failed on ' || head
+               OR json_extract(detail, '$.instruction') LIKE 'failed: %')
+              AND COALESCE(json_extract(detail, '$.evidence.ci.log_tail'), '') = ''
+          END
+        """,
+        bounds,
+    ).fetchone()[0]
+
+
+def _followups(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+) -> tuple[FollowUp, ...] | Unrecorded:
+    for table in ("followup_filings", "ticket_transitions"):
+        if table not in tables:
+            return _missing(table)
+    clause, bounds = window.sql("t.at")
+    return tuple(
+        (str(repo), str(ticket_id), f"https://github.com/{repo}/issues/{issue}")
+        for repo, ticket_id, issue in connection.execute(
+            f"""
+            SELECT DISTINCT f.repo, f.ticket_id, f.issue_number FROM followup_filings f
+            JOIN ticket_transitions t
+              ON lower(t.repo) = lower(f.repo) AND t.ticket_id = f.ticket_id
+             AND t.to_state = 'merged'
+            WHERE f.status IN ('filed', 'commented') AND f.issue_number IS NOT NULL
+              AND {clause}
+            ORDER BY f.repo, f.ticket_id, f.issue_number
+            """,
+            bounds,
+        )
+    )
+
+
+def _preflight_failures(connection: sqlite3.Connection, tables: set[str]) -> MetricValue:
     if "job_events" not in tables:
-        return None
+        return _missing("job_events")
     return sum(
         1
         for (detail,) in connection.execute(
@@ -1218,7 +1685,7 @@ def _preflight_failures(connection: sqlite3.Connection, tables: set[str]) -> int
     )
 
 
-def _capped(connection: sqlite3.Connection, tables: set[str]) -> int | None:
+def _capped(connection: sqlite3.Connection, tables: set[str]) -> MetricValue:
     parts: list[str] = []
     if "ticket_state" in tables:
         parts.append(
@@ -1230,17 +1697,17 @@ def _capped(connection: sqlite3.Connection, tables: set[str]) -> int | None:
             "WHERE outcome IN ('capped-review', 'capped-patch-review')"
         )
     if not parts:
-        return None
+        return _missing("ticket_state")
     return connection.execute(f"SELECT COUNT(*) FROM ({' UNION '.join(parts)})").fetchone()[0]
 
 
 def _tool_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
-) -> list[tuple[str, int | float | None]]:
+) -> list[tuple[str, MetricValue]]:
     names = ("skills-read-per-job", "helpers-per-job", "helpers-per-job-max")
     if "job_telemetry" not in tables:
-        return [(name, None) for name in names]
+        return [(name, _missing("job_telemetry")) for name in names]
     skills: list[int] = []
     helpers: list[int] = []
     for (raw,) in connection.execute(
@@ -1255,7 +1722,7 @@ def _tool_metrics(
         skills.append(_count(counts.get("Skill")))
         helpers.append(sum(_count(counts.get(tool)) for tool in HELPER_TOOLS))
     if not skills:
-        return [(name, None) for name in names]
+        return [(name, NO_RATIO) for name in names]
     return [
         ("skills-read-per-job", sum(skills) / len(skills)),
         ("helpers-per-job", sum(helpers) / len(helpers)),

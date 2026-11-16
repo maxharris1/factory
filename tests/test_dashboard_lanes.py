@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from lib.dashboard import collect_snapshot, render_pages
-from lib.dashboard_page import TILE_STATE, intake_split, queue_speed
+from lib.dashboard_page import CSS, TILE_STATE, intake_split, queue_speed
 from tests.test_dashboard import NOW, seeded
 from tests.test_dashboard_layout import BAR, HARNESS, NODE, _no_script, _run_page, _section, needs_node
 
@@ -26,13 +26,16 @@ STATES = {
     "build": {"job_state": "running", "action": "build"},
     "review": {"job_state": "running", "action": "review"},
     "fix": {"job_state": "running", "action": "fix"},
+    "clarify": {"job_state": "running", "action": "clarify"},
+    "update-from-main": {"job_state": "running", "action": "update-from-main"},
     "claimed": {"job_state": "claimed", "action": "build"},
     "stale": {"job_state": "stale", "action": "build"},
     "dead": {"job_state": "dead", "action": "build"},
     "overdue": {"job_state": "running", "action": "build", "overdue": True},
     "stuck": {"job_state": "running", "action": "review", "stuck": True},
 }
-EFFECT = {"plan": "field", "build": "fill", "review": "scan", "fix": "patch", "claimed": "spin3",
+EFFECT = {"plan": "field", "build": "fill", "review": "scan", "fix": "patch", "clarify": "field",
+          "update-from-main": "patch", "claimed": "spin3",
           "stale": "decay", "dead": "static", "overdue": "static", "stuck": "static"}
 BROKEN = ("dead", "overdue", "stuck")
 
@@ -81,8 +84,8 @@ def test_each_slot_state_has_its_strip_chip_and_link(tmp_path: Path, name: str) 
     if spec.get("chip"):
         assert f'<span class="chip {spec["chip"][1]}">{spec["chip"][0]}</span>' in tile
     if name == "overdue":
-        assert '<span class="chip bad">OVERDUE</span>' in tile
-    if name in ("plan", "build", "review", "fix"):
+        assert "OVERDUE" not in tile and 'aria-label="overdue"' in tile
+    if spec.get("verbs"):
         assert "chip" not in tile.replace('class="tile', "")
         assert 'class="glyph"' in tile
         assert any(f'aria-label="{verb}…"' in tile for verb in spec["verbs"])
@@ -91,6 +94,107 @@ def test_each_slot_state_has_its_strip_chip_and_link(tmp_path: Path, name: str) 
     if name in BROKEN:
         assert 'data-tint="#f7768e"' in tile and 'class="tile claude bad"' in tile
     assert "running" not in re.sub(r"<[^>]+>", " ", tile).lower()
+
+
+def _line(tile: str, n: int) -> str:
+    return re.search(rf'<div class="tile-l{n}">(.*?)</div>(?=<div class="tile-l{n + 1}">|</div></a>)', tile, re.S).group(1)
+
+
+def _children(line: str) -> list[str]:
+    """Each top-level element of a tile line as `tag.class=text`."""
+    out, depth = [], 0
+    for tag, close, attrs, text in re.findall(r"<(/?)(\w+)([^>]*)>([^<]*)", line) and [
+        (m.group(2), m.group(1), m.group(3), m.group(4)) for m in re.finditer(r"<(/?)(\w+)([^>]*)>([^<]*)", line)
+    ]:
+        if close:
+            depth -= 1
+            continue
+        if depth == 0:
+            cls = re.search(r'class="([^"]*)"', attrs)
+            out.append(f"{tag}.{cls.group(1) if cls else ''}={text}")
+        depth += 1
+    return out
+
+
+GITHUB = {"tracker": "github", "repo": "maxharris1/factory", "ticket_id": "471", "source": "#470", "pr": "471"}
+LINEAR = {"tracker": "linear", "repo": "maxharris1/factory", "ticket_id": "ENG-12", "source": None, "pr": "88"}
+
+
+def _label_tiles(tmp_path: Path) -> dict:
+    snapshot = _tiles(tmp_path)
+    template = snapshot["running"][0]
+    snapshot["running"] = [
+        _row(template, "claimed", job="t-gh", **GITHUB),
+        _row(template, "build", job="t-lin", **LINEAR),
+        _row(template, "overdue", job="t-late", **GITHUB),
+        _row(template, "build", job="t-odd", action="frobnicate"),
+    ]
+    return snapshot
+
+
+def _assert_label_tiles(html: str) -> None:
+    gh, lin, late, odd = (_job_tile(html, job) for job in ("t-gh", "t-lin", "t-late", "t-odd"))
+    assert _children(_line(gh, 1)) == [
+        "span.bot claude=claude", "span.ticket=factory#470", "span.chip warn=claimed"
+    ]
+    assert _children(_line(lin, 1)) == ["span.bot claude=claude", "span.ticket=ENG-12"]
+    assert _children(_line(late, 1)) == ["span.bot claude=claude", "span.ticket=factory#470"]
+    for tile in (gh, lin, late, odd):
+        assert 'class="kind"' not in tile and "PR #" not in _line(tile, 1) and "OVERDUE" not in tile
+    assert 'title="maxharris1/factory#470 (PR #471) · build' in gh
+    assert 'title="ENG-12' not in lin and "(PR #88)" in re.search(r'title="([^"]*)"', lin).group(1)
+    assert 'data-px="static" data-tint="#f7768e"' in late and "tile claude bad" in late
+    assert 'aria-label="overdue"' in late
+    text = re.sub(r"<[^>]+>", "", odd)
+    assert 'data-px="off"' in odd and 'class="glyph"' not in odd
+    assert text.count("frobnicate") == 1 and 'class="action"' not in _line(odd, 3)
+    assert '<span class="action">build</span>' in _line(gh, 3)
+
+
+def test_tile_line_one_is_bot_short_ticket_and_state_chip(tmp_path: Path) -> None:
+    _assert_label_tiles(_no_script(render_pages(_label_tiles(tmp_path))["index.html"]))
+
+
+@needs_node
+def test_the_page_script_draws_the_same_line_one(tmp_path: Path) -> None:
+    snapshot = _label_tiles(tmp_path)
+    _assert_label_tiles(_run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"])
+
+
+@pytest.mark.parametrize("name", ["clarify", "update-from-main"])
+def test_clarify_and_update_from_main_draw_like_plan_and_fix(tmp_path: Path, name: str) -> None:
+    verbs = {"clarify": ["Clarifying", "Untangling", "Answering"],
+             "update-from-main": ["Merging", "Syncing", "Reconciling"]}[name]
+    assert TILE_STATE[name]["verbs"] == verbs
+    tile = _tile(_no_script(render_pages(_tiles(tmp_path))["index.html"]), name)
+    assert f'data-px="{EFFECT[name]}" data-tint="claude"' in tile and 'class="glyph"' in tile
+    assert any(f'aria-label="{verb}…"' in tile for verb in verbs)
+
+
+@needs_node
+@pytest.mark.parametrize("name", ["clarify", "update-from-main"])
+def test_the_page_script_draws_clarify_and_update_from_main(tmp_path: Path, name: str) -> None:
+    lanes = _run_page(tmp_path, _tiles(tmp_path), "main", BAR + ["hud", "lanes"])["html"]["lanes"]
+    tile = _tile(lanes, name)
+    assert f'data-px="{EFFECT[name]}"' in tile and 'data-tint="claude"' in tile and 'class="glyph"' in tile
+    assert any(f'aria-label="{verb}…"' in tile for verb in TILE_STATE[name]["verbs"])
+
+
+def _rule(selector: str) -> str:
+    match = re.search(r"(?:^|[}\n])" + re.escape(selector) + r"\{([^}]*)\}", CSS)
+    assert match, selector
+    return match.group(1)
+
+
+def test_tile_lines_wrap_instead_of_cutting() -> None:
+    assert "flex-wrap:wrap" in _rule(".tile-l1")
+    ticket = _rule(".tile-l1 .ticket")
+    assert "flex:0 1 auto" in ticket and "max-width:100%" in ticket
+    assert "flex:none" in _rule(".tile-l1 .chip")
+    assert "flex-wrap:wrap" in _rule(".tile-l3")
+    action = _rule(".tile-l3 .action")
+    assert "ellipsis" not in action and "nowrap" not in action and "overflow-wrap:anywhere" in action
+    assert ".kind{" not in CSS.split(".wake{")[0].split(".tile-l1{")[1]
 
 
 def _stuck_review(tmp_path: Path) -> tuple[dict, dict]:
@@ -126,7 +230,7 @@ def test_the_page_script_draws_a_stuck_tickets_job_static_red(tmp_path: Path) ->
 
 def test_build_fill_and_stale_decay_follow_the_job(tmp_path: Path) -> None:
     snapshot = _tiles(tmp_path)
-    snapshot["running"][5]["heartbeat_age_seconds"] = 600
+    next(r for r in snapshot["running"] if r["job"] == "t-stale")["heartbeat_age_seconds"] = 600
     html = _no_script(render_pages(snapshot)["index.html"])
     assert 'data-progress="0.250"' in _tile(html, "build")
     assert 'data-progress="0.500"' in _tile(html, "stale")
@@ -165,6 +269,65 @@ def test_probe_down_gives_a_still_red_meter(tmp_path: Path) -> None:
     lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
     meter = re.search(r'<canvas[^>]*data-px-key="meter-box"[^>]*>', lanes).group(0)
     assert 'data-tint="#9ece6a"' in meter and "data-still" not in meter
+
+
+def _probe_lanes(tmp_path: Path) -> dict:
+    snapshot = _tiles(tmp_path)
+    snapshot["running"] = [dict(snapshot["running"][0], device="ghost")]
+    snapshot["slots"]["devices"] = [
+        {"name": name, "slot_max": 1, "held": 0, "enabled": name != "off", "placeholder": name == "later",
+         "harnesses": []}
+        for name in ("box", "pc", "off", "later")
+    ]
+    snapshot["health"] = {"components": [
+        {"component": "device-probe", "device": name, "state": "down"} for name in ("box", "off", "later", "ghost")
+    ]}
+    return snapshot
+
+
+def _assert_probe_chips(lanes: str) -> None:
+    chips = dict(re.findall(r'data-device="([^"]+)"><div class="lane-head"><div class="name">[^<]*</div>'
+                            r'<span class="chip ([^"]+)">', lanes))
+    words = dict(re.findall(r'data-device="([^"]+)"><div class="lane-head"><div class="name">[^<]*</div>'
+                            r'<span class="chip [^"]+">([^<]*)</span>', lanes))
+    assert words == {"box": "PROBE DOWN", "pc": "ONLINE", "off": "DISABLED", "later": "PLACEHOLDER",
+                     "ghost": "UNLISTED"}
+    assert chips["box"] == "bad" and chips["pc"] == "ok"
+
+
+def test_probe_down_replaces_online_but_not_disabled_placeholder_or_unlisted(tmp_path: Path) -> None:
+    _assert_probe_chips(_section(_no_script(render_pages(_probe_lanes(tmp_path))["index.html"]), "lanes"))
+
+
+@needs_node
+def test_the_page_script_shows_probe_down_the_same_way(tmp_path: Path) -> None:
+    _assert_probe_chips(_run_page(tmp_path, _probe_lanes(tmp_path), "main", BAR + ["hud", "lanes"])["html"]["lanes"])
+
+
+QUIET = "quiet: no Linear webhook for 2h 10m (nothing missed by the last reconcile)"
+
+
+def _quiet_webhook(tmp_path: Path) -> dict:
+    snapshot = _base(tmp_path)
+    snapshot["poller"]["linear_webhook"] = {
+        "last_received_age_seconds": None, "last_event": None, "listener_age_seconds": 60, "dirty": 0,
+        "warning": None, "note": QUIET,
+    }
+    return snapshot
+
+
+def _assert_quiet_once(intake: str) -> None:
+    hook = re.search(r'<div class="irow" id="linear-webhook">.*?</div>', intake, re.S).group(0)
+    assert hook.count(QUIET) == 1 and "note:" not in hook and f'<p class="muted">{QUIET}</p>' in hook
+
+
+def test_the_webhook_quiet_line_has_no_note_prefix(tmp_path: Path) -> None:
+    _assert_quiet_once(_section(_no_script(render_pages(_quiet_webhook(tmp_path))["index.html"]), "intake"))
+
+
+@needs_node
+def test_the_page_script_prints_the_quiet_line_once(tmp_path: Path) -> None:
+    _assert_quiet_once(_run_page(tmp_path, _quiet_webhook(tmp_path), "main", BAR + ["hud", "intake"])["html"]["intake"])
 
 
 def test_just_happened_shows_six_newest_and_marks_grok_wakes(tmp_path: Path) -> None:
@@ -325,7 +488,7 @@ def fifteen_slot_snapshot(tmp_path: Path) -> dict:
         for device, names in (
             ("box", ["build", "fix", "review", "stale", "dead"]),
             ("pc", ["plan", "build", "review", "fix", "claimed", "overdue"]),
-            ("mac", ["build", "review"]),
+            ("mac", ["update-from-main", "review"]),
         )
         for i, name in enumerate(names)
     ]
@@ -427,9 +590,17 @@ def browser():
     chrome.close()
 
 
+def _one_row(snapshot: dict) -> dict:
+    for row in snapshot["running"]:
+        if row["job_state"] != "running" or row["overdue"] or row["action"] not in ("plan", "build", "review", "fix"):
+            row.update(STATES["build"], overdue=False, stuck=False)
+    return snapshot
+
+
 @needs_chrome
 def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: Browser) -> None:
-    browser.open(_page_with_status_stub(fifteen_slot_snapshot(tmp_path), "index.html"), 1440)
+    board = fifteen_slot_snapshot(tmp_path)
+    browser.open(_page_with_status_stub(_one_row(copy.deepcopy(board)), "index.html"), 1440)
     rows = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
       return {device: lane.getAttribute('data-device'), tiles: [].map.call(lane.querySelectorAll('.tile'),
         function (t) { var b = t.getBoundingClientRect(); return [b.top, b.bottom]; })};
@@ -437,6 +608,13 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     assert {row["device"]: len(row["tiles"]) for row in rows} == {"box": 5, "pc": 6, "mac": 4}
     for row in rows:
         assert len({top for top, _ in row["tiles"]}) <= 2, f"{row['device']} wraps onto a second row"
+    wrapped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes a.tile .tile-l1, #lanes a.tile .tile-l3'),
+      function (line) {
+        var boxes = [].map.call(line.children, function (c) { return c.getBoundingClientRect(); });
+        return Math.max.apply(null, boxes.map(function (b) { return b.top; }))
+          >= Math.min.apply(null, boxes.map(function (b) { return b.bottom; }));
+      }).map(function (line) { return line.closest('a.tile').getAttribute('href') + ' ' + line.className; })""")
+    assert not wrapped, f"the fold holds only for one-row tiles, and these wrap: {wrapped}"
     assert browser.eval("innerHeight") == FOLD
     visible = browser.eval("""(function () {
       var floor = document.getElementById('statusline').getBoundingClientRect().top;
@@ -449,6 +627,7 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     })()""")
     hidden = [t for t in visible if t["bottom"] > t["floor"] or not t["own"]]
     assert not hidden, f"slots under the status line or off screen at 1440x{FOLD}: {hidden}"
+    browser.open(_page_with_status_stub(board, "index.html"), 1440)
     clipped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes .tile-l3 .action, #lanes .tile-l3 .t'),
       function (e) { return e.scrollWidth > e.clientWidth; }).map(function (e) { return e.textContent; })""")
     assert not clipped, f"line 3 cuts the job's action or elapsed time: {clipped}"

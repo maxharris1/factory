@@ -6,13 +6,22 @@ from __future__ import annotations
 import gc
 import sqlite3
 from contextlib import closing
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pytest
 
 from lib import cli
 from lib.queue import JobRequest
-from lib.state_backup import BackupError, backup, default_backup_path, restore
+from lib.state_backup import (
+    BackupError,
+    CycleBackup,
+    backup,
+    default_backup_path,
+    restore,
+    weekly_snapshot,
+)
 from tests.test_dispatcher import setup, ticket
 
 
@@ -80,7 +89,7 @@ def test_backup_failure_is_a_poll_error_not_a_crash(tmp_path: Path, monkeypatch)
     assert not inside.exists()
     with queue.connect() as connection:
         errors = [row[0] for row in connection.execute("SELECT error FROM poll_errors")]
-    assert errors == ["backup:BackupError"]
+    assert errors == ["backup:BackupError", "weekly-snapshot:BackupError"]
 
 
 def test_restore_db_restores_a_missing_db(tmp_path: Path, capsys) -> None:
@@ -177,3 +186,83 @@ def test_backup_refuses_a_path_nested_in_the_databases_directory(tmp_path: Path)
     _dispatcher, queue = _seeded(tmp_path)
     with pytest.raises(BackupError, match="own directory"):
         backup(queue.path, queue.path.parent / "backup" / "orch.db")
+
+
+ET = ZoneInfo("America/New_York")
+
+
+def _cycle(queue, dest: Path, at: datetime) -> list[str]:
+    errors: list[str] = []
+    CycleBackup(queue.path, dest, lambda *error: errors.append(error[2]), clock=lambda: at)()
+    return errors
+
+
+def _weekly(dest: Path) -> list[str]:
+    directory = dest.parent / "weekly"
+    return sorted(path.name for path in directory.iterdir()) if directory.exists() else []
+
+
+def test_weekly_snapshot_is_taken_monday_morning_beside_the_rolling_copy(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    dest = tmp_path / "share" / "backup" / "orch.db"
+
+    assert _cycle(queue, dest, datetime(2026, 11, 15, 23, 0, tzinfo=ET)) == []
+    assert _cycle(queue, dest, datetime(2026, 11, 15, 23, 59, tzinfo=ET)) == []
+    assert _weekly(dest) == ["orch-2026-11-09.db"]
+
+    assert _cycle(queue, dest, datetime(2026, 11, 16, 0, 5, tzinfo=ET)) == []
+    snapshot = dest.parent / "weekly" / "orch-2026-11-16.db"
+    assert _weekly(dest) == ["orch-2026-11-09.db", "orch-2026-11-16.db"]
+    assert _dedupe_keys(snapshot) == ["t1:build"]
+    with closing(sqlite3.connect(snapshot)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert _dedupe_keys(dest) == ["t1:build"]
+
+    taken = snapshot.stat().st_mtime_ns
+    assert _cycle(queue, dest, datetime(2026, 11, 16, 8, 0, tzinfo=ET)) == []
+    assert snapshot.stat().st_mtime_ns == taken
+
+
+def test_a_poller_down_over_monday_takes_the_snapshot_on_its_next_cycle(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    dest = tmp_path / "share" / "backup" / "orch.db"
+
+    assert _cycle(queue, dest, datetime(2026, 11, 18, 14, 0, tzinfo=ET)) == []
+
+    assert _weekly(dest) == ["orch-2026-11-16.db"]
+    assert dest.exists()
+
+
+def test_retention_keeps_four_weeks_plus_the_new_snapshot(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    weekly = tmp_path / "share" / "backup" / "weekly"
+    weekly.mkdir(parents=True)
+    for day in ("10-05", "10-12", "10-19", "10-26", "11-02", "11-09"):
+        (weekly / f"orch-2026-{day}.db").write_bytes(b"")
+    (weekly / "notes.txt").write_text("kept")
+
+    weekly_snapshot(queue.path, weekly, datetime(2026, 11, 16, 0, 5, tzinfo=ET))
+
+    assert sorted(path.name for path in weekly.iterdir()) == [
+        "notes.txt",
+        "orch-2026-10-19.db",
+        "orch-2026-10-26.db",
+        "orch-2026-11-02.db",
+        "orch-2026-11-09.db",
+        "orch-2026-11-16.db",
+    ]
+
+
+def test_retention_never_deletes_the_newest_snapshot(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    weekly = tmp_path / "share" / "backup" / "weekly"
+    weekly.mkdir(parents=True)
+    (weekly / "orch-2027-01-04.db").write_bytes(b"")
+    (weekly / "orch-2026-01-05.db").write_bytes(b"")
+
+    weekly_snapshot(queue.path, weekly, datetime(2026, 11, 16, 0, 5, tzinfo=ET))
+
+    assert sorted(path.name for path in weekly.iterdir()) == [
+        "orch-2026-11-16.db",
+        "orch-2027-01-04.db",
+    ]

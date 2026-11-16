@@ -16,6 +16,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.factory_md import FactoryConfig, family_findings
+from lib.handoff import matching_head as _matching_head
 from lib.queue import Job
 from lib.schema import HARNESSES
 
@@ -286,14 +287,6 @@ def _family_errors(config: FactoryConfig) -> list[str]:
         )
         if finding.severity == "error"
     ]
-
-
-def _matching_head(reported: str, current: str | None) -> str | None:
-    if current is None or min(len(reported), len(current)) < 7:
-        return None
-    if current.startswith(reported) or reported.startswith(current):
-        return current
-    return None
 
 
 def _redrive_eligible(exc: BaseException, policy: str) -> bool:

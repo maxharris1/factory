@@ -616,6 +616,7 @@ _VERDICT_TIMES = (
     ("auto_extra_comments", "MAX", "created_at", "comment_id"),
     ("verdict_heads", "MAX", "posted_at", "comment_id"),
     ("handled_times", "MAX", "handled_at", "comment_id"),
+    ("verdict_acceptances", "MAX", "accepted_at", "comment_id"),
 )
 
 
