@@ -84,11 +84,9 @@ class HoldsMixin:
                 )
                 connection.commit()
         self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason="awaiting-ok",
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             head=head,
             detail=json.dumps(
                 {

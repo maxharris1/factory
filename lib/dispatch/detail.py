@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
+    GROK_WAKE_SKIP,
     RETRY_REJECTION_NOTES,
 )
 from lib.dispatch.helpers import (
@@ -63,14 +64,14 @@ class DetailMixin:
                         job, release_exc, prefix="grok-delivery-release:"
                     )
 
+    grok_wake_skip: frozenset[str] = GROK_WAKE_SKIP
+
     def wake_grok_once(
         self,
+        ticket: TrackedTicket,
         *,
-        repo: str,
-        ticket_id: str,
         reason: str,
         source_comment_id: str,
-        timeout_seconds: int,
         detail: str,
         head: str | None = None,
         once_key: str | None = None,
@@ -85,6 +86,8 @@ class DetailMixin:
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
+        repo, ticket_id = ticket.repo, ticket.ticket_id
+        timeout_seconds = ticket.job_timeout_minutes * 60
         if once_key is None:
             if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
                 once_key = source_comment_id
@@ -102,22 +105,89 @@ class DetailMixin:
                 detail=detail,
             )
             return
-        self.queue.enqueue(
-            self._grok_request(
-                JobRequest(
-                    repo=repo,
-                    ticket_id=ticket_id,
-                    action=reason,
-                    recipient="grok",
-                    source_comment_id=source_comment_id,
-                    timeout_seconds=timeout_seconds,
-                    generation=self._generation(repo, ticket_id),
-                    head=head,
-                    detail=detail,
-                )
-            ),
-            dedupe_key=f"t7:{_scope(repo, ticket_id)}:{reason}:{once_key}",
+        dedupe_key = f"t7:{_scope(repo, ticket_id)}:{reason}:{once_key}"
+        request = self._grok_request(
+            JobRequest(
+                repo=repo,
+                ticket_id=ticket_id,
+                action=reason,
+                recipient="grok",
+                source_comment_id=source_comment_id,
+                timeout_seconds=timeout_seconds,
+                generation=self._generation(repo, ticket_id),
+                head=head,
+                detail=detail,
+            )
         )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM skipped_wakes WHERE dedupe_key = ?", (dedupe_key,)
+            ).fetchone():
+                return
+            if self._skips_wake(connection, ticket, reason):
+                if not connection.execute(
+                    "SELECT 1 FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
+                ).fetchone():
+                    connection.execute(
+                        """
+                        INSERT INTO skipped_wakes (
+                            dedupe_key, repo, ticket_id, reason, once_key, body,
+                            status, skipped_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                        """,
+                        (
+                            dedupe_key,
+                            repo.lower(),
+                            ticket_id,
+                            reason,
+                            once_key,
+                            _skip_notice(reason, once_key, request.detail or ""),
+                            self.queue.now(),
+                        ),
+                    )
+                    connection.commit()
+                return
+            self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
+            connection.commit()
+
+    def _skips_wake(
+        self, connection: sqlite3.Connection, ticket: TrackedTicket, reason: str
+    ) -> bool:
+        if reason not in self.grok_wake_skip:
+            return False
+        if ticket.pr_number is None and ticket.factory.tickets != "github":
+            return False
+        return reason != "done" or not connection.execute(
+            "SELECT 1 FROM followup_filings WHERE repo = ? AND ticket_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+
+    def _drain_skipped_wakes(self, ticket: TrackedTicket) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT dedupe_key, reason, once_key, body FROM skipped_wakes
+                WHERE repo = ? AND ticket_id = ? AND status = 'pending'
+                ORDER BY skipped_at, dedupe_key
+                """,
+                key,
+            ).fetchall()
+        if not rows:
+            return
+        actions = self._review_actions(ticket)
+        for row in rows:
+            dedupe_key = str(row["dedupe_key"])
+            actions.comment_once(
+                ticket, str(row["body"]), _skip_marker(str(row["reason"]), str(row["once_key"]))
+            )
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE skipped_wakes SET status = 'posted' WHERE dedupe_key = ?",
+                    (dedupe_key,),
+                )
+                connection.commit()
 
     def _grok_request(self, request: JobRequest) -> JobRequest:
         return replace(
@@ -494,11 +564,9 @@ class DetailMixin:
         if note is not None:
             detail["note"] = note
         self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason=reason,
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=json.dumps(detail, separators=(",", ":"), sort_keys=True),
             head=ticket.current_head,
         )
@@ -535,11 +603,9 @@ class DetailMixin:
         if note is not None:
             detail["note"] = note
         self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
+            ticket,
             reason="done",
             source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=json.dumps(
                 detail,
                 separators=(",", ":"),
@@ -547,6 +613,24 @@ class DetailMixin:
             ),
             head=ticket.current_head,
         )
+
+
+def _skip_marker(reason: str, once_key: str) -> str:
+    return f"<!-- orch-wake-skip {reason}:{once_key} -->"
+
+
+def _skip_notice(reason: str, once_key: str, detail: str) -> str:
+    parsed = json.loads(detail)
+    facts = "".join(
+        f"- {name}: {' '.join(str(parsed[name]).split())}\n"
+        for name in ("outcome", "note", "detail", "link")
+        if parsed.get(name)
+    )
+    return (
+        f"Factory notice: `{reason}` needs no orchestrator decision, "
+        "so the poller did not wake the orchestrator.\n\n"
+        f"{facts}\n{_skip_marker(reason, once_key)}"
+    )
 
 
 def _verdict_sources(

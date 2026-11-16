@@ -275,7 +275,9 @@ class FollowupActions(FakeReviewActions):
         return number
 
     def comment_once(self, ticket, body, marker) -> None:
-        del ticket
+        if marker.startswith("<!-- orch-wake-skip "):
+            super().comment_once(ticket, body, marker)
+            return
         if any(marker in existing.splitlines() for existing in self.pr_comments):
             return
         self.pr_comments.append(body)

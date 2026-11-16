@@ -35,6 +35,15 @@ _RECOVERS_EDITED = {
 
 class CommentsMixin:
     def process(self, ticket: TrackedTicket) -> None:
+        try:
+            self._process(ticket)
+        finally:
+            try:
+                self._drain_skipped_wakes(ticket)
+            except Exception as exc:
+                self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+
+    def _process(self, ticket: TrackedTicket) -> None:
         self._remember_links(ticket, ticket.comments)
         try:
             ticket = self._routed(ticket)

@@ -24,6 +24,7 @@ from tests.test_dispatcher import (
     seed_review_job,
     ticket,
 )
+from tests.test_hooks import skip_facts
 
 PR_124_HEAD = "6509f58ed23fcf8749c686c28d61f4e97a3007a2"
 PR_124_HEADER = (
@@ -154,9 +155,9 @@ def test_an_ac_unmet_approve_does_not_ship_or_use_up_the_review(tmp_path: Path) 
     assert ship_intents(queue) == []
     assert state(queue) == ("review", 0)
     assert outcome(queue, "verdict-" + head) == "rejected-approve-ac-unmet"
-    wakes = jobs(queue, "grok")
-    assert len(wakes) == 1
-    assert "ac=unmet" in wakes[0]["detail"]
+    assert jobs(queue, "grok") == []
+    [facts] = skip_facts(queue, "rejected")
+    assert "ac=unmet" in facts["note"]
 
 
 @pytest.mark.parametrize("ac", ["met", None])
@@ -223,9 +224,9 @@ def test_a_refused_verdict_gives_its_review_back_once(
 
     assert outcome(queue, stale.id).startswith(("stale-", "rejected-", "refused-"))
     assert state(queue) == ("review", 0)
-    wakes = jobs(queue, "grok")
-    assert len(wakes) == 1
-    assert outcome(queue, stale.id) in wakes[0]["detail"]
+    assert jobs(queue, "grok") == []
+    [facts] = [fact for reason in ("stale", "rejected", "refused") for fact in skip_facts(queue, reason)]
+    assert facts["outcome"] == outcome(queue, stale.id)
     retry = queue.claim("codex")
     assert retry is not None
     assert (retry.request.action, retry.request.head, retry.request.attempt) == ("review", head, 1)
@@ -399,9 +400,8 @@ def test_a_refused_approve_does_not_ship_and_gives_the_review_back(
     assert ship_intents(queue) == []
     assert state(queue) == ("review", 0)
     assert outcome(queue, approve.id) == expected
-    wakes = jobs(queue, "grok")
-    assert len(wakes) == 1
-    detail = json.loads(wakes[0]["detail"])
+    assert jobs(queue, "grok") == []
+    [detail] = skip_facts(queue, "rejected")
     assert detail["outcome"] == expected
     assert "verdict=REVISE" in detail["note"]
     retry = queue.claim("codex")

@@ -83,6 +83,12 @@ class FakeReviewActions:
         self.approvals: list[tuple[str, str]] = []
         self.state_failures: set[str] = set()
         self.events: list[str] = []
+        self.notices: list[str] = []
+
+    def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
+        del ticket
+        if not any(marker in notice.splitlines() for notice in self.notices):
+            self.notices.append(body)
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         del ticket
@@ -321,6 +327,40 @@ def restart(
     return setup(tmp_path, shipper, grok_delivery=grok_delivery)
 
 
+def park_followup(queue: SQLiteJobQueue, ticket_id: str = "42") -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO followup_filings (
+                repo, ticket_id, comment_id, round, title, body, labels, status,
+                issue_number, created_at
+            ) VALUES ('owner/repo', ?, 'verdict-0', 4, 'Follow-ups', 'body', '[]',
+                      'commented', 77, 0)
+            """,
+            (ticket_id,),
+        )
+
+
+def skipped_keys(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT reason, once_key FROM skipped_wakes ORDER BY skipped_at, dedupe_key"
+        ).fetchall()
+    return [(str(row["reason"]), str(row["once_key"])) for row in rows]
+
+
+def skip_facts(queue: SQLiteJobQueue, reason: str) -> list[dict[str, str]]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT body FROM skipped_wakes WHERE reason = ? ORDER BY skipped_at, dedupe_key",
+            (reason,),
+        ).fetchall()
+    return [
+        dict(line[2:].split(": ", 1) for line in str(row["body"]).splitlines() if line.startswith("- "))
+        for row in rows
+    ]
+
+
 def jobs(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
     with queue.connect() as connection:
         rows = connection.execute(
@@ -385,11 +425,11 @@ def test_t7_unparsed_header_from_trusted_login_wakes_grok_once(
     dispatcher.process(snapshot)
     restart(tmp_path)[0].process(snapshot)
 
-    grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["unparsed"]
-    assert grok[0].request.source_comment_id == "bad-1"
-    assert "unknown kind" in str(grok[0].request.detail)
-    assert len(jobs(queue)) == 1
+    assert FakeBot(queue, "grok").drain() == []
+    assert skipped_keys(queue) == [("unparsed", "bad-1")]
+    [notice] = dispatcher.review_actions.notices
+    assert "unknown kind" in notice
+    assert jobs(queue) == []
 
 
 def test_t7_plan_missing_ac_and_round_wakes_grok_once(tmp_path: Path) -> None:
@@ -404,26 +444,25 @@ def test_t7_plan_missing_ac_and_round_wakes_grok_once(tmp_path: Path) -> None:
     dispatcher.process(ticket(malformed))
     restart(tmp_path)[0].process(ticket(malformed))
 
-    grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["unparsed"]
-    assert grok[0].request.source_comment_id == "plan-1"
-    assert "missing required key 'ac'" in str(grok[0].request.detail)
+    assert FakeBot(queue, "grok").drain() == []
+    assert skipped_keys(queue) == [("unparsed", "plan-1")]
+    [notice] = dispatcher.review_actions.notices
+    assert "missing required key 'ac'" in notice
 
 
-def test_t7_config_refused_wakes_grok_once_across_restart(tmp_path: Path) -> None:
+def test_t7_config_capped_wakes_grok_once_across_restart(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     for target in (dispatcher, restart(tmp_path)[0], restart(tmp_path)[0]):
         target.wake_grok_once(
-            repo="owner/repo",
-            ticket_id="42",
-            reason="refused",
+            ticket(),
+            reason="capped",
             source_comment_id="factory.md@abc1234",
-            timeout_seconds=5400,
-            detail="missing required field 'ship'",
+            detail="review round cap reached",
+            head=HEAD_A,
         )
 
     grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["refused"]
+    assert [job.request.action for job in grok] == ["capped"]
 
 
 def test_t7_refuses_forged_blocked_and_stuck(tmp_path: Path) -> None:
@@ -440,7 +479,8 @@ def test_t7_refuses_forged_blocked_and_stuck(tmp_path: Path) -> None:
         )
     )
 
-    assert jobs(queue) == [("rejected", "grok"), ("rejected", "grok")]
+    assert jobs(queue) == []
+    assert skipped_keys(queue) == [("rejected", "stuck-1"), ("rejected", "verdict-1")]
 
 
 def test_t8_ok_on_previewed_sha_ships_that_sha(tmp_path: Path) -> None:
@@ -494,7 +534,8 @@ def test_t8_pending_ok_refused_after_later_revise(tmp_path: Path) -> None:
     declined = say("decline-1", DECLINE, "tracy-login", 2.5)
     one_poll.process(ticket(*approved_then_ok, declined, revise))
     assert one_poll_shipper.requests == []
-    assert sorted(action for action, _recipient in jobs(queue)) == [
+    assert jobs(queue) == []
+    assert sorted(reason for reason, _key in skipped_keys(queue)) == [
         "rejected",
         "rejected",
         "stale",
@@ -673,7 +714,8 @@ def test_t8_repeated_decline_of_one_preview_queues_one_fix(tmp_path: Path) -> No
     dispatcher.process(snapshot)
     restart(tmp_path)[0].process(snapshot)
 
-    assert sorted(jobs(queue)) == [("fix", "claude"), ("rejected", "grok")]
+    assert jobs(queue) == [("fix", "claude")]
+    assert skipped_keys(queue) == [("rejected", "decline-2")]
 
 
 def test_t8_decline_naming_another_sha_is_refused(tmp_path: Path) -> None:
@@ -727,7 +769,8 @@ def test_hooks_cannot_execute_a_harness_binary(
             say("decline-1", DECLINE, "tracy-login", 3),
         )
     )
-    assert {action for action, _recipient in jobs(queue)} == {"unparsed", "fix"}
+    assert jobs(queue) == [("fix", "claude")]
+    assert skipped_keys(queue) == [("unparsed", "bad-1")]
 
     for name in ("hook_t7.py", "hook_t8.py"):
         tree = ast.parse((Path(__file__).parents[1] / "lib" / name).read_text())
@@ -1016,9 +1059,8 @@ def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(
         )
     )
 
-    grok = FakeBot(queue, "grok").drain()
-    assert sorted(job.request.source_comment_id for job in grok) == ["bad-1", "bad-2"]
-    assert {job.request.action for job in grok} == {"unparsed"}
+    assert FakeBot(queue, "grok").drain() == []
+    assert skipped_keys(queue) == [("unparsed", "bad-1"), ("unparsed", "bad-2")]
 
 
 def test_hooks_cannot_claim_go_or_ready_and_first_answer_wins(
@@ -1065,8 +1107,8 @@ def test_t7_capped_wakes_once_per_head_and_refused_once_per_ticket(
     assert sorted((job.request.action, job.request.head) for job in grok) == [
         ("capped", HEAD_A),
         ("capped", HEAD_B),
-        ("refused", HEAD_A),
     ]
+    assert skipped_keys(queue) == [("refused", "-")]
 
 
 def test_t7_prose_that_mentions_orch_v_is_not_unparsed(tmp_path: Path) -> None:
@@ -1180,12 +1222,9 @@ def test_t8_orphaned_ship_claim_goes_to_ship_failed_and_wakes_once(
         ).fetchone()["outcome"]
     assert outcome == "ship-failed"
     grok = FakeBot(queue, "grok").drain()
-    expected = (
-        ["stale", "ship-failed"]
-        if change == "newer-verdict"
-        else ["ship-failed"]
-    )
-    assert sorted(job.request.action for job in grok) == sorted(expected)
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    expected = ["stale"] if change == "newer-verdict" else []
+    assert [reason for reason, _key in skipped_keys(queue)] == expected
 
 
 def test_t8_losing_dispatcher_cannot_overwrite_shipped(
@@ -1265,7 +1304,8 @@ def test_t8_two_declines_competing_for_one_preview_queue_one_fix(
     monkeypatch.setattr(hook_t8, "_claimed_by", lambda *_args: None)
     second.process(ticket(approved, say("decline-2", DECLINE, "tracy-login", 3)))
 
-    assert sorted(jobs(queue)) == [("fix", "claude"), ("rejected", "grok")]
+    assert jobs(queue) == [("fix", "claude")]
+    assert skipped_keys(queue) == [("rejected", "decline-2")]
     with queue.connect() as connection:
         rows = connection.execute(
             "SELECT comment_id FROM external_previews"
