@@ -365,9 +365,29 @@ def _num(value: object) -> str:
 
 
 def _usd(value: object) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return "—"
-    return f"${value:,.2f}"
+    cents = math.floor(value * 100 + 0.5)
+    return f"${cents // 100:,}.{cents % 100:02d}"
+
+
+TOKEN_UNITS = ((10**9, "B"), (10**6, "M"), (10**3, "K"))
+TOKEN_TILES = (("tokens_in", "tokens in"), ("tokens_cached", "of them cached"), ("tokens_out", "tokens out"))
+
+
+def _compact(value: int) -> str:
+    if value < 10_000:
+        return _num(value)
+    divisor = 10 ** (len(str(value)) - 4)
+    q = (value + divisor // 2) // divisor
+    if q == 10**4:
+        q, divisor = 1000, divisor * 10
+    value = q * divisor
+    unit, letter = next(pair for pair in TOKEN_UNITS if pair[0] <= value)
+    places = max(0, 4 - len(str(value // unit)))
+    digits = str(value * 10**places // unit)
+    cut = len(digits) - places
+    return f"{digits[:cut]}.{digits[cut:]}".rstrip("0").rstrip(".") + letter
 
 
 def _span(cls: str | None, text: object) -> str:
@@ -393,7 +413,7 @@ def _table(rows: list[dict], first: str) -> str:
         "</tr>"
         for row in rows
     )
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    return f'<div class="ef-scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def _recent_table(rows: list[dict]) -> str:
@@ -419,7 +439,7 @@ def _recent_table(rows: list[dict]) -> str:
         + "</tr>"
         for row in rows
     )
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    return f'<div class="ef-scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def rollup_panel(snapshot: dict) -> str:
@@ -430,19 +450,25 @@ def rollup_panel(snapshot: dict) -> str:
     if not totals["jobs"]:
         inner = '<p class="empty">no telemetry</p>'
     else:
-        unpriced = totals["jobs"] - totals["priced_jobs"]
         stats = "".join(
-            f'<div class="stat"><b>{value}</b>{_span(None, label)}</div>'
-            for value, label in (
-                (_num(totals["jobs"]), "jobs"),
-                (_num(totals["tokens_in"]), "tokens in"),
-                (_num(totals["tokens_cached"]), "of them cached"),
-                (_num(totals["tokens_out"]), "tokens out"),
-                (_usd(totals["cost_usd"]), "cost reported"),
+            f'<div class="stat"{title}><b>{value}</b>{_span(None, label)}</div>'
+            for value, label, title in (
+                (_num(totals["jobs"]), "jobs", ""),
+                *(
+                    (_compact(totals[name]), label, f' title="{_num(totals[name])}"')
+                    for name, label in TOKEN_TILES
+                ),
+                (_usd(totals["cost_usd"]), "cost reported", ""),
             )
         )
+        unpriced = sorted(
+            ((row["jobs"] - row["priced_jobs"], row["name"]) for row in rollup["by_harness"]
+             if row["jobs"] > row["priced_jobs"]),
+            key=lambda pair: (-pair[0], pair[1]),
+        )
         note = (
-            f'<p class="muted">{unpriced} jobs report no cost (Codex does not)</p>'
+            f'<p class="muted">{sum(count for count, _ in unpriced)} jobs report no cost: '
+            f'{_e(", ".join(f"{name} {count}" for count, name in unpriced))}</p>'
             if unpriced
             else ""
         )
@@ -477,10 +503,27 @@ TELEMETRY_CSS = (
 TELEMETRY_SCRIPT = r"""
   // --- job telemetry (#93): the Efficiency rollup -------
 
-  function usd(v) { return (v === null || v === undefined || !isFinite(v)) ? '—' : '$' + Number(v).toFixed(2); }
+  function usd(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    var c = Math.floor(v * 100 + 0.5);
+    return '$' + Math.floor(c / 100).toLocaleString('en-US') + '.' + pad(c % 100);
+  }
+  var TOKEN_UNITS = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+  function compactCount(n) {
+    if (n < 10000) return num(n);
+    var divisor = Math.pow(10, String(n).length - 4);
+    var q = Math.floor((n + divisor / 2) / divisor);
+    if (q === 10000) { q = 1000; divisor *= 10; }
+    var value = q * divisor;
+    var unit = TOKEN_UNITS.filter(function (u) { return u[0] <= value; })[0];
+    var places = Math.max(0, 4 - String(Math.floor(value / unit[0])).length);
+    var digits = String(value * Math.pow(10, places) / unit[0]);
+    var cut = digits.length - places;
+    return (digits.slice(0, cut) + '.' + digits.slice(cut)).replace(/0+$/, '').replace(/\.$/, '') + unit[1];
+  }
   function teleTable(root, rows, first, recent) {
     if (!rows.length) { add(root, el('p', 'empty', recent ? 'no finished jobs with telemetry' : 'no jobs with telemetry')); return; }
-    var table = add(root, el('table'));
+    var table = add(add(root, el('div', 'ef-scroll')), el('table'));
     var head = add(add(table, el('thead')), el('tr'));
     (recent ? ['job', 'repo', 'harness', 'tokens in', 'tokens out', 'cost', 'exit']
             : [first, 'jobs', 'tokens in', 'cached', 'tokens out', 'cost']).forEach(function (h) { add(head, el('th', null, h)); });
@@ -513,14 +556,21 @@ TELEMETRY_SCRIPT = r"""
     var t = r.totals || {jobs: 0};
     if (!t.jobs) { add(root, el('p', 'empty', 'no telemetry')); return; }
     var stats = add(root, el('div', 'stats'));
-    [[num(t.jobs), 'jobs'], [num(t.tokens_in), 'tokens in'], [num(t.tokens_cached), 'of them cached'],
-     [num(t.tokens_out), 'tokens out'], [usd(t.cost_usd), 'cost reported']].forEach(function (s) {
+    [[num(t.jobs), 'jobs', null], [compactCount(t.tokens_in), 'tokens in', num(t.tokens_in)],
+     [compactCount(t.tokens_cached), 'of them cached', num(t.tokens_cached)],
+     [compactCount(t.tokens_out), 'tokens out', num(t.tokens_out)], [usd(t.cost_usd), 'cost reported', null]].forEach(function (s) {
       var box = add(stats, el('div', 'stat'));
+      if (s[2] !== null) box.setAttribute('title', s[2]);
       add(box, el('b', null, s[0]));
       add(box, el('span', null, s[1]));
     });
-    var unpriced = t.jobs - t.priced_jobs;
-    if (unpriced) add(root, el('p', 'muted', unpriced + ' jobs report no cost (Codex does not)'));
+    var unpriced = (r.by_harness || []).filter(function (h) { return h.jobs > h.priced_jobs; })
+      .map(function (h) { return [h.jobs - h.priced_jobs, h.name]; })
+      .sort(function (a, b) { return b[0] - a[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0); });
+    if (unpriced.length) {
+      add(root, el('p', 'muted', unpriced.reduce(function (sum, u) { return sum + u[0]; }, 0) + ' jobs report no cost: ' +
+        unpriced.map(function (u) { return u[1] + ' ' + u[0]; }).join(', ')));
+    }
     if (t.unmetered_jobs) add(root, el('p', 'muted', t.unmetered_jobs + ' jobs report no token usage (no data)'));
     add(root, el('h3', 'tele-head', 'per harness'));
     teleTable(root, r.by_harness || [], 'harness', false);
