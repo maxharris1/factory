@@ -151,11 +151,27 @@ def test_no_stale_phrase(rel: Path, name: str) -> None:
     assert not found, f"{rel}: {name}: {found.group(0)!r}"
 
 
-def test_builder_gives_one_title_shape() -> None:
-    text = read(BUILDER)
-    assert "`#<issue>: type(scope): subject`" in text
-    shapes = set(re.findall(r"`#<issue>:[^`]*`", text))
-    assert shapes == {"`#<issue>: type(scope): subject`"}, shapes
+TITLE = "#<issue>: type(scope): subject"
+
+
+def other_title_shapes(text: str) -> set[str]:
+    return {shape.strip() for shape in re.findall(r"#<issue>:[^`\n|]*", text)} - {TITLE}
+
+
+def test_builder_gives_the_title_shape() -> None:
+    assert f"`{TITLE}`" in read(BUILDER)
+
+
+@pytest.mark.parametrize("rel", ROUTERS_AND_ADAPTER, ids=str)
+def test_one_title_shape(rel: Path) -> None:
+    shapes = other_title_shapes(read(rel))
+    assert not shapes, f"{rel}: a second title shape: {sorted(shapes)}"
+
+
+@pytest.mark.parametrize("rel", ROUTERS_AND_ADAPTER, ids=str)
+@pytest.mark.parametrize("line", ["The PR title is `#<issue>: subject`.", "Title: #<issue>: fix the bug"])
+def test_title_guard_catches_a_second_shape(rel: Path, line: str) -> None:
+    assert other_title_shapes(f"{read(rel)}\n{line}\n"), f"{rel}: guard missed {line!r}"
 
 
 def test_builder_states_the_owner_duties() -> None:
