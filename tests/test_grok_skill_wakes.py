@@ -5,10 +5,15 @@ import re
 from pathlib import Path
 
 from lib.dispatch.constants import GROK_WAKE_REASONS
+from lib.orchestrate import answers_comment, choose_route, go_comment
+from tests.test_hooks import FakeBot, say, setup
+from tests.test_orchestrate import request_for
+from tests.test_wake_payload import GO, on_pr
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "grok" / "orchestrate-project" / "SKILL.md"
 DETAIL_REASONS = ("repeat-block", "criterion-unsatisfiable", "preflight-missing")
+GO_WITHOUT_STATE = "kind=go must set state=planning or state=building"
 
 
 def _keyword(call: ast.Call, name: str) -> str | None:
@@ -41,11 +46,20 @@ def lib_source() -> str:
     return "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "lib").rglob("*.py"))
 
 
-def wake_rows() -> list[str]:
+def wake_table() -> dict[str, tuple[str, str]]:
     text = SKILL.read_text(encoding="utf-8")
     section = text.split("\n## Wakes\n", 1)[1].split("\n## ", 1)[0]
-    rows = [line for line in section.splitlines() if line.startswith("| `")]
-    return [re.match(r"\| `([^`]+)`", row).group(1) for row in rows]
+    table = {}
+    for line in section.splitlines():
+        if line.startswith("| `"):
+            wake, cause, todo = (cell.strip() for cell in line.strip("|").split(" | "))
+            assert wake.strip("`") not in table, wake
+            table[wake.strip("`")] = (cause, todo)
+    return table
+
+
+def wake_rows() -> list[str]:
+    return list(wake_table())
 
 
 def test_code_wake_actions_include_the_constant_and_clarify():
@@ -58,12 +72,34 @@ def test_detail_reasons_are_written_by_code():
     source = lib_source()
     for reason in DETAIL_REASONS:
         assert f'"{reason}: ' in source or f'f"{reason}: ' in source, reason
+    assert f'"{GO_WITHOUT_STATE}"' in source
 
 
 def test_every_wake_reason_in_code_has_one_row():
-    rows = wake_rows()
-    assert len(rows) == len(set(rows)), rows
-    assert set(rows) == code_wake_actions() | set(DETAIL_REASONS)
+    assert set(wake_rows()) == code_wake_actions() | set(DETAIL_REASONS) | {GO_WITHOUT_STATE}
+
+
+def test_go_without_state_recovers_through_a_generated_go(tmp_path):
+    todo = wake_table()[GO_WITHOUT_STATE][1]
+    assert "go_comment" in todo
+    assert "Do not post `answers_comment`" in todo
+    assert "`go`" not in wake_table()["clarify"][0]
+
+    dispatcher, queue = setup(tmp_path)
+    bare_go = say("906", GO.format(state=""), "grok-login", 1)
+    dispatcher.process(on_pr(bare_go))
+    wake = FakeBot(queue, "grok").drain()[0].request
+    assert wake.action == "clarify"
+    assert GO_WITHOUT_STATE in str(wake.detail)
+
+    answer = say("907", answers_comment("Which state?", "building"), "grok-login", 2)
+    dispatcher.process(on_pr(bare_go, answer))
+    assert queue.claim("claude") is None
+
+    generated = go_comment(choose_route(request_for("examples/cleffy/factory.md")), "none")
+    rego = say("908", generated, "grok-login", 3)
+    dispatcher.process(on_pr(bare_go, answer, rego))
+    assert queue.claim("claude").request.action in ("plan", "build")
 
 
 def test_no_hand_written_header():

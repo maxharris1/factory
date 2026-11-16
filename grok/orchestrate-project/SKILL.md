@@ -138,7 +138,7 @@ If an answer changes the scope of the ticket (this skill's judgment), post the `
 
 ## Wakes
 
-One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.constants.GROK_WAKE_REASONS`, `clarify`, and the reasons that arrive inside another action's `detail`. `tests/test_grok_skill_wakes.py` reads the code's list and fails when a wake has no row.
+One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.constants.GROK_WAKE_REASONS`, `clarify`, and the reasons and instructions that arrive inside another action's `detail`. `tests/test_grok_skill_wakes.py` reads the code's list and fails when a wake has no row.
 
 | Wake | Cause | What to do |
 | --- | --- | --- |
@@ -151,7 +151,8 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `rejected` | The dispatcher refused a trusted comment (wrong author, edited, superseded, a retry it could not act on). `detail.outcome` names why, and `detail.note` explains a refused retry. | Read the outcome. Tell Max once only when it needs him. |
 | `stale` | A verdict for a head or round that is no longer current. `detail.outcome` names it. | Nothing to post. The current head gets its own review. |
 | `go-not-from-approver` | With the GitHub App switch on (#122), a `go` on a capped, blocked or waiting ticket, or answers on a `repeat-block`, came from a login not in `approver_logins`. Nothing resumed. | Tell Max once. The step still needs his own words through an approver login. |
-| `clarify` | A `kind=questions` comment from a builder or reviewer, or a `go` with no valid `state`. | Run Mid-work questions below. |
+| `clarify` | A `kind=questions` comment from a builder or reviewer. The dispatcher paused that step on the question. | Run Mid-work questions above. |
+| `kind=go must set state=planning or state=building` | A `clarify` wake whose `detail.instruction` is this text. A trusted `go` had no valid `state`, so nothing was queued and no question is paused. | Call `choose_route` again and post `go_comment(decision, verify)` once. It writes a valid `state`. Do not post `answers_comment`: with no paused question the dispatcher rejects it as `rejected-answers-without-question`. |
 | `repeat-block` | A `clarify` wake whose `detail` starts `repeat-block:`. A reviewer blocked the same rule twice, and the ticket waits on Max. | Ask Max once, with the rule and both verdict links. Only an approver `go` resumes it and grants one extra round: post it with `extra_round_go`. Answers do not resume it. |
 | `criterion-unsatisfiable` | A `clarify` wake whose `detail` starts `criterion-unsatisfiable:`. A reviewer says an acceptance criterion cannot be met. | Ask Max once, quoting the criterion. Post his decision with `answers_comment`, or his extra-round `go` with `extra_round_go`. |
 | `ship-failed` | The merge or the merged-state write failed. `detail` has the error. | Tell Max once. Do not merge by hand. |
