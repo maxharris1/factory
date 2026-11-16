@@ -29,7 +29,7 @@ from tests.test_approver_credential import MAX, AppFlow
 from tests.test_orchestrate import choose_route, request_for
 from tests.test_orchestrate_helpers import go_for, to_questions
 from tests.test_dispatcher import comment, handled_outcome
-from tests.test_rounds_and_caps import HEADS, Flow, outcome
+from tests.test_rounds_and_caps import APPROVE, HEADS, Flow, outcome
 
 HEADER = re.compile(r"<!-- orch:v1 [^\n`]*?-->")
 CHOICE = re.compile(r"<([A-Za-z]+(?:\|[A-Za-z]+)+)>")
@@ -391,8 +391,9 @@ def refuses_an_agent_go_at_the_cap(tmp: Path) -> None:
 def refuses_a_fourth_high_risk_round(tmp: Path) -> None:
     flow = Flow(tmp)
     flow.to_cap()
-    assert flow.queue.claim("claude") is None
-    assert flow.queue.claim("codex") is None
+    fourth = APPROVE.format(round="4/3", head=flow.head)
+    assert flow.post("verdict-fourth", fourth, "codex-login") == "rejected-over-cap"
+    assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("capped", 3)
 
 
 def refuses_approve_with_unmet_criteria() -> None:

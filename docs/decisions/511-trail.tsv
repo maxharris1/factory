@@ -8,3 +8,5 @@ enforced rules	rule-post-only, review-one-reviewer, review-agent-approval, revie
 guidance rules	the other 23 rule ids	no refusal path, or a probe showed a breaking handoff accepted
 accepted breaking handoffs	APPROVE with a [blocking] finding merges; REVISE ac=met with no finding queues a fix; APPROVE naming a non-PR head merges	probed with Flow; out of scope to enforce per the ticket
 review-low-risk-rounds	guidance	the contract Flow is high risk; no cheap low-risk path in this file
+review-high-risk-rounds fix (f-1)	post an over-cap 4/3 APPROVE after to_cap and assert rejected-over-cap with state capped 3	reviewer probe failed before (rounds 1/3..3/3) and passed after (adds 4/3); disabling the t4 over-cap check fails the row with stale-approve
+macos CI red on 9f25ef1	infrastructure, no repo change	job cancelled after 32m: "The job was not acquired by Runner of type hosted"; the new push reruns CI
