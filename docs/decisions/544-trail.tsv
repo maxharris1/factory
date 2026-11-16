@@ -1,0 +1,9 @@
+decision	choice	why
+playbook	figure-it-out at Feature steps, one owner, no fan-out	one module and two call sites; the change is code-coupled
+age rule	min(wall age, monotonic age) when the beat's boot id matches the reader's	monotonic stops during a suspend and advances with wall time in a hang, so a hang stays down (ac-2) and a suspend does not count (ac-1)
+reboot	compare boot ids from /proc/sys/kernel/random/boot_id; another boot ages by wall time	monotonic restarts at boot, so an old stamp cannot be compared (ac-4); the box runs Linux under systemd
+storage	two new columns, seen_boot TEXT and seen_monotonic REAL, added by the existing ALTER TABLE path	rows stay in orch.health.db (ticket constraint); older files gain the columns on first open
+checks	_latest_checks takes the boot and monotonic stamp from the row with the newest last_seen	device-probe and dashboard-push merge rows across processes (ac-3)
+fake clocks	read_uptime returns None unless the clock is time.time	a fixed test wall clock cannot be paired with the real monotonic clock; existing tests keep wall-only ages
+readers	orch health, orch status and the dashboard snapshot pass the reader's uptime	self-heal reads orch health --json; status and the dashboard show the same states
+left alone	poller slow-cycle age and the beat's cleanup of other processes' down rows stay on wall time	outside the acceptance criteria; a suspend mid-cycle can still show the poller stale (not down) once

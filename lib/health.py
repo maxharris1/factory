@@ -27,10 +27,12 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   the reason "port held by another owner: PORT on HOST".
 
 A row is (component, device, bot, pid, started_at, last_seen, version,
-interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds),
-one per process: the key holds the pid, so one waiter exiting never removes
-another's row. Every value is an allowlisted name, a device listed in machines.yml, a number or a
-12-digit git SHA (`HealthStore.beat` refuses anything else), so no argv,
+interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds,
+seen_boot, seen_monotonic), one per process: the key holds the pid, so one
+waiter exiting never removes another's row. Every value is an allowlisted name,
+a device listed in machines.yml, a number, a 12-digit git SHA (`HealthStore.beat`
+refuses anything else) or the kernel's boot id (`read_uptime` keeps only its
+UUID form), so no argv,
 environment value, path, URL or token can reach a row. A beat also removes
 rows other processes left for the same component and bot once they are
 down.
@@ -49,7 +51,11 @@ dropped, and a report that cannot be read says so (`error`) and needs
 attention.
 
 State (`classify`): up while the last beat is at most STALE_BEATS (3)
-intervals old, stale up to DOWN_BEATS (8) intervals, then down; a clean
+intervals old, stale up to DOWN_BEATS (8) intervals, then down. A beat's age
+leaves out time the box was suspended (#544): each beat also records the boot
+id and the monotonic clock, which stops while the box sleeps, and a reader on
+the same boot takes the smaller of the wall and monotonic ages. After a reboot
+the monotonic clock has restarted, so the age is the wall age; a clean
 stop is down at once, and so is a component with no beat at all. A device
 whose latest probe failed is at least stale. With the default 15 seconds,
 stale after 45 seconds and down after 2 minutes; a probe (60 seconds) is
@@ -177,19 +183,45 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     checked_at REAL,
     cycle_started_at REAL,
     last_cycle_seconds REAL,
+    seen_boot TEXT,
+    seen_monotonic REAL,
     PRIMARY KEY (component, device, bot, pid)
 )
 """
-_ADDED = ("cycle_started_at", "last_cycle_seconds")
+_ADDED = {"cycle_started_at": "REAL", "last_cycle_seconds": "REAL",
+          "seen_boot": "TEXT", "seen_monotonic": "REAL"}
 _COLUMNS = (
     "component, device, bot, pid, started_at, last_seen, version, "
-    "interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds"
+    "interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds, "
+    "seen_boot, seen_monotonic"
 )
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_BOOT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 Cycle = Callable[[], "tuple[float | None, float | None]"]
 
 
 class HealthError(ValueError):
     """A heartbeat value outside the allowlist, or an unreadable health file."""
+
+
+class Uptime(NamedTuple):
+    """Where this boot's monotonic clock stands: it stops while the box is suspended."""
+
+    boot: str
+    monotonic: float
+
+
+def read_uptime(clock: Callable[[], float] = time.time) -> Uptime | None:
+    """This boot's id and monotonic clock, or None when the boot id is
+    unreadable or `clock` is not the real wall clock (a fixed test clock has
+    no monotonic clock to pair with)."""
+    if clock is not time.time:
+        return None
+    try:
+        boot = BOOT_ID.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return Uptime(boot, time.monotonic()) if _BOOT.fullmatch(boot) else None
 
 
 def _stderr(line: str) -> None:
@@ -330,11 +362,13 @@ class HealthStore:
     """Writes heartbeat rows to the health file beside `db`, for `devices` only."""
 
     def __init__(self, db: Path, *, devices: Collection[str],
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 uptime: Callable[[], Uptime | None] | None = None):
         self.db = Path(db)
         self.path = health_path(self.db)
         self.devices = frozenset(devices)
         self.clock = clock
+        self.uptime = uptime if uptime is not None else (lambda: read_uptime(clock))
         self._prepared = False
         self._prepare_lock = threading.Lock()
 
@@ -353,16 +387,16 @@ class HealthStore:
         return connection
 
     def _prepare(self, connection: sqlite3.Connection) -> None:
-        """First open: WAL, so a reader never blocks a beat, and the cycle columns
-        an older file lacks."""
+        """First open: WAL, so a reader never blocks a beat, and the columns an
+        older file lacks."""
         connection.execute("PRAGMA journal_mode = WAL")
         _share_sidecars(self.path)
         with connection:
             connection.execute(_SCHEMA)
             have = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
-            for column in _ADDED:
+            for column, kind in _ADDED.items():
                 if column not in have:
-                    connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {column} REAL")
+                    connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {column} {kind}")
 
     def _write(self, sql: str, params: tuple, busy: float = BUSY_SECONDS) -> int:
         connection = self._connect(busy)
@@ -389,21 +423,25 @@ class HealthStore:
         _check(component, device, bot, pid, version, interval, self.devices)
         _check_cycle(cycle_started_at, last_cycle_seconds)
         now = float(self.clock())
+        seen = self.uptime()
         connection = self._connect(busy)
         try:
             with connection:
                 connection.execute(
                     f"INSERT INTO {TABLE} ({_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
                     "started_at = excluded.started_at, last_seen = excluded.last_seen, "
                     "version = excluded.version, interval_seconds = excluded.interval_seconds, "
                     "stopped_at = NULL, checked_at = excluded.checked_at, "
                     "cycle_started_at = excluded.cycle_started_at, "
-                    "last_cycle_seconds = excluded.last_cycle_seconds",
+                    "last_cycle_seconds = excluded.last_cycle_seconds, "
+                    "seen_boot = excluded.seen_boot, seen_monotonic = excluded.seen_monotonic",
                     (component, device, bot, pid, _real(started_at, now), now, version,
                      float(interval), now, _optional(cycle_started_at),
-                     _optional(last_cycle_seconds)),
+                     _optional(last_cycle_seconds),
+                     None if seen is None else seen.boot,
+                     None if seen is None else float(seen.monotonic)),
                 )
                 connection.execute(
                     f"DELETE FROM {TABLE} WHERE component = ? AND bot = ? AND pid IS NOT ? "
@@ -431,7 +469,7 @@ class HealthStore:
         now = float(self.clock())
         self._write(
             f"INSERT INTO {TABLE} ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL) "
             "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
             "started_at = excluded.started_at, version = excluded.version, "
             "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
@@ -972,6 +1010,8 @@ class Heartbeat(NamedTuple):
     checked_at: float | None
     cycle_started_at: float | None = None
     last_cycle_seconds: float | None = None
+    seen_boot: str | None = None
+    seen_monotonic: float | None = None
 
 
 def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
@@ -1004,15 +1044,15 @@ def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
     return tuple(result)
 
 
-def classify(row: Heartbeat, now: float) -> tuple[str, str]:
-    """(state, reason): up, stale or down by the age of the last beat; a
-    poller that beats while one cycle runs past SLOW_CYCLE_SECONDS is stale."""
+def classify(row: Heartbeat, now: float, uptime: Uptime | None = None) -> tuple[str, str]:
+    """(state, reason): up, stale or down by the age of the last beat (`_age`);
+    a poller that beats while one cycle runs past SLOW_CYCLE_SECONDS is stale."""
     if row.last_seen is None:
         return DOWN, _never(row.component)
     if row.stopped_at is not None and row.stopped_at >= row.last_seen:
         return DOWN, "stopped"
     interval = max(float(row.interval_seconds), 1.0)
-    age = max(0.0, now - row.last_seen)
+    age = _age(row, now, uptime)
     failed = row.checked_at is not None and row.checked_at > row.last_seen
     if age > DOWN_BEATS * interval:
         state = DOWN
@@ -1028,6 +1068,16 @@ def classify(row: Heartbeat, now: float) -> tuple[str, str]:
     if failed:
         return state, f"unreachable, last reached {age_text(age)} ago"
     return state, f"no heartbeat for {age_text(age)}"
+
+
+def _age(row: Heartbeat, now: float, uptime: Uptime | None) -> float:
+    """Seconds since the last beat, less any time the box was suspended: the
+    monotonic age when the beat and `uptime` share a boot, if it is smaller."""
+    wall = max(0.0, now - row.last_seen)
+    if uptime is None or row.seen_monotonic is None or row.seen_boot != uptime.boot:
+        return wall
+    awake = uptime.monotonic - row.seen_monotonic
+    return min(wall, awake) if awake >= 0 else wall
 
 
 def _cycle_seconds(row: Heartbeat, now: float) -> float | None:
@@ -1228,8 +1278,11 @@ def _latest_checks(rows: Sequence[Heartbeat]) -> list[Heartbeat]:
             merged[key] = row
             continue
         newer = row if _checked(row) > _checked(held) else held
+        seen = max((row, held), key=lambda r: -math.inf if r.last_seen is None else r.last_seen)
         merged[key] = newer._replace(
-            last_seen=max((r.last_seen for r in (row, held) if r.last_seen is not None), default=None),
+            last_seen=seen.last_seen,
+            seen_boot=seen.seen_boot,
+            seen_monotonic=seen.seen_monotonic,
             checked_at=max(_checked(row), _checked(held)),
         )
     return others + list(merged.values())
@@ -1249,6 +1302,7 @@ def build_report(
     checkout_version: str = "unknown",
     devices: Sequence[DeviceSync] = (),
     tunnel_held: str | None = None,
+    uptime: Uptime | None = None,
 ) -> HealthReport:
     """Classify every row and flag queued jobs no live waiter can take.
 
@@ -1258,7 +1312,8 @@ def build_report(
     on the box); `checkout_version` is the checkout's commit: a poller,
     waiter or listener whose row names another known commit runs stale
     code; `devices` are the factory checkouts' sync states; `tunnel_held`
-    is the `PORT on HOST` the tunnel loop gave up on, if any."""
+    is the `PORT on HOST` the tunnel loop gave up on, if any; `uptime` is
+    the reader's boot and monotonic clock at `now` (`_age`)."""
     checkout = checkout_version
     checkouts = tuple(devices)
     if rows is None and not tunnel_held:
@@ -1267,7 +1322,7 @@ def build_report(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
     for row in _latest_checks(rows or ()):
-        state, reason = classify(row, now)
+        state, reason = classify(row, now, uptime)
         item = Component(
             component=row.component,
             device=row.device,
@@ -1329,6 +1384,7 @@ def load_report(
     machines: MachinesConfig | None = None,
     orch: OrchConfig | None = None,
     root: Path | None = None,
+    uptime: Uptime | None = None,
 ) -> HealthReport:
     """`build_report` from the health file and orch.db's `device_sync` rows;
     an unreadable health file is reported (`error`, which needs attention),
@@ -1344,7 +1400,7 @@ def load_report(
     return build_report(rows, now, queued=queued, eligible=eligible_devices(machines),
                         expected=expected_components(machines, orch),
                         checkout_version=factory_version(), devices=devices,
-                        tunnel_held=read_tunnel_held(db))
+                        tunnel_held=read_tunnel_held(db), uptime=uptime)
 
 
 def read_tunnel_held(db: Path) -> str | None:
@@ -1702,7 +1758,8 @@ def _report(argv: list[str], out: TextIO, clock: Callable[[], float],
     now = clock()
     try:
         orch = _orch(args.orch)
-        report = load_report(db, now, queued=_queued(db), machines=machines, orch=orch)
+        report = load_report(db, now, queued=_queued(db), machines=machines, orch=orch,
+                             uptime=read_uptime(clock))
     except (HealthError, sqlite3.Error) as exc:
         print(f"orch health: {exc}", file=sys.stderr)
         return 1
