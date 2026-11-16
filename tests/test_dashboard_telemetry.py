@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import telemetry
+from lib import dashboard_telemetry, telemetry
 from lib.dashboard import collect_snapshot, redact, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, needs_node
@@ -225,7 +225,7 @@ def test_efficiency_rolls_up_tokens_and_cost_per_harness_repo_and_job(tmp_path: 
     assert [row["job"] for row in rollup["recent"]] == ["f-claude", "d-claude"]  # newest first
     assert rollup["recent"][0]["exit_reason"] == "max turns reached; exit 1"
     page = _section(_no_script(render_pages(collect_snapshot(db, log, now=NOW))["efficiency.html"]), "tokens")
-    for needle in ("last 7 days", "$0.47", "1 jobs report no cost", "per harness", "per repo",
+    for needle in ("last 7 days", "$0.47", "1 jobs report no cost: codex 1", "per harness", "per repo",
                    "recent jobs", '<td class="bad">max turns reached; exit 1</td>',
                    "<td>success; exit 0</td>", "maxharris1/factory"):
         assert needle in page, needle
@@ -466,7 +466,7 @@ def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     tokens = eff["text"]["tokens"]
     for needle in ("Tokens and cost", "last 7 days", "per harness", "per repo", "recent jobs",
-                   "$0.42", "success; exit 0", "1 jobs report no cost"):
+                   "$0.42", "success; exit 0", "1 jobs report no cost: codex 1"):
         assert needle in tokens, needle
 
 
@@ -478,6 +478,103 @@ def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> No
     assert "no telemetry" in out["text"]["jobview"]
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     assert "no telemetry" in eff["text"]["tokens"]
+
+
+# --- the Tokens and cost panel: phone width, costs, compact tiles, no-cost note (#485) ---------
+
+
+def _rollup(tmp_path: Path, *rows: dict) -> dict:
+    db, log = seeded(tmp_path)
+    for n, row in enumerate(rows):
+        add_telemetry(db, f"d-job-{n:03d}", **{
+            "finished_at": NOW - 100 - n, "updated_at": NOW - 100 - n, "exit_code": 0,
+            "exit_reason": "success; exit 0", **row,
+        })
+    return collect_snapshot(db, log, now=NOW)
+
+
+def _tokens(snapshot: dict) -> str:
+    whole = _section(_no_script(render_pages(snapshot)["efficiency.html"]), "tokens")
+    return whole[whole.index(">") + 1 : whole.rindex("<")]
+
+
+def test_tokens_tables_each_scroll_on_their_own(tmp_path: Path) -> None:
+    snapshot = _rollup(tmp_path, {"harness": "claude", "cost_usd": 1.5})
+    page = render_pages(snapshot)["efficiency.html"]
+    panel = _tokens(snapshot)
+    assert panel.count("<table>") == 3
+    assert len(re.findall(r'<div class="ef-scroll"><table>.*?</table></div>', panel)) == 3
+    assert ".ef-scroll{overflow-x:auto}" in page
+
+
+COSTS = [1057.64, 0.4213, 0.005, 12345.675]
+
+
+@needs_node
+def test_costs_print_the_same_in_both_renders(tmp_path: Path) -> None:
+    snapshot = _rollup(tmp_path, *({"harness": "claude", "cost_usd": cost} for cost in COSTS))
+    server = _tokens(snapshot)
+    script = _run_page(tmp_path, snapshot, "efficiency", ["tokens"])["html"]["tokens"]
+    costs = re.findall(r"\$[\d,.]+", server)
+    assert "$1,057.64" in costs and "$0.42" in costs and "$0.01" in costs
+    assert costs == re.findall(r"\$[\d,.]+", script)
+    assert script == server
+
+
+COMPACT = [
+    (9_999, "9,999"),
+    (10_000, "10K"),
+    (45_200, "45.2K"),
+    (99_995, "100K"),
+    (999_950, "1M"),
+    (812_400_000, "812.4M"),
+    (2_635_600_591, "2.636B"),
+]
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+@pytest.mark.parametrize(("count", "shown"), COMPACT)
+def test_compact_token_counts(tmp_path: Path, render: str, count: int, shown: str) -> None:
+    if render == "server":
+        assert dashboard_telemetry._compact(count) == shown
+        return
+    snapshot = _rollup(tmp_path, {"harness": "claude"})
+    snapshot["telemetry"]["totals"]["tokens_out"] = count
+    html = _run_page(tmp_path, snapshot, "efficiency", ["tokens"])["html"]["tokens"]
+    assert f'<div class="stat" title="{count:,}"><b>{shown}</b><span>tokens out</span></div>' in html
+
+
+def test_token_tiles_are_compact_with_the_exact_count_in_title(tmp_path: Path) -> None:
+    snapshot = _rollup(tmp_path, {
+        "harness": "claude", "tokens_in": 2_635_600_591, "tokens_cached": 812_400_000, "tokens_out": 45_200,
+        "cost_usd": 3.0,
+    })
+    snapshot["telemetry"]["totals"]["jobs"] = 1234
+    panel = _tokens(snapshot)
+    for tile in (
+        '<div class="stat"><b>1,234</b><span>jobs</span></div>',
+        '<div class="stat" title="2,635,600,591"><b>2.636B</b><span>tokens in</span></div>',
+        '<div class="stat" title="812,400,000"><b>812.4M</b><span>of them cached</span></div>',
+        '<div class="stat" title="45,200"><b>45.2K</b><span>tokens out</span></div>',
+        '<div class="stat"><b>$3.00</b><span>cost reported</span></div>',
+    ):
+        assert tile in panel, tile
+    harness = re.search(r"<tr><td>claude</td>(.*?)</tr>", panel).group(1)
+    assert '<td class="num">2,635,600,591</td>' in harness
+
+
+NO_COST = [
+    {"harness": "codex"}, {"harness": "codex"}, {"harness": "claude"}, {"harness": "claude", "cost_usd": 0.5},
+]
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_no_cost_note_counts_per_harness(tmp_path: Path, render: str) -> None:
+    snapshot = _rollup(tmp_path, *NO_COST)
+    panel = (_tokens(snapshot) if render == "server"
+             else _run_page(tmp_path, snapshot, "efficiency", ["tokens"])["html"]["tokens"])
+    assert '<p class="muted">3 jobs report no cost: codex 2, claude 1</p>' in panel
+    assert "Codex does not" not in panel
 
 
 # --- no command or argument text is stored or published (#100 r10) ---------------------------

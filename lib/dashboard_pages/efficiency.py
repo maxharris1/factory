@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from lib.dashboard_pages.common import _b, _chip, _e, _num, _panel, _short, _span, duration
+from lib.dashboard_pages.common import _b, _e, _num, _panel, _short, _span, duration
 from lib.dashboard_pages.lanes import lane_devices
 
 CSS = """\
@@ -187,6 +187,7 @@ SCRIPT = r"""
   var USAGE_HARNESSES = ['claude', 'codex', 'cursor', 'grok'];
   var USAGE_UNTRACKED = {cursor: true, grok: true};
   function pct(x) { return halfUp(x * 100) + '%'; }
+  var WINDOW_NAMES = {five_hour: '5-hour', seven_day: '7-day'};
   function usageLevel(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }
   function usageCells(e, now) {
     if (e.state === 'not tracked' || e.state === 'no telemetry') {
@@ -200,7 +201,11 @@ SCRIPT = r"""
       .map(function (w) { return e[w].resets_at; });
     cells.push(resets.length ? ['in ' + dur(Math.min.apply(null, resets) - now), null] : ['—', 'muted']);
     if (e.limit_label) cells.push([e.limit_label, 'bad']);
-    else if (e.headroom !== null) cells.push([pct(e.headroom), usageLevel(e.headroom)]);
+    else if (e.headroom !== null) {
+      var fresh = ['five_hour', 'seven_day'].filter(function (w) { return e[w].state === 'ok'; });
+      cells.push(fresh.length === 2 ? [pct(e.headroom), usageLevel(e.headroom)]
+        : [pct(e.headroom) + ' (' + WINDOW_NAMES[fresh[0]] + ' only)', null]);
+    }
     else if (e.state === 'stale' && e.age_seconds !== null) cells.push(['reading ' + dur(e.age_seconds) + ' old', 'muted']);
     else if (e.age_seconds === null) cells.push(['no reading yet', 'muted']);
     else cells.push([e.state, 'muted']);
@@ -210,7 +215,6 @@ SCRIPT = r"""
     var usage = d.usage;
     var root = panel('headroom', 'Subscription headroom');
     if (!root) return;
-    add(root.children[0], chip('proposed', 'accent'));
     add(root, el('p', 'ef-lede', "Usage per bot account against each plan's limit, read at the start of every job, " +
       'so it is clear which bot has room before the queue backs up.'));
     var table = add(add(root, el('div', 'ef-scroll')), el('table', 'ef-usage'));
@@ -244,6 +248,7 @@ WORKING_BOTS = ("claude", "codex", "cursor")
 USAGE_HARNESSES = ("claude", "codex", "cursor", "grok")
 USAGE_UNTRACKED = ("cursor", "grok")
 WINDOWS = ("five_hour", "seven_day")
+WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "7-day"}
 
 
 def _half_up(value: float) -> int:
@@ -423,8 +428,11 @@ def _usage_cells(entry: dict, now: float) -> list[tuple[str, str | None]]:
     if entry.get("limit_label"):
         cells.append((entry["limit_label"], "bad"))
     elif room is not None:
-        level = "ok" if room >= 0.5 else "warn" if room >= 0.2 else "bad"
-        cells.append((f"{_half_up(room * 100)}%", level))
+        fresh = [w for w in WINDOWS if entry[w]["state"] == "ok"]
+        if len(fresh) == len(WINDOWS):
+            cells.append((f"{_half_up(room * 100)}%", "ok" if room >= 0.5 else "warn" if room >= 0.2 else "bad"))
+        else:
+            cells.append((f"{_half_up(room * 100)}% ({WINDOW_NAMES[fresh[0]]} only)", None))
     elif state == "stale" and entry["age_seconds"] is not None:
         cells.append((f"reading {duration(entry['age_seconds'])} old", "muted"))
     elif entry["age_seconds"] is None:
@@ -467,7 +475,7 @@ def _headroom(snapshot: dict) -> str:
     title = "Subscription headroom"
     return (
         f'<section class="panel" id="headroom" aria-label="{title}">'
-        f'<h2>{_span(None, title)}{_chip("proposed", "accent")}</h2>'
+        f"<h2>{_span(None, title)}</h2>"
         f'<p class="ef-lede">{_e(HEADROOM_LEDE)}</p>'
         f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
         f"<tbody>{body}</tbody></table></div></section>"
