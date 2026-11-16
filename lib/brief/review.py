@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import _HEAD, _URL, evidence_part, fenced
+from lib.brief.common import _HEAD, _URL, evidence_part, fenced, local_checks
 from lib.followups import followup_start, followups_active
 
 MAX_LISTED_COMMITS = 50
@@ -189,7 +189,9 @@ def task_lines(facts: dict) -> list[str]:
             if facts["update"]
             else [
                 (
-                    "Read the whole diff. " + _CI_WHILE_RUNNING
+                    "Read the whole diff. " + _local_checks_required(facts)
+                    if facts["no_ci_base"]
+                    else "Read the whole diff. " + _CI_WHILE_RUNNING
                     if facts["start_before_ci"]
                     else "Read the whole diff and the CI result on that head."
                 )
@@ -242,6 +244,13 @@ def task_lines(facts: dict) -> list[str]:
         "Follow the router in Skills above.",
         *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
     ]
+
+
+def _local_checks_required(facts: dict) -> str:
+    return (
+        f"CI does not run on `{facts['no_ci_base']}`. The ready must paste the commands and results of "
+        f"{local_checks(facts)} run at this head. A ready without that paste is a `[blocking]` finding, so REVISE."
+    )
 
 
 def _bar_step(variant: bool) -> str:

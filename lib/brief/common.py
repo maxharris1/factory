@@ -7,7 +7,12 @@ import re
 from dataclasses import asdict
 
 from lib.brief.skills import skill_paths
-from lib.factory_md import DEFAULT_PLAN_MAX_CRITERIA, DEFAULT_PLAN_MAX_LINES, FactoryContext
+from lib.factory_md import (
+    _CHECK_LABEL,
+    DEFAULT_PLAN_MAX_CRITERIA,
+    DEFAULT_PLAN_MAX_LINES,
+    FactoryContext,
+)
 from lib.github_actions import TOKEN_VARIABLES
 from lib.pr_title import SOURCE
 from lib.queue import Job, plan_round
@@ -92,6 +97,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     implement = job.request.action in ("plan", "build")
     brief_text = detail.get("brief_text") if implement else None
     brief_url = detail.get("brief_url")
+    no_ci_base = detail.get("no_ci_base")
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
@@ -107,6 +113,8 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "repo": _plain_repo(job.request.repo),
         "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
+        "no_ci_base": no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None,
+        "local_checks": _check_labels(detail.get("local_checks")),
         "verify": verify,
         "verify_unavailable": context.config.verify_unavailable if context is not None else False,
         "reviewer": reviewer if isinstance(reviewer, str) and _HARNESS.fullmatch(reviewer) else None,
@@ -166,12 +174,26 @@ def _pr_number(value: object) -> int | None:
     return None
 
 
+def _check_labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and _CHECK_LABEL.fullmatch(item))
+
+
 def _plain_repo(repo: str) -> str | None:
     if not _REPO.fullmatch(repo):
         return None
     if repo.partition("/")[2] in (".", ".."):
         return None
     return repo
+
+
+def local_checks(facts: dict) -> str:
+    """The base's local checks in plain English, as in "typecheck, Jest and pgTAP"."""
+    checks = facts["local_checks"]
+    if not checks:
+        return "the repo's checks"
+    return checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + " and " + checks[-1]
 
 
 def opening(bot: str, kind: str) -> str:

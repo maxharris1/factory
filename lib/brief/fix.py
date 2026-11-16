@@ -15,8 +15,10 @@ from lib.queue import Job
 def task_lines(job: Job, facts: dict) -> list[str]:
     detail = detail_of(job)
     verdict = _revise_verdict_url(detail, facts)
-    lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(detail, facts)
-    return [*lines, *builder_notes(job, facts)]
+    if verdict:
+        return [*_review_fix(detail, facts, verdict), *builder_notes(job, facts)]
+    # A CI-fix exists only because a check reported red on this head, so CI is the gate.
+    return [*_ci_fix(detail, facts), *builder_notes(job, {**facts, "no_ci_base": None})]
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
