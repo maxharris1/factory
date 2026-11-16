@@ -400,3 +400,44 @@ def test_bold_label_section_ends_at_a_heading():
 def test_bold_label_inside_a_heading_section_does_not_end_it():
     body = "## Acceptance criteria\n- one\n\n**Detail**\n- two\n\n## Notes\n- not one\n"
     assert [c.text for c in _bundle(issue_body=body).criteria] == ["one", "two"]
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        ">= 95% of requests finish under 100 ms.",
+        "> 2 retries are allowed.",
+        "# of retries is 3.",
+        "***",
+        "- -",
+        "---",
+        "1. The first step runs.",
+        "<div> renders.",
+        "<!-- note -->",
+        "```sh make test",
+        "~~~",
+        "[ ] Already boxed.",
+        "[x] Already done.",
+        "[ref]: /url",
+    ],
+)
+def test_f1_every_orchestrate_brief_criterion_round_trips(first):
+    criteria = [first, "Errors are retried."]
+    bundle = _bundle(comments=(_orchestrate_brief(criteria, []),))
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", first), ("ac-2", "Errors are retried.")]
+
+
+@pytest.mark.parametrize(
+    "item, expected",
+    [
+        ("- >= 95% of requests finish under 100 ms.", ">= 95% of requests finish under 100 ms."),
+        ("- # of retries is 3.", "# of retries is 3."),
+        ("1. > 2 retries are allowed.", "> 2 retries are allowed."),
+        ("- - Nested on the same line.", "- Nested on the same line."),
+        ("* <div> renders.", "<div> renders."),
+    ],
+)
+def test_items_that_open_with_a_block_keep_their_place(item, expected):
+    body = f"## Acceptance criteria\n- First.\n{item}\n- Last.\n"
+    bundle = _bundle(issue_body=body)
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "First."), ("ac-2", expected), ("ac-3", "Last.")]

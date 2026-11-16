@@ -25,8 +25,10 @@ label, as lib.orchestrate.brief_comment writes, counts as a heading below
 level 6: its section ends at the next heading of any level or the next bold
 label. A code
 example inside the section stays in the text. The criteria are the section's
-list items, each read from the first line of its leading paragraph; an item
-that opens with a code block, and any item inside a code block, is not one.
+list items, each read from the first line of its leading paragraph, or from
+its source line after the list marker when it opens with another block such
+as a quote, heading or nested list; an item that opens with a code block, and
+any item inside a code block, is not one, and a line yields one item at most.
 Without the heading, the text is the whole source and only its bulleted
 checkbox items are criteria. Criteria are numbered `ac-1`, `ac-2`, ... in
 order, so the same text always gets the same ids.
@@ -58,6 +60,7 @@ _AC_HEADING = re.compile(r"^acceptance criteria\b", re.IGNORECASE)
 _TICKET_HEADING = re.compile(r"^ticket$", re.IGNORECASE)
 _CHECKBOX = re.compile(r"^\[[ xX]\]\s+(.+)$")
 _BULLETS = frozenset("-*+")
+_MARKER = re.compile(r"^(?:[ \t]*>)*[ \t]*(?:[-*+]|\d{1,9}[.)])")
 _MARKDOWN = MarkdownIt("commonmark")
 _NOTE_ROOM = 80
 _LABEL_LEVEL = 7
@@ -219,14 +222,23 @@ def _section(lines: list[str]) -> list[str] | None:
 
 
 def _items(text: str, checkboxes: bool) -> list[str]:
-    tokens = _parse(text.splitlines())
+    lines = text.splitlines()
+    tokens = _parse(lines)
     items = []
-    for index, token in enumerate(tokens[:-2]):
-        if token.type != "list_item_open" or tokens[index + 1].type != "paragraph_open":
+    seen = set()
+    for index, token in enumerate(tokens[:-1]):
+        block = tokens[index + 1]
+        if token.type != "list_item_open" or token.map is None or token.map[0] in seen:
+            continue
+        if block.type in ("list_item_close", "fence", "code_block"):
             continue
         if checkboxes and token.markup not in _BULLETS:
             continue
-        first = tokens[index + 2].content.split("\n", 1)[0].strip()
+        seen.add(token.map[0])
+        if block.type == "paragraph_open":
+            first = tokens[index + 2].content.split("\n", 1)[0].strip()
+        else:
+            first = _MARKER.sub("", lines[token.map[0]], count=1).strip()
         box = _CHECKBOX.match(first)
         if box is not None:
             items.append(box.group(1).strip())
