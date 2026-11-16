@@ -13,7 +13,7 @@ def append_bytes(log: Path, data: bytes) -> None:
         os.fsync(handle.fileno())
 
 
-def blank_bytes(log: Path, start: int, length: int) -> None:
+def erase_with_spaces(log: Path, start: int, length: int) -> None:
     with log.open("r+b") as handle:
         handle.seek(start)
         handle.write(b" " * length)
@@ -22,7 +22,6 @@ def blank_bytes(log: Path, start: int, length: int) -> None:
 
 
 def append_lines(log: Path, lines: list[bytes]) -> None:
-    """Append newline-terminated lines, starting a new line if the log lacks one."""
     data = b"".join(lines)
     if log.exists() and log.stat().st_size > 0:
         with log.open("rb") as handle:

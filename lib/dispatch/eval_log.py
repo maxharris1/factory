@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from lib.eval_log import append_bytes, append_lines, blank_bytes
+from lib.eval_log import append_bytes, append_lines, erase_with_spaces
 from lib.eval_report import _PR, _REPO, _STATE, _TICKET, _TOKEN, _format_time
 from lib.handoff import HandoffError, parse_comment
 
@@ -35,7 +35,6 @@ def remember_repo(connection: sqlite3.Connection, repo: str) -> None:
 
 
 def _finish_batch(log: Path, offset: int, batch: list[bytes]) -> None:
-    """Append what the log after offset lacks of batch, keeping other writers' lines."""
     tail = b""
     if log.exists():
         with log.open("rb") as handle:
@@ -47,14 +46,14 @@ def _finish_batch(log: Path, offset: int, batch: list[bytes]) -> None:
         if done == len(batch):
             break
         content = line.removesuffix(b"\n")
+        unterminated = content == line
         if line == batch[done]:
             done += 1
         elif content and batch[done].startswith(content):
-            if content == line:
+            if unterminated:
                 append_bytes(log, batch[done][len(line) :] + b"".join(batch[done + 1 :]))
                 return
-            # A writer ended this torn line; eval_report skips whitespace-only lines.
-            blank_bytes(log, position, len(content))
+            erase_with_spaces(log, position, len(content))
         position += len(line)
     if done < len(batch):
         append_lines(log, batch[done:])
