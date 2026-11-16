@@ -441,15 +441,18 @@ class CommentsMixin:
             if fields.get("kind") == "verdict" and self._trusted(
                 ticket, comment, fields, reviewer, role="reviewer"
             ):
+                head = fields.get("head") or ""
                 rows.append(
                     (
                         ticket.repo.lower(),
                         ticket.ticket_id,
                         comment.id,
-                        fields.get("head") or "",
+                        head,
                         _round_number(fields.get("round")),
                         comment.created_at,
-                        ticket.changed_lines,
+                        ticket.changed_lines
+                        if _matching_head(head, ticket.current_head) is not None
+                        else None,
                     )
                 )
         with self._connect() as connection:

@@ -75,7 +75,8 @@ list. The rest are lifetime counts:
   rounds plus the approving one
 - first-round REVISE and first-pass APPROVE rates: each PR's first acted-on
   verdict, in handled_comments order: a REVISE recorded in review_events,
-  or an APPROVE recorded as a ship intent or ship hold. They read verdict
+  or an APPROVE recorded as a ship intent, a ship hold, or a held APPROVE
+  a base update displaced (held-base-update review_events). They read verdict
   history only, so a re-entry after handoff or an update-from-main
   re-review does not change them. A held APPROVE stays unhandled until its
   hold clears, so it counts as that PR's latest verdict until then
@@ -94,24 +95,30 @@ list. The rest are lifetime counts:
   lib.remote.preflight raises (PREFLIGHT_FAILURE). An unreachable device
   counts: preflight is a job's first ssh call
 - slot-hours lost: telemetry elapsed time of failed and cancelled jobs
-- hand-written gos: gos _t1 acted on (queued, answered or deduped plan or
-  build) that the feeder did not post (feeder_items.go_comment_id),
-  timed by handled_times
+- hand-written gos: gos the dispatcher acted on that the feeder did not
+  post (feeder_items.go_comment_id), timed by handled_times: a queued,
+  answered or deduped plan or build, a go that lifts a cap (queued-fix) or
+  resumes a BLOCKED review (queued-blocked-review), and a resumed-<action>
+  whose job's evidence names a go as its cause
 - submitted-invalid: submitted-invalid job events
 - repeat-block and unsatisfiable stops: waiting-max-repeat and
   waiting-max-unsat review_events, timed by handled_times
 - review-loop measures read verdict_heads. A PR's cohort is the window
   holding its first verdict. A verdict's round is its review_round, else
   its place in the PR's verdicts. An APPROVE counts once it is a ship
-  intent or ship hold. Risk is the review job's (jobs.handoff_comment_id),
-  else the PR's latest job's. Line bands read the first verdict's
-  changed_lines, stored from the PR's additions plus deletions; older rows
-  fall in unknown
+  intent, ship hold or held-base-update. Risk is the review job's
+  (jobs.handoff_comment_id), else the PR's latest job's. Line bands read the first verdict's
+  changed_lines, stored from the PR's additions plus deletions when the
+  verdict names the PR's current head; older rows fall in unknown. A
+  snapshot whose verdict_heads has no posted_at prints them unrecorded
 - verdicts per merged PR: verdicts of PRs merged in the window
-- CI fixes without a log: fix jobs whose instruction is the bare
-  "CI failed on <head>" fallback
-- verdicts on an accepted head: verdicts posted after an earlier verdict on
-  the same head was acted on (review_events, ship intent or ship hold)
+- CI fixes without a log: CI-fix jobs (instruction "CI failed on <head>"
+  or the failed check names, "failed: <checks>") whose evidence carries no
+  CI log tail
+- verdicts on an accepted head: verdicts posted after another verdict on
+  the same head, matched as the dispatcher matches a sha prefix, was
+  accepted (review_events, ship intent or ship hold), timed by
+  handled_times or the hold's held_at
 - merged PRs with follow-ups: followup_filings filed or commented on a PR
   merged in the window, with the issue link
 
@@ -130,7 +137,7 @@ from pathlib import Path
 from typing import Literal, assert_never
 
 from lib.factory_md import FactoryConfig, load_factory_md
-from lib.handoff import STATES, HandoffError, parse_comment
+from lib.handoff import STATES, HandoffError, matching_head, parse_comment
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
 from lib.schema import AUT0_REPO
@@ -1071,9 +1078,17 @@ PREFLIGHT_FAILURE = re.compile(
 )
 REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
 HELPER_TOOLS = ("Agent", "Task")
-GO_OUTCOMES = tuple(
-    f"{verb}-{action}" for verb in ("queued", "answered", "deduped") for action in ("plan", "build")
+GO_OUTCOMES = (
+    *(
+        f"{verb}-{action}"
+        for verb in ("queued", "answered", "deduped")
+        for action in ("plan", "build")
+    ),
+    "queued-fix",
+    "queued-blocked-review",
 )
+GO_CAUSES = ("go", "extra-round")
+HELD_APPROVE_OUTCOME = "held-base-update"
 LINE_BANDS: tuple[tuple[str, int, int | None], ...] = (
     ("under-150", 0, 150),
     ("150-399", 150, 400),
@@ -1296,11 +1311,7 @@ def _first_verdict_rates(
     for table in ("handled_comments", "review_events", "ship_intents"):
         if table not in tables:
             return [(name, _missing(table)) for name in names]
-    approvals = ["SELECT repo, ticket_id, comment_id, 'APPROVE', 0 FROM ship_intents"]
-    if "ship_holds" in tables:
-        approvals.append(
-            "SELECT repo, ticket_id, approve_comment_id, 'APPROVE', 1 FROM ship_holds"
-        )
+    approvals = _approvals_sql(tables)
     marks = ", ".join("?" for _ in REVISE_OUTCOMES)
     first: dict[tuple[str, str], str] = {}
     for repo, ticket_id, verdict in connection.execute(
@@ -1308,7 +1319,7 @@ def _first_verdict_rates(
         SELECT v.repo, v.ticket_id, v.verdict FROM (
             SELECT repo, ticket_id, comment_id, 'REVISE' AS verdict, 0 AS held
             FROM review_events WHERE outcome IN ({marks})
-            UNION ALL {" UNION ALL ".join(approvals)}
+            UNION ALL SELECT repo, ticket_id, comment_id, 'APPROVE', held FROM ({approvals})
         ) v
         LEFT JOIN handled_comments h
           ON lower(h.repo) = lower(v.repo) AND h.ticket_id = v.ticket_id
@@ -1326,6 +1337,17 @@ def _first_verdict_rates(
     ]
 
 
+def _approvals_sql(tables: set[str]) -> str:
+    sources = [
+        "SELECT repo, ticket_id, comment_id, 0 AS held FROM ship_intents",
+        "SELECT repo, ticket_id, comment_id, 1 FROM review_events "
+        f"WHERE outcome = '{HELD_APPROVE_OUTCOME}'",
+    ]
+    if "ship_holds" in tables:
+        sources.append("SELECT repo, ticket_id, approve_comment_id, 1 FROM ship_holds")
+    return " UNION ALL ".join(sources)
+
+
 def _handled_count(
     connection: sqlite3.Connection,
     tables: set[str],
@@ -1333,12 +1355,13 @@ def _handled_count(
     source: str,
     where: str,
     params: tuple[object, ...],
+    needs: tuple[str, ...] = (),
 ) -> MetricValue:
     clause, bounds = window.sql("t.handled_at")
     return _scalar(
         connection,
         tables,
-        (source, "handled_times"),
+        (source, "handled_times", *needs),
         f"""
         SELECT COUNT(*) FROM {source} s
         LEFT JOIN handled_times t
@@ -1362,9 +1385,18 @@ def _stop_metrics(
             tables,
             window,
             "handled_comments",
-            f"s.outcome IN ({marks}) AND s.comment_id NOT IN "
-            "(SELECT go_comment_id FROM feeder_items WHERE go_comment_id IS NOT NULL)",
-            GO_OUTCOMES,
+            f"""
+            (s.outcome IN ({marks}) OR (s.outcome LIKE 'resumed-%' AND EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE lower(j.repo) = lower(s.repo) AND j.ticket_id = s.ticket_id
+                  AND j.source_comment_id = s.comment_id AND json_valid(j.detail)
+                  AND json_extract(j.detail, '$.evidence.instructions.cause') IN (?, ?)
+            )))
+            AND s.comment_id NOT IN
+                (SELECT go_comment_id FROM feeder_items WHERE go_comment_id IS NOT NULL)
+            """,
+            (*GO_OUTCOMES, *GO_CAUSES),
+            ("jobs",),
         )
         if "feeder_items" in tables
         else _missing("feeder_items")
@@ -1411,17 +1443,31 @@ def _loop_metrics(
     tables: set[str],
     window: MetricWindow,
 ) -> list[tuple[str, MetricValue]]:
-    names = [name for name in WINDOWED_METRICS if name not in _STOP_NAMES]
+    measures = _verdict_measures(connection, tables, window)
+    measures["ci-fix-without-log"] = (
+        _ci_fixes_without_log(connection, window) if "jobs" in tables else _missing("jobs")
+    )
+    return [(name, measures[name]) for name in WINDOWED_METRICS if name not in _STOP_NAMES]
+
+
+def _verdict_measures(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+) -> dict[str, MetricValue]:
+    names = [
+        name
+        for name in WINDOWED_METRICS
+        if name not in _STOP_NAMES and name != "ci-fix-without-log"
+    ]
     for table in ("verdict_heads", "review_events", "ship_intents", "jobs", "ticket_transitions"):
         if table not in tables:
-            return [(name, _missing(table)) for name in names]
-    approvals = {str(row[0]) for row in connection.execute("SELECT comment_id FROM ship_intents")}
-    if "ship_holds" in tables:
-        approvals |= {
-            str(row[0]) for row in connection.execute("SELECT approve_comment_id FROM ship_holds")
-        }
-    accepted = approvals | {
-        str(row[0]) for row in connection.execute("SELECT comment_id FROM review_events")
+            return {name: _missing(table) for name in names}
+    if "posted_at" not in _columns(connection, "verdict_heads"):
+        return {name: Unrecorded("no-verdict_heads-posted_at-column") for name in names}
+    approvals = {
+        str(row[0])
+        for row in connection.execute(f"SELECT comment_id FROM ({_approvals_sql(tables)})")
     }
     verdicts = _head_verdicts(connection)
     cohort = {key: rows for key, rows in verdicts.items() if window.contains(rows[0].posted_at)}
@@ -1444,48 +1490,68 @@ def _loop_metrics(
             bounds,
         )
     }
-    values: list[tuple[str, MetricValue]] = [
-        ("approved-by-round-2-share", _ratio(by_round_2, len(cohort))),
-        (
-            "verdicts-per-merged-pr",
-            _ratio(sum(len(verdicts.get(key, ())) for key in merged), len(merged)),
+    measures: dict[str, MetricValue] = {
+        "approved-by-round-2-share": _ratio(by_round_2, len(cohort)),
+        "verdicts-per-merged-pr": _ratio(
+            sum(len(verdicts.get(key, ())) for key in merged), len(merged)
         ),
-        (
-            "first-round-approve-rate-high-risk",
-            _ratio(sum(first_approved[key] for key in high), len(high)),
+        "first-round-approve-rate-high-risk": _ratio(
+            sum(first_approved[key] for key in high), len(high)
         ),
-    ]
+    }
     for band, low, high_edge in (*LINE_BANDS, ("unknown", None, None)):
         members = [
             key for key, rows in cohort.items() if _in_band(rows[0].changed_lines, low, high_edge)
         ]
-        values.append(
-            (
-                f"first-round-approve-rate-lines-{band}",
-                _ratio(sum(first_approved[key] for key in members), len(members)),
-            )
+        measures[f"first-round-approve-rate-lines-{band}"] = _ratio(
+            sum(first_approved[key] for key in members), len(members)
         )
-    values.append(("ci-fix-without-log", _ci_fixes_without_log(connection, window)))
-    values.append(
-        (
-            "verdicts-on-accepted-head",
-            sum(
-                window.contains(later.posted_at)
-                and any(
-                    earlier.head == later.head
-                    and earlier.comment_id in accepted
-                    and earlier.posted_at is not None
-                    and later.posted_at is not None
-                    and earlier.posted_at < later.posted_at
-                    for earlier in rows
-                )
-                for rows in verdicts.values()
-                for later in rows
-                if later.head
-            ),
-        )
+    measures["verdicts-on-accepted-head"] = (
+        _verdicts_on_accepted_head(connection, tables, window, verdicts)
+        if "handled_times" in tables
+        else _missing("handled_times")
     )
-    return values
+    return measures
+
+
+def _verdicts_on_accepted_head(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    window: MetricWindow,
+    verdicts: dict[tuple[str, str], list[_HeadVerdict]],
+) -> int:
+    held = (
+        " UNION ALL SELECT approve_comment_id, held_at FROM ship_holds"
+        if "ship_holds" in tables
+        else ""
+    )
+    accepted_at: dict[str, float] = {}
+    for comment_id, at in connection.execute(
+        f"""
+        SELECT a.comment_id, MIN(a.at) FROM (
+            SELECT comment_id, handled_at AS at FROM handled_times{held}
+        ) a
+        JOIN (
+            SELECT comment_id FROM review_events
+            UNION SELECT comment_id FROM ({_approvals_sql(tables)})
+        ) v ON v.comment_id = a.comment_id
+        GROUP BY a.comment_id
+        """
+    ):
+        accepted_at[str(comment_id)] = float(at)
+    return sum(
+        window.contains(later.posted_at)
+        and any(
+            earlier.comment_id != later.comment_id
+            and earlier.comment_id in accepted_at
+            and accepted_at[earlier.comment_id] < later.posted_at
+            and matching_head(earlier.head, later.head) is not None
+            for earlier in rows
+        )
+        for rows in verdicts.values()
+        for later in rows
+        if later.posted_at is not None
+    )
 
 
 def _in_band(lines: int | None, low: int | None, high: int | None) -> bool:
@@ -1548,8 +1614,11 @@ def _ci_fixes_without_log(connection: sqlite3.Connection, window: MetricWindow) 
     return connection.execute(
         f"""
         SELECT COUNT(*) FROM jobs WHERE action = 'fix' AND {clause}
-          AND CASE WHEN json_valid(detail)
-              THEN json_extract(detail, '$.instruction') = 'CI failed on ' || head END
+          AND CASE WHEN json_valid(detail) THEN
+              (json_extract(detail, '$.instruction') = 'CI failed on ' || head
+               OR json_extract(detail, '$.instruction') LIKE 'failed: %')
+              AND COALESCE(json_extract(detail, '$.evidence.ci.log_tail'), '') = ''
+          END
         """,
         bounds,
     ).fetchone()[0]

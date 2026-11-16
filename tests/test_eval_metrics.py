@@ -534,6 +534,11 @@ def _head_verdict(
         "INSERT INTO verdict_heads VALUES ('owner/repo', ?, ?, ?, ?, ?, ?)",
         (ticket_id, comment_id, head or comment_id, review_round, _day(day), lines),
     )
+    if outcome in ("A", "R"):
+        connection.execute(
+            "INSERT INTO handled_times VALUES ('owner/repo', ?, ?, ?)",
+            (ticket_id, comment_id, _day(day)),
+        )
     if outcome == "A":
         connection.execute(
             "INSERT INTO ship_intents (repo, ticket_id, comment_id, head, policy, status) "
@@ -640,13 +645,13 @@ def test_ci_fixes_without_a_log_and_verdicts_on_an_accepted_head_are_counted(
         _raw_job(connection, "20", "fix", {"instruction": "E   assert 1 == 2"}, head="h2")
         _raw_job(connection, "20", "fix", {"instruction": "address the review"}, head="h2")
         _raw_job(connection, "20", "fix", {"instruction": "CI failed on h3"}, head="h3", created=1)
-        for day, outcome in ((2, "R"), (3, "-"), (4, "-")):
+        for day, outcome, head in ((2, "R", "a" * 7), (3, "-", "a" * 40), (4, "-", "a" * 40)):
             _head_verdict(
-                connection, "21", f"x{day}", outcome, day=day, review_round=1, lines=1, head="x"
+                connection, "21", f"x{day}", outcome, day=day, review_round=1, lines=1, head=head
             )
         for day in (2, 3):
             _head_verdict(
-                connection, "22", f"y{day}", "-", day=day, review_round=1, lines=1, head="y"
+                connection, "22", f"y{day}", "-", day=day, review_round=1, lines=1, head="b" * 40
             )
     values = _values(build_metrics(queue.path, since=SINCE, until=UNTIL))
     assert values["ci-fix-without-log"] == 1
