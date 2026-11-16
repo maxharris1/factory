@@ -133,6 +133,14 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-7",
         "round": "2/3",
     }),
+    "build-pre-ready": ("build", "claude", 1, None, {
+        "gitBranchName": "factory/issue-42",
+        "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",
+    }),
+    "fix-pre-ready": ("fix", "claude", 1, HEAD, {
+        "instruction": "https://github.com/owner/repo/pull/42#issuecomment-7",
+        "round": "2/3",
+    }),
     "ci-fix": ("fix", "claude", 1, HEAD, {"instruction": CI_LOG, "round": "1/3"}),
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
@@ -154,9 +162,13 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     }),
 }
 
+PRE_READY = "review:\n  pre_ready:\n    command: pytest -q tests/fast\n    timeout_seconds: 300\n"
+
 FACTORY_MDS = {
     "review-before-ci": FACTORY_MD.replace("  verify: verify-cleffy\n", "  verify: verify-cleffy\n  start_before_ci: true\n"),
     "review-followups": FACTORY_MD.replace("review:\n", "review:\n  followup_from_round: 2\n"),
+    "build-pre-ready": FACTORY_MD.replace("review:\n", PRE_READY),
+    "fix-pre-ready": FACTORY_MD.replace("review:\n", PRE_READY),
 }
 
 

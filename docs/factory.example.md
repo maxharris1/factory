@@ -13,6 +13,9 @@ review:
   # followup_from_round: 4  # optional; from this round, variants of an earlier finding become a follow-up ticket
   # auto_extra_rounds: 0  # optional; the poller grants this many extra rounds at the cap itself
   # start_before_ci: true  # optional; review starts when the ready lands, ship still needs green CI
+  # pre_ready:  # optional; a check the factory runs before a builder's ready counts
+  #   command: pytest -q tests/fast
+  #   timeout_seconds: 300
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship
 skills:
