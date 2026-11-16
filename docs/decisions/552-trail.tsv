@@ -1,0 +1,6 @@
+decision	choice	why
+playbook	figure-it-out at low rigor with Feature test-first steps, no helpers	one-function fix in lib/orchestrate.py with a known repro from the #520 r4 verdict
+fix site	writer: lib.orchestrate._block escapes each line's block opener	the generated brief put free text at a block start; any opener there (HTML types 1-5, unclosed fence, ATX heading, bold label) could end or replace the criteria section, not only <script>
+reader alternative rejected	keep criteria.py parsing CommonMark with HTML on	turning HTML off would also make commented-out criteria in issue templates live, and would not stop an unclosed fence or an Acceptance-criteria heading in the goal
+escape form	backslash before the opener (and before the dot or paren of an ordered marker); leading whitespace stripped	CommonMark renders the escaped character as itself, so the goal still reads as written on GitHub; stripping spaces stops 4-space code blocks and 1-3 space indented openers
+import allowlist	add stdlib re to the lib/orchestrate.py import guard in tests/test_orchestrate.py	the guard keeps orchestrate off heavy deps; re is stdlib

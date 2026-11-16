@@ -19,6 +19,7 @@ Stable names for F1-08, which owns best fit and the usage reserve:
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -39,6 +40,8 @@ ROLE = "orchestrator"
 QUESTION_CLASSES = ("observable", "default-able", "product")
 JOBS = ("build", "plan")
 STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
+_ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
+_OPENER_CHARACTERS = frozenset("-+*_=#>`~<[")
 
 RECOMMENDED_NEXT = {
     "refused": (
@@ -513,11 +516,11 @@ def brief_comment(
     files = [_one_line(item, "likely file") for item in likely_files]
     body = "".join(
         (
-            _block("Goal", _contained(goal.strip())),
+            _paragraph("Goal", goal.strip()),
             _items("Acceptance criteria", [f"[ ] {item}" for item in criteria]),
             _items("Likely files", files),
-            _block("Risk", risk),
-            _block("Done-evidence", done_evidence.strip()),
+            _paragraph("Risk", risk),
+            _paragraph("Done-evidence", done_evidence.strip()),
         )
     )
     return _comment(
@@ -842,12 +845,18 @@ def _items(title: str, items: Sequence[str]) -> str:
     return f"**{title}**\n{rendered}\n\n"
 
 
-def _block(title: str, text: str) -> str:
-    return f"**{title}**\n{text}\n\n"
+def _paragraph(title: str, text: str) -> str:
+    lines = (_escape_block_opener(line.lstrip()) for line in text.splitlines())
+    return f"**{title}**\n" + "\n".join(lines) + "\n\n"
 
 
-def _contained(text: str) -> str:
-    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
+def _escape_block_opener(line: str) -> str:
+    number = _ORDERED_MARKER.match(line)
+    if number is not None:
+        return f"{line[: number.end()]}\\{line[number.end():]}"
+    if line[:1] in _OPENER_CHARACTERS:
+        return f"\\{line}"
+    return line
 
 
 def _comment(
