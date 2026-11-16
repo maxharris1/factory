@@ -151,7 +151,9 @@ class SchemaMixin:
                 """
             )
             connection.commit()
-            _add_missing_columns(connection, "verdict_heads", {"posted_at": "REAL"})
+            _add_missing_columns(
+                connection, "verdict_heads", {"posted_at": "REAL", "changed_lines": "INTEGER"}
+            )
             _add_missing_columns(
                 connection,
                 "ticket_state",

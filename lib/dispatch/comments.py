@@ -449,16 +449,18 @@ class CommentsMixin:
                         fields.get("head") or "",
                         _round_number(fields.get("round")),
                         comment.created_at,
+                        ticket.changed_lines,
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
                 """
                 INSERT INTO verdict_heads (
-                    repo, ticket_id, comment_id, head, review_round, posted_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, head, review_round, posted_at, changed_lines
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
-                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at)
+                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at),
+                    changed_lines = COALESCE(verdict_heads.changed_lines, excluded.changed_lines)
                 """,
                 rows,
             )
