@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -255,7 +257,8 @@ class T3Mixin:
                         head=ticket.current_head,
                         detail=self._project_wake_detail(
                             ticket,
-                            f"criterion-unsatisfiable: {self._criterion_text(ticket, criterion_id)}, "
+                            "criterion-unsatisfiable: "
+                            f"{self._criterion_text(connection, ticket, comment, criterion_id)}, "
                             f"{_comment_link(comment)}",
                         ),
                     )
@@ -266,21 +269,31 @@ class T3Mixin:
         self._write_state_label(ticket, "waiting-max")
         return True, "waiting-max-unsat"
 
-    def _criterion_text(self, ticket: TrackedTicket, criterion_id: str) -> str:
-        from lib.evidence.criteria import criteria_evidence
-
-        criteria = criteria_evidence(
-            issue_key=ticket.source_issue or ticket.ticket_id,
-            issue_url=ticket.ticket_url,
-            comments=ticket.comments,
-            trusted_logins=self.trusted_logins,
-            issue_body=None,
-            pr_body=None,
-            ready_starts_review=ticket.ready_starts_review,
-            pr_url=ticket.ticket_url,
-        ).criteria
-        text = next((item.text for item in criteria if item.id == criterion_id), None)
-        return f"{criterion_id} (not in the brief)" if text is None else f"{criterion_id}: {text}"
+    @staticmethod
+    def _criterion_text(
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        criterion_id: str,
+    ) -> str:
+        rows = connection.execute(
+            """
+            SELECT head, detail FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+            ORDER BY coalesce(handoff_comment_id = ?, 0) DESC, created_at DESC, rowid DESC
+            """,
+            (ticket.repo.lower(), ticket.ticket_id, comment.id),
+        ).fetchall()
+        review = next(
+            (row for row in rows if _matching_head(str(row["head"] or ""), ticket.current_head)),
+            None,
+        )
+        detail = json.loads(review["detail"] or "{}") if review is not None else {}
+        criteria = detail.get("evidence", {}).get("criteria", {}).get("criteria", [])
+        text = next((item["text"] for item in criteria if item["id"] == criterion_id), None)
+        if text is None:
+            return f"{criterion_id} (not in the criteria)"
+        return f"{criterion_id}: {text}"
 
     def _revise_ci_gate(
         self,

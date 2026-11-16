@@ -514,7 +514,7 @@ def brief_comment(
     body = "".join(
         (
             _block("Goal", goal.strip()),
-            _items("Acceptance criteria", criteria),
+            _items("Acceptance criteria", [f"[ ] {item}" for item in criteria]),
             _items("Likely files", files),
             _block("Risk", risk),
             _block("Done-evidence", done_evidence.strip()),
