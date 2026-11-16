@@ -463,6 +463,30 @@ def test_a_released_slot_takes_the_next_job(tmp_path: Path) -> None:
     assert pool.used() == {"box": 1}
 
 
+def test_the_timeout_sweep_never_fails_an_autostart_claim_that_has_not_started(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, device("box", 2, "claude"), now=now)
+    enqueue(queue, "claude", "1")
+    enqueue(queue, "claude", "2")
+    assert pool.claim("claude", autostart=(4242, "start")) is not None
+    assert pool.claim("claude") is not None
+    now[0] = 100.0 + 5400
+    autostart, plain = queue.outstanding()
+
+    assert queue.mark_timed_out(plain) is True, "a bot's own claim keeps its timeout"
+    assert queue.mark_timed_out(autostart) is False
+    (held,) = queue.outstanding()
+    assert held.state == "running"
+
+    now[0] += 1
+    queue.heartbeat(held.id, owner="claude")
+    now[0] += 5400
+    (started,) = queue.outstanding()
+    assert queue.mark_timed_out(started) is True, "once it heartbeats, its timeout applies"
+
+
 def test_pool_refuses_two_devices_on_one_tailscale_host(tmp_path: Path) -> None:
     """A1: slots are counted per device name, so two entries for one host
     would double its slot_max. The pool refuses such a config even when it
@@ -538,7 +562,7 @@ def test_a_deploying_device_takes_no_harness(tmp_path: Path) -> None:
     enqueue(queue, "codex", "1")
 
     assert pool.claim("codex") is None
-    assert device_pool.free_slots(pool.config, "codex", {}, device_pool.sync_blocks(queue)) == 0
+    assert device_pool.free_slots(pool.config, "codex", {}, device_pool.placement_blocks(queue)) == 0
 
 
 @pytest.mark.parametrize("state", ["synced", "unreachable"])
@@ -557,4 +581,4 @@ def test_a_device_with_no_sync_row_stays_placeable(tmp_path: Path) -> None:
 
     claimed = pool.claim("claude")
     assert claimed is not None and claimed[1].device == "mac"
-    assert device_pool.free_slots(pool.config, "claude", {}, device_pool.sync_blocks(queue)) == 2
+    assert device_pool.free_slots(pool.config, "claude", {}, device_pool.placement_blocks(queue)) == 2

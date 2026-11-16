@@ -56,7 +56,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lib.device_pool import LINK_DROP_TAG, Placement
+from lib.device_pool import LINK_DROP_TAG, UNREACHABLE_BACKOFF_SECONDS, Placement, back_off
 from lib.device_sync import SYNC_GRACE_SECONDS
 from lib.queue import SLOTS_TABLE, retire_requeued
 from lib.remote_follow import LAUNCH_TTL_SECONDS
@@ -437,6 +437,37 @@ def requeue_unstarted(
         )
     record_job_event(connection, job_id, outcome, detail, now)
     return outcome, detail
+
+
+REQUEUED_UNREACHABLE = "requeued-unreachable"
+
+
+def requeue_unreachable(
+    connection: sqlite3.Connection,
+    job_id: str,
+    *,
+    device: str,
+    now: float,
+    reason: str,
+    slot_guard: str,
+    slot_params: tuple[object, ...],
+) -> tuple[str, str] | None:
+    """Back device off for UNREACHABLE_BACKOFF_SECONDS and requeue a running
+    job whose preflight could not reach it (#460), in the caller's write
+    transaction. Guarded as requeue_unstarted, but charges no free requeue,
+    round or attempt."""
+    back_off(connection, device, until=now + UNREACHABLE_BACKOFF_SECONDS, reason=reason)
+    if not _free_unstarted_slot(connection, job_id, slot_guard, slot_params):
+        return None
+    connection.execute(
+        "UPDATE jobs SET state = 'queued', last_activity_at = ? WHERE id = ?", (now, job_id)
+    )
+    retired = retire_requeued(connection, job_id, reason, now=now)
+    if retired is not None:
+        return "cancelled", retired
+    detail = f"{reason}; requeued, no round or attempt charged"
+    record_job_event(connection, job_id, REQUEUED_UNREACHABLE, detail, now)
+    return REQUEUED_UNREACHABLE, detail
 
 
 LINK_DROP = "link-drop"

@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, lane_limit, skill_preflight
-from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
+from lib.device_pool import (
+    backed_off_through,
+    box_device,
+    free_slots,
+    placement_blocks,
+    used_slots,
+)
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
@@ -135,13 +141,19 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
-        blocked = sync_blocks(self.queue)
+        blocked = placement_blocks(self.queue)
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
             and free_slots(config, harness, used, blocked) == 0
         )
+
+    def _backed_off_through(self) -> dict[str, float]:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return {}
+        return backed_off_through(self.queue, config)
 
     def _lag_blocked_recipients(self) -> frozenset[str]:
         config = getattr(self.devices, "config", None)
@@ -209,6 +221,7 @@ class JobsMixin:
         with self._connect() as connection:
             limited = {limit.recipient for limit in lane_limit.all_active(connection, now)}
             paused = lane_limit.paused_through(connection, now)
+        backed_off = self._backed_off_through()
         for job in self.queue.outstanding():
             if job.state == "queued" and job.request.recipient in limited:
                 self._restart_queue_wait(job, now)
@@ -218,8 +231,12 @@ class JobsMixin:
             # (#77 F1.2), so a release never times out a job for the wait
             # before its claim. A running job's is its last heartbeat.
             waited_since = job.last_activity_at
-            if job.state == "queued" and paused.get(job.request.recipient, 0.0) > waited_since:
-                waited_since = paused[job.request.recipient]
+            not_waiting_through = max(
+                paused.get(job.request.recipient, 0.0),
+                backed_off.get(job.request.recipient, 0.0),
+            )
+            if job.state == "queued" and not_waiting_through > waited_since:
+                waited_since = not_waiting_through
                 self._restart_queue_wait(job, waited_since)
             if (
                 job.state == "queued"
