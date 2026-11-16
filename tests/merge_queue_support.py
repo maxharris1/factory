@@ -29,7 +29,7 @@ from tests.test_dispatcher import (
 REPO = "owner/repo"
 APPROVE = (
     "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
-    "round={round} head={head} verdict=APPROVE risk=high -->\nApproved.\n"
+    "round={round} head={head} ac=met verdict=APPROVE risk=high -->\nApproved.\n"
 )
 
 

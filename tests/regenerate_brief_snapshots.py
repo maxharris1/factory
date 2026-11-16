@@ -154,6 +154,8 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "reviewed_base": "e" * 40,
         "base": "f" * 40,
     }}),
+    "review-user-impact": ("review", "codex", 1, HEAD, {"round": "1/3", "evidence": evidence_bundle(1)}),
+    "review-user-impact-round-2": ("review", "codex", 1, HEAD, {"round": "2/3", "evidence": evidence_bundle(2)}),
     "review-update": ("review", "codex", 1, HEAD, {"round": "1/3", **UPDATE}),
     "review-update-commits": ("review", "codex", 1, HEAD, {
         "round": "1/3",
@@ -169,6 +171,8 @@ FACTORY_MDS = {
     "review-followups": FACTORY_MD.replace("review:\n", "review:\n  followup_from_round: 2\n"),
     "build-pre-ready": FACTORY_MD.replace("review:\n", PRE_READY),
     "fix-pre-ready": FACTORY_MD.replace("review:\n", PRE_READY),
+    "review-user-impact": FACTORY_MD.replace("review:\n", "review:\n  block_on: user-impact\n"),
+    "review-user-impact-round-2": FACTORY_MD.replace("review:\n", "review:\n  block_on: user-impact\n"),
 }
 
 

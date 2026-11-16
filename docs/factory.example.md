@@ -16,6 +16,7 @@ review:
   # pre_ready:  # optional; a check the factory runs before a builder's ready counts
   #   command: pytest -q tests/fast
   #   timeout_seconds: 300
+  # block_on: any-failure  # optional; user-impact uses pstack's blocking bar and files follow-ups from round 1
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship
 skills:

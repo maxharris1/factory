@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -47,11 +48,40 @@ def setup(
     return dispatcher, queue
 
 
-def verdict(head: str, *, verdict: str = "APPROVE", round_: str = "1", ac: str | None = None) -> str:
-    body = VERDICT.format(round=round_, head=head, verdict=verdict, risk="high")
+def verdict(
+    head: str, *, verdict: str = "APPROVE", round_: str = "1", ac: str | None = None, body: str = ""
+) -> str:
+    text = str.format(VERDICT, round=round_, head=head, verdict=verdict, risk="high") + body
     if ac is None:
-        return body
-    return body.replace(f" verdict={verdict}", f" ac={ac} verdict={verdict}")
+        return text
+    return text.replace(f" verdict={verdict}", f" ac={ac} verdict={verdict}")
+
+
+def set_floor(queue, since: float) -> None:
+    with queue.connect() as connection:
+        connection.execute("UPDATE approve_rule_floor SET since = ?", (since,))
+        connection.commit()
+
+
+def check(body: str) -> list[str]:
+    expected = Expected(
+        repo="owner/repo",
+        pr=124,
+        branch=None,
+        bot="codex-bot",
+        role="reviewer",
+        kind="verdict",
+        head=PR_124_HEAD,
+        round="1/1",
+    )
+    read = {
+        "repos/owner/repo/issues/comments/101": {
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/124",
+            "user": {"login": "codex-login"},
+            "body": body,
+        }
+    }.__getitem__
+    return problems(expected, "101", read, {"codex-login": frozenset({"codex-bot"})})
 
 
 def state(queue) -> tuple[str, int]:
@@ -100,24 +130,7 @@ def test_a_revise_with_ac_unmet_still_parses() -> None:
 
 
 def test_the_pr_124_header_is_an_invalid_review_handoff() -> None:
-    expected = Expected(
-        repo="owner/repo",
-        pr=124,
-        branch=None,
-        bot="codex-bot",
-        role="reviewer",
-        kind="verdict",
-        head=PR_124_HEAD,
-        round="1/1",
-    )
-    read = {
-        "repos/owner/repo/issues/comments/101": {
-            "issue_url": "https://api.github.com/repos/owner/repo/issues/124",
-            "user": {"login": "codex-login"},
-            "body": PR_124_HEADER + "\nLooks good.\n",
-        }
-    }.__getitem__
-    found = problems(expected, "101", read, {"codex-login": frozenset({"codex-bot"})})
+    found = check(PR_124_HEADER + "\nLooks good.\n")
     assert len(found) == 1
     assert "ac=unmet" in found[0]
 
@@ -140,7 +153,7 @@ def test_an_ac_unmet_approve_does_not_ship_or_use_up_the_review(tmp_path: Path) 
     assert actions.states == []
     assert ship_intents(queue) == []
     assert state(queue) == ("review", 0)
-    assert outcome(queue, "verdict-" + head) == "woke-grok-unparsed"
+    assert outcome(queue, "verdict-" + head) == "rejected-approve-ac-unmet"
     wakes = jobs(queue, "grok")
     assert len(wakes) == 1
     assert "ac=unmet" in wakes[0]["detail"]
@@ -152,6 +165,7 @@ def test_an_ac_met_or_legacy_approve_still_ships(tmp_path: Path, ac: str | None)
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     head = "a" * 40
     seed_review_job(dispatcher, queue, head)
+    set_floor(queue, 5.0)
     dispatcher.process(
         ticket(
             comment("verdict-" + head, verdict(head, ac=ac), author="codex-login"),
@@ -203,7 +217,8 @@ def test_a_refused_verdict_gives_its_review_back_once(
     head = "a" * 40
     seed_review_job(dispatcher, queue, head)
     ready = comment("ready-" + head, READY.format(head=head), author="claude-login")
-    stale = comment("verdict-" + head, verdict(reported, verdict=refused, round_=round_), author="codex-login")
+    ac = "met" if refused == "APPROVE" else None
+    stale = comment("verdict-" + head, verdict(reported, verdict=refused, round_=round_, ac=ac), author="codex-login")
     dispatcher.process(ticket(ready, stale, head=head, ci={head: CIResult("success")}))
 
     assert outcome(queue, stale.id).startswith(("stale-", "rejected-", "refused-"))
@@ -217,7 +232,7 @@ def test_a_refused_verdict_gives_its_review_back_once(
     assert json.loads(retry.request.detail)["round"] == "1/3"
 
     queue.finish(retry.id, owner="codex", handoff_comment_id="verdict-again")
-    again = comment("verdict-again", verdict(reported, verdict=refused, round_=round_), author="codex-login", created_at=2)
+    again = comment("verdict-again", verdict(reported, verdict=refused, round_=round_, ac=ac), author="codex-login", created_at=2)
     dispatcher.process(ticket(ready, stale, again, head=head, ci={head: CIResult("success")}))
 
     assert queue.claim("codex") is None
@@ -360,3 +375,107 @@ def test_a_review_cancelled_by_a_rejected_verdict_waits_for_same_head_fix(tmp_pa
 
     assert outcome(queue, edited.id) == "rejected-edited"
     assert queue.claim("codex") is None, review_jobs(queue)
+
+
+REFUSED_APPROVES = [
+    ("rejected-approve-no-ac", None, ""),
+    ("rejected-approve-open-blocking", "met", "\n1. [blocking] f-2. The ship path skips CI.\n"),
+]
+
+
+@pytest.mark.parametrize(("expected", "ac", "body"), REFUSED_APPROVES)
+def test_a_refused_approve_does_not_ship_and_gives_the_review_back(
+    tmp_path: Path, expected: str, ac: str | None, body: str
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    ready = comment("ready-" + head, READY.format(head=head), author="claude-login")
+    approve = comment("verdict-" + head, verdict(head, ac=ac, body=body), author="codex-login")
+    dispatcher.process(ticket(ready, approve, head=head, ci={head: CIResult("success")}))
+
+    assert actions.merges == []
+    assert ship_intents(queue) == []
+    assert state(queue) == ("review", 0)
+    assert outcome(queue, approve.id) == expected
+    wakes = jobs(queue, "grok")
+    assert len(wakes) == 1
+    detail = json.loads(wakes[0]["detail"])
+    assert detail["outcome"] == expected
+    assert "verdict=REVISE" in detail["note"]
+    retry = queue.claim("codex")
+    assert retry is not None
+    assert (retry.request.action, retry.request.head, retry.request.attempt) == ("review", head, 1)
+    assert json.loads(retry.request.detail)["round"] == "1/3"
+
+
+def test_a_corrected_approve_after_a_refused_one_ships(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    ready = comment("ready-" + head, READY.format(head=head), author="claude-login")
+    refused = comment("verdict-" + head, verdict(head), author="codex-login")
+    dispatcher.process(ticket(ready, refused, head=head, ci={head: CIResult("success")}))
+    retry = queue.claim("codex")
+    assert retry is not None
+    queue.finish(retry.id, owner="codex", handoff_comment_id="verdict-2")
+    corrected = comment(
+        "verdict-2",
+        verdict(head, ac="met", body="\n1. [closed] f-2. Fixed.\n"),
+        author="codex-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(ready, refused, corrected, head=head, ci={head: CIResult("success")}))
+
+    assert outcome(queue, refused.id) == "rejected-approve-no-ac"
+    assert actions.merges == [(True, head)]
+    assert [row["head"] for row in ship_intents(queue)] == [head]
+
+
+def test_an_approve_posted_before_the_floor_is_not_read_under_the_rule(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    set_floor(queue, 5.0)
+    old = comment(
+        "verdict-" + head,
+        verdict(head, ac="met", body="\n1. [blocking] f-2. Open.\n"),
+        author="codex-login",
+        created_at=4,
+    )
+    dispatcher.process(ticket(old, head=head, ci={head: CIResult("success")}))
+
+    assert actions.merges == [(True, head)]
+
+
+@pytest.mark.parametrize(("expected", "ac", "body"), REFUSED_APPROVES)
+def test_job_done_refuses_the_approve_with_what_to_change(
+    expected: str, ac: str | None, body: str
+) -> None:
+    header = PR_124_HEADER.replace(" ac=unmet", "" if ac is None else f" ac={ac}")
+    found = check(header + "\nLooks good.\n" + body)
+    assert len(found) == 1
+    assert "verdict=REVISE" in found[0]
+    assert ("ac=met" if ac is None else "(f-2)") in found[0]
+
+
+def test_job_done_accepts_an_ac_met_approve_with_only_closed_items() -> None:
+    header = PR_124_HEADER.replace(" ac=unmet", " ac=met")
+    assert check(header + "\n1. [closed] f-2. Fixed at 6509f58.\n") == []
+
+
+def test_the_floor_is_zero_on_a_fresh_database_and_now_on_one_in_use(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    with queue.connect() as connection:
+        assert [tuple(row) for row in connection.execute("SELECT since FROM approve_rule_floor")] == [(0.0,)]
+        connection.execute("DROP TABLE approve_rule_floor")
+        connection.execute("INSERT INTO handled_comments VALUES ('owner/repo', '42', 'old', 'merged')")
+        connection.commit()
+    before = time.time()
+    setup(tmp_path)
+    with queue.connect() as connection:
+        (since,) = connection.execute("SELECT since FROM approve_rule_floor").fetchone()
+    assert before <= since <= time.time()

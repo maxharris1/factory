@@ -51,6 +51,20 @@ RETRY_REJECTION_NOTES = {
         "a job is already queued or running for the ticket; nothing to retry"
     ),
 }
+APPROVE_REJECTION_NOTES = {
+    "rejected-approve-no-ac": (
+        "verdict=APPROVE needs ac=met; the review is given back so the reviewer"
+        " can post ac=met or verdict=REVISE with ac=unmet"
+    ),
+    "rejected-approve-ac-unmet": (
+        "verdict=APPROVE with ac=unmet; the review is given back so the reviewer"
+        " can post verdict=REVISE with ac=unmet"
+    ),
+    "rejected-approve-open-blocking": (
+        "verdict=APPROVE lists an open [blocking] item; the review is given back"
+        " so the reviewer can post verdict=REVISE or close the item"
+    ),
+}
 SETTLE_FAILURES_TO_WAKE = 3
 STUCK_WAKE_FAILURE_LIMIT = 2
 _QUESTIONS_HEADING = re.compile(
