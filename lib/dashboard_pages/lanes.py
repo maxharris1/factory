@@ -881,8 +881,9 @@ def _tier_chip(tier: object) -> str:
 def _fed_line(item: dict) -> str:
     state = item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"])
     pr = f"→ PR #{item['pr']}" if item.get("pr") else ""
+    ticket = f"{_short(item['repo'])}#{item['issue']}"
     return (
-        f'<li>{_span("ticket", f"{_short(item["repo"])}#{item["issue"]}")}{_tier_chip(item.get("tier"))}'
+        f'<li>{_span("ticket", ticket)}{_tier_chip(item.get("tier"))}'
         f'{_span("what", state)}'
         f'<span class="when">{_e(pr)}</span></li>'
     )
