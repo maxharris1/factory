@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 _ADDED = {"cycle_started_at": "REAL", "last_cycle_seconds": "REAL",
           "seen_boot": "TEXT", "seen_monotonic": "REAL", "checked_boot": "TEXT",
           "down_since": "REAL"}
+_BACKFILL = {"down_since": "COALESCE(last_seen, started_at)"}
 _COLUMNS = (
     "component, device, bot, pid, started_at, last_seen, version, "
     "interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds, "
@@ -412,6 +413,8 @@ class HealthStore:
             for column, kind in _ADDED.items():
                 if column not in have:
                     connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {column} {kind}")
+                    if column in _BACKFILL:
+                        connection.execute(f"UPDATE {TABLE} SET {column} = {_BACKFILL[column]}")
 
     def _write(self, sql: str, params: tuple, busy: float = BUSY_SECONDS) -> int:
         connection = self._connect(busy)
@@ -1054,7 +1057,7 @@ def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
             return ()
         have = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
         columns = ", ".join(
-            name if name in have else f"NULL AS {name}"
+            name if name in have else f"{_BACKFILL.get(name, 'NULL')} AS {name}"
             for name in (part.strip() for part in _COLUMNS.split(","))
         )
         rows = connection.execute(f"SELECT {columns} FROM {TABLE}").fetchall()

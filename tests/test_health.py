@@ -2048,6 +2048,22 @@ def test_a_tunnel_never_reached_keeps_its_item_when_the_restarted_listener_reuse
     assert health.load_report(db, NOW + 61, orch=orch(listener=True)).attention == ()
 
 
+def test_a_tunnel_down_in_a_database_from_before_down_since_keeps_its_item_through_the_upgrade(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 31 * 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    with sqlite3.connect(health.health_path(db)) as connection:
+        connection.execute(f"ALTER TABLE {health.TABLE} DROP COLUMN down_since")
+    assert [(a.kind, a.since) for a in health.load_report(
+        db, NOW - 30, orch=orch(listener=True)).attention] == [("tunnel-down", NOW - 31 * 60)]
+    store(db, NOW - 30).stop("tunnel", "box", pid=101)
+    store(db, NOW).checked("tunnel", "box", pid=101, started_at=NOW - 29)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 101)]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+
+
 def test_a_tunnel_last_reached_before_a_reboot_keeps_its_item_when_the_pid_is_reused(
         tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
