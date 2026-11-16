@@ -291,8 +291,24 @@ class ResumeMixin:
             ).fetchone()
         return None if resumed is None else self._resume_paused(ticket, comment)
 
-    def _parked_for_max(self, ticket: TrackedTicket) -> Literal["unsat", "repeat"] | None:
+    def _parked_for_max(
+        self, ticket: TrackedTicket
+    ) -> Literal["unsat", "repeat", "size"] | None:
         with self._connect() as connection:
+            if connection.execute(
+                """
+                SELECT 1 FROM ticket_state
+                JOIN plan_events
+                  ON plan_events.repo = ticket_state.repo
+                 AND plan_events.ticket_id = ticket_state.ticket_id
+                 AND plan_events.comment_id = ticket_state.paused_question_id
+                WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
+                  AND ticket_state.workflow_state = 'waiting-max'
+                  AND plan_events.outcome = 'waiting-max-size'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone() is not None:
+                return "size"
             parked = connection.execute(
                 """
                 SELECT review_events.outcome FROM ticket_state

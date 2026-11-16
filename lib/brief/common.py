@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict
 
 from lib.brief.skills import skill_paths
-from lib.factory_md import FactoryContext
+from lib.factory_md import DEFAULT_PLAN_MAX_CRITERIA, DEFAULT_PLAN_MAX_LINES, FactoryContext
 from lib.github_actions import TOKEN_VARIABLES
 from lib.pr_title import SOURCE
 from lib.queue import Job, plan_round
@@ -33,6 +33,7 @@ _ROUND = re.compile(r"^([1-9][0-9]*)/([1-9][0-9]*)$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _HARNESS = re.compile(r"^(claude|codex|cursor)$")
+_UNMAPPED = re.compile(r"^(?:ac-[1-9][0-9]*|expected size|not named)$")
 _URL = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
 # A PR number as the producers write it: a decimal string (TrackedTicket.pr_number).
 _NUMBER = re.compile(r"^[1-9][0-9]{0,9}$")
@@ -85,7 +86,8 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         else detail.get("instruction")
     )
     plan = origin if build else None
-    plan_text = detail.get("plan_text") if build else None
+    plan_text = detail.get("plan_text") if job.request.action in ("build", "plan") else None
+    unmapped = detail.get("unmapped") if job.request.action == "plan" else None
     implement = job.request.action in ("plan", "build")
     brief_text = detail.get("brief_text") if implement else None
     brief_url = detail.get("brief_url")
@@ -114,6 +116,14 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "skills": skill_paths(detail.get("repo_skill_paths")),
         "source": source,
         "plan_round": plan_round(job.request.detail),
+        "plan_title": "Plan" if build else "First plan",
+        "unmapped": unmapped if isinstance(unmapped, str) and _UNMAPPED.fullmatch(unmapped) else None,
+        "plan_max_lines": (
+            context.config.plan_max_lines if context is not None else DEFAULT_PLAN_MAX_LINES
+        ),
+        "plan_max_criteria": (
+            context.config.plan_max_criteria if context is not None else DEFAULT_PLAN_MAX_CRITERIA
+        ),
         "update": _update_scope(detail) if job.request.action == "review" else None,
         "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
     }
@@ -268,14 +278,15 @@ def _post_command(facts: dict) -> str:
     )
 
 
-_QUOTED = {"brief_text": "(quoted in the Ticket brief section)", "plan_text": "(quoted in the Plan section)"}
-
-
 def data_section(job: Job, detail: dict[str, object], facts: dict) -> str:
+    quoted = {
+        "brief_text": "(quoted in the Ticket brief section)",
+        "plan_text": f"(quoted in the {facts['plan_title']} section)",
+    }
     request = asdict(job.request)
     if detail:
         request["detail"] = {
-            key: _QUOTED[key] if key in _QUOTED and facts[key] else _cut(value)
+            key: quoted[key] if key in quoted and facts[key] else _cut(value)
             for key, value in detail.items()
         }
     else:

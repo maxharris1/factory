@@ -60,6 +60,7 @@ def filled(header: str, head: str, **choices: str) -> str:
     for field in FIELDS_LEFT_OUT_WHEN_UNUSED:
         header = header.replace(f" {field}=<id>", "")
     header = header.replace("<pushed-head-sha>", head).replace("<reviewed-head-sha>", head)
+    header = header.replace("lines=<n>", "lines=40")
 
     def pick(match: re.Match[str]) -> str:
         options = match.group(1).split("|")

@@ -2307,6 +2307,7 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
         "mergeable": mergeable if isinstance(mergeable, bool) else None,
         "mergeable_state": _optional_string(pull.get("mergeable_state")),
         "closed": pull.get("state") == "closed" and not merged,
+        "draft": pull["draft"] if isinstance(pull.get("draft"), bool) else None,
         "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
     }
 

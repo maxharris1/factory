@@ -217,6 +217,18 @@ T1PPlanMapped ==
   /\ flags' = [flags EXCEPT !.planOk = TRUE]
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0]
 
+\* #502. A mapped plan over factory.md's plan.max_lines or plan.max_criteria
+\* waits for Max with the build paused; answers or an approver's go resume it.
+T1PPlanOverSize ==
+  /\ "T1P" \notin Omit
+  /\ state = "plan-check"
+  /\ state' = "waiting-max"
+  /\ paused' = "building"
+  /\ cap' = cap
+  /\ configOk' = configOk
+  /\ flags' = [flags EXCEPT !.planOk = TRUE]
+  /\ counts' = [counts EXCEPT !.deaths = 0]
+
 keep == cap' = cap /\ configOk' = configOk /\ paused' = "none"
 
 \* T2. ready head=<sha>, then CI on that SHA.
@@ -686,6 +698,7 @@ Next ==
   \/ T5Ask \/ T5Answer \/ T5Abandon
   \/ T1KindGoPlan \/ T1KindGoBuild
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
+  \/ T1PPlanOverSize
   \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck \/ T2ReadyCovered
   \/ T6JobRetry \/ T6JobStuck \/ T6DeviceOffline
   \/ T3Revise \/ T3Unsat \/ T7Blocked
@@ -754,9 +767,9 @@ T1KindGo ==
 T1PDecided ==
   /\ state = "planning" => ENABLED T1PPlanPosted
   /\ state = "plan-check" /\ counts.planGaps = 0 =>
-       ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped
+       ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
   /\ state = "plan-check" /\ counts.planGaps = 1 =>
-       ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped
+       ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
 
 T2Decided ==
   /\ state \in {"building", "fixing"} => ENABLED T2ReadyGreen
@@ -831,9 +844,9 @@ ChartEdges ==
   /\ state = "intake" /\ configOk => ENABLED IntakeBrief
   /\ state = "planning" => ENABLED T1PPlanPosted
   /\ state = "plan-check" /\ counts.planGaps = 0 =>
-       ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped
+       ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
   /\ state = "plan-check" /\ counts.planGaps = 1 =>
-       ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped
+       ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped /\ ENABLED T1PPlanOverSize
   /\ state = "capped" => ENABLED MaxOkAnotherRound
   /\ state = "blocked" => ENABLED MaxGoAfterBlocked
 

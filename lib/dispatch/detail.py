@@ -475,6 +475,7 @@ class DetailMixin:
         rebase: RebaseScope | None = None,
         plan_round: int | None = None,
         ci_failure: tuple[str, ...] = (),
+        unmapped: str | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -519,6 +520,8 @@ class DetailMixin:
             context["kind"] = kind
         if plan_round is not None:
             context["plan_round"] = plan_round
+        if unmapped is not None:
+            context["unmapped"] = unmapped
         if update is not None:
             context.update(
                 kind="update",
