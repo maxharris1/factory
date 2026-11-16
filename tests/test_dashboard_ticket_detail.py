@@ -652,11 +652,8 @@ def test_the_script_hero_chips_only_trouble(tmp_path: Path, case, change, chip) 
 
 
 def _now_durs(markup: str) -> dict[str, str]:
-    """The current visit's time in the hero line, the Run log and the caption."""
     hero = re.search(r'<p class="line">.*?</p>', markup, re.S).group(0)
     log = re.search(r'<button[^>]*class="now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
-    if not log:
-        log = re.search(r'<button class="now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
     cap = re.search(r'<div class="jd-cap now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
     return {"hero": re.search(r"(\d+m \d\ds) in review", hero).group(1), "log": log.group(1), "cap": cap.group(1)}
 
