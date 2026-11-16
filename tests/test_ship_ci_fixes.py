@@ -347,6 +347,73 @@ def test_when_dedupe_drops_a_job_the_ticket_is_flagged_needs_attention(tmp_path:
     assert attention(queue) == [("42", "dedupe-dropped")]  # ... and it is not silent
 
 
+def jobs_by_action(queue: SQLiteJobQueue) -> list[tuple[str, str | None]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), row[1])
+            for row in connection.execute("SELECT action, head FROM jobs ORDER BY rowid")
+        ]
+
+
+def dropped_ready_at_red_head(tmp_path: Path) -> tuple[object, SQLiteJobQueue, list[object]]:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    first = ready("ready-1", 1)
+    dispatcher.process(ticket(first, head=SHA, ci={SHA: CIResult("failure", "runner refused")}))
+    fix = queue.claim("claude")
+    assert fix is not None and fix.request.action == "fix"
+    queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
+    second = ready("ready-2", 2)
+    dispatcher.process(
+        ticket(first, second, head=SHA, ci={SHA: CIResult("failure", "runner refused")})
+    )
+    assert attention(queue) == [("42", "dedupe-dropped")]
+    return dispatcher, queue, [first, second]
+
+
+def test_issue_452_a_green_rerun_after_a_dropped_ready_queues_one_review(tmp_path: Path) -> None:
+    dispatcher, queue, readies = dropped_ready_at_red_head(tmp_path)
+    before = jobs_by_action(queue)
+
+    dispatcher.process(ticket(*readies, head=SHA, ci={SHA: CIResult("success")}))
+
+    assert jobs_by_action(queue) == [*before, ("review", SHA)]
+    review = next(job for job in queue.outstanding() if job.request.action == "review")
+    assert review.request.source_comment_id == "ready-2"
+    assert workflow(queue) == "review"
+    assert attention(queue) == []
+
+    for _ in range(2):
+        dispatcher.process(ticket(*readies, head=SHA, ci={SHA: CIResult("success")}))
+    assert jobs_by_action(queue) == [*before, ("review", SHA)]
+
+
+def test_issue_452_red_ci_at_the_head_queues_no_review_and_no_extra_fix(tmp_path: Path) -> None:
+    dispatcher, queue, readies = dropped_ready_at_red_head(tmp_path)
+    before = jobs_by_action(queue)
+
+    for _ in range(2):
+        dispatcher.process(
+            ticket(*readies, head=SHA, ci={SHA: CIResult("failure", "runner refused")})
+        )
+        dispatcher.process(ticket(*readies, head=SHA, ci={SHA: CIResult("pending")}))
+
+    assert jobs_by_action(queue) == before
+    assert [action for action, _head in before].count("fix") == 1
+
+
+def test_issue_452_no_review_while_the_ci_fix_is_still_open(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    first = ready("ready-1", 1)
+    dispatcher.process(ticket(first, head=SHA, ci={SHA: CIResult("failure", "runner refused")}))
+    before = jobs_by_action(queue)
+
+    dispatcher.process(ticket(first, head=SHA, ci={SHA: CIResult("success")}))
+
+    assert jobs_by_action(queue) == before
+
+
 def test_needs_attention_shows_in_orch_status_and_the_dashboard(tmp_path: Path) -> None:
     from lib.dashboard import collect_snapshot
     from lib.status import SQLiteStatusReader, build_status, render
