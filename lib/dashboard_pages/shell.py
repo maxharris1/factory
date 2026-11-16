@@ -17,7 +17,7 @@ from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_devices, _lanes
 from lib.dashboard_pages.system import (
-    _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE,
+    _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE, version_drift,
 )
 from lib.dashboard_pages.ticket_detail import _jobview
 from lib.dashboard_pages.tickets import _board, _tickets
@@ -1149,22 +1149,6 @@ STATUS_ABSENT_LINK = "index.html#intake"
 def shell_table() -> dict:
     """What the page script's shell needs from here (SHELL in SCRIPT)."""
     return {"links": STATUS_LINKS, "absent": STATUS_ABSENT_LINK, "code": sorted(CODE_COMPONENTS)}
-
-
-def version_drift(health: dict | None) -> dict:
-    """newest: the checkout's version; behind: configured code components on
-    another known version (lib/health.py stale_code); unknown: configured code
-    components whose version is unknown, not counted as behind."""
-    health = health or {}
-    rows = [
-        row for row in health.get("components") or []
-        if row.get("configured") is not False and row.get("component") in CODE_COMPONENTS
-    ]
-    return {
-        "newest": str(health.get("code_version") or "unknown"),
-        "behind": [row["label"] for row in rows if row.get("stale_code")],
-        "unknown": [row["label"] for row in rows if row.get("version") == "unknown"],
-    }
 
 
 def _segment(key: str, text: str, state: str | None = None, label: str | None = None,

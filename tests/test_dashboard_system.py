@@ -21,7 +21,7 @@ from lib.dashboard import (
     rules_and_limits,
 )
 from lib.dashboard_flow import load_chart
-from lib.dashboard_page import CSS, render_pages
+from lib.dashboard_page import CSS, render_pages, version_drift
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
 from tests import test_dashboard_tickets_board as board
@@ -35,7 +35,7 @@ PANELS = ["components", "drift", "health", "log", "rules", "no-waiter"]
 
 def _component(component: str, device: str, *, bot: str = "", state: str = "up",
                version: str = NEWEST, age: int | None = 4, started: float | None = NOW - 600,
-               anchor: str | None = None) -> dict:
+               anchor: str | None = None, stale_code: bool = False) -> dict:
     label = f"waiter {bot} @ {device}" if bot else component
     return {
         "component": component, "device": device, "bot": bot, "pid": 10, "state": state,
@@ -43,7 +43,7 @@ def _component(component: str, device: str, *, bot: str = "", state: str = "up",
         "last_seen_et": None if age is None else component_health.et(NOW - age),
         "last_seen_age_seconds": age, "interval_seconds": 15.0, "configured": True,
         "started_at_et": None if started is None else component_health.et(started),
-        "started_at": started, "version": version, "stale_code": False, "label": label,
+        "started_at": started, "version": version, "stale_code": stale_code, "label": label,
         "anchor": anchor or "health-" + re.sub(r"[^A-Za-z0-9_-]", "-", f"{component}-{bot}-{device}"),
     }
 
@@ -54,10 +54,10 @@ def _snapshot(tmp_path: Path) -> dict:
         _component("poller", "box"),
         _component("waiter", "box", bot="claude-bot"),
         _component("waiter", "pc", bot="claude-bot"),
-        _component("waiter", "box", bot="codex-bot", version=OLDER, started=NOW - 300),
+        _component("waiter", "box", bot="codex-bot", version=OLDER, started=NOW - 300, stale_code=True),
         _component("linear-listener", "box", state="down", version="unknown", age=None,
                    started=None),
-        _component("device-probe", "pc"),
+        _component("device-probe", "pc", version=OLDER),
     ]
     no_waiter = [{"harness": "codex", "bot": "codex-bot", "jobs": ["j1"], "count": 1,
                   "anchor": "health-no-waiter-codex"}]
@@ -151,11 +151,29 @@ def test_drift_colours_newest_older_and_unknown(tmp_path: Path) -> None:
     names = re.findall(r'<span class="name (\w+)">([^<]+)</span>', drift)
     assert names == [("ok", NEWEST), ("warn", OLDER), ("bad", "unknown")]
     blocks = re.findall(r'<span class="sys-blk (\w+)"></span>', drift)
-    assert blocks == ["ok"] * 4 + ["warn"] + ["bad"]
+    assert blocks == ["ok"] * 3 + ["warn"] * 2 + ["bad"]
     text = _text(drift)
-    assert "4 components" in text
-    assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in text
+    assert "3 components" in text
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in text
     assert "linear-listener" in text
+
+
+def test_drift_and_status_line_count_the_same_stale_code_components(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    html = _no_script(render_pages(snapshot)["health.html"])
+    assert version_drift(snapshot["health"])["behind"] == ["waiter codex-bot @ box"]
+    drift = _section(html, "drift")
+    assert '<span class="count warn">1 behind</span>' in drift
+    assert "<span>aaaaaaa · 1 behind</span>" in html
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(drift)
+
+
+@needs_node
+def test_script_drift_and_status_line_count_the_same_stale_code_components(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", "drift"])
+    assert '<span class="count warn">1 behind</span>' in out["html"]["drift"]
+    assert "<span>aaaaaaa · 1 behind</span>" in out["html"]["statusline"]
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
 
 
 def test_down_component_is_a_static_red_block_linking_its_row(tmp_path: Path) -> None:
@@ -230,7 +248,7 @@ def test_process_table_times_drop_the_et_their_header_already_names(tmp_path: Pa
     cells = _cells(components, "health-poller--box")
     assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
     assert _cells(components, "health-linear-listener--box")[4::4] == ["never", "—"]
-    assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in _drift_meta(_section(html, "drift"))
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(_section(html, "drift"))
 
 
 @needs_node
@@ -239,7 +257,7 @@ def test_script_process_table_times_drop_the_et_their_header_already_names(tmp_p
     cells = _cells(out["html"]["components"], "health-poller--box")
     assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
     assert _cells(out["html"]["components"], "health-linear-listener--box")[4::4] == ["never", "—"]
-    assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
 
 
 DETAILS_HARNESS = board.HARNESS.replace(

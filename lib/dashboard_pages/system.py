@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 
+from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.common import (
     _b, _chip, duration, _e, _feed, _num, _panel, _span, _td, _ticket, _when,
@@ -257,22 +258,19 @@ SCRIPT_COMPONENTS = r"""
     if (newest && groups[newest]) out.push(groups[newest]);
     byStart.forEach(function (v) { if (v !== newest) out.push(groups[v]); });
     if (groups.unknown) out.push(groups.unknown);
-    var behind = 0;
-    out.forEach(function (g) {
-      g.tone = g.version === newest ? 'ok' : g.version === 'unknown' ? 'bad' : 'warn';
-      if (g.tone === 'warn') behind += g.rows.length;
-    });
-    return {groups: out, behind: behind};
+    out.forEach(function (g) { g.tone = g.version === newest ? 'ok' : g.version === 'unknown' ? 'bad' : 'warn'; });
+    return out;
   }
   function renderDrift(d) {
     var h = d.health || {known: false, components: []};
-    var drift = driftOf(h);
+    var groups = driftOf(h);
+    var behind = versionDrift(h).behind.length;
     var root = panel('drift', 'Version drift');
     if (!root) return;
     if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
-    add(root.children[0], el('span', 'count' + (drift.behind ? ' warn' : ''), drift.behind + ' behind'));
+    add(root.children[0], el('span', 'count' + (behind ? ' warn' : ''), behind + ' behind'));
     var box = add(root, el('div', 'sys-drift'));
-    drift.groups.forEach(function (g) {
+    groups.forEach(function (g) {
       var row = add(box, el('div', 'sys-ver'));
       add(row, el('span', 'name ' + g.tone, g.version));
       var blocks = add(row, el('span', 'blocks'));
@@ -561,11 +559,10 @@ def _components(snapshot: dict) -> str:
     return _panel("components", "Components", inner, count=count)
 
 
-def version_groups(health: dict) -> tuple[list[dict], int]:
+def version_groups(health: dict) -> list[dict]:
     """Version drift (SPEC 9: group components by version): the newest
     version first (the checkout's, else the latest started), then the other
-    known versions by latest start, then unknown; and how many components are
-    on a known version other than the newest (driftOf in the script)."""
+    known versions by latest start, then unknown (driftOf in the script)."""
     groups: dict[str, dict] = {}
     for row in health.get("components") or []:
         if row.get("configured") is False:
@@ -590,8 +587,23 @@ def version_groups(health: dict) -> tuple[list[dict], int]:
     for group in ordered:
         version = group["version"]
         group["tone"] = "ok" if version == newest else "bad" if version == "unknown" else "warn"
-    behind = sum(len(group["rows"]) for group in ordered if group["tone"] == "warn")
-    return ordered, behind
+    return ordered
+
+
+def version_drift(health: dict | None) -> dict:
+    """newest: the checkout's version; behind: configured code components on
+    another known version (lib/health.py stale_code); unknown: configured code
+    components whose version is unknown, not counted as behind."""
+    health = health or {}
+    rows = [
+        row for row in health.get("components") or []
+        if row.get("configured") is not False and row.get("component") in CODE_COMPONENTS
+    ]
+    return {
+        "newest": str(health.get("code_version") or "unknown"),
+        "behind": [row["label"] for row in rows if row.get("stale_code")],
+        "unknown": [row["label"] for row in rows if row.get("version") == "unknown"],
+    }
 
 
 def _drift(snapshot: dict) -> str:
@@ -599,7 +611,8 @@ def _drift(snapshot: dict) -> str:
     if not health.get("known"):
         text = f"unknown: {health['error']}" if health.get("error") else "no heartbeats recorded yet"
         return _panel("drift", "Version drift", f'<p class="empty">{_e(text)}</p>')
-    groups, behind = version_groups(health)
+    groups = version_groups(health)
+    behind = len(version_drift(health)["behind"])
     items = []
     for group in groups:
         rows = group["rows"]
