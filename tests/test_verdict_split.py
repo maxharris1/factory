@@ -37,6 +37,7 @@ RULE_MODULE = {
     "_record_blocked_review": "blocked",
     "_record_approval": "record",
     "_approval_covers": "coverage",
+    "_registered_review_head": "coverage",
     "_shipped_approval": "shipped",
     "_previewed_head": "preview",
     "_latest_review_verdict": "latest",
