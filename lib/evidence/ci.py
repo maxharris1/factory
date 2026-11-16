@@ -1,7 +1,4 @@
-"""The failed CI checks, their Actions runs and each failed job's log tail.
-
-The tail is cut before it is redacted, so redaction never scans a whole log.
-"""
+"""The failed CI checks, their Actions runs and each failed job's log tail."""
 
 from __future__ import annotations
 
@@ -11,7 +8,6 @@ from dataclasses import dataclass
 from lib.dispatch.types import FailedCheck
 
 LOG_LINES = 150
-LOG_JOBS = 5
 
 
 @dataclass(frozen=True)
@@ -55,10 +51,9 @@ def _tail(text: str, limit: int) -> tuple[str, str | None]:
     from lib.dashboard import redact, redact_key_blocks
     from lib.dispatch.errors_text import _redact
 
-    lines = text.rstrip().splitlines()
-    cut = None
-    if len(lines) > limit:
-        cut = f"[cut {len(lines) - limit} earlier lines]"
-        lines = lines[len(lines) - limit :]
-    kept = [_redact(redact(line)) for line in redact_key_blocks(lines)]
-    return "\n".join([cut, *kept] if cut else kept), cut
+    blocks = redact_key_blocks(text.rstrip().splitlines())
+    lines = _redact(redact("\n".join(blocks))).splitlines()
+    if len(lines) <= limit:
+        return "\n".join(lines), None
+    cut = f"[cut {len(lines) - limit} earlier lines]"
+    return "\n".join([cut, *lines[len(lines) - limit :]]), cut

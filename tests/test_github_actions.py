@@ -161,8 +161,7 @@ class RecordedGh:
         assert timeout > 0
         argv = list(argv)
         self.calls.append(argv)
-        assert argv[: len(GH) + 1] == [*GH, "api"], argv
-        key = tuple(argv[len(GH) + 1 :])
+        key = _key(argv)
         if key not in self.routes:
             raise AssertionError(f"unrecorded gh call {key}")
         queue = self.routes[key]
@@ -172,10 +171,16 @@ class RecordedGh:
         return response
 
     def count(self, key: tuple[str, ...]) -> int:
-        return sum(1 for call in self.calls if tuple(call[len(GH) + 1 :]) == key)
+        return sum(1 for call in self.calls if _key(call) == key)
 
     def keys(self) -> list[tuple[str, ...]]:
-        return [tuple(call[len(GH) + 1 :]) for call in self.calls]
+        return [_key(call) for call in self.calls]
+
+
+def _key(argv: list[str]) -> tuple[str, ...]:
+    assert argv[: len(GH)] == list(GH), argv
+    rest = argv[len(GH) :]
+    return tuple(rest[1:] if rest[:1] == ["api"] else rest)
 
 
 def pr(
@@ -1286,13 +1291,29 @@ def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
     )
 
 
-def test_failed_job_log_reads_one_actions_job_log_as_text() -> None:
-    actions, gh = adapter()
-    gh.route((f"{REPO}/actions/jobs/31000000004/logs",), GhResult(0, "a\nFAILED x\n", ""))
+RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")
 
-    assert actions.failed_job_log("owner/repo", "31000000004") == "a\nFAILED x\n"
+
+def test_failed_run_logs_reads_the_run_once_and_splits_it_by_job() -> None:
+    actions, gh = adapter()
+    gh.route(
+        RUN_LOG,
+        GhResult(
+            0,
+            "pytest\tRun tests\t2026-11-10T19:50:00Z a\n"
+            "lint\tRun lint\t2026-11-10T19:50:01Z b\tc\n"
+            "pytest\tRun tests\t2026-11-10T19:50:02Z FAILED x\n",
+            "",
+        ),
+    )
+
+    assert actions.failed_run_logs("owner/repo", "123456") == {
+        "pytest": "2026-11-10T19:50:00Z a\n2026-11-10T19:50:02Z FAILED x",
+        "lint": "2026-11-10T19:50:01Z b\tc",
+    }
+    assert gh.count(RUN_LOG) == 1
     with pytest.raises(GitHubAdapterError):
-        actions.failed_job_log("owner/repo", "../secrets")
+        actions.failed_run_logs("owner/repo", "../secrets")
 
 
 def draft_pull() -> GhResult:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatcher import CIResult, TrackedTicket
+from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
 from lib.queue import Job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
 from lib.github_actions import GhResult
@@ -86,22 +86,22 @@ def test_ci_fix_carries_the_failed_checks_github_actions_reports(tmp_path: Path)
 
 
 RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
-JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs",)
+RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")
 
 
 def actions_ci_fix(tmp_path: Path, *log: GhResult | BaseException) -> tuple[CIFlow, RecordedGh]:
     actions, gh = adapter()
     gh.route(CHECKS, served("check-runs-failure-actions.json"))
     gh.route(STATUS, served("status-empty.json"))
-    gh.route(JOB_LOG, *log)
+    gh.route(RUN_LOG, *log)
     flow = built(tmp_path)
-    flow.dispatcher.ci_logs = actions.failed_job_log
+    flow.dispatcher.ci_logs = actions.failed_run_logs
     flow.ci_result = actions.ci_status("owner/repo", HEAD)
     return flow, gh
 
 
 def test_ci_fix_carries_the_run_and_the_failed_jobs_log_tail_read_once(tmp_path: Path) -> None:
-    log = "".join(f"line {n}\n" for n in range(1, 201))
+    log = "".join(f"pytest\tRun tests\tline {n}\n" for n in range(1, 201))
     flow, gh = actions_ci_fix(tmp_path, GhResult(0, log, ""))
 
     assert flow.ready(HEADS[1]) == "queued-ci-fix"
@@ -120,7 +120,30 @@ def test_ci_fix_carries_the_run_and_the_failed_jobs_log_tail_read_once(tmp_path:
     assert tail[0] == pytest_job["cut"] == "[cut 50 earlier lines]"
     assert (tail[1], tail[-1], len(tail)) == ("line 51", "line 200", 151)
     assert lint_job["log_tail"] is None
-    assert gh.count(JOB_LOG) == 1
+    assert gh.count(RUN_LOG) == 1
+
+
+def test_six_failed_jobs_of_one_run_read_the_run_once_and_keep_every_tail(tmp_path: Path) -> None:
+    flow = built(tmp_path)
+    reads: list[str] = []
+
+    def read_run(repo: str, run_id: str) -> dict[str, str]:
+        reads.append(run_id)
+        return {f"job-{n}": f"FAILED {n}" for n in range(6)}
+
+    flow.dispatcher.ci_logs = read_run
+    flow.ci_result = CIResult(
+        "failure",
+        "failed: jobs",
+        failed=tuple(FailedCheck(f"job-{n}", "42", str(n), RUN_URL) for n in range(6)),
+    )
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+    flow.dispatcher.process(flow.snapshot())
+
+    jobs = evidence(claim(flow, "claude"))["ci"]["jobs"]
+    assert reads == ["42"]
+    assert [job["log_tail"] for job in jobs] == [f"FAILED {n}" for n in range(6)]
 
 
 def test_a_log_that_cannot_be_read_still_queues_the_ci_fix(tmp_path: Path) -> None:
@@ -130,7 +153,7 @@ def test_a_log_that_cannot_be_read_still_queues_the_ci_fix(tmp_path: Path) -> No
 
     job = evidence(claim(flow, "claude"))["ci"]["jobs"][0]
     assert (job["run_url"], job["log_tail"]) == (RUN_URL, None)
-    assert gh.count(JOB_LOG) == 1
+    assert gh.count(RUN_LOG) == 1
 
 
 def test_review_fix_carries_the_blocking_finding(tmp_path: Path) -> None:

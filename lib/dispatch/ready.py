@@ -297,7 +297,7 @@ class ReadyMixin:
         self, repo: str, result: CIResult, dedupe_key: str
     ) -> CIEvidence | None:
         """Runs outside the enqueue's transaction, so no network read holds the DB lock."""
-        from lib.evidence.ci import LOG_JOBS, ci_evidence
+        from lib.evidence.ci import ci_evidence
         from lib.github_actions import GitHubAdapterError
         from lib.poll_source import PollSourceError
 
@@ -310,16 +310,17 @@ class ReadyMixin:
         failed = failed_checks(result)
         logs: dict[str, str | None] = {}
         if self.ci_logs is not None:
-            job_ids = [check.job_id for check in failed if check.job_id is not None]
-            for job_id in dict.fromkeys(job_ids).keys():
-                if len(logs) == LOG_JOBS:
-                    break
+            run_ids = [check.run_id for check in failed if check.run_id is not None]
+            for run_id in dict.fromkeys(run_ids):
                 try:
-                    logs[job_id] = self.ci_logs(repo, job_id)
+                    run_logs = self.ci_logs(repo, run_id)
                 except (GitHubAdapterError, PollSourceError) as exc:
-                    logs[job_id] = None
+                    run_logs = {}
                     if self.log is not None:
-                        self.log(f"ci log: {repo} job {job_id} unavailable: {type(exc).__name__}")
+                        self.log(f"ci log: {repo} run {run_id} unavailable: {type(exc).__name__}")
+                for check in failed:
+                    if check.run_id == run_id and check.job_id is not None:
+                        logs[check.job_id] = run_logs.get(check.name)
         return ci_evidence(failed=failed, logs=logs)
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:

@@ -63,7 +63,7 @@ class DispatcherBase:
         update_classifier: UpdateClassifier | None = None,
         rebase_classifier: RebaseClassifier | None = None,
         approvals: Approvals | None = None,
-        ci_logs: Callable[[str, str], str] | None = None,
+        ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")

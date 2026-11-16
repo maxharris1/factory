@@ -106,3 +106,25 @@ def test_secrets_in_the_log_tail_are_redacted():
         assert secret not in tail
     assert tail.splitlines()[0] == "collecting"
     assert tail.splitlines()[-1] == "FAILED tests/test_x.py::test_y"
+
+
+def test_a_credential_value_on_the_line_after_its_name_is_redacted():
+    tail = _tail("collecting\npassword:\n  synthetic-swordfish\nFAILED x\n").log_tail or ""
+
+    assert "synthetic-swordfish" not in tail
+    assert tail.splitlines()[-1] == "FAILED x"
+
+
+def test_a_name_above_the_cut_still_hides_the_value_below_it():
+    tail = _tail("password:\n  synthetic-swordfish\nFAILED x\n", limit=2).log_tail or ""
+
+    assert "synthetic-swordfish" not in tail
+
+
+def test_an_unfinished_key_block_whose_begin_was_cut_stays_hidden():
+    log = "\n".join(["setup", "-----BEGIN OPENSSH PRIVATE KEY-----", *[KEY_BODY] * 4, "AAAA"])
+
+    tail = _tail(log, limit=3).log_tail or ""
+
+    assert KEY_BODY not in tail
+    assert "AAAA" not in tail

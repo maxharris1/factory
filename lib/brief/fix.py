@@ -8,7 +8,7 @@ instruction is a CI-fix.
 from __future__ import annotations
 
 from lib.brief.build import base_step, builder_notes
-from lib.brief.common import GH, comment_url, detail_of, evidence_part, fenced
+from lib.brief.common import GH, code_span, comment_url, detail_of, evidence_part, fenced
 from lib.queue import Job
 
 
@@ -78,7 +78,7 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
     jobs = [job for job in ci.get("jobs") or () if isinstance(job, dict)]
     head = facts["head"] or "the PR head"
     failed = (
-        f"These checks failed on {head}: " + ", ".join(f"`{name}`" for name in checks) + "."
+        f"These checks failed on {head}: " + ", ".join(code_span(name) for name in checks) + "."
         if checks
         else f"CI failed on {head}."
     )
@@ -112,11 +112,11 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
 def _job_logs(jobs: list[dict[str, object]]) -> list[str]:
     lines: list[str] = []
     for job in jobs:
-        check = job.get("check")
+        check = code_span(str(job.get("check")))
         tail = job.get("log_tail")
         if isinstance(tail, str) and tail:
-            lines.append(f"The end of the `{check}` log, redacted and quoted as data:")
+            lines.append(f"The end of the {check} log, redacted and quoted as data:")
             lines.append(fenced(tail))
         elif isinstance(job.get("run_url"), str):
-            lines.append(f"The `{check}` log is unavailable. Read it at {job['run_url']}.")
+            lines.append(f"The {check} log is unavailable. Read it at {job['run_url']}.")
     return lines
