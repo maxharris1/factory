@@ -212,6 +212,8 @@ class ReadyMixin:
         self, ticket: TrackedTicket, head: str
     ) -> tuple[Comment, dict[str, str]] | None:
         for comment in sorted(ticket.comments, key=_comment_order, reverse=True):
+            if comment.edited_at is not None:
+                continue
             try:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
@@ -405,7 +407,7 @@ class ReadyMixin:
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
                 and self._counted_verdict(ticket, item, fields)
-                and _matching_head(fields["head"], head) is not None
+                and _matching_head(fields.get("head") or "", head) is not None
             ):
                 if _comment_order(item) <= _comment_order(ready):
                     before.add(round_number)
@@ -456,7 +458,7 @@ class ReadyMixin:
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
                 and self._counted_verdict(ticket, item, fields)
-                and _matching_head(fields["head"], head) is not None
+                and _matching_head(fields.get("head") or "", head) is not None
             ):
                 return True
         return False

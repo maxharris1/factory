@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.dispatcher import CIResult
 from lib.github_actions import GhResult, GitHubAdapterError, HeadMismatchError
-from lib.queue import SQLiteJobQueue
+from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
     READY,
     TRUSTED_LOGINS,
@@ -412,6 +413,57 @@ def test_issue_452_no_review_while_the_ci_fix_is_still_open(tmp_path: Path) -> N
     dispatcher.process(ticket(first, head=SHA, ci={SHA: CIResult("success")}))
 
     assert jobs_by_action(queue) == before
+
+
+def test_issue_452_an_edited_handled_ready_cannot_queue_a_review_of_its_new_head(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, (first, second) = dropped_ready_at_red_head(tmp_path)
+    before = jobs_by_action(queue)
+    new_head = "d" * 40
+    edited = replace(second, body=READY.format(head=new_head), edited_at=3)
+
+    dispatcher.process(ticket(first, edited, head=new_head, ci={new_head: CIResult("success")}))
+
+    assert jobs_by_action(queue) == before
+
+
+def test_issue_452_a_headless_revise_beside_a_green_ready_is_stale(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    first = ready("ready-1", 1)
+    dispatcher.process(ticket(first, head=SHA, ci={SHA: CIResult("success")}))
+    review = queue.claim("codex")
+    assert review is not None
+    queue.finish(review.id, owner="codex", handoff_comment_id="verdict-1")
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="fix",
+            recipient="claude",
+            source_comment_id="ci-fix",
+            timeout_seconds=5400,
+            head=SHA,
+        ),
+        dedupe_key="second-builder",
+    )
+    fix = queue.claim("claude")
+    assert fix is not None
+    queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
+    second = ready("ready-2", 2)
+    verdict = comment(
+        "verdict-1",
+        "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1 verdict=REVISE -->\nNeeds work.\n",
+        author="codex-login",
+        created_at=3,
+    )
+    snapshot = ticket(second, verdict, head=SHA, ci={SHA: CIResult("success")})
+
+    dispatcher.process(snapshot)
+
+    assert dispatcher._handled_outcome(snapshot, verdict.id) == "stale-revise"
+    assert dispatcher._handled_outcome(snapshot, second.id) == "queued-review"
 
 
 def test_needs_attention_shows_in_orch_status_and_the_dashboard(tmp_path: Path) -> None:
