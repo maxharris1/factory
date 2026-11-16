@@ -12,15 +12,11 @@ from lib.dashboard_telemetry import NO_DATA
 from lib.dashboard_pages.common import anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _span, _state_chip
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
+from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.tickets import WAITING, _active_jobs, _px
 
 
-VERBS = {
-    "plan": ("Pondering", "Sketching", "Scheming"),
-    "build": ("Assembling", "Stacking", "Forging"),
-    "review": ("Scrutinizing", "Combing", "Squinting"),
-    "fix": ("Patching", "Mending", "Tinkering"),
-}
+VERBS = {name: spec["verbs"] for name, spec in TILE_STATE.items() if "verbs" in spec}
 NEXT_ORDER = {"normal": 0, "human": 1, "stop": 2}
 FIRST_REASON = "ticket arrives"
 STOP_TINT = journey_canvas.STOP
