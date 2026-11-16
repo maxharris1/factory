@@ -466,6 +466,7 @@ class DetailMixin:
         head: str | None = None,
         round_number: int | None = None,
         instruction: str | None = None,
+        plan_text: str | None = None,
         resume: bool = False,
         cap: int | None = None,
         kind: str | None = None,
@@ -501,6 +502,10 @@ class DetailMixin:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if action in ("plan", "build") and ticket.brief_text:
+            context.update(brief_text=ticket.brief_text, brief_url=ticket.brief_url)
+        if plan_text is not None:
+            context["plan_text"] = plan_text
         if action in ("plan", "build") and (answers := self._answers(ticket)):
             context["answers"] = answers
         if ticket.factory_md is not None:

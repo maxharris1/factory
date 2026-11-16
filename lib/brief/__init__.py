@@ -56,6 +56,7 @@ from lib.brief.common import (
     questions_handoff_section,
 )
 from lib.brief.context import context_section
+from lib.brief.inline import BRIEF_TEXT_LIMIT, PLAN_TEXT_LIMIT, quoted_section
 from lib.brief.plan import PLAN_HANDOFF_LIMIT
 from lib.brief.rules import finish_section, review_rules, rules
 from lib.factory_md import FactoryContext
@@ -133,6 +134,7 @@ def render_brief(
             *([skills.section(router)] if router is not None else []),
             *(review.evidence_sections(detail, facts) if kind == "review" else []),
             "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
+            *_quoted_sections(facts),
             _handoff(job, bot, kind, facts, skills_read=router is not None),
         ]
     parts = [
@@ -142,10 +144,19 @@ def render_brief(
         finish_section(job, bot, remote_device),
         review_rules(facts),
         rules(remote_device),
-        data_section(job, detail),
+        data_section(job, detail, facts),
         context_section(facts, context, context_ref, context_note, kind),
     ]
     return "\n\n".join(part.rstrip() for part in parts) + "\n"
+
+
+def _quoted_sections(facts: dict) -> list[str]:
+    sections = []
+    if facts["brief_text"]:
+        sections.append(quoted_section("Ticket brief", facts["brief_text"], facts["brief_url"], BRIEF_TEXT_LIMIT))
+    if facts["plan_text"]:
+        sections.append(quoted_section("Plan", facts["plan_text"], facts["plan"], PLAN_TEXT_LIMIT))
+    return sections
 
 
 def _is_plan(job: Job, kind: str) -> bool:

@@ -447,7 +447,7 @@ def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
 
 
@@ -477,7 +477,7 @@ def test_a_ready_github_dates_to_the_fixs_own_second_still_settles_it(
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
 
 
@@ -502,7 +502,7 @@ def test_a_ready_the_cached_read_missed_settles_the_failed_fix_without_a_retry(
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]
     assert board.queue.claim("claude") is None
 
@@ -527,5 +527,5 @@ def test_a_failed_fix_whose_ready_github_dates_to_its_own_second_is_done(
     board.poll()
     board.poll()
 
-    assert board.outcome("ready-rollback") == "queued-review"
+    assert board.outcome("ready-rollback") == "approval-covers:handed-off"
     assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]
