@@ -204,6 +204,33 @@ def test_a_ready_that_still_conflicts_counts_as_a_failed_update(tmp_path: Path) 
     assert len(board.jobs("update-from-main")) == 2
 
 
+def test_a_conflict_from_a_later_merge_is_not_a_failed_update(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    younger = board.open("50", sha(50))
+    board.build_and_approve(pr, mergeable=None)
+    board.build_and_approve(younger, mergeable=None)
+    pr.conflict()
+    board.poll()
+    board.finish("claude")
+    pr.push(sha(2), ci="pending")
+    ready = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(ready) is None
+
+    younger.mergeable, younger.mergeable_state = True, "clean"
+    board.poll()
+    assert board.actions.merges == [(True, sha(50))]
+    pr.conflict()
+    board.poll()
+
+    assert board.outcome(ready) == "update-conflicts-anew"
+    row = board.state("42")
+    assert (row["stuck"], row["update_failures"]) == (0, 0)
+    assert row["workflow_state"] == "updating"
+    assert [job["head"] for job in board.jobs("update-from-main")] == [sha(1), sha(2)]
+
+
 def test_a_successful_update_resets_the_failure_count(tmp_path: Path) -> None:
     board, pr, _approve = conflicted(tmp_path)
     board.fail("claude")
