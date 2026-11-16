@@ -15,13 +15,14 @@ from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     LINEAR_HANDOFF_QUERY,
     OFF_LOOP_VERIFY_READS,
+    POLL_ERROR_RETENTION_SECONDS,
     POLL_ERROR_STREAK,
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
 )
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
-from lib.dispatch.types import PollSource, TicketRef, TrackedTicket
+from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import POLL_SECONDS
 from lib.queue import Job, _job
@@ -48,6 +49,7 @@ class PollMixin:
         self._merged_repos = set()
         self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
+        self._cycle_failures: list[str] = []
         read_from = self.queue.now()
         with self._phase("feed"):
             self._feed(source)
@@ -58,6 +60,7 @@ class PollMixin:
                 )
             except Exception as exc:
                 self.record_poll_exception("github", "-", exc)
+                self._cycle_failures.append(f"github: {type(exc).__name__}")
                 github = ()
             self._discover(github, tracker="github")
         with self._phase("linear-candidates"):
@@ -73,6 +76,7 @@ class PollMixin:
                 )
             except Exception as exc:
                 self.record_poll_exception("linear", "-", exc)
+                self._cycle_failures.append(f"linear: {type(exc).__name__}")
                 linear = ()
             self._discover(linear, tracker="linear")
         with self._phase("tracked-read"):
@@ -83,6 +87,7 @@ class PollMixin:
                 tracked = source.tracked_tickets(refs)
             except Exception as exc:
                 self.record_poll_exception("tracked", "-", exc)
+                self._cycle_failures.append(f"tracked: {type(exc).__name__}")
                 tracked = ()
             read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
             self._record_reads(read, read_at)
@@ -119,8 +124,17 @@ class PollMixin:
                 self._read_started = None
         with self._phase("factory-reads"):
             self._record_factory_reads(source)
-        if end is not None:
-            end()
+        self._prune_poll_errors()
+        failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
+        try:
+            if end is not None:
+                end()
+        except Exception as exc:
+            if self._cycle_failures:
+                raise PollCycleFailed(f"{failed}; {exc}") from exc
+            raise
+        if self._cycle_failures:
+            raise PollCycleFailed(failed)
 
     def _verify_handoffs(self, source: PollSource, read_from: float) -> None:
         """#18: check each done job's handoff comment once, on the ticket read.
@@ -140,6 +154,7 @@ class PollMixin:
                     tickets[(ticket.repo.lower(), ticket.ticket_id)] = ticket
             except Exception as exc:
                 self.record_poll_error("verify", "-", type(exc).__name__)
+                self._cycle_failures.append(f"verify: {type(exc).__name__}")
         for (repo, ticket_id), ticket in tickets.items():
             with self._connect() as connection:
                 rows = connection.execute(
@@ -224,6 +239,16 @@ class PollMixin:
                 project_rules.record_reads(connection, cycle, self.queue.now())
         except Exception as exc:
             self.record_poll_error("factory", "-", type(exc).__name__)
+
+    def _prune_poll_errors(self) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM poll_errors WHERE recorded_at < ?",
+                    (self.queue.now() - POLL_ERROR_RETENTION_SECONDS,),
+                )
+        except sqlite3.Error as exc:
+            self.record_poll_error("prune", "-", type(exc).__name__)
 
     def _record_reads(self, keys: set[tuple[str, str]], at: float) -> None:
         with self._connect() as connection:

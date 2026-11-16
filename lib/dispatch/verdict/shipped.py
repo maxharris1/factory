@@ -5,6 +5,14 @@ from lib.dispatch.types import TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 
 
+def _approved_round(shipped: tuple[str, int | None] | None, review_round: int) -> int:
+    """The round a handed-off ticket's shipped APPROVE completed (#108); one
+    past review_round when that APPROVE names none."""
+    if shipped is not None and shipped[1] is not None:
+        return shipped[1]
+    return review_round + 1
+
+
 class ShippedApprovalMixin:
     def _shipped_approval(self, ticket: TrackedTicket) -> tuple[str, int | None] | None:
         """(head, round) of the APPROVE whose ship intent completed last."""
