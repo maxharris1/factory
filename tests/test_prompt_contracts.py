@@ -19,13 +19,14 @@ from lib.brief import render_brief
 from lib.brief.common import GH
 from lib.brief.inline import quoted_section
 from lib.evidence.findings import blocking_ids, findings_evidence
+from lib.factory_md import parse_factory_context
 from lib.dispatch.helpers import _REGISTERING_ACTIONS
 from lib.dispatcher import Comment
 from lib.handoff import HandoffError, parse_comment
 from lib.orchestrate import APPROVAL_TOKEN_VARIABLES, answers_for, go_comment
 from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job
-from tests.regenerate_brief_snapshots import CASES, render_snapshot
+from tests.regenerate_brief_snapshots import CASES, FACTORY_MD, _job, render_snapshot
 from tests.test_approver_credential import MAX, AppFlow
 from tests.test_orchestrate import choose_route, request_for
 from tests.test_orchestrate_helpers import go_for, to_questions
@@ -322,8 +323,13 @@ def rendered(kinds: tuple[str, ...] = tuple(CASES), *, side: str = "both") -> li
     return texts
 
 
-def carried(rule_id: str, kinds: tuple[str, ...] = tuple(CASES), *, side: str = "both") -> None:
+REVIEW_KINDS = tuple(kind for kind in CASES if CASES[kind][0] == "review")
+
+
+def carried(rule_id: str, kinds: tuple[str, ...] | None = None, *, side: str = "both") -> None:
     phrase = brief_rules.RULE_PHRASES[rule_id]
+    if kinds is None:
+        kinds = REVIEW_KINDS if rule_id.startswith("review-") else tuple(CASES)
     for text in rendered(kinds, side=side):
         assert phrase in text, f"{rule_id} is missing from a brief"
 
@@ -412,15 +418,41 @@ def refused(rule_id: str, check: Callable[[Path], None]) -> Callable[[], None]:
 
 
 USER_IMPACT_KINDS = ("review-user-impact", "review-user-impact-round-2")
+ANY_FAILURE_KINDS = ("review-evidence", "review-round-2-evidence")
+USER_IMPACT_MD = FACTORY_MD.replace("review:\n", "review:\n  block_on: user-impact\n")
 
 
 def wording_user_impact(rule_id: str) -> None:
     phrase = brief_rules.RULE_PHRASES[rule_id]
-    for round_number in (1, 2):
-        facts = {"followup_from": None, "round_number": round_number, "auto_extra": 0}
-        assert phrase in brief_rules.review_rules({**facts, "block_on": "user-impact"})
-        assert phrase not in brief_rules.review_rules({**facts, "block_on": "any-failure"})
     carried(rule_id, USER_IMPACT_KINDS, side="box")
+    for text in rendered(ANY_FAILURE_KINDS, side="box"):
+        assert phrase not in text, f"{rule_id} is in a block_on: any-failure brief"
+
+
+def brief_under(factory_md: str, kind: str) -> str:
+    context, findings = parse_factory_context(factory_md)
+    assert context is not None, findings
+    action, recipient, attempt, head, extra = CASES[kind]
+    job = _job(action, recipient, attempt, head, extra)
+    return render_brief(job, bot=f"{recipient}-bot", context=context, factory_root=str(ROOT))
+
+
+def rules_section(text: str) -> str:
+    return text.split("\n## Rules\n", 1)[1].split("\n## ", 1)[0]
+
+
+BUILDER_KINDS = ("plan", "build", "fix", "ci-fix", "merge-only")
+
+
+def wording_no_follow_up_fixes() -> None:
+    phrase = brief_rules.RULE_PHRASES["rule-no-follow-up-fixes"]
+    for text in rendered(FOLLOW_UP_KINDS + USER_IMPACT_KINDS, side="box"):
+        assert text.count(phrase) == 1
+    for kind in BUILDER_KINDS:
+        assert f"- {phrase}" in rules_section(brief_under(USER_IMPACT_MD, kind)), kind
+        assert phrase not in brief_under(FACTORY_MD, kind), kind
+    for text in rendered(("review", *ANY_FAILURE_KINDS), side="box"):
+        assert phrase not in text
 
 
 ENFORCED: dict[str, Callable[[], None]] = {
@@ -442,6 +474,7 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "finish-remote-no-db": lambda: carried("finish-remote-no-db", side="remote"),
     "finish-remote-waiter": lambda: carried("finish-remote-waiter", side="remote"),
     "finish-no-heartbeat": wording("finish-no-heartbeat"),
+    "review-verify-skill": wording("review-verify-skill"),
     "review-blocking-ran": wording("review-blocking-ran"),
     "review-no-judge": wording("review-no-judge"),
     "review-low-risk-rounds": wording("review-low-risk-rounds"),
@@ -459,6 +492,7 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "rule-secrets": wording_secrets,
     "rule-scratch": lambda: carried("rule-scratch", side="box"),
     "rule-one-channel": wording("rule-one-channel"),
+    "rule-no-follow-up-fixes": wording_no_follow_up_fixes,
     "rule-job-text": wording("rule-job-text"),
 }
 
@@ -472,8 +506,10 @@ def test_every_rule_id_is_enforced_or_guidance() -> None:
 
 def test_every_rule_line_in_a_brief_has_an_id() -> None:
     phrases = brief_rules.RULE_PHRASES.values()
-    for text in rendered():
+    for text in [*rendered(), brief_under(USER_IMPACT_MD, "build")]:
         for heading in ("## Finish the job", "## Review rules", "## Rules"):
+            if heading == "## Review rules" and heading not in text:
+                continue
             section = text[text.index(heading) :]
             end = section.find("\n## ", 1)
             for line in (section if end < 0 else section[:end]).splitlines()[1:]:

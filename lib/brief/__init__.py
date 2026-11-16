@@ -13,8 +13,8 @@ brief per job kind:
   nothing else).
 
 Each brief is rendered from the job row alone: repo, PR or ticket, head sha,
-round and cap, risk, the review rules (docs/SPEC.md section 8) and the
-orch:v1 handoff header the job must end with (section 5). The target repo's factory.md prose is appended as an
+round and cap, risk, the review rules (docs/SPEC.md section 8) in a review
+brief, and the orch:v1 handoff header the job must end with (section 5). The target repo's factory.md prose is appended as an
 additional-context section (lib/factory_md.py parse_factory_context), so
 project-specific behavior stays in each repo's factory.md.
 
@@ -142,9 +142,11 @@ def render_brief(
         job_section(job, bot, kind, facts, remote_device),
         *middle,
         finish_section(job, bot, remote_device),
-        review_rules(facts),
-        rules(remote_device),
-        data_section(job, detail, facts),
+        *([review_rules(facts)] if kind == "review" else []),
+        rules(remote_device, follow_ups=kind != "review" and review.filing_active(facts)),
+        data_section(
+            job, detail, facts, findings_quoted=kind == "fix" and bool(fix.quoted_findings(detail, facts))
+        ),
         context_section(facts, context, context_ref, context_note, kind),
     ]
     return "\n\n".join(part.rstrip() for part in parts) + "\n"

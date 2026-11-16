@@ -19,7 +19,6 @@ NO_EDIT_RULE = (
     "and leave the posted one as it is."
 )
 QUESTIONS_LINES = [
-    "If something left open needs a decision, post a `questions` handoff.",
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
 ]
 BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cursor Bot"}
@@ -207,10 +206,20 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         f"- head: {facts['head']}" if facts["head"] else "- head: none given (see the PR or the base branch)",
         f"- base branch: {facts['base']}" if facts["base"] else "- base branch: see factory.md",
         f"- risk: {facts['risk']}" if facts["risk"] else "- risk: unknown (ask in a questions comment)",
-        f"- round: {facts['round']}" if facts["round"] else "- round: not set for this job",
+        *(
+            [f"- round: {facts['round']}"]
+            if facts["round"]
+            else ["- round: not set for this job"] if kind == "review" else []
+        ),
         f"- round cap: {facts['cap']}" if facts["cap"] else "- round cap: unknown",
-        f"- reviewer harness: {facts['reviewer']}" if facts["reviewer"] else "- reviewer harness: see factory.md",
-        f"- verify skill: {facts['verify']}" if facts["verify"] else "- verify skill: see factory.md",
+        *(
+            [
+                f"- reviewer harness: {facts['reviewer']}" if facts["reviewer"] else "- reviewer harness: see factory.md",
+                f"- verify skill: {facts['verify']}" if facts["verify"] else "- verify skill: see factory.md",
+            ]
+            if kind == "review"
+            else []
+        ),
         f"- attempt: {request.attempt}",
         f"- wall-clock budget: {request.timeout_seconds / 60:g} minutes from the start of this run. "
         "Near it, push what you have and post `questions`. Past it, `orch job run` stops you "
@@ -280,7 +289,7 @@ def _post_command(facts: dict) -> str:
     )
 
 
-def data_section(job: Job, detail: dict[str, object], facts: dict) -> str:
+def data_section(job: Job, detail: dict[str, object], facts: dict, *, findings_quoted: bool = False) -> str:
     quoted = {
         "brief_text": "(quoted in the Ticket brief section)",
         "plan_text": f"(quoted in the {facts['plan_title']} section)",
@@ -291,6 +300,10 @@ def data_section(job: Job, detail: dict[str, object], facts: dict) -> str:
             key: quoted[key] if key in quoted and facts[key] else _cut(value)
             for key, value in detail.items()
         }
+        if findings_quoted:
+            evidence = request["detail"]["evidence"]
+            findings = {**evidence["findings"], "findings": "(quoted in the What to do section)"}
+            request["detail"]["evidence"] = {**evidence, "findings": findings}
     else:
         request["detail"] = _cut(request["detail"])
     data = json.dumps(request, indent=2, sort_keys=True, ensure_ascii=False)

@@ -10,6 +10,7 @@ from lib.handoff import AC_VALUES, VERDICTS
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
 GONE = ("factory-review-rules", "second AC-unmet", "demonstrated failure")
+REVIEW_KINDS = sorted(kind for kind in CASES if CASES[kind][0] == "review")
 
 
 def _briefs(kind: str) -> list[str]:
@@ -24,8 +25,8 @@ def test_no_brief_carries_the_old_contract_text(kind: str) -> None:
             assert phrase not in text
 
 
-@pytest.mark.parametrize("kind", sorted(CASES))
-def test_every_brief_defines_ac_and_the_three_verdicts(kind: str) -> None:
+@pytest.mark.parametrize("kind", REVIEW_KINDS)
+def test_every_review_brief_defines_ac_and_the_three_verdicts(kind: str) -> None:
     for text in _briefs(kind):
         section = text[text.index("## Review rules (docs/SPEC.md section 8)") :]
         section = section[: section.index("\n## ")]
@@ -36,13 +37,11 @@ def test_every_brief_defines_ac_and_the_three_verdicts(kind: str) -> None:
         assert "- `verdict=BLOCKED`: you could not review at all; say what you need." in section
 
 
-@pytest.mark.parametrize("kind", sorted(CASES))
-def test_every_brief_states_the_blocking_rule(kind: str) -> None:
+@pytest.mark.parametrize("kind", REVIEW_KINDS)
+def test_every_review_brief_states_the_blocking_rule_once(kind: str) -> None:
     for text in _briefs(kind):
-        assert (
-            "That reviewer marks a finding `[blocking]` only when they have run it and seen it fail."
-            in text
-        )
+        assert text.count("Mark a finding `[blocking]` only when you have run it and seen it fail") == 1
+        assert "That reviewer marks a finding `[blocking]`" not in text
 
 
 def test_the_review_brief_tells_the_reviewer_when_a_finding_blocks() -> None:

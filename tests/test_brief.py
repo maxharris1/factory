@@ -130,8 +130,7 @@ def test_each_kind_has_the_standard_parts(
     assert "round cap: 3" in text
     assert f"job id: {item.id}" in text
     assert f"bot: {bot}" in text
-    # The review rules and the orch:v1 handoff format.
-    assert "## Review rules (docs/SPEC.md section 8)" in text
+    assert ("## Review rules (docs/SPEC.md section 8)" in text) == (kind == "review")
     assert "factory-review-rules" not in text
     assert "second AC-unmet" not in text
     assert "<!-- orch:v1 kind=" in text
@@ -168,7 +167,7 @@ def test_implement_and_fix_briefs_end_in_a_ready_comment() -> None:
 def test_builder_briefs_say_run_tests_in_the_foreground(action: str, extra: dict) -> None:
     first = render_brief(job(action, **extra), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "in the foreground" in first
-    assert "in the background, or in chunks" in first
+    assert "in the background or in chunks" in first
     assert "git log @{u}.." not in first
     first_job = job(action, **extra)
     retry = replace(first_job, request=replace(first_job.request, attempt=2))
@@ -226,7 +225,7 @@ def test_factory_md_is_appended_as_an_additional_context_section() -> None:
     assert "Never apply migrations on a hosted Supabase project" in text[section:]
     assert "The reviewer runs `verify-cleffy`." not in text[section:]
     # The standard parts come first; the repo's prose only adds to them.
-    assert text.index("## Review rules") < section
+    assert text.index("## Rules") < section
     assert text.index("orch job done") < section
     # Front matter is policy the dispatcher already applied, not prose.
     assert "base_branch: dev" not in text[section:]

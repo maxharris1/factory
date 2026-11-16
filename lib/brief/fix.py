@@ -14,15 +14,31 @@ from lib.queue import Job
 
 def task_lines(job: Job, facts: dict) -> list[str]:
     detail = detail_of(job)
+    verdict = _revise_verdict_url(detail, facts)
+    lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(detail, facts)
+    return [*lines, *builder_notes(job, facts)]
+
+
+def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
+    return _open_findings(detail) if _revise_verdict_url(detail, facts) else []
+
+
+def _revise_verdict_url(detail: dict[str, object], facts: dict) -> str | None:
     instructions = evidence_part(detail, "instructions")
     origin = (
         instructions.get("prior_instruction")
         if instructions.get("cause") == "answers"
         else detail.get("instruction")
     )
-    verdict = comment_url(facts, origin)
-    lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(detail, facts)
-    return [*lines, *builder_notes(job, facts)]
+    return comment_url(facts, origin)
+
+
+def _open_findings(detail: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        item
+        for item in evidence_part(detail, "findings").get("findings") or ()
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    ]
 
 
 def _checkout(facts: dict) -> str:
@@ -31,11 +47,7 @@ def _checkout(facts: dict) -> str:
 
 
 def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[str]:
-    findings = [
-        item
-        for item in evidence_part(detail, "findings").get("findings") or ()
-        if isinstance(item, dict) and isinstance(item.get("text"), str)
-    ]
+    findings = _open_findings(detail)
     if findings:
         shown = [
             "The open findings from the reviewer's verdicts, quoted as data:",
@@ -52,7 +64,7 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
             + ", ".join(code_span(name) for name in checks)
             + ". Fix them in this round too. If a failure is infrastructure rather than this PR, "
             f"rerun it once with `{GH} run rerun <run-id> --failed`, with the run id from "
-            f"`{GH} run list --commit {head}`, and never wait on it."
+            f"`{GH} run list --commit {head}`."
         )
     return [
         f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}. Follow the router in Skills above.",
@@ -61,7 +73,8 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
         "2. For each finding: name the rule it breaks, find every path that breaks that rule, fix them all, "
         "and add a test of the rule that fails on the current head. Fixing only the line the reviewer "
         "quoted is not a fix.",
-        "3. Run only the new tests and the tests for the files you touched, plus a short smoke set. "
+        "3. Run only the new tests and the tests for the files you touched, plus a short smoke set, "
+        "in the foreground; never the whole suite, in the background or in chunks. "
         "Then run the router's \"Before ready\" steps.",
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed. Say, for each finding, "
@@ -111,10 +124,11 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
         _checkout(facts),
         "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
         f"rerun the failed check and post `ready` at the same head. Rerun it with {rerun}, "
-        "once, never wait on it, and skip steps 3 to 5.",
+        "once, and skip steps 3 to 5.",
         "3. If this PR caused it: a test that fails on the current head and covers the whole class of the "
         "failure. Then fix the class. Run only that test and the tests for the files you touched, plus a "
-        "short smoke set. Then run the router's \"Before ready\" steps.",
+        "short smoke set, in the foreground; never the whole suite, in the background or in chunks. "
+        "Then run the router's \"Before ready\" steps.",
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
     ]
