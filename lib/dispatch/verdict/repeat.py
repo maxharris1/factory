@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from lib.dispatch.helpers import _comment_link, _comment_order, _round_number, _scope
@@ -28,6 +29,10 @@ class _EarlierRevise:
     round: int
     comment: Comment
     blocking: frozenset[str]
+
+
+def _stopped_rule(wake: str) -> str:
+    return str(json.loads(wake)["detail"]).split(", ", 1)[0].removeprefix("repeat-block: ")
 
 
 class RepeatBlockMixin:
@@ -83,6 +88,33 @@ class RepeatBlockMixin:
                 found.append(_EarlierRevise(number, item, blocking))
         return sorted(found, key=lambda entry: (entry.round, _comment_order(entry.comment)), reverse=True)
 
+    def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
+        with self._connect() as connection:
+            wakes = connection.execute(
+                """
+                SELECT jobs.detail FROM review_events AS stop
+                JOIN jobs ON jobs.dedupe_key = 't3-repeat:' || ? || ':' || stop.comment_id
+                WHERE stop.repo = ? AND stop.ticket_id = ? AND stop.comment_id != ?
+                  AND stop.outcome = 'waiting-max-repeat'
+                """,
+                (_scope(ticket.repo, ticket.ticket_id), ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchall()
+        return 1 + sum(_stopped_rule(str(row["detail"])) == rule_id for row in wakes)
+
+    def _repeat_detail(self, ticket: TrackedTicket, comment: Comment, block: RepeatBlock) -> str:
+        earlier = "no earlier verdict" if block.earlier is None else _comment_link(block.earlier)
+        stops = self._repeat_stops(ticket, comment, block.rule_id)
+        fields = [
+            f"repeat-block: {block.rule_id}",
+            earlier,
+            _comment_link(comment),
+            f"stops={stops}",
+            f"for={'factory' if stops == 1 else 'max'}",
+        ]
+        if ticket.changed_lines is not None:
+            fields.append(f"changed_lines={ticket.changed_lines}")
+        return ", ".join(fields)
+
     def _t3_repeat(
         self,
         ticket: TrackedTicket,
@@ -91,6 +123,7 @@ class RepeatBlockMixin:
         reported_round: int | None,
     ) -> tuple[bool, str]:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        detail = self._repeat_detail(ticket, comment, block)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -143,7 +176,6 @@ class RepeatBlockMixin:
                 """,
                 (*key, comment.id),
             )
-            earlier = "no earlier verdict" if block.earlier is None else _comment_link(block.earlier)
             self.queue.enqueue_in_transaction(
                 connection,
                 self._grok_request(
@@ -156,10 +188,7 @@ class RepeatBlockMixin:
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
                         head=ticket.current_head,
-                        detail=self._project_wake_detail(
-                            ticket,
-                            f"repeat-block: {block.rule_id}, {earlier}, {_comment_link(comment)}",
-                        ),
+                        detail=self._project_wake_detail(ticket, detail),
                     )
                 ),
                 dedupe_key=f"t3-repeat:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",

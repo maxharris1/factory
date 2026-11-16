@@ -863,3 +863,17 @@ def test_factory_pr_loop_review_fix_review_approve_hands_off_and_wakes_grok(
     assert [job.request.action for job in delivery.jobs] == ["done"]
     detail = json.loads(str(delivery.jobs[0].request.detail))
     assert (detail["outcome"], detail["project_bot"]) == ("handed-off", "grok-bot")
+
+
+@pytest.mark.parametrize(
+    ("pull", "expected"),
+    [({"additions": 30, "deletions": 12}, 42), ({}, None), ({"additions": 3}, None)],
+    ids=["read", "absent", "partial"],
+)
+def test_github_ticket_carries_the_prs_changed_line_count(pull: dict, expected: int | None) -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = pull
+    source = LivePollSource(config(), gh_runner=gh)
+    project = config().projects[0]
+
+    assert source._github_ticket(project, source._factory(project), "12").changed_lines == expected
