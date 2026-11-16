@@ -24,6 +24,7 @@ from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
+from lib.wait import claim_once
 from lib.waiter import Waiter
 
 ORCH_SCRIPT = (
@@ -332,7 +333,7 @@ def test_a_lagging_preflight_during_a_busy_deploy_keeps_the_device_blocked(
         queue.enqueue(JobRequest(repo="o/r", ticket_id=harness, action="build",
                                  recipient=harness, source_comment_id=harness,
                                  timeout_seconds=60), dedupe_key=harness)
-    job, placement = pool.claim("claude", autostart=(12345, None))
+    job, placement, proof = claim_once(queue, "claude", pool, autostart=(12345, None))
     deploying = threading.Event()
     resume = threading.Event()
 
@@ -359,7 +360,7 @@ def test_a_lagging_preflight_during_a_busy_deploy_keeps_the_device_blocked(
                                  pinned=Pinned("x", {}, {}), transport=transport)
         try:
             assert deploying.wait(10)
-            assert waiter._start(job, placement) is None
+            assert waiter._start(job, placement, proof) is None
             assert rows(queue)[("pc", "claude-bot")].state == "deploying"
             assert pool.claim("codex") is None
         finally:
