@@ -25,6 +25,7 @@ RULE_MODULE = {
     "_lift_cap": "resume",
     "_resume_after_blocked": "resume",
     "_queue_blocked_review": "resume",
+    "_fix_unsat_revise": "resume",
     "_over_cap": "effective",
     "_config_cap": "effective",
     "_effective_cap": "effective",

@@ -138,16 +138,66 @@ def test_slash_go_with_a_rewrite_resumes_the_same_review_round(tmp_path: Path) -
     assert revise(flow, "1/3", "revise-2") == "queued-review-fix"
 
 
-def test_a_grok_go_resumes_the_review_instead_of_a_build(tmp_path: Path) -> None:
+def test_an_approvers_building_go_queues_a_fix_round_at_the_parked_head(tmp_path: Path) -> None:
     flow = AppFlow(tmp_path, enabled=True)
     to_first_review(flow)
     revise(flow, "1/3", "revise-1", " unsat=ac-1")
-    builds = job_count(flow.queue, "build")
+    before = jobs(flow)
 
-    assert flow.go("go-2", author=MAX) == "resumed-review"
+    assert flow.go("go-2", author=MAX) == "queued-fix"
 
-    assert flow.state()["workflow_state"] == "review"
-    assert job_count(flow.queue, "build") == builds
+    assert jobs(flow) == [*before, ("fix", "claude", "go-2")]
+    fix = flow.queue.claim("claude")
+    assert fix is not None
+    detail = json.loads(fix.request.detail or "{}")
+    assert (fix.request.head, detail["round"]) == (HEADS[1], "2/3")
+    assert detail["instruction"].endswith("revise-1")
+    state = flow.state()
+    assert (state["workflow_state"], state["review_round"], state["cap_extra"], state["paused_action"]) == (
+        "fixing",
+        1,
+        0,
+        None,
+    )
+    assert flow.dispatcher.review_actions.states[-1] == "fixing"
+
+
+def test_a_building_go_on_an_unsat_park_at_the_cap_grants_the_fix_round(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_first_review(flow)
+    for number in (1, 2):
+        body = f"- [blocking] f-{number}: the parser accepts prose.\n"
+        assert revise(flow, f"{number}/3", f"revise-{number}", body=body) == "queued-review-fix"
+        flow.finish("claude")
+        assert flow.ready(HEADS[number + 1]) == "queued-review"
+        flow.finish("codex")
+    revise(flow, "3/3", "revise-3", " unsat=ac-2")
+
+    assert flow.go("go-2", author=MAX) == "queued-fix"
+
+    state = flow.state()
+    assert (state["workflow_state"], state["review_round"], state["cap_extra"]) == ("fixing", 3, 1)
+    fix = flow.queue.claim("claude")
+    assert fix is not None
+    assert (fix.request.source_comment_id, json.loads(fix.request.detail or "{}")["round"]) == ("go-2", "4/4")
+
+
+def test_a_replayed_building_go_after_a_failed_label_write_queues_one_fix(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_first_review(flow)
+    revise(flow, "1/3", "revise-1", " unsat=ac-1")
+    flow.dispatcher.review_actions.state_failures.add(("owner/repo", "fixing"))
+    with pytest.raises(RetryableStateError):
+        flow.go("go-2", author=MAX)
+    before = jobs(flow)
+    flow.dispatcher.review_actions.state_failures.clear()
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert handled_outcome(flow.queue, "go-2") == "queued-fix"
+    assert jobs(flow) == before
+    assert [row for row in before if row[0] == "fix"] == [("fix", "claude", "go-2")]
+    assert flow.dispatcher.review_actions.states[-1] == "fixing"
 
 
 def test_a_go_from_a_bot_leaves_the_unsat_pause(tmp_path: Path) -> None:
@@ -160,6 +210,7 @@ def test_a_go_from_a_bot_leaves_the_unsat_pause(tmp_path: Path) -> None:
 
     assert flow.state()["workflow_state"] == "waiting-max"
     assert flow.state()["paused_action"] == "review"
+    assert job_count(flow.queue, "fix") == 0
     assert [row["source_comment_id"] for row in grok_wakes(flow, "go-not-from-approver")] == ["go-2", "slash-1"]
 
 
@@ -198,7 +249,7 @@ def test_a_replayed_go_after_a_failed_label_write_queues_nothing_more(tmp_path: 
     flow = park_with_ready_starts_review(tmp_path)
     flow.dispatcher.review_actions.state_failures.add(("owner/repo", "review"))
     with pytest.raises(RetryableStateError):
-        flow.go("go-resume", author=MAX)
+        flow.post("go-resume", GO.format(state="planning"), MAX)
     before = jobs(flow)
     flow.dispatcher.review_actions.state_failures.clear()
     flow.dispatcher.process(flow.snapshot())
@@ -208,13 +259,41 @@ def test_a_replayed_go_after_a_failed_label_write_queues_nothing_more(tmp_path: 
 
 
 @pytest.mark.job_bound
-def test_an_approvers_go_carries_the_rewrite_into_the_review_brief(tmp_path: Path) -> None:
+def test_an_approvers_building_go_carries_the_rewrite_into_the_fix_brief(tmp_path: Path) -> None:
     flow = park_with_ready_starts_review(tmp_path, text=WITHOUT_MAX_GROK_TRUST)
     rewrite = "ac-1 now reads: the CLI exits 2."
-    assert flow.post("go-rewrite", GO.format(state="building") + "\n" + rewrite, MAX) == "resumed-review"
-    review = flow.queue.claim("codex")
-    assert review is not None
-    assert rewrite in render_brief(review, bot="codex-bot", context=None)
+    assert flow.post("go-rewrite", GO.format(state="building") + "\n" + rewrite, MAX) == "queued-fix"
+    assert flow.queue.claim("codex") is None
+    fix = flow.queue.claim("claude")
+    assert fix is not None
+    assert rewrite in render_brief(fix, bot="claude-bot", context=None)
+
+
+@pytest.mark.job_bound
+def test_a_building_go_fix_brief_targets_the_revise_and_quotes_the_go(tmp_path: Path) -> None:
+    flow = park_with_ready_starts_review(tmp_path, text=WITHOUT_MAX_GROK_TRUST)
+    snapshot = flow.snapshot
+    flow.snapshot = lambda: replace(
+        snapshot(),
+        pr_number=42,
+        comments=tuple(
+            replace(item, url=f"https://github.com/owner/repo/pull/42#issuecomment-{100 + index}")
+            for index, item in enumerate(flow.comments)
+        ),
+    )
+    revise_url = flow.snapshot().comments[[item.id for item in flow.comments].index("unsat-1")].url
+    rewrite = "ac-1 now reads: the CLI exits 2."
+    assert flow.ci == "success"
+
+    assert flow.post("go-fix", GO.format(state="building") + "\n" + rewrite, MAX) == "queued-fix"
+
+    fix = flow.queue.claim("claude")
+    assert fix is not None
+    brief = render_brief(fix, bot="claude-bot", context=None, factory_root="/srv/orch/factory")
+    task = next(line for line in brief.splitlines() if line.startswith("Fix the "))
+    assert task.startswith(f"Fix the `[blocking]` findings of the REVISE verdict at {revise_url}.")
+    assert "f-1: the parser accepts prose." in brief
+    assert rewrite in brief
 
 
 def test_f2_an_unsat_id_keeps_the_meaning_the_review_was_given(tmp_path: Path) -> None:

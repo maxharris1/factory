@@ -256,6 +256,102 @@ class ResumeMixin:
             connection.commit()
         return "queued-blocked-review"
 
+    def _fix_unsat_revise(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[bool, str] | None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replayed = connection.execute(
+                """
+                SELECT 1 FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND outcome = 'queued-fix'
+                """,
+                (*key, comment.id),
+            ).fetchone()
+            if replayed is None:
+                row = connection.execute(
+                    """
+                    SELECT ticket_state.review_round, ticket_state.cap_extra,
+                           ticket_state.generation, ticket_state.paused_question_id
+                    FROM ticket_state
+                    JOIN review_events
+                      ON review_events.repo = ticket_state.repo
+                     AND review_events.ticket_id = ticket_state.ticket_id
+                     AND review_events.comment_id = ticket_state.paused_question_id
+                    WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
+                      AND ticket_state.workflow_state = 'waiting-max'
+                      AND review_events.outcome = 'waiting-max-unsat'
+                    """,
+                    key,
+                ).fetchone()
+                if row is None or not self._may_lift_cap(comment.author):
+                    connection.commit()
+                    return None
+                counted_round = int(row["review_round"]) + 1
+                at_cap = counted_round >= self._effective_cap(ticket, connection)
+                cap_extra = int(row["cap_extra"]) + (1 if at_cap else 0)
+                verdict = next(
+                    (_comment_link(item) for item in ticket.comments if item.id == row["paused_question_id"]),
+                    f"comment:{row['paused_question_id']}",
+                )
+                self._enqueue_step(
+                    connection,
+                    ticket,
+                    comment,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="fix",
+                        recipient=ticket.factory.builder_harness,
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=int(row["generation"]),
+                        head=ticket.current_head,
+                        detail=self._job_detail(
+                            ticket,
+                            action="fix",
+                            head=ticket.current_head,
+                            round_number=counted_round + 1,
+                            cap=self._config_cap(ticket, connection) + cap_extra,
+                            instruction=verdict,
+                            resume=True,
+                            ci_failure=red_checks(ticket, ticket.current_head),
+                        ),
+                    ),
+                    dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:fix:{comment.id}",
+                )
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "fixing",
+                    source="unsat-fix",
+                    at=self.queue.now(),
+                    also={
+                        "review_round": counted_round,
+                        "cap_extra": cap_extra,
+                        "paused_action": None,
+                        "paused_recipient": None,
+                        "paused_head": None,
+                        "paused_generation": None,
+                        "paused_question_id": None,
+                    },
+                )
+                connection.execute(
+                    """
+                    INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                    VALUES (?, ?, ?, 'queued-fix')
+                    """,
+                    (*key, comment.id),
+                )
+            connection.commit()
+        self._write_state_label(ticket, "fixing")
+        return True, "queued-fix"
+
     def _resume_for_max(
         self,
         ticket: TrackedTicket,

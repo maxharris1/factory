@@ -30,7 +30,8 @@ class T1Mixin:
                 return True, "rejected-go-same-family"
             ticket = routed
             resumed = (
-                self._resume_for_max(ticket, comment)
+                (self._fix_unsat_revise(ticket, comment) if state == "building" else None)
+                or self._resume_for_max(ticket, comment)
                 or self._resume_after_blocked(ticket, comment)
                 or self._resume_after_cap(ticket, comment)
             )

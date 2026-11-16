@@ -3,7 +3,8 @@
 #89 was approved at 1/1 and handed off, then got two more rounds outside the
 factory and was merged by hand; the poller never saw any of it. AUT-2284 was
 finished when #66 lost the state dir, and the fresh database queued its
-build again.
+build again. #580 parked on an unsat= REVISE, and Max's state=building go
+re-queued the same review instead of a fix (#611).
 """
 
 from __future__ import annotations
@@ -190,3 +191,55 @@ def test_aut_2284_on_an_empty_db_queues_no_build(tmp_path: Path) -> None:
     ]
     assert _rows(queue, "SELECT workflow_state FROM ticket_state") == [("handed-off",)]
     assert len(actions.handoffs) == 1
+
+
+def test_pr_580_building_go_on_an_unsat_park_fixes_then_reviews_the_new_head(tmp_path: Path) -> None:
+    data, comments = _load("pr-580.json")
+    now = [1000.0]
+    dispatcher, queue = _dispatcher(tmp_path, FakeReviewActions(), now)
+    base = TrackedTicket(
+        repo=data["repo"],
+        ticket_id=data["ticket_id"],
+        factory=factory(),
+        comments=(),
+        current_head=None,
+        ci={},
+        risk=data["risk"],
+    )
+    source = Thread(dispatcher, base, comments)
+    claimed = []
+
+    for shown in range(1, len(comments) + 1):
+        source.shown = shown
+        _run(dispatcher, source, now)
+        for recipient in ("claude", "codex"):
+            job = queue.claim(recipient)
+            if job is None:
+                continue
+            detail = json.loads(job.request.detail or "{}")
+            claimed.append((job.request.action, recipient, job.request.head, detail.get("round")))
+            answer = comments[shown].id if shown < len(comments) else None
+            queue.finish(job.id, owner=recipient, handoff_comment_id=answer)
+
+    outcomes = dict(_rows(queue, "SELECT comment_id, outcome FROM handled_comments"))
+    assert [outcomes.get(item.id) for item in comments] == [
+        None,
+        "queued-plan",
+        "queued-plan-build",
+        "queued-review",
+        "waiting-max-unsat",
+        "queued-fix",
+        "queued-review",
+    ]
+    parked, fixed = "1870b3b61486e62112c30d74d5efbcf2dbffa250", "2" * 40
+    assert claimed == [
+        ("plan", "claude", None, None),
+        ("build", "claude", None, "1/3"),
+        ("review", "codex", parked, "1/3"),
+        ("fix", "claude", parked, "2/3"),
+        ("review", "codex", fixed, "2/3"),
+    ]
+    assert _rows(queue, "SELECT action, head FROM jobs WHERE action = 'review' ORDER BY rowid") == [
+        ("review", parked),
+        ("review", fixed),
+    ]

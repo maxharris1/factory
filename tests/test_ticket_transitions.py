@@ -41,6 +41,7 @@ WRITERS = {
     "t3-repeat": "lib/dispatch/verdict/repeat.py",
     "cap-resume": "lib/dispatch/caps/resume.py",
     "blocked-resume": "lib/dispatch/caps/resume.py",
+    "unsat-fix": "lib/dispatch/caps/resume.py",
     "t-blocked": "lib/dispatch/verdict/blocked.py",
     "retry": "lib/dispatch/retry.py",
 }
