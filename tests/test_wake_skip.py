@@ -7,7 +7,10 @@ import pytest
 
 from lib.dispatch.constants import GROK_WAKE_REASONS, GROK_WAKE_SKIP
 from lib.dispatcher import Dispatcher, TrackedTicket
+from lib.hook_t7 import T7Hook
+from lib.queue import SQLiteJobQueue
 from tests.test_approver_credential import AppFlow
+from tests.test_dispatcher import ticket as routed_ticket
 from tests.test_hooks import (
     HEAD_A,
     HEAD_B,
@@ -19,9 +22,11 @@ from tests.test_hooks import (
     restart,
     setup,
     skipped_keys,
+    stop,
     ticket,
 )
 from tests.test_repeat_block import F1, repeat_wakes, rounds
+from tests.test_routing_honored import _drifted
 from tests.test_wake_payload import on_pr
 
 JUDGMENT = ("capped", "stuck", "blocked", "awaiting-ok", "ship-failed", "go-not-from-approver")
@@ -224,4 +229,51 @@ def test_a_failed_post_stays_pending_and_posts_on_the_next_read(tmp_path: Path) 
     dispatcher.process(on_pr())
 
     assert len(actions.notices) == 1
+    assert FakeBot(queue, "grok").drain() == []
+
+
+def _status(queue: SQLiteJobQueue) -> str:
+    with queue.connect() as connection:
+        return str(connection.execute("SELECT status FROM skipped_wakes").fetchone()[0])
+
+
+def test_a_pending_notice_posts_while_routing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher, queue, go, _, old, new = _drifted(tmp_path)
+    dispatcher.hooks = (T7Hook(),)
+    refused = stop("refused-1", 3, state="refused")
+    actions = dispatcher.review_actions
+    working = actions.comment_once
+
+    def outage(*args: object) -> None:
+        raise RuntimeError("comment post failed")
+
+    monkeypatch.setattr(actions, "comment_once", outage)
+    dispatcher.process(routed_ticket(go, refused, factory_config=old))
+    assert _status(queue) == "pending"
+    monkeypatch.setattr(actions, "comment_once", working)
+
+    dispatcher.process(routed_ticket(go, refused, factory_config=new))
+
+    assert _status(queue) == "posted"
+    [notice] = actions.notices
+    assert "`refused`" in notice
+
+
+def test_a_pending_notice_posts_when_comment_processing_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    wake(dispatcher, "stale")
+
+    def broken(*args: object) -> None:
+        raise RuntimeError("comment processing failed")
+
+    monkeypatch.setattr(dispatcher, "_process_comments", broken)
+    with pytest.raises(RuntimeError, match="comment processing failed"):
+        dispatcher.process(on_pr())
+
+    assert _status(queue) == "posted"
+    assert len(notices(dispatcher)) == 1
     assert FakeBot(queue, "grok").drain() == []

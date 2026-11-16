@@ -7,3 +7,4 @@ signature	wake_grok_once takes the TrackedTicket instead of repo, ticket_id and 
 Linear ticket with no PR	wake Grok as before	there is no GitHub thread to post the notice on
 once-key dedupe both ways	a skipped once-key never becomes a Grok wake later, and a once-key Grok already had is never also skipped	ac-5; the check runs in one BEGIN IMMEDIATE transaction with the insert or enqueue
 existing tests on the old wakes	converted to assert the skip row or notice; ship and merge flow modules opt out with the every_wake_reaches_grok fixture	those modules test shipping and exact gh calls, not the wake policy, which tests/test_wake_skip.py covers
+notice drain placement (round 1 f-1)	process() drains pending skipped-wake notices in a finally around the whole read	worker routing, a closed-ticket return or a raised comment step must not hold back a notice already recorded; posting it needs only the repo and PR number
