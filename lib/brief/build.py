@@ -8,6 +8,7 @@ from lib.brief.common import (
     answers_lines,
     comment_url,
     detail_of,
+    read_ticket_line,
     resume_lines,
 )
 from lib.queue import Job
@@ -15,14 +16,15 @@ from lib.queue import Job
 
 def task_lines(job: Job, facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
-    plan_line = (
-        f"Read the plan handoff comment at {facts['plan']}: it is the plan."
-        if facts["plan"]
-        else "No plan handoff comment is linked: build from the ticket."
-    )
+    if facts["plan_text"]:
+        plan_line = f"The plan handoff is quoted in the Plan section below ({facts['plan'] or 'see the PR'}): it is the plan."
+    elif facts["plan"]:
+        plan_line = f"Read the plan handoff comment at {facts['plan']}: it is the plan."
+    else:
+        plan_line = "No plan handoff comment is linked: build from the ticket."
     return [
         "Build the ticket. Follow the router in Skills above.",
-        f"1. Read the ticket and its brief (Job data). {plan_line}",
+        f"1. {read_ticket_line(facts)} {plan_line}",
         f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
         "Test first.",
         "3. Run only the tests for the files you touched plus a short smoke set. "

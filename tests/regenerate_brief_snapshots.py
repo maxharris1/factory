@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.brief import render_brief  # noqa: E402
+from lib.brief_comment import before_factory_md  # noqa: E402
 from lib.factory_md import parse_factory_context  # noqa: E402
 from lib.queue import Job, JobRequest  # noqa: E402
 
@@ -49,6 +50,62 @@ The reviewer runs `verify-cleffy`.
 
 CI_LOG = "FAILED tests/test_pricing.py::test_start_free - AssertionError\n```\ntraceback\n```"
 
+BRIEF_URL = "https://github.com/owner/repo/pull/42#issuecomment-3"
+PLAN_URL = "https://github.com/owner/repo/pull/42#issuecomment-5"
+
+BRIEF_COMMENT = """**Brief for #41: Add a Start free button to the pricing page** (factory feeder)
+
+- Goal: Add a Start free button to the pricing page
+- Ticket: https://github.com/owner/repo/issues/41
+- PR: #42 on branch `factory/issue-42` off `dev`
+- Risk: high (from the ticket's Risk line)
+- Start: planning (the ticket says Plan first: yes)
+- Builder: claude; reviewer: codex
+
+### Acceptance criteria
+- ac-1: The pricing page shows a Start free button above the plans. Proof: a page test.
+- ac-2: The button opens the sign-up form with the free plan chosen. Proof: an end-to-end test.
+
+### Ticket
+````
+Plan first: yes
+Risk: high
+
+## Why
+Visitors leave the pricing page without a way to try the product.
+
+## Context
+The button reuses the sign-up link:
+
+```tsx
+<a href="/signup?plan=free">Start free</a>
+```
+````
+
+### factory.md (from `dev`)
+### Review
+The reviewer runs `verify-cleffy`.
+
+### Ship
+Squash-merge after APPROVE.
+
+### Context
+- Never apply migrations on a hosted Supabase project from an agent session.
+"""
+
+PLAN_TEXT = """## Plan for #41: Add a Start free button to the pricing page
+
+- ac-1: `app/pricing/page.tsx` renders `<StartFree />` above the plan grid. Proof: `tests/pricing.test.tsx`.
+- ac-2: `StartFree` links to `/signup?plan=free`. Proof: `e2e/start-free.spec.ts`.
+
+Skills read: /home/claude-bot/factory/skills/factory/factory-builder/SKILL.md"""
+
+GITHUB_BRIEF: dict[str, object] = {
+    "brief": BRIEF_URL,
+    "brief_text": before_factory_md(BRIEF_COMMENT).strip(),
+    "brief_url": BRIEF_URL,
+}
+
 UPDATE: dict[str, object] = {
     "kind": "update",
     "last_reviewed_head": "a" * 40,
@@ -60,6 +117,13 @@ UPDATE: dict[str, object] = {
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
     "plan-round-2": ("plan", "claude", 1, None, {"plan_round": 2}),
+    "plan-github": ("plan", "claude", 1, None, {**GITHUB_BRIEF, "gitBranchName": "factory/issue-42"}),
+    "build-github": ("build", "claude", 1, None, {
+        **GITHUB_BRIEF,
+        "gitBranchName": "factory/issue-42",
+        "instruction": PLAN_URL,
+        "plan_text": PLAN_TEXT,
+    }),
     "build": ("build", "claude", 1, None, {
         "gitBranchName": "factory/issue-42",
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",

@@ -80,6 +80,8 @@ class TrackedTicket:
     git_branch_name: str | None = None
     pr_number: str | None = None
     brief: str | None = None
+    brief_text: str | None = None
+    brief_url: str | None = None
     grok_bot: str = "grok-bot"
     linear_issue_id: str | None = None
     linear_ready_state_id: str | None = None
