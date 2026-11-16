@@ -6,16 +6,25 @@ finished tickets. The backup lives outside that directory (default
 taken with SQLite's online backup API (consistent under WAL, and it never
 holds the poller's database for long), and is swapped into place with an
 atomic rename, so a reader never sees half a backup.
+
+Beside that rolling copy, the first cycle of each week in America/New_York
+takes a dated snapshot, weekly/orch-<Monday>.db, the baseline that
+`orch eval-report --db --baseline` compares against (#545). A poller down
+over Monday takes it on its first later cycle that week. Snapshots dated
+more than KEEP_WEEKS weeks before the current Monday are deleted; the
+newest is always kept.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 BACKUP_ENV = "ORCH_DB_BACKUP"
 # The job_events detail of a step restore() holds; the dispatcher's first
@@ -25,6 +34,9 @@ RESTORED = "restored"
 # claim that later goes back to the queue is held as RESTORED (#108).
 RESTORED_CLAIM = "restored-claim"
 STEPS = ("plan", "build", "fix", "review")
+KEEP_WEEKS = 4
+WEEK_ZONE = ZoneInfo("America/New_York")
+_WEEKLY_NAME = re.compile(r"orch-(\d{4}-\d{2}-\d{2})\.db")
 
 
 class BackupError(RuntimeError):
@@ -85,6 +97,36 @@ def backup(db: Path, dest: Path) -> None:
     if not db.exists():
         raise BackupError(f"database {db} does not exist")
     _copy(db, dest)
+
+
+def week_monday(now: datetime) -> date:
+    local = now.astimezone(WEEK_ZONE).date()
+    return local - timedelta(days=local.weekday())
+
+
+def weekly_snapshot(db: Path, directory: Path, now: datetime) -> Path:
+    """Take this week's dated snapshot of db into directory unless it exists,
+    then prune snapshots past KEEP_WEEKS."""
+    _check_apart(db, directory / "orch.db")
+    monday = week_monday(now)
+    target = directory / f"orch-{monday.isoformat()}.db"
+    if not target.exists():
+        if not db.exists():
+            raise BackupError(f"database {db} does not exist")
+        _copy(db, target)
+    _prune(directory, monday - timedelta(weeks=KEEP_WEEKS))
+    return target
+
+
+def _prune(directory: Path, oldest: date) -> None:
+    dated = sorted(
+        (date.fromisoformat(match.group(1)), path)
+        for path in directory.iterdir()
+        if (match := _WEEKLY_NAME.fullmatch(path.name)) is not None
+    )
+    for day, path in dated[:-1]:
+        if day < oldest:
+            path.unlink()
 
 
 def restore(backup_path: Path, db: Path) -> datetime:
@@ -173,15 +215,28 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
 
 
 class CycleBackup:
-    """The poll loop's after-cycle hook: back up, record a failure, go on."""
+    """The poll loop's after-cycle hook: back up, take the weekly snapshot,
+    record a failure, go on."""
 
-    def __init__(self, db: Path, dest: Path, record_error) -> None:
+    def __init__(
+        self,
+        db: Path,
+        dest: Path,
+        record_error,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         self.db = db
         self.dest = dest
+        self.weekly = dest.parent / "weekly"
         self.record_error = record_error
+        self.clock = clock
 
     def __call__(self) -> None:
         try:
             backup(self.db, self.dest)
         except Exception as exc:
             self.record_error("backup", "-", f"backup:{type(exc).__name__}")
+        try:
+            weekly_snapshot(self.db, self.weekly, self.clock())
+        except Exception as exc:
+            self.record_error("backup", "-", f"weekly-snapshot:{type(exc).__name__}")

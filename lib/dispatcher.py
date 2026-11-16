@@ -65,6 +65,9 @@ from lib.dispatch.core import (
 from lib.dispatch.detail import (
     DetailMixin,
 )
+from lib.dispatch.eval_log import (
+    EvalLogMixin,
+)
 from lib.dispatch.followups import (
     FollowupsMixin,
 )
@@ -240,6 +243,7 @@ class Dispatcher(
     FollowupsMixin,
     TrackingMixin,
     PollMixin,
+    EvalLogMixin,
     SchemaMixin,
     DispatcherBase,
 ):

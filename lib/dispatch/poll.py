@@ -124,6 +124,7 @@ class PollMixin:
                 self._read_started = None
         with self._phase("factory-reads"):
             self._record_factory_reads(source)
+        self._export_eval_log()
         self._prune_poll_errors()
         failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
         try:

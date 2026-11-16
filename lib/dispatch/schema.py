@@ -453,6 +453,40 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eval_log_cursor (
+                    source TEXT PRIMARY KEY,
+                    last INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eval_log_pending (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    offset INTEGER NOT NULL,
+                    text TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS eval_log_repos (
+                    repo_key TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL
+                )
+                """
+            )
+            # #545: an existing database starts dispatcher.log at its current
+            # rows rather than dumping its whole history into one cycle.
+            for source in ("ticket_transitions", "jobs", "handled_times"):
+                connection.execute(
+                    f"""
+                    INSERT OR IGNORE INTO eval_log_cursor (source, last)
+                    SELECT '{source}', COALESCE(MAX(rowid), 0) FROM {source}
+                    """
+                )
 
 
 def _add_missing_columns(
