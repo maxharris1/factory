@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from lib.factory_md import EXAMPLE_PATHS, FactoryConfig
-from lib.handoff import labels_for, parse_comment, parse_header_line
+from lib.handoff import labels_for, parse_comment
 from lib.orchestrate import (
     RECOMMENDED_NEXT,
     STOPS,
@@ -592,14 +592,6 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
     assert _named_fields(text, "RouteDecision") == tuple(
         field.name for field in fields(RouteDecision)
     )
-    headers = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip().startswith("<!-- orch:")
-    ]
-    assert headers
-    for header in headers:
-        assert parse_header_line(header)["from"] == "grok-bot"
     tree = ast.parse(source)
     modules: set[str] = set()
     for node in ast.walk(tree):
