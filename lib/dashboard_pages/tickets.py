@@ -9,7 +9,7 @@ from lib.dashboard_flow import GLOSS, PHASE_OVERRIDES, PHASES, PIPELINE, SHIPPED
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.common import (
-    anchor, _bot, _chip, duration, _e, _panel, _short, _span, _td, _ticket,
+    anchor, _bot, _chip, duration, _e, github_links, _panel, _short, _span, _td, _ticket,
 )
 
 
@@ -36,7 +36,7 @@ font-family:var(--mono)}
 .tk-card.tk-stop{border:1px solid color-mix(in srgb,var(--bad) 45%,transparent);box-shadow:none}
 .tk-strip{display:block}
 .tk-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px}
-.tk-id{display:flex;align-items:baseline;gap:8px}
+.tk-id{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
 .tk-id a,.tk-tid{font-size:13px;font-weight:600;overflow-wrap:anywhere;color:var(--text);text-decoration:none}
 .tk-id a:hover{color:var(--ok)}
 .tk-tag{font-size:10px;line-height:1.5;padding:0 4px;border:1px solid var(--line-hi);color:var(--muted)}
@@ -230,6 +230,7 @@ SCRIPT_TICKETS = r"""
     if (job) add(id, link(null, 'job.html#' + anchor(job.job))).textContent = ticketOf(t);
     else add(id, el('span', 'tk-tid', ticketOf(t)));
     add(id, el('span', 'tk-tag', t.tracker));
+    addGh(id, t);
     var state = add(main, el('div', 'tk-state'));
     add(state, el('span', null, t.state));
     tkChips(state, c.live);
@@ -250,6 +251,7 @@ SCRIPT_TICKETS = r"""
       return card;
     }
     if (BOARD.idle.indexOf(c.phase) >= 0) add(main, el('div', 'tk-none', 'no job running'));
+    if (waiting && GH.on && ghRefs(t)) add(main, ghPanel(t, t));
     if (c.verdict && !(waitLine && c.verdict.kind === 'waiting')) {
       var said = add(main, el('div', 'tk-run'));
       add(said, chip(c.verdict.kind, VERDICT[c.verdict.kind] || 'muted'));
@@ -542,7 +544,7 @@ def _card(card: dict) -> str:
     return (
         f'<div class="{"tk-card tk-stop" if stop else "tk-card"}" data-ticket="{_e(_key(ticket))}">'
         + (f'<div class="tk-strip" aria-hidden="true">{strip}</div>' if strip else "")
-        + f'<div class="tk-body"><div class="tk-id">{ident}{_span("tk-tag", ticket["tracker"])}</div>'
+        + f'<div class="tk-body"><div class="tk-id">{ident}{_span("tk-tag", ticket["tracker"])}{github_links(ticket)}</div>'
         f'<div class="tk-state">{state}</div>{lines}</div></div>'
     )
 

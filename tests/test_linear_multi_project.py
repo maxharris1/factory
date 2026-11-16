@@ -171,8 +171,9 @@ class LinearByIssueProject(FakeLinear):
         super().__init__()
         self.where: dict[str, str] = {}
 
-    def linear_intake(self, project_ids: frozenset[str], state: str):
+    def linear_intake(self, project_ids: frozenset[str], state: str, assignees):
         self.queries.append((project_ids, state))
+        self.assignees.append(dict(assignees))
         return [issue for issue in self.issues if self.where[issue.key] in project_ids]
 
 
@@ -211,7 +212,7 @@ def test_the_intake_client_reads_every_project_in_one_query() -> None:
     source = PagedLinearSource([[linear_node(7)]])
     client = LinearIntakeClient(source, {"proj-2": "acme/app", "proj-1": "acme/app"})
 
-    found = client.linear_intake(frozenset({"proj-2", "proj-1"}), "In Progress")
+    found = client.linear_intake(frozenset({"proj-2", "proj-1"}), "In Progress", {})
 
     assert len(source.documents) == 1
     assert "project: { id: { in: $projects } }" in source.documents[0]["query"]
@@ -225,7 +226,7 @@ def test_the_intake_client_refuses_projects_of_two_repos() -> None:
     )
 
     with pytest.raises(Exception, match="one repo"):
-        client.linear_intake(frozenset({"proj-1", "proj-2"}), "In Progress")
+        client.linear_intake(frozenset({"proj-1", "proj-2"}), "In Progress", {})
 
 
 def test_cli_maps_every_linear_id_to_its_repo(tmp_path: Path) -> None:

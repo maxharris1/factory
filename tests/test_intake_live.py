@@ -97,7 +97,7 @@ class FakeLinearSource:
 # Issue does not have gets a GraphQL error, which LivePollSource raises.
 LINEAR_ISSUE_FIELDS = frozenset({
     "id", "identifier", "title", "description", "url", "branchName", "priority",
-    "createdAt", "labels", "history", "project", "state", "team", "comments",
+    "createdAt", "labels", "history", "project", "assignee", "state", "team", "comments",
     "attachments",
 })
 
@@ -161,7 +161,7 @@ def test_linear_intake_reads_who_moved_the_issue_to_the_state() -> None:
     }]}})
     client = LinearIntakeClient(source, {"proj-1": "acme/app"})
 
-    found = client.linear_intake(frozenset({"proj-1"}), "In Progress")
+    found = client.linear_intake(frozenset({"proj-1"}), "In Progress", {})
 
     assert source.documents[0]["query"] == LINEAR_INTAKE_QUERY
     assert source.documents[0]["variables"] == {
@@ -190,7 +190,7 @@ def test_the_linear_intake_query_aliases_branch_name_as_the_poller_does() -> Non
 
 def test_the_linear_intake_reads_the_branch_from_the_aliased_field() -> None:
     source = PagedLinearSource([[linear_node(7)]])
-    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress")
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
     assert [(item.key, item.branch, item.applied_by) for item in found] == [
         ("AUT-7", "max/aut-7", "max")
     ]
@@ -200,7 +200,7 @@ def test_the_linear_intake_reads_every_page() -> None:
     first = [linear_node(number) for number in range(1, 51)]
     second = [linear_node(51, priority=1)]  # urgent, past the first page
     source = PagedLinearSource([first, second])
-    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress")
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
     assert len(found) == 51
     assert [doc["variables"]["after"] for doc in source.documents] == [None, "cursor-1"]
     assert "pageInfo { hasNextPage endCursor }" in source.documents[0]["query"]
@@ -215,7 +215,7 @@ def test_a_next_page_without_a_cursor_fails_the_read() -> None:
                                         "pageInfo": {"hasNextPage": True, "endCursor": None}}}}
 
     with pytest.raises(GitHubAdapterError, match="endCursor"):
-        LinearIntakeClient(NoCursor([]), {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress")
+        LinearIntakeClient(NoCursor([]), {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
 
 
 def pull(number: int, state: str, branch: str = "factory/issue-85", merged: bool = False) -> dict:
@@ -460,7 +460,7 @@ def test_linear_intake_reads_blocks_relations() -> None:
         {"type": "blocks", "issue": {"identifier": "AUT-5", "state": {"type": "completed"}}},
     ]}
     found = LinearIntakeClient(PagedLinearSource([[node]]), {"proj-1": "acme/app"}).linear_intake(
-        frozenset({"proj-1"}), "In Progress"
+        frozenset({"proj-1"}), "In Progress", {}
     )
     assert found[0].blocked_by == (("AUT-7", "started"), ("AUT-5", "completed"))
     assert "inverseRelations(first: 10) { nodes { type issue { identifier state { type } } } " in (
@@ -474,7 +474,7 @@ def test_linear_relations_add_no_linear_request() -> None:
         {"type": "blocks", "issue": {"identifier": "AUT-7", "state": {"type": "started"}}},
     ]}
     source = PagedLinearSource([[node]])
-    LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress")
+    LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
     assert len(source.documents) == 1
 
 
@@ -512,7 +512,7 @@ class RelationPagesSource(PagedLinearSource):
 
 def test_linear_intake_reads_every_page_of_blocks_relations() -> None:
     source = RelationPagesSource()
-    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress")
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
     assert len(found[0].blocked_by) == 120
     assert found[0].blocked_by[-1] == ("AUT-120", "started")
     assert len(source.documents) == 4
@@ -524,4 +524,4 @@ def test_linear_relation_pages_without_a_cursor_fail_the_read() -> None:
             return {"nodes": self.relations[:1], "pageInfo": {"hasNextPage": True, "endCursor": None}}
 
     with pytest.raises(GitHubAdapterError, match="endCursor"):
-        LinearIntakeClient(NoCursor(), {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress")
+        LinearIntakeClient(NoCursor(), {"proj-1": "acme/app"}).linear_intake(frozenset({"proj-1"}), "In Progress", {})
