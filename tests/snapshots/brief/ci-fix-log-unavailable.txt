@@ -1,7 +1,7 @@
 ===== box =====
 # Factory job brief: fix
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: fix
@@ -77,7 +77,7 @@ Never poll, watch or wait on GitHub Actions or any other CI from inside this job
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
@@ -178,7 +178,7 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: fix
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: fix
@@ -254,7 +254,7 @@ Never poll, watch or wait on GitHub Actions or any other CI from inside this job
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 

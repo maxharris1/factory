@@ -1,7 +1,7 @@
 ===== box =====
 # Factory job brief: implement
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: implement
@@ -64,7 +64,7 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 Build the ticket. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). Read the plan handoff comment at https://github.com/owner/repo/pull/42#issuecomment-5: it is the plan.
-2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `dev`). Test first.
+2. Work on PR #42's branch (`gitBranchName` in Job data). Test first.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
 4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
 5. Push, then post the ready handoff below with the head you pushed.
@@ -74,7 +74,7 @@ Never poll, watch or wait on GitHub Actions or any other CI from inside this job
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
@@ -145,7 +145,7 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: implement
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: implement
@@ -208,7 +208,7 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 Build the ticket. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). Read the plan handoff comment at https://github.com/owner/repo/pull/42#issuecomment-5: it is the plan.
-2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `dev`). Test first.
+2. Work on PR #42's branch (`gitBranchName` in Job data). Test first.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
 4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
 5. Push, then post the ready handoff below with the head you pushed.
@@ -218,7 +218,7 @@ Never poll, watch or wait on GitHub Actions or any other CI from inside this job
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 

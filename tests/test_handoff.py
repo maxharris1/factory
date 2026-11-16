@@ -76,8 +76,8 @@ def test_every_fenced_handoff_example_in_the_spec_parses() -> None:
 
 def test_spec_verdict_example_matches_the_review_brief_form() -> None:
     facts = {
-        "round": None,
-        "cap": None,
+        "round": "2/3",
+        "cap": 3,
         "head": None,
         "risk": None,
         "round_number": 2,

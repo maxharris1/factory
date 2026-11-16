@@ -16,6 +16,8 @@ from lib.brief.common import (
 )
 from lib.queue import Job
 
+_PRINT_MODE = {"claude-bot": " Print mode stops background tasks after your last turn, and unpushed work is lost."}
+
 
 def task_lines(job: Job, facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
@@ -25,11 +27,15 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         plan_line = f"Read the plan handoff comment at {facts['plan']}: it is the plan."
     else:
         plan_line = "No plan handoff comment is linked: build from the ticket."
+    branch = (
+        f"PR #{facts['pr']}'s branch (`gitBranchName` in Job data)"
+        if facts["pr"]
+        else f"the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`)"
+    )
     return [
         "Build the ticket. Follow the router in Skills above.",
         f"1. {read_ticket_line(facts)} {plan_line}",
-        f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
-        "Test first.",
+        f"2. Work on {branch}. Test first.",
         f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
         "Before `ready`, run the router's \"Before ready\" steps.",
         base_step(4, facts),
@@ -51,8 +57,8 @@ def base_step(number: int, facts: dict) -> str:
 def builder_notes(job: Job, facts: dict) -> list[str]:
     notes = [
         title_line(facts),
-        "CI runs the full suite and is the gate: a red CI comes back to you "
-        "as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.",
+        "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
+        + _PRINT_MODE.get(f"{job.request.recipient}-bot", ""),
         "Never poll, watch or wait on GitHub Actions or any other CI from inside this job.",
         *QUESTIONS_LINES,
     ]

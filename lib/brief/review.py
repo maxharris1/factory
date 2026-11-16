@@ -159,9 +159,10 @@ def task_lines(facts: dict) -> list[str]:
         unchanged_tag = "`[minor]`."
     if user_impact and later_round:
         gate = (
-            f"Run the verify skill `{verify}` (UI and database checks). {_unreadable_verify(verify, unavailable)} "
+            f"Run the verify skill `{verify}` (UI and database checks), and say which checks did not run. "
+            f"{_unreadable_verify(verify, unavailable)} "
             if verify and verify != "none"
-            else "factory.md names no verify skill (`none`): say which checks did not run. "
+            else f"{_no_verify(verify)}: say which checks did not run. "
         ) + (
             f"pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So run interrogate and "
             "blast-radius only when the merge resolution or the commits after it are new behavior, a redesign or "
@@ -169,14 +170,11 @@ def task_lines(facts: dict) -> list[str]:
         )
     elif verify and verify != "none":
         gate = (
-            f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
-            + _unreadable_verify(verify, unavailable)
+            f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius, "
+            "and say which checks did not run. " + _unreadable_verify(verify, unavailable)
         )
     else:
-        gate = (
-            "factory.md names no verify skill (`none`): run interrogate and blast-radius, "
-            "and say which checks did not run."
-        )
+        gate = f"{_no_verify(verify)}: run interrogate and blast-radius, and say which checks did not run."
     steps = [
         "Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above "
         "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "
@@ -257,6 +255,12 @@ def _bar_step(variant: bool) -> str:
     )
 
 
+def _no_verify(verify: str | None) -> str:
+    if verify == "none":
+        return "factory.md names no verify skill (`none`)"
+    return "Job data has no valid `verify_skill`, so the verify skill is unknown"
+
+
 def _unreadable_verify(verify: str, unavailable: bool) -> str:
     if not unavailable:
         return "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
@@ -270,9 +274,10 @@ def _unreadable_verify(verify: str, unavailable: bool) -> str:
 
 def _fix_round_step(rebase: dict | None, head: str, verify: str | None, unavailable: bool) -> str:
     gates = (
-        f"the CI result and the verify skill `{verify}`. {_unreadable_verify(verify, unavailable)}"
+        f"the CI result and the verify skill `{verify}`, and say which checks did not run. "
+        f"{_unreadable_verify(verify, unavailable)}"
         if verify and verify != "none"
-        else "the CI result (factory.md names no verify skill)."
+        else f"the CI result. {_no_verify(verify)}: say which checks did not run."
     )
     return (
         "This is a fix round: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
@@ -288,12 +293,12 @@ def _fix_round_step(rebase: dict | None, head: str, verify: str | None, unavaila
 
 
 def handoff(bot: str, facts: dict) -> tuple[str, str]:
-    round_text = facts["round"] or (f"<n>/{facts['cap']}" if facts["cap"] else "<n>/<cap>")
     head = facts["head"] or "<reviewed-head-sha>"
     risk = facts["risk"] or "<low|high>"
     header = (
-        f"<!-- orch:v1 kind=verdict from={bot} role=reviewer round={round_text} "
-        f"head={head} ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk={risk} "
+        f"<!-- orch:v1 kind=verdict from={bot} role=reviewer "
+        + (f"round={facts['round']} " if facts["round"] else "")
+        + f"head={head} ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk={risk} "
         "repeat=<id> unsat=<id> -->"
     )
     tags = _tags(facts)

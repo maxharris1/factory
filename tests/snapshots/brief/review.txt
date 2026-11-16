@@ -1,7 +1,7 @@
 ===== box =====
 # Factory job brief: review
 
-You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
+You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: review
@@ -65,14 +65,14 @@ The evidence bundle has no acceptance criteria, so take them from the ticket at 
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
 1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it never leads to `APPROVE`.
 2. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
-3. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
+3. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius, and say which checks did not run. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
 4. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
 5. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
 6. When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, and count it as unmet for `ac`.
 7. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk=low repeat=<id> unsat=<id> -->
 
@@ -159,7 +159,7 @@ The reviewer runs `verify-cleffy`.
 ===== remote (mac) =====
 # Factory job brief: review
 
-You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
+You are Codex Bot (codex-bot). `orch wait codex-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: review
@@ -223,14 +223,14 @@ The evidence bundle has no acceptance criteria, so take them from the ticket at 
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
 1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it never leads to `APPROVE`.
 2. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
-3. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
+3. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius, and say which checks did not run. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
 4. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
 5. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
 6. When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, and count it as unmet for `ac`.
 7. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk=low repeat=<id> unsat=<id> -->
 

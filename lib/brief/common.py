@@ -179,7 +179,7 @@ def opening(bot: str, kind: str) -> str:
         f"# Factory job brief: {kind}\n\n"
         f"You are {BOTS[bot]} ({bot}). `orch wait {bot} --autostart` claimed this job and "
         "started you under `orch job run`, which already sends the job's heartbeat. "
-        "Nobody will message you about this job: this brief is the whole hand-off. "
+        "Nobody will message you while this job runs: this brief is the whole hand-off. "
         "Where this brief and the router skill or pstack differ, this brief wins. "
         "Work only on this job, then finish it as the last sections say."
     )
@@ -262,7 +262,7 @@ def handoff_section(
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
         "not an inline comment). Its first line is this orch:v1 header, "
-        "with each `<...>` replaced by one of its choices:\n\n"
+        "with each `<a|b>` replaced by one choice and each other `<...>` by its value:\n\n"
         f"{header}\n\n"
         f"Then plain prose for people and agents: {example} {read}"
         "If a product question blocks the work, post a questions handoff instead "
