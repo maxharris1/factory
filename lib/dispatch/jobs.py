@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, lane_limit, skill_preflight
-from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
+from lib.device_pool import box_device, free_slots, placement_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
@@ -135,7 +135,7 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
-        blocked = sync_blocks(self.queue)
+        blocked = placement_blocks(self.queue)
         return frozenset(
             harness
             for harness in HARNESSES

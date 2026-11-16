@@ -29,8 +29,11 @@ start fails with CheckoutLagging (`preflight-lagging: ...` or
 the cause. The waiter requeues such a job without charging a round and
 marks the target lagging, so placement skips that device until
 `orch heal devices` brings it up to date. The check is skipped when the box
-HEAD cannot be read. A remote start is also refused while the box checkout
-itself is behind its fetched origin/main (`preflight-lagging: box ...`), so
+HEAD cannot be read. When ssh cannot reach the device at all the start
+fails with DeviceUnreachable (`preflight-unreachable: ...`); the waiter
+requeues the job with no attempt charged and backs the device off (#460).
+A remote start is also refused while the box checkout itself is behind its
+fetched origin/main (`preflight-lagging: box ...`), so
 a pending or refused box deploy never lets a remote run the old commit. On
 the box the checkout's HEAD is compared with its own fetched origin/main
 instead: a box HEAD behind it (self-deploy has not moved it yet) fails the
@@ -119,6 +122,14 @@ class CheckoutLagging(PreflightError):
     def __init__(self, message: str, *, box_behind_origin: bool = False):
         super().__init__(message)
         self.box_behind_origin = box_behind_origin
+
+
+class DeviceUnreachable(PreflightError):
+    """ssh could not reach the placed device, so nothing ran there."""
+
+    def __init__(self, device: str, alias: str):
+        super().__init__(f"preflight-unreachable: {device} ({alias})")
+        self.device = device
 
 
 @dataclass(frozen=True)
@@ -269,7 +280,7 @@ def remote_hashes(
         raise PreflightError(f"preflight: {device.name} has no usable ssh_alias or workdir_root")
     seen = remote_seen(transport, target, checkout, paths)
     if seen is None:
-        raise PreflightError(f"preflight-unreachable: {device.name} ({target.alias})")
+        raise DeviceUnreachable(device.name, target.alias)
     return seen
 
 

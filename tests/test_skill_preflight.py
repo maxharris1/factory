@@ -18,16 +18,19 @@ import shutil
 import subprocess
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib import device_sync, skill_preflight
-from lib.device_pool import DevicePool, Placement
+from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement
+from lib.device_pool import placement_blocked as pool_blocked
+from lib.job_state import MAX_FREE_REQUEUES, free_requeues
 from lib.machines_yml import Device as MachinesDevice, load_machines_yml
 from lib.pstack_pin import install_skills
 from lib.remote import SshTransport
-from lib.queue import SQLiteJobQueue
+from lib.queue import SQLiteJobQueue, _ensure_job_events
 from lib import waiter
 from lib.waiter import HarnessCommand, Waiter
 from tests.test_remote_start import Ssh
@@ -373,22 +376,121 @@ def test_a_remote_without_a_factory_root_fails_without_ssh(tmp_path: Path, lock_
                               root=lock_root)
 
 
-def test_an_unreachable_remote_fails_before_launch(
+def attempt_of(db: Path, job_id: str) -> int:
+    with sqlite3.connect(db) as connection:
+        return int(connection.execute("SELECT attempt FROM jobs WHERE id = ?", (job_id,)).fetchone()[0])
+
+
+def with_job_events(db: Path) -> None:
+    with sqlite3.connect(db) as connection:
+        _ensure_job_events(connection)
+
+
+def events_of(db: Path, job_id: str) -> list[tuple[str, str]]:
+    with sqlite3.connect(db) as connection:
+        return connection.execute(
+            "SELECT event, detail FROM job_events WHERE job_id = ? ORDER BY id", (job_id,)
+        ).fetchall()
+
+
+def test_an_unreachable_remote_requeues_the_job_with_no_attempt_charged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
 ) -> None:
     device = Device(tmp_path, monkeypatch, remote=True)
     install(device.home)
     deploy(device.checkout)
+    with_job_events(device.db)
     device.ssh.offline("fakepc-claude-bot").touch()
 
     job_id, started = device.run_one()
 
     assert started is None
     assert device.spawn.calls == []
-    assert state(device.db, job_id) == "failed"
+    assert state(device.db, job_id) == "queued", "an unreachable device never fails the job"
+    assert attempt_of(device.db, job_id) == 1
+    assert slot_count(device.db) == 0
     assert detail_of(device.db, job_id)["skill_preflight"]["error"].startswith(
         "preflight-unreachable: pc"
     )
+    [(event, detail)] = events_of(device.db, job_id)
+    assert event == "requeued-unreachable"
+    assert detail.endswith("; requeued, no round or attempt charged")
+    with sqlite3.connect(device.db) as connection:
+        assert free_requeues(connection, job_id) == 0, "no free requeue is spent"
+
+
+def test_repeated_unreachable_starts_never_fail_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    deploy(device.checkout)
+    with_job_events(device.db)
+    now = [1_800_000_000.0]
+    device.queue.clock = lambda: now[0]
+    device.ssh.offline("fakepc-claude-bot").touch()
+    job_id, _ = device.run_one()
+
+    for _ in range(MAX_FREE_REQUEUES + 2):
+        assert device.waiter.step() is None
+        assert slot_count(device.db) == 0, "the only device is backed off: nothing is placed"
+        now[0] += UNREACHABLE_BACKOFF_SECONDS
+        assert device.waiter.step() is None
+
+    assert state(device.db, job_id) == "queued"
+    assert attempt_of(device.db, job_id) == 1
+    assert [event for event, _ in events_of(device.db, job_id)] == (
+        ["requeued-unreachable"] * (MAX_FREE_REQUEUES + 3)
+    )
+
+
+def test_an_unreachable_device_gets_no_placement_until_its_backoff_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    real = skill_preflight.preflight
+    monkeypatch.setattr(
+        skill_preflight, "preflight",
+        lambda *args, device, **kwargs: None if device is None or device.local
+        else real(*args, device=device, **kwargs),
+    )
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    deploy(device.checkout)
+    now = [1_800_000_000.0]
+    device.queue.clock = lambda: now[0]
+    pool = device.waiter.pool
+    pool.config = replace(pool.config, devices=tuple(
+        replace(d, enabled=True) for d in pool.config.devices
+    ))
+    device.ssh.offline("fakepc-claude-bot").touch()
+
+    job_id, started = device.run_one()
+    assert started is None
+    assert state(device.db, job_id) == "queued"
+
+    assert device.waiter.step() == job_id, "the same row is claimed again at once"
+    assert placed_on(device.db, job_id) == "box", "the backed-off pc is skipped for the free box"
+    assert attempt_of(device.db, job_id) == 1
+
+    device.ssh.offline("fakepc-claude-bot").unlink()
+    now[0] += UNREACHABLE_BACKOFF_SECONDS - 1
+    with sqlite3.connect(device.db) as connection:
+        assert pool_blocked(connection, now[0]).blocks("pc", "codex"), "the whole device backs off"
+    later = enqueue(device.queue, "b")
+    assert device.waiter.step() == later
+    assert placed_on(device.db, later) == "box", "still inside the backoff"
+
+    now[0] += 1
+    third = enqueue(device.queue, "c")
+    assert device.waiter.step() == third
+    assert placed_on(device.db, third) == "pc", "the backoff has ended"
+
+
+def placed_on(db: Path, job_id: str) -> str:
+    with sqlite3.connect(db) as connection:
+        return str(connection.execute(
+            "SELECT device FROM device_slots WHERE job_id = ?", (job_id,)
+        ).fetchone()[0])
 
 
 def test_the_box_is_checked_in_place_without_ssh(

@@ -538,7 +538,7 @@ def test_a_deploying_device_takes_no_harness(tmp_path: Path) -> None:
     enqueue(queue, "codex", "1")
 
     assert pool.claim("codex") is None
-    assert device_pool.free_slots(pool.config, "codex", {}, device_pool.sync_blocks(queue)) == 0
+    assert device_pool.free_slots(pool.config, "codex", {}, device_pool.placement_blocks(queue)) == 0
 
 
 @pytest.mark.parametrize("state", ["synced", "unreachable"])
@@ -557,4 +557,4 @@ def test_a_device_with_no_sync_row_stays_placeable(tmp_path: Path) -> None:
 
     claimed = pool.claim("claude")
     assert claimed is not None and claimed[1].device == "mac"
-    assert device_pool.free_slots(pool.config, "claude", {}, device_pool.sync_blocks(queue)) == 2
+    assert device_pool.free_slots(pool.config, "claude", {}, device_pool.placement_blocks(queue)) == 2

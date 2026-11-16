@@ -36,7 +36,9 @@ lib/remote.py, so a check never trusts a stored process number). #80 adds
 the job, if one did. #96 adds `run_token_hash`: the hash of the secret
 token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
-contact and when it began failing, for the 60-minute offline check.
+contact and when it began failing, for the 60-minute offline check. #460
+adds `device_backoff`: a device whose start preflight could not reach it
+takes no new placement, for any harness, until its `until` time.
 
 This module starts nothing and contacts no device.
 """
@@ -64,6 +66,8 @@ from lib.remote import new_tag
 from lib.schema import HARNESSES
 
 HEALTH_TABLE = "device_health"
+BACKOFF_TABLE = "device_backoff"
+UNREACHABLE_BACKOFF_SECONDS = 5 * 60
 # Columns F2-02 added to the F2-01 slot table, added in place on an old database.
 _SLOT_COLUMNS = (
     ("runner_pid", "INTEGER"),
@@ -244,7 +248,8 @@ class DevicePool:
                 """
             )
             device = choose_device(
-                self.config, harness, _used(connection, self.config), sync_blocked(connection)
+                self.config, harness, _used(connection, self.config),
+                placement_blocked(connection, now),
             )
             if device is None:
                 connection.commit()
@@ -266,7 +271,7 @@ class DevicePool:
                     self.config,
                     harness,
                     _used(connection, self.config),
-                    sync_blocked(connection),
+                    placement_blocked(connection, now),
                     avoid={dropped},
                 )
                 assert device is not None
@@ -712,9 +717,43 @@ def box_device(config: MachinesConfig | None) -> str:
     return "box"
 
 
-def sync_blocks(queue: SQLiteJobQueue) -> Blocked:
+def back_off(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
+    """Keep new placements off device until `until`, in the caller's transaction (#460)."""
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {BACKOFF_TABLE} (
+            device TEXT PRIMARY KEY,
+            until REAL NOT NULL,
+            reason TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT INTO {BACKOFF_TABLE} (device, until, reason) VALUES (?, ?, ?)
+        ON CONFLICT(device) DO UPDATE SET until = excluded.until, reason = excluded.reason
+        """,
+        (device, until, reason),
+    )
+
+
+def placement_blocked(connection: sqlite3.Connection, now: float) -> Blocked:
+    """Where a claim must not go now: device_sync's blocks plus every backed-off device."""
+    blocked = sync_blocked(connection)
+    if not _has_table(connection, BACKOFF_TABLE):
+        return blocked
+    backed_off = {
+        str(row[0])
+        for row in connection.execute(
+            f"SELECT device FROM {BACKOFF_TABLE} WHERE until > ?", (now,)
+        )
+    }
+    return replace(blocked, devices=blocked.devices | backed_off)
+
+
+def placement_blocks(queue: SQLiteJobQueue) -> Blocked:
     with queue.connect() as connection:
-        return sync_blocked(connection)
+        return placement_blocked(connection, queue.now())
 
 
 def used_slots(queue: SQLiteJobQueue, config: MachinesConfig | None) -> dict[str, int]:

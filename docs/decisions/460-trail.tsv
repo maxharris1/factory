@@ -1,0 +1,7 @@
+decision	choice	why
+requeue path	waiter requeues the claimed row at once (requeue_unreachable), not fail-then-T6 like preflight-lagging	an unreachable start ran nothing; the existing orch job run path already requeues unreachable remote checkouts for free (requeued-unstarted), so this matches it without new T6 states
+free-requeue budget	not charged, not counted in FREE_REQUEUE_EVENTS	the ticket asks that a flap never reaches job-failed-2; the device backoff, not a budget, keeps it from looping hot
+backoff store	new device_backoff table (device, until, reason) written in the requeue's transaction	device_sync rows are keyed (device, bot) and their unreachable state is not a placement block; reusing it would overwrite a lagging row and unblock it
+backoff scope	whole device, every harness, 5 minutes	the ticket names the device; a flapping link affects every bot alias on it
+backoff readers	claim, the dispatcher's busy check and the feeder's capacity read all use placement_blocked	so a backed-off device is not counted as free capacity, and a queued job waiting on it restarts its queue wait instead of timing out
+verification	tests/test_skill_preflight.py drives the real waiter and preflight over fake ssh	the three new tests fail with 'failed' == 'queued' when the waiter's DeviceUnreachable branch is removed
