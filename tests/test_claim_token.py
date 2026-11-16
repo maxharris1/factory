@@ -293,16 +293,20 @@ def test_retired_at_gate_does_not_execute(
     assert not marker.exists(), "retired runner opened gate and executed command for successor claim"
 
 
-def reclaim(queue, pool, job_id: str, waiter=None) -> None:
+def reclaim(queue, pool, job_id: str, waiter=None, *, finished: bool = False) -> None:
     from lib import job_token
+    from lib.queue import Proof
 
     queue.release(job_id, owner="claude")
-    _, hashed = job_token.mint()
+    token, hashed = job_token.mint()
     assert pool.claim("claude", token_hash=hashed, autostart=waiter)[0].id == job_id
+    if finished:
+        queue.finish(job_id, owner="claude", handoff_comment_id=None, proof=Proof(token))
 
 
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
 def test_waiter_brief_failure_cannot_fail_later_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finished: bool
 ) -> None:
     from lib.brief import BriefError
     from lib.queue import _ensure_job_events
@@ -316,7 +320,7 @@ def test_waiter_brief_failure_cannot_fail_later_claim(
     later: list[tuple] = []
 
     def changed_brief(*args, **kwargs):
-        reclaim(queue, waiter.pool, job_id, waiter._claimer)
+        reclaim(queue, waiter.pool, job_id, waiter._claimer, finished=finished)
         later.append(successor(db, job_id))
         raise BriefError("old claim brief failed after release and reclaim")
 
@@ -354,7 +358,8 @@ def test_a_preflight_failure_after_a_reclaim_leaves_the_later_claim(
     assert successor(db, job_id) == later[0]
 
 
-def test_waiter_reap_cannot_fail_later_claim(tmp_path: Path) -> None:
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
+def test_waiter_reap_cannot_fail_later_claim(tmp_path: Path, finished: bool) -> None:
     from lib.queue import _ensure_job_events
     from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
 
@@ -365,7 +370,7 @@ def test_waiter_reap_cannot_fail_later_claim(tmp_path: Path) -> None:
     spawn = FakeSpawn()
     waiter = make_waiter(tmp_path, queue, db, spawn)
     assert waiter.step() == job_id
-    reclaim(queue, waiter.pool, job_id, waiter._claimer)
+    reclaim(queue, waiter.pool, job_id, waiter._claimer, finished=finished)
     later = successor(db, job_id)
     spawn.children[0].returncode = 1
     waiter._reap()
