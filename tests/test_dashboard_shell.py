@@ -49,7 +49,7 @@ def _inner(html: str, ident: str) -> str:
 
 
 def _footer(html: str) -> str:
-    match = re.search(r'<footer class="statusline" id="statusline">.*?</footer>', html, flags=re.S)
+    match = re.search(r'<footer class="statusline" id="statusline" aria-label="Status line">.*?</footer>', html, flags=re.S)
     assert match
     return match.group(0)
 
@@ -86,7 +86,7 @@ def test_the_strip_lists_exactly_the_badge_items_on_every_page(base: dict) -> No
             ("overdue", "cleffy#14", "cursor fix running, no heartbeat for 2h 00m"),
             ("paused", "tracy-harris-coaching#5", "waiting-max (clarify)"),
         ]
-        assert {href for _, _, href, _, _ in rows} == {"job.html"}
+        assert [href for _, _, href, _, _ in rows] == ["job.html", "job.html#job-r-cursor", "job.html"]
         assert [cls for cls, *_ in rows] == ["bad", "bad", "warn"]
 
 
@@ -105,7 +105,7 @@ def _clear(snapshot: dict) -> dict:
 
 def test_the_strip_is_absent_when_the_count_is_zero(base: dict) -> None:
     for name, html in render_pages(_clear(base)).items():
-        assert '<div class="attn" id="attention-strip" hidden></div>' in html, name
+        assert '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention" hidden></div>' in html, name
         assert "attention-count" not in _no_script(html)
         assert 'data-px-key="attention"' not in html
 
@@ -307,7 +307,7 @@ def test_each_segment_is_computed_from_the_snapshot(
         assert f'data-seg="{key}"><span class="sl-k">{seg["label"]}</span><span class="sl-v">{seg["text"]}' in footer
     else:
         assert (f'<a class="sl-vital {state}" href="{href}" data-seg="{key}"><span class="blk" '
-                f'aria-hidden="true"></span><span>{text}</span></a>') in footer
+                f'aria-hidden="true"></span><span>{text}</span><span class="vh">, {state}</span></a>') in footer
 
 
 @needs_node
@@ -329,12 +329,12 @@ def test_the_script_ticks_the_ages_and_ages_the_components(tmp_path: Path, base:
     assert "<span>webhook 8m 44s</span>" in line
     # The snapshot is overdue, so the page can no longer see either component.
     assert ('<a class="sl-vital warn" href="health.html#components" data-seg="components">'
-            '<span class="blk" aria-hidden="true"></span><span>0 / 2 up</span></a>') in line
+            '<span class="blk" aria-hidden="true"></span><span>0 / 2 up</span><span class="vh">, warn</span></a>') in line
 
 
 def test_the_status_line_is_on_every_page_after_main(base: dict) -> None:
     for name, html in render_pages(base).items():
-        assert html.index("</main>") < html.index('<footer class="statusline" id="statusline">'), name
+        assert html.index("</main>") < html.index('<footer class="statusline" id="statusline" aria-label="Status line">'), name
         footer = _footer(html)
         assert footer.count('<span class="sl-brand">factory</span>') == 1
         for href in re.findall(r'href="([^"]+)"', footer):
@@ -826,3 +826,200 @@ def test_focus_on_a_resolved_attention_item_falls_back_to_the_panel_root(
     (step,) = _place(tmp_path, snapshot, page_name, _ids(page_name), [["put", at], ["poll", later], ["where", None]])
     assert step["where"]["path"] == [root], step
     assert step["where"]["attrs"]["tabindex"] == "-1", step
+
+
+# --- #480: link state, strip ticket links, skip link and landmarks ---------------------
+
+
+def _link_harness() -> str:
+    return (
+        activity.HARNESS.replace("const steps = [];", "const steps = [];\nlet failing = false;")
+        .replace(
+            "  return Promise.resolve({ok: true, status: 200,",
+            "  if (failing) return Promise.reject(new Error('offline'));\n  return Promise.resolve({ok: true, status: 200,",
+        )
+        .replace(
+            "    } else if (kind === 'poll') {",
+            "    } else if (kind === 'hide' || kind === 'show') {\n"
+            "      document.hidden = kind === 'hide';\n"
+            "      (docListeners.visibilitychange || []).forEach(fn => fn({type: 'visibilitychange'}));\n"
+            "      if (document.hidden) polls.splice(0).forEach(fn => fn());\n"
+            "      await new Promise(resolve => realSetTimeout(resolve, 50));\n"
+            "    } else if (kind === 'fail' || kind === 'ok') {\n"
+            "      failing = kind === 'fail';\n"
+            "    } else if (kind === 'focused') {\n"
+            "      steps.push({focused: document.activeElement ? document.activeElement.attrs.id : null});\n"
+            "    } else if (kind === 'label') {\n"
+            "      ids['attention-strip'].setAttribute('aria-label', 'Needs attention');\n"
+            "      ids.statusline.setAttribute('aria-label', 'Status line');\n"
+            "    } else if (kind === 'labels') {\n"
+            "      steps.push({labels: [ids['attention-strip'].getAttribute('aria-label'), ids.statusline.getAttribute('aria-label')]});\n"
+            "    } else if (kind === 'link') {\n"
+            "      steps.push({link: [ids['link-text'].textContent, ids.link.className, ids.caret.children.map(c => c.html()).join('')]});\n"
+            "    } else if (kind === 'poll') {",
+        )
+    )
+
+
+def _link_run(tmp_path: Path, snapshot: dict, actions: list, name: str = "index.html",
+              ids: list[str] | None = None) -> dict:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    harness = _link_harness()
+    assert "kind === 'hide'" in harness and "if (failing)" in harness
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)[name], flags=re.S)
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         SCRIPT_PAGE[name], "", json.dumps(ids or BAR), json.dumps(actions)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _links(out: dict) -> list[list[str]]:
+    return [step["link"] for step in out["steps"] if "link" in step]
+
+
+@needs_node
+def test_a_hidden_tab_never_reads_link_lost(tmp_path: Path, base: dict) -> None:
+    out = _link_run(tmp_path, base, [
+        ["link"], ["hide"], ["link"], ["advance", 10], ["link"], ["show"], ["link"], ["advance", 1], ["link"],
+    ])
+    seen = _links(out)
+    assert [text for text, *_ in seen] == ["LIVE"] * 5
+    assert len({tuple(state) for state in seen}) == 1, seen
+
+
+@needs_node
+def test_hidden_time_does_not_count_after_the_tab_shows(tmp_path: Path, base: dict) -> None:
+    out = _link_run(tmp_path, base, [
+        ["hide"], ["advance", 30], ["fail"], ["show"], ["link"], ["advance", 5], ["link"],
+    ])
+    assert [text for text, *_ in _links(out)] == ["LIVE", "LIVE"]
+
+
+@needs_node
+def test_failing_polls_on_a_visible_tab_still_reach_link_lost(tmp_path: Path, base: dict) -> None:
+    out = _link_run(tmp_path, base, [["fail"], ["hide"], ["show"], ["link"], ["advance", 7], ["link"]])
+    (before, _, _), (after, cls, caret) = _links(out)
+    assert (before, after, cls) == ("LIVE", "LINK LOST", "link lost")
+    assert caret == page.px_strip("caret", state="link-lost", height=12)
+    out = _link_run(tmp_path / "visible", base, [["fail"], ["advance", 7], ["link"]])
+    assert _links(out)[0][0] == "LINK LOST"
+
+
+def _ticket_items(snapshot: dict) -> dict:
+    out = copy.deepcopy(snapshot)
+    out["queued"].append(dict(out["queued"][0], ticket_id="13", job="q-later"))
+    out["attention"] = {"count": 3, "items": [
+        {"kind": "stuck", "repo": "maxharris1/cleffy", "ticket_id": "13", "detail": "running"},
+        {"kind": "stale", "repo": "maxharris1/Cleffy", "ticket_id": "12", "detail": "queued"},
+        {"kind": "paused", "repo": "aut0-code/aut0", "ticket_id": "AUT-7", "detail": "neither"},
+    ]}
+    return out
+
+
+TICKET_HREFS = ["job.html#job-r-codex-", "job.html#job-g-grok-c", "job.html"]
+
+
+def _strip_hrefs(markup: str) -> list[str]:
+    return re.findall(r'<a class="attn-who" href="([^"]+)"', markup)
+
+
+def _panel_hrefs(markup: str) -> list[str]:
+    return re.findall(r'<a class="at-go" href="([^"]+)"', markup)
+
+
+def test_strip_ticket_links_follow_the_activity_panel_rule(base: dict) -> None:
+    snapshot = _ticket_items(base)
+    pages = render_pages(snapshot)
+    assert _panel_hrefs(_section(pages["activity.html"], "attention")) == TICKET_HREFS
+    for name, html in pages.items():
+        assert _strip_hrefs(_section(_no_script(html), "attention-strip")) == TICKET_HREFS, name
+
+
+@needs_node
+def test_script_strip_ticket_links_follow_the_activity_panel_rule(tmp_path: Path, base: dict) -> None:
+    out = _script(tmp_path, _ticket_items(base), "activity.html", ids=BAR + ["attention"])
+    assert _strip_hrefs(out["html"]["attention-strip"]) == TICKET_HREFS
+    assert _panel_hrefs(out["html"]["attention"]) == TICKET_HREFS
+
+
+FOCUSABLE = re.compile(r'<(a\s[^>]*href=|button\b|input\b|select\b|textarea\b|summary\b|[a-z]+\s[^>]*tabindex="(?!-1)")')
+
+
+def test_skip_to_content_is_the_first_focusable_element_on_every_page(base: dict) -> None:
+    for name, html in render_pages(base).items():
+        body = _no_script(html)[html.index("<body"):]
+        body = body[body.index(">") + 1:]
+        first = FOCUSABLE.search(body)
+        assert first and body[first.start():].startswith(
+            '<a class="skip" id="skip" href="#hud">Skip to content</a>'), name
+        assert '<main id="hud" tabindex="-1">' in html, name
+    css = page.CSS
+    assert ".vh,.skip:not(:focus){position:absolute;width:1px;height:1px;" in css
+    assert "clip:rect(0 0 0 0)" in css
+    assert re.search(r"\.skip:focus\{position:fixed;[^}]*background:var\(--panel\);[^}]*color:var\(--text\)", css)
+    assert "a:focus-visible{outline:2px solid var(--brand)" in css
+
+
+@needs_node
+@pytest.mark.parametrize("name", PAGES)
+def test_the_skip_link_moves_focus_to_main_without_a_hash(tmp_path: Path, base: dict, name: str) -> None:
+    out = _link_run(tmp_path, base, [["focused"], ["click", {"id": "skip"}], ["focused"]], name=name,
+                    ids=JOB + ["skip"] if name == "job.html" else BAR + ["skip", "hud"])
+    before, click, after = out["steps"]
+    assert (before["focused"], click["prevented"], after["focused"]) == (None, True, "hud")
+
+
+@pytest.mark.parametrize(("name", "label"), [
+    ("index.html", "Lanes"), ("activity.html", "Activity"), ("efficiency.html", "Efficiency"), ("health.html", "System"),
+])
+def test_four_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
+    html = render_pages(base)[name]
+    assert re.findall(r"<h1\b[^>]*>.*?</h1>", html) == [f'<h1 class="vh">{label}</h1>']
+    assert f'<a href="{name}" aria-current="page">{label}</a>' in html
+    assert '<main id="hud" tabindex="-1"><h1 class="vh">' in html
+
+
+def test_the_tickets_page_keeps_its_headings(base: dict) -> None:
+    html = render_pages(base)["job.html"]
+    assert 'class="vh">Tickets<' not in html
+    assert re.findall(r"<h1\b[^>]*>", html) == ["<h1>"] * 4
+
+
+def test_the_strip_and_status_line_are_labelled(base: dict) -> None:
+    for snapshot in (base, _clear(base)):
+        for name, html in render_pages(snapshot).items():
+            assert '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention"' in html, name
+            assert '<footer class="statusline" id="statusline" aria-label="Status line">' in html, name
+
+
+@needs_node
+def test_a_redraw_keeps_the_strip_and_status_line_labels(tmp_path: Path, base: dict) -> None:
+    later = _ticket_items(base)
+    later["generated_at_epoch"] += 5
+    out = _link_run(tmp_path, base, [["label"], ["poll", later], ["labels"]])
+    assert out["steps"][-1]["labels"] == ["Needs attention", "Status line"]
+    assert _strip_hrefs(out["html"]["attention-strip"]) == TICKET_HREFS
+
+
+def _visible(markup: str) -> str:
+    return re.sub(r'<span class="vh">[^<]*</span>', "", markup)
+
+
+@pytest.mark.parametrize(("case", "change"), [(row[0], row[1]) for row in SEGMENTS],
+                         ids=[row[0] for row in SEGMENTS])
+def test_every_stated_segment_says_its_state_in_hidden_text(base: dict, case: str, change) -> None:
+    snapshot = change(base)
+    footer = _footer(render_pages(snapshot)["index.html"])
+    vitals = re.findall(r'<a class="sl-vital ([a-z]+)"[^>]*>(.*?)</a>', footer)
+    assert vitals, case
+    for state, inner in vitals:
+        assert state in ("ok", "warn", "bad", "muted"), case
+        assert inner.endswith(f'<span class="vh">, {state}</span>'), (case, inner)
+        assert _visible(inner).count("<span") == 2, (case, inner)
+    assert '<span class="vh">' not in "".join(re.findall(r'<span class="sl-seg[^"]*".*?</span></span>', footer))

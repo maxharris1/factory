@@ -75,7 +75,7 @@ def test_an_unsat_id_missing_from_the_brief_is_named_as_such(tmp_path: Path) -> 
 
     assert revise(flow, "1/3", "revise-1", " unsat=ac-9") == "waiting-max-unsat"
 
-    assert "ac-9 (not in the brief)" in unsat_wakes(flow)[0]
+    assert "ac-9 (not in the criteria)" in unsat_wakes(flow)[0]
 
 
 def test_an_unsat_revise_at_the_cap_parks_instead_of_capping(tmp_path: Path) -> None:
@@ -215,3 +215,17 @@ def test_an_approvers_go_carries_the_rewrite_into_the_review_brief(tmp_path: Pat
     review = flow.queue.claim("codex")
     assert review is not None
     assert rewrite in render_brief(review, bot="codex-bot", context=None)
+
+
+def test_f2_an_unsat_id_keeps_the_meaning_the_review_was_given(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_first_review(flow)
+    changed = BRIEF.replace("The CLI exits 1 on a bad flag.", "The CLI always exits 0.")
+    flow.comments.append(comment("brief-2", changed, author="grok-login", created_at=flow.now[0] + 1))
+
+    assert revise(flow, "1/3", "revise-1", " unsat=ac-1") == "waiting-max-unsat"
+
+    wakes = unsat_wakes(flow)
+    assert len(wakes) == 1
+    assert "criterion-unsatisfiable: ac-1: The CLI exits 1 on a bad flag., " in wakes[0]
+    assert "always exits 0" not in wakes[0]

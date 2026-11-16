@@ -13,7 +13,7 @@ from lib.dashboard_telemetry import rollup_panel, TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key, _health_link, _relay
-from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
+from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _ticket, ticket_href
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_devices, _lanes
 from lib.dashboard_pages.system import (
@@ -151,6 +151,7 @@ SCRIPT = r"""
     root.replaceChildren();
     root.hidden = !items.length;
     if (!items.length) return;
+    var hrefs = jobHrefs(d);
     var head = add(root, el('div', 'attn-head'));
     var blk = add(head, el('span', 'attn-blk'));
     blk.setAttribute('aria-hidden', 'true');
@@ -162,7 +163,7 @@ SCRIPT = r"""
       var row = add(root, el('div', 'attn-item'));
       row.setAttribute('data-attn', attentionKey(x));
       add(row, chip(x.kind, ATTENTION[x.kind] || 'muted'));
-      add(row, link('attn-who', x.component ? healthLink(x.link) : 'job.html')).textContent =
+      add(row, link('attn-who', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
         x.component ? x.component : ticketOf(x);
       add(row, el('span', 'attn-what', x.detail));
     });
@@ -264,6 +265,7 @@ SCRIPT = r"""
       add(a, el('span', 'blk')).setAttribute('aria-hidden', 'true');
       var text = add(a, el('span', null, s.text));
       if (s.age !== null) ticking(text, s.age, s.prefix);
+      add(a, el('span', 'vh', ', ' + s.state));
     });
   }
 
@@ -1096,14 +1098,16 @@ def _attention_strip(snapshot: dict) -> str:
     """Every item behind the attention count, inline with its chip and link;
     empty and hidden when there is none."""
     items = (snapshot.get("attention") or {}).get("items") or []
+    root = '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention"'
     if not items:
-        return '<div class="attn" id="attention-strip" hidden></div>'
+        return f"{root} hidden></div>"
+    hrefs = _job_hrefs(snapshot)
 
     def item(row: dict) -> str:
         if row.get("component"):
             href, who = _health_link(row.get("link")), row["component"]
         else:
-            href, who = "job.html", _ticket(row)
+            href, who = ticket_href(hrefs, row), _ticket(row)
         return (
             f'<div class="attn-item" data-attn="{_e(_attention_key(row))}">'
             + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
@@ -1114,7 +1118,7 @@ def _attention_strip(snapshot: dict) -> str:
 
     need = " needs attention" if len(items) == 1 else " need attention"
     return (
-        '<div class="attn" id="attention-strip">'
+        f"{root}>"
         '<div class="attn-head"><span class="attn-blk" aria-hidden="true">'
         f'{px_strip("attention", state="attention", height=16)}</span>'
         '<a class="attn-count" href="activity.html#attention">'
@@ -1252,9 +1256,10 @@ def _statusline(snapshot: dict) -> str:
             filled = True
         parts.append(
             f'<a class="sl-vital {seg["state"]}" href="{_e(seg["href"])}" data-seg="{_e(seg["key"])}">'
-            f'<span class="blk" aria-hidden="true"></span>{_span(None, seg["text"])}</a>'
+            f'<span class="blk" aria-hidden="true"></span>{_span(None, seg["text"])}'
+            f'{_span("vh", ", " + seg["state"])}</a>'
         )
-    return f'<footer class="statusline" id="statusline">{"".join(parts)}</footer>'
+    return f'<footer class="statusline" id="statusline" aria-label="Status line">{"".join(parts)}</footer>'
 
 
 _PANELS = {
@@ -1270,6 +1275,7 @@ def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
+    heading = "" if name == "job.html" else f'<h1 class="vh">{_e(label)}</h1>'
     return "\n".join(
         [
             "<!doctype html>",
@@ -1285,8 +1291,9 @@ def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
             f'<body data-page="{page}" '
             f'data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
             f'data-refresh="{refresh}">',
+            '<a class="skip" id="skip" href="#hud">Skip to content</a>',
             _topbar(snapshot, name),
-            f'<main id="hud">{panels}</main>',
+            f'<main id="hud" tabindex="-1">{heading}{panels}</main>',
             _statusline(snapshot),
             f"<script>{script}</script>",
             "</body></html>",

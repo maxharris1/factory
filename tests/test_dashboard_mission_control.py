@@ -304,7 +304,7 @@ def test_page_keeps_a_no_script_fallback(tmp_path: Path) -> None:
     assert '<noscript><meta http-equiv="refresh" content="20"></noscript>' in html
     # The panels are rendered server-side, so the page reads without script
     # (tests/test_dashboard_layout.py checks every page).
-    assert '<main id="hud">' in html and "cleffy#13" in html
+    assert '<main id="hud" tabindex="-1">' in html and "cleffy#13" in html
 
 
 def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:

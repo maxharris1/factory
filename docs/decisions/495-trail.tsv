@@ -1,0 +1,7 @@
+decision	choice	why
+playbook	figure-it-out with Feature steps, one owner, no helper	plan named one owner; about 150 lines across coupled files; 60-minute job budget
+brief choice	store the poll's pick on TrackedTicket.brief_comment	same brief by construction, Linear included (plan option A)
+bold label	top-level paragraph whose first line is one bold span counts as a level-7 heading	reads briefs already posted; how criteria show in the brief is out of scope
+GitHub issue read	one per-head read, only with no trusted brief	issue constraint: no extra call per poll; plan open question left at the recommended default
+empty bundle	fixed sentence in text, source none	ac-4
+fixture	tests/test_dispatcher.ticket sets brief_comment with canonical_brief	dispatcher tests keep reading criteria from their comments
