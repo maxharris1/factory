@@ -1079,8 +1079,9 @@ Keep the checkout at
 `$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
 The script warns for another checkout or branch, refuses to replace a
 non-factory `orch` wrapper, and safely recreates the venv on every run while
-preserving the shared database. Production requirements contain PyYAML only;
-test tooling is in `requirements-dev.txt`.
+preserving the shared database. `requirements.txt` holds what the venv runs, pytest
+included because this repo's `review.pre_ready` runs it under `$ORCH_PYTHON`;
+`requirements-dev.txt` adds pytest-xdist for CI.
 Before initialization, fill the stable Linear-user and project-ID placeholders
 with values Max confirms. Confirm that `LINEAR_API_KEY` is an
 existing Max-provisioned key; this repository does not create one. Then run:
