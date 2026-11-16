@@ -760,7 +760,8 @@ NO_SCRIPT_VIEW = r"""
     canvases: [...art.querySelectorAll('canvas.jd-journey, canvas.jd-flowmap')].filter(shown).length,
     buttons: [...art.querySelectorAll('.jd-box button, .jd-ctl button, .jd-chart button')].filter(shown).length,
     steps: [...art.querySelectorAll('ol.journey .step')].filter(shown).map(s => s.textContent),
-    allButtons: [...art.querySelectorAll('button')].filter(shown).length,
+    allButtons: [...document.body.querySelectorAll('button')].filter(shown).length,
+    filterButtons: [...document.querySelectorAll('#ticket-filter button')].filter(shown).length,
     logNames: [...art.querySelectorAll('ol.runlog .visit .name')].filter(shown).map(s => s.textContent),
   };
 })()"""
@@ -791,7 +792,8 @@ def test_with_scripting_off_the_journey_is_a_readable_list(tmp_path: Path) -> No
     assert [name.removesuffix(" · now") for name in views["off"]["logNames"]] == path
     assert views["on"]["canvases"] == 2 and views["on"]["steps"] == []
     assert views["on"]["buttons"] == len(path) + 3
-    assert views["on"]["allButtons"] == 2 * len(path) + 3
+    assert views["on"]["filterButtons"] > 0
+    assert views["on"]["allButtons"] == 2 * len(path) + 3 + views["on"]["filterButtons"]
 
 
 def test_a_queued_job_s_live_run_says_not_started_yet(tmp_path: Path) -> None:
