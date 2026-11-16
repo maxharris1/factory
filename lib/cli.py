@@ -83,6 +83,7 @@ from lib.queue import (
     QueueError,
     SQLiteJobQueue,
     job_from_row,
+    require_proof,
 )
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
@@ -1685,7 +1686,7 @@ def _job_run_command(argv: list[str]) -> int:
         # #96: an autostart run proves itself to `orch job done` with a
         # fresh secret token; only its hash goes on the slot (in prepare).
         run_token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
-        refusal = None if checked_autostart is not None else _proof_refusal(queue, args.job_id)
+        refusal = _proof_refusal(queue, args.job_id)
     except placed_run.PlacementError as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 2
@@ -1695,8 +1696,8 @@ def _job_run_command(argv: list[str]) -> int:
     if refusal is not None:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return 2
-    proof = run_token if checked_autostart is not None else job_token.presented(os.environ)
-    claim_proof = None if checked_autostart is not None else Proof(proof)
+    claim_proof = Proof(job_token.presented(os.environ))
+    proof = run_token if checked_autostart is not None else claim_proof.token
     try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
     except ClaimProofError as exc:
@@ -1917,7 +1918,7 @@ def _job_run_command(argv: list[str]) -> int:
         return 1
     finally:
         if budget.expired:
-            _record_wall_clock(queue, args.job_id, budget, placed.device.name, log)
+            _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
         if session is not None:
@@ -1935,7 +1936,7 @@ def _job_run_command(argv: list[str]) -> int:
         # once no worker of it runs (run reaped its own), so T6 never
         # retries it beside a live one.
         settle = (
-            (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker))
+            (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker, claim_proof))
             if (placed.autostart or budget.expired) and not placed.remote
             else None
         )
@@ -1955,6 +1956,7 @@ def _settle_box(
     owner: str,
     log: Callable[[str], None],
     live: Callable[[], int | None],
+    proof: Proof,
 ) -> None:
     """Fail an ended box run's job for T6, unless `live` names a worker that still runs.
 
@@ -1965,19 +1967,27 @@ def _settle_box(
     if pid is not None:
         log(f"worker pid {pid} still runs; job {job_id} not failed while it runs")
         return
-    _fail_unfinished(queue, job_id, owner, log)
+    _fail_unfinished(queue, job_id, owner, log, proof)
 
 
-def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
+def _fail_unfinished(
+    queue: SQLiteJobQueue,
+    job_id: str,
+    owner: str,
+    log: Callable[[str], None],
+    proof: Proof,
+) -> None:
     """An autostart run whose command ended without `orch job done` goes to T6 now (#80)."""
     try:
         with queue.connect() as connection:
             row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None or row["state"] != "running":
             return
-        retry_locked(lambda: queue.finish(job_id, owner=owner, handoff_comment_id=None))
+        retry_locked(
+            lambda: queue.finish(job_id, owner=owner, handoff_comment_id=None, proof=proof)
+        )
     except QueueError:
-        return  # finished between the read and the write
+        return
     except (sqlite3.Error, OSError) as exc:
         log(f"could not fail job {job_id}: {' '.join(str(exc).split())}")
         return
@@ -1990,6 +2000,7 @@ def _record_wall_clock(
     budget: job_run.Budget,
     device: str,
     log: Callable[[str], None],
+    proof: Proof,
 ) -> None:
     """#199: the `wall-clock` job event, while the job still runs. Never raises."""
     name = signal.Signals(budget.signum).name if budget.signum is not None else "a stop"
@@ -2002,6 +2013,7 @@ def _record_wall_clock(
     def write() -> None:
         with queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is not None and row["state"] == "running":
                 record_job_event(connection, job_id, job_run.WALL_CLOCK, detail, queue.now())

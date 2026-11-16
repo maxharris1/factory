@@ -181,3 +181,93 @@ def test_a_reclaim_after_the_proof_check_still_refuses_the_old_proof(
             "SELECT claim_token_hash FROM jobs WHERE id = ?", (job_id,)
         ).fetchone()[0] == new_hash
     assert not marker.exists()
+
+
+def successor(db: Path, job_id: str) -> tuple:
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        job = connection.execute(
+            "SELECT state, last_activity_at, finished_at, handoff_comment_id, claim_token_hash "
+            "FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        slot = connection.execute(
+            "SELECT * FROM device_slots WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event, detail FROM job_events WHERE job_id = ?", (job_id,)
+        ).fetchall()
+    return tuple(job), tuple(slot) if slot else None, [tuple(row) for row in events]
+
+
+@pytest.mark.parametrize("autostart", [False, True], ids=["plain", "autostart"])
+@pytest.mark.parametrize("stage", ["check_autostart", "prepare", "started"])
+def test_a_run_retired_by_a_reclaim_never_runs_or_writes_for_the_later_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, autostart: bool
+) -> None:
+    from lib import cli, job_token, placed_run
+    from lib.queue import _ensure_job_events
+    from lib.worktrees import process_start
+    from tests.test_waiter import MACHINES, enqueue, local_pool, make_queue
+
+    db, queue = make_queue(tmp_path)
+    pool = local_pool(queue)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, "retired")
+    waiter = (os.getppid(), process_start(os.getppid())) if autostart else None
+    old, old_hash = job_token.mint()
+    _, new_hash = job_token.mint()
+    pool.claim("claude", token_hash=old_hash, autostart=waiter)
+    monkeypatch.setenv(PROOF_ENV, old)
+    later: list[tuple] = []
+
+    def reclaim() -> None:
+        queue.release(job_id, owner="claude")
+        assert pool.claim("claude", token_hash=new_hash, autostart=waiter)[0].id == job_id
+        later.append(successor(db, job_id))
+
+    if stage == "started":
+        started = placed_run.PlacedRun.started
+
+        def started_then_reclaim(self, pid):
+            started(self, pid)
+            reclaim()
+
+        monkeypatch.setattr(placed_run.PlacedRun, "started", started_then_reclaim)
+    else:
+        step = getattr(placed_run, stage)
+
+        def step_then_reclaim(*args, **kwargs):
+            result = step(*args, **kwargs)
+            reclaim()
+            return result
+
+        monkeypatch.setattr(placed_run, stage, step_then_reclaim)
+    marker = tmp_path / "retired-command-ran"
+
+    cli.main([
+        "job", "run", "claude-bot", job_id, "--db", str(db), "--machines", str(MACHINES),
+        "--", sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ])
+
+    assert [successor(db, job_id)] == later
+    if stage != "started":
+        assert not marker.exists()
+
+
+def test_the_autostart_waiter_hands_its_run_the_claims_proof(tmp_path: Path) -> None:
+    from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
+
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "handed")
+    spawn = FakeSpawn()
+
+    assert make_waiter(tmp_path, queue, db, spawn).step() == job_id
+
+    proof = spawn.calls[0][1]["env"][PROOF_ENV]
+    with sqlite3.connect(db) as connection:
+        stored = connection.execute(
+            "SELECT claim_token_hash FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()[0]
+    assert hashlib.sha256(proof.encode()).hexdigest() == stored

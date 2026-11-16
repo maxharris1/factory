@@ -143,7 +143,6 @@ def _registration_gate(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
 
 @pytest.fixture(autouse=True)
 def _claim_proof(monkeypatch: pytest.MonkeyPatch):
-    """An autostart claim gets no CLAIM_HASH: only its run's token proves it (#96)."""
     from lib.device_pool import DevicePool
     from lib.job_token import PROOF_ENV
     from lib.queue import SQLiteJobQueue
@@ -152,8 +151,7 @@ def _claim_proof(monkeypatch: pytest.MonkeyPatch):
     def proven(claim):
         @functools.wraps(claim)
         def wrapper(self, recipient, **kwargs):
-            if kwargs.get("autostart") is None:
-                kwargs.setdefault("token_hash", CLAIM_HASH)
+            kwargs.setdefault("token_hash", CLAIM_HASH)
             return claim(self, recipient, **kwargs)
 
         return wrapper

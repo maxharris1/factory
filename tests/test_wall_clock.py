@@ -192,13 +192,13 @@ def test_no_retry_starts_while_a_worker_of_the_job_still_runs(tmp_path: Path) ->
     """The wall-clock fail waits for every box worker of the job to be gone."""
     poller, job_id = _box(tmp_path, timeout=2)
     lines: list[str] = []
-    cli._settle_box(poller.queue, job_id, "codex", lines.append, lambda: 4242)
+    cli._settle_box(poller.queue, job_id, "codex", lines.append, lambda: 4242, None)
     assert poller.row(job_id)["state"] == "running"
     assert "worker pid 4242 still runs" in lines[0]
     poller.dispatcher.reconcile_jobs()
     assert [(state, attempt) for _id, state, attempt in poller.jobs()] == [("running", 1)]
 
-    cli._settle_box(poller.queue, job_id, "codex", lines.append, lambda: None)
+    cli._settle_box(poller.queue, job_id, "codex", lines.append, lambda: None, None)
     assert poller.row(job_id)["state"] == "failed"
     poller.dispatcher.reconcile_jobs()
     assert [(state, attempt) for _id, state, attempt in poller.jobs()] == [

@@ -311,12 +311,13 @@ class DevicePool:
             autostart_start=claimer_start,
         )
 
-    def release(self, job_id: str, *, owner: str) -> bool:
+    def release(self, job_id: str, *, owner: str, proof: Proof | None = None) -> bool:
         """Free a job's slot once its worker is confirmed gone. False if already free."""
         if owner not in HARNESSES:
             raise QueueError(f"unknown owner {owner!r}")
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             row = connection.execute(
                 f"SELECT harness FROM {SLOTS_TABLE} WHERE job_id = ?",
                 (job_id,),
@@ -336,7 +337,7 @@ class DevicePool:
         return True
 
     def requeue_unstarted(
-        self, job_id: str, *, owner: str, runner: int, reason: str
+        self, job_id: str, *, owner: str, runner: int, reason: str, proof: Proof | None = None
     ) -> bool:
         """Requeue a placed job whose start failed before any worker (#94).
 
@@ -356,6 +357,7 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
             changed = connection.execute(
                 f"""
                 UPDATE jobs SET state = 'queued', last_activity_at = ?
@@ -463,6 +465,7 @@ class DevicePool:
         remote: bool = False,
         tag: str | None = None,
         runner: int | None = None,
+        proof: Proof | None = None,
     ) -> str | None:
         """Record the worker: a local command's pid, or that a remote start began.
 
@@ -493,15 +496,33 @@ class DevicePool:
         if remote:
             worker_tag = tag if tag is not None else new_tag()
             self._update_slot(
-                job_id, owner, "remote_started = 1, worker_tag = ?", (worker_tag,), guard=checked
+                job_id,
+                owner,
+                "remote_started = 1, worker_tag = ?",
+                (worker_tag,),
+                guard=checked,
+                proof=proof,
             )
             return worker_tag
         self._update_slot(
-            job_id, owner, "worker_pid = ?, worker_start = ?", (pid, start), guard=checked
+            job_id,
+            owner,
+            "worker_pid = ?, worker_start = ?",
+            (pid, start),
+            guard=checked,
+            proof=proof,
         )
         return None
 
-    def forget_worker(self, job_id: str, *, owner: str, runner: int, earlier: Placement) -> None:
+    def forget_worker(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        runner: int,
+        earlier: Placement,
+        proof: Proof | None = None,
+    ) -> None:
         """Drop the record of an earlier runner's worker, now confirmed gone.
 
         Guarded: the slot is still run by `runner` and still names exactly
@@ -527,6 +548,7 @@ class DevicePool:
             "worker_pid = NULL, worker_start = NULL, remote_started = 0, worker_tag = NULL",
             (),
             guard=guard,
+            proof=proof,
         )
 
     def held(self) -> tuple[HeldSlot, ...]:
