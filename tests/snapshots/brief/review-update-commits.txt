@@ -58,9 +58,12 @@ interrogate reviewers: gpt-6.1-sol high, gpt-6.1-sol high
 
 You may start helper agents as pstack recommends. They do research only; you write the verdict.
 
+## Acceptance criteria
+The evidence bundle has no acceptance criteria, so take them from the ticket at https://github.com/owner/repo/pull/42.
+
 ## What to do
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
-1. Requirements first. Before the diff, list the ticket's acceptance criteria by `ac-<n>` and mark each `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state.
+1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state.
 2. The code at `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` was already reviewed and approved. This head brings `dev` in by merge commit `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`. Review only how that merge resolved conflicts (`git show --remerge-diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`) and whether the base changes break this PR: read the CI result on this head, and use `git range-diff` where useful. A finding in code unchanged since `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` is not blocking: tag it `[minor]`. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
 3. These commits came after the merge and get a normal review: `cccccccccccccccccccccccccccccccccccccccc` `dddddddddddddddddddddddddddddddddddddddd`. Read their diff (`git diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6`).
 4. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
@@ -221,9 +224,12 @@ interrogate reviewers: gpt-6.1-sol high, gpt-6.1-sol high
 
 You may start helper agents as pstack recommends. They do research only; you write the verdict.
 
+## Acceptance criteria
+The evidence bundle has no acceptance criteria, so take them from the ticket at https://github.com/owner/repo/pull/42.
+
 ## What to do
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
-1. Requirements first. Before the diff, list the ticket's acceptance criteria by `ac-<n>` and mark each `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state.
+1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state.
 2. The code at `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` was already reviewed and approved. This head brings `dev` in by merge commit `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`. Review only how that merge resolved conflicts (`git show --remerge-diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`) and whether the base changes break this PR: read the CI result on this head, and use `git range-diff` where useful. A finding in code unchanged since `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` is not blocking: tag it `[minor]`. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
 3. These commits came after the merge and get a normal review: `cccccccccccccccccccccccccccccccccccccccc` `dddddddddddddddddddddddddddddddddddddddd`. Read their diff (`git diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6`).
 4. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius. A verify result you cannot read (unknown) is `verdict=BLOCKED`.

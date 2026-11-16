@@ -131,6 +131,7 @@ def render_brief(
     else:
         middle = [
             *([skills.section(router)] if router is not None else []),
+            *(review.evidence_sections(detail, facts) if kind == "review" else []),
             "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
             _handoff(job, bot, kind, facts, skills_read=router is not None),
         ]
