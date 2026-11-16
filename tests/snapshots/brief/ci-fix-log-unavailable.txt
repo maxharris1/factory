@@ -81,7 +81,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -258,7 +258,7 @@ Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, 
 
 <!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
-Then plain prose for people and agents: What changed, the tests and their results, and anything left open. The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: What changed, the tests and their results, and anything left open. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 

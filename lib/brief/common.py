@@ -250,21 +250,16 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
 
 
 def handoff_section(
-    bot: str, role: str, facts: dict, header: str, example: str, *, skills_read: bool
+    bot: str, role: str, facts: dict, header: str, example: str
 ) -> str:
     target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
-    read = (
-        "The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. "
-        if skills_read
-        else ""
-    )
     return (
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
         "not an inline comment). Its first line is this orch:v1 header, "
         "with each `<a|b>` replaced by one choice and each other `<...>` by its value:\n\n"
         f"{header}\n\n"
-        f"Then plain prose for people and agents: {example} {read}"
+        f"Then plain prose for people and agents: {example} "
         "If a product question blocks the work, post a questions handoff instead "
         f"(`<!-- orch:v1 kind=questions from={bot} role={role} -->`, "
         "then the question); it is this job's handoff.\n\n"
