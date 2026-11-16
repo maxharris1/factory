@@ -4,7 +4,6 @@ review.auto_extra_rounds extra rounds at the cap itself."""
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
 
 from lib.dispatch.types import Comment, TrackedTicket
 
@@ -17,10 +16,9 @@ class AutoExtraMixin:
     def _auto_granted_cap_extra(
         self,
         ticket: TrackedTicket,
-        fields: Mapping[str, str],
         state: sqlite3.Row,
     ) -> int | None:
-        if "repeat" in fields or state["stuck"]:
+        if state["stuck"]:
             return None
         already = int(state["cap_extra"])
         if already >= ticket.factory.auto_extra_rounds:

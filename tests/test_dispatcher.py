@@ -14,6 +14,7 @@ from lib.dispatcher import (
     CIResult,
     Comment,
     Dispatcher,
+    PollCycleFailed,
     PollLoop,
     RetryableShipError,
     TicketRef,
@@ -30,6 +31,9 @@ from lib.machines_yml import Device, MachinesConfig
 from lib.orch_yml import Approvals, load_orch_yml
 from lib.poll_source import IntakeRisks
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
+from tests.test_hooks import DECLINE, approve, in_review, say
+from tests.test_hooks import setup as setup_with_hooks
+from tests.test_hooks import ticket as approver_ticket
 
 GO = (
     "<!-- orch:v1 kind=go from=grok-bot role=orchestrator "
@@ -1583,7 +1587,8 @@ def test_poll_records_an_error_when_listing_candidates_raises(
         dedupe_key="clarify:g1",
     )
 
-    dispatcher.poll_once(RaisingSource(failing))
+    with pytest.raises(PollCycleFailed, match=component):
+        dispatcher.poll_once(RaisingSource(failing))
 
     with queue.connect() as connection:
         errors = connection.execute(
@@ -2581,7 +2586,8 @@ def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
         def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
             raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
 
-    dispatcher.poll_once(BrokenGithub())
+    with pytest.raises(PollCycleFailed, match="github: RuntimeError"):
+        dispatcher.poll_once(BrokenGithub())
 
     with queue.connect() as connection:
         row = connection.execute(
@@ -2755,7 +2761,8 @@ def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
     dispatcher, queue = setup(tmp_path)
     log = tmp_path / "poller.log"
     with log.open("w") as stream, contextlib.redirect_stderr(stream):
-        dispatcher.poll_once(GhFailure(body))
+        with pytest.raises(PollCycleFailed, match="linear: ValueError"):
+            dispatcher.poll_once(GhFailure(body))
 
     with queue.connect() as connection:
         detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
@@ -2941,11 +2948,32 @@ def test_stop_wakes_carry_the_configured_project_bot(tmp_path: Path) -> None:
         assert detail["project_bot"] == "offer-brief-project"
 
 
-def test_every_grok_enqueue_for_project_bot_ticket_has_routing_detail(
-    tmp_path: Path,
-) -> None:
+PROJECT_BOT = "offer-brief-project"
+
+
+def watch_grok_enqueues(
+    monkeypatch: pytest.MonkeyPatch, queue: SQLiteJobQueue
+) -> list[JobRequest]:
+    seen: list[JobRequest] = []
+    enqueue = queue.enqueue_in_transaction
+
+    def watched(
+        connection: sqlite3.Connection, request: JobRequest, *, dedupe_key: str
+    ) -> Job:
+        if request.recipient == "grok":
+            seen.append(request)
+        return enqueue(connection, request, dedupe_key=dedupe_key)
+
+    monkeypatch.setattr(queue, "enqueue_in_transaction", watched)
+    return seen
+
+
+def drive_wake_sites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[JobRequest]:
     dispatcher, queue = setup(tmp_path)
-    tracked = replace(ticket(), grok_bot="offer-brief-project")
+    seen = watch_grok_enqueues(monkeypatch, queue)
+    tracked = replace(ticket(), grok_bot=PROJECT_BOT)
     trusted = comment("trusted", "not parsed", author="codex-login")
 
     dispatcher._wake_capped(tracked, trusted)
@@ -2957,28 +2985,138 @@ def test_every_grok_enqueue_for_project_bot_ticket_has_routing_detail(
         "rejected-marker",
     )
     dispatcher._wake_done(tracked, trusted, "handed-off")
+    return seen
+
+
+def drive_invalid_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[JobRequest]:
+    dispatcher, queue = setup(tmp_path)
+    seen = watch_grok_enqueues(monkeypatch, queue)
     invalid_go = comment(
         "invalid-go",
-        (
-            "<!-- orch:v1 kind=go from=grok-bot role=orchestrator -->\n"
-            "Go.\n"
-        ),
+        "<!-- orch:v1 kind=go from=grok-bot role=orchestrator -->\nGo.\n",
         author="grok-login",
     )
-    dispatcher.process(replace(tracked, comments=(invalid_go,)))
+    dispatcher.process(replace(ticket(invalid_go), grok_bot=PROJECT_BOT))
+    return seen
 
-    with queue.connect() as connection:
-        details = [
-            str(row["detail"])
-            for row in connection.execute(
-                "SELECT detail FROM jobs WHERE recipient = 'grok'"
+
+def drive_declined_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[JobRequest]:
+    dispatcher, queue = setup_with_hooks(tmp_path)
+    seen = watch_grok_enqueues(monkeypatch, queue)
+    comments: tuple[Comment, ...] = ()
+    for number, head in enumerate(("1" * 40, "2" * 40, "3" * 40), start=1):
+        comments += (
+            approve(f"verdict-{number}", head, number * 10),
+            say(f"decline-{number}", DECLINE, "tracy-login", number * 10 + 1),
+        )
+        in_review(queue, head)
+        dispatcher.process(
+            replace(approver_ticket(*comments, head=head), grok_bot=PROJECT_BOT)
+        )
+        while (fix := queue.claim("claude")) is not None:
+            queue.finish(fix.id, owner="claude", handoff_comment_id=f"fix-{number}")
+    assert ticket_row(queue)["stuck_reason"] == "declined-3"
+    return seen
+
+
+def drive_ci_red_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[JobRequest]:
+    dispatcher, queue = setup(tmp_path)
+    seen = watch_grok_enqueues(monkeypatch, queue)
+    seed_builder_job(queue)
+    readies: list[Comment] = []
+    for number in range(1, 4):
+        head = str(number) * 7
+        readies.append(
+            comment(
+                f"ready-{number}",
+                READY.format(head=head),
+                author="claude-login",
+                created_at=number,
             )
-        ]
-    assert details
-    assert all(
-        json.loads(detail)["project_bot"] == "offer-brief-project"
-        for detail in details
+        )
+        dispatcher.process(
+            replace(
+                ticket(
+                    *readies,
+                    head=head,
+                    ci={head: CIResult("failure", f"log-{number}")},
+                ),
+                grok_bot=PROJECT_BOT,
+            )
+        )
+        fix = queue.claim("claude")
+        if fix is not None:
+            queue.finish(
+                fix.id, owner="claude", handoff_comment_id=f"ready-{number + 1}"
+            )
+    assert ticket_row(queue)["stuck_reason"] == "ci-red-3"
+    return seen
+
+
+def drive_route_same_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[JobRequest]:
+    dispatcher, queue = setup(tmp_path)
+    seen = watch_grok_enqueues(monkeypatch, queue)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-route",
+            timeout_seconds=5400,
+            detail=json.dumps({"routing": {"builder": "claude", "reviewer": "codex"}}),
+        ),
+        dedupe_key="seed-route",
     )
+    drifted = replace(
+        factory(), builder_harness="codex", reviewer_model="claude-sonnet-4"
+    )
+    dispatcher.process(
+        replace(ticket(factory_config=drifted), grok_bot=PROJECT_BOT)
+    )
+    assert ticket_row(queue)["stuck_reason"] == "route-same-family"
+    return seen
+
+
+def wake_project_bot(request: JobRequest) -> object:
+    try:
+        detail = json.loads(request.detail or "")
+    except json.JSONDecodeError:
+        return None
+    return detail.get("project_bot") if isinstance(detail, dict) else None
+
+
+@pytest.mark.parametrize(
+    ("drive", "actions"),
+    [
+        (drive_wake_sites, {"capped", "ship-failed", "rejected", "done"}),
+        (drive_invalid_go, {"clarify"}),
+        (drive_declined_3, {"stuck"}),
+        (drive_ci_red_3, {"stuck"}),
+        (drive_route_same_family, {"stuck"}),
+    ],
+    ids=["wake-sites", "invalid-go", "declined-3", "ci-red-3", "route-same-family"],
+)
+def test_every_grok_enqueue_for_project_bot_ticket_has_routing_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drive,
+    actions: set[str],
+) -> None:
+    seen = drive(tmp_path, monkeypatch)
+
+    assert actions <= {request.action for request in seen}
+    assert [(request.action, wake_project_bot(request)) for request in seen] == [
+        (request.action, PROJECT_BOT) for request in seen
+    ]
 
 
 def test_t3_rejects_untrusted_reviewer_and_stale_head(tmp_path: Path) -> None:
@@ -5475,7 +5613,8 @@ def test_a_poll_error_row_holds_the_exception_message(tmp_path: Path) -> None:
     from lib.github_actions import GitHubAdapterError
 
     dispatcher, queue = setup(tmp_path, [0.0])
-    dispatcher.poll_once(_FailingSource(GitHubAdapterError("gh pr list exited 1: HTTP 502")))
+    with pytest.raises(PollCycleFailed, match="github: GitHubAdapterError"):
+        dispatcher.poll_once(_FailingSource(GitHubAdapterError("gh pr list exited 1: HTTP 502")))
     # Merged with #135: a poll step's exception keeps its class in `error`
     # and its message, redacted, in `detail` beside the traceback.
     assert _poll_errors(queue) == ["GitHubAdapterError"]

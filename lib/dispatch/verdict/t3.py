@@ -37,6 +37,9 @@ class T3Mixin:
             return True, "stale-revise"
         if "unsat" in fields:
             return self._t3_unsat(ticket, comment, fields["unsat"], reported_round)
+        repeat = self._repeat_trigger(ticket, comment, reported_round)
+        if repeat is not None:
+            return self._t3_repeat(ticket, comment, repeat, reported_round)
         instruction = _comment_link(comment)
         if ticket.factory.start_before_ci:
             gate = self._revise_ci_gate(ticket, comment, reported_round)
@@ -103,7 +106,7 @@ class T3Mixin:
                 connection.commit()
                 return "stale-revise", None
             granted = (
-                self._auto_granted_cap_extra(ticket, fields, state)
+                self._auto_granted_cap_extra(ticket, state)
                 if round_number >= cap
                 else None
             )
