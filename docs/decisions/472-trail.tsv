@@ -1,0 +1,4 @@
+decision	choice	why
+f-1 socket creation	keep socket construction inside the per-address OSError handler, as main de1637b (#475) already does	the head 72f8342 created the socket outside the try, so an EAFNOSUPPORT on the first resolved family aborted the read; a test of family 255 (real kernel EAFNOSUPPORT) failed on 72f8342 with "Linear request failed: URLError"
+rebase onto main	take main for lib/poll_source.py and tests/test_poll_hang_bound.py and drop 72f8342	#473 fixed the same #469 f-2 finding in the same function with the same tests (eight stalled addresses, unsupported family falls through); keeping a second implementation would only churn
+coverage	rely on main tests for ac-1 and ac-3 and f-1	moving socket.socket out of the try makes test_an_address_whose_socket_cannot_be_made_falls_through_to_the_next fail with the reviewer error; reverting the connect loop is what test_a_linear_read_stalled_in_tcp_connects_frees_its_slot_for_the_next_cycle covers
