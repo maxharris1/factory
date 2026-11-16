@@ -288,7 +288,7 @@ SCRIPT_COMPONENTS = r"""
   function renderNoWaiter(d) {
     var h = d.health || {};
     var rows = h.no_waiter || [];
-    var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length ? rows.length + ' harnesses' : 'none');
+    var root = panel('no-waiter', 'Queued jobs with no waiter', !rows.length ? 'none' : rows.length === 1 ? '1 harness' : rows.length + ' harnesses');
     if (!root) return;
     if (!rows.length) {
       var aged = agedHealth(d);
@@ -656,4 +656,4 @@ def _no_waiter(snapshot: dict) -> str:
         for row in rows
     )
     return _panel("no-waiter", "Queued jobs with no waiter", f'<ul class="feed">{items}</ul>',
-                  count=f"{len(rows)} harnesses")
+                  count="1 harness" if len(rows) == 1 else f"{len(rows)} harnesses")

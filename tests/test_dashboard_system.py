@@ -196,6 +196,32 @@ def test_poller_log_lines_are_coloured_by_kind(tmp_path: Path) -> None:
     assert "<div>cycle line</div>" in log
 
 
+def _with_no_waiters(snapshot: dict, count: int) -> dict:
+    snapshot["health"]["no_waiter"] = [
+        {"harness": f"h{n}", "bot": f"bot{n}", "jobs": [f"j{n}"], "count": 1,
+         "anchor": f"health-no-waiter-h{n}"}
+        for n in range(count)
+    ]
+    return snapshot
+
+
+@pytest.mark.parametrize(("count", "shown"), [(1, "1 harness"), (2, "2 harnesses")])
+def test_no_waiter_count_names_harness_in_the_singular_for_one(
+        tmp_path: Path, count: int, shown: str) -> None:
+    snapshot = _with_no_waiters(_snapshot(tmp_path), count)
+    panel = _section(_no_script(render_pages(snapshot)["health.html"]), "no-waiter")
+    assert f'<span class="count">{shown}</span>' in panel
+
+
+@needs_node
+@pytest.mark.parametrize(("count", "shown"), [(1, "1 harness"), (2, "2 harnesses")])
+def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
+        tmp_path: Path, count: int, shown: str) -> None:
+    snapshot = _with_no_waiters(_snapshot(tmp_path), count)
+    out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "no-waiter"])
+    assert f'<span class="count">{shown}</span>' in out["html"]["no-waiter"]
+
+
 def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     pages = render_pages(_snapshot(tmp_path))
     assert 'id="health"' not in pages["efficiency.html"]
