@@ -85,7 +85,7 @@ def test_picking_a_log_row_selects_its_bar_and_the_reverse(tmp_path: Path) -> No
     for cls in ("runlog", "journey"):
         assert [i for i, _, p in _buttons(row["html"]["jobview"], cls) if p == "true"] == ["1"], cls
     bar = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
-                    actions=[["click", {"attr": {"data-visit": "2", "aria-label": "review"}}]])
+                    actions=[["click", {"attr": {"data-visit": "2", "aria-label": "Step 3 of 5: review, codex, 16m 40s"}}]])
     for cls in ("runlog", "journey"):
         assert [i for i, _, p in _buttons(bar["html"]["jobview"], cls) if p == "true"] == ["2"], cls
 
@@ -405,8 +405,11 @@ def test_picking_a_visit_rewrites_the_caption_in_both_renderers(tmp_path: Path) 
     assert f"|{visit['state']}|" in caption and f"|{visit['who']}|" in caption, caption
     if visit["reason"]:
         assert visit["reason"] in caption, caption
+    from lib.dashboard_pages.common import duration
+    age = _review(snapshot)["flow"]["state_age_seconds"]
     loaded = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
-    assert _caption(loaded["html"]["jobview"]) == _caption(_article(snapshot))
+    ticked = _caption(_article(snapshot)).replace(f"|{duration(age)} so far|", f"|{duration(age + 3)} so far|")
+    assert _caption(loaded["html"]["jobview"]) == ticked
 
 
 DRAWN_NAMES = r"""
@@ -544,7 +547,7 @@ def test_the_journey_control_strip_matches_journey_climb(tmp_path: Path) -> None
         "axis": "Time axis",
         "scales": [["even steps", "true", 44, *ON], ["to scale", "false", 44, *OFF]],
         "replay": [44, *OFF],
-        "keys": ["script", "claude", "codex", "cursor", "grok", "stopped", "off-chart hop"],
+        "keys": PATH_KEYS,
         "separateLegend": False,
     }
 
@@ -554,6 +557,274 @@ def test_the_no_script_control_strip_holds_the_axis_replay_and_legend_in_one_row
     strip = re.search(r'<div class="jd-ctl">(.*)</div></section>$', journey, re.S).group(1)
     assert re.search(r'<div class="axis" role="group" aria-label="Time axis">.*data-scale="even".*data-scale="scale".*</div>'
                      r'<button type="button" data-replay="1">replay</button><span class="gap"></span>', strip, re.S)
-    assert re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', strip) == [
-        "script", "claude", "codex", "cursor", "grok", "stopped", "off-chart hop"]
+    assert re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', strip) == PATH_KEYS
     assert "jd-legend" not in journey
+
+
+def _queued(snapshot: dict) -> str:
+    return _section(_no_script(render_pages(snapshot)["job.html"]), "job-q-claude")
+
+
+def _script_view(tmp_path: Path, snapshot: dict, job: str = "h-review", actions: list | None = None) -> str:
+    out = _run_page(tmp_path, snapshot, "job", JOB, hash_=f"#job-{job}", actions=actions)
+    return out["html"]["jobview"]
+
+
+def _beat_class(markup: str) -> str:
+    match = re.search(r'<div class="jd-tile"><b(?: class="([a-z]*)")?>[^<]*(?:<span>[^<]*</span>)?</b>'
+                      r'<span>last heartbeat</span>', markup)
+    assert match, markup
+    return match.group(1) or ""
+
+
+BEAT = [
+    ("running fresh", _set(), "ok"),
+    ("claimed", _set(job_state="claimed"), ""),
+    ("stale", _set(job_state="stale"), "warn"),
+    ("dead", _set(job_state="dead"), "bad"),
+    ("overdue", _set(overdue=True), "bad"),
+]
+
+
+@pytest.mark.parametrize(("case", "change", "tone"), BEAT, ids=[c[0] for c in BEAT])
+def test_the_heartbeat_tile_takes_its_tone_from_the_job(tmp_path: Path, case, change, tone) -> None:
+    snapshot = _snapshot(tmp_path)
+    _hero_case(snapshot, change)
+    assert _beat_class(_article(snapshot)) == tone, case
+
+
+@needs_node
+@pytest.mark.parametrize(("case", "change", "tone"), BEAT, ids=[c[0] for c in BEAT])
+def test_the_script_heartbeat_tile_takes_its_tone_from_the_job(tmp_path: Path, case, change, tone) -> None:
+    snapshot = _snapshot(tmp_path)
+    _hero_case(snapshot, change)
+    assert _beat_class(_script_view(tmp_path, snapshot)) == tone, case
+
+
+def test_a_queued_job_s_heartbeat_tile_has_no_tone(tmp_path: Path) -> None:
+    assert _beat_class(_queued(_snapshot(tmp_path))) == ""
+
+
+@needs_node
+def test_the_script_gives_a_queued_job_s_heartbeat_tile_no_tone(tmp_path: Path) -> None:
+    assert _beat_class(_script_view(tmp_path, _snapshot(tmp_path), "q-claude")) == ""
+
+
+def test_the_heartbeat_tone_is_the_lanes_heartbeat_rule() -> None:
+    from lib.dashboard_pages.lanes import TILE_STATE
+    lanes = {"live": "ok", "warn": "warn", "bad": "bad", "none": ""}
+    assert ticket_detail.HEARTBEAT_TONE == {name: lanes[spec["hb"]] for name, spec in TILE_STATE.items()}
+    assert ".jd-tile b.warn{color:var(--warn)}" in ticket_detail.CSS
+    assert ".jd-tile b.bad{color:var(--bad)}" in ticket_detail.CSS
+
+
+def _title(markup: str) -> str:
+    return re.search(r'<div class="title">(.*?)</div>', markup, re.S).group(1)
+
+
+CHIPS = [
+    ("running", _set(), None),
+    ("claimed", _set(job_state="claimed"), "claimed, not started"),
+    ("stale", _set(job_state="stale"), "stale heartbeat"),
+    ("dead", _set(job_state="dead"), "runner dead"),
+    ("overdue", _set(overdue=True), "OVERDUE"),
+    ("retries", _set(retries=2), "retried 2x"),
+]
+
+
+def _chips(title: str) -> list[str]:
+    return re.findall(r'<span class="chip [a-z]+">([^<]*)</span>', title)
+
+
+@pytest.mark.parametrize(("case", "change", "chip"), CHIPS, ids=[c[0] for c in CHIPS])
+def test_the_hero_chips_only_trouble(tmp_path: Path, case, change, chip) -> None:
+    snapshot = _snapshot(tmp_path)
+    _hero_case(snapshot, change)
+    assert _chips(_title(_article(snapshot))) == ([chip] if chip else []), case
+
+
+@needs_node
+@pytest.mark.parametrize(("case", "change", "chip"), CHIPS, ids=[c[0] for c in CHIPS])
+def test_the_script_hero_chips_only_trouble(tmp_path: Path, case, change, chip) -> None:
+    snapshot = _snapshot(tmp_path)
+    _hero_case(snapshot, change)
+    assert _chips(_title(_script_view(tmp_path, snapshot))) == ([chip] if chip else []), case
+
+
+def _now_durs(markup: str) -> dict[str, str]:
+    """The current visit's time in the hero line, the Run log and the caption."""
+    hero = re.search(r'<p class="line">.*?</p>', markup, re.S).group(0)
+    log = re.search(r'<button[^>]*class="now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
+    if not log:
+        log = re.search(r'<button class="now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
+    cap = re.search(r'<div class="jd-cap now"[^>]*>.*?<span class="dur">([^<]*)</span>', markup, re.S)
+    return {"hero": re.search(r"(\d+m \d\ds) in review", hero).group(1), "log": log.group(1), "cap": cap.group(1)}
+
+
+def test_the_current_step_says_how_long_so_far(tmp_path: Path) -> None:
+    from lib.dashboard_pages.common import duration
+    snapshot = _snapshot(tmp_path)
+    age = _review(snapshot)["flow"]["state_age_seconds"]
+    durs = _now_durs(_article(snapshot))
+    assert durs == {"hero": duration(age), "log": f"{duration(age)} so far", "cap": f"{duration(age)} so far"}
+
+
+@needs_node
+def test_the_script_counts_the_current_step_up_with_the_hero_line(tmp_path: Path) -> None:
+    from lib.dashboard_pages.common import duration
+    snapshot = _snapshot(tmp_path)
+    age = _review(snapshot)["flow"]["state_age_seconds"]
+    first = _now_durs(_script_view(tmp_path, snapshot))
+    later = _now_durs(_script_view(tmp_path, snapshot, actions=[["advance", 5]]))
+    assert first["log"] == first["cap"] == first["hero"] + " so far"
+    assert later["log"] == later["cap"] == later["hero"] + " so far"
+    assert first["hero"] == duration(age + 3) and later["hero"] == duration(age + 8)
+
+
+def test_in_progress_only_when_the_time_in_state_is_unknown(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot)["flow"]["state_age_seconds"] = None
+    article = _article(snapshot)
+    assert re.search(r'<button[^>]*class="now"[^>]*>.*?<span class="dur">in progress</span>', article, re.S)
+    assert '<span class="dur">in progress</span><span class="note">' in _caption_html(article)
+
+
+@needs_node
+def test_the_script_says_in_progress_only_when_the_time_in_state_is_unknown(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot)["flow"]["state_age_seconds"] = None
+    view = _script_view(tmp_path, snapshot, actions=[["advance", 5]])
+    assert re.search(r'<button class="now"[^>]*>.*?<span class="dur">in progress</span>', view, re.S)
+    assert '<span class="dur">in progress</span><span class="note">' in _caption_html(view)
+
+
+def _caption_html(markup: str) -> str:
+    return re.search(r'<div class="jd-cap[^"]*"[^>]*>.*?</div>', markup, re.S).group(0)
+
+
+def _step_labels(markup: str) -> list[str]:
+    ol = re.search(r'<ol class="journey">(.*?)</ol>', markup, re.S).group(1)
+    return re.findall(r'<button[^>]*aria-label="([^"]*)"', ol)
+
+
+def _steps(markup: str) -> list[str]:
+    ol = re.search(r'<ol class="journey">(.*?)</ol>', markup, re.S).group(1)
+    return re.findall(r'<span class="step">([^<]*)</span>', ol)
+
+
+STEP_NAMES = [
+    "Step 1 of 5: intake, script, time unknown",
+    "Step 2 of 5: building, claude, 16m 40s",
+    "Step 3 of 5: review, codex, 16m 40s",
+    "Step 4 of 5: fixing, claude, 16m 40s",
+    "Step 5 of 5: review, codex, 33m 20s so far",
+]
+
+
+def test_each_journey_step_is_named_by_place_state_actor_and_time(tmp_path: Path) -> None:
+    article = _article(_snapshot(tmp_path))
+    assert _step_labels(article) == STEP_NAMES
+    assert _steps(article) == STEP_NAMES
+
+
+@needs_node
+def test_the_script_names_each_journey_step_the_same_way(tmp_path: Path) -> None:
+    view = _script_view(tmp_path, _snapshot(tmp_path))
+    assert _step_labels(view) == STEP_NAMES
+    assert _steps(view) == STEP_NAMES
+    assert len(set(STEP_NAMES)) == len(STEP_NAMES)
+
+
+def test_no_script_css_shows_the_step_list_and_hides_canvases_and_dead_controls() -> None:
+    css = ticket_detail.CSS
+    assert ".journey .step{display:none}" in css
+    block = re.search(r"@media \(scripting:none\)\{(.*)\}\n", css).group(1)
+    hidden = re.search(r"^([^{]*)\{display:none\}", block).group(1).split(",")
+    assert set(hidden) == {".jd-box canvas", ".journey button", ".jd-ctl .axis", ".jd-ctl [data-replay]", ".jd-chart .jd-box"}
+    assert ".journey .step{display:inline}" in block
+
+
+NO_SCRIPT_VIEW = r"""
+(() => {
+  const art = document.querySelector('#job-h-review');
+  const shown = n => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== 'hidden';
+  return {
+    canvases: [...art.querySelectorAll('canvas.jd-journey, canvas.jd-flowmap')].filter(shown).length,
+    buttons: [...art.querySelectorAll('.jd-box button, .jd-ctl button, .jd-chart button')].filter(shown).length,
+    steps: [...art.querySelectorAll('ol.journey .step')].filter(shown).map(s => s.textContent),
+  };
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_with_scripting_off_the_journey_is_a_readable_list(tmp_path: Path) -> None:
+    snapshot = _fully_timed(_snapshot(tmp_path))
+    path = _review(snapshot)["flow"]["path"]
+    server = _serve(tmp_path, {"fixture": snapshot})
+    url = f"http://127.0.0.1:{server.server_address[1]}/fixture/job.html#job-h-review"
+    views = {}
+    try:
+        for name, off in (("off", True), ("on", False)):
+            chrome = _Chrome(tmp_path / f"profile-{name}")
+            try:
+                chrome.send("Emulation.setScriptExecutionDisabled", chrome.session, value=off)
+                _open(chrome, url, "document.querySelector('#job-h-review ol.journey')")
+                chrome.run("document.querySelector('#job-h-review details.jd-chart').open = true")
+                time.sleep(0.3)
+                views[name] = chrome.run(NO_SCRIPT_VIEW)
+            finally:
+                chrome.close()
+    finally:
+        server.shutdown()
+    assert views["off"]["canvases"] == 0 and views["off"]["buttons"] == 0
+    assert [step.split(": ")[1].split(",")[0] for step in views["off"]["steps"]] == path
+    assert views["on"]["canvases"] == 2 and views["on"]["steps"] == []
+    assert views["on"]["buttons"] == len(path) + 3
+
+
+def test_a_queued_job_s_live_run_says_not_started_yet(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    queued = _queued(snapshot)
+    assert '<p class="empty">not started yet</p>' in queued
+    assert "no telemetry" not in queued
+    assert '<p class="empty">no telemetry</p>' in _article(snapshot)
+
+
+@needs_node
+def test_the_script_says_a_queued_job_has_not_started_yet(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    queued = _script_view(tmp_path, snapshot, "q-claude")
+    assert '<p class="empty">not started yet</p>' in queued and "no telemetry" not in queued
+    assert '<p class="empty">no telemetry</p>' in _script_view(tmp_path, snapshot)
+
+
+def _keys(markup: str) -> list[str]:
+    return re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', markup)
+
+
+def _chart_keys(markup: str) -> list[str]:
+    legend = re.search(r'<div class="jd-legend">(.*?)</div>', markup, re.S).group(1)
+    return re.findall(r"<span><i[^>]*></i>([^<]+)</span>", legend)
+
+
+PATH_KEYS = ["script", "claude", "codex", "stopped", "off-chart hop"]
+CHART_KEYS = ["path taken · script", "path taken · claude", "path taken · codex", "visited", "off-chart jump", "now",
+              "can come next"]
+GROK_KEYS = ["script", "claude", "codex", "grok", "stopped", "off-chart hop"]
+
+
+def test_the_legends_list_only_this_ticket_s_actors(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    article = _article(snapshot)
+    assert _keys(article) == PATH_KEYS
+    assert _chart_keys(article) == CHART_KEYS
+    assert _keys(_queued(snapshot)) == GROK_KEYS
+
+
+@needs_node
+def test_the_script_legends_list_only_this_ticket_s_actors(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    view = _script_view(tmp_path, snapshot)
+    assert _keys(view) == PATH_KEYS
+    assert _chart_keys(view) == CHART_KEYS
+    assert _keys(_script_view(tmp_path, snapshot, "q-claude")) == GROK_KEYS

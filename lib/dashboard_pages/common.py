@@ -225,8 +225,8 @@ SCRIPT_HEAD = r"""
   // #92: only a link into the Health tab, never a value used as a URL.
   function healthLink(href) { return /^health\.html#[A-Za-z0-9_-]+$/.test(String(href)) ? String(href) : 'health.html'; }
   // #75: lib/job_state.py's state of a running job, as a chip.
-  var JOB_STATE = {claimed: ['claimed, not started', 'warn'], running: ['running', 'ok'],
-                   stale: ['stale heartbeat', 'warn'], dead: ['runner dead', 'bad']};
+  var JOB_STATE = {claimed: ['claimed, not started', 'warn'], stale: ['stale heartbeat', 'warn'],
+                   dead: ['runner dead', 'bad']};
   function stateChip(r) {
     var s = JOB_STATE[r.job_state];
     return s ? chip(s[0], s[1]) : null;
@@ -626,7 +626,6 @@ def _when(seconds: object, prefix: str = "", suffix: str = "") -> str:
 # #75: lib/job_state.py's state of a running job, as a chip (JOB_STATE in the script).
 _JOB_STATE = {
     "claimed": ("claimed, not started", "warn"),
-    "running": ("running", "ok"),
     "stale": ("stale heartbeat", "warn"),
     "dead": ("runner dead", "bad"),
 }
