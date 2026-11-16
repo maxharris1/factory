@@ -41,7 +41,9 @@ still ship `enabled: false` until Max turns them on.
 - A `ship: merge` or `ship: handoff` repo may add `hold:` to `factory.md`
   (issues #86 and #183, [`lib/hold.py`](lib/hold.py)). A PR carrying
   `hold.label` (default `factory:hold`), or whose diff touches a `hold.paths`
-  glob, does not ship on APPROVE: it waits in `orch:state/awaiting-ok`
+  glob, does not ship on APPROVE. A matched repo-root `factory.md` counts
+  only when its `hold`, `ship`, `finish_line`, `builder` or `reviewer` front
+  matter differs from base (#564). A held PR waits in `orch:state/awaiting-ok`
   ("waiting on <approver>" in `orch status` and the dashboard) until
   `hold.approver` posts `<!-- orch:v1 kind=ok head=<sha> -->` for the current
   head, or removes the label on a label-only hold. The OK may also be a
