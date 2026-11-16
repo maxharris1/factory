@@ -553,3 +553,23 @@ def test_a_linear_read_stalled_in_tcp_connects_frees_its_slot_for_the_next_cycle
         assert source._linear_request(DOCUMENT) == {"data": {"viewer": {"id": "me"}}}
 
     assert stalling_servers.posts == 1
+
+
+def test_an_address_whose_socket_cannot_be_made_falls_through_to_the_next(
+    stalling_servers,
+) -> None:
+    port = int(stalling_servers.proxy.rsplit(":", 1)[1])
+    unsupported = 9999
+
+    def unsupported_then_local(host, requested_port, *args, **kwargs):
+        return [
+            (unsupported, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ]
+
+    with patch("urllib.request.getproxies", return_value={}), patch(
+        "socket.getaddrinfo", side_effect=unsupported_then_local
+    ):
+        result = post_json("http://dual-stack.invalid/graphql", {}, b"{}", DEADLINE)
+
+    assert result.status == 200

@@ -257,16 +257,18 @@ class _Tracked:
             remaining = self._cutoff.deadline - time.monotonic()
             if self._cutoff.fired or remaining <= 0:
                 raise TimeoutError
-            sock = socket.socket(family, kind, proto)
-            self._cutoff.track(sock)
+            sock = None
             try:
+                sock = socket.socket(family, kind, proto)
+                self._cutoff.track(sock)
                 sock.settimeout(remaining)
                 if source_address:
                     sock.bind(source_address)
                 sock.connect(peer)
                 return sock
             except OSError as exc:
-                sock.close()
+                if sock is not None:
+                    sock.close()
                 error = exc
         raise error
 
