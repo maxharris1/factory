@@ -426,7 +426,7 @@ def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_pat
                                            "link": "health.html#waiter-x", "detail": "down (never seen)"})
     snapshot["attention"]["count"] += 1
     attention = _server(snapshot)["attention"]
-    rows = re.findall(r'<div class="at-row" data-attn="[^"]+">(.*?)</a></div>', attention)
+    rows = re.findall(r'<div class="at-row" data-attn="[^"]+">(.*?)</div>', attention)
     assert len(rows) == snapshot["attention"]["count"]
     for row in rows:
         assert row.startswith('<span class="at-px" aria-hidden="true"><canvas class="px" data-px="static" '
@@ -434,11 +434,11 @@ def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_pat
         assert 'data-cell="4"' in row and "height:24px" in row
     down = next(row for row in rows if "waiter x" in row)
     assert '<span class="at-subj">waiter x</span><span class="at-what">down (never seen)</span>' in down
-    assert down.endswith('<a class="at-go" href="health.html#waiter-x">open in System')
+    assert down.endswith('<a class="at-go" href="health.html#waiter-x">open in System</a>')
     running = next(row for row in rows if "cleffy#14" in row)
-    assert running.endswith('<a class="at-go" href="job.html#job-r-cursor">open ticket')
+    assert running.endswith('<a class="at-go" href="job.html#job-r-cursor">open ticket</a>')
     stuck = next(row for row in rows if "AUT-7" in row)
-    assert stuck.endswith('<a class="at-go" href="job.html">open ticket')
+    assert stuck.endswith('<a class="at-go" href="job.html">open ticket</a>')
 
 
 @layout.needs_node
@@ -446,3 +446,15 @@ def test_a_relay_filter_keeps_focus_when_pressed(tmp_path: Path, snapshot: dict)
     actions = [["focus", ["data-relay", "shipped"]], ["press", ["data-relay", "shipped"]], ["focused", "data-relay"]]
     steps = _script(tmp_path, _rich(snapshot), actions)["steps"]
     assert [step["focused"] for step in steps if "focused" in step] == [["button", "shipped"]]
+
+
+@layout.needs_node
+def test_attention_ticket_rows_link_github_in_both_renderers(tmp_path: Path, snapshot: dict) -> None:
+    snap = copy.deepcopy(snapshot)
+    item = next(row for row in snap["attention"]["items"] if not row.get("component"))
+    item.update(repo="maxharris1/cleffy", source="#14", pr="15")
+    server = _server(snap)["attention"]
+    links = re.findall(r'href="(https://github\.com/[^"]*)" rel="noopener noreferrer" target="_blank"', server)
+    issue = links.index("https://github.com/maxharris1/cleffy/issues/14")
+    assert links[issue + 1] == "https://github.com/maxharris1/cleffy/pull/15"
+    assert _script(tmp_path, snap)["html"]["attention"] == server

@@ -17,6 +17,18 @@
 #   DASHBOARD_DIR=<the directory orch.yml dashboard.push.remote_dir names>
 #   DASHBOARD_PORT=8787
 #
+# Optional GitHub actions (comments and the hold OK as Max, README
+# "Dashboard"). Off unless DASHBOARD_GITHUB_CLIENT_ID is set; the client id
+# of an OAuth App with device flow on is public, not a secret:
+#   DASHBOARD_GITHUB_CLIENT_ID=<the OAuth App's client id>
+#   DASHBOARD_APPROVER=maxharris1
+#   DASHBOARD_ACTION_CLIENTS=<Max's phone and laptop tailnet IPv4s, comma list>
+# With actions on, install and run this unit as a dedicated user (e.g.
+# factory-dash) that can only read DASHBOARD_DIR (group read on
+# /home/cursor-bot/factory-dashboard), never as cursor-bot or another bot:
+# a bot that shares the process's user could read the in-memory token.
+# --check and startup refuse a bot account.
+#
 # The sandbox below needs unprivileged user namespaces in a user unit (WSL2
 # has them). If the node's systemd cannot set it up the unit fails to start
 # rather than running without it; `systemd-analyze --user security

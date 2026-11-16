@@ -605,12 +605,15 @@ def test_every_page_reads_without_script(tmp_path: Path) -> None:
 
 def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
     for name, html in _pages(tmp_path).items():
-        for needle in ("<link", "src=", "http://", "https://", "@import", "url(", "//cdn"):
+        # #563: the only https:// text is a link to github.com, never an asset.
+        assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}, name
+        for needle in ("<link", "src=", "http://", "@import", "url(", "//cdn"):
             assert needle not in html, (name, needle)
         (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
             assert sink not in script, (name, sink)
-        assert re.findall(r"fetch\(([^,)]+)", script) == ["STATUS_URL"], name
+        assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "STATUS_URL"], name
+        assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script)), name
 
 
 def test_no_secret_reaches_any_page(tmp_path: Path) -> None:
