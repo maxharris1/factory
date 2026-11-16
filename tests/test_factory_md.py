@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib.factory_md import EXAMPLE_PATHS, load_factory_md, parse_factory_context, parse_factory_md
+from lib.factory_md import (
+    EXAMPLE_PATHS,
+    load_factory_md,
+    parse_factory_context,
+    parse_factory_md,
+    trust_front_matter_changed,
+)
 from lib.schema import AUT0_REPO, HARNESSES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -687,3 +693,65 @@ def test_check_config_refuses_a_pre_ready_timeout_over_900(tmp_path: Path) -> No
     assert "review.pre_ready.timeout_seconds must be an integer from 1 to 900" in (
         result.stdout + result.stderr
     )
+
+
+ROOT_FACTORY_MD = (Path(__file__).resolve().parents[1] / "factory.md").read_text(encoding="utf-8")
+
+
+def _edit(old: str, new: str) -> str:
+    assert ROOT_FACTORY_MD.count(old) == 1, old
+    return ROOT_FACTORY_MD.replace(old, new)
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        _edit("## Review\n", "## Review\nA new Review sentence.\n"),
+        _edit("## Context\n", "## Context\n- A new Context bullet.\n"),
+        _edit("    high: 3\n", "    high: 4\n"),
+        _edit("shared_paths: [", "shared_paths: [docs/new.md, "),
+        _edit("base_branch: main\n", "base_branch: main  # a comment\n"),
+    ],
+    ids=["review-prose", "context-prose", "review-rounds", "shared-paths", "comment-only"],
+)
+def test_a_factory_md_edit_outside_the_trust_sections_is_not_a_trust_change(head: str) -> None:
+    assert trust_front_matter_changed(ROOT_FACTORY_MD, head) is False
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        _edit("    - .github/**\n", ""),
+        _edit("  approver: maxharris1\n", "  approver: someone\n"),
+        _edit("  approver: maxharris1\n", "  approver: maxharris1\n  label: other\n"),
+        _edit("ship: handoff\n", "ship: merge\n"),
+        _edit("finish_line: merge\n", "finish_line: ready-for-review\n"),
+        _edit("builder:\n  harness: claude\n", "builder:\n  harness: codex\n"),
+        _edit("reviewer:\n  harness: codex\n", "reviewer:\n  harness: claude\n"),
+        None,
+        "no front matter\n",
+        _edit("ship: handoff\n", "ship: handoff\nship: merge\n"),
+    ],
+    ids=[
+        "hold-paths",
+        "hold-approver",
+        "hold-label",
+        "ship",
+        "finish-line",
+        "builder-harness",
+        "reviewer-harness",
+        "deleted",
+        "no-front-matter",
+        "unparseable",
+    ],
+)
+def test_a_trust_front_matter_edit_is_a_trust_change(head: str | None) -> None:
+    assert trust_front_matter_changed(ROOT_FACTORY_MD, head) is True
+
+
+def test_adding_a_hold_mapping_is_a_trust_change() -> None:
+    start, end = ROOT_FACTORY_MD.index("hold:\n"), ROOT_FACTORY_MD.index("---\n", 4)
+    without_hold = ROOT_FACTORY_MD[:start] + ROOT_FACTORY_MD[end:]
+
+    assert trust_front_matter_changed(without_hold, ROOT_FACTORY_MD) is True
+    assert trust_front_matter_changed(None, ROOT_FACTORY_MD) is True

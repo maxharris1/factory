@@ -7,6 +7,7 @@ kind=ok head=<sha> (or, for a label-only hold, the approver removing the
 label), and Grok Bot is woken once per held head.
 """
 
+import base64
 import json
 import sqlite3
 from pathlib import Path
@@ -135,6 +136,7 @@ def snapshot(
     events: tuple[LabelEvent, ...] | None = (),
     ci: str = "success",
     risk: str = "high",
+    trust: bool | None = False,
 ) -> TrackedTicket:
     return TrackedTicket(
         repo="owner/repo",
@@ -149,6 +151,7 @@ def snapshot(
         labels=labels,
         changed_files=files,
         label_events=events,
+        factory_md_trust_changed=trust,
     )
 
 
@@ -763,6 +766,7 @@ def test_an_ok_clears_a_label_put_back_before_it_but_not_one_put_back_at_or_afte
         comments=(ok(HEAD),),
         approver_allowed=True,
         covers=lambda head: head == HEAD,
+        factory_md_trust_changed=False,
     )
 
     assert decision.reasons == ("label",)
@@ -1261,3 +1265,91 @@ def test_a_merge_re_drive_waits_while_the_hold_applies_again(tmp_path: Path) -> 
 
     dispatcher.process(snapshot(*cleared))
     assert actions.merges == [(True, HEAD)]
+
+
+BASE_SHA = "b" * 40
+PROSE = "\n## Context\nProse.\n"
+
+
+class TrustGh(HoldGh):
+    def __init__(self, base: str | None, head: str | None, *, files=("factory.md",)):
+        super().__init__(HOLD_FACTORY.format(ship="handoff", hold=TRUST_HOLD))
+        self.inner.pull = {"base": {"ref": "main", "sha": BASE_SHA}}
+        self.texts = {BASE_SHA: base, self.inner.head: head}
+        self.files = files
+
+    def __call__(self, argv, timeout):
+        from lib.github_actions import GhResult
+
+        call = list(argv)
+        endpoint = next((part for part in call if part.startswith("repos/")), "")
+        ref = next((part[4:] for part in call if part.startswith("ref=")), None)
+        if endpoint.endswith("/pulls/12/files?per_page=100"):
+            self.calls.append(call)
+            value = [{"filename": name, "status": "modified"} for name in self.files]
+            return GhResult(0, json.dumps(value), "")
+        if endpoint.endswith("/contents/factory.md") and ref in self.texts:
+            self.calls.append(call)
+            text = self.texts[ref]
+            if text is None:
+                return GhResult(1, "", "gh: Not Found (HTTP 404)")
+            if text == "error":
+                return GhResult(1, "", "failed (HTTP 502)")
+            encoded = base64.b64encode(text.encode()).decode()
+            return GhResult(0, json.dumps({"encoding": "base64", "content": encoded}), "")
+        return super().__call__(argv, timeout)
+
+    def trust_reads(self) -> list[list[str]]:
+        return [
+            call
+            for call in self.calls
+            if any(part.endswith("/contents/factory.md") for part in call)
+            and any(part in (f"ref={BASE_SHA}", f"ref={self.inner.head}") for part in call)
+        ]
+
+
+TRUST_HOLD = "hold:\n  approver: maxharris1\n  paths: [factory.md]\n"
+TRUSTED_TEXT = HOLD_FACTORY.format(ship="handoff", hold=TRUST_HOLD)
+
+
+@pytest.mark.parametrize(
+    ("head", "changed"),
+    [
+        (TRUSTED_TEXT + PROSE, False),
+        (TRUSTED_TEXT.replace("approver: maxharris1", "approver: someone"), True),
+        (None, True),
+    ],
+    ids=["prose", "hold-edit", "deleted-at-head"],
+)
+def test_the_poll_source_compares_factory_md_trust_sections_at_base_and_head(
+    head: str | None, changed: bool
+) -> None:
+    gh = TrustGh(TRUSTED_TEXT, head)
+
+    found, errors = live_ticket(gh)
+
+    assert errors == []
+    assert found.changed_files == ("factory.md",)
+    assert found.factory_md_trust_changed is changed
+    assert len(gh.trust_reads()) == 2
+
+
+def test_a_failed_factory_md_read_is_recorded_and_left_unread() -> None:
+    gh = TrustGh(TRUSTED_TEXT, "error")
+
+    found, errors = live_ticket(gh)
+
+    assert found.factory_md_trust_changed is None
+    assert [(repo, ticket_id) for repo, ticket_id, _error in errors] == [
+        ("acme/widgets", "12")
+    ]
+
+
+def test_the_poll_source_skips_the_factory_md_reads_when_the_diff_misses_it() -> None:
+    gh = TrustGh(TRUSTED_TEXT, TRUSTED_TEXT + PROSE, files=("skills/x.md",))
+
+    found, errors = live_ticket(gh)
+
+    assert errors == []
+    assert found.factory_md_trust_changed is False
+    assert gh.trust_reads() == []

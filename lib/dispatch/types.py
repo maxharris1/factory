@@ -106,6 +106,7 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    factory_md_trust_changed: bool | None = None
     # Issue #206: factory.md's config when a go routed this ticket to other
     # harnesses; factory then holds the routed pair.
     factory_md: FactoryConfig | None = None
