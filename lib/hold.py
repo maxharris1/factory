@@ -18,8 +18,8 @@ head=<40-char sha> or a first line of /ok <40-char sha>, whose
 head covers the current head by the ship rule (the same commit, or an
 equal git patch-id --stable), or, for a label-only hold, by the
 approver removing the label. An ok also covers a head whose every later
-commit merges base in, when the PR owns no new file and each hold-path
-file it owns keeps its patch id (ok_carries, issue #574). An ok does not
+commit merges base in, when the PR owns no new file and no merge changes a
+hold-path file from git's own merge (ok_carries, issue #574). An ok does not
 clear a label hold whose label was labeled at or after the latest
 covering ok: a label put back after the ok holds the PR again, and
 still holds it once someone other than the approver removes it. Neither
@@ -35,7 +35,7 @@ is everything under ``a/``, ``a/**/b`` includes ``a/b``).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -131,39 +131,22 @@ def held_paths(patterns: Sequence[str], files: Iterable[str]) -> tuple[str, ...]
 
 
 @dataclass(frozen=True)
-class OwnDiff:
-    """A head's own changes: the files of its diff from its merge base with
-    base, and per hold-glob file the git patch-id --stable of that file's
-    diff (None when the diff has no patch id, such as a binary file)."""
-
-    files: frozenset[str]
-    identities: Mapping[str, str | None]
-
-
-@dataclass(frozen=True)
 class MergeStep:
-    """One commit on the first-parent chain from the ok head to the head.
-    other_parents_on_base: every parent after the first is on base."""
-
     commit: str
     parents: tuple[str, ...]
     other_parents_on_base: bool
+    hand_merged: frozenset[str]
 
 
 @dataclass(frozen=True)
 class MergeUpdate:
-    """The commits after approved_head, oldest first, and both heads' own diffs."""
-
     approved_head: str
     steps: tuple[MergeStep, ...]
-    approved: OwnDiff
-    current: OwnDiff
+    approved_own_files: frozenset[str]
+    current_own_files: frozenset[str]
 
 
 def ok_carries(update: MergeUpdate, patterns: Sequence[str]) -> bool:
-    """Issue #574: an ok at approved_head covers the head when every later
-    commit merges base into the PR, the PR owns no new file, and each
-    hold-glob file it owns has the same patch id on both sides."""
     if not update.steps:
         return False
     previous = update.approved_head
@@ -175,14 +158,9 @@ def ok_carries(update: MergeUpdate, patterns: Sequence[str]) -> bool:
         ):
             return False
         previous = step.commit
-    approved, current = update.approved, update.current
-    if not current.files <= approved.files:
+    if not update.current_own_files <= update.approved_own_files:
         return False
-    return all(
-        approved.identities.get(path) is not None
-        and approved.identities.get(path) == current.identities.get(path)
-        for path in held_paths(patterns, approved.files | current.files)
-    )
+    return not any(held_paths(patterns, step.hand_merged) for step in update.steps)
 
 
 @dataclass(frozen=True)

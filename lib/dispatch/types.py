@@ -392,6 +392,4 @@ RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]
 
 
 class HoldCarry(Protocol):
-    def __call__(
-        self, repo: str, base: str, approved: str, head: str, patterns: tuple[str, ...]
-    ) -> MergeUpdate: ...
+    def __call__(self, repo: str, base: str, approved: str, head: str) -> MergeUpdate: ...

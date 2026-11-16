@@ -333,7 +333,7 @@ PR_FILES = {
 
 
 def carry(repo: Repo, approved: str, head: str, base_ref: str = "refs/heads/main"):
-    return merge_update(repo.gitdir, approved, head, base_ref, HOLD_PATTERNS)
+    return merge_update(repo.gitdir, approved, head, base_ref)
 
 
 def test_an_ok_carries_over_two_merges_of_main_with_a_resolution_outside_the_hold(
@@ -377,16 +377,12 @@ def test_a_head_that_does_not_descend_from_the_ok_head_does_not_carry(repo: Repo
     assert not ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
 
 
-def test_a_binary_hold_file_has_no_identity_and_does_not_carry(repo: Repo) -> None:
+def test_an_ok_carries_past_a_binary_hold_file_the_merges_never_touch(repo: Repo) -> None:
     approved = held_pr(repo, {**PR_FILES, "public/logo.png": "\x89PNG\x00\x01"})
     main_commit(repo, {"other.py": "x = 2\n"})
     head = repo.merge_main()
 
-    update = carry(repo, approved, head)
-
-    assert update.approved.identities["public/logo.png"] is None
-    assert update.current.identities["src/view/A.tsx"] is not None
-    assert not ok_carries(update, HOLD_PATTERNS)
+    assert ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
 
 
 def test_an_unknown_ok_head_raises(repo: Repo) -> None:
@@ -407,18 +403,84 @@ def test_a_missing_base_ref_raises(repo: Repo) -> None:
         carry(repo, approved, head, "refs/remotes/origin/main")
 
 
-def test_a_failing_patch_id_raises(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("code", "stdout"), [(2, b""), (1, b"")], ids=["merge-tree-fails", "merge-tree-writes-no-tree"]
+)
+def test_an_unreadable_merge_tree_raises(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, code: int, stdout: bytes
+) -> None:
     approved = held_pr(repo, PR_FILES)
     main_commit(repo, {"other.py": "x = 2\n"})
     head = repo.merge_main()
     real_run = update_check._run
 
-    def failing_patch_id(clone, *args, **kwargs):
-        if args[0] == "patch-id":
-            return subprocess.CompletedProcess(args, 1, b"", b"boom")
-        return real_run(clone, *args, **kwargs)
+    def broken_merge_tree(clone, *args):
+        if args[0] == "merge-tree":
+            return subprocess.CompletedProcess(args, code, stdout, b"boom")
+        return real_run(clone, *args)
 
-    monkeypatch.setattr(update_check, "_run", failing_patch_id)
+    monkeypatch.setattr(update_check, "_run", broken_merge_tree)
 
     with pytest.raises(ValueError):
         carry(repo, approved, head)
+
+
+def test_base_edits_near_a_held_change_still_carry_the_ok(repo: Repo) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(
+        repo,
+        {
+            ".github/workflows/ci.yml": "on: push\n",
+            "lib/a.py": BASE.replace("line 5\n", "line 5 main\n"),
+            "src/view/A.tsx": BASE.replace("line 4\n", "line 4 main\n"),
+        },
+    )
+    repo.merge_main(
+        lambda r: r.write("lib/a.py", BASE.replace("line 5\n", "line 5 pr and main\n"))
+    )
+    main_view = BASE.replace("line 4\n", "line 4 main\n").replace("line 6\n", "line 6 main\n")
+    main_commit(repo, {"src/view/A.tsx": main_view})
+    head = repo.merge_main()
+
+    assert ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
+
+
+def test_a_whitespace_only_hold_resolution_needs_a_fresh_ok(repo: Repo) -> None:
+    approved_label = 'export const label = "approved value";\n'
+    approved = held_pr(
+        repo,
+        {
+            "lib/a.py": BASE.replace("line 5\n", "line 5 pr\n"),
+            "src/view/A.tsx": BASE.replace("line 2\n", approved_label),
+        },
+    )
+    main_commit(
+        repo,
+        {
+            "lib/a.py": BASE.replace("line 5\n", "line 5 main\n"),
+            "src/view/A.tsx": BASE.replace("line 2\n", "line  2\n"),
+        },
+    )
+
+    def resolve(r: Repo) -> None:
+        r.write("lib/a.py", BASE.replace("line 5\n", "line 5 pr and main\n"))
+        r.write(
+            "src/view/A.tsx",
+            BASE.replace("line 2\n", 'export const label = "approvedvalue";\n'),
+        )
+
+    head = repo.merge_main(resolve)
+
+    assert not ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
+
+
+def test_a_clean_merge_amended_to_change_a_hold_file_needs_a_fresh_ok(repo: Repo) -> None:
+    approved = held_pr(repo, PR_FILES)
+    main_commit(repo, {"other.py": "x = 2\n"})
+    repo.merge_main()
+    repo.write("src/view/A.tsx", PR_FILES["src/view/A.tsx"].replace("line 9\n", "line 9 x\n"))
+    repo.git("add", "-A")
+    repo.git("commit", "-q", "--amend", "--no-edit")
+    head = repo.git("rev-parse", "HEAD")
+
+    assert not ok_carries(carry(repo, approved, head), HOLD_PATTERNS)

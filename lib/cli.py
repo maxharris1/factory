@@ -1076,13 +1076,11 @@ def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | N
     return rebase_scope(clone, last, head, f"refs/remotes/origin/{base}")
 
 
-def _hold_carry(
-    repo: str, base: str, approved: str, head: str, patterns: tuple[str, ...]
-) -> MergeUpdate:
+def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
     clone = worktrees.fetched_clone(
         worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
     )
-    return merge_update(clone, approved, head, f"refs/remotes/origin/{base}", patterns)
+    return merge_update(clone, approved, head, f"refs/remotes/origin/{base}")
 
 
 def _feeder(

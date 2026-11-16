@@ -25,7 +25,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig, HoldConfig, parse_factory_md
-from lib.hold import MergeStep, MergeUpdate, OwnDiff, decide, glob_matches, ok_carries
+from lib.hold import MergeStep, MergeUpdate, decide, glob_matches, ok_carries
 from lib.hook_t8 import T8Hook
 from lib.poll_source import IntakeRisks
 from lib.queue import SQLiteJobQueue
@@ -654,27 +654,25 @@ def test_a_new_head_after_the_ok_needs_a_new_review_and_a_new_ok(
 
 MAIN = "c" * 40
 PR_FILES = ("lib/a.py", "src/view/A.tsx")
-VIEW_PATCH = {"src/view/A.tsx": "d" * 40}
 MERGED_MAIN = MergeUpdate(
     approved_head=HEAD,
-    steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), True),),
-    approved=OwnDiff(frozenset(PR_FILES), VIEW_PATCH),
-    current=OwnDiff(frozenset(PR_FILES), VIEW_PATCH),
+    steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), True, frozenset()),),
+    approved_own_files=frozenset(PR_FILES),
+    current_own_files=frozenset(PR_FILES),
 )
 VIEW_RESOLVED = replace(
-    MERGED_MAIN, current=OwnDiff(frozenset(PR_FILES), {"src/view/A.tsx": "e" * 40})
+    MERGED_MAIN,
+    steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), True, frozenset({"src/view/A.tsx"})),),
 )
 
 
 class FakeHoldCarry:
     def __init__(self, *outcomes: MergeUpdate | Exception):
         self.outcomes = list(outcomes)
-        self.calls: list[tuple[str, str, str, str, tuple[str, ...]]] = []
+        self.calls: list[tuple[str, str, str, str]] = []
 
-    def __call__(
-        self, repo: str, base: str, approved: str, head: str, patterns: tuple[str, ...]
-    ) -> MergeUpdate:
-        self.calls.append((repo, base, approved, head, tuple(patterns)))
+    def __call__(self, repo: str, base: str, approved: str, head: str) -> MergeUpdate:
+        self.calls.append((repo, base, approved, head))
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
         if isinstance(outcome, Exception):
             raise outcome
@@ -699,7 +697,7 @@ def test_an_ok_carries_to_a_head_that_only_merged_main(tmp_path: Path) -> None:
 
     assert actions.merges == [(True, NEW_HEAD)]
     assert workflow_state(queue) == "merged"
-    assert hold_carry.calls[0] == ("owner/repo", "main", HEAD, NEW_HEAD, UI_PATHS)
+    assert hold_carry.calls[0] == ("owner/repo", "main", HEAD, NEW_HEAD)
 
 
 def test_an_ok_does_not_carry_when_a_resolution_changed_a_hold_file(
@@ -739,7 +737,7 @@ def test_an_unread_carry_keeps_the_hold_and_is_read_again_next_poll(
 def test_a_new_head_with_its_own_commit_after_the_ok_still_needs_a_new_ok(
     tmp_path: Path,
 ) -> None:
-    pushed = replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD,), True),))
+    pushed = replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD,), True, frozenset()),))
     actions = FakeReviewActions({HEAD: "1" * 40, NEW_HEAD: "2" * 40})
     dispatcher, queue, actions = setup(tmp_path, actions, hold_carry=FakeHoldCarry(pushed))
     ready(dispatcher, queue)
@@ -772,56 +770,62 @@ def test_the_merge_carry_rule_holds_for_a_merge_of_base() -> None:
     assert ok_carries(MERGED_MAIN, UI_PATHS)
 
 
+def test_the_merge_carry_rule_holds_when_a_merge_resolves_only_files_outside_the_hold() -> None:
+    resolved_outside = replace(
+        MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), True, frozenset({"lib/a.py"})),)
+    )
+
+    assert ok_carries(resolved_outside, UI_PATHS)
+
+
 @pytest.mark.parametrize(
     "update",
     [
         pytest.param(
-            replace(
-                MERGED_MAIN,
-                current=OwnDiff(frozenset({*PR_FILES, "lib/b.py"}), VIEW_PATCH),
-            ),
+            replace(MERGED_MAIN, current_own_files=frozenset({*PR_FILES, "lib/b.py"})),
             id="new-pr-owned-file",
         ),
         pytest.param(
-            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD,), True),)),
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD,), True, frozenset()),)),
             id="non-merge-step",
         ),
         pytest.param(
-            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD, MAIN, "e" * 40), True),)),
+            replace(
+                MERGED_MAIN,
+                steps=(MergeStep(NEW_HEAD, (HEAD, MAIN, "e" * 40), True, frozenset()),),
+            ),
             id="octopus-merge",
         ),
         pytest.param(
-            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), False),)),
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (HEAD, MAIN), False, frozenset()),)),
             id="second-parent-not-on-base",
         ),
         pytest.param(
             replace(
                 MERGED_MAIN,
                 steps=(
-                    MergeStep("e" * 40, (HEAD, MAIN), True),
-                    MergeStep(NEW_HEAD, ("f" * 40, MAIN), True),
+                    MergeStep("e" * 40, (HEAD, MAIN), True, frozenset()),
+                    MergeStep(NEW_HEAD, ("f" * 40, MAIN), True, frozenset()),
                 ),
             ),
             id="broken-chain",
         ),
         pytest.param(
-            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (MAIN, HEAD), True),)),
+            replace(MERGED_MAIN, steps=(MergeStep(NEW_HEAD, (MAIN, HEAD), True, frozenset()),)),
             id="base-as-first-parent",
         ),
         pytest.param(replace(MERGED_MAIN, steps=()), id="no-steps"),
+        pytest.param(VIEW_RESOLVED, id="hold-file-resolved"),
         pytest.param(
             replace(
                 MERGED_MAIN,
-                approved=OwnDiff(frozenset(PR_FILES), {"src/view/A.tsx": None}),
-                current=OwnDiff(frozenset(PR_FILES), {"src/view/A.tsx": None}),
+                steps=(
+                    MergeStep("e" * 40, (HEAD, MAIN), True, frozenset({"lib/a.py"})),
+                    MergeStep(NEW_HEAD, ("e" * 40, MAIN), True, frozenset({"src/view/A.tsx"})),
+                ),
             ),
-            id="no-identity",
+            id="hold-file-resolved-in-a-later-merge",
         ),
-        pytest.param(
-            replace(MERGED_MAIN, current=OwnDiff(frozenset(PR_FILES), {})),
-            id="missing-identity",
-        ),
-        pytest.param(VIEW_RESOLVED, id="hold-file-changed"),
     ],
 )
 def test_the_merge_carry_rule_fails_closed(update: MergeUpdate) -> None:

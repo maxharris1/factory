@@ -214,7 +214,7 @@ class HoldsMixin:
         if key in self._hold_carries:
             return self._hold_carries[key]
         try:
-            update = self.hold_carry(ticket.repo, base, ok_head, head, hold.paths)
+            update = self.hold_carry(ticket.repo, base, ok_head, head)
             carries = ok_carries(update, hold.paths)
         except Exception as exc:
             if self.log is not None:
