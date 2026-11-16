@@ -14,6 +14,7 @@ pinned skills, installed as install-skills does.
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import signal
@@ -149,6 +150,7 @@ def _claim_proof(monkeypatch: pytest.MonkeyPatch):
     from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
 
     def proven(claim):
+        @functools.wraps(claim)
         def wrapper(self, recipient, **kwargs):
             if kwargs.get("autostart") is None:
                 kwargs.setdefault("token_hash", CLAIM_HASH)
