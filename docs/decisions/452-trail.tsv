@@ -6,3 +6,5 @@ replay safety	rewrite the ready's handled outcome to what _t2 returned (_rehandl
 open fix at H	skip while a review or fix job at H is queued, running or failed-unhandled	that job may still push a new head or post its own ready; #84 already covers its ready landing on green
 states	run only in no state, building, fixing or review	questions, waiting-max, blocked, capped, planning, updating and shipped states each own the next step
 test home	tests/test_ship_ci_fixes.py beside the #84 dedupe tests, not tests/test_dispatcher.py	it reuses the #84 ready and dedupe helpers; the ticket's Touches line named test_dispatcher.py
+edited readies (round 2, f-1)	skip any ready with an edit time in _latest_ready_at	the recovery re-reads a handled comment, and SPEC 10 says a handled comment is never read again; refusing edited candidates keeps an edit from authorizing a head no clean ready named
+verdict head (round 2, f-2)	keep fields.get("head") or "" in the two verdict scanners	only APPROVE requires a head (lib/handoff.py), so a headless REVISE must read as stale, not raise
