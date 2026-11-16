@@ -7,9 +7,20 @@ from pathlib import Path
 import pytest
 
 from lib.evidence.findings import blocking_ids
+from lib.dispatcher import Dispatcher, TrackedTicket
 from lib.handoff import parse_comment, repeat_id
-from tests.test_approver_credential import APP_BOT, MAX, AppFlow, grok_wakes
-from tests.test_dispatcher import ANSWERS, GO, READY, VERDICT, job_count
+from tests.test_approver_credential import APP_BOT, MAX, AppFlow, approvals, grok_wakes, load, orch_text, trusted
+from tests.test_dispatcher import (
+    ANSWERS,
+    GO,
+    READY,
+    VERDICT,
+    FakeGrokDelivery,
+    FakeReviewActions,
+    comment,
+    handled_outcome,
+    job_count,
+)
 from tests.test_rounds_and_caps import HEADS
 from tests.test_slash_go import jobs
 from tests.test_unsatisfiable_criterion import revise, to_first_review
@@ -209,7 +220,7 @@ def test_a_released_named_repeat_still_blocks_the_next_round(tmp_path: Path) -> 
     ("last", "expected", "wakes"),
     [
         (F1, "queued-review-fix", []),
-        (F2, "waiting-max-repeat", ["repeat-block: f-2, comment:102, comment:103"]),
+        (F2, "waiting-max-repeat", ["repeat-block: f-2, comment:102, comment:103, stops=1, for=factory"]),
     ],
     ids=["superseded-id", "final-id"],
 )
@@ -391,3 +402,117 @@ def test_blocking_ids(body: str, expected: set[str]) -> None:
 )
 def test_repeat_id(text: str, expected: str | None) -> None:
     assert repeat_id(parse_comment(text)) == expected
+
+
+PR_URL = "https://github.com/owner/repo/pull/42#issuecomment-"
+
+
+class SizedFlow(AppFlow):
+    def __init__(self, tmp_path: Path, changed_lines: int | None):
+        super().__init__(tmp_path, enabled=True)
+        self.tmp_path = tmp_path
+        self.changed_lines = changed_lines
+
+    def snapshot(self) -> TrackedTicket:
+        return replace(super().snapshot(), changed_lines=self.changed_lines)
+
+    def post(self, comment_id: str, body: str, author: str) -> str:
+        self.now[0] += 10
+        self.comments.append(
+            comment(comment_id, body, author=author, created_at=self.now[0], url=PR_URL + comment_id)
+        )
+        self.dispatcher.process(self.snapshot())
+        return handled_outcome(self.queue, comment_id)
+
+    def restart(self) -> None:
+        config, _ = load(self.tmp_path, orch_text(enabled=True))
+        self.dispatcher = Dispatcher(
+            self.queue.path,
+            self.queue,
+            trusted_logins=trusted(config),
+            review_actions=FakeReviewActions(),
+            grok_delivery=FakeGrokDelivery(),
+            approvals=approvals(config),
+        )
+
+
+def release_and_review(flow: SizedFlow, number: int) -> None:
+    assert flow.post(f"go-max-{number}", "/go", MAX) == "resumed-fix"
+    next_review(flow, number)
+
+
+def test_the_first_repeat_stop_carries_count_links_size_and_the_factory(tmp_path: Path) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=42)
+
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+
+    assert repeat_wakes(flow) == [
+        f"repeat-block: f-1, {PR_URL}revise-1, {PR_URL}revise-2, stops=1, for=factory, changed_lines=42"
+    ]
+
+
+def test_the_wake_leaves_out_a_size_the_poll_did_not_read(tmp_path: Path) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=None)
+
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+
+    assert repeat_wakes(flow) == [f"repeat-block: f-1, {PR_URL}revise-1, {PR_URL}revise-2, stops=1, for=factory"]
+
+
+def test_the_second_stop_on_one_id_goes_to_max_across_a_restart(tmp_path: Path) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=7)
+    flow.factory = replace(flow.factory, auto_extra_rounds=2)
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+    flow.restart()
+    release_and_review(flow, 2)
+
+    assert revise(flow, "3/3", "revise-3", body=F1) == "waiting-max-repeat"
+
+    assert_parked(flow, job_count(flow.queue, "fix"), "revise-3", 3)
+    assert repeat_wakes(flow)[-1] == (
+        f"repeat-block: f-1, {PR_URL}revise-2, {PR_URL}revise-3, stops=2, for=max, changed_lines=7"
+    )
+
+
+def test_a_stop_on_another_id_counts_from_one(tmp_path: Path) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=None)
+    flow.factory = replace(flow.factory, auto_extra_rounds=2)
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+    release_and_review(flow, 2)
+
+    assert revise(flow, "3/3", "revise-3", " repeat=f-2", body=F2) == "waiting-max-repeat"
+
+    assert repeat_wakes(flow)[-1].endswith(f"{PR_URL}revise-3, stops=1, for=factory")
+
+
+def edit(flow: AppFlow, comment_id: str, body: str) -> None:
+    flow.comments = [
+        replace(item, body=body, edited_at=flow.now[0]) if item.id == comment_id else item
+        for item in flow.comments
+    ]
+
+
+@pytest.mark.parametrize(
+    ("comment_id", "body"),
+    [
+        ("revise-1", None),
+        ("revise-1", "Withdrawn.\n"),
+        ("revise-2", None),
+        ("revise-2", "Withdrawn.\n"),
+    ],
+    ids=["earlier-id-edited", "earlier-withdrawn", "stopped-id-edited", "stopped-withdrawn"],
+)
+def test_an_edited_history_keeps_the_count_of_accepted_stops(
+    tmp_path: Path, comment_id: str, body: str | None
+) -> None:
+    flow = SizedFlow(tmp_path, changed_lines=7)
+    flow.factory = replace(flow.factory, auto_extra_rounds=2)
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+    release_and_review(flow, 2)
+    original = next(item.body for item in flow.comments if item.id == comment_id)
+    edit(flow, comment_id, body or original.replace("f-1", "f-2"))
+    flow.restart()
+
+    assert revise(flow, "3/3", "revise-3", " repeat=f-1", body=F1) == "waiting-max-repeat"
+
+    assert repeat_wakes(flow)[-1].endswith(f"{PR_URL}revise-3, stops=2, for=max, changed_lines=7")

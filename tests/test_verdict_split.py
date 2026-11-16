@@ -28,6 +28,8 @@ RULE_MODULE = {
     "_revise_ci_gate": "t3",
     "_repeat_trigger": "repeat",
     "_accepted_revises": "repeat",
+    "_repeat_stops": "repeat",
+    "_repeat_detail": "repeat",
     "_t3_repeat": "repeat",
     "_t4": "t4",
     "_approve_ci_red_fix": "t4",
