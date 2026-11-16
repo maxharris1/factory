@@ -37,7 +37,11 @@ fetched origin/main (`preflight-lagging: box ...`), so
 a pending or refused box deploy never lets a remote run the old commit. On
 the box the checkout's HEAD is compared with its own fetched origin/main
 instead: a box HEAD behind it (self-deploy has not moved it yet) fails the
-same way, until it deploys. A box factory_root other than the box checkout
+same way, until it deploys. Neither refuses while self-deploy holds the box
+at that HEAD for that origin/main (a device_sync `held` row, written when
+local edits conflict with upstream): the box and the remotes keep running
+the box's commit. A held row naming another HEAD or origin/main still
+refuses. A box factory_root other than the box checkout
 (a per-account checkout, #345) must also sit at the box HEAD, the same rule
 as a remote, and is refused while the box checkout lags its origin/main; the
 waiter syncs it before each claim.
@@ -69,6 +73,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from lib import device_sync
 from lib.device_monitor import remote_target
 from lib.health import checkout_sha
 from lib.device_pool import Placement
@@ -296,10 +301,13 @@ def lag(device: str, bot: str, checkout: str, head: Head, box: str | None) -> st
     return None
 
 
-def box_behind_origin(device: str, bot: str, checkout: str) -> str | None:
+def box_behind_origin(device: str, bot: str, checkout: str,
+                      held: device_sync.Row | None = None) -> str | None:
     head = checkout_sha(Path(checkout))
     upstream = checkout_sha(Path(checkout), "refs/remotes/origin/main")
     if head is None or upstream is None or head == upstream:
+        return None
+    if held is not None and (held.sha, held.target) == (head, upstream):
         return None
     try:
         behind = subprocess.run(
@@ -314,10 +322,11 @@ def box_behind_origin(device: str, bot: str, checkout: str) -> str | None:
             f"origin/main at {upstream[:12]}")
 
 
-def refuse_configured_checkout_behind_box(name: str, bot: str, checkout: str, root: Path) -> None:
+def refuse_configured_checkout_behind_box(name: str, bot: str, checkout: str, root: Path,
+                                          held: device_sync.Row | None = None) -> None:
     if Path(checkout).resolve() == root.resolve():
         return
-    lagging = box_behind_origin("box", bot, str(root.resolve()))
+    lagging = box_behind_origin("box", bot, str(root.resolve()), held)
     if lagging is not None:
         raise CheckoutLagging(lagging, box_behind_origin=True)
     head = Head(exists=Path(checkout).is_dir(), sha=checkout_sha(Path(checkout)), branch=None)
@@ -357,6 +366,7 @@ def check(
     home: Path,
     checkout: str | None,
     root: Path = ROOT,
+    held: device_sync.Row | None = None,
 ) -> Report:
     skills = skills_dir(bot)
     try:
@@ -371,17 +381,17 @@ def check(
     install_errors: list[str] = []
     if device is None or device.local or placement is None:
         name = device.name if device is not None else "box"
-        lagging = box_behind_origin(name, bot, checkout)
+        lagging = box_behind_origin(name, bot, checkout, held)
         if lagging is not None:
             raise CheckoutLagging(lagging, box_behind_origin=True)
-        refuse_configured_checkout_behind_box(name, bot, checkout, root)
+        refuse_configured_checkout_behind_box(name, bot, checkout, root, held)
         found = local_hashes(home, paths)
         if home_install_stale(expected, found):
             install_errors = install_into_home(Path(checkout), home)
             found = local_hashes(home, paths)
     else:
         name = device.name
-        lagging = box_behind_origin("box", bot, str(root.resolve()))
+        lagging = box_behind_origin("box", bot, str(root.resolve()), held)
         if lagging is not None:
             raise CheckoutLagging(lagging, box_behind_origin=True)
         seen = remote_hashes(transport, device, placement, paths, checkout)
@@ -439,6 +449,7 @@ def preflight(
     transport: CaptureTransport | None = None,
     home: Path | None = None,
     root: Path | None = None,
+    held: device_sync.Row | None = None,
 ) -> Report:
     """Check the pinned skills on the job's device, under the checkout the brief names,
     and record the result. Raises PreflightError."""
@@ -451,6 +462,7 @@ def preflight(
             home=home if home is not None else Path.home(),
             checkout=checkout,
             root=root if root is not None else ROOT,
+            held=held,
         )
     except PreflightError as exc:
         record(queue, job, {"device": device.name if device is not None else "box", "error": str(exc)})

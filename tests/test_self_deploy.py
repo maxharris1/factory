@@ -18,7 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_sync, heal, pstack_pin, self_deploy, skill_preflight
+from lib import (
+    attention, config_overlay, device_sync, heal, pstack_pin, self_deploy, skill_preflight,
+)
+from lib.dashboard import collect_snapshot
+from lib.load import load_yaml
 from lib.device_pool import DevicePool, slots_in_use
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -478,6 +482,87 @@ def test_after_a_conflict_is_resolved_a_new_one_escalates_again(repo: Repo) -> N
     repo.commit("orch 2")
     assert run(repo, posts=posts)[0].kind == "conflict"
     assert len(posts.calls) == 2
+
+
+def test_a_box_value_in_the_ignored_overlay_survives_an_upstream_comment_beside_it(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    write(repo.upstream, ".gitignore", "orch.local.yml\n")
+    repo.commit("ignore the overlay")
+    git(repo.box, "pull", "--quiet", "--ff-only", "origin", "main")
+    write(repo.box, "orch.local.yml", "linear: box-project-id\n")
+    write(repo.upstream, "orch.yml", "# the Linear project\nlinear: REPLACE\ntrusted: []\n")
+    new = repo.commit("comment")
+
+    outcome, _, posts = run(repo)
+
+    assert (outcome.kind, repo.head()) == ("deployed", new)
+    assert git(repo.box, "status", "--porcelain") == ""
+    assert posts.calls == []
+    base = load_yaml((repo.box / "orch.yml").read_text(encoding="utf-8"))
+    assert config_overlay.apply_overlay(repo.box / "orch.yml", base) == (
+        {"linear": "box-project-id", "trusted": []}, [])
+
+
+def test_the_same_box_value_edited_into_tracked_orch_yml_conflicts(repo: Repo) -> None:
+    write(repo.box, "orch.yml", "linear: box-project-id\ntrusted: []\n")
+    write(repo.upstream, "orch.yml", "# the Linear project\nlinear: REPLACE\ntrusted: []\n")
+    repo.commit("comment")
+
+    assert run(repo)[0].kind == "conflict"
+
+
+def held_rows(queue: SQLiteJobQueue) -> list[tuple[str, str, str, str | None, str | None]]:
+    with queue.connect() as connection:
+        return [(row.device, row.bot, row.state, row.sha, row.target)
+                for row in device_sync.read(connection)]
+
+
+def attention_rows(queue: SQLiteJobQueue) -> list[tuple[str, str, str, str]]:
+    with queue.connect() as connection:
+        attention.ensure_table(connection)
+        return [tuple(row) for row in connection.execute(
+            "SELECT repo, ticket_id, reason, detail FROM needs_attention")]
+
+
+def test_a_conflict_holds_the_box_at_its_commit_and_flags_it_once_until_resolved(
+    repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(self_deploy, "own_repo", lambda checkout=self_deploy.ROOT: "acme/factory")
+    queue, pool = box_queue(tmp_path)
+    with queue.connect() as connection:
+        device_sync.upsert(connection, device="box", bot="codex-bot", harness="codex",
+                           checkout=str(repo.box), target=None, sha=None,
+                           state=device_sync.LAGGING, detail="preflight-lagging", now=NOW)
+        connection.commit()
+    write(repo.box, "orch.yml", "linear: box\ntrusted: []\n")
+    old = repo.head()
+    write(repo.upstream, "orch.yml", "linear: up\ntrusted: []\n")
+    new = repo.commit("orch")
+
+    first = run(repo, db=queue.path)[0]
+    second = run(repo, db=queue.path, now=NOW + 120)[0]
+
+    assert (first.kind, second.kind) == ("conflict", "conflict")
+    assert held_rows(queue) == [("box", "", "held", old, new)]
+    detail = "local edits conflict with upstream: orch.yml"
+    assert attention_rows(queue) == [("acme/factory", "self-deploy", "deploy-conflict", detail)]
+    items = collect_snapshot(queue.path, tmp_path / "none.log", now=NOW)["attention"]["items"]
+    assert [item["detail"] for item in items if item["kind"] == "needs-attention"] == [
+        f"deploy-conflict: {detail}"]
+    with queue.connect() as connection:
+        held = device_sync.held(connection, "box")
+    assert skill_preflight.box_behind_origin("box", "codex-bot", str(repo.box), held) is None
+    enqueue(queue, "1")
+    assert pool.claim("codex") is not None
+
+    git(repo.box, "checkout", "--", "orch.yml")
+    assert run(repo, db=queue.path, now=NOW + 240)[0].kind == "deployed"
+
+    assert repo.head() == new
+    assert held_rows(queue) == []
+    assert attention_rows(queue) == []
 
 
 @pytest.mark.parametrize("setup, reason", [

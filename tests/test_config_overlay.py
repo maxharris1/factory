@@ -179,3 +179,77 @@ def test_check_config_lists_overlay_key_names_and_no_values(
     ]
     assert "secret-project-id" not in result.stdout + result.stderr
     assert "secret-user-id" not in result.stdout + result.stderr
+
+
+def check_config(orch: Path, machines: Path, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "check-config",
+         "--orch", str(orch), "--machines", str(machines), "--allow-placeholders", *extra],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def test_check_config_warns_on_uncommitted_edits_to_a_tracked_config_file(
+    shipped: tuple[Path, Path]
+) -> None:
+    orch, machines = shipped
+    git = ["git", "-C", str(orch.parent), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "orch.yml", "machines.yml"], check=True)
+    subprocess.run([*git, "commit", "-qm", "seed"], check=True)
+    clean = check_config(orch, machines)
+    orch.write_text(orch.read_text(encoding="utf-8").replace(
+        "REPLACE_WITH_LINEAR_PROJECT_ID", "real-project"), encoding="utf-8")
+
+    dirty = check_config(orch, machines)
+
+    assert (clean.returncode, dirty.returncode) == (0, 0), dirty.stderr
+    assert "uncommitted" not in clean.stderr
+    assert [line for line in dirty.stderr.splitlines() if "uncommitted" in line] == [
+        f"{orch}: warning: uncommitted edits to a tracked config file; "
+        "move them into orch.local.yml"]
+
+
+def test_check_config_digest_is_the_same_for_a_tracked_edit_and_its_overlay(
+    overlay_on: None, tmp_path: Path
+) -> None:
+    digests = {}
+    for name in ("base", "edited", "layered"):
+        folder = tmp_path / name
+        folder.mkdir()
+        orch, machines = folder / "orch.yml", folder / "machines.yml"
+        shutil.copy(ROOT / "machines.yml", machines)
+        text = (ROOT / "orch.yml").read_text(encoding="utf-8")
+        if name == "edited":
+            text = text.replace("REPLACE_WITH_LINEAR_PROJECT_ID", "real-project")
+        orch.write_text(text, encoding="utf-8")
+        if name == "layered":
+            overlay_path(orch).write_text(
+                "projects:\n  - repo: aut0-code/aut0\n    linear_project_id: real-project\n",
+                encoding="utf-8")
+        result = check_config(orch, machines, "--digest")
+        digests[name] = [line for line in result.stdout.splitlines()
+                         if line.startswith("effective ")]
+
+    assert [line.split(" sha256=")[0] for line in digests["edited"]] == [
+        "effective orch.yml", "effective machines.yml"]
+    assert digests["edited"] == digests["layered"]
+    assert digests["base"][0] != digests["edited"][0]
+    assert digests["base"][1] == digests["edited"][1]
+
+
+def test_the_dashboard_reads_machines_yml_through_its_overlay(
+    overlay_on: None, shipped: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.queue import SQLiteJobQueue
+
+    _, machines = shipped
+    overlay_path(machines).write_text("devices:\n  - name: box\n    slot_max: 7\n",
+                                      encoding="utf-8")
+    SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000.0)
+
+    snapshot = collect_snapshot(tmp_path / "orch.db", tmp_path / "none.log", now=1000.0,
+                                machines_path=machines)
+
+    assert snapshot["slots"]["box"]["slot_max"] == 7

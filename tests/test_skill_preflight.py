@@ -884,3 +884,33 @@ def test_a_waiter_starts_on_a_configured_box_checkout_only_at_the_box_head(
     assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
     assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
     assert any("failed for T6 to requeue after a backoff" in line for line in device.log)
+
+
+@pytest.mark.parametrize("held_at", ["origin/main", "an older origin/main"])
+@pytest.mark.parametrize("remote", [False, True], ids=["box", "pc"])
+def test_a_box_held_at_its_commit_still_starts_jobs_until_origin_main_moves_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, remote: bool, held_at: str
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=remote)
+    install(device.home)
+    deploy(lock_root)
+    head, later = box_behind_origin_main(lock_root)
+    if remote:
+        subprocess.run(["git", "clone", "-q", str(lock_root), str(device.checkout)], check=True)
+    with sqlite3.connect(device.db) as connection:
+        device_sync.upsert(connection, device="box", bot="", harness="", checkout=str(lock_root),
+                           target=later if held_at == "origin/main" else "f" * 40, sha=head,
+                           state=device_sync.HELD, detail="local edits conflict with upstream: "
+                           "orch.yml", now=time.time())
+
+    job_id, started = device.run_one()
+
+    if held_at == "origin/main":
+        assert started == job_id
+        assert len(device.spawn.calls) == 1
+        return
+    assert started is None
+    assert state(device.db, job_id) == "failed"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == (
+        f"preflight-lagging: box claude-bot {lock_root.resolve()} at {head[:12]}, "
+        f"origin/main at {later[:12]}")

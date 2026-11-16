@@ -49,6 +49,14 @@ One pass, in order; the first guard that fails ends it:
    the checkout moves. Jobs already running keep running. The mark is
    dropped when the apply ends, and the box's own row and every lagging
    row once HEAD is origin/main. A waiter's synced or refused row stays.
+   A conflict holds the box at its commit instead (#610): one BEGIN
+   IMMEDIATE transaction writes the box's `held` row (sha the old HEAD,
+   target origin/main, detail the conflicting files), which the start's
+   preflight accepts in place of a box behind origin/main, drops the
+   lagging rows, and raises one `deploy-conflict` needs_attention row for
+   the factory's own repo (ticket `self-deploy`). The next up-to-date or
+   deployed pass drops both, so jobs keep starting while a person
+   resolves the conflict.
 7. When the merge changed deploy/ or requirements.txt, it runs
    `deploy/install.sh --update` (output in self-deploy-install.log). When
    it changed skills/ (the pin and the pinned files), or HOME's installed
@@ -85,7 +93,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import device_sync, health, pstack_pin
+from lib import attention, device_sync, health, pstack_pin
 from lib.heal import (
     ESCALATE,
     LOG_NAME,
@@ -126,6 +134,9 @@ FETCH_FAILED = "fetch-failed"
 ROLLED_BACK = "rolled-back"
 WOULD_DEPLOY = "would-deploy"
 INSTALL_FAILED = "install-failed"
+
+DEPLOY_CONFLICT = "deploy-conflict"
+ATTENTION_TICKET = "self-deploy"
 
 
 @dataclass(frozen=True)
@@ -418,12 +429,34 @@ def _mark_deploying(
         connection.commit()
 
 
-def _release(queue: SQLiteJobQueue, device: str, states: Sequence[str]) -> None:
+def _release(queue: SQLiteJobQueue, device: str) -> None:
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        device_sync.clear(connection, device, states, bots=("",))
-        if device_sync.LAGGING in states:
-            device_sync.clear(connection, device, (device_sync.LAGGING,))
+        device_sync.clear(connection, device, (device_sync.DEPLOYING,), bots=("",))
+        connection.commit()
+
+
+def _settle(queue: SQLiteJobQueue, device: str, checkout: Path, now: float,
+            held: Outcome | None = None) -> None:
+    """Record where the box stays: at origin/main, or `held` at its commit by a conflict.
+
+    At origin/main the box's own row goes; held, it becomes the held row. Either
+    way the lagging rows go, and the conflict flag tracks `held`."""
+    repo = own_repo(checkout)
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if held is None:
+            device_sync.clear(connection, device, device_sync.STATES, bots=("",))
+        else:
+            device_sync.upsert(connection, device=device, bot="", harness="",
+                               checkout=str(checkout), target=held.new, sha=held.old,
+                               state=device_sync.HELD, detail=held.detail, now=now)
+        device_sync.clear(connection, device, (device_sync.LAGGING,))
+        if repo is not None:
+            flags = {} if held is None else {
+                (repo, ATTENTION_TICKET, DEPLOY_CONFLICT): held.detail}
+            attention.ensure_table(connection)
+            attention.sync(connection, (DEPLOY_CONFLICT,), (repo,), flags, now)
         connection.commit()
 
 
@@ -462,7 +495,7 @@ def run_pass(
         if dry_run:
             return Outcome(UP_TO_DATE, old=old, new=new), {}
         if queue is not None:
-            _release(queue, device, device_sync.STATES)
+            _settle(queue, device, checkout, now)
         stale = _stale_homes(checkout, homes)
         if not stale:
             return Outcome(UP_TO_DATE, old=old, new=new), {}
@@ -474,7 +507,7 @@ def run_pass(
             skills = _install_skills(checkout, stale, environ, webhook, state_dir,
                                      install, clock)
         finally:
-            _release(queue, device, (device_sync.DEPLOYING,))
+            _release(queue, device)
         return _installed(old, new, skills)
     if not git.ok("merge-base", "--is-ancestor", old, new):
         return Outcome(REFUSED, f"local commits: HEAD {old[:12]} is not behind origin/main",
@@ -501,8 +534,11 @@ def run_pass(
     changed = sorted(name for name in dirty if name in upstream)
     merged, conflicts = _merge_kept(git, changed, old, new)
     if conflicts:
-        return Outcome(CONFLICT, "local edits conflict with upstream: " + ",".join(conflicts),
-                       old, new), {}
+        conflict = Outcome(CONFLICT, "local edits conflict with upstream: " + ",".join(conflicts),
+                           old, new)
+        if queue is not None:
+            _settle(queue, device, checkout, now, held=conflict)
+        return conflict, {}
     if queue is None:
         return _apply(git, state_dir, dirty, changed, merged, old, new, environ=environ,
                       webhook=webhook, now=now, install=install, clock=clock, started=started,
@@ -513,10 +549,12 @@ def run_pass(
                                 environ=environ, webhook=webhook, now=now, install=install,
                                 clock=clock, started=started, homes=homes)
     except BaseException:
-        _release(queue, device, (device_sync.DEPLOYING,))
+        _release(queue, device)
         raise
-    _release(queue, device,
-             device_sync.STATES if outcome.kind == DEPLOYED else (device_sync.DEPLOYING,))
+    if outcome.kind == DEPLOYED:
+        _settle(queue, device, checkout, now)
+    else:
+        _release(queue, device)
     return outcome, extra
 
 

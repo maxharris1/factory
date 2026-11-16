@@ -1408,6 +1408,15 @@ Only the account that owns the checkout pulls:
   not hash to the index entry, as with a stale fsmonitor), so the backup
   always holds every local edit a rollback would reset. A fetch failing for 30 minutes escalates; its log
   line holds only the exit code.
+- A kept file whose local edits conflict with upstream holds the box at
+  its commit (issue #610): a `held` box row in `device_sync` lets jobs
+  keep starting on the box and on remotes at the box's commit, and one
+  `deploy-conflict` needs-attention row (ticket `self-deploy`) names the
+  file. Both go away on the next pass that reaches `origin/main`. Box-local
+  values belong in `orch.local.yml` and `machines.local.yml`; `orch
+  check-config` warns about uncommitted edits to a tracked `orch.yml` or
+  `machines.yml`, and `orch check-config --digest` prints a hash of each
+  effective config, so you can check that a move changed nothing.
 - When the merge changed `deploy/` or `requirements.txt` it runs
   `deploy/install.sh --update`, which installs requirements into the
   existing venv instead of recreating it (`self-deploy-install.log`).
