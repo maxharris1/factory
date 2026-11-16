@@ -42,9 +42,6 @@ time.sleep(300)
 # Like OpenSSH it closes every inherited descriptor, so the loop's child lock
 # (fd 7) does not outlive the loop. The remote forward is an exclusive flock
 # on $HOME/remote-forward.lock; its holder's pid is in $HOME/forward-owner.
-# The tunnel ssh plays the remote sshd session too: it runs the remote
-# command, up to its keep-alive loop, as its own child, so that command's
-# $PPID is the forward's holder.
 FAKE_SSH = """#!/usr/bin/env python3
 import fcntl, os, subprocess, sys, time
 os.closerange(3, 1024)
