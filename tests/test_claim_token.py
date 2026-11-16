@@ -327,6 +327,33 @@ def test_waiter_brief_failure_cannot_fail_later_claim(
     assert actual == later[0], "retired waiter failed successor claim and removed its slot"
 
 
+@pytest.mark.parametrize("failure", ["lagging", "unreachable"])
+def test_a_preflight_failure_after_a_reclaim_leaves_the_later_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from lib.queue import _ensure_job_events
+    from lib.skill_preflight import CheckoutLagging, DeviceUnreachable
+    from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
+
+    db, queue = make_queue(tmp_path)
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    job_id = enqueue(queue, failure)
+    waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+    later: list[tuple] = []
+
+    def changed_brief(*args, **kwargs):
+        reclaim(queue, waiter.pool, job_id, waiter._claimer)
+        later.append(successor(db, job_id))
+        if failure == "lagging":
+            raise CheckoutLagging("the box checkout is behind origin")
+        raise DeviceUnreachable("box", "box-alias")
+
+    monkeypatch.setattr(waiter, "_brief", changed_brief)
+    assert waiter.step() is None
+    assert successor(db, job_id) == later[0]
+
+
 def test_waiter_reap_cannot_fail_later_claim(tmp_path: Path) -> None:
     from lib.queue import _ensure_job_events
     from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter

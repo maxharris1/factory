@@ -537,7 +537,7 @@ def test_a_remote_run_whose_runner_is_killed_never_runs_two_workers(
     runner = None
     try:
         assert waiter.step() == job_id
-        runner = waiter._children[job_id]
+        runner, _ = waiter._children[job_id]
         wait_for(lambda: len(workers()) == 1)
         os.kill(runner.pid, signal.SIGKILL)
         runner.wait(timeout=10)
