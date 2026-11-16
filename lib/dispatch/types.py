@@ -55,6 +55,7 @@ class CIResult:
     # GitHub ran nothing there (#255), as opposed to CI still running.
     reported: bool = True
     failed: tuple[FailedCheck, ...] = ()
+    pending: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in ("pending", "success", "failure"):

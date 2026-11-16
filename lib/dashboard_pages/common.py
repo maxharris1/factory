@@ -246,6 +246,11 @@ SCRIPT_HEAD = r"""
   function ticketHref(hrefs, r) { return hrefs[threadKey(r)] || 'job.html'; }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
+  function checksNamed(ci) { return ci.checks.join(', ') || 'checks pending'; }
+  function checksHref(t) {
+    var refs = ghRefs(t);
+    return refs && refs.pr ? 'https://github.com/' + refs.repo + '/pull/' + refs.pr + '/checks' : null;
+  }
   // #92: only a link into the Health tab, never a value used as a URL.
   function healthLink(href) { return /^health\.html#[A-Za-z0-9_-]+$/.test(String(href)) ? String(href) : 'health.html'; }
   // #75: lib/job_state.py's state of a running job, as a chip.
@@ -653,6 +658,17 @@ def _bot(name: object) -> str:
 
 def _chip(text: object, cls: str = "muted") -> str:
     return _span(f"chip {cls}", text)
+
+
+def checks_named(ci: dict) -> str:
+    return ", ".join(ci["checks"]) or "checks pending"
+
+
+def checks_link(ticket: dict) -> str:
+    refs = github_refs(ticket)
+    if refs is None or refs["pr"] is None:
+        return ""
+    return f'<a href="https://github.com/{_e(refs["repo"])}/pull/{refs["pr"]}/checks">checks</a>'
 
 
 def _panel(

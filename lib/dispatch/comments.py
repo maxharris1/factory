@@ -94,6 +94,7 @@ class CommentsMixin:
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
         self._remember_verdicts(ticket, comments)
+        self._drop_ci_wait_without_comment(ticket, comments)
         for comment in comments:
             # A ready may re-read the ticket uncached (T2); later comments
             # then see the fresh head.
@@ -383,6 +384,17 @@ class CommentsMixin:
             ).fetchone()
         return row is not None
 
+    def _drop_ci_wait_without_comment(
+        self, ticket: TrackedTicket, comments: list[Comment]
+    ) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT comment_id FROM ci_waits WHERE repo = ? AND ticket_id = ?", key
+            ).fetchone()
+            if row is not None and row["comment_id"] not in {comment.id for comment in comments}:
+                connection.execute("DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key)
+
     def _is_handled(self, ticket: TrackedTicket, comment_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -408,6 +420,10 @@ class CommentsMixin:
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
+            )
+            connection.execute(
+                "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
             self._record_handled_time(connection, ticket, comment_id, self.queue.now())
 
