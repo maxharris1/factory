@@ -785,6 +785,23 @@ def test_a_run_log_row_keeps_focus_when_it_stops_being_current(tmp_path: Path) -
     assert not after["connected"], "the focused row was rebuilt, not kept"
 
 
+@needs_node
+def test_a_ticket_link_keeps_focus_when_its_card_moves_to_another_column(tmp_path: Path) -> None:
+    snapshot = _job(tmp_path)
+    href = "job.html#job-h-review"
+
+    def advance(later: dict) -> None:
+        next(t for t in later["tickets"] if t["ticket_id"] == "40")["state"] = "ship"
+        _ship(later)
+
+    at = {"in": "pipeline", "attr": {"href": href}, "focus": True}
+    (step,) = _place(tmp_path, snapshot, "job.html", _ids("job.html"),
+                     [["put", at], ["poll", _next(snapshot, advance)], ["where", None]])
+    after = step["where"]
+    assert (after["tag"], after["attrs"].get("href")) == ("a", href), after
+    assert not after["connected"], "the focused link was rebuilt, not kept"
+
+
 GONE_ATTENTION = [
     ("job.html", "attention-strip", "attn-who"),
     ("activity.html", "attention", "at-go"),

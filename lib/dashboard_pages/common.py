@@ -288,12 +288,29 @@ SCRIPT_TAIL = r"""
       if (k === 0) hits.push(kids[i]); else twins(kids[i], keys, k - 1, hits);
     }
   }
+  function keyed(key) { return key.indexOf('[') > 0; }
+  function owner(node, root) {
+    for (var n = node.parentNode; n !== root; n = n.parentNode) if (keyed(nodeKey(n))) return nodeKey(n);
+    return null;
+  }
+  function owned(node, key, mine, root, hits) {
+    var kids = node.children;
+    for (var i = 0; i < kids.length; i++) {
+      if (nodeKey(kids[i]) === key && owner(kids[i], root) === mine) hits.push(kids[i]);
+      owned(kids[i], key, mine, root, hits);
+    }
+    return hits;
+  }
   function locate(at) {
     var i = 0;
     while (!at.chain[i].isConnected) i++;
     if (!i) return {root: at.chain[0], node: at.chain[0]};
     var hits = [];
     twins(at.chain[i], at.keys, i - 1, hits);
+    if (!hits.length) {
+      var mine = at.keys.slice(1, i).filter(keyed)[0] || null;
+      hits = owned(at.chain[i], at.keys[0], mine, at.chain[i], []);
+    }
     var same = hits.filter(function (h) { return h.textContent === at.text; });
     return {root: at.chain[i], node: same[0] || (hits.length === 1 ? hits[0] : null)};
   }
