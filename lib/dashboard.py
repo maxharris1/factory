@@ -854,6 +854,13 @@ def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str
     return found
 
 
+def _no_ci_bases(connection: sqlite3.Connection) -> dict[tuple[str, str], dict]:
+    return {
+        (str(row["repo"]).casefold(), str(row["ticket_id"])): {"base": _clean(row["base"], 80)}
+        for row in connection.execute("SELECT repo, ticket_id, base FROM no_ci_bases")
+    }
+
+
 def _ticket_ref(
     sources: dict[tuple[str, str], tuple[str | None, str | None]],
     repo: object,
@@ -1194,6 +1201,7 @@ def _read_db(
     if "tracked_tickets" in tables and "ticket_state" in tables:
         approvers = _hold_approvers(connection)
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
+        no_ci_bases = _no_ci_bases(connection) if "no_ci_bases" in tables else {}
         for row in connection.execute(
             """
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -1222,8 +1230,10 @@ def _read_db(
                 else None
             )
             waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
-            ci_wait = ci_waits.get((str(row["repo"]).casefold(), str(row["ticket_id"])))
-            ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = TicketInfo(
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            ci_wait = ci_waits.get(key)
+            no_ci = no_ci_bases.get(key)
+            ticket_info[key] = TicketInfo(
                 _enum(row["tracker"], TRACKERS), stuck, state
             )
             tickets.append(
@@ -1237,6 +1247,7 @@ def _read_db(
                     "paused_action": paused_action,
                     **waiting,
                     **({"ci_wait": ci_wait} if ci_wait else {}),
+                    **({"no_ci": no_ci} if no_ci else {}),
                 }
             )
             if stuck:
