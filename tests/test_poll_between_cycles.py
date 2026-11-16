@@ -162,6 +162,31 @@ def test_an_on_time_gap_logs_no_between_cycles_line(capsys) -> None:
     assert "between cycles" not in capsys.readouterr().out
 
 
+def test_a_slow_sleep_hidden_by_a_wall_clock_stepped_back_is_still_named(capsys) -> None:
+    clock = PausedClock()
+
+    def delayed(seconds: float) -> None:
+        clock.slept.append(seconds)
+        clock.mono += 45.0
+        clock.wall += 25.0
+
+    loop = PollLoop(
+        Dispatcher(), object(), interval_seconds=1,
+        sleep=lambda seconds: sleep_on_either_clock(
+            seconds, wall=lambda: clock.wall, monotonic=lambda: clock.mono, sleep=delayed
+        ),
+    )
+    loop.clock = CycleClock(wall=lambda: clock.wall, monotonic=lambda: clock.mono)
+
+    loop.run(max_polls=2)
+
+    assert clock.slept == [1.0]
+    assert capsys.readouterr().out.splitlines()[2] == (
+        "orch poll: between cycles 45.0s: sleep 45.0s "
+        "(asked 1s, monotonic 45.0s, clock stepped back 20.0s)"
+    )
+
+
 def test_a_wall_clock_stepped_back_still_ends_the_sleep_on_the_monotonic_clock() -> None:
     mono = [0.0]
     slept: list[float] = []

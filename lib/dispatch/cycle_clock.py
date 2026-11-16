@@ -95,12 +95,15 @@ class CycleClock:
             return None
         wall = self.wall() - self._ended[0]
         monotonic = self.monotonic() - self._ended[1]
-        if wall - asked <= SLOW_STEP_SECONDS:
+        elapsed = max(wall, monotonic)
+        if elapsed - asked <= SLOW_STEP_SECONDS:
             return None
         detail = f"asked {asked:g}s, monotonic {monotonic:.1f}s"
         if wall - monotonic > SLOW_STEP_SECONDS:
             detail += f", clock jumped {wall - monotonic:.1f}s"
-        return f"orch poll: between cycles {wall:.1f}s: sleep {wall:.1f}s ({detail})"
+        elif monotonic - wall > SLOW_STEP_SECONDS:
+            detail += f", clock stepped back {monotonic - wall:.1f}s"
+        return f"orch poll: between cycles {elapsed:.1f}s: sleep {elapsed:.1f}s ({detail})"
 
     def state(self) -> tuple[float | None, float | None]:
         return self.started_at, self.last_cycle_seconds
