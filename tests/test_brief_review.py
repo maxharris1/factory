@@ -142,7 +142,8 @@ def test_merge_conflict_and_unknown_verify() -> None:
 
 UNREADABLE_BLOCKS = "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
 NOT_YET_REVIEW = (
-    "The reviewer runs `verify-cleffy` once that skill is on `dev`. Until then, list it in the PR as not run."
+    "The reviewer runs `verify-cleffy` once that skill is on `dev`. "
+    "Until then, list `verify-cleffy` in the PR as not run."
 )
 NOT_YET_MD = snapshots.FACTORY_MD.replace("The reviewer runs `verify-cleffy`.", NOT_YET_REVIEW)
 USER_IMPACT = "review:\n  block_on: user-impact\n"
@@ -244,6 +245,9 @@ REQUIRED_ELSEWHERE = {
     "List optional browser checks as not run when no browser is installed.",
     "separate list item": "- The reviewer must run `verify-cleffy`. If it is unavailable, stop.\n"
     "- List optional browser checks as not run when no browser is installed.",
+    "same paragraph": "The reviewer must run `verify-cleffy`. If it is unavailable, stop. "
+    "List optional browser checks as not run when no browser is installed.",
+    "pronoun only": "The reviewer runs `verify-cleffy` once that skill is on `dev`. Until then, list it as not run.",
 }
 
 

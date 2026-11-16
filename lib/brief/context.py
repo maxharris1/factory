@@ -87,7 +87,8 @@ def verify_not_run(verify: str | None, context: FactoryContext | None) -> bool:
     skill = re.compile(rf"(?<![a-z0-9-]){re.escape(verify)}(?![a-z0-9-])")
     not_run = re.compile(r"\bnot\s+run\b", re.IGNORECASE)
     blocks = re.split(r"\n\s*\n|\n(?=\s*(?:[-*+]|\d+[.)])\s)", review_prose(context))
-    return any(skill.search(block) and not_run.search(block) for block in blocks)
+    sentences = (s for block in blocks for s in re.split(r"(?<=[.!?])\s+", " ".join(block.split())))
+    return any(skill.search(sentence) and not_run.search(sentence) for sentence in sentences)
 
 
 def _ship_line(context: FactoryContext) -> str:
