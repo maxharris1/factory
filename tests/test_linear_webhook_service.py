@@ -42,10 +42,6 @@ time.sleep(300)
 # Like OpenSSH it closes every inherited descriptor, so the loop's child lock
 # (fd 7) does not outlive the loop. The remote forward is an exclusive flock
 # on $HOME/remote-forward.lock; its holder's pid is in $HOME/forward-owner.
-# A `-N` call is a tunnel session, logged to ssh-calls.log. A call ending in a
-# remote command returns at once and is logged to ssh-command-calls.log: `true`
-# is the probe, which binds the forward only while the lock is free, and the
-# reclaim script runs under sh with FAKE_SS as `ss` on its PATH.
 FAKE_SSH = """#!/usr/bin/env python3
 import fcntl, os, subprocess, sys, time
 os.closerange(3, 1024)
@@ -74,9 +70,6 @@ with open(os.path.join(home, "forward-owner"), "w") as owner:
 time.sleep(300)
 """
 
-# ss on the tunnel host: one listener line while the forward lock is held,
-# with the holder from $HOME/forward-owner and $HOME/forward-owner-kind
-# when -p asks for it.
 FAKE_SS = """#!/usr/bin/env python3
 import fcntl, os, sys
 home = os.environ["HOME"]
@@ -964,8 +957,7 @@ HELD_SETTINGS = dict(LINEAR_WEBHOOK_REFUSED_LIMIT="2", LINEAR_WEBHOOK_RETRY_SEC=
                      LINEAR_WEBHOOK_HELD_RETRY_SEC=str(HELD_RETRY))
 
 
-def _remote_holder(home: Path, kind: str) -> subprocess.Popen:
-    """A process on the tunnel host listening on the forward port, which ss names `kind`."""
+def _remote_holder(home: Path, process_name: str) -> subprocess.Popen:
     script = (
         "import fcntl, os, time\n"
         "home = os.environ['HOME']\n"
@@ -974,7 +966,7 @@ def _remote_holder(home: Path, kind: str) -> subprocess.Popen:
         "with open(os.path.join(home, 'forward-owner'), 'w') as owner:\n"
         "    owner.write(str(os.getpid()))\n"
         "with open(os.path.join(home, 'forward-owner-kind'), 'w') as name:\n"
-        f"    name.write({kind!r})\n"
+        f"    name.write({process_name!r})\n"
         "print('ready', flush=True)\n"
         "time.sleep(300)\n"
     )

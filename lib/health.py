@@ -1181,8 +1181,6 @@ def box_sync(device: str, root: Path = ROOT) -> DeviceSync | None:
 
 @dataclass(frozen=True)
 class Attention:
-    """A needs-attention item derived from the report: a tunnel down past its alert."""
-
     kind: str
     label: str
     reason: str
@@ -1470,7 +1468,6 @@ def read_tunnel_held(db: Path) -> str | None:
 
 
 def _read_held(db: Path) -> tuple[str, float] | None:
-    """(`PORT on HOST`, when the record was written) from the held record, if any."""
     try:
         with open(db.parent / TUNNEL_HELD, encoding="utf-8") as record:
             text = record.read().strip()

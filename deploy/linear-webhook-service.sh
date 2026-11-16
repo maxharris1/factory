@@ -70,7 +70,7 @@
 #     any other holder is left alone and logged as `held by <users>`.
 #   probe: `ssh -o ExitOnForwardFailure=yes -R ... HOST true`. Exit 0 removes
 #     the record and the loop starts the tunnel again; otherwise the record
-#     stays, untouched, so health sees no gap and dates the outage from it.
+#     stays as written.
 # start removes the record and the waiting loop retries at once; restart
 # keeps it. A loop started on another port or host removes it.
 #
@@ -324,8 +324,7 @@ held_here() {
     [[ "$(cat "$HELD" 2>/dev/null)" == "${PORT} ${TUNNEL_HOST}" ]]
 }
 
-# Runs on the tunnel host (see the header); @PORT@ becomes the checked PORT.
-read -r -d '' RECLAIM <<'EOF' || true
+read -r -d '' RECLAIM_ON_HOST <<'EOF' || true
 listeners=$(ss -Hltnp "sport = :@PORT@") || exit 1
 [ -n "$listeners" ] || exit 0
 own='\("sshd(-session)?",pid=[0-9]+'
@@ -343,12 +342,10 @@ while [ "$i" -lt 10 ] && [ -n "$(ss -Hltn "sport = :@PORT@")" ]; do
 done
 EOF
 
-# End this user's sshd sessions still forwarding PORT on TUNNEL_HOST, and
-# log every holder; HOLDER keeps the last report for status.
 reclaim() {
     local errors="$1" line
     run_child ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 \
-        -o ServerAliveCountMax=3 "$TUNNEL_HOST" "${RECLAIM//@PORT@/$PORT}" \
+        -o ServerAliveCountMax=3 "$TUNNEL_HOST" "${RECLAIM_ON_HOST//@PORT@/$PORT}" \
         >"${HOLDER}.tmp" 2>"$errors"
     cat "$errors" >&2 2>/dev/null || true
     while IFS= read -r line; do
@@ -362,7 +359,6 @@ reclaim() {
     fi
 }
 
-# Can the forward bind now? The held record stays on disk throughout.
 probe() {
     run_child ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=30 \
         -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
@@ -371,7 +367,6 @@ probe() {
     ((STATUS == 0))
 }
 
-# Wait HELD_RETRY seconds, or less once start clears the held record.
 held_wait() {
     local until=$((SECONDS + HELD_RETRY))
     while held_here && ! stopping && ((SECONDS < until)); do
