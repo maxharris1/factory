@@ -19,20 +19,23 @@ CSS = """\
 .at-go:hover,.rl-tk:hover{color:var(--ok)}
 .at-go{margin-left:auto;font-family:var(--mono);font-size:12px;white-space:nowrap}
 .rl-filter{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+@media (scripting:none){#relay .rl-filter{display:none}}
 .rl-btn{height:44px;padding:0 16px;font-family:var(--mono);font-size:12px;cursor:pointer;
 border:1px solid var(--line-hi);background:var(--panel);color:var(--text)}
 .rl-btn[aria-pressed=true]{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent);color:var(--ok)}
 .rl-btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 .rl-rows{display:flex;flex-direction:column;font-family:var(--mono);font-size:12px}
-.rl-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:9px 6px;border-bottom:1px solid var(--line)}
-.rl-tk{flex:0 0 104px;font-size:13px;font-weight:600}
-.rl-step{--h:var(--muted);display:inline-flex;align-items:baseline;gap:6px;padding:1px 8px;
+.rl-row{display:grid;grid-template-columns:104px minmax(0,1fr);align-items:baseline;gap:8px;padding:9px 6px;
+border-bottom:1px solid var(--line)}
+.rl-tk{font-size:13px;font-weight:600}
+.rl-steps{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;min-width:0}
+.rl-step{--h:var(--muted);display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;padding:1px 8px;
 border:1px solid color-mix(in srgb,var(--h) 40%,transparent);background:color-mix(in srgb,var(--h) 9%,transparent);white-space:nowrap}
 .rl-step.b2b{border-style:dashed}
 .rl-claude{--h:var(--claude)}.rl-codex{--h:var(--codex)}.rl-cursor{--h:var(--cursor)}.rl-grok{--h:var(--grok)}
 .rl-bot{color:var(--h)}.rl-what{color:var(--text)}.rl-when{color:var(--muted)}
 .rl-sep{color:var(--muted)}
-.rl-verdict{display:inline-flex;align-items:baseline;gap:6px;white-space:nowrap}
+.rl-verdict{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;white-space:nowrap}
 .rl-out{color:var(--text-2)}
 .rl-done{display:block;flex:1 0 100%}
 .rl-legend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 20px;margin:12px 0 0;font-family:var(--mono);font-size:12px;
@@ -51,7 +54,7 @@ SCRIPT = r"""
                    down: 'bad', 'no-waiter': 'bad', health: 'bad'};
   var VERDICT = {routed: 'accent', shipped: 'ok', stale: 'muted', rejected: 'warn', stuck: 'bad',
                  blocked: 'bad', waiting: 'warn', other: 'muted'};
-  var ATTENTION_TINT = '#f7768e';
+  var TONE_TINT = {warn: '#ff9e64', bad: '#f7768e', muted: '#8b93b8'};
   var DONE_TINT = '#9ece6a';
   var RELAY_FILTERS = [['all', 'all'], ['scripted', 'scripted'], ['wakes', 'grok wakes'], ['shipped', 'shipped']];
   var rlFilter = 'all';
@@ -114,6 +117,9 @@ SCRIPT = r"""
       var said = add(row, el('span', 'rl-verdict'));
       add(said, chip(r.kind, VERDICT[r.kind] || 'muted'));
       add(said, el('span', 'rl-out', r.outcome));
+      if (r.age_seconds !== null && r.age_seconds !== undefined) {
+        ticking(add(said, el('span', 'rl-when')), r.age_seconds, '', ' ago');
+      }
       return;
     }
     var step = add(row, el('span', 'rl-step rl-' + (BOTS[r.recipient] ? r.recipient : 'other') +
@@ -166,21 +172,23 @@ SCRIPT = r"""
         var row = add(rows, el('div', 'rl-row'));
         row.setAttribute('data-thread', t.key);
         add(row, link('rl-tk', hrefs[t.key] || 'job.html')).textContent = ticketOf(t.ref);
+        var steps = add(row, el('span', 'rl-steps'));
         t.steps.forEach(function (s, i) {
-          if (i) add(row, el('span', 'rl-sep', '→')).setAttribute('aria-hidden', 'true');
-          relayStep(row, s);
+          if (i) add(steps, el('span', 'rl-sep', '→')).setAttribute('aria-hidden', 'true');
+          relayStep(steps, s);
         });
         if (played[t.key] && !still) {
-          var box = add(row, el('span', 'rl-done'));
+          var box = add(steps, el('span', 'rl-done'));
           box.setAttribute('aria-hidden', 'true');
           add(box, PX.strip('relay-' + played[t.key], {effect: 'off', tint: DONE_TINT, done: true, settle: true, cell: 4, height: 8}));
         }
       });
     }
     var legend = add(root, el('div', 'rl-legend'));
-    legendKey(legend, el('span', 'rl-sw'), 'scripted handoff');
+    legendKey(legend, el('span', 'rl-sw'), 'handoff');
     legendKey(legend, el('span', 'rl-sw b2b'), 'bot-to-bot (grok wake)');
     legendKey(legend, chip('routed', 'accent'), 'verdict');
+    legendKey(legend, chip('failed', 'bad'), 'failed handoff');
   }
 
   function renderAttention(d) {
@@ -196,8 +204,9 @@ SCRIPT = r"""
       row.setAttribute('data-attn', key);
       var blk = add(row, el('span', 'at-px'));
       blk.setAttribute('aria-hidden', 'true');
-      add(blk, PX.strip('attention-' + key, {effect: 'static', tint: ATTENTION_TINT, cell: 4, height: 24}));
-      add(row, chip(x.kind, ATTENTION[x.kind] || 'muted'));
+      var tone = ATTENTION[x.kind] || 'muted';
+      add(blk, PX.strip('attention-' + key, {effect: 'static', tint: TONE_TINT[tone], cell: 4, height: 24}));
+      add(row, chip(x.kind, tone));
       add(row, el('span', 'at-subj', x.component || ticketOf(x)));
       add(row, el('span', 'at-what', x.detail));
       add(row, link('at-go', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
@@ -222,7 +231,7 @@ _VERDICT = {"routed": "accent", "shipped": "ok", "stale": "muted", "rejected": "
             "stuck": "bad", "blocked": "bad", "waiting": "warn", "other": "muted"}
 
 
-_ATTENTION_TINT = "#f7768e"
+_TONE_TINT = {"warn": "#ff9e64", "bad": "#f7768e", "muted": "#8b93b8"}
 _RELAY_FILTERS = (("all", "all"), ("scripted", "scripted"), ("wakes", "grok wakes"), ("shipped", "shipped"))
 
 
@@ -286,9 +295,12 @@ def _relay_count(threads: list[dict]) -> str:
 def _relay_step(step: dict) -> str:
     row = step["row"]
     if step["type"] == "verdict":
+        age = row.get("age_seconds")
         return (
             f'<span class="rl-verdict">{_chip(row["kind"], _VERDICT.get(row["kind"], "muted"))}'
-            f'{_span("rl-out", row["outcome"])}</span>'
+            f'{_span("rl-out", row["outcome"])}'
+            + ("" if age is None else _span("rl-when", duration(age) + " ago"))
+            + "</span>"
         )
     bot = row["recipient"] if row["recipient"] in _BOTS else "other"
     b2b = " b2b" if row["kind"] == "bot_to_bot" else ""
@@ -311,16 +323,16 @@ def _relay(snapshot: dict) -> str:
     rows = "".join(
         f'<div class="rl-row" data-thread="{_e(t["key"])}">'
         f'<a class="rl-tk" href="{_e(hrefs.get(t["key"], "job.html"))}">{_e(_ticket(t["ref"]))}</a>'
-        + sep.join(_relay_step(step) for step in t["steps"])
-        + "</div>"
+        f'<span class="rl-steps">{sep.join(_relay_step(step) for step in t["steps"])}</span></div>'
         for t in threads
     )
     body = f'<div class="rl-rows">{rows}</div>' if rows else '<p class="empty">no handoffs or verdicts yet</p>'
     legend = (
         '<div class="rl-legend">'
-        '<span class="rl-key"><span class="rl-sw" aria-hidden="true"></span><span>scripted handoff</span></span>'
+        '<span class="rl-key"><span class="rl-sw" aria-hidden="true"></span><span>handoff</span></span>'
         '<span class="rl-key"><span class="rl-sw b2b" aria-hidden="true"></span><span>bot-to-bot (grok wake)</span></span>'
-        '<span class="rl-key"><span class="chip accent" aria-hidden="true">routed</span><span>verdict</span></span></div>'
+        '<span class="rl-key"><span class="chip accent" aria-hidden="true">routed</span><span>verdict</span></span>'
+        '<span class="rl-key"><span class="chip bad" aria-hidden="true">failed</span><span>failed handoff</span></span></div>'
     )
     return _panel(
         "relay", "Relay",
@@ -346,11 +358,12 @@ def _attention(snapshot: dict) -> str:
     def draw(row: dict) -> str:
         component = row.get("component")
         key = _attention_key(row)
-        strip = _px().px_strip(f"attention-{key}", effect="static", tint=_ATTENTION_TINT, cell=4, height=24)
+        tone = _ATTENTION.get(row["kind"], "muted")
+        strip = _px().px_strip(f"attention-{key}", effect="static", tint=_TONE_TINT[tone], cell=4, height=24)
         href = _health_link(row.get("link")) if component else ticket_href(hrefs, row)
         return (
             f'<div class="at-row" data-attn="{_e(key)}"><span class="at-px" aria-hidden="true">{strip}</span>'
-            + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
+            + _chip(row["kind"], tone)
             + _span("at-subj", component or _ticket(row))
             + _span("at-what", row["detail"])
             + f'<a class="at-go" href="{_e(href)}">{"open in System" if component else "open ticket"}</a>'

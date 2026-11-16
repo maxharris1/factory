@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from lib.dashboard import _VERDICT_TIMES, collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW, add_job, seeded
+from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dispatcher import retry, seed_state, setup, ticket
 
 IDS = layout.BAR + ["hud", "attention", "relay"]
@@ -335,6 +337,7 @@ def _rich(snapshot: dict) -> dict:
 
 @layout.needs_node
 def test_script_relay_and_attention_match_the_server(tmp_path: Path, snapshot: dict) -> None:
+    assert {page._ATTENTION[row["kind"]] for row in snapshot["attention"]["items"]} == {"warn", "bad"}
     for case, snap in (("seeded", snapshot), ("rich", _rich(snapshot))):
         (tmp_path / case).mkdir()
         out = _script(tmp_path / case, snap)
@@ -348,8 +351,10 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
     rows = re.findall(r'<div class="rl-row" data-thread="([^"]+)">(.*?)</div>', relay)
     assert [key for key, _ in rows] == [
         "maxharris1/factory#114", "maxharris1/factory#124", "maxharris1/factory#100", "maxharris1/factory#107"]
+    for _, row in rows:
+        assert re.fullmatch(r'<a class="rl-tk" href="[^"]*">[^<]*</a><span class="rl-steps">.*</span>', row)
     row124 = dict(rows)["maxharris1/factory#124"]
-    assert re.findall(r'class="(rl-step[^"]*|rl-verdict)"', row124) == [
+    assert re.findall(r'class="(rl-step [^"]*|rl-verdict)"', row124) == [
         "rl-verdict", "rl-step rl-claude", "rl-verdict", "rl-step rl-codex", "rl-step rl-grok b2b", "rl-verdict"]
     assert row124.count('<span class="rl-sep" aria-hidden="true">→</span>') == 5
     assert '<span class="chip ok">shipped</span><span class="rl-out">handed-off</span>' in row124
@@ -361,8 +366,26 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
                          r"([^<]+)</button>", relay)
     assert buttons == [("true", "all", "all"), ("false", "scripted", "scripted"),
                        ("false", "wakes", "grok wakes"), ("false", "shipped", "shipped")]
-    for words in ("scripted handoff", "bot-to-bot (grok wake)", "verdict"):
-        assert f"<span>{words}</span>" in relay
+    (legend,) = re.findall(r'<div class="rl-legend">(.*?)</div>', relay)
+    keys = re.findall(r'<span class="rl-key"><span class="([^"]+)" aria-hidden="true">([^<]*)</span>'
+                      r"<span>([^<]+)</span></span>", legend)
+    assert keys == [("rl-sw", "", "handoff"), ("rl-sw b2b", "", "bot-to-bot (grok wake)"),
+                    ("chip accent", "routed", "verdict"), ("chip bad", "failed", "failed handoff")]
+    assert legend.count('class="rl-key"') == 4
+    for drawn in ('class="rl-step rl-claude"', 'class="rl-step rl-grok b2b"',
+                  'class="rl-verdict"><span class="chip accent">routed</span>', '<span class="chip bad">failed</span>'):
+        assert drawn in relay
+
+
+def test_a_verdict_shows_its_age_like_a_handoff_and_no_time_when_it_has_none() -> None:
+    relay = page._relay(_snap([_handoff("build", "1", 400)],
+                              [_verdict(2, "1", "queued-review", 380), _verdict(1, "1", "authorized-unstick-build", None)]))
+    assert ('<span class="rl-verdict"><span class="chip accent">routed</span><span class="rl-out">queued-review</span>'
+            '<span class="rl-when">6m 20s ago</span></span>') in relay
+    assert '<span class="rl-what">build</span><span class="rl-when">6m 40s ago</span>' in relay
+    assert ('<span class="rl-verdict"><span class="chip accent">routed</span>'
+            '<span class="rl-out">authorized-unstick-build</span></span>') in relay
+    assert relay.count('class="rl-when"') == 2
 
 
 def _threads(markup: str) -> list[str]:
@@ -419,7 +442,7 @@ def test_each_new_shipped_verdict_on_one_ticket_gets_its_own_settle(tmp_path: Pa
     assert keys == [["relay-maxharris1/factory#114:10"], ["relay-maxharris1/factory#114:11"]]
 
 
-def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_path: Path) -> None:
+def test_attention_rows_are_full_rows_with_a_still_block_in_the_chip_tone_and_a_link(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     snapshot = collect_snapshot(db, log, now=NOW)
     snapshot["attention"]["items"].append({"kind": "down", "repo": "", "ticket_id": "", "component": "waiter x",
@@ -428,10 +451,15 @@ def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_pat
     attention = _server(snapshot)["attention"]
     rows = re.findall(r'<div class="at-row" data-attn="[^"]+">(.*?)</div>', attention)
     assert len(rows) == snapshot["attention"]["count"]
+    palette = {tone: re.search(rf"--{tone}:(#[0-9a-f]{{6}})", page.CSS).group(1) for tone in ("warn", "bad")}
+    tones = []
     for row in rows:
+        (tone,) = re.findall(r'<span class="chip (\w+)">', row)
+        tones.append(tone)
         assert row.startswith('<span class="at-px" aria-hidden="true"><canvas class="px" data-px="static" '
-                              'data-tint="#f7768e"')
+                              f'data-tint="{palette[tone]}"')
         assert 'data-cell="4"' in row and "height:24px" in row
+    assert sorted(set(tones)) == ["bad", "warn"]
     down = next(row for row in rows if "waiter x" in row)
     assert '<span class="at-subj">waiter x</span><span class="at-what">down (never seen)</span>' in down
     assert down.endswith('<a class="at-go" href="health.html#waiter-x">open in System</a>')
@@ -458,3 +486,87 @@ def test_attention_ticket_rows_link_github_in_both_renderers(tmp_path: Path, sna
     issue = links.index("https://github.com/maxharris1/cleffy/issues/14")
     assert links[issue + 1] == "https://github.com/maxharris1/cleffy/pull/15"
     assert _script(tmp_path, snap)["html"]["attention"] == server
+
+
+def _long(snapshot: dict) -> dict:
+    long = _rich(snapshot)
+    long["handoff_savings"]["recent"] += [
+        _handoff("j-l1", "131", 3000), _handoff("j-l2", "131", 2800, recipient="codex", action="review"),
+        _handoff("j-l3", "131", 2600, "failed", action="fix"), _handoff("j-l4", "131", 2400, "bot_to_bot", "grok", "done"),
+        _handoff("j-l5", "131", 2200, action="fix"), _handoff("j-l6", "131", 2000, recipient="codex", action="review"),
+    ]
+    long["poller"]["verdicts"][:0] = [
+        _verdict(19, "131", "handed-off", 1900, "shipped"), _verdict(18, "131", "authorized-unstick-build", None, "other"),
+        _verdict(17, "131", "queued-review", 2500), _verdict(16, "131", "queued-fix", 2700)]
+    return long
+
+
+def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
+    browser.call("Emulation.setScriptExecutionDisabled", value=not script)
+    if script:
+        browser.open(_page_with_status_stub(snapshot, "activity.html"), width)
+        return
+    bare = Path(browser.tmp.name) / f"bare-{width}.html"
+    bare.write_text(render_pages(snapshot)["activity.html"], encoding="utf-8")
+    browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
+    browser.call("Page.navigate", url=bare.as_uri())
+    deadline = time.monotonic() + 30
+    while not browser.eval(f"location.href === {json.dumps(bare.as_uri())} && document.readyState === 'complete' "
+                           "&& document.fonts.status === 'loaded'"):
+        assert time.monotonic() < deadline, f"{bare.name} never loaded"
+        time.sleep(0.05)
+
+
+RELAY_ROWS = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
+  var box = row.getBoundingClientRect(), tk = row.querySelector('.rl-tk').getBoundingClientRect();
+  var parts = [].filter.call(row.querySelectorAll('*'), function (n) { return !n.closest('.rl-tk'); });
+  return {
+    thread: row.getAttribute('data-thread'),
+    outside: parts.filter(function (n) {
+      var b = n.getBoundingClientRect();
+      return b.left < tk.right || b.right > box.right + 0.5;
+    }).map(function (n) { return n.className + ': ' + n.textContent; }),
+    lines: new Set([].map.call(row.querySelectorAll('.rl-step, .rl-verdict'), function (n) {
+      return Math.round(n.getBoundingClientRect().top);
+    })).size
+  };
+})"""
+
+
+@needs_chrome
+def test_wrapped_relay_steps_start_in_the_second_column_in_a_browser(snapshot: dict) -> None:
+    long = _long(snapshot)
+    browser = Browser()
+    try:
+        for script in (True, False):
+            for width in (1440, 375):
+                _load(browser, long, width, script)
+                rows = {row["thread"]: row for row in browser.eval(RELAY_ROWS)}
+                assert len(rows) == 5, (script, width)
+                assert rows["maxharris1/factory#131"]["lines"] > 1, (script, width)
+                for row in rows.values():
+                    assert not row["outside"], (script, width, row)
+    finally:
+        browser.close()
+
+
+RELAY_FILTER = """[].filter.call(document.querySelectorAll('#relay .rl-filter, #relay .rl-btn'), function (n) {
+  return n.getClientRects().length > 0;
+}).map(function (n) { return n.textContent; })"""
+
+
+@needs_chrome
+def test_the_relay_filter_shows_only_with_script_in_a_browser(snapshot: dict) -> None:
+    rich = _rich(snapshot)
+    browser = Browser()
+    try:
+        _load(browser, rich, 1440, False)
+        assert browser.eval("document.querySelectorAll('#relay .rl-filter .rl-btn').length") == 4
+        assert browser.eval(RELAY_FILTER) == []
+        _load(browser, rich, 1440, True)
+        assert browser.eval(RELAY_FILTER)[1:] == ["all", "scripted", "grok wakes", "shipped"]
+        threads = browser.eval("""(document.querySelector('[data-relay="wakes"]').click(),
+          [].map.call(document.querySelectorAll('#relay .rl-row'), function (r) { return r.getAttribute('data-thread'); }))""")
+        assert threads == ["maxharris1/factory#124"]
+    finally:
+        browser.close()
