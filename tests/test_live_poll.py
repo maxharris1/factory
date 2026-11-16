@@ -2529,7 +2529,8 @@ NON_READ_CALLS = {
     "method-equals-patch": ("--method=PATCH", "repos/acme/widgets/pulls/12"),
     "attached-x-delete": ("-XDELETE", "repos/acme/widgets/issues/12/labels/x"),
     "lowercase-x-put": ("-X", "put", "repos/acme/widgets/pulls/12/merge"),
-    "graphql": ("graphql", "-f", "query=query { viewer { login } }"),
+    "graphql": ("graphql", "-f", "query=mutation { addStar(input: {}) { clientMutationId } }"),
+    "graphql-query-file": ("graphql", "-F", "query=@query.graphql"),
     "graphql-no-fields": ("graphql",),
     "get-with-input": ("-X", "GET", "repos/acme/widgets/pulls", "--input", "-"),
 }
@@ -2537,9 +2538,6 @@ NON_READ_CALLS = {
 
 @pytest.mark.parametrize("name", sorted(NON_READ_CALLS))
 def test_poll_adapter_runs_every_non_read_form_once(name: str) -> None:
-    """Round 2 (F2.3): only provable reads are retried; every write form,
-    and graphql, runs once at the 60 s write timeout with no sleeps.
-    """
     calls: list[float] = []
     sleeps: list[float] = []
 

@@ -33,11 +33,13 @@ class CycleClock:
     last_cycle_seconds: float | None = None
     _rows: list[tuple[str, float, bool]] = field(default_factory=list)
     _parts: dict[str, dict[str, float]] = field(default_factory=dict)
+    _open: str | None = None
     _ended: tuple[float, float] | None = None
 
     def start(self) -> str:
         self._rows = []
         self._parts = {}
+        self._open = None
         self._ended = None
         self.started_at = self.wall()
         return f"orch poll: cycle start {et(self.started_at)}"
@@ -48,10 +50,12 @@ class CycleClock:
             raise ValueError(f"unknown poll phase {name!r}")
         began = self.wall()
         failed = True
+        self._open = name
         try:
             yield
             failed = False
         finally:
+            self._open = None
             self._rows.append((name, self.wall() - began, failed))
 
     @contextmanager
@@ -65,7 +69,16 @@ class CycleClock:
             self._add("after-poll", name, self.wall() - began)
 
     def add_source(self, name: str, seconds: float) -> None:
-        self._add("tracked-read", name, seconds)
+        if self._open is not None:
+            self._add(self._open, name, seconds)
+
+    @contextmanager
+    def source(self, name: str) -> Iterator[None]:
+        began = self.wall()
+        try:
+            yield
+        finally:
+            self.add_source(name, self.wall() - began)
 
     def _add(self, phase: str, name: str, seconds: float) -> None:
         parts = self._parts.setdefault(phase, {})

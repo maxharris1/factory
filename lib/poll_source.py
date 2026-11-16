@@ -5,18 +5,29 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
 import re
+import socket
 import sqlite3
 import subprocess
+import threading
 import time
 from bisect import bisect_right
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    Request,
+    build_opener,
+)
 
 from lib.dispatcher import (
     CIResult,
@@ -114,6 +125,9 @@ BACKOFF_SECONDS = 300.0
 GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
+READ_DEADLINE_SECONDS = 30.0
+HANG_STRIKES = 2
+LINEAR_CUTOFF_MARGIN_SECONDS = 1.0
 LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
@@ -188,7 +202,84 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-_OPENER = build_opener(_NoRedirect)
+_REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
+
+
+class _Cutoff:
+    """urllib's timeout is per socket operation, so a reply trickling bytes
+    never times out."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self.fired = False
+
+    def track(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sockets.append(sock)
+            if self.fired:
+                _shut(sock)
+
+    def fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            for sock in self._sockets:
+                _shut(sock)
+
+
+def _shut(sock: socket.socket) -> None:
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+class _Tracked:
+    def __init__(self, *args: Any, cutoff: _Cutoff, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._cutoff = cutoff
+        self._create_connection = self._open_tracked_before_tunnel
+
+    def _open_tracked_before_tunnel(self, *args: Any, **kwargs: Any) -> socket.socket:
+        sock = socket.create_connection(*args, **kwargs)
+        self._cutoff.track(sock)
+        return sock
+
+
+class _TrackedHTTP(_Tracked, HTTPConnection):
+    pass
+
+
+class _TrackedHTTPS(_Tracked, HTTPSConnection):
+    def connect(self) -> None:
+        HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(
+            self.sock,
+            server_hostname=self._tunnel_host or self.host,
+            do_handshake_on_connect=False,
+        )
+        self._cutoff.track(self.sock)
+        self.sock.do_handshake()
+
+
+class _CutoffHTTP(HTTPHandler):
+    def __init__(self, cutoff: _Cutoff) -> None:
+        super().__init__()
+        self._cutoff = cutoff
+
+    def http_open(self, req: Request) -> Any:
+        return self.do_open(_TrackedHTTP, req, cutoff=self._cutoff)
+
+
+class _CutoffHTTPS(HTTPSHandler):
+    def __init__(self, cutoff: _Cutoff) -> None:
+        super().__init__()
+        self._cutoff = cutoff
+
+    def https_open(self, req: Request) -> Any:
+        return self.do_open(
+            _TrackedHTTPS, req, context=self._context, cutoff=self._cutoff
+        )
 
 
 class _TerminalTicket(RuntimeError):
@@ -201,20 +292,41 @@ def post_json(
     body: bytes,
     timeout: float,
 ) -> HTTPResult:
+    """POST with timeout as the whole request's deadline, not per socket read."""
+    cutoff = _Cutoff()
+    timer = threading.Timer(timeout, cutoff.fire)
+    timer.daemon = True
+    timer.start()
+    opener = build_opener(_NoRedirect, _CutoffHTTP(cutoff), _CutoffHTTPS(cutoff))
     try:
         request = Request(url, data=body, method="POST", headers=dict(headers))
-        with _OPENER.open(request, timeout=timeout) as response:
-            return HTTPResult(
+        with opener.open(request, timeout=timeout) as response:
+            result = HTTPResult(
                 response.status,
                 response.read().decode("utf-8"),
                 dict(response.headers.items()),
             )
     except HTTPError as exc:
         return HTTPResult(exc.code, "", dict(exc.headers.items()))
-    except (OSError, URLError, ValueError) as exc:
+    except TimeoutError:
+        raise
+    except URLError as exc:
+        if cutoff.fired or isinstance(exc.reason, TimeoutError):
+            raise TimeoutError from None
         raise PollSourceError(
             f"Linear request failed: {type(exc).__name__}"
         ) from None
+    except (OSError, ValueError, HTTPException) as exc:
+        if cutoff.fired:
+            raise TimeoutError from None
+        raise PollSourceError(
+            f"Linear request failed: {type(exc).__name__}"
+        ) from None
+    finally:
+        timer.cancel()
+    if cutoff.fired:
+        raise TimeoutError
+    return result
 
 
 class IntakeRisks:
@@ -257,6 +369,7 @@ class LivePollSource:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
+        read_deadline_seconds: float = READ_DEADLINE_SECONDS,
         risks: IntakeRisks | None = None,
     ):
         self.config = config
@@ -271,6 +384,9 @@ class LivePollSource:
         self.clock = clock
         self.sleep = sleep
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
+        self.read_deadline_seconds = read_deadline_seconds
+        self._hangs: dict[str, int] = {}
+        self._linear_calls = _Abandoning(HANG_STRIKES)
         self._trusted = {
             "github": config.trusted_logins,
             "linear": config.trusted_linear_users,
@@ -365,6 +481,7 @@ class LivePollSource:
         self._cycles_until_linear -= 1
         self._cycle_errors = {}
         self._cycle_deferrals = {}
+        self._hangs = {}
         if self.config.linear_webhook is not None:
             if self._linear_due:
                 self._begin_webhook_cycle()
@@ -739,7 +856,6 @@ class LivePollSource:
                     # Its repo left orch.yml: never read, so ack its dirty rows.
                     self._note_unread(ref.ticket_id)
                 continue
-            began = time.monotonic()
             try:
                 ticket = self._tracked_ticket(ref, project)
             except Exception as exc:
@@ -748,12 +864,6 @@ class LivePollSource:
             else:
                 if ticket is not None:
                     found.append(ticket)
-            finally:
-                if self.cycle_clock is not None:
-                    self.cycle_clock.add_source(
-                        "linear" if ref.tracker == "linear" else ref.repo,
-                        time.monotonic() - began,
-                    )
         return tuple(found)
 
     def _tracked_ticket(
@@ -1028,6 +1138,7 @@ class LivePollSource:
             raise RetryablePollSourceError(
                 "Linear rate-limit backoff is active"
             )
+        self._check_hangs("linear")
         query = document.get("query")
         complexity = _linear_request_complexity(query)
         if not self._linear_request_available(query):
@@ -1035,16 +1146,25 @@ class LivePollSource:
         self._linear_requests += 1
         self._linear_complexity += complexity
         payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        headers = {
+            "Authorization": self._linear_key(),
+            "Content-Type": "application/json",
+        }
+        deadline = min(self.timeout_seconds, self.read_deadline_seconds)
+        cutoff = deadline - min(LINEAR_CUTOFF_MARGIN_SECONDS, deadline / 4)
         try:
-            result = self.linear_transport(
-                LINEAR_ENDPOINT,
-                {
-                    "Authorization": self._linear_key(),
-                    "Content-Type": "application/json",
-                },
-                payload,
-                self.timeout_seconds,
-            )
+            with self._timed("linear"):
+                result = self._linear_calls.run(
+                    deadline,
+                    lambda: self.linear_transport(
+                        LINEAR_ENDPOINT, headers, payload, cutoff
+                    ),
+                )
+        except TimeoutError:
+            self._hung("linear")
+            raise RetryablePollSourceError(
+                f"Linear request timed out after {deadline:g}s"
+            ) from None
         except PollSourceError:
             raise
         except Exception as exc:
@@ -1746,29 +1866,54 @@ class LivePollSource:
         return self._gh_call(*args, _unconditional=True)
 
     def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
-        """Retry the poll adapter's GETs; never repeat a write."""
+        """Retry the poll adapter's reads (GETs and GraphQL queries); never repeat a write."""
         call = list(argv)
-        if _is_read(call[call.index("api") + 1 :]):
+        args = call[call.index("api") + 1 :]
+        if _is_read(args) or _is_graphql_query(args):
             return self._run_gh_read(call)
-        return self.gh_runner(call, self.timeout_seconds)
+        with self._timed(_gh_source(call)):
+            return self.gh_runner(call, self.timeout_seconds)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
-        """Every _gh_call is a GET, so a timed-out call is safe to repeat."""
-        attempt = 1
-        while True:
-            try:
-                return self.gh_runner(argv, self.gh_call_timeout_seconds)
-            except subprocess.TimeoutExpired:
-                if attempt >= GH_CALL_ATTEMPTS:
-                    raise RetryablePollSourceError(
-                        f"gh api timed out after {attempt} attempts"
-                    ) from None
-            except OSError as exc:
-                raise PollSourceError(
-                    f"gh could not run: {type(exc).__name__}"
-                ) from exc
-            self.sleep(GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1))
-            attempt += 1
+        self._check_hangs("github")
+        with self._timed(_gh_source(argv)):
+            deadline = self.clock() + self.read_deadline_seconds
+            attempt = 1
+            while True:
+                left = deadline - self.clock()
+                try:
+                    return self.gh_runner(argv, min(self.gh_call_timeout_seconds, left))
+                except subprocess.TimeoutExpired:
+                    pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
+                    if attempt >= GH_CALL_ATTEMPTS or deadline - self.clock() <= pause:
+                        self._hung("github")
+                        raise RetryablePollSourceError(
+                            f"gh api timed out after {attempt} attempts"
+                        ) from None
+                except OSError as exc:
+                    raise PollSourceError(
+                        f"gh could not run: {type(exc).__name__}"
+                    ) from exc
+                self.sleep(pause)
+                attempt += 1
+
+    def _timed(self, name: str) -> AbstractContextManager[None]:
+        return nullcontext() if self.cycle_clock is None else self.cycle_clock.source(name)
+
+    def _check_hangs(self, service: str) -> None:
+        if self._hangs.get(service, 0) >= HANG_STRIKES:
+            raise RetryablePollSourceError(
+                f"{service} skipped for the rest of this cycle after "
+                f"{HANG_STRIKES} timed-out reads"
+            )
+
+    def _hung(self, service: str) -> None:
+        self._hangs[service] = self._hangs.get(service, 0) + 1
+        if self._hangs[service] == HANG_STRIKES and self.warning_sink is not None:
+            self.warning_sink(
+                f"{service} skipped for the rest of this cycle after "
+                f"{HANG_STRIKES} timed-out reads; read again next cycle"
+            )
 
     def _defer(self, reason: str) -> None:
         """A budget or page-limit cutoff is expected load shedding, not an error."""
@@ -1784,6 +1929,63 @@ class LivePollSource:
             if value:
                 reason = reason.replace(value, "<secret>")
         self.error_sink(repo, ticket_id, reason)
+
+
+class _Abandoning:
+    def __init__(self, max_running: int) -> None:
+        self.max_running = max_running
+        self._running = 0
+        self._lock = threading.Lock()
+
+    def run(self, seconds: float, call: Callable[[], HTTPResult]) -> HTTPResult:
+        with self._lock:
+            if self._running >= self.max_running:
+                raise RetryablePollSourceError(
+                    f"{self._running} timed-out Linear requests are still running"
+                )
+            self._running += 1
+        done: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
+
+        def target() -> None:
+            try:
+                outcome: tuple[bool, Any] = (True, call())
+            except BaseException as exc:
+                outcome = (False, exc)
+            with self._lock:
+                self._running -= 1
+            done.put(outcome)
+
+        threading.Thread(target=target, daemon=True).start()
+        try:
+            ok, value = done.get(timeout=seconds)
+        except queue.Empty:
+            raise TimeoutError from None
+        if ok:
+            return value
+        raise value
+
+
+def _is_graphql_query(args: Sequence[str]) -> bool:
+    if "graphql" not in args or "--input" in args:
+        return False
+    fields: list[str] = []
+    for index, arg in enumerate(args):
+        if arg in ("-f", "-F", "--field", "--raw-field"):
+            fields.append(args[index + 1] if index + 1 < len(args) else "")
+        elif arg.startswith(("--field=", "--raw-field=")):
+            fields.append(arg.partition("=")[2])
+        elif arg.startswith(("-f", "-F")):
+            fields.append(arg[2:])
+    documents = [value[len("query="):].lstrip() for value in fields if value.startswith("query=")]
+    return len(documents) == 1 and documents[0].startswith(("query", "{"))
+
+
+def _gh_source(argv: Sequence[str]) -> str:
+    for part in argv:
+        match = _REPO_ROUTE.match(part)
+        if match:
+            return match.group(1).lower()
+    return "github"
 
 
 def _json_object(text: str, source: str) -> dict[str, Any]:

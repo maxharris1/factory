@@ -1074,7 +1074,7 @@ def _feeder(
         queue,
         config,
         machines,
-        github=GitHubIntakeClient(cleared_variables=cleared),
+        github=GitHubIntakeClient(runner=source._adapter_runner, cleared_variables=cleared),
         linear=linear,
         factory_for=source.factory_context,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
