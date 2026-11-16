@@ -23,6 +23,7 @@ from lib.dispatcher import (
 )
 from lib.dashboard import collect_snapshot
 from lib.device_pool import DevicePool
+from lib.evidence.criteria import canonical_brief
 from lib.factory_md import FactoryConfig
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
@@ -338,6 +339,7 @@ def ticket(
         current_head=head,
         ci=ci or {},
         risk=risk,
+        brief_comment=canonical_brief(comments, TRUSTED_LOGINS),
         **extra,
     )
 

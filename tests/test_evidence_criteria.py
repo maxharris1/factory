@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from lib.dispatcher import Comment
+from lib.orchestrate import brief_comment
 from lib.evidence import TEXT_LIMIT, Criterion, criteria_evidence
+from lib.evidence.criteria import EMPTY, canonical_brief
 
 TRUSTED = {"github": {"factory-app[bot]": frozenset({"grok-bot"}), "claude-app[bot]": frozenset({"claude-bot"})}}
 
@@ -39,13 +41,12 @@ def _bundle(**overrides):
     args = {
         "issue_key": "162",
         "issue_url": "https://github.com/o/r/issues/162",
-        "comments": (),
-        "trusted_logins": TRUSTED,
         "issue_body": None,
         "pr_body": None,
         "ready_starts_review": False,
     }
     args.update(overrides)
+    args["brief"] = canonical_brief(args.pop("comments", ()), TRUSTED)
     return criteria_evidence(**args)
 
 
@@ -84,7 +85,7 @@ def test_pr_description_only_for_ready_starts_review():
     none = _bundle(pr_body=pr, ready_starts_review=False)
     assert none.source == "none"
     assert none.criteria == ()
-    assert none.text == ""
+    assert none.text == EMPTY
 
 
 def test_blank_source_falls_through():
@@ -109,10 +110,16 @@ def test_trusted_login_speaking_for_another_bot_is_not_the_brief():
     assert bundle.source == "issue"
 
 
-def test_first_trusted_brief_is_canonical():
+def test_latest_trusted_brief_is_canonical():
     first = _brief("factory-app[bot]", "- [ ] First brief.\n", at=1.0, cid="1")
     second = _brief("factory-app[bot]", "- [ ] Second brief.\n", at=2.0, cid="2")
-    assert _bundle(comments=(second, first)).criteria == (Criterion("ac-1", "First brief."),)
+    assert _bundle(comments=(second, first)).criteria == (Criterion("ac-1", "Second brief."),)
+
+
+def test_brief_without_the_orchestrator_role_is_not_canonical():
+    brief = _brief("factory-app[bot]", "- [ ] No role.\n")
+    brief = Comment(brief.id, brief.author, brief.body.replace(" role=orchestrator", ""), brief.created_at, brief.url)
+    assert _bundle(comments=(brief,), issue_body=TICKET).source == "issue"
 
 
 def test_non_brief_handoffs_and_plain_comments_are_skipped():
@@ -349,3 +356,47 @@ def test_code_examples_follow_commonmark(body, expected):
     bundle = _bundle(issue_body=body)
     assert [(c.id, c.text) for c in bundle.criteria] == [(f"ac-{n}", text) for n, text in enumerate(expected, 1)]
     assert bundle.cut is None
+
+
+def _orchestrate_brief(criteria: list[str], likely_files: list[str]) -> Comment:
+    body = brief_comment(
+        risk="high",
+        goal="Ship the thing.",
+        acceptance_criteria=criteria,
+        likely_files=likely_files,
+        done_evidence="The tests pass.",
+    )
+    return Comment(id="9", author="factory-app[bot]", body=body, created_at=1.0, url="u/9")
+
+
+@pytest.mark.parametrize("likely_files", [["lib/a.py", "lib/b.py"], []])
+def test_orchestrate_brief_round_trips_its_criteria(likely_files):
+    criteria = ["The first one holds.", "The second one holds."]
+    bundle = _bundle(comments=(_orchestrate_brief(criteria, likely_files),), issue_body=TICKET)
+    assert bundle.source == "brief"
+    assert bundle.criteria == (Criterion("ac-1", criteria[0]), Criterion("ac-2", criteria[1]))
+    assert "lib/a.py" not in bundle.text
+    assert "Done-evidence" not in bundle.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "- **Acceptance criteria**\n- not one\n",
+        "> **Acceptance criteria**\n> - not one\n",
+        "```\n**Acceptance criteria**\n- not one\n```\n",
+        "Some **Acceptance criteria** prose.\n- not one\n",
+    ],
+)
+def test_bold_label_outside_a_top_level_paragraph_is_not_a_section(body):
+    assert _bundle(issue_body=body).criteria == ()
+
+
+def test_bold_label_section_ends_at_a_heading():
+    body = "**Acceptance criteria**\n- one\n\n## Notes\n- not one\n"
+    assert [c.text for c in _bundle(issue_body=body).criteria] == ["one"]
+
+
+def test_bold_label_inside_a_heading_section_does_not_end_it():
+    body = "## Acceptance criteria\n- one\n\n**Detail**\n- two\n\n## Notes\n- not one\n"
+    assert [c.text for c in _bundle(issue_body=body).criteria] == ["one", "two"]

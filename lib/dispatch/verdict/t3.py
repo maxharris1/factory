@@ -272,15 +272,14 @@ class T3Mixin:
         criteria = criteria_evidence(
             issue_key=ticket.source_issue or ticket.ticket_id,
             issue_url=ticket.ticket_url,
-            comments=ticket.comments,
-            trusted_logins=self.trusted_logins,
-            issue_body=None,
-            pr_body=None,
+            brief=ticket.brief_comment,
+            issue_body=ticket.issue_body,
+            pr_body=ticket.pr_body,
             ready_starts_review=ticket.ready_starts_review,
             pr_url=ticket.ticket_url,
         ).criteria
         text = next((item.text for item in criteria if item.id == criterion_id), None)
-        return f"{criterion_id} (not in the brief)" if text is None else f"{criterion_id}: {text}"
+        return f"{criterion_id} (not in the criteria)" if text is None else f"{criterion_id}: {text}"
 
     def _revise_ci_gate(
         self,

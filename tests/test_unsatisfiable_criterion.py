@@ -75,7 +75,7 @@ def test_an_unsat_id_missing_from_the_brief_is_named_as_such(tmp_path: Path) -> 
 
     assert revise(flow, "1/3", "revise-1", " unsat=ac-9") == "waiting-max-unsat"
 
-    assert "ac-9 (not in the brief)" in unsat_wakes(flow)[0]
+    assert "ac-9 (not in the criteria)" in unsat_wakes(flow)[0]
 
 
 def test_an_unsat_revise_at_the_cap_parks_instead_of_capping(tmp_path: Path) -> None:
