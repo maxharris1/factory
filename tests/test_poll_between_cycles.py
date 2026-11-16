@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -9,7 +11,7 @@ import pytest
 
 from lib import health
 from lib.cli import StopAtBoundary, _AfterPoll
-from lib.dashboard_push import PollPusher
+from lib.dashboard_push import ROOT, PollPusher, PushError, SshTransport
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.poll import PollLoop, sleep_on_either_clock
 from tests.test_health import make_db, machines_file
@@ -108,6 +110,96 @@ def test_a_hanging_device_probe_does_not_delay_the_next_cycle(tmp_path, monkeypa
         _kill_all(pids)
         beats.stop()
     _assert_on_time(starts)
+
+
+def hanging_scp(tmp_path: Path) -> tuple[Path, Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pids = tmp_path / "copy.pids"
+    (bin_dir / "ssh").write_text(f"#!/bin/sh\necho $$ >> {pids}\nexec sleep 600\n")
+    (bin_dir / "scp").write_text(
+        f'#!/bin/sh\necho $$ >> {pids}\n"$(dirname "$0")/ssh" "$@" &\nwait\n'
+    )
+    for name in ("ssh", "scp"):
+        (bin_dir / name).chmod(0o755)
+    return bin_dir, pids
+
+
+def running(pids: Path) -> list[int]:
+    alive = []
+    for pid in map(int, pids.read_text().split()):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except FileNotFoundError:
+            continue
+        if state not in ("Z", "X"):
+            alive.append(pid)
+    return alive
+
+
+def test_a_timed_out_upload_leaves_no_scp_or_ssh_running(tmp_path, monkeypatch) -> None:
+    bin_dir, pids = hanging_scp(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    page = tmp_path / "status.json"
+    page.write_text("{}")
+    transport = SshTransport("pc-wsl-cursor-bot", "/srv/d", method="scp", timeout=1)
+    try:
+        with pytest.raises(PushError, match="scp to pc-wsl-cursor-bot timed out after 1s"):
+            transport.send([page])
+        assert len(pids.read_text().split()) == 2
+        assert running(pids) == []
+    finally:
+        for pid in running(pids):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_a_poll_cycle_push_that_times_out_keeps_cycles_on_time_and_leaves_no_ssh(
+    tmp_path,
+) -> None:
+    bin_dir, pids = hanging_scp(tmp_path)
+    page = tmp_path / "status.json"
+    page.write_text("{}")
+    push = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from lib.dashboard_push import SshTransport, run_push\n"
+        "transport = SshTransport('pc-wsl-cursor-bot', '/srv/d', method='scp', timeout=2)\n"
+        f"sys.exit(run_push(transport=transport, snapshot=lambda: [Path({str(page)!r})],"
+        " interval=30, once=True, sleep=None, log=lambda line: print(line, file=sys.stderr)))\n"
+    )
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PYTHONPATH": str(ROOT),
+    }
+    children: list[subprocess.Popen] = []
+
+    def spawn(*args, **kwargs) -> subprocess.Popen:
+        children.append(subprocess.Popen(*args, **kwargs))
+        return children[-1]
+
+    pusher = PollPusher([sys.executable, "-c", push], env, 0, spawn=spawn, log=print)
+    starts: list[float] = []
+    clock = CycleClock()
+    start = clock.start
+
+    def stamped() -> str:
+        starts.append(time.monotonic())
+        return start()
+
+    clock.start = stamped
+    loop = PollLoop(Dispatcher(), object(), interval_seconds=1.0)
+    loop.clock = clock
+    try:
+        loop.run(max_polls=5, after_poll=_AfterPoll(lambda: None, pusher))
+        codes = [child.wait(timeout=30) for child in children]
+    finally:
+        for pid in running(pids) if pids.exists() else []:
+            os.kill(pid, signal.SIGKILL)
+    gaps = [later - earlier for earlier, later in zip(starts, starts[1:])]
+    assert len(gaps) == 4 and all(gap <= 1.0 + SLACK for gap in gaps), gaps
+    assert codes and set(codes) == {1}
+    assert len(pids.read_text().split()) == 2 * len(children)
+    assert running(pids) == []
 
 
 class PausedClock:

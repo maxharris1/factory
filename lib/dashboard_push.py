@@ -54,6 +54,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -104,6 +105,35 @@ class NoopTransport:
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
+def run_in_own_group(
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    capture_output: bool = False,
+    check: bool = False,
+    **kwargs: object,
+) -> subprocess.CompletedProcess:
+    """`subprocess.run`, except that a timeout kills the program's whole
+    process group: scp and rsync run ssh as a child, and killing only the
+    program leaves that ssh running."""
+    if capture_output:
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with subprocess.Popen(argv, start_new_session=True, **kwargs) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
+
+
 class SshTransport:
     def __init__(
         self,
@@ -112,7 +142,7 @@ class SshTransport:
         *,
         method: str = "rsync",
         ssh_config: str | None = None,
-        runner: Runner = subprocess.run,
+        runner: Runner = run_in_own_group,
         timeout: int = SEND_TIMEOUT_SECONDS,
     ):
         if not valid_host(host):
@@ -204,7 +234,7 @@ class SshTransport:
             raise PushError(message)
 
 
-def transport_for(config: PushConfig, *, runner: Runner = subprocess.run) -> Transport:
+def transport_for(config: PushConfig, *, runner: Runner = run_in_own_group) -> Transport:
     if config.transport == "none":
         return NoopTransport()
     if config.transport == "ssh":
