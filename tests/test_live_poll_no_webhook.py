@@ -161,7 +161,8 @@ PINNED_READS = [
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
 ]
-PINNED_GH_CALLS = [13, 13, 13]
+# #600 adds one branch-PR read per Linear ticket (three) to each cycle.
+PINNED_GH_CALLS = [16, 16, 16]
 
 
 def test_no_webhook_poll_cycles_make_exactly_todays_linear_reads(

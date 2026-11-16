@@ -209,9 +209,9 @@ def linear_ticket(
             "nodes": [{"name": name} for name in labels],
             "pageInfo": {"hasNextPage": False},
         }
-    if not linked:
-        issue["attachments"]["nodes"] = []
     gh = FilesGh(None if files is None else list(files))
+    if not linked:
+        gh.branch_pulls = []
 
     def transport(url, headers, body, timeout):
         del url, headers, timeout
