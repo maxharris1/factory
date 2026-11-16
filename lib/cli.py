@@ -83,6 +83,7 @@ from lib.queue import (
     QueueError,
     SQLiteJobQueue,
     job_from_row,
+    require_latest_claim,
     require_proof,
 )
 from lib.remote import SshTransport
@@ -1753,6 +1754,7 @@ def _job_run_command(argv: list[str]) -> int:
         environ=environment,
         worker_env=placed.remote,
         device=placed.device.name,
+        guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
     )
     if session is not None:
         sessions.append(session)

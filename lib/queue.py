@@ -1052,6 +1052,14 @@ def _require_claim(connection: sqlite3.Connection, row: sqlite3.Row, proof: Proo
     )
 
 
+def require_latest_claim(connection: sqlite3.Connection, job_id: str, proof: Proof | None) -> None:
+    if proof is None:
+        return
+    row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is not None:
+        _require_claim(connection, row, proof)
+
+
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
 
