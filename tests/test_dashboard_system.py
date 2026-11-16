@@ -353,7 +353,7 @@ LAND_ON_EVERY_LINK = r"""
     await sleep(200);
     const target = document.getElementById(href.split('#')[1]);
     const box = target.getBoundingClientRect();
-    out.push({href, hash: location.hash, visible: target.checkVisibility(),
+    out.push({href, hash: location.hash, focus: document.activeElement.id, visible: target.checkVisibility(),
               inView: box.bottom > 0 && box.top < innerHeight});
   }
   return out;
@@ -389,5 +389,8 @@ def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path
     assert {"health.html#health-linear-listener--box", "#health-linear-listener--box",
             "health.html#health-no-waiter-codex", "health.html#components"} <= hrefs, hrefs
     for row in landed:
+        if row["href"] == "#hud":
+            assert (row["hash"], row["focus"]) == ("", "hud"), row
+            continue
         assert row["hash"] == "#" + row["href"].split("#")[1], row
         assert row["visible"] and row["inView"], row

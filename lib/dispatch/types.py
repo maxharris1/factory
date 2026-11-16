@@ -80,6 +80,12 @@ class TrackedTicket:
     git_branch_name: str | None = None
     pr_number: str | None = None
     brief: str | None = None
+    # #495: the trusted brief the poll picked once (canonical_brief); brief
+    # and the reviewer's criteria both come from it. issue_body and pr_body
+    # are the source issue's text and the PR description, None when unread.
+    brief_comment: Comment | None = None
+    issue_body: str | None = None
+    pr_body: str | None = None
     grok_bot: str = "grok-bot"
     linear_issue_id: str | None = None
     linear_ready_state_id: str | None = None
