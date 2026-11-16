@@ -1,18 +1,12 @@
-"""#503: T6 never settles a failed builder job with a ready its pre_ready refused.
-
-A refused ready is recorded as a `pre-ready-failed` job event whose detail
-starts `handoff <comment-id>:`. Without the skip, the job's failure would let
-T6 mark it done from that ready and T2 would register it for review. Real
-Dispatcher over a temp database, with test_dispatcher's fakes.
-"""
-
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.dispatcher import CIResult, TrackedTicket
+from lib.factory_md import PreReady
 from lib.queue import PRE_READY_FAILED, Job, JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import READY, comment, handled_outcome, setup, ticket
 
@@ -21,7 +15,9 @@ pytestmark = pytest.mark.job_bound
 HEAD = "a" * 40
 
 
-def _failed_build(queue: SQLiteJobQueue, *, refused: str | None) -> Job:
+def _failed_build(
+    queue: SQLiteJobQueue, *, refused: str | None, passed: str | None = None
+) -> Job:
     queue.enqueue(
         JobRequest(
             repo="owner/repo",
@@ -44,6 +40,8 @@ def _failed_build(queue: SQLiteJobQueue, *, refused: str | None) -> Job:
             detail="pre_ready failed: exit 1",
             event=PRE_READY_FAILED,
         )
+    if passed is not None:
+        queue.record_pre_ready_passed(build.id, comment_id=passed, head=HEAD)
     queue.finish(build.id, owner="claude", handoff_comment_id=None)
     return build
 
@@ -53,6 +51,12 @@ def _ready(comment_id: str) -> TrackedTicket:
         comment(comment_id, READY.format(head=HEAD), author="claude-login", created_at=200),
         head=HEAD,
         ci={HEAD: CIResult("success")},
+    )
+
+
+def _with_pre_ready(snapshot: TrackedTicket) -> TrackedTicket:
+    return replace(
+        snapshot, factory=replace(snapshot.factory, pre_ready=PreReady("make check", 60))
     )
 
 
@@ -109,3 +113,39 @@ def test_a_refusal_of_another_ready_does_not_hide_this_one(tmp_path: Path) -> No
 
     assert _state(queue, build.id) == ("done", "ready-1")
     assert handled_outcome(queue, "ready-1") == "queued-review"
+
+
+def test_with_pre_ready_set_a_ready_never_checked_does_not_settle(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    build = _failed_build(queue, refused=None)
+    snapshot = _with_pre_ready(_ready("ready-1"))
+
+    _settle(dispatcher, snapshot)
+
+    assert _state(queue, build.id)[1] is None
+    assert _reviews(queue) == 0
+
+
+def test_with_pre_ready_set_a_ready_that_passed_settles(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    build = _failed_build(queue, refused=None, passed="ready-1")
+    snapshot = _with_pre_ready(_ready("ready-1"))
+
+    _settle(dispatcher, snapshot)
+
+    assert _state(queue, build.id) == ("done", "ready-1")
+    assert handled_outcome(queue, "ready-1") == "queued-review"
+    assert _reviews(queue) == 1
+
+
+def test_with_pre_ready_set_a_pass_for_another_ready_does_not_settle_this_one(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    build = _failed_build(queue, refused=None, passed="ready-10")
+    snapshot = _with_pre_ready(_ready("ready-1"))
+
+    _settle(dispatcher, snapshot)
+
+    assert _state(queue, build.id)[1] is None
+    assert _reviews(queue) == 0

@@ -1326,7 +1326,14 @@ def _check_handoff(
         event, checked = SUBMITTED_INVALID, None
         if not found:
             checked = _pre_ready_check(config, expected, args.handoff, read)
-            if checked is None or checked.passed:
+            if checked is None:
+                return None
+            if checked.passed:
+                retry_locked(
+                    lambda: queue.record_pre_ready_passed(
+                        args.job_id, comment_id=args.handoff, head=checked.head, proof=proof
+                    )
+                )
                 return None
             found, event = [f"pre_ready failed: {checked.reason}"], PRE_READY_FAILED
         count, job = retry_locked(

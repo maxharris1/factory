@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from lib.cli import main as cli_main
 from lib.queue import (
     MAX_INVALID_HANDOFFS,
     PRE_READY_FAILED,
+    PRE_READY_PASSED,
     SUBMITTED_INVALID,
     JobRequest,
     SQLiteJobQueue,
@@ -372,7 +374,6 @@ def pre_ready_setup(
     tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch, command: str, timeout: int = 30
 ):
     import base64
-    import subprocess
 
     from tests.handoff_store import serve
 
@@ -423,7 +424,7 @@ def done_with(db: Path, job, orch: Path, handoff: str = "1101") -> int:
     )
 
 
-def pre_ready_events(db: Path, job_id: str) -> list[str]:
+def pre_ready_events(db: Path, job_id: str, event: str = PRE_READY_FAILED) -> list[str]:
     with sqlite3.connect(db) as connection:
         if not has_table(connection, "job_events"):
             return []
@@ -431,7 +432,7 @@ def pre_ready_events(db: Path, job_id: str) -> list[str]:
             detail
             for (detail,) in connection.execute(
                 "SELECT detail FROM job_events WHERE job_id = ? AND event = ?",
-                (job_id, PRE_READY_FAILED),
+                (job_id, event),
             )
         ]
 
@@ -461,6 +462,10 @@ def test_a_ready_whose_pre_ready_passes_completes(
     assert done_with(db, job, orch) == 0
 
     assert (row(db, job.id)["state"], row(db, job.id)["handoff_comment_id"]) == ("done", "1101")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert pre_ready_events(db, job.id, PRE_READY_PASSED) == [f"handoff 1101: at {head}"]
     assert (work / "base-command-ran").exists()
     assert not (work / "head-command-ran").exists()
 

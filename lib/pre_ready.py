@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 TAIL_LINES = 40
 TAIL_CHARS = 4000
+DRAIN_SECONDS = 1
 JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB"})
 
 
@@ -28,6 +29,7 @@ class PreReadyResult:
     passed: bool
     reason: str
     tail: str
+    head: str
 
 
 class ContextUnavailable(Exception):
@@ -68,7 +70,7 @@ def run(spec: PreReady, cwd: Path, head: str, environ: Mapping[str, str]) -> Pre
     at = _git(cwd, "rev-parse", "HEAD")
     dirty = _git(cwd, "status", "--porcelain", "--untracked-files=no")
     if at is None or at != head or dirty is None or dirty:
-        return PreReadyResult(False, f"not at head {head}", "")
+        return PreReadyResult(False, f"not at head {head}", "", head)
     try:
         process = subprocess.Popen(
             ["/bin/sh", "-c", spec.command],
@@ -80,17 +82,32 @@ def run(spec: PreReady, cwd: Path, head: str, environ: Mapping[str, str]) -> Pre
             start_new_session=True,
         )
     except OSError as exc:
-        return PreReadyResult(False, f"could not start: {type(exc).__name__}", "")
+        return PreReadyResult(False, f"could not start: {type(exc).__name__}", "", head)
     try:
         output, _ = process.communicate(timeout=spec.timeout_seconds)
     except subprocess.TimeoutExpired:
         _kill_group(process.pid)
-        output, _ = process.communicate()
-        return PreReadyResult(False, f"timeout after {spec.timeout_seconds}s", _decoded(output))
+        output = _drain(process)
+        return PreReadyResult(
+            False, f"timeout after {spec.timeout_seconds}s", _decoded(output), head
+        )
     _kill_group(process.pid)
     if process.returncode != 0:
-        return PreReadyResult(False, f"exit {process.returncode}", _decoded(output))
-    return PreReadyResult(True, "exit 0", _decoded(output))
+        return PreReadyResult(False, f"exit {process.returncode}", _decoded(output), head)
+    return PreReadyResult(True, "exit 0", _decoded(output), head)
+
+
+def _drain(process: subprocess.Popen[bytes]) -> bytes | None:
+    """What the killed check wrote, without waiting on a descendant that
+    left its group and still holds the pipe."""
+    try:
+        output, _ = process.communicate(timeout=DRAIN_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        output = exc.output
+        if process.stdout is not None:
+            process.stdout.close()
+        process.wait()
+    return output
 
 
 def _decoded(output: bytes | None) -> str:

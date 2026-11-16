@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -56,6 +57,26 @@ def test_a_timeout_fails_and_kills_the_whole_group(tmp_path: Path) -> None:
     assert time.monotonic() - started < 10
     time.sleep(3.5)
     assert not marker.exists()
+
+
+def test_a_timeout_does_not_wait_on_a_descendant_that_left_the_group(tmp_path: Path) -> None:
+    repo, head = checkout(tmp_path)
+    pid_file = tmp_path / "escaped.pid"
+
+    started = time.monotonic()
+    try:
+        result = run(
+            PreReady(f"echo before; setsid sh -c 'echo $$ > {pid_file}; exec sleep 30' & wait", 1),
+            repo,
+            head,
+            dict(os.environ),
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+    assert (result.passed, result.reason, result.tail) == (False, "timeout after 1s", "before")
+    assert elapsed < 5
 
 
 def test_another_head_or_a_dirty_tree_runs_nothing(tmp_path: Path) -> None:

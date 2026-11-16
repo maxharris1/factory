@@ -1256,8 +1256,7 @@ class Waiter:
     ) -> str | None:
         """#503: a fitting ready runs the base factory.md's review.pre_ready
         at the ready's head, in a throwaway worktree of the shared clone (the
-        remote run's checkout is on its device). A failure is recorded
-        pre-ready-failed, which T6 never settles a job with."""
+        remote run's checkout is on its device)."""
         head = ready_head(expected, comment_id, read)
         if head is None:
             return None
@@ -1271,6 +1270,11 @@ class Waiter:
                 spec, checkout, head, check_environ(os.environ, approvals(config))
             )
         if result.passed:
+            retry_locked(
+                lambda: self.queue.record_pre_ready_passed(
+                    job_id, comment_id=comment_id, head=head, proof=proof
+                )
+            )
             return None
         detail = f"pre_ready failed: {result.reason}"
         retry_locked(

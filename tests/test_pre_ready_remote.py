@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib.queue import PRE_READY_FAILED, job_from_row
+from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, job_from_row
 from tests.handoff_store import env_store, serve, serve_handoff
 from tests.test_factory_md import VALID
 from tests.test_waiter import FakeSpawn, enqueue
@@ -127,7 +127,7 @@ def test_a_ready_whose_pre_ready_passes_completes_the_remote_job(
 ) -> None:
     db, job_id, _log = _remote_ready(tmp_path, origin, "sh ok.sh")
     assert _row(db, job_id) == ("done", COMMENT)
-    assert _events(db, job_id) == []
+    assert _events(db, job_id) == [(PRE_READY_PASSED, f"handoff {COMMENT}: at {origin}")]
 
 
 def test_the_check_runs_at_the_readys_head(tmp_path: Path, origin: str) -> None:

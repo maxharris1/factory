@@ -69,6 +69,7 @@ from lib.job_state import (
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
     PRE_READY_FAILED,
+    PRE_READY_PASSED,
     SLOTS_TABLE,
     Job,
     JobRequest,
@@ -1166,7 +1167,7 @@ class JobsMixin:
                 or self._update_job_before(ticket, item) != job.id
             ):
                 continue
-            if kind == "ready" and self._pre_ready_refused(ticket, item.id):
+            if kind == "ready" and self._pre_ready_unmet(ticket, item.id):
                 continue
             unread = (
                 kind == "ready"
@@ -1176,22 +1177,29 @@ class JobsMixin:
             return HandoffCandidate(item, unread)
         return None
 
-    def _pre_ready_refused(self, ticket: TrackedTicket, comment_id: str) -> bool:
-        """A ready whose pre_ready check failed (#503) never settles a job.
-
-        Keyed on the comment, not the job, so a T6 retry of the job that
-        refused it cannot settle with it either."""
+    def _pre_ready_unmet(self, ticket: TrackedTicket, comment_id: str) -> bool:
+        """A ready settles no job (#503) once its pre_ready check failed, or
+        while factory.md sets review.pre_ready and the check never passed.
+        Keyed on the comment, not the job, so a T6 retry cannot settle with it."""
         prefix = f"handoff {comment_id}:"
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT 1 FROM job_events
-                WHERE repo = ? AND ticket_id = ? AND event = ? AND substr(detail, 1, ?) = ?
-                LIMIT 1
-                """,
-                (ticket.repo.lower(), ticket.ticket_id, PRE_READY_FAILED, len(prefix), prefix),
-            ).fetchone()
-        return row is not None
+            events = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT event FROM job_events
+                    WHERE repo = ? AND ticket_id = ? AND event IN (?, ?)
+                      AND substr(detail, 1, ?) = ?
+                    """,
+                    (
+                        ticket.repo.lower(), ticket.ticket_id, PRE_READY_FAILED,
+                        PRE_READY_PASSED, len(prefix), prefix,
+                    ),
+                )
+            }
+        if PRE_READY_FAILED in events:
+            return True
+        return ticket.factory.pre_ready is not None and PRE_READY_PASSED not in events
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
         """Mark a failed job done with the handoff it already posted."""

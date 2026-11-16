@@ -65,6 +65,7 @@ PRIORITY_TABLE = "ticket_priority"
 _PRIORITY_COLUMNS = (("tier", "INTEGER"), ("unblocks", "INTEGER NOT NULL DEFAULT 0"))
 SUBMITTED_INVALID = "submitted-invalid"
 PRE_READY_FAILED = "pre-ready-failed"
+PRE_READY_PASSED = "pre-ready-passed"
 MAX_INVALID_HANDOFFS = 3
 
 
@@ -497,6 +498,25 @@ class SQLiteJobQueue:
             updated = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             connection.commit()
         return count, _job(updated)
+
+    def record_pre_ready_passed(
+        self, job_id: str, *, comment_id: str, head: str, proof: Proof | None = None
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            require_proof(connection, job_id, proof)
+            _ensure_job_events(connection)
+            connection.execute(
+                """
+                INSERT INTO job_events (
+                    job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+                )
+                SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ?
+                FROM jobs WHERE id = ?
+                """,
+                (PRE_READY_PASSED, f"handoff {comment_id}: at {head}", self.now(), job_id),
+            )
+            connection.commit()
 
     def clear_invalid_handoff(self, job_id: str) -> None:
         """Drop the ticket's submitted-invalid flag once its job is done."""
