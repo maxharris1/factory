@@ -93,7 +93,7 @@ def test_overlay_fills_a_placeholder(overlay_on: None, shipped: tuple[Path, Path
     assert findings == []
     assert config is not None
     project = next(p for p in config.projects if p.repo == "aut0-code/aut0")
-    assert project.linear_project_id == "real-project"
+    assert project.linear_project_ids == frozenset({"real-project"})
     assert project.job_timeout == 150
 
 

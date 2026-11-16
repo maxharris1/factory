@@ -453,6 +453,53 @@ def test_ci_cancels_superseded_pr_runs_and_runs_every_shard_and_serial_test() ->
     assert "pytest -m serial -p no:xdist" in runs
 
 
+def _ci_jobs() -> dict:
+    import yaml
+
+    return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+
+
+def _py311_compile_runs() -> list[str]:
+    jobs = [
+        job
+        for job in _ci_jobs().values()
+        if any(step.get("with", {}).get("python-version") == "3.11" for step in job["steps"])
+    ]
+    assert len(jobs) == 1
+    return [step["run"] for step in jobs[0]["steps"] if "run" in step]
+
+
+def test_ci_byte_compiles_lib_and_bin_on_python_311() -> None:
+    runs = _py311_compile_runs()
+    assert "python -m compileall -q lib bin" in runs
+    assert "python -m py_compile bin/orch bin/skill-probe" in runs
+    assert any("sys.version_info[:2] == (3, 11)" in run for run in runs)
+
+    versions = _ci_jobs()["test"]["steps"][1]["with"]["python-version"].split()
+    assert versions[-1] == "3.12" and "3.11" in versions
+
+
+@pytest.mark.parametrize("bad", [None, "lib/dashboard_pages/new.py", "bin/orch"])
+def test_ci_py311_compile_job_fails_on_a_pep701_fstring(tmp_path: Path, bad: str | None) -> None:
+    python = shutil.which("python3.11")
+    if python is None:
+        assert not os.environ.get("GITHUB_ACTIONS"), "the CI test job installs Python 3.11"
+        pytest.skip("no Python 3.11 here")
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    (shims / "python").symlink_to(python)
+    tree = tmp_path / "tree"
+    for name in ("lib/dashboard_pages/ok.py", "bin/orch", "bin/skill-probe"):
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        (tree / name).write_text("x = {'k': 1}\nprint(f\"{x['k']}\")\n", encoding="utf-8")
+    if bad:
+        (tree / bad).write_text("x = {'k': 1}\nprint(f\"{x[\"k\"]}\")\n", encoding="utf-8")
+    script = "set -e\n" + "\n".join(_py311_compile_runs())
+    env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-c", script], cwd=tree, env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) == (bad is None), result.stdout + result.stderr
+
+
 FAKE_CRONTAB = """#!/usr/bin/python3
 import os, sys
 from pathlib import Path

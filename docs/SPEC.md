@@ -452,6 +452,8 @@ projects:
     factory_ref: main
     # Required when this repo's tickets are in Linear:
     # linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
+    # or, for tickets in several Linear projects:
+    # linear_project_ids: [PROJECT_ID_A, PROJECT_ID_B]
     # grok_bot: project-bot
     # linear_ready_for_review: false
     # ready_starts_review: false
@@ -512,6 +514,20 @@ including for GitHub projects.
 `factory.md`; it never discovers policy through the repository's default
 branch. `linear_project_id` is an immutable Linear project ID, not its
 renameable display name.
+
+One repo can take tickets from several Linear projects (issue #132):
+`linear_project_ids` lists their IDs, and `linear_project_id: X` means the
+same as `linear_project_ids: [X]`. A project sets one key or the other, never
+both. An empty list, an ID listed twice in one project, and an ID that
+another project already names are errors, so every Linear project ID maps to
+exactly one repo. Intake, discovery, tracked-ticket polling and the webhook
+accept a ticket in any of a repo's projects. The factory never stores which
+project a ticket is in: a tracked ticket that moves between two projects of
+its repo keeps its job and state, and one that moves to an unconfigured
+project fails with "Linear issue is not in its configured project", as
+before. An `orch.local.yml` overlay replaces a nested list whole, so an
+overlay that sets `linear_project_ids` over a base `linear_project_id` is
+refused as setting both.
 
 The Grok webhook fields also contain environment-variable names, not values.
 Delivery sends one JSON object containing the job fields and `logical_key`,
@@ -593,7 +609,7 @@ compare, and refuses a `webhookTimestamp` more than 60 seconds from now. When
 it can see the client address (the TCP peer, or the last `X-Forwarded-For`
 hop when the peer is a local proxy) it must be one of Linear's published
 source IPs. A signed, fresh Issue event for a configured
-`linear_project_id` (or one just moved out of it), or a Comment on a tracked
+project of `linear_project_ids` (or one just moved out of it), or a Comment on a tracked
 issue, or a Comment carrying an `orch:v1` marker on an issue a signed Issue
 event last placed in a configured project (Comment payloads do not carry the
 issue's project, and a marker is text anyone can type), upserts one row in

@@ -365,7 +365,10 @@ status, the exception type, or the missing variable names, never the URL, key,
 headers, or body.
 `projects[].factory_ref` selects the trusted branch containing `factory.md`;
 `projects[].linear_project_id` maps an immutable Linear project ID to its
-repo. `trusted_logins` maps GitHub authors to sets of bot markers, while
+repo. `projects[].linear_project_ids: [A, B]` maps several Linear projects to
+one repo instead (issue #132): its tickets are fed and tracked from any of
+them, and a ticket moved between them keeps its job. Set one key or the
+other, not both. An empty list or a repeated ID is refused. `trusted_logins` maps GitHub authors to sets of bot markers, while
 `trusted_linear_users` maps immutable Linear user IDs to sets separately.
 The dispatcher still requires the expected `from=` and `role=`. With one
 shared GitHub login, the marker is a routing label, not an identity or
@@ -492,7 +495,7 @@ discovery. The signal is per-project config, never code:
       label: factory:ready     # default; applied by a trusted login
   - repo: owner/linear-app     # a Linear project
     factory_ref: dev
-    linear_project_id: ...
+    linear_project_id: ...     # or linear_project_ids: [..., ...]
     intake:
       linear_state: In Progress
       # trusted: [linear-user-id]   # default: the trusted_linear_users keys
@@ -587,7 +590,7 @@ each request:
   signing secret, with `hmac.compare_digest` (401 when missing or wrong);
 - refuses a `webhookTimestamp` (inside the signed body) more than 60 seconds
   from now (401);
-- for an Issue in a configured `linear_project_id` (or just moved out of
+- for an Issue in a configured Linear project (or just moved out of
   one), or a Comment on a tracked issue, or a Comment carrying an `orch:v1`
   marker on an issue a signed Issue event last placed in a project that is
   still configured (the project is stored with it, issue #69), upserts one

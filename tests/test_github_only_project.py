@@ -61,7 +61,7 @@ def test_shipped_orch_yml_adds_the_factory_repo_as_a_github_only_project(
     projects = {project.repo: project for project in config_.projects}
     factory_project = projects[FACTORY_REPO]
     assert factory_project.factory_ref == "main"
-    assert factory_project.linear_project_id is None
+    assert factory_project.linear_project_ids == frozenset()
     assert factory_project.linear_ready_for_review is False
     assert factory_project.grok_bot == "grok-bot"
     assert factory_project.ready_starts_review is True
