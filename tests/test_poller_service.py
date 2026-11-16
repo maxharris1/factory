@@ -182,6 +182,10 @@ def leave(*_):
     raise SystemExit(143)
 
 signal.signal(signal.SIGTERM, leave)
+if os.environ.get("FAKE_ORCH_STARTS"):
+    with open(os.environ["FAKE_ORCH_STARTS"], "a") as starts:
+        starts.write(f"{os.getpid()}\\n")
+    time.sleep(float(os.environ.get("FAKE_ORCH_START_DELAY", "0")))
 pidfile.write_text(f"{os.getpid()}\\n")
 print(f"polling as {os.getpid()}", flush=True)
 while True:
@@ -851,6 +855,45 @@ def test_remove_autostart_ends_the_ensure_loop_that_ensure_started(
         assert not _pidfile(home).exists() or int(_pidfile(home).read_text()) == original
         assert _service(home, "status", service=service).returncode == 3
         assert calls.read_text() == waiter_calls
+    finally:
+        _stop_loop(home)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_remove_autostart_waits_for_an_ensure_already_launching_a_poller(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    (home / ".config/factory/poller-autostart").touch()
+    starts = tmp_path / "poller-starts"
+    loop_pid = home / ".local/state/factory/poller-ensure-loop.pid"
+    try:
+        started = _service(home, "ensure", service=service, ORCH_POLL_ENSURE_SEC="0.1",
+                           FAKE_ORCH_STARTS=str(starts), FAKE_ORCH_START_DELAY="1")
+        assert started.returncode == 0, started.stderr
+        deadline = time.monotonic() + 15
+        while not loop_pid.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        loop = int(loop_pid.read_text())
+
+        _kill_poller(home)
+        while len(starts.read_text().splitlines()) < 2:
+            assert time.monotonic() < deadline, "the ensure loop never relaunched the poller"
+            time.sleep(0.02)
+        removed = _service(home, "remove-autostart", service=service)
+        assert removed.returncode == 0, removed.stderr
+        after_remove = _pidfile(home).read_text()
+
+        deadline = time.monotonic() + 10
+        while alive(loop):
+            assert time.monotonic() < deadline, "ensure loop outlived poller-autostart"
+            time.sleep(0.05)
+        time.sleep(1.5)
+
+        assert _pidfile(home).read_text() == after_remove
+        assert len(starts.read_text().splitlines()) == 2
     finally:
         _stop_loop(home)
 

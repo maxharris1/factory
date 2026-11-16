@@ -20,8 +20,10 @@
 # its environment (none of webhook.env), and the poll loop never waits on it:
 # a failed push is one redacted line in poller.log and polling goes on.
 # Without dashboard.push nothing is pushed and nothing changes here.
-# start, stop, restart and ensure take poller-service.lock (flock(1), where
-# installed), so a stop cannot interleave with an ensure about to launch.
+# start, stop, restart, ensure and remove-autostart take poller-service.lock
+# (flock(1), where installed), so a stop cannot interleave with an ensure
+# about to launch, and remove-autostart returns only after any ensure that
+# still saw poller-autostart has finished.
 # Before launching, start and ensure also probe orch.db.lock, the lock
 # `orch poll` holds beside its database: the ORCH_DB run-poller.sh ends up
 # with after sourcing its env files (`run-poller.sh --print-db`), else the
@@ -144,8 +146,9 @@ poll_lock_held() {
     ((status == 75))
 }
 
-# Serialize start/stop/restart/ensure. Without flock(1) (macOS) this is a
-# no-op and ensure's re-check of the stop marker is the only guard.
+# Serialize start/stop/restart/ensure/remove-autostart. Without flock(1)
+# (macOS) this is a no-op and ensure's re-check of the stop marker is the
+# only guard.
 service_lock() {
     command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$STATE"
@@ -430,7 +433,7 @@ case "${1:-}" in
     status) status ;;
     ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
-    remove-autostart) remove_autostart ;;
+    remove-autostart) service_lock && remove_autostart ;;
     *)
         echo "usage: $(basename "$0") {start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
         exit 2
