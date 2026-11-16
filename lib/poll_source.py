@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 from bisect import bisect_right
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -114,6 +117,8 @@ BACKOFF_SECONDS = 300.0
 GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
+READ_DEADLINE_SECONDS = 30.0
+HANG_STRIKES = 2
 LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
@@ -189,6 +194,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 _OPENER = build_opener(_NoRedirect)
+_REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 
 
 class _TerminalTicket(RuntimeError):
@@ -211,7 +217,15 @@ def post_json(
             )
     except HTTPError as exc:
         return HTTPResult(exc.code, "", dict(exc.headers.items()))
-    except (OSError, URLError, ValueError) as exc:
+    except TimeoutError:
+        raise
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise TimeoutError from None
+        raise PollSourceError(
+            f"Linear request failed: {type(exc).__name__}"
+        ) from None
+    except (OSError, ValueError) as exc:
         raise PollSourceError(
             f"Linear request failed: {type(exc).__name__}"
         ) from None
@@ -257,6 +271,7 @@ class LivePollSource:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
+        read_deadline_seconds: float = READ_DEADLINE_SECONDS,
         risks: IntakeRisks | None = None,
     ):
         self.config = config
@@ -271,6 +286,8 @@ class LivePollSource:
         self.clock = clock
         self.sleep = sleep
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
+        self.read_deadline_seconds = read_deadline_seconds
+        self._hangs: dict[str, int] = {}
         self._trusted = {
             "github": config.trusted_logins,
             "linear": config.trusted_linear_users,
@@ -365,6 +382,7 @@ class LivePollSource:
         self._cycles_until_linear -= 1
         self._cycle_errors = {}
         self._cycle_deferrals = {}
+        self._hangs = {}
         if self.config.linear_webhook is not None:
             if self._linear_due:
                 self._begin_webhook_cycle()
@@ -739,7 +757,6 @@ class LivePollSource:
                     # Its repo left orch.yml: never read, so ack its dirty rows.
                     self._note_unread(ref.ticket_id)
                 continue
-            began = time.monotonic()
             try:
                 ticket = self._tracked_ticket(ref, project)
             except Exception as exc:
@@ -748,12 +765,6 @@ class LivePollSource:
             else:
                 if ticket is not None:
                     found.append(ticket)
-            finally:
-                if self.cycle_clock is not None:
-                    self.cycle_clock.add_source(
-                        "linear" if ref.tracker == "linear" else ref.repo,
-                        time.monotonic() - began,
-                    )
         return tuple(found)
 
     def _tracked_ticket(
@@ -1028,6 +1039,7 @@ class LivePollSource:
             raise RetryablePollSourceError(
                 "Linear rate-limit backoff is active"
             )
+        self._check_hangs("linear")
         query = document.get("query")
         complexity = _linear_request_complexity(query)
         if not self._linear_request_available(query):
@@ -1035,16 +1047,24 @@ class LivePollSource:
         self._linear_requests += 1
         self._linear_complexity += complexity
         payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        headers = {
+            "Authorization": self._linear_key(),
+            "Content-Type": "application/json",
+        }
+        deadline = min(self.timeout_seconds, self.read_deadline_seconds)
         try:
-            result = self.linear_transport(
-                LINEAR_ENDPOINT,
-                {
-                    "Authorization": self._linear_key(),
-                    "Content-Type": "application/json",
-                },
-                payload,
-                self.timeout_seconds,
-            )
+            with self._timed("linear"):
+                result = _abandon_after(
+                    deadline,
+                    lambda: self.linear_transport(
+                        LINEAR_ENDPOINT, headers, payload, deadline
+                    ),
+                )
+        except TimeoutError:
+            self._hung("linear")
+            raise RetryablePollSourceError(
+                f"Linear request timed out after {deadline:g}s"
+            ) from None
         except PollSourceError:
             raise
         except Exception as exc:
@@ -1750,25 +1770,50 @@ class LivePollSource:
         call = list(argv)
         if _is_read(call[call.index("api") + 1 :]):
             return self._run_gh_read(call)
-        return self.gh_runner(call, self.timeout_seconds)
+        with self._timed(_gh_source(call)):
+            return self.gh_runner(call, self.timeout_seconds)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         """Every _gh_call is a GET, so a timed-out call is safe to repeat."""
-        attempt = 1
-        while True:
-            try:
-                return self.gh_runner(argv, self.gh_call_timeout_seconds)
-            except subprocess.TimeoutExpired:
-                if attempt >= GH_CALL_ATTEMPTS:
-                    raise RetryablePollSourceError(
-                        f"gh api timed out after {attempt} attempts"
-                    ) from None
-            except OSError as exc:
-                raise PollSourceError(
-                    f"gh could not run: {type(exc).__name__}"
-                ) from exc
-            self.sleep(GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1))
-            attempt += 1
+        self._check_hangs("github")
+        with self._timed(_gh_source(argv)):
+            deadline = self.clock() + self.read_deadline_seconds
+            attempt = 1
+            while True:
+                left = deadline - self.clock()
+                try:
+                    return self.gh_runner(argv, min(self.gh_call_timeout_seconds, left))
+                except subprocess.TimeoutExpired:
+                    pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
+                    if attempt >= GH_CALL_ATTEMPTS or deadline - self.clock() <= pause:
+                        self._hung("github")
+                        raise RetryablePollSourceError(
+                            f"gh api timed out after {attempt} attempts"
+                        ) from None
+                except OSError as exc:
+                    raise PollSourceError(
+                        f"gh could not run: {type(exc).__name__}"
+                    ) from exc
+                self.sleep(pause)
+                attempt += 1
+
+    def _timed(self, name: str) -> AbstractContextManager[None]:
+        return nullcontext() if self.cycle_clock is None else self.cycle_clock.source(name)
+
+    def _check_hangs(self, service: str) -> None:
+        if self._hangs.get(service, 0) >= HANG_STRIKES:
+            raise RetryablePollSourceError(
+                f"{service} skipped for the rest of this cycle after "
+                f"{HANG_STRIKES} timed-out reads"
+            )
+
+    def _hung(self, service: str) -> None:
+        self._hangs[service] = self._hangs.get(service, 0) + 1
+        if self._hangs[service] == HANG_STRIKES and self.warning_sink is not None:
+            self.warning_sink(
+                f"{service} skipped for the rest of this cycle after "
+                f"{HANG_STRIKES} timed-out reads; read again next cycle"
+            )
 
     def _defer(self, reason: str) -> None:
         """A budget or page-limit cutoff is expected load shedding, not an error."""
@@ -1784,6 +1829,33 @@ class LivePollSource:
             if value:
                 reason = reason.replace(value, "<secret>")
         self.error_sink(repo, ticket_id, reason)
+
+
+def _abandon_after(seconds: float, call: Callable[[], HTTPResult]) -> HTTPResult:
+    done: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
+
+    def run() -> None:
+        try:
+            done.put((True, call()))
+        except BaseException as exc:
+            done.put((False, exc))
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        ok, value = done.get(timeout=seconds)
+    except queue.Empty:
+        raise TimeoutError from None
+    if ok:
+        return value
+    raise value
+
+
+def _gh_source(argv: Sequence[str]) -> str:
+    for part in argv:
+        match = _REPO_ROUTE.match(part)
+        if match:
+            return match.group(1).lower()
+    return "github"
 
 
 def _json_object(text: str, source: str) -> dict[str, Any]:

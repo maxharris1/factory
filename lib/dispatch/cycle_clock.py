@@ -29,11 +29,13 @@ class CycleClock:
     started_at: float | None = None
     last_cycle_seconds: float | None = None
     _rows: list[tuple[str, float, bool]] = field(default_factory=list)
-    _sources: dict[str, float] = field(default_factory=dict)
+    _sources: dict[str, dict[str, float]] = field(default_factory=dict)
+    _open: str | None = None
 
     def start(self) -> str:
         self._rows = []
         self._sources = {}
+        self._open = None
         self.started_at = self.wall()
         return f"orch poll: cycle start {et(self.started_at)}"
 
@@ -43,14 +45,27 @@ class CycleClock:
             raise ValueError(f"unknown poll phase {name!r}")
         began = self.wall()
         failed = True
+        self._open = name
         try:
             yield
             failed = False
         finally:
+            self._open = None
             self._rows.append((name, self.wall() - began, failed))
 
     def add_source(self, name: str, seconds: float) -> None:
-        self._sources[name] = self._sources.get(name, 0.0) + seconds
+        if self._open is None:
+            return
+        spent = self._sources.setdefault(self._open, {})
+        spent[name] = spent.get(name, 0.0) + seconds
+
+    @contextmanager
+    def source(self, name: str) -> Iterator[None]:
+        began = self.wall()
+        try:
+            yield
+        finally:
+            self.add_source(name, self.wall() - began)
 
     def end(self) -> str:
         ended = self.wall()
@@ -60,9 +75,10 @@ class CycleClock:
         parts = []
         for name, seconds, failed in self._rows:
             part = f"{name}{'!' if failed else ''} {seconds:.1f}s"
-            if name == "tracked-read" and self._sources:
+            sources = self._sources.get(name)
+            if sources:
                 part += " [" + ", ".join(
-                    f"{source} {spent:.1f}s" for source, spent in self._sources.items()
+                    f"{source} {spent:.1f}s" for source, spent in sources.items()
                 ) + "]"
             parts.append(part)
         return (
