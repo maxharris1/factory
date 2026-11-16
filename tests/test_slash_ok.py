@@ -30,6 +30,7 @@ def held_by_paths(*comments, approver_allowed: bool = True):
         comments=comments,
         approver_allowed=approver_allowed,
         covers=lambda head: head == HEAD,
+        factory_md_trust_changed=False,
     )
 
 

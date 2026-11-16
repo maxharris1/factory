@@ -197,6 +197,7 @@ class HoldsMixin:
             labels=ticket.labels,
             changed_files=ticket.changed_files,
             label_events=ticket.label_events,
+            factory_md_trust_changed=ticket.factory_md_trust_changed,
             comments=ticket.comments,
             approver_allowed=self._may_approve(hold.approver),
             covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),

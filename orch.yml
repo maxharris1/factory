@@ -91,11 +91,12 @@ projects:
     factory_ref: main
   # The factory's own PRs: GitHub only, no Linear. They are built outside
   # the queue, so a trusted builder ready starts review (README "Poll").
-  # factory.md ships by handoff: APPROVE with green CI wakes grok-bot
-  # (Factory) to merge; the poller never merges here.
+  # factory.md sets ship: handoff and finish_line: merge, so the poller
+  # merges an approved PR once CI on its head is green.
   - repo: maxharris1/factory
     factory_ref: main
     ready_starts_review: true
+    job_timeout: 120
     intake:
       label: factory:ready
       priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]

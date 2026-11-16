@@ -144,6 +144,7 @@ _PLAN_KEYS = {"max_lines", "max_criteria"}
 DEFAULT_PLAN_MAX_LINES = 400
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 
@@ -202,6 +203,25 @@ class FactoryConfig:
     @property
     def hold_applies(self) -> bool:
         return self.hold is not None and self.ship in ("merge", "handoff")
+
+
+def trust_front_matter_changed(base_text: str | None, head_text: str | None) -> bool:
+    base = _trust_sections(base_text)
+    head = _trust_sections(head_text)
+    return base is None or head is None or base != head
+
+
+def _trust_sections(text: str | None) -> dict[str, object] | None:
+    if text is None:
+        return None
+    try:
+        raw, _body = split_front_matter(text)
+        data = load_yaml(raw)
+    except (ValueError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {key: data.get(key) for key in TRUST_KEYS}
 
 
 def default_finish_line(ship: str) -> str:
