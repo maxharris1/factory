@@ -207,13 +207,14 @@ def test_safe_ship_error_prefers_safe_detail_and_is_capped() -> None:
 # Criterion 3: a handoff that failed before any confirmed write is re-driven once.
 
 
+@pytest.mark.parametrize("ci", ["success", "not-run"])
 def test_handoff_that_failed_before_any_write_is_re_driven_once_and_completes(
-    tmp_path: Path,
+    tmp_path: Path, ci: str
 ) -> None:
     dispatcher, queue, gh = github_setup(tmp_path)
     gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), draft_pull())
     gh.route(MARK_READY, served("graphql-mark-ready.json"))
-    snapshot = approve_snapshot()
+    snapshot = approve_snapshot(ci=ci)
 
     dispatcher.process(snapshot)
 

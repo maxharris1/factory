@@ -90,9 +90,10 @@ def test_codex_reviewer_helpers_run_on_sol() -> None:
     assert "research only; you write the verdict" in text
 
 
-@pytest.mark.parametrize(("action", "recipient", "extra"), ROUTER_JOBS)
-def test_skills_read_is_required(action: str, recipient: str, extra: dict) -> None:
-    assert "The handoff ends with a `Skills read:` line" in _brief(action, recipient, extra)
+@pytest.mark.parametrize(("action", "recipient", "extra"), ALL_JOBS)
+def test_no_brief_asks_for_a_skills_read_line(action: str, recipient: str, extra: dict) -> None:
+    for remote in (None, "pc"):
+        assert "Skills read" not in _brief(action, recipient, extra, remote_device=remote)
 
 
 @pytest.mark.parametrize(("action", "recipient", "extra"), ALL_JOBS)

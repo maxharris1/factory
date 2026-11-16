@@ -135,7 +135,7 @@ def render_brief(
             *(review.evidence_sections(detail, facts) if kind == "review" else []),
             "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
             *_quoted_sections(facts),
-            _handoff(job, bot, kind, facts, skills_read=router is not None),
+            _handoff(job, bot, kind, facts),
         ]
     parts = [
         opening(bot, kind),
@@ -179,7 +179,7 @@ def _task_lines(job: Job, kind: str, facts: dict) -> list[str]:
     return merge_only.task_lines(job, facts)
 
 
-def _handoff(job: Job, bot: str, kind: str, facts: dict, *, skills_read: bool) -> str:
+def _handoff(job: Job, bot: str, kind: str, facts: dict) -> str:
     if kind == "review":
         header, example = review.handoff(bot, facts)
     elif _is_plan(job, kind):
@@ -187,4 +187,4 @@ def _handoff(job: Job, bot: str, kind: str, facts: dict, *, skills_read: bool) -
     else:
         header, example = build.ready_handoff(bot)
     role = "reviewer" if kind == "review" else "builder"
-    return handoff_section(bot, role, facts, header, example, skills_read=skills_read)
+    return handoff_section(bot, role, facts, header, example)

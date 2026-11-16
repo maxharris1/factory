@@ -25,6 +25,7 @@ from lib.queue import BUSY_TIMEOUT_SECONDS
 from tests.test_approver_credential import APP_BOT, MAX, AppFlow
 from tests.test_dispatcher import (
     ANSWERS,
+    GO,
     READY,
     VERDICT,
     FakeGrokDelivery,
@@ -301,6 +302,26 @@ def test_approver_go_queues_a_fresh_review_that_can_ship(
 
     assert flow.approve("approve-2") not in ("verdict-while-blocked", "stale-approve")
     assert shipped(flow)
+
+
+def test_an_approvers_building_go_on_a_blocked_ticket_queues_a_review_not_a_fix(
+    tmp_path: Path,
+) -> None:
+    flow = blocked_flow(tmp_path)
+    flow.verdict("blocked-1", "BLOCKED")
+    fixes = job_count(flow.queue, "fix")
+
+    assert flow.post("go-2", GO.format(state="building"), MAX) == "queued-blocked-review"
+
+    assert flow.state()["workflow_state"] == "review"
+    assert job_count(flow.queue, "fix") == fixes
+    review = flow.queue.claim("codex")
+    assert review is not None
+    assert (review.request.source_comment_id, review.request.head, round_of(review)) == (
+        "go-2",
+        HEADS[1],
+        "1/3",
+    )
 
 
 def test_a_second_blocked_after_the_fresh_review_wakes_again(tmp_path: Path) -> None:

@@ -872,3 +872,50 @@ def test_script_draws_a_ready_held_for_ci_like_the_server(tmp_path: Path) -> Non
     assert 'data-wait="ci"' in server["pipeline"]
     for ident in BOARD:
         assert out["html"][ident] == server[ident], ident
+
+
+NO_CI = ("maxharris1/Factory", "615")
+ON_CI = ("maxharris1/factory", "616")
+
+
+def no_ci_snapshot(tmp_path: Path) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, *NO_CI, state="building")
+        add_ticket(connection, *ON_CI, state="building")
+        connection.execute(
+            "INSERT INTO no_ci_bases (repo, ticket_id, base) VALUES (?, ?, 'release/1.x')",
+            (NO_CI[0].lower(), NO_CI[1]),
+        )
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+def _check_no_ci(board: str) -> None:
+    card = _card(board, "#".join(NO_CI))
+    line = _one(card, _cls("tk-ci"))
+    chip = _one(line, _cls("chip"))
+    assert (_text(chip), chip["attrs"]["class"]) == ("no CI on this base", "chip muted")
+    assert "release/1.x" in _text(line)
+    assert "waiting on CI" not in _text(card) and "data-wait" not in card["attrs"]
+    plain = _card(board, "#".join(ON_CI))
+    assert "no CI on this base" not in _text(plain) and not _all(plain, _cls("tk-ci"))
+
+
+def test_a_ticket_on_a_base_without_ci_says_so_instead_of_waiting_on_ci(tmp_path: Path) -> None:
+    snapshot = no_ci_snapshot(tmp_path)
+    assert {row["ticket_id"]: row.get("no_ci") for row in snapshot["tickets"]} == {
+        NO_CI[1]: {"base": "release/1.x"}, ON_CI[1]: None,
+    }
+    _check_no_ci(_server(snapshot)["pipeline"])
+
+
+@layout.needs_node
+def test_script_draws_a_base_without_ci_like_the_server(tmp_path: Path) -> None:
+    snapshot = no_ci_snapshot(tmp_path)
+    out, server = _script(tmp_path, snapshot), _server(snapshot)
+    _check_no_ci(out["html"]["pipeline"])
+    for ident in BOARD:
+        assert out["html"][ident] == server[ident], ident

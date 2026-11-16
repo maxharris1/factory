@@ -91,9 +91,17 @@ list. The rest are lifetime counts:
 - BLOCKED stops: tickets in blocked
 - tickets succeeded: merged or done; Aut0 counts at handed-off (Ready for
   Review)
-- Skills read and helpers per job: #100's job_telemetry tool counts
-  (Skill; Agent and Task) over Claude jobs. D25 sets no helper cap, so the
-  max is printed too
+- skill reads per job kind (plan, build, fix, review; #505), over done
+  and failed jobs, merge-only fixes left out: the share of jobs that read
+  the factory-builder or factory-reviewer router and the mean count of
+  distinct skill files read, from job_telemetry.skill_reads (paths under
+  the deployed skills tree, from file reads and Skill tool calls). The
+  Skill tool count is not used. A job with no telemetry row or no
+  skill_reads value is counted in skill-reads-unrecorded-<kind> and left
+  out of both means; a kind with no recorded job, or a snapshot from
+  before the column, prints unrecorded
+- helpers per job: #100's job_telemetry tool counts (Agent and Task) over
+  Claude jobs. D25 sets no helper cap, so the max is printed too
 - preflight failures: requeued-unstarted job events whose reason is one
   lib.remote.preflight raises (PREFLIGHT_FAILURE). An unreachable device
   counts: preflight is a job's first ssh call
@@ -1096,6 +1104,9 @@ PREFLIGHT_FAILURE = re.compile(
 )
 REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
 HELPER_TOOLS = ("Agent", "Task")
+SKILL_KINDS = ("plan", "build", "fix", "review")
+SKILL_METRICS = ("router-read-share", "skill-files-per-job", "skill-reads-unrecorded")
+ROUTER_SKILLS = frozenset({"factory/factory-builder/SKILL.md", "factory/factory-reviewer/SKILL.md"})
 GO_OUTCOMES = (
     *(
         f"{verb}-{action}"
@@ -1259,6 +1270,7 @@ def _metric_values(
             ),
         )
     )
+    values.extend(_skill_read_metrics(connection, tables))
     values.extend(_tool_metrics(connection, tables))
     values.append(("preflight-failures", _preflight_failures(connection, tables)))
     lost = _scalar(
@@ -1701,14 +1713,72 @@ def _capped(connection: sqlite3.Connection, tables: set[str]) -> MetricValue:
     return connection.execute(f"SELECT COUNT(*) FROM ({' UNION '.join(parts)})").fetchone()[0]
 
 
+def _skill_read_metrics(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> list[tuple[str, MetricValue]]:
+    names = [f"{metric}-{kind}" for kind in SKILL_KINDS for metric in SKILL_METRICS]
+    for table in ("job_telemetry", "jobs"):
+        if table not in tables:
+            return [(name, _missing(table)) for name in names]
+    if "skill_reads" not in _columns(connection, "job_telemetry"):
+        return [(name, Unrecorded("no-skill_reads-column")) for name in names]
+    recorded: dict[str, list[frozenset[str]]] = {kind: [] for kind in SKILL_KINDS}
+    unrecorded = dict.fromkeys(SKILL_KINDS, 0)
+    for action, detail, raw in connection.execute(
+        "SELECT j.action, j.detail, t.skill_reads FROM jobs j "
+        "LEFT JOIN job_telemetry t ON t.job_id = j.id "
+        "WHERE j.state IN ('done', 'failed') "
+        f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))})",
+        SKILL_KINDS,
+    ):
+        if _merge_only(detail):
+            continue
+        files = _skill_files(raw)
+        if files is None:
+            unrecorded[action] += 1
+        else:
+            recorded[action].append(files)
+    values: list[tuple[str, MetricValue]] = []
+    for kind in SKILL_KINDS:
+        jobs = recorded[kind]
+        none = Unrecorded("no-skill-reads")
+        values += [
+            (
+                f"router-read-share-{kind}",
+                sum(bool(files & ROUTER_SKILLS) for files in jobs) / len(jobs) if jobs else none,
+            ),
+            (f"skill-files-per-job-{kind}", sum(map(len, jobs)) / len(jobs) if jobs else none),
+            (f"skill-reads-unrecorded-{kind}", unrecorded[kind]),
+        ]
+    return values
+
+
+def _merge_only(detail: object) -> bool:
+    try:
+        value = json.loads(detail)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get("kind") == "merge-only"
+
+
+def _skill_files(raw: object) -> frozenset[str] | None:
+    try:
+        files = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(files, list) or not all(isinstance(path, str) for path in files):
+        return None
+    return frozenset(files)
+
+
 def _tool_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
 ) -> list[tuple[str, MetricValue]]:
-    names = ("skills-read-per-job", "helpers-per-job", "helpers-per-job-max")
+    names = ("helpers-per-job", "helpers-per-job-max")
     if "job_telemetry" not in tables:
         return [(name, _missing("job_telemetry")) for name in names]
-    skills: list[int] = []
     helpers: list[int] = []
     for (raw,) in connection.execute(
         "SELECT tool_calls FROM job_telemetry WHERE harness = 'claude'"
@@ -1719,12 +1789,10 @@ def _tool_metrics(
             continue
         if not isinstance(counts, dict):
             continue
-        skills.append(_count(counts.get("Skill")))
         helpers.append(sum(_count(counts.get(tool)) for tool in HELPER_TOOLS))
-    if not skills:
+    if not helpers:
         return [(name, NO_RATIO) for name in names]
     return [
-        ("skills-read-per-job", sum(skills) / len(skills)),
         ("helpers-per-job", sum(helpers) / len(helpers)),
         ("helpers-per-job-max", max(helpers)),
     ]

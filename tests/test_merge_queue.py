@@ -14,6 +14,7 @@ from lib.dispatcher import ShipError
 from lib.factory_md import HoldConfig
 from lib.queue import retire_requeued
 from tests.merge_queue_support import Board, sha
+from tests.test_ready_ci_gate import NO_CI_BASE, on_base
 from tests.test_remote_start import config_of, machines_file
 
 
@@ -43,6 +44,23 @@ def test_approve_on_a_handoff_repo_enters_the_merge_queue_and_merges(tmp_path: P
     assert board.actions.states[-1] == "merged"
     [wake] = board.wakes("done")
     assert wake["outcome"] == "merged"
+
+
+def test_an_approval_on_a_base_ci_never_runs_on_merges_through_the_queue(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    on_base(board, NO_CI_BASE)
+    pr = board.open("42", sha(1))
+    pr.ci[sha(1)] = "pending"
+    approve = board.build_and_approve(pr, mergeable=None)
+    assert board.outcome(approve) == "merge-queue"
+
+    pr.mergeable, pr.mergeable_state = True, "clean"
+    board.poll()
+
+    assert board.actions.merges == [(True, sha(1))]
+    assert board.state("42")["workflow_state"] == "merged"
 
 
 def test_a_watched_ticket_is_polled_every_cycle(tmp_path: Path) -> None:

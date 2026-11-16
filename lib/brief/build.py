@@ -10,6 +10,7 @@ from lib.brief.common import (
     answers_lines,
     comment_url,
     detail_of,
+    local_checks,
     read_ticket_line,
     resume_lines,
     title_line,
@@ -55,10 +56,15 @@ def base_step(number: int, facts: dict) -> str:
 
 
 def builder_notes(job: Job, facts: dict) -> list[str]:
+    gate = (
+        f"CI does not run on `{facts['no_ci_base']}`. Run {local_checks(facts)} locally at the head you push, "
+        "paste each command and its result in the ready, and say that CI did not run."
+        if facts["no_ci_base"]
+        else "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
+    )
     notes = [
         title_line(facts),
-        "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
-        + _PRINT_MODE.get(f"{job.request.recipient}-bot", ""),
+        gate + _PRINT_MODE.get(f"{job.request.recipient}-bot", ""),
         "Never poll, watch or wait on GitHub Actions or any other CI from inside this job.",
         *QUESTIONS_LINES,
     ]

@@ -819,3 +819,68 @@ def test_adding_a_hold_mapping_is_a_trust_change() -> None:
 
     assert trust_front_matter_changed(without_hold, ROOT_FACTORY_MD) is True
     assert trust_front_matter_changed(None, ROOT_FACTORY_MD) is True
+
+
+def test_ci_is_absent_by_default(tmp_path: Path) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, VALID))
+    assert findings == []
+    assert config is not None
+    assert (config.ci_branches, config.ci_local_checks) == (None, ())
+
+
+def test_ci_branches_and_local_checks_are_read_from_factory_md(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {
+        "branches": ["dev", "main", "oliver/aut-1928-org-type"],
+        "local_checks": ["typecheck", "Jest", "pgTAP"],
+    }
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
+    assert config.ci_branches == ("dev", "main", "oliver/aut-1928-org-type")
+    assert config.ci_local_checks == ("typecheck", "Jest", "pgTAP")
+
+
+@pytest.mark.parametrize(
+    ("ci", "message"),
+    [
+        (["dev"], "ci must be a mapping"),
+        ({"local_checks": ["Jest"]}, "ci.branches must be a non-empty list"),
+        ({"branches": []}, "ci.branches must be a non-empty list"),
+        ({"branches": "dev"}, "ci.branches must be a non-empty list"),
+        ({"branches": ["dev", "bad branch"]}, "ci.branches[1] must be a branch name"),
+        ({"branches": ["dev"], "local_checks": "Jest"}, "ci.local_checks must be a list"),
+        ({"branches": ["dev"], "local_checks": [3]}, "ci.local_checks[0] must be a short label"),
+        ({"branches": ["dev"], "on_push": True}, "unknown field 'ci.on_push'"),
+    ],
+)
+def test_a_bad_ci_mapping_is_refused_even_when_lenient(
+    tmp_path: Path, ci: object, message: str
+) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = ci
+    path = write_factory(tmp_path, data)
+    assert messages(path) == [message]
+    lenient, _ = parse_factory_md(path.read_text(encoding="utf-8"), strict=False)
+    assert lenient is None
+
+
+def test_check_config_refuses_an_empty_ci_branch_list(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["ci"] = {"branches": []}
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--factory",
+         str(write_factory(tmp_path, data))],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert result.returncode != 0
+    assert "ci.branches must be a non-empty list" in result.stdout + result.stderr
+
+
+def test_removing_a_ci_branch_is_a_trust_change() -> None:
+    base = ROOT_FACTORY_MD.replace("---\n", "---\nci:\n  branches: [main, dev]\n", 1)
+    head = ROOT_FACTORY_MD.replace("---\n", "---\nci:\n  branches: [main]\n", 1)
+    assert trust_front_matter_changed(base, head) is True
