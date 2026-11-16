@@ -67,17 +67,19 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 This is a plan job. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). Start with an architect scaffold.
-2. Map every acceptance criterion to the work that meets it. The plan lives in the plan handoff comment, never in a file in the repo.
-3. Post the plan handoff below with `round=1/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not.
+2. Map every acceptance criterion to the work that meets it, and name each criterion's proof: the test, command or observation that will show it is met. The plan lives in the plan handoff comment, never in a file in the repo.
+3. Estimate the changed lines the build will add and remove, tests and docs included, and put the number in the header as `lines=<n>`. A plan without `lines=` counts as a plan with a criterion left unmapped.
+4. When the estimate is over 400 lines, or the ticket has more than 5 acceptance criteria, add a `## Proposed split` section that names the smaller tickets, each with its criteria and its expected lines. Such a plan does not start the build: it waits for Max, who answers or splits the ticket.
+5. Post the plan handoff below with `round=1/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
 
-<!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=1/2 -->
+<!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=1/2 lines=<n> unsat=<id> -->
 
-Then plain prose for people and agents: The plan itself: the criterion-to-work map, in at most 60,000 characters (GitHub caps a comment at 65,536). The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: The plan itself: the criterion-to-work map with each criterion's proof, the expected size, and any proposed split, in at most 60,000 characters (GitHub caps a comment at 65,536). The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -223,17 +225,19 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 This is a plan job. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). Start with an architect scaffold.
-2. Map every acceptance criterion to the work that meets it. The plan lives in the plan handoff comment, never in a file in the repo.
-3. Post the plan handoff below with `round=1/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not.
+2. Map every acceptance criterion to the work that meets it, and name each criterion's proof: the test, command or observation that will show it is met. The plan lives in the plan handoff comment, never in a file in the repo.
+3. Estimate the changed lines the build will add and remove, tests and docs included, and put the number in the header as `lines=<n>`. A plan without `lines=` counts as a plan with a criterion left unmapped.
+4. When the estimate is over 400 lines, or the ticket has more than 5 acceptance criteria, add a `## Proposed split` section that names the smaller tickets, each with its criteria and its expected lines. Such a plan does not start the build: it waits for Max, who answers or splits the ticket.
+5. Post the plan handoff below with `round=1/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
 
-<!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=1/2 -->
+<!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=1/2 lines=<n> unsat=<id> -->
 
-Then plain prose for people and agents: The plan itself: the criterion-to-work map, in at most 60,000 characters (GitHub caps a comment at 65,536). The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: The plan itself: the criterion-to-work map with each criterion's proof, the expected size, and any proposed split, in at most 60,000 characters (GitHub caps a comment at 65,536). The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
