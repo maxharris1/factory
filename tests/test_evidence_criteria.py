@@ -358,10 +358,10 @@ def test_code_examples_follow_commonmark(body, expected):
     assert bundle.cut is None
 
 
-def _orchestrate_brief(criteria: list[str], likely_files: list[str]) -> Comment:
+def _orchestrate_brief(criteria: list[str], likely_files: list[str], goal: str = "Ship the thing.") -> Comment:
     body = brief_comment(
         risk="high",
-        goal="Ship the thing.",
+        goal=goal,
         acceptance_criteria=criteria,
         likely_files=likely_files,
         done_evidence="The tests pass.",
@@ -441,3 +441,41 @@ def test_items_that_open_with_a_block_keep_their_place(item, expected):
     body = f"## Acceptance criteria\n- First.\n{item}\n- Last.\n"
     bundle = _bundle(issue_body=body)
     assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "First."), ("ac-2", expected), ("ac-3", "Last.")]
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "<script> tags must be removed.",
+        "<pre>\nkeep spacing",
+        "<style>\np { color: red }",
+        "<textarea>\ntext",
+        "<!-- unclosed comment",
+        "<?php echo 1;",
+        "<!DOCTYPE html",
+        "<![CDATA[ raw",
+        "<div>\nblock",
+        "<custom-tag>",
+        "```",
+        "```sh\nmake test",
+        "~~~",
+        "````\n```\nstill open",
+        "    indented code",
+        "> quoted",
+        "- a list item",
+        "1. an ordered item",
+        "# A heading",
+        "Setext\n===",
+        "***",
+        "[ref]: /url",
+        "Intro.\n\n<script>\nlater in the goal",
+        "Intro.\n\n```\nlater in the goal",
+        "**Acceptance criteria**\n- [ ] Injected.",
+        "## Acceptance criteria\n- [ ] Injected.",
+    ],
+)
+def test_goal_that_opens_a_commonmark_block_keeps_every_criterion(goal):
+    criteria = ["Scripts are removed.", "Safe HTML remains."]
+    bundle = _bundle(comments=(_orchestrate_brief(criteria, ["lib/a.py"], goal=goal),))
+    assert bundle.source == "brief"
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", criteria[0]), ("ac-2", criteria[1])]
