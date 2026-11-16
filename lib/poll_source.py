@@ -41,7 +41,13 @@ from lib.dispatcher import (
 )
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.cycle_clock import CycleClock
-from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
+from lib.factory_md import (
+    FactoryConfig,
+    FactoryContext,
+    parse_factory_context,
+    parse_factory_md,
+    trust_front_matter_changed,
+)
 from lib.evidence.criteria import canonical_brief
 from lib.github_actions import (
     GhResult,
@@ -53,6 +59,7 @@ from lib.github_actions import (
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
+from lib.hold import FACTORY_MD
 from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
 from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
@@ -1529,7 +1536,47 @@ class LivePollSource:
             except Exception as exc:
                 self._record(repo, number, exc)
                 found[name] = None
+        found["factory_md_trust_changed"] = self._factory_md_trust_changed(
+            repo, number, pull, found["changed_files"]
+        )
         return found
+
+    def _factory_md_trust_changed(
+        self,
+        repo: str,
+        number: str,
+        pull: Mapping[str, Any],
+        changed_files: Sequence[str] | None,
+    ) -> bool | None:
+        """Issue #564: whether the PR changes factory.md's trust front matter,
+        read once per head. None when the diff or a factory.md read failed."""
+        if changed_files is None:
+            return None
+        if FACTORY_MD not in changed_files:
+            return False
+
+        def read() -> bool:
+            base = _object(pull.get("base") or {}, "GitHub pull request base").get("sha")
+            if not isinstance(base, str):
+                raise PollSourceError(f"{repo}#{number} has no base sha")
+            return trust_front_matter_changed(
+                self._factory_text_at(repo, base),
+                self._factory_text_at(repo, _pr_head(pull, repo, number)),
+            )
+
+        try:
+            return self._per_head("factory-trust", repo, number, pull, read)
+        except Exception as exc:
+            self._record(repo, number, exc)
+            return None
+
+    def _factory_text_at(self, repo: str, sha: str) -> str | None:
+        try:
+            return self._factory_text(repo, sha)
+        except PollSourceError as exc:
+            if str(exc) == "gh returned HTTP 404":
+                return None
+            raise
 
     def _source_issue_body(
         self, repo: str, number: str, source: str, pull: Mapping[str, Any]

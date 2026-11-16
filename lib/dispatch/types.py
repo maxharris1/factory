@@ -104,6 +104,9 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #564: whether the diff changes factory.md's trust front matter.
+    # False when factory.md is not in the diff; None when not read.
+    factory_md_trust_changed: bool | None = None
     # Issue #206: factory.md's config when a go routed this ticket to other
     # harnesses; factory then holds the routed pair.
     factory_md: FactoryConfig | None = None

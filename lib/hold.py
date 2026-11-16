@@ -10,7 +10,9 @@ with green CI does not ship while the PR is held:
   removal the approver did not make never clears the hold);
 - paths: the PR's diff against base touches a hold.paths glob, read at
   the current head on every poll, so a PR that grows into those files
-  gets held.
+  gets held. The repo-root factory.md is the one exception (issue #564):
+  it holds only when its trust front matter (hold, ship, finish_line,
+  builder, reviewer) differs from base, so a prose-only edit is not held.
 
 The hold clears on a comment from the approver, either kind=ok
 head=<40-char sha> or a first line of /ok <40-char sha>, whose
@@ -38,6 +40,7 @@ from functools import lru_cache
 from lib.factory_md import HoldConfig
 from lib.handoff import HandoffError, parse_comment
 
+FACTORY_MD = "factory.md"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SLASH_OK = re.compile(r"/ok[ \t]+([0-9a-f]{40})")
 
@@ -161,6 +164,7 @@ def decide(
     comments: Iterable[object],
     approver_allowed: bool,
     covers: Callable[[str], bool],
+    factory_md_trust_changed: bool | None,
 ) -> HoldDecision:
     """Whether the hold blocks a merge of the current head.
 
@@ -185,6 +189,11 @@ def decide(
     )
     label_hold = on_pr or (latest is not None and latest.action == "unlabeled" and not removed_by_approver)
     paths = held_paths(hold.paths, changed_files)
+    if FACTORY_MD in paths:
+        if factory_md_trust_changed is None:
+            return HoldDecision(unread="factory.md trust sections")
+        if not factory_md_trust_changed:
+            paths = tuple(path for path in paths if path != FACTORY_MD)
     reasons = tuple(
         name for name, active in (("label", label_hold), ("paths", bool(paths))) if active
     )
