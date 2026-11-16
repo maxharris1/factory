@@ -87,6 +87,8 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "followup_from": context.config.followup_from_round if context is not None else None,
         "auto_extra": context.config.auto_extra_rounds if context is not None else 0,
         "start_before_ci": context.config.start_before_ci if context is not None else False,
+        "pre_ready": context.config.pre_ready if context is not None else None,
+        "block_on": context.config.block_on if context is not None else "any-failure",
         "cap": cap,
         "head": head if isinstance(head, str) and _HEAD.fullmatch(head) else None,
         "pr": pr,

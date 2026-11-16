@@ -238,7 +238,7 @@ def test_restored_same_family_pair_does_not_ship(tmp_path: Path) -> None:
     verdict = comment(
         "verdict-1",
         "<!-- orch:v1 kind=verdict from=cursor-bot role=reviewer "
-        f"round=1/3 head={HEAD} verdict=APPROVE risk=high -->\nApproved.\n",
+        f"round=1/3 head={HEAD} ac=met verdict=APPROVE risk=high -->\nApproved.\n",
         author="cursor-login",
         created_at=3,
     )

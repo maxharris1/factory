@@ -27,6 +27,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from lib.approve_rule import approve_refusal
 from lib.brief import brief_kind
 from lib.brief.common import BriefError, detail_of, facts_of
 from lib.github_actions import GH
@@ -153,9 +154,10 @@ def problems(
     if expected.bot not in _bots_for(trusted_logins, login):
         found.append(f"author {login or '(none)'} is not a trusted_logins login for {expected.bot}")
     try:
-        fields = parse_comment(str(comment.get("body") or "")).as_dict()
+        handoff = parse_comment(str(comment.get("body") or ""))
     except HandoffError as exc:
         return [*found, f"comment {comment_id} has no valid orch:v1 header ({exc})"]
+    fields = handoff.as_dict()
     kind = fields.get("kind")
     if fields.get("from") != expected.bot:
         found.append(f"from={fields.get('from')} is not {expected.bot}")
@@ -173,6 +175,9 @@ def problems(
             found.append(f"no head; the reviewed head is {expected.head}")
         elif not _same_head(reported, expected.head):
             found.append(f"head={reported} is not the reviewed head {expected.head}")
+    refusal = approve_refusal(fields, handoff.body)
+    if refusal is not None:
+        found.append(refusal.message)
     if kind == "ready" and expected.pr is not None:
         pull = _pull(repo, number, read)
         if pull is None:
@@ -213,3 +218,23 @@ def _bots_for(trusted_logins: Mapping[str, frozenset[str]], login: str) -> froze
         if key.casefold() == wanted:
             return frozenset(bots)
     return frozenset()
+
+
+def ready_head(expected: Expected, comment_id: str, read: Read) -> str | None:
+    """The head a ready names (#503), as the PR's full sha when they still
+    agree; None when the handoff is not a ready."""
+    if expected.kind != "ready":
+        return None
+    comment = read(f"repos/{expected.repo}/issues/comments/{comment_id}")
+    try:
+        fields = parse_comment(str(comment.get("body") or "")).as_dict()
+    except HandoffError:
+        return None
+    if fields.get("kind") != "ready":
+        return None
+    match = _ISSUE_URL.fullmatch(str(comment.get("issue_url") or ""))
+    if match is None:
+        return None
+    pull = _pull(match.group(1), int(match.group(2)), read)
+    named = str(fields.get("head") or "")
+    return pull.sha if pull is not None and _same_head(named, pull.sha) else named

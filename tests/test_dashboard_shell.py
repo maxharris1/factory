@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,10 @@ import lib.dashboard_page as page
 from lib.dashboard import collect_snapshot, render_pages
 from lib.health import CODE_COMPONENTS
 from tests.test_dashboard import NOW, seeded
-from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, _text, needs_node
+from tests import test_dashboard_activity as activity
+from tests import test_dashboard_layout as layout
+from tests import test_dashboard_system as system
+from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, _text, needs_node
 from tests.test_dashboard_pixelstrip import _node
 
 PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
@@ -73,7 +77,7 @@ def test_the_strip_lists_exactly_the_badge_items_on_every_page(base: dict) -> No
         assert re.search(r'<b id="attention-count">3</b><span> need attention</span>', strip), name
         assert 'href="activity.html#attention"' in strip
         rows = re.findall(
-            r'<div class="attn-item"><span class="chip ([a-z]+)">([^<]+)</span>'
+            r'<div class="attn-item" data-attn="[^"]+"><span class="chip ([a-z]+)">([^<]+)</span>'
             r'<a class="attn-who" href="([^"]+)">([^<]+)</a><span class="attn-what">([^<]*)</span></div>',
             strip,
         )
@@ -611,3 +615,214 @@ def test_the_no_script_band_reflects_load(base: dict) -> None:
     assert "--l:0.000;" in idle and "--l:1.000;" in full
     rule = re.search(r"\n\.px\[data-load\]\{([^}]*)\}", page.CSS)
     assert rule and "var(--l" in rule.group(1)
+
+
+def _place_harness() -> str:
+    return activity.HARNESS.replace(
+        "    } else if (kind === 'poll') {",
+        "    } else if (kind === 'put') {\n"
+        "      const scope = arg.in ? find(body, n => n.attrs.id === arg.in || n.className.split(' ')[0] === arg.in) : body;\n"
+        "      const node = find(scope, n => Object.entries(arg.attr || {}).every(([k, v]) => n.attrs[k] === v) &&\n"
+        "        (arg.cls === undefined || n.className.split(' ')[0] === arg.cls) && (arg.tag === undefined || n.tagName === arg.tag) &&\n"
+        "        (arg.has === undefined || n.children.some(c => c.className.split(' ')[0] === arg.has)));\n"
+        "      if (!node) throw new Error('nothing to put: ' + JSON.stringify(arg));\n"
+        "      if (arg.focus) { node.focus(); kept = node; }\n"
+        "      if (arg.left !== undefined) node.scrollLeft = arg.left;\n"
+        "      if (arg.top !== undefined) node.scrollTop = arg.top;\n"
+        "    } else if (kind === 'where') {\n"
+        "      const node = document.activeElement;\n"
+        "      const path = [];\n"
+        "      for (let n = node; n && n !== body; n = n.parentNode) path.unshift(n.attrs.id || n.className.split(' ')[0] || n.tagName);\n"
+        "      const scroll = [];\n"
+        "      (function walk(n) { if (n.scrollLeft || n.scrollTop) scroll.push([n.className.split(' ')[0], n.scrollLeft || 0, n.scrollTop || 0, n.isConnected]);\n"
+        "        n.children.forEach(walk); })(body);\n"
+        "      steps.push({where: {tag: node ? node.tagName : 'BODY', attrs: node ? node.attrs : {}, path,\n"
+        "        same: node === kept, connected: !!kept && kept.isConnected}, scroll});\n"
+        "    } else if (kind === 'poll') {",
+    ).replace("const steps = [];", "const steps = [];\nlet kept = null;")
+
+
+def _place(tmp_path: Path, snapshot: dict, page_name: str, ids: list[str], actions: list, hash_: str = "") -> list[dict]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    html = render_pages(snapshot)[page_name]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "harness.js").write_text(_place_harness(), encoding="utf-8")
+    result = subprocess.run(
+        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         SCRIPT_PAGE[page_name], hash_, json.dumps(ids), json.dumps(actions)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [step for step in json.loads(result.stdout)["steps"] if "where" in step]
+
+
+def _next(snapshot: dict, change=None) -> dict:
+    later = copy.deepcopy(snapshot)
+    later["generated_at_epoch"] = snapshot["generated_at_epoch"] + 5
+    if change:
+        change(later)
+    return later
+
+
+def _activity(tmp_path: Path) -> dict:
+    return activity._rich(activity.activity_snapshot(tmp_path / "db"))
+
+
+def _job(tmp_path: Path) -> dict:
+    return _snapshot(tmp_path / "db")
+
+
+def _ids(page_name: str) -> list[str]:
+    return {"activity.html": activity.IDS, "job.html": JOB}.get(page_name, BAR)
+
+
+@needs_node
+def test_a_relay_filter_button_keeps_focus_across_two_snapshots(tmp_path: Path) -> None:
+    snapshot = _activity(tmp_path)
+    at = {"in": "relay", "attr": {"data-relay": "shipped"}, "focus": True}
+    steps = _place(tmp_path, snapshot, "activity.html", _ids("activity.html"),
+                   [["put", at], ["poll", _next(snapshot)], ["where", None], ["poll", _next(_next(snapshot))], ["where", None]])
+    for step in steps:
+        where = step["where"]
+        assert (where["tag"], where["attrs"].get("data-relay"), where["path"][0]) == ("button", "shipped", "relay"), where
+        assert not where["connected"], "the focused button was rebuilt, not kept"
+
+
+SAME_CONTROL = [
+    ("activity.html", "", {"in": "relay", "tag": "button", "attr": {"data-relay": "scripted"}}, "data-relay"),
+    ("job.html", "", {"in": "ticket-filter", "attr": {"data-view": "table"}}, "data-view"),
+    ("job.html", "", {"in": "ticket-filter", "attr": {"data-project": ""}}, "data-project"),
+    ("job.html", "#job-h-review", {"in": "runlog", "attr": {"data-visit": "2"}}, "data-visit"),
+    ("job.html", "#job-h-review", {"in": "journey", "attr": {"data-visit": "3"}}, "data-visit"),
+    ("job.html", "#job-h-review", {"in": "jobview", "attr": {"data-scale": "even"}}, "data-scale"),
+    ("job.html", "#job-h-review", {"in": "jobview", "attr": {"data-replay": "1"}}, "data-replay"),
+    ("index.html", "", {"in": "statusline", "cls": "sl-vital", "tag": "a"}, "href"),
+    ("index.html", "", {"in": "attention-strip", "cls": "attn-count"}, "href"),
+]
+
+
+@needs_node
+@pytest.mark.parametrize(("page_name", "hash_", "at", "key"), SAME_CONTROL,
+                         ids=[f"{p}:{a['in']}:{k}" for p, _, a, k in SAME_CONTROL])
+def test_focus_lands_on_the_rebuilt_twin_of_the_same_control(
+    tmp_path: Path, page_name: str, hash_: str, at: dict, key: str
+) -> None:
+    snapshot = _activity(tmp_path) if page_name == "activity.html" else _job(tmp_path)
+    steps = _place(tmp_path, snapshot, page_name, _ids(page_name),
+                   [["put", {**at, "focus": True}], ["where", None], ["poll", _next(snapshot)], ["where", None]],
+                   hash_=hash_)
+    before, after = (step["where"] for step in steps)
+    assert after["tag"] == before["tag"] and after["attrs"].get(key) == before["attrs"].get(key), (before, after)
+    assert after["path"] == before["path"], (before, after)
+    assert not after["connected"], "the focused control was rebuilt, not kept"
+
+
+@needs_node
+def test_focus_falls_back_to_the_panel_root_when_the_control_is_gone(tmp_path: Path) -> None:
+    snapshot = _job(tmp_path)
+    repo = snapshot["tickets"][0]["repo"]
+    gone = _next(snapshot, lambda s: s.update(tickets=[t for t in s["tickets"] if t["repo"] != repo]))
+    at = {"in": "ticket-filter", "attr": {"data-project": repo}, "focus": True}
+    (step,) = _place(tmp_path, snapshot, "job.html", _ids("job.html"), [["put", at], ["poll", gone], ["where", None]])
+    assert step["where"]["path"] == ["ticket-filter"], step
+    assert step["where"]["attrs"]["tabindex"] == "-1", step
+
+
+@needs_node
+def test_a_redraw_never_takes_focus(tmp_path: Path) -> None:
+    snapshot = _job(tmp_path)
+    steps = _place(tmp_path, snapshot, "job.html", _ids("job.html"),
+                   [["where", None], ["poll", _next(snapshot)], ["where", None],
+                    ["put", {"in": "link", "tag": "div", "focus": True}], ["poll", _next(_next(snapshot))], ["where", None]])
+    nothing, still_nothing, outside = (step["where"] for step in steps)
+    assert nothing["tag"] == still_nothing["tag"] == "BODY", (nothing, still_nothing)
+    assert outside["same"] and outside["connected"], outside
+
+
+@needs_node
+@pytest.mark.parametrize(("page_name", "hash_", "box", "axis"), [
+    ("job.html", "#job-h-review", {"cls": "jd-box", "has": "jd-journey"}, "left"),
+    ("job.html", "#job-h-review", {"cls": "jd-box", "has": "jd-flowmap"}, "left"),
+    ("health.html", "", {"in": "log", "cls": "sys-log"}, "top"),
+    ("health.html", "", {"in": "components", "cls": "sys-scroll"}, "left"),
+    ("efficiency.html", "", {"cls": "ef-scroll"}, "left"),
+], ids=["journey", "state-chart", "poller-log", "components", "efficiency"])
+def test_a_scroll_box_keeps_its_offset_across_two_snapshots(
+    tmp_path: Path, page_name: str, hash_: str, box: dict, axis: str
+) -> None:
+    snapshot = system._snapshot(tmp_path / "db") if page_name == "health.html" else _job(tmp_path)
+    ids = _ids(page_name) + {"health.html": ["components", "log"], "efficiency.html": ["headroom"]}.get(page_name, [])
+    steps = _place(tmp_path, snapshot, page_name, ids,
+                   [["put", {**box, axis: 137}], ["poll", _next(snapshot)], ["where", None],
+                    ["poll", _next(_next(snapshot))], ["where", None]], hash_=hash_)
+    for step in steps:
+        assert [s for s in step["scroll"] if s[0] == box["cls"]] == [
+            [box["cls"], 137 if axis == "left" else 0, 137 if axis == "top" else 0, True]
+        ], step["scroll"]
+
+
+def _ship(snapshot: dict) -> None:
+    flow = next(job for job in snapshot["running"] if job["job"] == "h-review")["flow"]
+    flow["visits"][-1]["current"] = False
+    flow["visits"].append({"state": "ship", "who": "script", "started_at": 1800000000.0, "duration_seconds": None,
+                           "time_known": False, "off_chart": False, "reason": "APPROVE", "current": True})
+    flow["state"] = "ship"
+    flow["path"].append("ship")
+
+
+@needs_node
+def test_a_run_log_row_keeps_focus_when_it_stops_being_current(tmp_path: Path) -> None:
+    snapshot = _job(tmp_path)
+    at = {"in": "runlog", "attr": {"data-visit": "4"}, "focus": True}
+    steps = _place(tmp_path, snapshot, "job.html", _ids("job.html"),
+                   [["put", at], ["where", None], ["poll", _next(snapshot, _ship)], ["where", None]], hash_="#job-h-review")
+    before, after = (step["where"] for step in steps)
+    assert "now" in before["path"], before
+    assert (after["tag"], after["attrs"].get("data-visit")) == ("button", "4"), after
+    assert after["path"][:-1] == before["path"][:-1], (before, after)
+    assert not after["connected"], "the focused row was rebuilt, not kept"
+
+
+@needs_node
+def test_a_ticket_link_keeps_focus_when_its_card_moves_to_another_column(tmp_path: Path) -> None:
+    snapshot = _job(tmp_path)
+    href = "job.html#job-h-review"
+
+    def advance(later: dict) -> None:
+        next(t for t in later["tickets"] if t["ticket_id"] == "40")["state"] = "ship"
+        _ship(later)
+
+    at = {"in": "pipeline", "attr": {"href": href}, "focus": True}
+    (step,) = _place(tmp_path, snapshot, "job.html", _ids("job.html"),
+                     [["put", at], ["poll", _next(snapshot, advance)], ["where", None]])
+    after = step["where"]
+    assert (after["tag"], after["attrs"].get("href")) == ("a", href), after
+    assert not after["connected"], "the focused link was rebuilt, not kept"
+
+
+GONE_ATTENTION = [
+    ("job.html", "attention-strip", "attn-who"),
+    ("activity.html", "attention", "at-go"),
+]
+
+
+@needs_node
+@pytest.mark.parametrize(("page_name", "root", "cls"), GONE_ATTENTION, ids=[g[1] for g in GONE_ATTENTION])
+def test_focus_on_a_resolved_attention_item_falls_back_to_the_panel_root(
+    tmp_path: Path, page_name: str, root: str, cls: str
+) -> None:
+    snapshot = _activity(tmp_path) if page_name == "activity.html" else _job(tmp_path)
+    first = snapshot["attention"]["items"][0]
+
+    def resolve(s: dict) -> None:
+        s["attention"]["items"] = [x for x in s["attention"]["items"] if x != first]
+        s["attention"]["count"] = len(s["attention"]["items"])
+
+    later = _next(snapshot, resolve)
+    assert later["attention"]["items"], "another attention item must remain to be wrongly focused"
+    at = {"in": root, "cls": cls, "tag": "a", "focus": True}
+    (step,) = _place(tmp_path, snapshot, page_name, _ids(page_name), [["put", at], ["poll", later], ["where", None]])
+    assert step["where"]["path"] == [root], step
+    assert step["where"]["attrs"]["tabindex"] == "-1", step

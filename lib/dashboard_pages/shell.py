@@ -12,7 +12,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from lib.dashboard_telemetry import rollup_panel, TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
-from lib.dashboard_pages.activity import _ATTENTION, _attention, _health_link, _relay
+from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key, _health_link, _relay
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_devices, _lanes
@@ -141,6 +141,7 @@ SCRIPT = r"""
     var a = d.attention || {items: []};
     return (a.items || []).concat(agedHealth(d).extra);
   }
+  function attentionKey(x) { return x.kind + ':' + (x.component || x.repo + '#' + x.ticket_id); }
 
   // The attention strip (#139): every item the count covers, hidden when clear.
   function renderAttentionStrip(d) {
@@ -159,6 +160,7 @@ SCRIPT = r"""
     add(count, el('span', null, items.length === 1 ? ' needs attention' : ' need attention'));
     items.forEach(function (x) {
       var row = add(root, el('div', 'attn-item'));
+      row.setAttribute('data-attn', attentionKey(x));
       add(row, chip(x.kind, ATTENTION[x.kind] || 'muted'));
       add(row, link('attn-who', x.component ? healthLink(x.link) : 'job.html')).textContent =
         x.component ? x.component : ticketOf(x);
@@ -1103,7 +1105,7 @@ def _attention_strip(snapshot: dict) -> str:
         else:
             href, who = "job.html", _ticket(row)
         return (
-            '<div class="attn-item">'
+            f'<div class="attn-item" data-attn="{_e(_attention_key(row))}">'
             + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
             + f'<a class="attn-who" href="{_e(href)}">{_e(who)}</a>'
             + _span("attn-what", row["detail"])

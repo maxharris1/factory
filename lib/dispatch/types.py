@@ -114,6 +114,7 @@ class TrackedTicket:
     mergeable_state: str | None = None
     closed: bool = False
     intake_label: str | None = None
+    changed_lines: int | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:

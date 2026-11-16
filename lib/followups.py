@@ -35,6 +35,10 @@ def followups_active(followup_from: int | None, round_number: int | None) -> boo
     return round_number >= followup_from
 
 
+def followup_start(followup_from: int | None, block_on: str) -> int | None:
+    return 1 if block_on == "user-impact" else followup_from
+
+
 def followup_findings(body: str) -> tuple[str, ...]:
     text = re.sub(r"\r\n?", "\n", body or "")
     lines = text.split("\n")

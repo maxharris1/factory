@@ -2212,15 +2212,15 @@ def _linear_closed(issue: Mapping[str, Any]) -> bool:
 
 
 def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
-    """The linked PR's merge facts a ticket carries, whatever its tracker
-    (#130: the merge queue reads them)."""
     merged = pull.get("merged") is True
     mergeable = pull.get("mergeable")
+    sizes = (pull.get("additions"), pull.get("deletions"))
     return {
         "merged": merged and fresh,
         "mergeable": mergeable if isinstance(mergeable, bool) else None,
         "mergeable_state": _optional_string(pull.get("mergeable_state")),
         "closed": pull.get("state") == "closed" and not merged,
+        "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
     }
 
 

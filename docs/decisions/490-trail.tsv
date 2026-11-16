@@ -1,0 +1,11 @@
+decision	choice	why
+filing round	followup_start(followup_from_round, block_on) returns 1 for user-impact; the brief and _record_followups both use it	One policy source, as #259 set up; brief and poller cannot disagree
+variant demotion	stays on followup_from_round alone	repeat= keeps its meaning; a repeated user-impact blocker is still a stop for Max
+[minor] under user-impact	dropped; tags are [blocking] or [follow-up]	ac-2 says every other finding is [follow-up]; pstack sends everything else to a follow-up
+linear tickets	user-impact refused with tickets: linear	Linear has no filer, so round-1 follow-ups would be lost; same rule as followup_from_round
+verify skill in a fix round	still run, as a gate in step (b)	ac-4 says the gates pass; only interrogate and blast-radius become conditional
+quote drift	test pins PSTACK_BAR and PSTACK_FIX_ROUND as substrings of vendored autopilot-full.md	A pstack edit fails CI instead of leaving a misquote
+ac-5 proof	regenerate script then git diff --exit-code tests/snapshots/brief/	Only the two new snapshot files appear; 17 existing kinds byte-identical
+local test runs	test_prompt_contracts needs /proc boot_id; run on mac through a shim that stubs that one read	CI on Linux runs it unshimmed
+merge-update fix rounds (f-1)	A later user-impact round brought in by merge now runs interrogate and blast-radius only for new behavior, a redesign or a large new diff, like an ordinary fix round	Codex round-1 repro passes; test_a_later_user_impact_round_never_orders_the_full_pass fails 4/6 before, passes 6/6 after
+CI shard 3 KeyError	test_auto_extra_round._facts (from main) built facts without block_on; facts_of always sets it, so the test dict gets the key	review_rules call reproduced KeyError; passes after
