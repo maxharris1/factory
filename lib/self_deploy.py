@@ -437,24 +437,20 @@ def _release(queue: SQLiteJobQueue, device: str) -> None:
 
 
 def _settle(queue: SQLiteJobQueue, device: str, checkout: Path, now: float,
-            held: Outcome | None = None) -> None:
-    """Record where the box stays: at origin/main, or `held` at its commit by a conflict.
-
-    At origin/main the box's own row goes; held, it becomes the held row. Either
-    way the lagging rows go, and the conflict flag tracks `held`."""
+            conflict: Outcome | None = None) -> None:
     repo = own_repo(checkout)
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        if held is None:
+        if conflict is None:
             device_sync.clear(connection, device, device_sync.STATES, bots=("",))
         else:
             device_sync.upsert(connection, device=device, bot="", harness="",
-                               checkout=str(checkout), target=held.new, sha=held.old,
-                               state=device_sync.HELD, detail=held.detail, now=now)
+                               checkout=str(checkout), target=conflict.new, sha=conflict.old,
+                               state=device_sync.HELD, detail=conflict.detail, now=now)
         device_sync.clear(connection, device, (device_sync.LAGGING,))
         if repo is not None:
-            flags = {} if held is None else {
-                (repo, ATTENTION_TICKET, DEPLOY_CONFLICT): held.detail}
+            flags = {} if conflict is None else {
+                (repo, ATTENTION_TICKET, DEPLOY_CONFLICT): conflict.detail}
             attention.ensure_table(connection)
             attention.sync(connection, (DEPLOY_CONFLICT,), (repo,), flags, now)
         connection.commit()
@@ -537,7 +533,7 @@ def run_pass(
         conflict = Outcome(CONFLICT, "local edits conflict with upstream: " + ",".join(conflicts),
                            old, new)
         if queue is not None:
-            _settle(queue, device, checkout, now, held=conflict)
+            _settle(queue, device, checkout, now, conflict=conflict)
         return conflict, {}
     if queue is None:
         return _apply(git, state_dir, dirty, changed, merged, old, new, environ=environ,

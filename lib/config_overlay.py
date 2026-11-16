@@ -124,7 +124,7 @@ def describe(path: Path) -> str | None:
 
 def digest(path: Path) -> str | None:
     """sha256 of the effective config (the base with its overlay merged), or None
-    when it cannot be read. Two hosts with the same digest run the same config."""
+    when it cannot be read."""
     try:
         data = load_yaml(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
@@ -139,8 +139,7 @@ def digest(path: Path) -> str | None:
 
 
 def uncommitted_edits(path: Path) -> Finding | None:
-    """A warning when `path` is tracked in its git checkout and differs from HEAD:
-    self-deploy holds the box when upstream changes the same lines."""
+    """A warning when `path` is tracked in its git checkout and differs from HEAD."""
     path = Path(path)
     env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
 
