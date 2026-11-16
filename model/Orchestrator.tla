@@ -578,10 +578,7 @@ MaxGoAfterBlocked ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0]
 
-\* #611. An approver's state=building go on an unsat= park queues a fix at the
-\* parked head. The REVISE's round counts now, and at the effective cap the go
-\* is Max's extra round. Bounded at 1 for TLC: a second extra round this way
-\* is not modeled.
+\* #611. TLC bounds extra at 1, so a second extra round this way is not modeled.
 T1UnsatFix ==
   /\ state = "waiting-max"
   /\ paused = "review"

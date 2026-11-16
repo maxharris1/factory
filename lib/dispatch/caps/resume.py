@@ -261,14 +261,6 @@ class ResumeMixin:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        """An approver's state=building go on an unsat= park queues a fix (#611).
-
-        The REVISE's round counts now, as it would for any REVISE, and a
-        REVISE at the effective cap gets one more round. The fix runs at the
-        parked head with the REVISE and the go as its instruction, keyed on
-        the go. None when the ticket is not parked on an unsat= REVISE or the
-        author may not lift a cap: _resume_for_max then handles the go.
-        """
         key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -299,8 +291,8 @@ class ResumeMixin:
                 if row is None or not self._may_lift_cap(comment.author):
                     connection.commit()
                     return None
-                round_number = int(row["review_round"]) + 1
-                at_cap = round_number >= self._effective_cap(ticket, connection)
+                counted_round = int(row["review_round"]) + 1
+                at_cap = counted_round >= self._effective_cap(ticket, connection)
                 cap_extra = int(row["cap_extra"]) + (1 if at_cap else 0)
                 links = [
                     _comment_link(item)
@@ -324,7 +316,7 @@ class ResumeMixin:
                             ticket,
                             action="fix",
                             head=ticket.current_head,
-                            round_number=round_number + 1,
+                            round_number=counted_round + 1,
                             cap=self._config_cap(ticket, connection) + cap_extra,
                             instruction="\n".join([*links, _comment_link(comment)]),
                             resume=True,
@@ -341,7 +333,7 @@ class ResumeMixin:
                     source="unsat-fix",
                     at=self.queue.now(),
                     also={
-                        "review_round": round_number,
+                        "review_round": counted_round,
                         "cap_extra": cap_extra,
                         "paused_action": None,
                         "paused_recipient": None,
