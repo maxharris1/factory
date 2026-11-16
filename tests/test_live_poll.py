@@ -97,7 +97,7 @@ class FakeGh:
         self.head = "a" * 40
         self.comments: list[dict] = []
         self.issues: list[dict] = []
-        self.search_items: list[dict] = []
+        self.branch_pulls: list[dict] = [{"number": 12, "state": "open"}]
         self.calls: list[list[str]] = []
         self.fail_factory = False
         self.pull: dict = {}
@@ -129,6 +129,8 @@ class FakeGh:
             )
         elif endpoint.endswith("/events?per_page=100"):
             value = self.label_events
+        elif endpoint.endswith("/pulls"):
+            value = self.branch_pulls
         elif "/pulls/" in endpoint:
             value = {**self.pull, "head": {"sha": self.head, **self.pull.get("head", {})}}
         elif endpoint.endswith("/comments?per_page=100"):
@@ -146,8 +148,6 @@ class FakeGh:
             }
         elif endpoint.endswith("/status"):
             value = {"total_count": 0, "state": "pending"}
-        elif endpoint == "search/issues":
-            value = {"items": self.search_items}
         else:
             raise AssertionError(call)
         return GhResult(0, json.dumps(value), "")
@@ -180,6 +180,7 @@ def linear_issue(
         "id": "issue-id",
         "identifier": identifier,
         "url": f"https://linear.test/{identifier}",
+        "gitBranchName": f"max/{identifier.lower()}-fixture",
         "project": {"id": project} if isinstance(project, str) else project,
         "comments": {
             "nodes": [
@@ -189,12 +190,6 @@ def linear_issue(
                     "createdAt": "2026-11-11T12:00:00Z",
                     "user": {"id": user} if isinstance(user, str) else user,
                 }
-            ],
-            "pageInfo": {"hasNextPage": False},
-        },
-        "attachments": {
-            "nodes": [
-                {"url": "https://github.com/acme/widgets/pull/12"}
             ],
             "pageInfo": {"hasNextPage": False},
         },
@@ -1265,9 +1260,7 @@ def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:
 
 def test_fresh_linear_ticket_skips_ticket_cache_and_all_github_caches() -> None:
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
-    gh.search_items = [{"number": 12}]
     issue = linear_issue()
-    issue["attachments"]["nodes"] = []
 
     def transport(url, headers, body, timeout):
         del url, headers, timeout
@@ -1304,7 +1297,10 @@ def test_fresh_linear_ticket_skips_ticket_cache_and_all_github_caches() -> None:
     assert fresh is not original
     assert len(original.comments) + 1 == len(fresh.comments)
     fresh_calls = gh.calls[before:]
-    assert any("search/issues" in call for call in fresh_calls)
+    assert any(
+        "repos/acme/widgets/pulls" in call and "head=acme:max/aut-42-fixture" in call
+        for call in fresh_calls
+    )
     assert all("--cache" not in call for call in fresh_calls)
 
 
@@ -2709,7 +2705,6 @@ def test_linear_state_phase_places_the_issue_relative_to_ready_for_review(
 
 def test_linear_ticket_carries_the_issue_state_phase() -> None:
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
-    gh.search_items = [{"number": 12}]
     issue = {
         **linear_issue(),
         **phase_issue({"id": "done", "type": "completed", "position": 5.0}),

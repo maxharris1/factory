@@ -42,6 +42,7 @@ from lib.dispatcher import (
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.cycle_clock import CycleClock
+from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
     FactoryConfig,
     FactoryContext,
@@ -118,10 +119,6 @@ query FactoryIssue($id: String!) {
       nodes { id body createdAt editedAt url user { id } }
       pageInfo { hasNextPage }
     }
-    attachments(first: 50) {
-      nodes { url }
-      pageInfo { hasNextPage }
-    }
     labels(first: 50) { nodes { name } pageInfo { hasNextPage } }
   }
 }
@@ -153,10 +150,6 @@ HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
-_PR_URL = re.compile(
-    r"^https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/"
-    r"(?P<number>[1-9][0-9]*)/?$"
-)
 
 
 class PollSourceError(RuntimeError):
@@ -392,6 +385,24 @@ class IntakeRisks:
         return self.get(repo, ticket_id) or "high"
 
 
+class FedPulls:
+    def __init__(self, path: Path | None = None):
+        self._connection = sqlite3.connect(
+            ":memory:" if path is None else str(path), timeout=30, isolation_level=None
+        )
+
+    def get(self, repo: str, identifier: str) -> str | None:
+        if self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (FEEDER_TABLE,)
+        ).fetchone() is None:
+            return None
+        row = self._connection.execute(
+            f"SELECT pr_number FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
+            (repo.lower(), identifier),
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+
 class LivePollSource:
     def __init__(
         self,
@@ -409,9 +420,11 @@ class LivePollSource:
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
         read_deadline_seconds: float = READ_DEADLINE_SECONDS,
         risks: IntakeRisks | None = None,
+        fed_pulls: FedPulls | None = None,
     ):
         self.config = config
         self.risks = IntakeRisks() if risks is None else risks
+        self.fed_pulls = FedPulls() if fed_pulls is None else fed_pulls
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
@@ -1669,7 +1682,7 @@ class LivePollSource:
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
-        pr_number = self._linked_pr_number(
+        pr_number = self._factory_pr_number(
             project.repo,
             identifier,
             issue,
@@ -1842,7 +1855,7 @@ class LivePollSource:
         if not allow_merged:
             raise _TerminalTicket()
 
-    def _linked_pr_number(
+    def _factory_pr_number(
         self,
         repo: str,
         identifier: str,
@@ -1850,45 +1863,34 @@ class LivePollSource:
         *,
         fresh: bool = False,
     ) -> str | None:
-        attachments = _object(issue.get("attachments"), "Linear attachments")
-        page = _object(
-            attachments.get("pageInfo"),
-            "Linear attachments pageInfo",
-        )
-        if page.get("hasNextPage") is True:
-            raise PollSourceError("Linear issue has more than 50 attachments")
-        numbers = {
-            match.group("number")
-            for item in _array(
-                attachments.get("nodes"),
-                "Linear attachment nodes",
-            )
-            if isinstance(item, dict)
-            and isinstance(item.get("url"), str)
-            and (match := _PR_URL.fullmatch(item["url"])) is not None
-            and match.group("repo").lower() == repo.lower()
-        }
-        if len(numbers) > 1:
-            raise PollSourceError("Linear issue links more than one GitHub PR")
-        if numbers:
-            return next(iter(numbers))
-        result = _json_object(
-            self._gh_call(
-                "-X",
-                "GET",
-                "search/issues",
-                "-f",
-                f"q={identifier} repo:{repo} is:pr is:open",
-                fresh=fresh,
+        recorded = self.fed_pulls.get(repo, identifier)
+        if recorded is not None:
+            return recorded
+        branch = _optional_string(issue.get("gitBranchName"))
+        if branch is None:
+            return None
+        pulls = _array(
+            _json(
+                self._gh_call(
+                    "-X",
+                    "GET",
+                    f"repos/{repo}/pulls",
+                    "-f",
+                    f"head={repo.split('/', 1)[0]}:{branch}",
+                    "-f",
+                    "state=all",
+                    fresh=fresh,
+                ),
+                "GitHub branch pulls",
             ),
-            "GitHub pull request search",
+            "GitHub branch pulls",
         )
-        matches = [
-            str(_positive_int(item.get("number"), "pull request number"))
-            for item in _array(result.get("items"), "GitHub search items")
-            if isinstance(item, dict)
-        ]
-        return matches[0] if len(matches) == 1 else None
+        factory_pull = max(
+            (item for item in pulls if isinstance(item, dict) and _on_branch(item, repo, branch)),
+            key=_open_then_newest,
+            default=None,
+        )
+        return None if factory_pull is None else str(factory_pull["number"])
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
@@ -2102,12 +2104,27 @@ def _gh_source(argv: Sequence[str]) -> str:
     return "github"
 
 
-def _json_object(text: str, source: str) -> dict[str, Any]:
+def _json(text: str, source: str) -> object:
     try:
-        value = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise PollSourceError(f"{source} returned malformed JSON") from exc
-    return _object(value, source)
+
+
+def _json_object(text: str, source: str) -> dict[str, Any]:
+    return _object(_json(text, source), source)
+
+
+def _open_then_newest(pull: Mapping[str, Any]) -> tuple[bool, int]:
+    return pull.get("state") == "open", _positive_int(pull.get("number"), "pull request number")
+
+
+def _on_branch(pull: Mapping[str, Any], repo: str, branch: str) -> bool:
+    head = pull.get("head")
+    head = head if isinstance(head, dict) else {}
+    head_repo = head.get("repo")
+    full_name = head_repo.get("full_name") if isinstance(head_repo, dict) else None
+    return head.get("ref", branch) == branch and str(full_name or repo).lower() == repo.lower()
 
 
 def _included_response(text: str) -> tuple[int, dict[str, str], str]:
