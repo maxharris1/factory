@@ -1,6 +1,8 @@
 import html
+import json
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -11,7 +13,9 @@ from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages import efficiency
 from lib.usage_readings import Reading
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
+from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
+from tests.test_dashboard_telemetry import add_telemetry
 
 PANELS = ["savings", "jobs-lifetime", "rounds", "working", "headroom", "tokens"]
 
@@ -45,8 +49,11 @@ def _readings(connection: sqlite3.Connection) -> None:
           Reading("seven_day", 0.5, int(NOW - 10), NOW - 3 * 3600))
 
 
-def _snapshot(tmp_path: Path, *, readings: bool = True) -> dict:
+def _snapshot(tmp_path: Path, *, readings: bool = True, telemetry: tuple[dict, ...] = ()) -> dict:
     db, log = seeded(tmp_path)
+    for n, row in enumerate(telemetry):
+        add_telemetry(db, f"d-job-{n:03d}", **{"finished_at": NOW - 100 - n, "exit_code": 0,
+                                               "exit_reason": "success; exit 0", **row})
     with sqlite3.connect(db) as connection:
         for repo, ticket, state, rounds in (
             ("maxharris1/factory", "65", "merged", 0),
@@ -131,7 +138,7 @@ def _rows(table: str) -> dict[str, list[str]]:
 def test_headroom_shows_the_fixture_readings_and_no_number_without_one(tmp_path: Path) -> None:
     rows = _rows(_inner(_page(_snapshot(tmp_path)), "headroom"))
     assert rows["claude-bot box"] == ["42% used", "30% used", "in 2h 10m", "58%"]
-    assert rows["codex-bot box"] == ["10% used", "stale", "in 1h 00m", "90%"]
+    assert rows["codex-bot box"] == ["10% used", "stale", "in 1h 00m", "90% (5-hour only)"]
     assert rows["claude-bot pc"] == ["no reading", "no reading", "—", "no reading yet"]
     assert rows["codex-bot pc"] == ["stale", "stale", "—", "reading 3h 00m old"]
     assert rows["cursor-bot"] == ["not tracked"] * 4
@@ -143,7 +150,33 @@ def test_headroom_shows_the_fixture_readings_and_no_number_without_one(tmp_path:
 def test_headroom_colours_follow_the_page_thresholds(tmp_path: Path) -> None:
     headroom = _inner(_page(_snapshot(tmp_path)), "headroom")
     assert '<td class="ef-v ok">58%</td>' in headroom
-    assert '<td class="ef-v ok">90%</td>' in headroom
+    assert '<td class="ef-v">90% (5-hour only)</td>' in headroom
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_headroom_header_has_no_proposed_chip(tmp_path: Path, render: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    headroom = (_inner(_page(snapshot), "headroom") if render == "server"
+                else _run_page(tmp_path, snapshot, "efficiency", ["headroom"])["html"]["headroom"])
+    assert headroom.startswith("<h2><span>Subscription headroom</span></h2>"), headroom[:120]
+    assert "proposed" not in headroom
+
+
+def _seven_day_only(tmp_path: Path) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        usage_readings.store(connection, harness="claude", bot="claude-bot", device="box", job_id="j",
+                             readings=[Reading("seven_day", 0.26, int(NOW + 86400), NOW - 60)])
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_headroom_on_one_window_is_neutral_and_names_it(tmp_path: Path, render: str) -> None:
+    snapshot = _seven_day_only(tmp_path)
+    headroom = (_inner(_page(snapshot), "headroom") if render == "server"
+                else _run_page(tmp_path, snapshot, "efficiency", ["headroom"])["html"]["headroom"])
+    assert _rows(headroom)["claude-bot box"] == ["no reading", "26% used", "in 1d 0h", "74% (7-day only)"]
+    assert '<td class="ef-v">74% (7-day only)</td>' in headroom
 
 
 def test_headroom_without_the_table_says_no_telemetry(tmp_path: Path) -> None:
@@ -248,10 +281,53 @@ def test_script_twin_matches_on_a_disabled_device(tmp_path: Path, state: str) ->
 def test_script_twins_match_the_server_render(tmp_path: Path, readings: bool) -> None:
     snapshot = _snapshot(tmp_path, readings=readings)
     page = _page(snapshot)
-    twins = PANELS[:-1]
-    out = _run_page(tmp_path, snapshot, "efficiency", twins)
-    for ident in twins:
+    out = _run_page(tmp_path, snapshot, "efficiency", PANELS)
+    for ident in PANELS:
         assert out["html"][ident] == _inner(page, ident), ident
+
+
+LONG_REPO = "maxharris1/the-factory-dashboard-efficiency-page-on-a-phone"
+WIDE = tuple(
+    {"harness": harness, "repo": LONG_REPO, "tokens_in": 2_635_600_591 + n,
+     "tokens_cached": 812_400_000, "tokens_out": 45_200_000, "cost_usd": 12345.675 if n % 2 else None}
+    for n, harness in enumerate(["claude", "codex", "claude", "codex", "claude"])
+)
+
+
+def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
+    browser.call("Emulation.setScriptExecutionDisabled", value=not script)
+    if script:
+        browser.open(_page_with_status_stub(snapshot, "efficiency.html"), width)
+        return
+    bare = Path(browser.tmp.name) / f"bare-{width}.html"
+    bare.write_text(_page(snapshot), encoding="utf-8")
+    browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
+    browser.call("Page.navigate", url=bare.as_uri())
+    deadline = time.monotonic() + 30
+    while not browser.eval(f"location.href === {json.dumps(bare.as_uri())} && document.readyState === 'complete' "
+                           "&& document.fonts.status === 'loaded'"):
+        assert time.monotonic() < deadline, f"{bare.name} never loaded"
+        time.sleep(0.05)
+
+
+WIDER_THAN_THE_PAGE = """[].filter.call(document.querySelectorAll('main .panel'), function (n) {
+  return n.getBoundingClientRect().right > innerWidth + 0.5;
+}).map(function (n) { return n.id; })"""
+
+
+@needs_chrome
+def test_efficiency_has_no_page_scroll_at_375_in_a_browser(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, telemetry=WIDE)
+    assert LONG_REPO in _inner(_page(snapshot), "tokens")
+    browser = Browser()
+    try:
+        for script in (False, True):
+            _load(browser, snapshot, 375, script)
+            assert browser.eval("document.querySelectorAll('#tokens .ef-scroll > table').length") == 3, script
+            assert browser.eval(WIDER_THAN_THE_PAGE) == [], script
+            assert browser.eval("document.documentElement.scrollWidth") <= browser.eval("innerWidth"), script
+    finally:
+        browser.close()
 
 
 def test_efficiency_parts_carry_no_motion_of_their_own() -> None:
