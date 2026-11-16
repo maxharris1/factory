@@ -287,6 +287,10 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+class TargetNavigated(Exception):
+    pass
+
+
 class _Chrome:
     """Headless Chrome driven over --remote-debugging-pipe: NUL-framed CDP JSON on fds 3 and 4."""
 
@@ -321,6 +325,8 @@ class _Chrome:
             raw, self._buf = self._buf.split(b"\0", 1)
             reply = json.loads(raw)
             if reply.get("id") == self._next:
+                if reply.get("error", {}).get("message") == "Inspected target navigated or closed":
+                    raise TargetNavigated(reply)
                 assert "error" not in reply, reply
                 return reply["result"]
 
@@ -329,6 +335,17 @@ class _Chrome:
                            awaitPromise=True, returnByValue=True)
         assert "exceptionDetails" not in result, result
         return result["result"].get("value")
+
+    def wait_for(self, expression: str, what: str) -> None:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                if self.run(expression):
+                    return
+            except TargetNavigated:
+                pass
+            assert time.monotonic() < deadline, f"never showed {what}"
+            time.sleep(0.05)
 
     def close(self) -> None:
         self._proc.kill()
@@ -376,10 +393,8 @@ def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path
     try:
         chrome.send("Page.navigate", chrome.session,
                     url=f"http://127.0.0.1:{server.server_address[1]}/health.html")
-        deadline = time.monotonic() + 30
-        while chrome.run("location.pathname + ' ' + document.readyState") != "/health.html complete":
-            assert time.monotonic() < deadline, "health.html never loaded"
-            time.sleep(0.05)
+        chrome.wait_for("location.pathname === '/health.html' && document.readyState === 'complete'",
+                        "health.html")
         landed = chrome.run(LAND_ON_EVERY_LINK)
     finally:
         chrome.close()

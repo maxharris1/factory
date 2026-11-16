@@ -202,10 +202,7 @@ def _serve(tmp_path: Path, sites: dict[str, dict]) -> http.server.ThreadingHTTPS
 
 
 def _wait(chrome: _Chrome, ready: str) -> None:
-    deadline = time.monotonic() + 30
-    while not chrome.run(f"document.readyState === 'complete' && !!({ready})"):
-        assert time.monotonic() < deadline, f"never showed {ready}"
-        time.sleep(0.05)
+    chrome.wait_for(f"document.readyState === 'complete' && !!({ready})", ready)
 
 
 def _open(chrome: _Chrome, url: str, ready: str) -> None:

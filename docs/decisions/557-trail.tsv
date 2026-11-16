@@ -1,0 +1,8 @@
+decision	choice	why
+playbook	figure-it-out, low rigor on a 2-file test-helper fix; Feature step 4 delegation skipped	the change is about 20 lines in one helper; the reproduction and proof were the work
+root cause	the poll after the lanes-tile click sends Runtime.evaluate into index.html while its click starts a cross-document navigation to job.html; Chrome tears down the context and answers -32000 'Inspected target navigated or closed'	reproduced: 21/200 fail at -n 24 and 3/200 at -n 8, every failure at _drawn -> _wait -> _Chrome.run, the first poll after the click
+fix site	_Chrome.wait_for treats that one error as not ready and polls again; send raises TargetNavigated for it	a poll during a navigation is a legitimate state; any other CDP error still fails the test
+rejected	retry in _Chrome.run for every call	a one-shot run that hits a navigation is a test bug and should still fail
+rejected	Page.enable and wait for a navigation event	send discards events; more machinery than the poll the tests already use
+shared helper	the health.html load loop in test_dashboard_system uses wait_for too	same race after Page.navigate; one poll for both files
+proof	200 repeats at -n 24: 21 failed before, 0 after; 200 at -n 8: 3 failed before, 0 after; 50 at -n 8 after: 0 failed	scratch parametrized test calling the target 200 times, not committed
