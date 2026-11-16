@@ -288,7 +288,9 @@ def _mark_declined_stuck(
         source_comment_id=source_comment_id,
         timeout_seconds=ticket.job_timeout_minutes * 60,
         reason="declined-3",
-        detail=f"{approver} declined three times",
+        detail=dispatcher._project_wake_detail(
+            ticket, f"{approver} declined three times"
+        ),
     )
 
 

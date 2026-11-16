@@ -65,6 +65,7 @@ _NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
 SHIP_ERROR_LIMIT = 240
 POLL_ERROR_LIMIT = 500
 POLL_ERROR_STREAK = 3
+POLL_ERROR_RETENTION_SECONDS = 7 * 86400
 _UNVERIFIED_HANDOFF = """
     jobs.state = 'done' AND jobs.recipient != 'grok'
     AND jobs.handoff_comment_id IS NOT NULL

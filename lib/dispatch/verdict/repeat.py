@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lib.dispatch.helpers import _comment_link, _round_number, _scope
+from lib.dispatch.helpers import _comment_link, _comment_order, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment, repeat_id
@@ -81,7 +81,7 @@ class RepeatBlockMixin:
                 named = repeat_id(handoff)
                 blocking = blocking_ids(handoff.body) | ({named} if named else set())
                 found.append(_EarlierRevise(number, item, blocking))
-        return sorted(found, key=lambda entry: (entry.round, entry.comment.created_at), reverse=True)
+        return sorted(found, key=lambda entry: (entry.round, _comment_order(entry.comment)), reverse=True)
 
     def _t3_repeat(
         self,

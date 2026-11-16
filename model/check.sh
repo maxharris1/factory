@@ -178,6 +178,7 @@ grep -q '^## Rules that hold$' "$RUN_OUT/report.md" || fail "phase 1 report has 
 grep -q 'T1KindGo' "$RUN_OUT/report.md" || fail "phase 1 report did not check T1KindGo"
 grep -q 'T1PDecided' "$RUN_OUT/report.md" || fail "phase 1 report did not check T1PDecided"
 grep -q 'Phase1T9Off' "$RUN_OUT/report.md" || fail "phase 1 report did not check Phase1T9Off"
+grep -q 'HandoffCountsApprovedRound' "$RUN_OUT/report.md" || fail "phase 1 report did not check HandoffCountsApprovedRound"
 if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "phase 1 report contains a broken rule"
 fi
