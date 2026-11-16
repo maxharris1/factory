@@ -54,8 +54,8 @@ State (`classify`): up while the last beat is at most STALE_BEATS (3)
 intervals old, stale up to DOWN_BEATS (8) intervals, then down. A beat's age
 leaves out time the box was suspended (#544): each beat also records the boot
 id and the monotonic clock, which stops while the box sleeps, and a reader on
-the same boot takes the smaller of the wall and monotonic ages. After a reboot
-the monotonic clock has restarted, so the age is the wall age; a clean
+the same boot takes the smaller of the wall and monotonic ages. A beat from an
+earlier boot is down, since its process died with that boot. A clean
 stop is down at once, and so is a component with no beat at all. A device
 whose latest probe failed is at least stale. With the default 15 seconds,
 stale after 45 seconds and down after 2 minutes; a probe (60 seconds) is
@@ -423,6 +423,7 @@ class HealthStore:
         _check_cycle(cycle_started_at, last_cycle_seconds)
         now = float(self.clock())
         seen = self.uptime()
+        boot, monotonic = (None, None) if seen is None else (seen.boot, float(seen.monotonic))
         connection = self._connect(busy)
         try:
             with connection:
@@ -438,15 +439,16 @@ class HealthStore:
                     "seen_boot = excluded.seen_boot, seen_monotonic = excluded.seen_monotonic",
                     (component, device, bot, pid, _real(started_at, now), now, version,
                      float(interval), now, _optional(cycle_started_at),
-                     _optional(last_cycle_seconds),
-                     None if seen is None else seen.boot,
-                     None if seen is None else float(seen.monotonic)),
+                     _optional(last_cycle_seconds), boot, monotonic),
                 )
                 connection.execute(
                     f"DELETE FROM {TABLE} WHERE component = ? AND bot = ? AND pid IS NOT ? "
                     "AND (stopped_at IS NOT NULL "
-                    "OR COALESCE(last_seen, checked_at, 0) < ? - ? * interval_seconds)",
-                    (component, bot, pid, now, DOWN_BEATS),
+                    "OR (COALESCE(last_seen, checked_at, 0) < ? - ? * interval_seconds "
+                    "AND NOT COALESCE(seen_boot = ? AND seen_monotonic BETWEEN "
+                    "? - ? * interval_seconds AND ?, 0)))",
+                    (component, bot, pid, now, DOWN_BEATS, boot, monotonic, DOWN_BEATS,
+                     monotonic),
                 )
         finally:
             connection.close()
@@ -1044,12 +1046,14 @@ def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
 
 
 def classify(row: Heartbeat, now: float, uptime: Uptime | None = None) -> tuple[str, str]:
-    """(state, reason): up, stale or down by the age of the last beat (`_age`);
-    a poller that beats while one cycle runs past SLOW_CYCLE_SECONDS is stale."""
+    """(state, reason): up, stale or down by the age of the last beat (`_age`),
+    down when it came from an earlier boot; a poller that beats while one cycle runs past SLOW_CYCLE_SECONDS is stale."""
     if row.last_seen is None:
         return DOWN, _never(row.component)
     if row.stopped_at is not None and row.stopped_at >= row.last_seen:
         return DOWN, "stopped"
+    if uptime is not None and row.seen_boot is not None and row.seen_boot != uptime.boot:
+        return DOWN, f"{_never(row.component)} since reboot"
     interval = max(float(row.interval_seconds), 1.0)
     age = _age(row, now, uptime)
     failed = row.checked_at is not None and row.checked_at > row.last_seen

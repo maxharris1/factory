@@ -83,7 +83,7 @@ def test_a_poller_hung_six_minutes_is_down(tmp_path: Path) -> None:
     assert state(db, clocks, "poller", "box") == ("down", "no heartbeat for 6m")
 
 
-def test_after_a_reboot_missing_beats_age_by_the_wall_clock(tmp_path: Path) -> None:
+def test_after_a_reboot_a_missing_beat_is_down(tmp_path: Path) -> None:
     clocks = Clocks()
     db = tmp_path / "orch.db"
     beat(db, clocks, "poller", "box", health.BEAT_SECONDS)
@@ -91,6 +91,41 @@ def test_after_a_reboot_missing_beats_age_by_the_wall_clock(tmp_path: Path) -> N
     clocks.wall += SUSPEND
     clocks.monotonic = clocks.monotonic + 2.0
     assert state(db, clocks, "poller", "box")[0] == "down"
+
+
+def test_a_previous_boot_beat_is_down_before_its_wall_age_runs_out(tmp_path: Path) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    beat(db, clocks, "poller", "box", health.BEAT_SECONDS)
+    clocks.boot = REBOOT
+    clocks.wall += 30.0
+    clocks.monotonic = 10.0
+    assert state(db, clocks, "poller", "box") == ("down", "never seen since reboot")
+
+
+def test_another_process_beat_keeps_a_suspend_fresh_probe_of_another_device(
+        tmp_path: Path) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices={"box", "pc", "mac"}, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    for device in ("pc", "mac"):
+        store.beat("device-probe", device, pid=101, interval=health.PROBE_SECONDS)
+    clocks.advance(wall=150.0 + SUSPEND, monotonic=150.0 + 2.0)
+    store.beat("device-probe", "pc", pid=202, interval=health.PROBE_SECONDS)
+    assert state(db, clocks, "device-probe", "mac") == ("up", "")
+
+
+def test_another_process_beat_still_clears_a_hung_probe(tmp_path: Path) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices={"box", "pc", "mac"}, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat("device-probe", "mac", pid=101, interval=health.PROBE_SECONDS)
+    hang = health.DOWN_BEATS * health.PROBE_SECONDS + 1
+    clocks.advance(wall=hang, monotonic=hang)
+    store.beat("device-probe", "pc", pid=202, interval=health.PROBE_SECONDS)
+    assert [r.device for r in health.read_heartbeats(db)] == ["pc"]
 
 
 def test_a_monotonic_stamp_ahead_of_the_clock_ages_by_the_wall_clock() -> None:
