@@ -1012,8 +1012,8 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 
 
 def _simple_commands(script: str) -> list[tuple[str, list[str]]]:
-    """Each simple command's words, after the operator that joined it to the
-    one before: "&&", "||", or "always"."""
+    """Each simple command's words, paired with the operator that joined it
+    to the one before: "&&", "||", or "always" for any other."""
     lexer = shlex.shlex(script, posix=True, punctuation_chars=_OPERATORS)
     lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
     commands: list[tuple[str, list[str]]] = [("always", [])]
@@ -1035,9 +1035,9 @@ def _simple_commands(script: str) -> list[tuple[str, list[str]]]:
 
 
 class _Step(NamedTuple):
-    """One simple command of a call: how it joined the one before, every file
-    operand of its reads, and the locked files among them by operand (None for
-    a Read or Skill call)."""
+    """One simple command of a call: how it joined the one before, every
+    non-flag argument of its reads, and each locked file it reads with the
+    operand that named it (None for a Read or Skill call)."""
 
     joined: str
     operands: list[str]
