@@ -578,6 +578,17 @@ MaxGoAfterBlocked ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0]
 
+\* #611. TLC bounds extra at 1, so a second extra round this way is not modeled.
+T1UnsatFix ==
+  /\ state = "waiting-max"
+  /\ paused = "review"
+  /\ counts.round + 1 < cap + counts.extra \/ counts.extra = 0
+  /\ state' = "fixing"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0,
+       !.extra = IF counts.round + 1 >= cap + counts.extra THEN 1 ELSE @]
+
 \* #108. A trusted ready at a new head after handoff re-enters review. The
 \* approved round counts as completed, so the next review is round + 2, and it
 \* must be within the effective cap. #130: the same from merge-queue.
@@ -709,6 +720,7 @@ Next ==
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ MaxGoAfterBlocked \/ ReenterAfterHandoff \/ MergeObserved
+  \/ T1UnsatFix
   \/ MaxOkAfterHandoff
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild

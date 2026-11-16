@@ -75,7 +75,7 @@ stateDiagram-v2
   s15 --> s5: a product question
   s15 --> s10: device offline 60 minutes or CI red three times or job dies twice (T6)
   s5 --> s9: answer, same step resumes
-  s5 --> s15: answer, same step resumes
+  s5 --> s15: approver's building go on an unsat= REVISE, fix round or answer, same step resumes
   s16 --> s9: head changed and the patch differs
   s16 --> s15: REVISE, under the round cap or PR dirty or behind, base update
   s16 --> s5: REVISE with unsat=, the criterion goes to Max
