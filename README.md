@@ -1282,9 +1282,10 @@ adds `code_version`, and `stale_code` and `started_at` for each component.
 
 **Needs attention** (issue #581): a tunnel down longer than
 `linear_webhook.tunnel_alert_minutes` (default 30) is a `tunnel-down` item.
-The tunnel is down since it was last seen; while its port is held, since the
-held record was written if that is earlier; with neither, since its first
-check. The item is worked out again on every read and is not stored, so it
+The tunnel is down since it was last seen, or, if it was never seen, since
+the first listener that checked it started, so a listener restart does not
+reset the clock; while its port is held, since the held record was written
+if that is earlier. The item is worked out again on every read and is not stored, so it
 stays while the tunnel is down and is gone on the first read that finds it
 up. `orch health` prints `  needs attention: tunnel @ box down 22h (port held
 by another owner: 8787 on pc-wsl-cursor-bot)` and exits 3. `orch health

@@ -76,9 +76,10 @@ line, `orch status` and `orch health` all read the same report.
 Needs attention (#581): a configured tunnel down longer than
 `linear_webhook.tunnel_alert_minutes` is a "tunnel-down" item, derived on
 every read, so it stays while the tunnel is down and is gone on the first
-read that finds it up. It is down since its last success; while the tunnel
-loop holds, since the held record was written if that is earlier; with
-neither, since its first check. A tunnel with none of these raises no item.
+read that finds it up. It is down since its last success, or, if it never
+succeeded, since the first listener that checked it started, so a listener
+restart does not reset the clock; while the tunnel loop holds, since the
+held record was written if that is earlier. A tunnel with none of these raises no item.
 The item makes `orch health` exit 3 and is `needs_attention` in its JSON,
 which the hourly momentum check reads.
 
@@ -1124,6 +1125,7 @@ class Component:
     stale_code: bool = False
     last_cycle_seconds: float | None = None
     cycle_seconds: float | None = None
+    first_started_at: float | None = None
 
     @property
     def label(self) -> str:
@@ -1288,30 +1290,33 @@ def _better(a: Component, b: Component) -> bool:
     return (_RANK[a.state], a.last_seen or 0.0) > (_RANK[b.state], b.last_seen or 0.0)
 
 
-def _latest_checks(rows: Sequence[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
+def _latest_checks(rows: Sequence[Heartbeat],
+                   uptime: Uptime | None) -> list[tuple[Heartbeat, float | None]]:
     """A device probe, tunnel check or dashboard push is a fact about its
     target, not about the process that made it: across processes (a poller
     or listener that restarted), the newest check decides, with the newest
-    success as its last seen. Every other component keeps one row per
-    process."""
+    success as its last seen and the earliest process start as its first
+    check. Every other component keeps one row per process, paired with
+    its own start."""
     groups: dict[tuple[str, str, str], list[Heartbeat]] = {}
     others = []
     for row in rows:
         if row.component in CHECKS:
             groups.setdefault((row.component, row.device, row.bot), []).append(row)
         else:
-            others.append(row)
+            others.append((row, row.started_at))
     merged = []
     for group in groups.values():
         group = _without_earlier_boots_once_this_boot_succeeded(group, uptime)
         last_check = max(group, key=_checked)
         last_success = max(group, key=lambda r: -math.inf if r.last_seen is None else r.last_seen)
-        merged.append(last_check._replace(
+        starts = [r.started_at for r in group if r.started_at is not None]
+        merged.append((last_check._replace(
             last_seen=last_success.last_seen,
             seen_boot=last_success.seen_boot,
             seen_monotonic=last_success.seen_monotonic,
             checked_at=_checked(last_check),
-        ))
+        ), min(starts, default=None)))
     return others + merged
 
 
@@ -1361,7 +1366,7 @@ def build_report(
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
-    for row in _latest_checks(rows or (), uptime):
+    for row, first_started_at in _latest_checks(rows or (), uptime):
         state, reason = classify(row, now, uptime)
         item = Component(
             component=row.component,
@@ -1372,6 +1377,7 @@ def build_report(
             reason=reason,
             last_seen=row.last_seen,
             started_at=row.started_at,
+            first_started_at=first_started_at,
             version=row.version,
             interval=row.interval_seconds,
             configured=registry.wants(row.component, row.device, row.bot),
@@ -1420,9 +1426,8 @@ def build_report(
 
 
 def _down_since(c: Component, held_since: float | None) -> float | None:
-    if held_since is not None:
-        return held_since if c.last_seen is None else min(held_since, c.last_seen)
-    return c.last_seen if c.last_seen is not None else c.started_at
+    checked = c.last_seen if c.last_seen is not None else c.first_started_at
+    return min((t for t in (held_since, checked) if t is not None), default=None)
 
 
 def _stale(component: str, version: str, checkout: str) -> bool:

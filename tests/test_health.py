@@ -2022,6 +2022,26 @@ def test_a_held_tunnel_that_still_answers_is_down_since_the_held_record(tmp_path
     assert [(a.reason, a.since) for a in report.attention] == [(HELD_REASON, NOW - 3600)]
 
 
+def test_a_tunnel_never_reached_keeps_its_item_across_a_listener_restart(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 31 * 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 60).checked("tunnel", "box", pid=101, started_at=NOW - 31 * 60)
+    store(db, NOW - 30).stop("tunnel", "box", pid=101)
+    store(db, NOW).checked("tunnel", "box", pid=102, started_at=NOW - 29)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.pid) for c in _tunnel(report)] == [("down", 102)]
+    assert [(a.kind, a.since) for a in report.attention] == [("tunnel-down", NOW - 31 * 60)]
+
+
+def test_a_held_record_written_again_does_not_restart_a_never_reached_tunnels_clock(
+        tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW).checked("tunnel", "box", pid=7, started_at=NOW - 2 * 3600)
+    hold_port(db, NOW - 5 * 60)
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(a.reason, a.since) for a in report.attention] == [(HELD_REASON, NOW - 2 * 3600)]
+
+
 def test_a_tunnel_never_checked_and_never_held_has_no_item() -> None:
     report = health.build_report([], NOW, expected=TUNNEL_SLOT, tunnel_alert_seconds=60)
     assert [c.state for c in _tunnel(report)] == ["down"]
