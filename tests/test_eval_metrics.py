@@ -137,6 +137,15 @@ def _seeded(directory: Path) -> Path:
         connection.execute(
             "INSERT INTO handled_comments VALUES ('owner/repo', '1', 'v2', 'duplicate-verdict')"
         )
+        for comment_id, refused in (
+            ("a1", "rejected-approve-no-ac"),
+            ("a2", "rejected-approve-ac-unmet"),
+            ("a3", "rejected-approve-open-blocking"),
+        ):
+            connection.execute(
+                "INSERT INTO handled_comments VALUES ('owner/repo', '2', ?, ?)",
+                (comment_id, refused),
+            )
         _telemetry(connection, build_1, {"Skill": 2, "Agent": 1, "Bash": 9})
         _telemetry(connection, build_2, {"Skill": 1, "Task": 4, "Agent": 1}, elapsed=5400)
         _telemetry(connection, build_3, {}, elapsed=1800)
@@ -198,7 +207,7 @@ def test_metrics_read_a_read_only_backup_and_leave_it_untouched(tmp_path: Path) 
     assert values["preflight-failures"] == 2
     assert values["slot-hours-lost"] == pytest.approx(2.0)
     assert values["hand-written-gos"] is None
-    assert values["ac-unmet-approve"] is None
+    assert values["refused-approvals"] == 3
     assert values["submitted-invalid"] is None
     assert values["repeat-block-stops"] is None
     assert values["unsatisfiable-stops"] is None
@@ -212,6 +221,9 @@ def test_a_snapshot_without_a_source_table_reports_it_unrecorded(tmp_path: Path)
             "review_round INTEGER)"
         )
         connection.execute("INSERT INTO ticket_state VALUES ('owner/repo', '1', 'fixing', 1)")
+        connection.execute(
+            "CREATE TABLE handled_comments (repo TEXT, ticket_id TEXT, comment_id TEXT, outcome TEXT)"
+        )
     values = _values(build_metrics(db))
     assert values["prs-reviewed"] == 1
     assert values["first-round-revise-rate"] is None
@@ -219,6 +231,7 @@ def test_a_snapshot_without_a_source_table_reports_it_unrecorded(tmp_path: Path)
     assert values["skills-read-per-job"] is None
     assert values["preflight-failures"] is None
     assert values["prs-dirty-after-approval"] is None
+    assert values["refused-approvals"] is None
 
 
 def test_each_metric_prints_beside_the_baseline(tmp_path: Path) -> None:
