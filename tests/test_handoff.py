@@ -6,7 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from markdown_it import MarkdownIt
 
+from lib.brief.review import handoff as review_handoff
+from lib.evidence.findings import blocking_ids
 from lib.handoff import (
     KEYS,
     KINDS,
@@ -52,6 +55,60 @@ def test_spec_verdict_header_round_trips() -> None:
     assert match is not None
     header = match.group(0)
     assert format_header(parse_header_line(header)) == header
+
+
+def _spec_handoff_examples() -> list[str]:
+    spec = (ROOT / "docs/SPEC.md").read_text(encoding="utf-8")
+    fences = [token.content for token in MarkdownIt("commonmark").parse(spec) if token.type == "fence"]
+    return [text for text in fences if "orch:v1" in text.lstrip().partition("\n")[0]]
+
+
+def _brief_form(form: str, tags: str) -> re.Pattern[str]:
+    pattern = re.escape(form.removeprefix("1. "))
+    pattern = pattern.replace(re.escape("[blocking]"), tags).replace("f\\-<n>", r"f-[1-9][0-9]*")
+    return re.compile(re.sub(r"<[^>]+>", ".+", pattern))
+
+
+def test_every_fenced_handoff_example_in_the_spec_parses() -> None:
+    examples = _spec_handoff_examples()
+    assert {parse_comment(text).as_dict()["kind"] for text in examples} >= {"verdict", "retry"}
+
+
+def test_spec_verdict_example_matches_the_review_brief_form() -> None:
+    facts = {
+        "round": None,
+        "cap": None,
+        "head": None,
+        "risk": None,
+        "round_number": 2,
+        "followup_from": None,
+        "block_on": "any-failure",
+    }
+    header, instructions = review_handoff("codex-bot", facts)
+    brief_keys = re.findall(r"(\w+)=", header)
+    finding_form, closed_form = re.findall(r"`(1\. \[[a-z]+\][^`]*)`", instructions)
+    tag_names = re.findall(r"`\[([a-z-]+)\]`", instructions.split("The tag is one of")[1])
+    tags = r"\[(?:" + "|".join(tag_names) + r")\]"
+    finding = _brief_form(finding_form, tags)
+    closed = _brief_form(closed_form, re.escape("[closed]"))
+    verdicts = [parse_comment(text) for text in _spec_handoff_examples()]
+    verdicts = [handoff for handoff in verdicts if handoff.as_dict()["kind"] == "verdict"]
+    assert verdicts
+    for handoff in verdicts:
+        fields = handoff.as_dict()
+        assert list(fields) == [key for key in brief_keys if key in fields]
+        assert set(brief_keys) - set(fields) <= {"repeat", "unsat"}
+        items = [
+            line.split(". ", 1)[1] for line in handoff.body.splitlines() if re.match(r"[0-9]+\. ", line)
+        ]
+        assert items
+        for item in items:
+            assert finding.fullmatch(item) or closed.fullmatch(item), item
+        blocking = {
+            match.group(1) for item in items if (match := re.match(r"\[blocking\] (f-[0-9]+)", item))
+        }
+        assert blocking
+        assert blocking_ids(handoff.body) == blocking
 
 
 def test_writer_normalizes_key_order() -> None:

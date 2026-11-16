@@ -1035,6 +1035,7 @@ def _runtime(
         update_classifier=_classify_update,
         rebase_classifier=_rebase_check,
         approvals=approvals(config),
+        ci_logs=source.github.failed_run_logs,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)

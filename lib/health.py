@@ -26,14 +26,11 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   it runs no ssh, so the tunnel is down whatever answers the public URL, with
   the reason "port held by another owner: PORT on HOST".
 
-A row is (component, device, bot, pid, started_at, last_seen, version,
-interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds,
-seen_boot, seen_monotonic), one per process: the key holds the pid, so one
-waiter exiting never removes another's row. Every value is an allowlisted name,
-a device listed in machines.yml, a number, a 12-digit git SHA (`HealthStore.beat`
+A row (`_COLUMNS`) is one per process: the key holds the pid, so one waiter
+exiting never removes another's row. Every value is an allowlisted name, a
+device listed in machines.yml, a number, a 12-digit git SHA (`HealthStore.beat`
 refuses anything else) or the kernel's boot id (`read_uptime` keeps only its
-UUID form), so no argv,
-environment value, path, URL or token can reach a row. A beat also removes
+UUID form), so no argv, environment value, path, URL or token can reach a row. A beat also removes
 rows other processes left for the same component and bot once they are
 down.
 
@@ -185,15 +182,16 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     last_cycle_seconds REAL,
     seen_boot TEXT,
     seen_monotonic REAL,
+    checked_boot TEXT,
     PRIMARY KEY (component, device, bot, pid)
 )
 """
 _ADDED = {"cycle_started_at": "REAL", "last_cycle_seconds": "REAL",
-          "seen_boot": "TEXT", "seen_monotonic": "REAL"}
+          "seen_boot": "TEXT", "seen_monotonic": "REAL", "checked_boot": "TEXT"}
 _COLUMNS = (
     "component, device, bot, pid, started_at, last_seen, version, "
     "interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds, "
-    "seen_boot, seen_monotonic"
+    "seen_boot, seen_monotonic, checked_boot"
 )
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _BOOT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -433,17 +431,18 @@ class HealthStore:
             with connection:
                 connection.execute(
                     f"INSERT INTO {TABLE} ({_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
                     "started_at = excluded.started_at, last_seen = excluded.last_seen, "
                     "version = excluded.version, interval_seconds = excluded.interval_seconds, "
                     "stopped_at = NULL, checked_at = excluded.checked_at, "
                     "cycle_started_at = excluded.cycle_started_at, "
                     "last_cycle_seconds = excluded.last_cycle_seconds, "
-                    "seen_boot = excluded.seen_boot, seen_monotonic = excluded.seen_monotonic",
+                    "seen_boot = excluded.seen_boot, seen_monotonic = excluded.seen_monotonic, "
+                    "checked_boot = excluded.checked_boot",
                     (component, device, bot, pid, _real(started_at, now), now, version,
                      float(interval), now, _optional(cycle_started_at),
-                     _optional(last_cycle_seconds), boot, monotonic),
+                     _optional(last_cycle_seconds), boot, monotonic, boot),
                 )
                 connection.execute(
                     f"DELETE FROM {TABLE} WHERE component = ? AND bot = ? AND pid IS NOT ? "
@@ -476,11 +475,12 @@ class HealthStore:
         boot = None if seen is None else seen.boot
         self._write(
             f"INSERT INTO {TABLE} ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?9) "
             "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
             "started_at = excluded.started_at, version = excluded.version, "
             "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
-            f"checked_at = excluded.checked_at, {_FORGET_SUCCESS_FROM_ANOTHER_BOOT}",
+            "checked_at = excluded.checked_at, checked_boot = excluded.checked_boot, "
+            f"{_FORGET_SUCCESS_FROM_ANOTHER_BOOT}",
             (component, device, bot, pid, _real(started_at, now), version,
              float(interval), now, boot),
             busy,
@@ -1019,6 +1019,7 @@ class Heartbeat(NamedTuple):
     last_cycle_seconds: float | None = None
     seen_boot: str | None = None
     seen_monotonic: float | None = None
+    checked_boot: str | None = None
 
 
 def read_heartbeats(db: Path) -> tuple[Heartbeat, ...] | None:
@@ -1298,7 +1299,9 @@ def _without_earlier_boots_once_this_boot_succeeded(
         group: list[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
     if uptime is None or all(r.seen_boot != uptime.boot for r in group):
         return group
-    return [r for r in group if r.seen_boot in (None, uptime.boot)]
+    bootless_rows_predate_a_check = any(r.checked_boot == uptime.boot for r in group)
+    kept_boots = {uptime.boot} if bootless_rows_predate_a_check else {uptime.boot, None}
+    return [r for r in group if (r.checked_boot or r.seen_boot) in kept_boots]
 
 
 def _checked(row: Heartbeat) -> float:

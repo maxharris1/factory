@@ -6,10 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatcher import CIResult, TrackedTicket
+from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
 from lib.queue import Job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
-from tests.test_github_actions import CHECKS, HEAD, STATUS, adapter, served
+from lib.github_actions import GhResult
+from lib.orch_yml import OrchConfig
+from lib.poll_source import LivePollSource
+from tests.test_github_actions import CHECKS, HEAD, REPO, STATUS, RecordedGh, adapter, served
 from tests.test_lifecycle import Flow as LifecycleFlow
 from tests.test_rounds_and_caps import HEADS, Flow
 
@@ -77,10 +80,115 @@ def test_ci_fix_carries_the_failed_checks_github_actions_reports(tmp_path: Path)
 
     assert evidence(claim(flow, "claude"))["ci"] == {
         "failed_checks": ["typecheck"],
-        "run_url": None,
-        "log_tail": "",
-        "cut": None,
+        "runs": [],
+        "jobs": [
+            {"check": "typecheck", "run_id": None, "run_url": None, "log_tail": None, "cut": None}
+        ],
     }
+
+
+RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
+RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")
+
+
+def actions_ci_fix(tmp_path: Path, *log: GhResult | BaseException) -> tuple[CIFlow, RecordedGh]:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-failure-actions.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(RUN_LOG, *log)
+    flow = built(tmp_path)
+    flow.dispatcher.ci_logs = actions.failed_run_logs
+    flow.ci_result = actions.ci_status("owner/repo", HEAD)
+    return flow, gh
+
+
+def test_ci_fix_carries_the_run_and_the_failed_jobs_log_tail_read_once(tmp_path: Path) -> None:
+    log = "".join(f"pytest\tRun tests\tline {n}\n" for n in range(1, 201))
+    flow, gh = actions_ci_fix(tmp_path, GhResult(0, log, ""))
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+    flow.dispatcher.process(flow.snapshot())
+
+    ci = evidence(claim(flow, "claude"))["ci"]
+    assert ci["failed_checks"] == ["pytest", "lint"]
+    assert ci["runs"] == [["123456", RUN_URL]]
+    pytest_job, lint_job = ci["jobs"]
+    assert (pytest_job["check"], pytest_job["run_id"], pytest_job["run_url"]) == (
+        "pytest",
+        "123456",
+        RUN_URL,
+    )
+    tail = pytest_job["log_tail"].splitlines()
+    assert tail[0] == pytest_job["cut"] == "[cut 50 earlier lines]"
+    assert (tail[1], tail[-1], len(tail)) == ("line 51", "line 200", 151)
+    assert lint_job["log_tail"] is None
+    assert gh.count(RUN_LOG) == 1
+
+
+def test_six_failed_jobs_of_one_run_read_the_run_once_and_keep_every_tail(tmp_path: Path) -> None:
+    flow = built(tmp_path)
+    reads: list[str] = []
+
+    def read_run(repo: str, run_id: str) -> dict[str, str]:
+        reads.append(run_id)
+        return {f"job-{n}": f"FAILED {n}" for n in range(6)}
+
+    flow.dispatcher.ci_logs = read_run
+    flow.ci_result = CIResult(
+        "failure",
+        "failed: jobs",
+        failed=tuple(FailedCheck(f"job-{n}", "42", str(n), RUN_URL) for n in range(6)),
+    )
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+    flow.dispatcher.process(flow.snapshot())
+
+    jobs = evidence(claim(flow, "claude"))["ci"]["jobs"]
+    assert reads == ["42"]
+    assert [job["log_tail"] for job in jobs] == [f"FAILED {n}" for n in range(6)]
+
+
+def test_a_log_that_cannot_be_read_still_queues_the_ci_fix(tmp_path: Path) -> None:
+    flow, gh = actions_ci_fix(tmp_path, GhResult(1, "", "gh: Not Found (HTTP 404)\n"))
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+
+    job = evidence(claim(flow, "claude"))["ci"]["jobs"][0]
+    assert (job["run_url"], job["log_tail"]) == (RUN_URL, None)
+    assert gh.count(RUN_LOG) == 1
+
+
+def test_the_poller_binding_reads_the_failed_run_once_and_queues_the_ci_fix(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def reader(argv: list[str], timeout: float) -> GhResult:
+        calls.append(list(argv))
+        return GhResult(0, "pytest\tRun tests\t2026-11-10T19:50:00Z FAILED x\n", "")
+
+    source = LivePollSource(OrchConfig(poll_seconds=60, projects=()), environ={}, gh_runner=reader)
+    flow, _ = actions_ci_fix(tmp_path)
+    flow.dispatcher.ci_logs = source.github.failed_run_logs
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+
+    assert [call[call.index("gh") + 1 :] for call in calls] == [list(RUN_LOG)]
+    jobs = evidence(claim(flow, "claude"))["ci"]["jobs"]
+    assert flow.queue.claim("claude") is None
+    assert [(job["check"], job["log_tail"]) for job in jobs] == [("pytest", "FAILED x"), ("lint", None)]
+
+
+def test_a_log_reader_that_raises_anything_still_queues_the_ci_fix(tmp_path: Path) -> None:
+    flow, _ = actions_ci_fix(tmp_path)
+
+    def broken(repo: str, run_id: str) -> dict[str, str]:
+        raise ValueError("substring not found")
+
+    flow.dispatcher.ci_logs = broken
+
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+
+    job = evidence(claim(flow, "claude"))["ci"]["jobs"][0]
+    assert (job["run_url"], job["log_tail"]) == (RUN_URL, None)
 
 
 def test_review_fix_carries_the_blocking_finding(tmp_path: Path) -> None:

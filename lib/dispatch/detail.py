@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, replace
+from typing import TYPE_CHECKING
 
 from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
@@ -19,12 +20,15 @@ from lib.dispatch.helpers import (
     _grok_logical_key,
     _scope,
 )
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, FailedCheck, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest
 from lib.queue import plan_round as _plan_round
 from lib.update_check import RebaseScope, UpdateScope
+
+if TYPE_CHECKING:
+    from lib.evidence.ci import CIEvidence
 
 
 class DetailMixin:
@@ -243,6 +247,7 @@ class DetailMixin:
         request: JobRequest,
         *,
         dedupe_key: str,
+        ci: CIEvidence | None = None,
     ) -> tuple[Job, Comment | None]:
         """Enqueue comment's step; when dedupe drops the job, flag the ticket
         (issue #84). Returns the job holding the key and the later trusted
@@ -257,7 +262,7 @@ class DetailMixin:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             job, answered = self._enqueue_step(
-                connection, ticket, comment, request, dedupe_key=dedupe_key
+                connection, ticket, comment, request, dedupe_key=dedupe_key, ci=ci
             )
             connection.commit()
         if answered is None:
@@ -284,6 +289,7 @@ class DetailMixin:
         request: JobRequest,
         *,
         dedupe_key: str,
+        ci: CIEvidence | None = None,
     ) -> tuple[Job, Comment | None]:
         """Enqueue the step comment asks for in the caller's open transaction,
         and cancel it in that transaction when a later trusted comment in the
@@ -293,7 +299,7 @@ class DetailMixin:
         """
         if request.recipient == "grok":
             request = self._grok_request(request)
-        request = self._with_evidence(connection, ticket, comment, request)
+        request = self._with_evidence(connection, ticket, comment, request, ci=ci)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
         self._record_handled_time(connection, ticket, comment.id, self.queue.now())
         if request.action not in _ANSWERS:
@@ -334,6 +340,8 @@ class DetailMixin:
         ticket: TrackedTicket,
         comment: Comment,
         request: JobRequest,
+        *,
+        ci: CIEvidence | None = None,
     ) -> JobRequest:
         detail = json.loads(request.detail or "{}")
         resume = detail.get("resume") is True
@@ -377,17 +385,8 @@ class DetailMixin:
         if rebase is not None and rebase["last_reviewed_head"] == findings.reviewed_head:
             findings = replace(findings, reviewed_base=rebase["reviewed_base"])
         result = ticket.ci.get(request.head or "")
-        ci = None
-        if result is not None and result.status == "failure":
-            ci = ci_evidence(
-                failed_checks=[
-                    name
-                    for name in (result.log or "").removeprefix("failed: ").split(", ")
-                    if name
-                ],
-                run_url=None,
-                fetch_log=str,
-            )
+        if ci is None and result is not None and result.status == "failure":
+            ci = ci_evidence(failed=failed_checks(result), logs={})
         detail["evidence"] = {
             "criteria": asdict(
                 criteria_evidence(
@@ -663,3 +662,13 @@ def _review_bases(details: list[str]) -> dict[int, str]:
         bases[number - 1] = str(rebase["reviewed_base"])
         bases[number] = str(rebase["base"])
     return bases
+
+
+def failed_checks(result: CIResult) -> tuple[FailedCheck, ...]:
+    if result.failed:
+        return result.failed
+    return tuple(
+        FailedCheck(name)
+        for name in (result.log or "").removeprefix("failed: ").split(", ")
+        if name
+    )

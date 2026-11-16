@@ -16,7 +16,7 @@ import pytest
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatcher import Dispatcher
 from lib.feeder_gates import github_ref
-from lib.github_actions import MARK_READY_QUERY
+from lib.github_actions import MARK_READY_QUERY, GhResult
 from lib.intake_live import GitHubIntakeClient
 from lib.orch_yml import LinearConfig, OrchConfig, Project
 from lib.poll_source import (
@@ -299,6 +299,40 @@ def test_a_graphql_mutation_keeps_the_write_timeout_and_runs_once() -> None:
             ["gh", "api", "-X", "POST", "graphql", "-f", f"query={MARK_READY_QUERY}"],
             ATTEMPT,
         )
+
+    assert timeouts == [source.timeout_seconds]
+
+
+def test_a_failed_run_log_read_retries_on_the_read_path() -> None:
+    timeouts: list[float] = []
+
+    def runner(argv, timeout):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return GhResult(0, "pytest\tRun tests\tFAILED x\n", "")
+
+    source = LivePollSource(
+        github_config(), gh_runner=runner, gh_call_timeout_seconds=ATTEMPT, sleep=lambda _: None
+    )
+    source.begin_cycle()
+
+    assert source.github.failed_run_logs("acme/widgets", "123") == {"pytest": "FAILED x"}
+    assert timeouts == [ATTEMPT, ATTEMPT]
+
+
+def test_a_gh_subcommand_that_is_not_a_known_read_runs_once_as_a_write() -> None:
+    timeouts: list[float] = []
+
+    def runner(argv, timeout):
+        timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    source = LivePollSource(github_config(), gh_runner=runner, gh_call_timeout_seconds=ATTEMPT)
+    source.begin_cycle()
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        source._adapter_runner([*source.gh, "run", "rerun", "123", "--repo", "acme/widgets", "--failed"], ATTEMPT)
 
     assert timeouts == [source.timeout_seconds]
 
