@@ -384,7 +384,7 @@ def test_a_waiter_installs_into_its_home_while_it_runs_a_box_job(
     run, _ = bot_waiter(tmp_path, monkeypatch, box, home, queue)
     installs = count_installs(monkeypatch)
     child = FakeChild(4242)
-    run._children["job-1"] = child
+    run._children["job-1"] = (child, None)
 
     run.step()
 
