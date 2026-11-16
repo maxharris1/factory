@@ -1759,7 +1759,7 @@ is an example systemd user unit for the pc-wsl-bots WSL node. It runs
 [`deploy/factory-dashboard-http.py`](deploy/factory-dashboard-http.py), a
 small standard-library server, instead of `python3 -m http.server` (which
 follows symlinks out of its directory, lists directories, and serves the
-home directory when `--directory` is empty). It answers GET and HEAD only,
+home directory when `--directory` is empty). It answers GET and HEAD (and, with GitHub actions on, POST under `/api`, below) only,
 and only for `/`, `/status.json` and the four pages (`/index.html`,
 `/job.html`, `/activity.html`, `/efficiency.html`, `/health.html`; an older
 copy of the server answers 404 for the last four until it is replaced): every other path, dot-
@@ -1787,6 +1787,46 @@ on that node), `DASHBOARD_DIR` and `DASHBOARD_PORT` in
 the unit to `~/.config/systemd/user/`, then runs `systemctl --user
 daemon-reload` and `enable --now`. WSL needs systemd enabled. Nothing in
 this repository installs, enables or starts it, or pushes anything.
+
+**GitHub actions (off by default).** With `DASHBOARD_GITHUB_CLIENT_ID` set
+in `http.env`, the server also answers a small JSON API under `/api` so the
+pages can comment on a ticket's issue or PR and give the hold OK as Max
+(issue #563). Setup, by Max: register a GitHub OAuth App with device flow
+on (scope `repo`); put its client id, `DASHBOARD_APPROVER=maxharris1` and
+`DASHBOARD_ACTION_CLIENTS` (his phone's and laptop's tailnet IPv4
+addresses, comma separated) in `http.env`; create a dedicated user (for
+example `factory-dash`) with group read on the pushed directory and nothing
+else of the bots', and install the unit under that user. `--check` and
+startup refuse actions when the process user or `USER` is a bot account
+(`*-bot`, `grok`, `box`), when the client list is empty, holds a
+non-tailnet address or holds the node's own `TAILNET_IP`.
+
+Threat model, in short:
+
+- Max signs in with GitHub's device flow: the page shows a code, he enters
+  it on github.com with his own 2FA. The server then reads `GET /user` and
+  keeps the session only for a `User` whose login is the approver; another
+  login, a `Bot` type, a `[bot]` login or an App token is refused and the
+  token dropped. Each post's reply is checked again for the approver's login
+  and no `performed_via_github_app`.
+- The token lives only in the server's memory. The browser gets a random
+  session id in an `HttpOnly; SameSite=Strict; Path=/api` cookie (12 hours,
+  one session at a time). The user code appears once, in the sign-in reply;
+  the device code and token never appear in a reply, a page, `status.json`
+  or the log, which records only method, path, status and peer.
+- Only the listed client addresses reach `/api` (everyone else gets 404),
+  so nothing on the server's own node, every bot included, can call it.
+  Every POST needs `Content-Type: application/json` and the server's own
+  `Origin`, and every POST after sign-in the session's `X-Factory-CSRF`.
+- Comments and OKs go only to tickets in the served `status.json`. A comment
+  whose first line is `/ok` or an `orch:v1` header is refused. The OK reads
+  the PR head live (the snapshot never holds heads), and the server re-reads
+  it right before posting `/ok <40-char sha>`: if it moved, nothing is
+  posted and the page is told the new head. The OK is refused unless the
+  snapshot row is `awaiting-ok`.
+- The server still writes nothing and has no chat path. Residual risk:
+  someone who gets Max to type their device code on github.com gets a
+  session as Max; only his own devices can start a sign-in.
 
 ## Local config overlay
 
