@@ -172,13 +172,13 @@ START_REFUSED = 125
 # the login PATH; a start with no record of its tag never ran the harness.
 # A login profile's tracing (set -x or -v, a DEBUG trap) would echo the
 # job's and the worker's environment values to stderr, so the start turns it
-# off first. A token variable the profile exports is dropped before the
-# job's own environment is applied (#509).
+# off first.
 _UNTRACE = "set +xvT; trap - DEBUG; "
+_DROP_PROFILE_TOKENS = f"unset {' '.join(TOKEN_VARIABLES)}; "
 _START_ENTER = (
     f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
-    f"unset {' '.join(TOKEN_VARIABLES)}; "
-    f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
+    + _DROP_PROFILE_TOKENS
+    + f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
     f"shift; "
 )
 _START_EXEC = (

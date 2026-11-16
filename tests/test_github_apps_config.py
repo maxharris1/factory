@@ -155,7 +155,6 @@ def test_switch_on_refuses_an_app_with_no_installation_for_a_project_owner(tmp_p
 
 
 def two_worker_apps(*, enabled: bool = True, codex_app: bool = True) -> str:
-    """#509: Apps for the worker bots only; Grok and Cursor stay on Max's login."""
     workers = ("claude-bot", "codex-bot") if codex_app else ("claude-bot",)
     trusted = {LOGINS[bot]: f"[{bot}]" for bot in workers}
     trusted["maxharris1"] = "[grok-bot, cursor-bot]" if codex_app else "[grok-bot, codex-bot, cursor-bot]"

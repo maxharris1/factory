@@ -1102,9 +1102,6 @@ def _app_switch(
     projects: tuple[Project, ...] | None,
     findings: list[Finding],
 ) -> None:
-    """With the switch on, each App's login must speak for its own bot
-    alone, each App must be installed for every project owner, and someone
-    must be able to approve."""
     owners = sorted(
         {project.repo.split("/", 1)[0].casefold() for project in projects or ()}
     )

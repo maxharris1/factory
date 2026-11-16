@@ -4,4 +4,4 @@ grok-bot requirement	deleted from _app_switch	the only place that refused two Ap
 scrub place	unset in _START_ENTER after the cd and before the job env export loop	runs inside bash -lc after the profile, and the job's own token is exported after it
 scrub names	imported from lib.github_app_token.TOKEN_VARIABLES	one list, so the remote and local scrubs cannot drift; github_app_token imports lib.remote only inside a function
 170 decision file	left unchanged; 509-worker-apps.md names the line it changes	docs/decisions/README.md: do not edit another ticket's file
-GH_CONFIG_DIR from a profile	not scrubbed	outside the ticket; noted for the reviewer
+GH_CONFIG_DIR from a profile	not scrubbed	outside the ticket
