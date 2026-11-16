@@ -20,8 +20,10 @@
 # its environment (none of webhook.env), and the poll loop never waits on it:
 # a failed push is one redacted line in poller.log and polling goes on.
 # Without dashboard.push nothing is pushed and nothing changes here.
-# start, stop, restart and ensure take poller-service.lock (flock(1), where
-# installed), so a stop cannot interleave with an ensure about to launch.
+# start, stop, restart, ensure and remove-autostart take poller-service.lock
+# (flock(1), where installed), so a stop cannot interleave with an ensure
+# about to launch, and remove-autostart returns only after any ensure that
+# still saw poller-autostart has finished.
 # Before launching, start and ensure also probe orch.db.lock, the lock
 # `orch poll` holds beside its database: the ORCH_DB run-poller.sh ends up
 # with after sourcing its env files (`run-poller.sh --print-db`), else the
@@ -144,8 +146,6 @@ poll_lock_held() {
     ((status == 75))
 }
 
-# Serialize start/stop/restart/ensure. Without flock(1) (macOS) this is a
-# no-op and ensure's re-check of the stop marker is the only guard.
 service_lock() {
     command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$STATE"
@@ -220,7 +220,6 @@ ensure_db() (
     esac
 )
 
-# Start the poller unless it is running. Only `start` clears a stop.
 launch() {
     local pid child i
     mkdir -p "$STATE"
@@ -238,7 +237,12 @@ launch() {
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
-            say "started orch poll (pid ${pid})"
+            if ((pid == child)); then
+                say "started orch poll (pid ${pid})"
+            else
+                say "orch poll already running (pid ${pid}); stopping launch ${child}"
+                stop_launch "$child"
+            fi
             return 0
         fi
         if ! kill -0 "$child" 2>/dev/null; then
@@ -247,8 +251,20 @@ launch() {
         fi
         sleep 0.1
     done
-    say "orch poll did not write ${PIDFILE} within ${START_WAIT}s; see ${LOG}" >&2
+    say "orch poll did not write ${PIDFILE} within ${START_WAIT}s; stopping it; see ${LOG}" >&2
+    stop_launch "$child"
     return 1
+}
+
+stop_launch() {
+    local i
+    kill -TERM "$1" 2>/dev/null || true
+    for ((i = 0; i < STOP_WAIT * 10; i++)); do
+        kill -0 "$1" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    kill -KILL "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
 }
 
 stop() {
@@ -430,7 +446,7 @@ case "${1:-}" in
     status) status ;;
     ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
-    remove-autostart) remove_autostart ;;
+    remove-autostart) service_lock && remove_autostart ;;
     *)
         echo "usage: $(basename "$0") {start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
         exit 2
