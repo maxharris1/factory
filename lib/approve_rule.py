@@ -1,14 +1,8 @@
 """An APPROVE ships only with ac=met and no open [blocking] item (#508).
 
-The parser accepts a verdict=APPROVE with no ac key, so verdicts accepted
-before this rule still read the same. The rule runs only where a new
-verdict is accepted: `orch job done` (lib/handoff_check.py) and T4 for
-comments posted after the approve_rule_floor time.
-
 An open blocking item is a list item whose leading paragraph opens with
-`[blocking]`, read as CommonMark outside code blocks and blockquotes, as
-lib/evidence/findings.py reads findings. `[closed]`, `[minor]` and
-`[follow-up]` items do not count.
+`[blocking]`, read as CommonMark outside code blocks and blockquotes.
+`[closed]`, `[minor]` and `[follow-up]` items do not count.
 """
 
 from __future__ import annotations
@@ -18,9 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from markdown_it import MarkdownIt
+from lib.markdown_items import list_item_leads
 
-_MARKDOWN = MarkdownIt("commonmark")
 _BLOCKING = re.compile(r"^\[blocking\]\s*[*_`]*(?P<id>(?:f|ac)-[1-9][0-9]*)?", re.IGNORECASE)
 
 
@@ -53,22 +46,9 @@ def approve_refusal(fields: Mapping[str, str], body: str) -> ApproveRefusal | No
 
 
 def open_blocking(body: str) -> tuple[str, ...]:
-    tokens = _MARKDOWN.parse(body)
     found: list[str] = []
-    quoted = 0
-    for index, token in enumerate(tokens):
-        if token.type == "blockquote_open":
-            quoted += 1
-        elif token.type == "blockquote_close":
-            quoted -= 1
-        elif (
-            not quoted
-            and token.type == "inline"
-            and index >= 2
-            and tokens[index - 2].type == "list_item_open"
-            and tokens[index - 1].type == "paragraph_open"
-        ):
-            match = _BLOCKING.match(" ".join(token.content.split()))
-            if match is not None:
-                found.append(match["id"] or "an untagged item")
+    for lead in list_item_leads(body):
+        match = _BLOCKING.match(lead)
+        if match is not None:
+            found.append(match["id"] or "an untagged item")
     return tuple(found)

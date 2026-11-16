@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -464,3 +465,17 @@ def test_job_done_refuses_the_approve_with_what_to_change(
 def test_job_done_accepts_an_ac_met_approve_with_only_closed_items() -> None:
     header = PR_124_HEADER.replace(" ac=unmet", " ac=met")
     assert check(header + "\n1. [closed] f-2. Fixed at 6509f58.\n") == []
+
+
+def test_the_floor_is_zero_on_a_fresh_database_and_now_on_one_in_use(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    with queue.connect() as connection:
+        assert [tuple(row) for row in connection.execute("SELECT since FROM approve_rule_floor")] == [(0.0,)]
+        connection.execute("DROP TABLE approve_rule_floor")
+        connection.execute("INSERT INTO handled_comments VALUES ('owner/repo', '42', 'old', 'merged')")
+        connection.commit()
+    before = time.time()
+    setup(tmp_path)
+    with queue.connect() as connection:
+        (since,) = connection.execute("SELECT since FROM approve_rule_floor").fetchone()
+    assert before <= since <= time.time()

@@ -172,8 +172,8 @@ class T4Mixin:
         self, comment: Comment, fields: Mapping[str, str]
     ) -> ApproveRefusal | None:
         with self._connect() as connection:
-            row = connection.execute("SELECT MAX(since) FROM approve_rule_floor").fetchone()
-        if comment.created_at < float(row[0] or 0.0):
+            since = connection.execute("SELECT since FROM approve_rule_floor").fetchone()[0]
+        if comment.created_at < since:
             return None
         return approve_refusal(fields, parse_comment(comment.body).body)
 

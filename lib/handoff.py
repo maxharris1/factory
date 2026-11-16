@@ -110,7 +110,7 @@ class HandoffError(ValueError):
 
 
 class UnmetApproveError(HandoffError):
-    """A verdict=APPROVE that says ac=unmet (#508 counts it as a refused approval)."""
+    """A verdict=APPROVE that says ac=unmet."""
 
 
 @dataclass(frozen=True)

@@ -30,10 +30,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
-from markdown_it.token import Token
 
 from lib.dispatcher import Comment, _comment_order, trusted_bots
 from lib.handoff import HandoffError, parse_comment
+from lib.markdown_items import list_item_leads
 
 _ID_END = r"[*_`]*+(?![^\W_]|-[-*_`]*[^\W_])"
 _TAGGED = re.compile(rf"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?={_ID_END}).*)$", re.IGNORECASE)
@@ -159,15 +159,7 @@ def _entries(body: str) -> list[str]:
             row.append(token.content.strip())
         elif token.type == "tr_close" and row:
             entries.append(" | ".join(row))
-        elif token.type == "inline":
-            entries.extend(_list_item_lead(tokens, index))
-    return entries
-
-
-def _list_item_lead(tokens: list[Token], index: int) -> list[str]:
-    opener = [token.type for token in tokens[max(index - 2, 0) : index]]
-    opens_item = opener == ["list_item_open", "paragraph_open"]
-    return [" ".join(tokens[index].content.split())] if opens_item else []
+    return entries + list_item_leads(body)
 
 
 def _tagged_items(body: str) -> list[tuple[str, int, str]]:
