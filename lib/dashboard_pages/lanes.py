@@ -378,7 +378,7 @@ SCRIPT = r"""
     lane.setAttribute('data-device', 'ci-wait');
     var head = add(lane, el('div', 'lane-head'));
     add(head, el('div', 'name', 'waiting on CI'));
-    add(head, el('div', 'sub', rows.length + ' tickets'));
+    add(head, el('div', 'sub', rows.length + (rows.length === 1 ? ' ticket' : ' tickets')));
     var ul = add(add(lane, el('div', 'lane-body')), el('ul', 'qrail'));
     rows.forEach(function (r) {
       var li = add(ul, el('li'));
@@ -765,7 +765,7 @@ def _ci_lane(snapshot: dict) -> list[str]:
     )
     return [
         '<div class="lane" data-device="ci-wait"><div class="lane-head"><div class="name">waiting on CI</div>'
-        f'<div class="sub">{len(rows)} tickets</div></div>'
+        f'<div class="sub">{len(rows)} ticket{"" if len(rows) == 1 else "s"}</div></div>'
         f'<div class="lane-body"><ul class="qrail">{items}</ul></div></div>'
     ]
 

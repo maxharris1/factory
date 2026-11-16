@@ -271,7 +271,7 @@ def _held_for_ci(snapshot: dict) -> dict:
 def _assert_ci_lane(lanes: str, ticket: dict) -> None:
     assert re.findall(r'data-device="([^"]+)"', lanes)[:2] == ["queue", "ci-wait"]
     lane = re.split(r'<div class="lane[ "]', lanes.split('data-device="ci-wait"')[1])[0]
-    for needle in ("waiting on CI", "1 tickets", f"#{ticket['ticket_id']}", "build, lint",
+    for needle in ("waiting on CI", "1 ticket", f"#{ticket['ticket_id']}", "build, lint",
                    'href="https://github.com/aut0-code/aut0/pull/13/checks"', "waiting 2m 0"):
         assert needle in lane, needle
 
