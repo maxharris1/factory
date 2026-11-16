@@ -239,7 +239,7 @@ def test_cli_maps_every_linear_id_to_its_repo(tmp_path: Path) -> None:
     orch, findings = load_orch_yml(path)
     assert orch is not None, findings
 
-    source = type("Source", (), {"factory_context": None})()
+    source = type("Source", (), {"factory_context": None, "_adapter_runner": None})()
     feeder = cli._feeder(orch, SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW), None, source, [])
 
     assert feeder.linear.repo_for_project == {
