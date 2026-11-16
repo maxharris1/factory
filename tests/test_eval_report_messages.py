@@ -151,15 +151,25 @@ def test_counts_split_by_week_and_window(tmp_path: Path) -> None:
     [
         "2026-11-02T09:00:00Z repo=maxharris1/Cleffy message from=a",
         "2026-11-02T09:00:00Z repo=maxharris1/Cleffy message from=a to=b ticket=7",
-        "2026-11-02T09:00:00Z repo=maxharris1/Other message from=a to=b",
     ],
 )
-def test_malformed_message_line_is_refused(tmp_path: Path, line: str) -> None:
+def test_malformed_message_line_is_skipped_and_counted(tmp_path: Path, line: str) -> None:
+    root = tmp_path / "bundle"
+    shutil.copytree(MESSAGES, root)
+    before = build_report(root).report.handoffs
+    with (root / "dispatcher.log").open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+    built = build_report(root)
+    assert built.report.skipped_lines == 1
+    assert built.report.handoffs == before
+
+
+def test_message_line_for_unknown_repo_is_refused(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     shutil.copytree(MESSAGES, root)
     with (root / "dispatcher.log").open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
-    with pytest.raises(EvalError):
+        handle.write("2026-11-02T09:00:00Z repo=maxharris1/Other message from=a to=b\n")
+    with pytest.raises(EvalError, match="is not a project in orch.yml"):
         build_report(root)
 
 

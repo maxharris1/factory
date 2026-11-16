@@ -35,6 +35,9 @@ the window or a dwell that overlaps it. Chart comparison uses the
 section 4.1 edges. post-merge is on the chart and is still reported,
 because Phase 1 configures no post_merge.
 
+A line that does not parse is skipped. The report counts the skipped
+lines, and each one is a warning naming its line number and fault.
+
 A message line is one manual bot-to-bot handoff and belongs to no run.
 Message lines in the window are counted against comment lines in the
 window, per repo and ISO week.
@@ -260,6 +263,7 @@ class Handoffs:
 @dataclass(frozen=True)
 class Report:
     runs: int
+    skipped_lines: int
     seconds: tuple[tuple[str, int], ...]
     open_states: tuple[tuple[str, str, str], ...]
     wakes: tuple[Wake, ...]
@@ -359,7 +363,8 @@ def build_report(
 
     warnings: list[str] = []
     repos = _load_orch(_top_level(root, "orch.yml"), warnings)
-    events, messages = _load_log(_top_level(root, "dispatcher.log"))
+    events, messages, skipped = _load_log(_top_level(root, "dispatcher.log"))
+    warnings.extend(f"{fault}; line skipped" for fault in skipped)
     for item in [*events, *messages]:
         if item.repo not in repos:
             raise EvalError(f"{item.repo} is not a project in orch.yml")
@@ -375,7 +380,7 @@ def build_report(
     manual = [item for item in messages if window.contains(item.at)]
 
     return Built(
-        report=_assemble(runs, findings, configs, _handoffs(manual, scripted)),
+        report=_assemble(runs, len(skipped), findings, configs, _handoffs(manual, scripted)),
         warnings=tuple(warnings),
     )
 
@@ -414,7 +419,12 @@ def render_json(report: Report) -> str:
 
 def render(report: Report) -> str:
     """Plain text. Section titles are the F1-14 measures."""
-    lines = ["weekly eval report", f"runs: {report.runs}", ""]
+    lines = [
+        "weekly eval report",
+        f"runs: {report.runs}",
+        f"skipped dispatcher.log lines: {report.skipped_lines}",
+        "",
+    ]
     lines.append("time in each state")
     if not report.seconds:
         lines.append("none")
@@ -502,6 +512,7 @@ def _handoffs(manual: list[_Handoff], scripted: list[_Handoff]) -> tuple[Handoff
 
 def _assemble(
     runs: list[_Run],
+    skipped_lines: int,
     findings: list[ModelBreak] | None,
     configs: dict[str, FactoryConfig],
     handoffs: tuple[Handoffs, ...],
@@ -566,6 +577,7 @@ def _assemble(
         )
     return Report(
         runs=len(runs),
+        skipped_lines=skipped_lines,
         seconds=seconds,
         open_states=open_states,
         wakes=wakes,
@@ -830,18 +842,23 @@ def _warning_lines(path: Path, findings: list[Finding]) -> list[str]:
     ]
 
 
-def _load_log(path: Path) -> tuple[list[_Event], list[_Handoff]]:
+def _load_log(path: Path) -> tuple[list[_Event], list[_Handoff], list[str]]:
     if not path.is_file():
         raise EvalError("dispatcher.log not found")
     events: list[_Event] = []
     messages: list[_Handoff] = []
+    skipped: list[str] = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        parsed = _parse_log_line(raw, number)
+        try:
+            parsed = _parse_log_line(raw, number)
+        except EvalError as fault:
+            skipped.append(str(fault))
+            continue
         if isinstance(parsed, _Event):
             events.append(parsed)
         elif isinstance(parsed, _Handoff):
             messages.append(parsed)
-    return events, messages
+    return events, messages, skipped
 
 
 def _parse_message(at: datetime, fields: dict[str, str], where: str) -> _Handoff:
