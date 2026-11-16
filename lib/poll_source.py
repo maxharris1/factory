@@ -2212,8 +2212,6 @@ def _linear_closed(issue: Mapping[str, Any]) -> bool:
 
 
 def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
-    """The linked PR's merge facts and size a ticket carries, whatever its
-    tracker (#130: the merge queue reads them)."""
     merged = pull.get("merged") is True
     mergeable = pull.get("mergeable")
     sizes = (pull.get("additions"), pull.get("deletions"))
