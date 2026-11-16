@@ -91,6 +91,11 @@ td.bad{color:var(--bad);font-weight:600}
 CSS_MISC = """\
 .definition{margin:8px 0 4px;color:var(--text-2)}
 [hidden]{display:none !important}
+.vh,.skip:not(:focus){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;
+clip:rect(0 0 0 0);white-space:nowrap}
+.skip:focus{position:fixed;top:8px;left:8px;z-index:100;padding:6px 10px;background:var(--panel);
+color:var(--text);box-shadow:var(--elev);font:600 13px/1.2 var(--mono)}
+#hud:focus{outline:none}
 """
 
 
@@ -147,6 +152,7 @@ SCRIPT_HEAD = r"""
   var generated = Number(body.getAttribute('data-generated')) || 0;
   function byId(id) { return document.getElementById(id); }
   var lastOk = 0;
+  var shownAt = Date.now();
   var everOk = false;
   var failures = 0;
   var inflight = false;
@@ -198,6 +204,18 @@ SCRIPT_HEAD = r"""
   function jobLabel(r) { return r.tracker === 'linear' ? String(r.ticket_id) + prOf(r, r.ticket_id) : ticketOf(r); }
   function jobKind(r) { return r.tracker === 'github' ? 'PR' : r.tracker === 'linear' ? 'ticket' : null; }
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
+  function threadKey(r) { return String(r.repo).toLowerCase() + '#' + r.ticket_id; }
+  function jobHrefs(d) {
+    var hrefs = {}, best = {};
+    (d.running || []).forEach(function (r) {
+      var key = threadKey(r);
+      if (!best[key] || (r.elapsed_seconds || 0) < (best[key].elapsed_seconds || 0)) best[key] = r;
+    });
+    (d.queued || []).forEach(function (r) { if (!best[threadKey(r)]) best[threadKey(r)] = r; });
+    Object.keys(best).forEach(function (key) { hrefs[key] = 'job.html#' + anchor(best[key].job); });
+    return hrefs;
+  }
+  function ticketHref(hrefs, r) { return hrefs[threadKey(r)] || 'job.html'; }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
   // #92: only a link into the Health tab, never a value used as a URL.
@@ -372,16 +390,18 @@ SCRIPT_TAIL = r"""
     var state;
     var label;
     if (!everOk) { state = 'boot'; label = failures ? 'NO LINK · static view' : 'ACQUIRING LINK'; }
-    else if (Date.now() - lastOk > LINK_LOST_MS) { state = 'lost'; label = 'LINK LOST'; }
+    else if (Date.now() - Math.max(lastOk, shownAt) > LINK_LOST_MS) { state = 'lost'; label = 'LINK LOST'; }
     else if (age > STALE_SECONDS) { state = 'stale'; label = 'STALE'; }
     else { state = 'live'; label = 'LIVE'; }
-    if (link) link.className = 'link ' + state;
-    if (text) text.textContent = label;
     var caret = byId('caret');
-    if (caret && state !== caretState) {
-      caretState = state;
-      caret.replaceChildren(PX.strip('caret', {state: 'link-' + state, height: 12}));
-      PX.bind();
+    if (!document.hidden) {
+      if (link) link.className = 'link ' + state;
+      if (text) text.textContent = label;
+      if (caret && state !== caretState) {
+        caretState = state;
+        caret.replaceChildren(PX.strip('caret', {state: 'link-' + state, height: 12}));
+        PX.bind();
+      }
     }
     var ageNode = byId('age');
     if (ageNode) ageNode.textContent = dur(age) + ' ago';
@@ -447,8 +467,19 @@ SCRIPT_TAIL = r"""
   }
 
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden && timer === null && !inflight) poll();
+    if (document.hidden) return;
+    shownAt = Date.now();
+    if (timer === null && !inflight) poll();
   });
+  var skip = byId('skip');
+  if (skip) {
+    skip.addEventListener('click', function (event) {
+      var main = byId('hud');
+      if (!main) return;
+      event.preventDefault();
+      main.focus();
+    });
+  }
   if (window.addEventListener) {
     window.addEventListener('hashchange', function () { if (latest) { render(latest); tick(); revealHash(); } });
   }
@@ -518,6 +549,25 @@ def _job_kind(row: dict) -> str | None:
 
 def anchor(job: object) -> str:
     return "job-" + re.sub(r"[^A-Za-z0-9_-]", "-", str(job))
+
+
+def _thread_key(row: dict) -> str:
+    return f"{str(row['repo']).lower()}#{row['ticket_id']}"
+
+
+def _job_hrefs(snapshot: dict) -> dict[str, str]:
+    best: dict[str, dict] = {}
+    for row in snapshot["running"]:
+        key = _thread_key(row)
+        if key not in best or (row.get("elapsed_seconds") or 0) < (best[key].get("elapsed_seconds") or 0):
+            best[key] = row
+    for row in snapshot["queued"]:
+        best.setdefault(_thread_key(row), row)
+    return {key: f"job.html#{anchor(row['job'])}" for key, row in best.items()}
+
+
+def ticket_href(hrefs: dict[str, str], row: dict) -> str:
+    return hrefs.get(_thread_key(row), "job.html")
 
 
 def _b(value: object, cls: str = "") -> str:
