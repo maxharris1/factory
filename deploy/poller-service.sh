@@ -237,7 +237,12 @@ launch() {
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
-            say "started orch poll (pid ${pid})"
+            if ((pid == child)); then
+                say "started orch poll (pid ${pid})"
+            else
+                say "orch poll already running (pid ${pid}); stopping launch ${child}"
+                stop_launch "$child"
+            fi
             return 0
         fi
         if ! kill -0 "$child" 2>/dev/null; then
@@ -247,14 +252,19 @@ launch() {
         sleep 0.1
     done
     say "orch poll did not write ${PIDFILE} within ${START_WAIT}s; stopping it; see ${LOG}" >&2
-    kill -TERM "$child" 2>/dev/null || true
+    stop_launch "$child"
+    return 1
+}
+
+stop_launch() {
+    local i
+    kill -TERM "$1" 2>/dev/null || true
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
-        kill -0 "$child" 2>/dev/null || return 1
+        kill -0 "$1" 2>/dev/null || return 0
         sleep 0.1
     done
-    kill -KILL "$child" 2>/dev/null || true
-    wait "$child" 2>/dev/null || true
-    return 1
+    kill -KILL "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
 }
 
 stop() {

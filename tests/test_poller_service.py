@@ -942,6 +942,66 @@ def test_remove_autostart_leaves_no_poller_from_a_launch_that_timed_out(
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_remove_autostart_leaves_no_loop_launch_pending_behind_a_direct_poller(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    (home / ".config/factory/poller-autostart").touch()
+    starts = tmp_path / "poller-starts"
+    loop_pid = home / ".local/state/factory/poller-ensure-loop.pid"
+    direct = None
+    try:
+        started = _service(home, "ensure", service=service, ORCH_POLL_ENSURE_SEC="0.1",
+                           FAKE_ORCH_STARTS=str(starts), FAKE_ORCH_START_DELAY="3")
+        assert started.returncode == 0, started.stderr
+        deadline = time.monotonic() + 15
+        while not loop_pid.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        loop = int(loop_pid.read_text())
+
+        _kill_poller(home)
+        while len(starts.read_text().splitlines()) < 2:
+            assert time.monotonic() < deadline, "the ensure loop never relaunched the poller"
+            time.sleep(0.02)
+        pending = int(starts.read_text().split()[1])
+        direct = subprocess.Popen(
+            [str(home / ".local/bin/orch"), "poll", "--pidfile", str(_pidfile(home))],
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+            stdout=subprocess.DEVNULL,
+        )
+        while not _pidfile(home).exists() or _pidfile(home).read_text().strip() != str(direct.pid):
+            assert time.monotonic() < deadline, "the direct poller never wrote the pidfile"
+            time.sleep(0.02)
+
+        removed = _service(home, "remove-autostart", service=service)
+        assert removed.returncode == 0, removed.stderr
+        assert not alive(pending), "a loop launch was still pending after remove-autostart"
+
+        deadline = time.monotonic() + 10
+        while alive(loop):
+            assert time.monotonic() < deadline, "ensure loop outlived poller-autostart"
+            time.sleep(0.05)
+        direct.terminate()
+        direct.wait(timeout=10)
+        time.sleep(3.5)
+
+        assert not _pidfile(home).exists()
+        assert starts.read_text().split()[1:] == [str(pending)]
+    finally:
+        _stop_loop(home)
+        if direct is not None:
+            direct.kill()
+            direct.wait()
+        for pid in starts.read_text().split() if starts.exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
 def test_a_hand_started_ensure_loop_runs_without_poller_autostart(
     home: Path, tmp_path: Path
 ) -> None:
