@@ -198,9 +198,13 @@ def parse_comment(text: str) -> Handoff:
     if text.strip() == "":
         raise HandoffError("not an orch:v1 header")
     normalized = text if text.endswith("\n") else text + "\n"
-    first, _, rest = normalized.partition("\n")
-    fields = parse_header_line(first)
+    _, _, rest = normalized.partition("\n")
+    fields = parse_header_line(first_line(text))
     return Handoff(fields=tuple(fields.items()), body=rest)
+
+
+def first_line(text: str) -> str:
+    return text.partition("\n")[0]
 
 
 def matching_head(reported: str, current: str | None) -> str | None:

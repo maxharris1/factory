@@ -22,6 +22,8 @@ from lib.dispatcher import (
     ship_mode,
 )
 from lib.dashboard import collect_snapshot
+from lib.brief import render_brief
+from lib.dispatch.helpers import _scope
 from lib.device_pool import DevicePool
 from lib.evidence.criteria import canonical_brief
 from lib.factory_md import FactoryConfig
@@ -7755,6 +7757,212 @@ def test_retry_on_live_ticket_is_noop(tmp_path: Path) -> None:
     (wake,) = rejected_wakes(queue)
     assert wake["outcome"] == "rejected-retry-not-stuck"
     assert "not stuck" in wake["note"]
+
+
+FACTORY_PR = "1462"
+WRONG_PR = "1338"
+
+
+def factory_pr_ticket(*comments: Comment) -> TrackedTicket:
+    return replace(ticket(*comments), pr_number=FACTORY_PR)
+
+
+def seed_finished_plan(
+    queue: SQLiteJobQueue, *, handoff: str = "wrong-pr-plan", finish: bool = True
+) -> None:
+    seed_state(queue, state="planning", generation=1)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="plan",
+            recipient="claude",
+            source_comment_id="go-0",
+            timeout_seconds=5400,
+            generation=1,
+            detail=json.dumps(
+                {
+                    "action": "plan",
+                    "pr_number": WRONG_PR,
+                    "post_to": f"PR #{WRONG_PR} issue comments",
+                }
+            ),
+        ),
+        dedupe_key=f"t1:{_scope('owner/repo', '42')}:plan:g1",
+    )
+    plan = queue.claim("claude")
+    assert plan is not None
+    if finish:
+        queue.finish(plan.id, owner="claude", handoff_comment_id=handoff)
+
+
+def flag_unlanded(dispatcher: Dispatcher) -> None:
+    dispatcher.flag_attention(
+        "owner/repo",
+        "42",
+        "unverified-handoff",
+        "job plan: handoff comment wrong-pr-plan is not on the ticket",
+    )
+
+
+def assert_fresh_plan_on_factory_pr(queue: SQLiteJobQueue, source: str) -> None:
+    (plan,) = queued_harness_jobs(queue)
+    assert (plan.request.action, plan.request.generation, plan.request.attempt) == (
+        "plan",
+        2,
+        1,
+    )
+    assert plan.request.source_comment_id == source
+    detail = json.loads(plan.request.detail or "{}")
+    assert not {"instruction", "plan_round", "plan_text", "unmapped"} & detail.keys()
+    assert detail["pr_number"] == FACTORY_PR
+    assert detail["post_to"].startswith(f"PR #{FACTORY_PR} ")
+    brief = render_brief(plan, bot="claude-bot", context=None)
+    for text in (plan.request.detail or "", brief):
+        assert "wrong-pr-plan" not in text
+        assert WRONG_PR not in text
+        assert "previous plan" not in text
+    row = ticket_row(queue)
+    assert (row["workflow_state"], row["stuck"], row["generation"]) == ("planning", 0, 2)
+    assert (row["plan_gap_count"], row["plan_check_comment_id"]) == (0, None)
+    assert "unverified-handoff" not in _attention(queue)
+
+
+def test_retry_replans_a_plan_whose_handoff_never_landed(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_finished_plan(queue)
+    flag_unlanded(dispatcher)
+
+    dispatcher.process(factory_pr_ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-plan"
+    assert_fresh_plan_on_factory_pr(queue, "retry-1")
+    with queue.connect() as connection:
+        recorded = connection.execute(
+            "SELECT stuck_reason, resumed_action FROM ticket_retries"
+        ).fetchone()
+    assert tuple(recorded) == (None, "plan")
+
+
+def test_go_planning_replans_a_plan_whose_handoff_never_landed(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_finished_plan(queue)
+    flag_unlanded(dispatcher)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login", created_at=60)
+
+    dispatcher.process(factory_pr_ticket(go))
+
+    assert handled_outcome(queue, "go-1") == "queued-plan"
+    assert_fresh_plan_on_factory_pr(queue, "go-1")
+    assert "dedupe-dropped" not in _attention(queue)
+
+
+def test_a_second_go_after_a_replan_dedupes(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_finished_plan(queue)
+    first = comment("go-1", GO.format(state="planning"), author="grok-login", created_at=60)
+    second = comment("go-2", GO.format(state="planning"), author="grok-login", created_at=70)
+
+    dispatcher.process(factory_pr_ticket(first, second))
+
+    assert handled_outcome(queue, "go-1") == "queued-plan"
+    assert handled_outcome(queue, "go-2") == "deduped-plan"
+    assert_fresh_plan_on_factory_pr(queue, "go-1")
+
+
+@pytest.mark.parametrize("kind", ["retry", "go"])
+def test_replan_after_a_lost_gap_plan_drops_the_gap_instruction(
+    tmp_path: Path, kind: str
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now=now)
+    seed_finished_plan(queue, handoff="plan-1")
+    first = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=101,
+        url=f"https://github.com/owner/repo/pull/{WRONG_PR}#issuecomment-101",
+    )
+    now[0] = 110
+    dispatcher.process(replace(factory_pr_ticket(first), pr_number=WRONG_PR))
+    gap = queue.claim("claude")
+    assert gap is not None
+    assert "round=2/2; previous plan" in (gap.request.detail or "")
+    now[0] = 120
+    queue.finish(gap.id, owner="claude", handoff_comment_id="missing-plan-2")
+    now[0] = 150
+    sent = (
+        retry(created_at=140)
+        if kind == "retry"
+        else comment(
+            "go-1", GO.format(state="planning"), author="grok-login", created_at=140
+        )
+    )
+
+    dispatcher.process(factory_pr_ticket(sent))
+
+    assert handled_outcome(queue, sent.id) == (
+        "queued-retry-plan" if kind == "retry" else "queued-plan"
+    )
+    assert_fresh_plan_on_factory_pr(queue, sent.id)
+
+
+def landed_plan_comment(queue: SQLiteJobQueue) -> tuple[Comment, ...]:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome)
+            VALUES ('owner/repo', '42', 'plan-1', 'plan-checking')
+            """
+        )
+    return (
+        comment(
+            "plan-1", PLAN.format(round=1, ac="met"), author="claude-login", created_at=10
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "retried", "went"),
+    [
+        ("verified", "rejected-retry-not-stuck", "deduped-plan"),
+        ("running", "rejected-retry-not-stuck", "deduped-plan"),
+        ("stuck", "queued-retry-plan", None),
+    ],
+)
+def test_replan_leaves_other_states_alone(
+    tmp_path: Path, case: str, retried: str, went: str | None
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    landed: tuple[Comment, ...] = ()
+    if case == "verified":
+        seed_finished_plan(queue, handoff="plan-1")
+        landed = landed_plan_comment(queue)
+    elif case == "running":
+        seed_finished_plan(queue, finish=False)
+    else:
+        seed_state(queue, state="planning", generation=1)
+        failed = fail_twice_through_t6(dispatcher, queue, action="plan", source="go-0")
+        assert ticket_row(queue)["stuck_reason"] == "job-failed-2"
+    before = ticket_row(queue)["generation"]
+    go = comment("go-1", GO.format(state="planning"), author="grok-login", created_at=60)
+    sent = (retry(),) if went is None else (retry(), go)
+
+    dispatcher.process(factory_pr_ticket(*landed, *sent))
+
+    assert handled_outcome(queue, "retry-1") == retried
+    if went is not None:
+        assert handled_outcome(queue, "go-1") == went
+    after = ticket_row(queue)
+    if case == "stuck":
+        (plan,) = queued_harness_jobs(queue)
+        assert (plan.request.source_comment_id, plan.request.attempt) == ("go-0", 2)
+        assert json.loads(plan.request.detail or "{}")["retry_of"] == failed.id
+        assert after["generation"] == before + 1
+    else:
+        assert queued_harness_jobs(queue) == []
+        assert after["generation"] == before
 
 
 def test_retry_on_capped_ticket_is_noop(tmp_path: Path) -> None:

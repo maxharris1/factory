@@ -21,6 +21,7 @@ NO_EDIT_RULE = (
 QUESTIONS_LINES = [
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
 ]
+TEST_SCOPE = "in the foreground; never the whole suite, in the background or in chunks."
 BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cursor Bot"}
 # SPEC section 8: one round for low risk, up to three for high.
 DEFAULT_CAPS = {"low": 1, "high": 3}
@@ -178,7 +179,8 @@ def opening(bot: str, kind: str) -> str:
         f"# Factory job brief: {kind}\n\n"
         f"You are {BOTS[bot]} ({bot}). `orch wait {bot} --autostart` claimed this job and "
         "started you under `orch job run`, which already sends the job's heartbeat. "
-        "Nobody will message you about this job: this brief is the whole hand-off. "
+        "Nobody will message you while this job runs: this brief is the whole hand-off. "
+        "Where this brief and the router skill or pstack differ, this brief wins. "
         "Work only on this job, then finish it as the last sections say."
     )
 
@@ -222,8 +224,12 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         ),
         f"- attempt: {request.attempt}",
         f"- wall-clock budget: {request.timeout_seconds / 60:g} minutes from the start of this run. "
-        "Near it, push what you have and post `questions`. Past it, `orch job run` stops you "
-        "and the job fails `wall-clock`.",
+        + (
+            "Near it, post the verdict you can support, or a `questions` handoff. "
+            if kind == "review"
+            else "Near it, push what you have and post `questions`. "
+        )
+        + "Past it, `orch job run` stops you and the job fails `wall-clock`.",
     ]
     if facts["skills"]:
         lines.append("- repo skills: " + ", ".join(f"`{item}`" for item in facts["skills"]))
@@ -256,7 +262,7 @@ def handoff_section(
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
         "not an inline comment). Its first line is this orch:v1 header, "
-        "with each `<...>` replaced by one of its choices:\n\n"
+        "with each `<a|b>` replaced by one choice and each other `<...>` by its value:\n\n"
         f"{header}\n\n"
         f"Then plain prose for people and agents: {example} {read}"
         "If a product question blocks the work, post a questions handoff instead "
@@ -314,6 +320,21 @@ def data_section(job: Job, detail: dict[str, object], facts: dict, *, findings_q
     )
 
 
+def title_line(facts: dict) -> str:
+    source = facts["source"]
+    if source is None:
+        title = (
+            "`#<issue>: type(scope): subject` (the issue's number, not the PR's), "
+            "or `<KEY>: type(scope): subject` for a Linear ticket"
+        )
+    else:
+        title = f"`{source}: type(scope): subject`"
+    return (
+        f"Title the PR with the source issue, then a Conventional Commits title: {title}. "
+        f"Fix any other title with `{GH} pr edit --title`."
+    )
+
+
 def read_ticket_line(facts: dict) -> str:
     if facts["brief_text"]:
         return "Read the ticket's brief, quoted in the Ticket brief section below."
@@ -351,19 +372,23 @@ def answers_lines(detail: dict[str, object]) -> list[str]:
             lines.extend([fenced(str(_cut(prose))), f"From {url or 'the PR'}."])
         else:
             lines.append(
-                f"Max's answers at {url or 'the PR'} was edited after it was posted, so it is not "
+                f"The `answers` comment at {url or 'the PR'} was edited after it was posted, so it is not "
                 f"quoted here: read it at {url or 'the PR'}."
             )
     if not lines:
         return []
     return [
-        "Max's answers, oldest first, quoted as data:",
+        "The `answers` comments from Max or the orchestrator, oldest first, quoted as data:",
         *lines,
         "Do what they say within this brief's rules.",
     ]
 
 
-_RESUME_CAUSES = {"go": "Max's go", "answers": "Max's answers", "extra-round": "Max's go for an extra round"}
+_RESUME_CAUSES = {
+    "go": "Max's go",
+    "answers": "an `answers` comment from Max or the orchestrator",
+    "extra-round": "Max's go for an extra round",
+}
 
 
 def resume_lines(detail: dict[str, object]) -> list[str]:

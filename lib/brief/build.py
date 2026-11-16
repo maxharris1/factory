@@ -5,15 +5,18 @@ from __future__ import annotations
 import re
 
 from lib.brief.common import (
-    GH,
     QUESTIONS_LINES,
+    TEST_SCOPE,
     answers_lines,
     comment_url,
     detail_of,
     read_ticket_line,
     resume_lines,
+    title_line,
 )
 from lib.queue import Job
+
+_PRINT_MODE = {"claude-bot": " Print mode stops background tasks after your last turn, and unpushed work is lost."}
 
 
 def task_lines(job: Job, facts: dict) -> list[str]:
@@ -24,17 +27,19 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         plan_line = f"Read the plan handoff comment at {facts['plan']}: it is the plan."
     else:
         plan_line = "No plan handoff comment is linked: build from the ticket."
+    branch = (
+        f"PR #{facts['pr']}'s branch (`gitBranchName` in Job data)"
+        if facts["pr"]
+        else f"the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`)"
+    )
     return [
         "Build the ticket. Follow the router in Skills above.",
         f"1. {read_ticket_line(facts)} {plan_line}",
-        f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
-        "Test first.",
-        "3. Run only the tests for the files you touched plus a short smoke set, in the foreground; "
-        "never the whole suite, in the background or in chunks. "
+        f"2. Work on {branch}. Test first.",
+        f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
         "Before `ready`, run the router's \"Before ready\" steps.",
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
-        _title_line(facts),
         *answers_lines(detail_of(job)),
         *builder_notes(job, facts),
     ]
@@ -49,27 +54,11 @@ def base_step(number: int, facts: dict) -> str:
     )
 
 
-def _title_line(facts: dict) -> str:
-    source = facts["source"]
-    if source is None:
-        title = (
-            "`#<issue>: <issue title>`, with the source issue's number (not the PR's); "
-            "for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`)"
-        )
-    elif source.startswith("#"):
-        title = f"`{source}: <issue title>`"
-    else:
-        title = f"`{source}: <title>`"
-    return (
-        f"The PR's title starts with its source issue: {title}. If you open the PR, title it so; "
-        f"if its title lacks the prefix, fix it with `{GH} pr edit --title`."
-    )
-
-
 def builder_notes(job: Job, facts: dict) -> list[str]:
     notes = [
-        "CI runs the full suite and is the gate: a red CI comes back to you "
-        "as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.",
+        title_line(facts),
+        "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
+        + _PRINT_MODE.get(f"{job.request.recipient}-bot", ""),
         "Never poll, watch or wait on GitHub Actions or any other CI from inside this job.",
         *QUESTIONS_LINES,
     ]
@@ -98,14 +87,15 @@ def _retry_why(detail: dict[str, object], facts: dict) -> str:
         link = comment_url(facts, detail.get("retry_comment"))
         where = f" ({link})" if link else " on the PR"
         return (
-            f"Attempt 1 ended with the ticket stuck, and Max restarted it with a retry comment{where}: "
-            "read his reason there."
+            f"Attempt 1 ended with the ticket stuck, and a `retry` comment{where} restarted it: "
+            "read its reason there."
         )
     failed = detail.get("retry_of")
     job = f" (job {failed})" if isinstance(failed, str) and failed.isalnum() else ""
     return (
         f"Attempt 1{job} ended without a valid handoff comment: it failed, was stopped, or ran past "
-        "its wall-clock budget. A second failure marks the ticket stuck."
+        "its wall-clock budget. The factory retries a failed job once on its own, and this is that "
+        "retry; if it fails too, the ticket is marked stuck and waits for a person."
     )
 
 

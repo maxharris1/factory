@@ -28,6 +28,7 @@ def pull(*, body: str | None = None, branch: str = "feature/x", title: str = "Do
         (pull(body="Resolved: #12"), "#12"),
         (pull(branch="factory/issue-115"), "#115"),
         (pull(title="#107: Status shows issues first"), "#107"),
+        (pull(title="#107: fix(brief): one shape"), "#107"),
         (pull(body="Fixes #115", branch="factory/issue-99"), "#115"),
         (pull(title="#107: Kept", body="Fixes #115"), "#107"),
         (pull(body="Fixes owner/other#5, see #3"), None),
@@ -63,6 +64,8 @@ def test_a_github_prs_source_issue(given: dict, source: str | None) -> None:
         ("AUT-2284", "[AUT-2284] Fix login", "AUT-2284: Fix login"),
         ("AUT-2284", "AUT-22840: other", "AUT-2284: AUT-22840: other"),
         ("AUT-2284", "AUT-2284", "AUT-2284"),
+        ("#115", "#115: feat(brief): name one title shape", "#115: feat(brief): name one title shape"),
+        ("AUT-2284", "AUT-2284: fix(login): keep the session", "AUT-2284: fix(login): keep the session"),
     ],
 )
 def test_prefixed_titles_are_idempotent(source: str, title: str, wanted: str) -> None:

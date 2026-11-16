@@ -8,7 +8,7 @@ instruction is a CI-fix.
 from __future__ import annotations
 
 from lib.brief.build import base_step, builder_notes
-from lib.brief.common import GH, code_span, comment_url, detail_of, evidence_part, fenced
+from lib.brief.common import GH, TEST_SCOPE, code_span, comment_url, detail_of, evidence_part, fenced
 from lib.queue import Job
 
 
@@ -73,8 +73,7 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
         "2. For each finding: name the rule it breaks, find every path that breaks that rule, fix them all, "
         "and add a test of the rule that fails on the current head. Fixing only the line the reviewer "
         "quoted is not a fix.",
-        "3. Run only the new tests and the tests for the files you touched, plus a short smoke set, "
-        "in the foreground; never the whole suite, in the background or in chunks. "
+        f"3. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
         "Then run the router's \"Before ready\" steps.",
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed. Say, for each finding, "
@@ -127,7 +126,7 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
         "once, and skip steps 3 to 5.",
         "3. If this PR caused it: a test that fails on the current head and covers the whole class of the "
         "failure. Then fix the class. Run only that test and the tests for the files you touched, plus a "
-        "short smoke set, in the foreground; never the whole suite, in the background or in chunks. "
+        f"short smoke set, {TEST_SCOPE} "
         "Then run the router's \"Before ready\" steps.",
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",

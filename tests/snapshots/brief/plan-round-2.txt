@@ -1,7 +1,7 @@
 ===== box =====
 # Factory job brief: implement
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: implement
@@ -70,6 +70,7 @@ The first plan is quoted in the First plan section below.
 3. Estimate the changed lines the build will add and remove, tests and docs included, and put the number in the header as `lines=<n>`. A plan without `lines=` counts as a plan with a criterion left unmapped.
 4. When the estimate is over 400 lines, or the ticket has more than 5 acceptance criteria, add a `## Proposed split` section that names the smaller tickets, each with its criteria and its expected lines. Such a plan does not start the build: it waits for Max, who answers or splits the ticket.
 5. Post the plan handoff below with `round=2/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.
+Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## First plan
@@ -83,7 +84,7 @@ Expected size: 60 lines.
 ````
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=2/2 lines=<n> unsat=<id> -->
 
@@ -97,7 +98,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ## Finish the job
 - After the handoff comment is posted: `orch job done claude-bot 0123456789abcdef0123456789abcdef --handoff <comment-id>`.
-- If you cannot finish: `orch job done claude-bot 0123456789abcdef0123456789abcdef --failed` (T6 retries the job once).
+- If you cannot finish: `orch job done claude-bot 0123456789abcdef0123456789abcdef --failed` (the factory retries a failed job once, automatically).
 - `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_PROOF`, so run it from this environment. Never print, post, write down or commit that value.
 - `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job.
 
@@ -157,7 +158,7 @@ Ship: `ship: merge`, `finish_line: merge`. After an APPROVE of the covered head 
 ===== remote (mac) =====
 # Factory job brief: implement
 
-You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you about this job: this brief is the whole hand-off. Work only on this job, then finish it as the last sections say.
+You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this job and started you under `orch job run`, which already sends the job's heartbeat. Nobody will message you while this job runs: this brief is the whole hand-off. Where this brief and the router skill or pstack differ, this brief wins. Work only on this job, then finish it as the last sections say.
 
 ## Job
 - kind: implement
@@ -226,6 +227,7 @@ The first plan is quoted in the First plan section below.
 3. Estimate the changed lines the build will add and remove, tests and docs included, and put the number in the header as `lines=<n>`. A plan without `lines=` counts as a plan with a criterion left unmapped.
 4. When the estimate is over 400 lines, or the ticket has more than 5 acceptance criteria, add a `## Proposed split` section that names the smaller tickets, each with its criteria and its expected lines. Such a plan does not start the build: it waits for Max, who answers or splits the ticket.
 5. Post the plan handoff below with `round=2/2`: `ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.
+Title the PR with the source issue, then a Conventional Commits title: `#<issue>: type(scope): subject` (the issue's number, not the PR's), or `<KEY>: type(scope): subject` for a Linear ticket. Fix any other title with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
 ## First plan
@@ -239,7 +241,7 @@ Expected size: 60 lines.
 ````
 
 ## Handoff comment
-Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
+Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=2/2 lines=<n> unsat=<id> -->
 
@@ -257,7 +259,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ORCH-HANDOFF: <comment-id>
 
-- If you cannot finish, make the very last line exactly this (T6 retries the job once):
+- If you cannot finish, make the very last line exactly this (the factory retries a failed job once, automatically):
 
 ORCH-HANDOFF: failed
 

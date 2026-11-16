@@ -454,11 +454,16 @@ def test_a_plain_repo_is_shown_with_its_pr_link() -> None:
 @pytest.mark.parametrize(
     ("ticket_id", "extra", "wanted"),
     [
-        ("116", {"source_issue": "#115"}, "`#115: <issue title>`"),
-        ("AUT-2284", {}, "`AUT-2284: <title>`"),
-        ("AUT-2284", {"source_issue": "AUT-2284"}, "`AUT-2284: <title>`"),
-        ("116", {}, "`#<issue>: <issue title>`, with the source issue's number (not the PR's)"),
-        ("116", {"source_issue": "#1`; rm"}, "`#<issue>: <issue title>`"),
+        ("116", {"source_issue": "#115"}, "`#115: type(scope): subject`"),
+        ("AUT-2284", {}, "`AUT-2284: type(scope): subject`"),
+        ("AUT-2284", {"source_issue": "AUT-2284"}, "`AUT-2284: type(scope): subject`"),
+        (
+            "116",
+            {},
+            "`#<issue>: type(scope): subject` (the issue's number, not the PR's), "
+            "or `<KEY>: type(scope): subject` for a Linear ticket",
+        ),
+        ("116", {"source_issue": "#1`; rm"}, "`#<issue>: type(scope): subject`"),
     ],
 )
 def test_the_build_brief_titles_the_pr_with_its_source_issue(
@@ -471,12 +476,12 @@ def test_the_build_brief_titles_the_pr_with_its_source_issue(
     task = task.split("## What to do")[1]
     task = task.split("## Handoff comment")[0]
 
-    assert f"The PR's title starts with its source issue: {wanted}" in task
+    assert f"Title the PR with the source issue, then a Conventional Commits title: {wanted}" in task
     assert "gh pr edit --title" in task
 
 
-def test_only_the_build_brief_asks_for_the_title() -> None:
-    for action, recipient in (("plan", "claude"), ("fix", "claude"), ("review", "codex")):
+def test_every_builder_brief_asks_for_the_title_once_and_the_review_brief_never() -> None:
+    for action, recipient, count in (("plan", "claude", 1), ("fix", "claude", 1), ("review", "codex", 0)):
         brief = render_brief(job(action, recipient), bot=f"{recipient}-bot", factory_root=FACTORY_ROOT, context=None)
         assert "Do not start the work" not in brief
-        assert "title starts with its source issue" not in brief
+        assert brief.count("Title the PR ") == count

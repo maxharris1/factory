@@ -21,7 +21,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig
-from lib.hook_t7 import T7Hook
+from lib.hook_t7 import ERROR_LIMIT, T7Hook
 from lib.hook_t8 import ShipRequest, Shipper, T8Hook
 from lib.queue import ACTIONS, Job, JobRequest, SQLiteJobQueue
 
@@ -1041,7 +1041,7 @@ def test_t8_retryable_ship_releases_claim_and_retries(
     assert FakeBot(queue, "grok").drain() == []
 
 
-def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(
+def test_t7_only_a_header_shaped_first_line_wakes_unparsed(
     tmp_path: Path,
 ) -> None:
     dispatcher, queue = setup(tmp_path)
@@ -1060,7 +1060,29 @@ def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(
     )
 
     assert FakeBot(queue, "grok").drain() == []
-    assert skipped_keys(queue) == [("unparsed", "bad-1"), ("unparsed", "bad-2")]
+    assert skipped_keys(queue) == [("unparsed", "bad-2")]
+
+
+def test_t7_unparsed_wake_cuts_the_parser_error(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "f" * 5000
+
+    dispatcher.process(
+        ticket(
+            say(
+                "bad-1",
+                f"<!-- orch:v1 kind=ready from=claude-bot role=builder head={head} -->\n",
+                "claude-login",
+                1,
+            )
+        )
+    )
+
+    assert skipped_keys(queue) == [("unparsed", "bad-1")]
+    [notice] = dispatcher.review_actions.notices
+    assert "bad head 'fff" in notice
+    assert f"[cut to {ERROR_LIMIT} characters]" in notice
+    assert "f" * (ERROR_LIMIT + 1) not in notice
 
 
 def test_hooks_cannot_claim_go_or_ready_and_first_answer_wins(

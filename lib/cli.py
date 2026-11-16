@@ -1533,6 +1533,21 @@ def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> 
                 if "jobs" in tables
                 else None
             )
+            lost_plan = (
+                connection.execute(
+                    "SELECT 1 FROM jobs JOIN job_events ON job_events.job_id = jobs.id "
+                    "WHERE jobs.id = (SELECT id FROM jobs "
+                    "WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok' "
+                    "AND action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1) "
+                    "AND jobs.action = 'plan' AND jobs.state = 'done' "
+                    "AND job_events.event = 'handoff-unverified' "
+                    "AND job_events.detail LIKE '%is not on the ticket' LIMIT 1",
+                    (repo.lower(), str(number)),
+                ).fetchone()
+                if {"jobs", "job_events"} <= tables
+                else None
+            )
         finally:
             connection.close()
     except sqlite3.Error as exc:
@@ -1541,7 +1556,8 @@ def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> 
             file=sys.stderr,
         )
         return None
-    if state is None or not state[0]:
+    replan = state == (0, "planning") and lost_plan is not None
+    if not replan and (state is None or not state[0]):
         return f"not stuck (state {state[1] if state else 'untracked'}); nothing to retry"
     if job is not None:
         return f"has job {job[0]} {job[1]} -> {job[2]} {job[3]}; nothing to retry until it ends"

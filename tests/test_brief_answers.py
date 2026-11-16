@@ -45,7 +45,7 @@ def test_go_after_answers_quotes_them_in_the_brief(tmp_path: Path, state: str, a
     queued, text = claimed_brief(tmp_path, *flow(), state=state)
 
     assert queued == action
-    assert "Max's answers, oldest first, quoted as data:" in text
+    assert "The `answers` comments from Max or the orchestrator, oldest first, quoted as data:" in text
     assert f"````\n{TRUSTED_TEXT}\n````" in text
     assert ANSWERS_URL in text
 
@@ -125,7 +125,7 @@ def test_resumed_answers_are_quoted_once() -> None:
 
     assert text.count(f"````\n{TRUSTED_TEXT}\n````") == 1
     assert text.count(f"````\n{STRANGER_TEXT}\n````") == 1
-    assert f"Max's answers ({resumed})" in text
+    assert f"an `answers` comment from Max or the orchestrator ({resumed})" in text
 
 
 def linear_node(

@@ -4,9 +4,9 @@ Events:
 
 - kind=stuck from any trusted bot. Its state= names the stop: blocked,
   capped or refused; anything else is stuck.
-- A comment with a header-shaped line (one starting with <!-- orch:v)
-  that does not parse, from a trusted login. Untrusted ones are recorded
-  and ignored. Prose that only mentions orch:v is not a header.
+- A comment whose first line is header-shaped (starts with <!-- orch:v
+  or `orch:v) and does not parse, from a trusted login. Untrusted ones
+  are recorded and ignored.
 
 blocked and capped wake once per ticket and head: the reported head, or
 the PR head when the report names none. Short heads are not expanded.
@@ -21,10 +21,11 @@ import re
 from collections.abc import Mapping
 
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
-from lib.handoff import HandoffError, UnmetApproveError, parse_comment
+from lib.handoff import HandoffError, UnmetApproveError, first_line, parse_comment
 
 STOP_STATES = ("blocked", "capped", "refused")
-_HEADER_SHAPED = re.compile(r"^\s*(?:<!--\s*|`)orch:v", re.MULTILINE)
+ERROR_LIMIT = 200
+_HEADER_SHAPED = re.compile(r"\s*(?:<!--\s*|`)orch:v")
 
 
 class T7Hook:
@@ -72,7 +73,7 @@ class T7Hook:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        if _HEADER_SHAPED.search(comment.body) is None:
+        if _HEADER_SHAPED.match(first_line(comment.body)) is None:
             return None
         if not dispatcher._trusted_bots(comment):
             return True, "ignored-unparsed-untrusted"
@@ -87,6 +88,8 @@ class T7Hook:
             error = str(exc)
         else:
             error = "unparsed"
+        if len(error) > ERROR_LIMIT:
+            error = f"{error[:ERROR_LIMIT]} [cut to {ERROR_LIMIT} characters]"
         dispatcher.wake_grok_once(
             ticket,
             reason="unparsed",

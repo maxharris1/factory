@@ -616,6 +616,56 @@ def test_retry_refuses_a_ticket_that_is_not_stuck(
     assert retry_gh() == []
 
 
+def _plan_done_with_event(tmp_path: Path, event: str | None):
+    from lib.queue import JobRequest
+
+    queue = _retry_db(tmp_path, stuck=False, state="planning")
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="plan",
+            recipient="claude",
+            source_comment_id="go-0",
+            timeout_seconds=5400,
+        ),
+        dedupe_key="plan:k",
+    )
+    plan = queue.claim("claude")
+    assert plan is not None
+    queue.finish(plan.id, owner="claude", handoff_comment_id="wrong-pr-plan")
+    if event is not None:
+        with sqlite3.connect(queue.path) as connection:
+            connection.execute(
+                "INSERT INTO job_events (job_id, repo, ticket_id, action, recipient, event, "
+                "detail, recorded_at) VALUES (?, 'owner/repo', '42', 'plan', 'claude', ?, ?, 101)",
+                (plan.id, event, "handoff comment wrong-pr-plan is not on the ticket"),
+            )
+    return queue
+
+
+def test_retry_allows_a_plan_whose_handoff_never_landed(tmp_path: Path, retry_gh) -> None:
+    queue = _plan_done_with_event(tmp_path, "handoff-unverified")
+
+    code = cli.main(["retry", "Owner/Repo#42", "--reason", "why", "--db", str(queue.path)])
+
+    assert code == 0
+    assert len(retry_gh()) == 1
+
+
+@pytest.mark.parametrize("event", ["handoff-verified", None])
+def test_retry_refuses_a_planning_ticket_whose_handoff_landed(
+    tmp_path: Path, retry_gh, capsys, event: str | None
+) -> None:
+    queue = _plan_done_with_event(tmp_path, event)
+
+    code = cli.main(["retry", "Owner/Repo#42", "--reason", "why", "--db", str(queue.path)])
+
+    assert code == 1
+    assert "not stuck (state planning); nothing to retry" in capsys.readouterr().err
+    assert retry_gh() == []
+
+
 def test_retry_refuses_while_a_harness_job_is_active(
     tmp_path: Path, retry_gh, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
