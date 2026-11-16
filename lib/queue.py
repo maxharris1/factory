@@ -569,9 +569,9 @@ class SQLiteJobQueue:
         beside a remote worker that may still run. It leaves running only
         through the poller's dead path, once its runner is gone and the
         device confirms its worker gone (lib/job_state.py), or as stuck when
-        the device stays offline for an hour. A claim with no runner and no
-        heartbeat since its placement is never timed out either (#460): its
-        waiter may still be in preflight, and the poller's claimed release
+        the device stays offline for an hour. An autostart claim with no runner
+        and no heartbeat since its placement is never timed out either (#460):
+        its waiter may still be in preflight, and the poller's claimed release
         requeues it with no attempt charged. The checks are in the same
         UPDATE, so a start recorded after the sweep read the job wins. A box
         job keeps the plain timeout.
@@ -823,12 +823,12 @@ def _slot_columns(connection: sqlite3.Connection) -> set[str]:
 
 
 def _not_claimed(connection: sqlite3.Connection) -> str:
-    if not {"job_id", "placed_at", "runner_pid"} <= _slot_columns(connection):
+    if not {"job_id", "placed_at", "runner_pid", "autostart_pid"} <= _slot_columns(connection):
         return ""
     return (
         f" AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} AS slot"
-        " WHERE slot.job_id = jobs.id AND slot.runner_pid IS NULL"
-        " AND jobs.last_activity_at <= slot.placed_at)"
+        " WHERE slot.job_id = jobs.id AND slot.autostart_pid IS NOT NULL"
+        " AND slot.runner_pid IS NULL AND jobs.last_activity_at <= slot.placed_at)"
     )
 
 
