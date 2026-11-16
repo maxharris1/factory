@@ -201,6 +201,34 @@ def test_an_updating_head_is_passed_once_by_entries_that_share_its_files(
     assert board.actions.merges[len(passed):] == [(True, sha(9)), (True, second.head)]
 
 
+@pytest.mark.parametrize("grows", ["head", "entry"])
+def test_files_a_push_adds_after_the_poll_still_hold_an_entry_behind_the_head(
+    tmp_path: Path, grows: str
+) -> None:
+    board = Board(tmp_path, hold=HoldConfig())
+    head, first, second = _queue_of(board, "1", "2", "3")
+    head.changed_files = first.changed_files = ("shared.py",)
+    second.changed_files = ("resolution.py",)
+    head.conflict()
+    board.poll()
+    assert board.actions.merges == [(True, first.head)]
+    board.claim("claude")
+    polled_read = board.fresh_ticket
+    pushed = {"head": head, "entry": second}[grows]
+
+    def read_after_push(ref):
+        if ref.ticket_id == pushed.number:
+            pushed.changed_files = ("shared.py", "resolution.py")
+        return polled_read(ref)
+
+    board.fresh_ticket = read_after_push
+    board.poll()
+
+    assert board.actions.merges == [(True, first.head)]
+    assert board.state("3")["workflow_state"] == "merge-queue"
+    assert any("#3 waits at" in line and "behind #1" in line for line in board.log)
+
+
 def test_only_a_ready_entry_merges_out_of_turn(tmp_path: Path) -> None:
     board = Board(tmp_path, hold=HoldConfig())
     head, held, red, pending, dirty, ready = _queue_of(board, "1", "2", "3", "4", "5", "6")

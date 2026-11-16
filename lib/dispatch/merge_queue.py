@@ -379,6 +379,7 @@ class MergeQueueMixin:
         ticket = self._fresh_ticket(polled)
         if ticket is None:
             return False
+        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         if ticket.merged:
             self.record_terminal(ticket.repo, ticket.ticket_id, "merged", ticket)
             return False
@@ -428,19 +429,14 @@ class MergeQueueMixin:
             ci = polled.ci.get(polled.current_head)
             if ci is None or ci.status != "success":
                 continue
-            if merged_since_approval >= MERGES_BEFORE_OVERLAP_WAITS and _may_share_files(
-                waiting, polled
-            ):
-                self._log_queue_wait(
-                    polled,
-                    polled.current_head,
-                    f"behind #{head['ticket_id']}, which may share its files "
-                    "and was passed already",
-                )
+            overlap_waits = merged_since_approval >= MERGES_BEFORE_OVERLAP_WAITS
+            if overlap_waits and self._waits_behind(head, waiting, polled):
                 continue
             try:
                 ticket = self._fresh_ticket(polled)
                 if ticket is None or ticket.merged or ticket.closed:
+                    continue
+                if overlap_waits and self._waits_behind(head, waiting, ticket):
                     continue
                 if ticket.factory.finish_line != "merge":
                     return
@@ -456,6 +452,18 @@ class MergeQueueMixin:
             except Exception as exc:
                 self._record_queue_error(row, exc)
             return
+
+    def _waits_behind(
+        self, head: sqlite3.Row, waiting: TrackedTicket | None, entry: TrackedTicket
+    ) -> bool:
+        if not _may_share_files(waiting, entry):
+            return False
+        self._log_queue_wait(
+            entry,
+            entry.current_head,
+            f"behind #{head['ticket_id']}, which may share its files and was passed already",
+        )
+        return True
 
     def _queue_head_wait_reason(
         self, ticket: TrackedTicket, row: sqlite3.Row, head: str | None
