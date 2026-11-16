@@ -8,6 +8,8 @@
 - **Max's rule (2026-11-13, ~6:10 PM ET):** "copy the UI that Claude created one-to-one, and if anything we add to it, we shouldn't be
   removing anything. We should make sure that we have the functionality to support the components proposed in the design."
   So: additions are allowed, nothing in the design is removed, every component gets real backing data, no permanent placeholders.
+  Since 2026-11-16 the "nothing in the design is removed" part is lifted for removals that a review-round ticket names; see
+  `Review round (2026-11-16)` below.
 - **Max's decisions (2026-11-13):**
   1. Lanes job modal: **dropped**; slot tiles link to the ticket page (6:10 PM ET, confirmed 6:11 PM ET).
   2. #100's step feed and per-tool counts in the job view: **removed** to match the design (6:10 PM ET, confirmed 6:11 PM ET: "they're not even in the application or functioning at this point").
@@ -25,3 +27,23 @@
   start; Codex reads the `rate_limits` of its own session rollout's `token_count` events. A login that cannot report limits, or a
   window the CLI leaves null, shows `no reading`. Cursor shows `not tracked`.
 - **Later (2026-11-13, 6:30 PM ET):** Max said to get these into the factory queue ("get these into the factory que").
+
+## Review round (2026-11-16)
+
+Claude reviewed the built dashboard against the design on 2026-11-16. Max's decisions (morning of 2026-11-16 ET, answering Claude's
+questions before the tickets were filed):
+
+1. Removals: Max chose "Allow the removals". The 2026-11-13 rule "we shouldn't be removing anything" is lifted for this round only:
+   a review-round ticket may remove a named element. Anything a ticket does not name stays.
+2. Ticket page scope: Max chose "Every ticket". The ticket page will open for all tickets, shipped history included, and the board
+   and the detail become separate views. This is not filed yet.
+3. Order of work: Max chose "Bugs now, mock the rest". Pure bug fixes are filed now. Design changes (one-row attention strip,
+   collapsed idle slots, capped Shipped shelf, Stopped placement, snapshot freshness state, narrow status line, ticket-keyed detail
+   page, phone layouts, Efficiency and System reorder, Relay windowing) are mocked on the design canvas first and filed after Max
+   signs off, with artboards.
+4. Queueing: Max chose "Label them all". The bug tickets are queued together and chained with `Depends on` so they build one at a
+   time.
+5. Phones: Max chose "Real target". A 375px-wide phone gets its own layout where the desktop one does not fit; horizontal page
+   scroll is a bug.
+6. Re-key timing: Max chose "After the mock-up round". Keying the detail page by ticket waits until the shipped-ticket and
+   stopped-ticket variants are mocked.
