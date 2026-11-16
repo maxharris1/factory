@@ -228,6 +228,7 @@ class QuestionsMixin:
             prior = self._resumed_step_detail(
                 connection, ticket, comment, action, paused["paused_question_id"]
             )
+        plan_text = (prior or {}).get("plan_text") if action == "build" else None
         request = JobRequest(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -245,6 +246,7 @@ class QuestionsMixin:
                     None if action == "plan" else self._review_context(ticket)[1] + 1
                 ),
                 instruction=_comment_link(comment),
+                plan_text=plan_text if isinstance(plan_text, str) and plan_text else None,
                 resume=True,
                 update=UpdateScope.from_detail(prior or {}, head),
                 plan_round=(

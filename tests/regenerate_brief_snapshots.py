@@ -76,6 +76,7 @@ def ci_bundle(logs: dict[str, str | None]) -> dict[str, object]:
 
 BRIEF_URL = "https://github.com/owner/repo/pull/42#issuecomment-3"
 PLAN_URL = "https://github.com/owner/repo/pull/42#issuecomment-5"
+ANSWERS_URL = "https://github.com/owner/repo/pull/42#issuecomment-9"
 
 BRIEF_COMMENT = """**Brief for #41: Add a Start free button to the pricing page** (factory feeder)
 
@@ -208,8 +209,23 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     }),
     "resume": ("build", "claude", 1, HEAD, {
         "gitBranchName": "factory/issue-42",
-        "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",
+        "instruction": ANSWERS_URL,
+        "plan_text": PLAN_TEXT,
         "resume": True,
+        "evidence": {
+            "criteria": None,
+            "findings": {"findings": [], "reviewed_head": None, "reviewed_base": None, "verdict_url": None},
+            "instructions": {
+                "cause": "answers",
+                "prose": "Use the v2 table.",
+                "url": ANSWERS_URL,
+                "prior_instruction": PLAN_URL,
+                "plan_attempt": None,
+                "retry_of": None,
+                "findings": [],
+            },
+            "ci": None,
+        },
     }),
     "retry": ("build", "claude", 2, None, {"gitBranchName": "factory/issue-42"}),
     "fix": ("fix", "claude", 1, HEAD, {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from lib.feeder_gates import GateLines, Holds, github_ref, parse_gate_lines
 from lib.followups import followup_findings, followup_issue
 from tests import regenerate_brief_snapshots as snapshots
 from tests.merge_queue_support import Board, sha
+from tests.test_hooks import FakeBot
 from tests.test_dispatcher import (
     TRUSTED_LOGINS,
     VERDICT,
@@ -256,11 +258,15 @@ class FollowupActions(FakeReviewActions):
     def __init__(self) -> None:
         super().__init__()
         self.issues: dict[int, tuple[str, str, tuple[str, ...]]] = {}
+        self.issue_comments: dict[int, list[str]] = {}
+        self.closed: set[int] = set()
         self.pr_comments: list[str] = []
         self.creates = 0
         self.posts = 0
+        self.additions = 0
         self.crash_after_create = False
         self.crash_after_post = False
+        self.crash_after_addition = False
 
     def file_issue(self, ticket, title, body, labels, marker, since) -> int:
         del ticket, since
@@ -285,6 +291,20 @@ class FollowupActions(FakeReviewActions):
         if self.crash_after_post:
             raise SystemExit("crash after the link comment was posted")
 
+    def open_issue_labels(self, ticket, number) -> tuple[str, ...] | None:
+        del ticket
+        return None if number in self.closed else self.issues[number][2]
+
+    def comment_on_issue_once(self, ticket, number, body, marker) -> None:
+        del ticket
+        existing = self.issue_comments.setdefault(number, [])
+        if any(marker in text.splitlines() for text in existing):
+            return
+        existing.append(body)
+        self.additions += 1
+        if self.crash_after_addition:
+            raise SystemExit("crash after the follow-ups were added to the issue")
+
 
 def at_round(tmp_path: Path, actions: FollowupActions, review_round: int):
     dispatcher, queue = setup(tmp_path, review_actions=actions)
@@ -306,6 +326,7 @@ def verdict_ticket(
     author: str = "codex-login",
     head: str = HEAD,
     risk: str = "high",
+    verdict_id: str = VERDICT_ID,
 ) -> TrackedTicket:
     body = (
         VERDICT.format(round=f"{round_number}/5", head=head, verdict=verdict, risk=risk)
@@ -313,7 +334,7 @@ def verdict_ticket(
         + "\n"
     )
     base = ticket(
-        comment(VERDICT_ID, body, author=author, url="https://github.com/owner/repo/pull/42#issuecomment-9"),
+        comment(verdict_id, body, author=author, url="https://github.com/owner/repo/pull/42#issuecomment-9"),
         head=HEAD,
         ci={HEAD: CIResult("success")},
     )
@@ -351,17 +372,17 @@ def test_approve_with_follow_ups_ships_as_before_and_files_one_ticket(tmp_path: 
     assert plain.issues == {} and plain.pr_comments == []
     [(title, body, labels)] = actions.issues.values()
     assert title == "Follow-ups from #42 r4"
-    assert labels == ("factory:ready", "urgent")
+    assert labels == ()
     assert "Blocked by: #42" in body.splitlines()
     assert "> 1. [follow-up] lib/a.py:10 breaks the path-format rule from round 2." in body
     assert "> 2. [follow-up] lib/c.py:7 breaks the exception rule from round 3." in body
     assert "[minor]" not in body
-    intake = parse_intake(body, labels)
+    intake = parse_intake(body, ("factory:ready",))
     assert intake.defects == ()
     assert intake.risk == "low"
     assert "Touches: lib/a.py, lib/c.py" in body.splitlines()
     assert actions.pr_comments == [
-        "Follow-ups from review round 4 are filed as #300; they do not block this PR."
+        "Follow-ups from review round 4 are parked on #300; they do not block this PR."
         f"\n\n<!-- orch-followup-link verdict={VERDICT_ID} -->"
     ]
 
@@ -396,6 +417,179 @@ def test_a_crash_after_each_tracker_write_never_writes_twice(tmp_path: Path) -> 
 
     assert (actions.creates, actions.posts) == (1, 1)
     assert list(actions.issues) == [300]
+    assert filings(queue) == [(VERDICT_ID, 4, "commented", 300)]
+
+
+FOLLOWUP_C = "1. [follow-up] lib/e.py:2 breaks the path-format rule from round 2 again."
+LATER_ID = f"verdict-r5-{HEAD}"
+
+
+def two_rounds(tmp_path: Path, actions: FollowupActions):
+    dispatcher, queue = at_round(tmp_path, actions, 4)
+    dispatcher.process(verdict_ticket("REVISE", 4, (FOLLOWUP_A,)))
+    later = verdict_ticket("REVISE", 5, (FOLLOWUP_C,), verdict_id=LATER_ID)
+    with queue.connect() as connection:
+        dispatcher._record_followups(connection, later, later.comments[0], 5)
+        connection.commit()
+    return dispatcher, queue, later
+
+
+def test_a_later_round_adds_its_follow_ups_to_the_parked_issue(tmp_path: Path) -> None:
+    actions = FollowupActions()
+    dispatcher, queue, later = two_rounds(tmp_path, actions)
+    dispatcher.process(later)
+
+    assert list(actions.issues) == [300]
+    [addition] = actions.issue_comments[300]
+    assert "> 1. [follow-up] lib/e.py:2 breaks the path-format rule from round 2 again." in addition
+    assert "round 5 review verdict on owner/repo#42" in addition
+    assert addition.splitlines()[-1] == f"<!-- orch-followup verdict={LATER_ID} -->"
+    assert actions.pr_comments == [
+        "Follow-ups from review round 4 are parked on #300; they do not block this PR."
+        f"\n\n<!-- orch-followup-link verdict={VERDICT_ID} -->",
+        "Follow-ups from review round 5 are parked on #300; they do not block this PR."
+        f"\n\n<!-- orch-followup-link verdict={LATER_ID} -->",
+    ]
+    assert filings(queue) == [
+        (VERDICT_ID, 4, "commented", 300),
+        (LATER_ID, 5, "commented", 300),
+    ]
+
+
+def test_a_crash_after_each_write_of_an_addition_never_writes_twice(tmp_path: Path) -> None:
+    actions = FollowupActions()
+    dispatcher, queue, later = two_rounds(tmp_path, actions)
+    actions.crash_after_addition = True
+    with pytest.raises(SystemExit):
+        dispatcher.process(later)
+    assert filings(queue)[1] == (LATER_ID, 5, "pending", 300)
+
+    actions.crash_after_addition = False
+    actions.closed.add(300)
+    actions.crash_after_post = True
+    restarted, _queue = setup(tmp_path, review_actions=actions)
+    with pytest.raises(SystemExit):
+        restarted.process(later)
+    assert filings(queue)[1] == (LATER_ID, 5, "filed", 300)
+
+    actions.crash_after_post = False
+    again, _queue = setup(tmp_path, review_actions=actions)
+    again.process(later)
+
+    assert (actions.creates, actions.additions, actions.posts) == (1, 1, 2)
+    assert list(actions.issues) == [300]
+    assert filings(queue)[1] == (LATER_ID, 5, "commented", 300)
+
+
+@pytest.mark.parametrize("left", ["closed", "promoted"])
+def test_a_later_round_files_a_new_issue_once_the_last_one_left_the_park(
+    tmp_path: Path, left: str
+) -> None:
+    actions = FollowupActions()
+    dispatcher, queue, later = two_rounds(tmp_path, actions)
+    if left == "closed":
+        actions.closed.add(300)
+    else:
+        title, body, _labels = actions.issues[300]
+        actions.issues[300] = (title, body, ("factory:ready",))
+    dispatcher.process(later)
+
+    assert list(actions.issues) == [300, 301]
+    assert actions.issue_comments == {}
+    assert actions.issues[301][0] == "Follow-ups from #42 r5"
+    assert actions.issues[301][2] == ()
+    assert filings(queue)[1] == (LATER_ID, 5, "commented", 301)
+
+
+def test_the_done_wake_names_the_parked_issue(tmp_path: Path) -> None:
+    actions = FollowupActions()
+    dispatcher, queue = at_round(tmp_path, actions, 4)
+    dispatcher.process(verdict_ticket("APPROVE", 4, (FOLLOWUP_A,)))
+
+    [wake] = [job for job in FakeBot(queue, "grok").drain() if job.request.action == "done"]
+    assert json.loads(str(wake.request.detail))["followup_issue"] == 300
+
+    plain = FollowupActions()
+    plain_dispatcher, plain_queue = at_round(tmp_path / "plain", plain, 4)
+    plain_dispatcher.process(verdict_ticket("APPROVE", 4, (MINOR,)))
+    # With nothing parked, a done is a PR notice, not a Grok wake (issue #543).
+    assert [
+        job for job in FakeBot(plain_queue, "grok").drain() if job.request.action == "done"
+    ] == []
+
+
+class FailingCreates(FollowupActions):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def file_issue(self, *args) -> int:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("transient GitHub failure")
+        return super().file_issue(*args)
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+def test_the_done_wake_waits_for_a_failed_filing_and_names_its_issue(
+    tmp_path: Path, failures: int
+) -> None:
+    actions = FailingCreates(failures)
+    dispatcher, queue = at_round(tmp_path, actions, 4)
+    approve = verdict_ticket("APPROVE", 4, (FOLLOWUP_A,))
+    dispatcher.process(approve)
+    bot = FakeBot(queue, "grok")
+    if failures == 2:
+        assert [job for job in bot.drain() if job.request.action == "done"] == []
+        assert filings(queue) == [(VERDICT_ID, 4, "pending", None)]
+        dispatcher.process(approve)
+    dispatcher.process(approve)
+
+    [wake] = [job for job in bot.drain() if job.request.action == "done"]
+    assert list(actions.issues) == [300]
+    detail = json.loads(str(wake.request.detail))
+    assert (detail["outcome"], detail["followup_issue"]) == ("merged", 300)
+    assert handled_outcome(queue, VERDICT_ID) == "merged"
+
+
+def test_a_crash_after_filing_a_new_issue_never_adds_to_a_reopened_one(
+    tmp_path: Path,
+) -> None:
+    actions = FollowupActions()
+    dispatcher, queue, later = two_rounds(tmp_path, actions)
+    actions.closed.add(300)
+    actions.crash_after_create = True
+    with pytest.raises(SystemExit):
+        dispatcher.process(later)
+    assert list(actions.issues) == [300, 301]
+
+    actions.closed.clear()
+    actions.crash_after_create = False
+    restarted, _queue = setup(tmp_path, review_actions=actions)
+    restarted.process(later)
+
+    assert actions.issue_comments == {}
+    assert actions.creates == 2
+    assert filings(queue)[1] == (LATER_ID, 5, "commented", 301)
+
+
+def test_a_pending_row_from_before_the_park_files_an_unlabelled_issue(
+    tmp_path: Path,
+) -> None:
+    actions = FollowupActions()
+    dispatcher, queue = at_round(tmp_path, actions, 4)
+    approve = verdict_ticket("APPROVE", 4, (FOLLOWUP_A,))
+    with queue.connect() as connection:
+        dispatcher._record_followups(connection, approve, approve.comments[0], 4)
+        connection.execute(
+            "UPDATE followup_filings SET labels = ?",
+            (json.dumps(["factory:ready", "urgent"]),),
+        )
+        connection.execute("ALTER TABLE followup_filings DROP COLUMN addition")
+    restarted, _queue = setup(tmp_path, review_actions=actions)
+    restarted.process(approve)
+
+    assert actions.issues[300][2] == ()
     assert filings(queue) == [(VERDICT_ID, 4, "commented", 300)]
 
 

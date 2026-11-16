@@ -78,10 +78,7 @@ class CommentsMixin:
                 )
             raise
         self._settle_external_ships(ticket)
-        try:
-            self._drain_followups(ticket)
-        except Exception as exc:
-            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        self._park_followups(ticket)
         try:
             self._drain_auto_extra(ticket)
         except Exception as exc:
@@ -444,24 +441,29 @@ class CommentsMixin:
             if fields.get("kind") == "verdict" and self._trusted(
                 ticket, comment, fields, reviewer, role="reviewer"
             ):
+                head = fields.get("head") or ""
                 rows.append(
                     (
                         ticket.repo.lower(),
                         ticket.ticket_id,
                         comment.id,
-                        fields.get("head") or "",
+                        head,
                         _round_number(fields.get("round")),
                         comment.created_at,
+                        ticket.changed_lines
+                        if _matching_head(head, ticket.current_head) is not None
+                        else None,
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
                 """
                 INSERT INTO verdict_heads (
-                    repo, ticket_id, comment_id, head, review_round, posted_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, head, review_round, posted_at, changed_lines
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
-                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at)
+                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at),
+                    changed_lines = COALESCE(verdict_heads.changed_lines, excluded.changed_lines)
                 """,
                 rows,
             )

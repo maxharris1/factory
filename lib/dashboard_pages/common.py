@@ -202,6 +202,10 @@ SCRIPT_HEAD = r"""
   }
   function ticketOf(row) { return ticketIn(short(row.repo), row); }
   function jobLabel(r) { return r.tracker === 'linear' ? String(r.ticket_id) + prOf(r, r.ticket_id) : ticketOf(r); }
+  function tileLabel(r) {
+    if (r.tracker === 'linear') return String(r.ticket_id);
+    return short(r.repo) + '#' + (r.source ? String(r.source).replace(/^#/, '') : r.ticket_id);
+  }
   function jobKind(r) { return r.tracker === 'github' ? 'PR' : r.tracker === 'linear' ? 'ticket' : null; }
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function threadKey(r) { return String(r.repo).toLowerCase() + '#' + r.ticket_id; }
@@ -541,6 +545,12 @@ def _job_label(row: dict) -> str:
         pr = row.get("pr")
         return f"{row['ticket_id']} (PR #{pr})" if pr else str(row["ticket_id"])
     return _ticket(row)
+
+
+def _tile_label(row: dict) -> str:
+    if row.get("tracker") == "linear":
+        return str(row["ticket_id"])
+    return label(_short(row["repo"]), str(row["ticket_id"]), row.get("source"), None)
 
 
 def _job_kind(row: dict) -> str | None:

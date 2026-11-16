@@ -257,6 +257,16 @@ class ReviewActions(Protocol):
         """Post body on the PR unless a comment carrying marker exists."""
         ...
 
+    def open_issue_labels(self, ticket: TrackedTicket, number: int) -> tuple[str, ...] | None:
+        """The labels of issue `number` in the ticket's repo, or None once it is closed."""
+        ...
+
+    def comment_on_issue_once(
+        self, ticket: TrackedTicket, number: int, body: str, marker: str
+    ) -> None:
+        """Post body on issue `number` unless a comment carrying marker exists."""
+        ...
+
 
 class GrokDelivery(Protocol):
     """Push a Grok job and return a non-empty delivery receipt.

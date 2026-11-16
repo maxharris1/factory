@@ -12,6 +12,7 @@ from lib.dispatch.constants import (
     WATCHED_STATES,
 )
 from lib.dispatch.helpers import _matching_head, _spread
+from lib.dispatch.eval_log import remember_repo
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -67,6 +68,7 @@ class TrackingMixin:
             raise ValueError(f"{state!r} is not a completed terminal state")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            remember_repo(connection, repo)
             if state == "merged":
                 entered = self._enter_merged(connection, repo, ticket_id, "observed")
             else:
@@ -315,6 +317,11 @@ class TrackingMixin:
                                WHERE filing.repo = tracked.repo
                                  AND filing.ticket_id = tracked.ticket_id
                                  AND filing.status IN ('pending', 'filed')
+                           ) OR EXISTS (
+                               SELECT 1
+                               FROM followup_wakes AS wake
+                               WHERE wake.repo = LOWER(tracked.repo)
+                                 AND wake.ticket_id = tracked.ticket_id
                            ) OR EXISTS (
                                SELECT 1
                                FROM auto_extra_comments AS notice

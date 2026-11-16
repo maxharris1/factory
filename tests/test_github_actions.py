@@ -1870,3 +1870,39 @@ def test_comment_once_posts_when_only_someone_else_carries_the_marker() -> None:
     gh.route(POST_LINK, GhResult(0, "{}", ""))
     actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
     assert gh.count(POST_LINK) == 1
+
+
+ISSUE = (f"{REPO}/issues/307",)
+ISSUE_COMMENTS = ("--paginate", f"{REPO}/issues/307/comments?per_page=100")
+ADDITION_MARKER = "<!-- orch-followup verdict=99 -->"
+ADDITION = f"Follow-up findings from round 5.\n\n{ADDITION_MARKER}"
+POST_ADDITION = ("-X", "POST", f"{REPO}/issues/307/comments", "-f", f"body={ADDITION}")
+
+
+def issue(state: str, *labels: str) -> GhResult:
+    return GhResult(
+        0, json.dumps({"number": 307, "state": state, "labels": [{"name": n} for n in labels]}), ""
+    )
+
+
+def test_open_issue_labels_reads_an_open_issue_and_hides_a_closed_one() -> None:
+    actions, gh = adapter()
+    gh.route(ISSUE, issue("open", "urgent", "factory:ready"))
+    assert actions.open_issue_labels(pr(), 307) == ("factory:ready", "urgent")
+
+    actions, gh = adapter()
+    gh.route(ISSUE, issue("closed"))
+    assert actions.open_issue_labels(pr(), 307) is None
+
+
+def test_comment_on_issue_once_posts_on_the_issue_only_once() -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUE_COMMENTS, GhResult(0, "[]", ""))
+    gh.route(POST_ADDITION, GhResult(0, "{}", ""))
+    actions.comment_on_issue_once(pr(), 307, ADDITION, ADDITION_MARKER)
+    assert gh.keys() == [ISSUE_COMMENTS, POST_ADDITION]
+
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUE_COMMENTS, GhResult(0, json.dumps([pr_comment(1, ADDITION)]), ""))
+    actions.comment_on_issue_once(pr(), 307, ADDITION, ADDITION_MARKER)
+    assert gh.keys() == [ISSUE_COMMENTS, USER]

@@ -476,15 +476,26 @@ class GitHubReviewActions:
         return _issue_number(_object(self._json(*args)).get("number"))
 
     def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
-        number = _pr_number(ticket)
+        self._comment_once(ticket.repo, _pr_number(ticket), body, marker)
+
+    def comment_on_issue_once(
+        self, ticket: TrackedTicket, number: int, body: str, marker: str
+    ) -> None:
+        self._comment_once(ticket.repo, str(_issue_number(number)), body, marker)
+
+    def open_issue_labels(self, ticket: TrackedTicket, number: int) -> tuple[str, ...] | None:
+        raw = _object(self._json(f"{_repo_path(ticket.repo)}/issues/{_issue_number(number)}"))
+        if raw.get("state") != "open":
+            return None
+        return tuple(sorted(_labels([raw.get("labels")])))
+
+    def _comment_once(self, repo: str, number: str, body: str, marker: str) -> None:
         if any(
             has_marker(comment.body, marker) and comment.author == self._login()
-            for comment in self.list_comments(ticket.repo, number)
+            for comment in self.list_comments(repo, number)
         ):
             return
-        self._call(
-            "-X", "POST", f"{_repo_path(ticket.repo)}/issues/{number}/comments", "-f", f"body={body}"
-        )
+        self._call("-X", "POST", f"{_repo_path(repo)}/issues/{number}/comments", "-f", f"body={body}")
 
     def _login(self) -> str:
         if self.login is None:

@@ -606,17 +606,8 @@ class DetailMixin:
         }
         if note is not None:
             detail["note"] = note
-        self.wake_grok_once(
-            ticket,
-            reason="done",
-            source_comment_id=comment.id,
-            detail=json.dumps(
-                detail,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            head=ticket.current_head,
-        )
+        self._hold_done_wake(ticket, comment, detail)
+        self._park_followups(ticket)
 
 
 def _skip_marker(reason: str, once_key: str) -> str:

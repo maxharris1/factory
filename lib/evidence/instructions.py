@@ -16,10 +16,8 @@ body without its header, or None when the comment was edited after it was
 posted. An approver's plain `/go` (#173) counts too, as extra-round for a fix and
 go otherwise; its prose is its instruction line.
 
-prior_instruction is the resumed job's `instruction`, which the resume's own
-instruction replaces in its detail. When the resumed job was itself resumed
-by answers, its instruction is that answers link, so prior_instruction is
-the one its own evidence carried: the instruction the step started from.
+prior_instruction is the instruction the resumed step started from, followed
+back through earlier go, answers and retry resumes.
 plan_attempt is plan_gap_count + 1 for a plan job, else None: a question and its answer leave plan_gap_count as it was.
 retry_of is the failed job a T6 retry names. Only a fix job carries findings.
 A retry replays the failed job's step, so when its own trigger is no go or
@@ -136,7 +134,10 @@ def _replayed_instructions(detail: Mapping[str, object]) -> Mapping[str, object]
 def _original_instruction(prior_detail: Mapping[str, object] | None) -> str | None:
     evidence = prior_detail.get("evidence") if prior_detail is not None else None
     prior = evidence.get("instructions") if isinstance(evidence, Mapping) else None
-    if isinstance(prior, Mapping) and prior.get("cause") == "answers":
+    if isinstance(prior, Mapping) and (
+        prior.get("cause") in ("answers", "go")
+        or (prior_detail.get("resume") is True and _text(prior_detail, "instruction") is None)
+    ):
         return _text(prior, "prior_instruction")
     return _text(prior_detail, "instruction")
 
