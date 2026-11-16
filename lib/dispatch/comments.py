@@ -258,7 +258,8 @@ class CommentsMixin:
             self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return "ticket-stuck"
         resumed = (
-            self._resume_after_blocked(ticket, comment)
+            self._resume_for_max(ticket, comment)
+            or self._resume_after_blocked(ticket, comment)
             or self._resume_after_cap(ticket, comment)
             or self._resume_paused(ticket, comment)
         )

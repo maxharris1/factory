@@ -1,9 +1,12 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.verdict.shipped import _approved_round
 from lib.queue import JobRequest
 
 
@@ -17,9 +20,12 @@ class ResumeMixin:
 
         One transaction raises cap_extra by 1, moves the ticket to fixing
         and queues the fix, keyed on the go comment so every go Max relays
-        queues exactly one fix. None when the ticket is not capped. A go
-        _may_lift_cap refuses wakes Grok once with go-not-from-approver and
-        changes nothing (#122, #174).
+        queues exactly one fix. A handed-off ticket whose next round T2
+        would flag ready-after-cap resumes the same way (#118): the approved
+        round counts as completed and the approval is cleared, as a T2
+        re-entry does. None when neither holds. A go _may_lift_cap refuses
+        wakes Grok once with go-not-from-approver and changes nothing
+        (#122, #174).
         """
         lifted = self._lift_cap(ticket, comment)
         if lifted is None:
@@ -59,9 +65,16 @@ class ResumeMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-            if row is None or row["workflow_state"] != "capped":
+            if row is None or row["workflow_state"] not in ("capped", "handed-off"):
                 connection.commit()
                 return None
+            handed_off = row["workflow_state"] == "handed-off"
+            completed = int(row["review_round"])
+            if handed_off:
+                completed = _approved_round(self._shipped_approval(ticket), completed)
+                if completed + 1 <= self._effective_cap(ticket, connection):
+                    connection.commit()
+                    return None
             if not self._may_lift_cap(comment.author):
                 connection.commit()
                 return "go-not-from-approver", False
@@ -74,8 +87,8 @@ class ResumeMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-            verdict = None
-            if capping is not None:
+            verdict = _comment_link(comment) if handed_off else None
+            if capping is not None and not handed_off:
                 verdict = next(
                     (_comment_link(item) for item in ticket.comments if item.id == capping["comment_id"]),
                     f"comment:{capping['comment_id']}",
@@ -97,7 +110,7 @@ class ResumeMixin:
                         ticket,
                         action="fix",
                         head=ticket.current_head,
-                        round_number=int(row["review_round"]) + 1,
+                        round_number=completed + 1,
                         cap=self._config_cap(ticket, connection) + cap_extra,
                         instruction=verdict,
                         resume=True,
@@ -112,7 +125,18 @@ class ResumeMixin:
                 "fixing",
                 source="cap-resume",
                 at=self.queue.now(),
-                also={"cap_extra": cap_extra},
+                also={"cap_extra": cap_extra} | (
+                    {
+                        "review_round": completed,
+                        "approved_head": None,
+                        "approved_at": None,
+                        "approve_comment_id": None,
+                        "update_failures": 0,
+                        "update_from_head": None,
+                    }
+                    if handed_off
+                    else {}
+                ),
             )
             connection.execute(
                 """
@@ -231,17 +255,29 @@ class ResumeMixin:
             connection.commit()
         return "queued-blocked-review"
 
-    def _resume_unsatisfiable(
+    def _resume_for_max(
         self,
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        if self._unsat_parked(ticket):
+        parked = self._parked_for_max(ticket)
+        if parked is not None:
             if not self._may_lift_cap(comment.author):
                 self._wake_comment_problem(
                     ticket, comment, "go-not-from-approver", "go-not-from-approver"
                 )
                 return True, "go-not-from-approver"
+            if parked == "repeat":
+                with self._connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        """
+                        UPDATE ticket_state SET cap_extra = cap_extra + 1
+                        WHERE repo = ? AND ticket_id = ? AND review_round >= ?
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id, self._effective_cap(ticket, connection)),
+                    )
+                    connection.commit()
             return self._resume_paused(ticket, comment)
         with self._connect() as connection:
             resumed = connection.execute(
@@ -254,19 +290,19 @@ class ResumeMixin:
             ).fetchone()
         return None if resumed is None else self._resume_paused(ticket, comment)
 
-    def _unsat_parked(self, ticket: TrackedTicket) -> bool:
+    def _parked_for_max(self, ticket: TrackedTicket) -> Literal["unsat", "repeat"] | None:
         with self._connect() as connection:
             parked = connection.execute(
                 """
-                SELECT 1 FROM ticket_state
+                SELECT review_events.outcome FROM ticket_state
                 JOIN review_events
                   ON review_events.repo = ticket_state.repo
                  AND review_events.ticket_id = ticket_state.ticket_id
                  AND review_events.comment_id = ticket_state.paused_question_id
                 WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
                   AND ticket_state.workflow_state = 'waiting-max'
-                  AND review_events.outcome = 'waiting-max-unsat'
+                  AND review_events.outcome IN ('waiting-max-unsat', 'waiting-max-repeat')
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        return parked is not None
+        return None if parked is None else "unsat" if parked["outcome"] == "waiting-max-unsat" else "repeat"

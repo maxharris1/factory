@@ -140,7 +140,6 @@ def revise(flow: AppFlow, round_text: str, comment_id: str, extra: str = "") -> 
     return flow.post(comment_id, body + "- [blocking] f-1: the parser accepts prose.\n", "codex-login")
 
 
-@pytest.mark.xfail(strict=True, reason="#189: T16c records the repeat block as waiting-max")
 def test_slash_go_releases_a_repeat_block(tmp_path: Path) -> None:
     flow = AppFlow(tmp_path, enabled=True)
     assert flow.go("go-1") == "queued-build"

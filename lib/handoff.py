@@ -190,6 +190,17 @@ def parse_comment(text: str) -> Handoff:
     return Handoff(fields=tuple(fields.items()), body=rest)
 
 
+def repeat_id(handoff: Handoff) -> str | None:
+    """The verdict's repeat id: the header's repeat=, else a first body line
+    that is exactly repeat=<ac-n|f-n>."""
+    fields = handoff.as_dict()
+    if "repeat" in fields:
+        return fields["repeat"]
+    first = next((line.strip() for line in handoff.body.splitlines() if line.strip()), "")
+    key, _, value = first.partition("=")
+    return value if key == "repeat" and _REPEAT.fullmatch(value) else None
+
+
 def format_comment(handoff: Handoff, *, visible: bool = False) -> str:
     header = format_header(handoff.as_dict(), visible=visible)
     if handoff.body == "":

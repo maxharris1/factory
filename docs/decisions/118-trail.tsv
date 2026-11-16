@@ -1,0 +1,10 @@
+decision	choice	why
+playbook	figure-it-out with Feature steps, three parallel helpers on disjoint files (U1; U2+U4; U3+U5)	plan's throughput checkpoint; file sets are disjoint
+U1 decision log	new docs/decisions/118-extra-round-after-handoff.md, not a SPEC log row	the SPEC decision log is frozen (docs/decisions/README.md)
+U1 fallback round	shared _approved_round helper used by T2 and the resume	the go's at-the-cap test must equal T2's ready-after-cap test
+U1 transition source	kept cap-resume	ticket_transitions already records the from-state; a new source needs writer-list changes
+U3 extra path	route-same-family stuck wake also gets _project_wake_detail	the new queue-wrapping guard caught it
+U2 verify	verify read failures also fail the cycle	the ticket's problem statement lists it
+U2 old tests	five tests that assumed a silent source failure now expect PollCycleFailed	ac-1 changes exactly that behavior
+out of scope	poll_deferrals growth	not in the ticket
+f-1 model	MaxOkAfterHandoff adds 1 to round, guarded to extra = 0; property HandoffCountsApprovedRound checks both handoff exits	resume.py records the approved round as completed; TLC needs extra bounded, so a second at-cap go after handoff is left out

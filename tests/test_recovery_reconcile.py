@@ -17,7 +17,7 @@ import pytest
 
 from lib.device_pool import DevicePool
 from lib.dispatch.types import RetryableStateError
-from lib.dispatcher import CIResult, Dispatcher, TicketRef, TrackedTicket
+from lib.dispatcher import CIResult, Dispatcher, PollCycleFailed, TicketRef, TrackedTicket
 from lib.handoff import parse_comment
 from lib.job_state import record_job_event
 from lib.machines_yml import Device, MachinesConfig
@@ -180,7 +180,8 @@ def test_a_failed_ticket_read_retries_nothing(tmp_path: Path) -> None:
     plan_job = board.start("planning")
     board.post("plan-1", PLAN.format(round=1, ac="met"))
     board.fail(plan_job)
-    board.poll(read_fails=True)
+    with pytest.raises(PollCycleFailed, match="tracked: RuntimeError"):
+        board.poll(read_fails=True)
     assert board.rows("plan") == [("failed", 1)]
     assert "reconcile-deferred" in board.events(plan_job)
     board.poll()

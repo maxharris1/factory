@@ -173,6 +173,7 @@ from lib.dispatch.types import (
     Feeder,
     GrokDelivery,
     Hook,
+    PollCycleFailed,
     PollSource,
     RetryableShipError,
     RetryableStateError,
