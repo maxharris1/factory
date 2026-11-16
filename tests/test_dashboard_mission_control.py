@@ -117,7 +117,7 @@ def test_recent_handoffs_newest_first_with_their_kind(tmp_path: Path) -> None:
         ("d-claude", "scripted", 400),
     ]
     assert set(recent[0]) == {
-        "job", "repo", "ticket_id", "action", "recipient", "state", "kind", "age_seconds",
+        "job", "repo", "ticket_id", "source", "pr", "action", "recipient", "state", "kind", "age_seconds",
     }
     # The handoff comment id itself is never copied out.
     assert "9001" not in json.dumps(recent) and "9002" not in json.dumps(recent)
@@ -159,6 +159,8 @@ def test_recent_verdicts_newest_first_and_classified(tmp_path: Path) -> None:
     assert verdicts[-1] == {
         "repo": "maxharris1/cleffy",
         "ticket_id": "12",
+        "source": None,
+        "pr": "12",
         "outcome": "queued-review",
         "kind": "routed",
         "seq": 1,
@@ -293,8 +295,9 @@ def test_page_polls_status_json_every_one_to_two_seconds(tmp_path: Path) -> None
     assert 1000 <= page.POLL_MS <= 2000
     assert f"var POLL_MS = {page.POLL_MS};" in script
     assert "var STATUS_URL = 'status.json';" in script
-    # The only request the page makes is for the relative status.json.
-    assert re.findall(r"fetch\(([^,)]+)", script) == ["STATUS_URL"]
+    # The page polls the relative status.json; its only other calls are to its own /api.
+    assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "STATUS_URL"]
+    assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script))
     assert "cache: 'no-store'" in script
     assert "location.reload" in script  # falls back to reloading if polling is blocked
 
@@ -323,7 +326,8 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
 
 def test_page_has_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
     html = _html(tmp_path)
-    for needle in ("<link", "src=", "http://", "https://", "@import", "url(", "//cdn"):
+    assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
+    for needle in ("<link", "src=", "http://", "@import", "url(", "//cdn"):
         assert needle not in html, needle
     script = _script(html)
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):

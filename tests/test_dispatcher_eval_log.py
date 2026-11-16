@@ -1,7 +1,9 @@
 import errno
 import json
+import pkgutil
 import resource
 import shutil
+import signal
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
@@ -11,7 +13,7 @@ import pytest
 
 from lib.cli import main
 from lib.dispatcher import Dispatcher
-from lib.eval_log import append_lines
+from lib.eval_log import append_lines, erase_with_spaces
 from lib.eval_report import build_report
 from lib.github_actions import GhResult
 from lib.orch_yml import Project
@@ -191,43 +193,71 @@ def one_batch(state_dir: Path) -> list[bytes]:
     return (state_dir / "dispatcher.log").read_bytes().splitlines(keepends=True)
 
 
-@pytest.mark.parametrize(
-    ("torn", "manual"),
-    [(0, True), (12, False), (12, True)],
-    ids=["whole-lines-then-manual", "torn", "torn-then-manual"],
-)
-def test_a_short_write_is_finished_once_around_later_lines(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, torn: int, manual: bool
-) -> None:
+def limited(limit: int, call, failures: list[int]):
+    def run(*args):
+        old = resource.getrlimit(resource.RLIMIT_FSIZE)
+        handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, old[1]))
+        try:
+            return call(*args)
+        except OSError as error:
+            failures.append(error.errno)
+            raise
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, old)
+            signal.signal(signal.SIGXFSZ, handler)
+
+    return run
+
+
+def short_append(tmp_path: Path, torn: int) -> tuple[list[bytes], SQLiteJobQueue]:
     batch = one_batch(tmp_path / "clean")
     assert len(batch) >= 3
     written = b"".join(batch[:2]) + batch[2][:torn]
     state = tmp_path / "state"
     state.mkdir()
     queue = SQLiteJobQueue(state / "d.db", clock=count(START, 1).__next__)
-    log = state / "dispatcher.log"
-    failures: list[int | None] = []
-
-    def short_write(path: Path, lines: list[bytes]) -> None:
-        old = resource.getrlimit(resource.RLIMIT_FSIZE)
-        resource.setrlimit(resource.RLIMIT_FSIZE, (len(written), old[1]))
-        try:
-            append_lines(path, lines)
-        except OSError as error:
-            failures.append(error.errno)
-            raise
-        finally:
-            resource.setrlimit(resource.RLIMIT_FSIZE, old)
-
-    with patch("lib.dispatch.eval_log.append_lines", short_write):
+    failures: list[int] = []
+    with patch("lib.dispatch.eval_log.append_lines", limited(len(written), append_lines, failures)):
         restart(queue).poll_once(FakeSource(busy_ticket(), github=(busy_ticket(),)))
     assert failures == [errno.EFBIG]
-    assert log.read_bytes() == written
+    assert (state / "dispatcher.log").read_bytes() == written
+    return batch, queue
 
-    expected = b"".join(batch)
+
+def log_message(log: Path) -> bytes:
+    argv = ["log-message", "--log", str(log), "--repo", REPO, "--pr", "7"]
+    assert main([*argv, "--from", "grok-bot", "--to", "claude-bot"]) == 0
+    return log.read_bytes().splitlines(keepends=True)[-1]
+
+
+def assert_readable(queue: SQLiteJobQueue, batch: list[bytes], manual: list[bytes], bundle: Path) -> None:
+    lines = queue.path.with_name("dispatcher.log").read_bytes().splitlines(keepends=True)
+    assert [line for line in lines if line.startswith(b" ") and line.strip()] == [], "no fragment"
+    assert sorted(line for line in lines if line.strip()) == sorted(batch + manual)
+    with queue.connect() as connection:
+        assert connection.execute("SELECT * FROM eval_log_pending").fetchall() == []
+    bundle_from(queue.path.parent, bundle)
+    assert build_report(bundle).report.skipped_lines == 0
+    assert main(["eval-report", "--input", str(bundle)]) == 0
+
+
+@pytest.mark.parametrize(
+    ("torn", "manual"),
+    [(0, True), (12, False), (12, True)],
+    ids=["whole-lines-then-manual", "torn", "torn-then-manual"],
+)
+def test_a_short_write_is_finished_once_around_later_lines(
+    tmp_path: Path, capsys, torn: int, manual: bool
+) -> None:
+    batch, queue = short_append(tmp_path, torn)
+    state = queue.path.parent
+    log = state / "dispatcher.log"
+    written = log.read_bytes()
+
+    expected = b"".join(batch[:2]) + b" " * torn + b"\n" + b"".join(batch[2:])
     if manual:
-        monkeypatch.setenv("ORCH_DB", str(queue.path))
-        assert main(["log-message", "--repo", REPO, "--pr", "7", "--from", "grok-bot", "--to", "claude-bot"]) == 0
+        log_message(log)
         after = log.read_bytes()
         assert after.startswith(written) and after.endswith(b"kind=handoff\n")
         expected = b"".join(batch[:2]) + b" " * torn + after[len(written) :] + b"".join(batch[2:])
@@ -243,9 +273,64 @@ def test_a_short_write_is_finished_once_around_later_lines(
     restart(queue).poll_once(FakeSource(busy_ticket()))
     assert log.read_bytes() == expected, "a second recovery repeats and drops no line"
 
+    bundle = bundle_from(state, tmp_path / "bundle")
+    assert build_report(bundle).report.skipped_lines == 0
     capsys.readouterr()
-    assert main(["eval-report", "--input", str(bundle_from(state, tmp_path / "bundle"))]) == 0
+    assert main(["eval-report", "--input", str(bundle)]) == 0
     assert "runs: 1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "hook",
+    ["lib.dispatch.eval_log.erase_with_spaces", "lib.dispatch.eval_log.append_lines", "lib.eval_log.append_bytes"],
+    ids=["before-erase", "before-append", "inside-append"],
+)
+def test_recovery_stays_readable_around_a_manual_message(tmp_path: Path, hook: str) -> None:
+    batch, queue = short_append(tmp_path, 12)
+    log = queue.path.with_name("dispatcher.log")
+    real = pkgutil.resolve_name(hook)
+    manual: list[bytes] = []
+
+    def message_first(*args):
+        if not manual:
+            manual.append(log_message(log))
+        return real(*args)
+
+    with patch(hook, message_first):
+        restart(queue).poll_once(FakeSource(busy_ticket()))
+    assert len(manual) == 1, "the message landed during recovery"
+    assert_readable(queue, batch, manual, tmp_path / "bundle")
+
+
+@pytest.mark.parametrize("message_first", [False, True], ids=["torn", "message-then-torn"])
+def test_an_interrupted_erase_is_finished_on_restart(tmp_path: Path, message_first: bool) -> None:
+    batch, queue = short_append(tmp_path, 12)
+    log = queue.path.with_name("dispatcher.log")
+    manual = [log_message(log)] if message_first else []
+    failures: list[int] = []
+
+    def cut_erase(path: Path, start: int, length: int) -> None:
+        limited(start + 6, erase_with_spaces, failures)(path, start, length)
+
+    with patch("lib.dispatch.eval_log.erase_with_spaces", cut_erase):
+        restart(queue).poll_once(FakeSource(busy_ticket()))
+    assert failures == [errno.EFBIG]
+    with queue.connect() as connection:
+        assert len(connection.execute("SELECT * FROM eval_log_pending").fetchall()) == 1
+    at = len(b"".join(batch[:2]))
+    assert log.read_bytes()[at : at + 12] == b" " * 6 + batch[2][6:12]
+
+    restart(queue).poll_once(FakeSource(busy_ticket()))
+    assert_readable(queue, batch, manual, tmp_path / "bundle")
+
+    settled = log.read_bytes()
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO eval_log_pending (id, offset, text) VALUES (1, 0, ?)",
+            (b"".join(batch).decode("utf-8"),),
+        )
+    restart(queue).poll_once(FakeSource(busy_ticket()))
+    assert log.read_bytes() == settled, "a third recovery changes nothing"
 
 
 def test_a_crash_before_the_append_appends_the_batch_once(tmp_path: Path) -> None:

@@ -734,7 +734,7 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
         for item in building["running"]
     ] == [(FACTORY_REPO, "51", "fix", "claude")]
 
-    # Read-only and redacted: no head, comment text or link reaches the page.
+    # Redacted: no head or comment text reaches the page; the PR link is github.com's.
     out = tmp_path / "site"
     status_path, page_path = write_snapshot(out, building)
     for path in (status_path, page_path):
@@ -744,7 +744,7 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
         assert PR_HEAD[:12] not in text
         assert "Ready for review" not in text
         assert "github.test" not in text
-        assert "maxharris1/factory/pull/51" not in text
+    assert "https://github.com/maxharris1/factory/pull/51" in page_path.read_text(encoding="utf-8")
 
 
 def test_with_the_flag_off_a_trusted_grok_brief_still_starts_tracking(
