@@ -13,7 +13,7 @@ import yaml
 from lib import cli
 from lib.dispatcher import _holds
 from lib.factory_md import HoldConfig, load_factory_md
-from lib.hold import decide, held_paths
+from lib.hold import decide, glob_can_match_under, glob_matches, held_paths
 from lib.orch_yml import hold_approver_findings, load_orch_yml
 from tests.test_ship_hold import (
     HEAD,
@@ -29,37 +29,33 @@ FACTORY_MD = ROOT / "factory.md"
 ORCH_YML = ROOT / "orch.yml"
 
 EXPECTED_PATHS = (
-    "skills/factory/**",
-    "skills/pstack/**",
-    "skills/skills.lock",
-    "grok/**",
     "orch.yml",
     "lib/hold.py",
     "lib/orch_yml.py",
     "lib/harness_env.py",
     ".github/**",
     "factory.md",
-    ".claude/skills/**",
 )
 
 HELD = (
-    "skills/factory/SKILL.md",
-    "skills/pstack/x/y.md",
-    "skills/skills.lock",
-    "grok/prompt.md",
     "orch.yml",
     "lib/hold.py",
     "lib/orch_yml.py",
     "lib/harness_env.py",
     ".github/workflows/ci.yml",
+    ".github/workflows/new.yml",
     "factory.md",
-    ".claude/skills/a/SKILL.md",
 )
 
 NOT_HELD = (
     "lib/dispatcher.py",
     "lib/hold_extra.py",
     "skills/other/x.md",
+    "skills/factory/SKILL.md",
+    "skills/pstack/x/y.md",
+    "skills/skills.lock",
+    "grok/prompt.md",
+    ".claude/skills/a/SKILL.md",
     "examples/cleffy/factory.md",
     "docs/orch.yml",
 )
@@ -168,6 +164,7 @@ def test_the_factory_repo_applies_its_hold_on_ship_handoff(tmp_path: Path) -> No
         comments=(),
         approver_allowed=True,
         covers=lambda _head: False,
+        factory_md_trust_changed=False,
     )
     assert would_block.blocks is True
 
@@ -189,3 +186,94 @@ def test_the_factory_repo_applies_its_hold_on_ship_handoff(tmp_path: Path) -> No
     assert actions.states == ["awaiting-ok"]
     assert any(row["action"] == "awaiting-ok" for row in grok_jobs(queue))
     assert actions.merges == []
+
+
+def root_decision(files, trust):
+    config, _ = root_config()
+    return decide(
+        config.hold,
+        labels=(),
+        changed_files=files,
+        label_events=(),
+        comments=(),
+        approver_allowed=True,
+        covers=lambda _head: False,
+        factory_md_trust_changed=trust,
+    )
+
+
+def test_no_hold_glob_reaches_skills_grok_or_the_lock() -> None:
+    config, _ = root_config()
+
+    for pattern in config.hold.paths:
+        for prefix in ("skills/", "grok/", ".claude/skills/"):
+            assert not glob_can_match_under(pattern, prefix), (pattern, prefix)
+        assert not glob_matches(pattern, "skills/skills.lock"), pattern
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        ("skills/pstack/x.md",),
+        ("grok/prompt.md",),
+        ("skills/skills.lock", ".claude/skills/a/SKILL.md"),
+        ("factory.md", "skills/factory/SKILL.md"),
+    ],
+)
+def test_skills_grok_and_factory_md_prose_are_not_path_held(files) -> None:
+    decision = root_decision(files, trust=False)
+
+    assert decision.reasons == ()
+    assert decision.blocks is False
+
+
+def test_a_factory_md_trust_change_is_path_held() -> None:
+    decision = root_decision(("factory.md", "grok/prompt.md"), trust=True)
+
+    assert decision.reasons == ("paths",)
+    assert decision.paths == ("factory.md",)
+    assert decision.blocks is True
+
+
+def test_an_unread_factory_md_comparison_fails_closed() -> None:
+    decision = root_decision(("factory.md",), trust=None)
+
+    assert decision.unread == "factory.md trust sections"
+    assert decision.blocks is True
+
+
+@pytest.mark.parametrize("trust", [True, False, None])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "lib/hold.py",
+        "orch.yml",
+        "lib/orch_yml.py",
+        "lib/harness_env.py",
+        ".github/workflows/ci.yml",
+        ".github/workflows/new.yml",
+    ],
+)
+def test_the_safety_files_stay_held_whatever_factory_md_says(path, trust) -> None:
+    decision = root_decision((path,), trust=trust)
+
+    assert decision.reasons == ("paths",)
+    assert decision.paths == (path,)
+    assert decision.blocks is True
+
+
+def test_a_nested_factory_md_is_not_the_root_exception() -> None:
+    hold = HoldConfig(approver="maxharris1", paths=("**/factory.md",))
+
+    decision = decide(
+        hold,
+        labels=(),
+        changed_files=("examples/cleffy/factory.md",),
+        label_events=(),
+        comments=(),
+        approver_allowed=True,
+        covers=lambda _head: False,
+        factory_md_trust_changed=False,
+    )
+
+    assert decision.paths == ("examples/cleffy/factory.md",)

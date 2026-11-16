@@ -19,6 +19,7 @@ Stable names for F1-08, which owns best fit and the usage reserve:
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -39,6 +40,14 @@ ROLE = "orchestrator"
 QUESTION_CLASSES = ("observable", "default-able", "product")
 JOBS = ("build", "plan")
 STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
+_ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
+_BACKTICK_FENCE = re.compile(r"^`{3,}[^`]*$")
+_BACKTICK_RUN = re.compile(r"`+")
+_LINK_TAIL = re.compile(
+    r"""\]\(\s*(?:<(?:\\.|[^<>\\\n])*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))*)"""
+    r"""(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)"""
+)
+_OPENER_CHARACTERS = frozenset("-+*_=#>~<[")
 
 RECOMMENDED_NEXT = {
     "refused": (
@@ -513,11 +522,11 @@ def brief_comment(
     files = [_one_line(item, "likely file") for item in likely_files]
     body = "".join(
         (
-            _block("Goal", _contained(goal.strip())),
+            _paragraph("Goal", goal.strip()),
             _items("Acceptance criteria", [f"[ ] {item}" for item in criteria]),
             _items("Likely files", files),
-            _block("Risk", risk),
-            _block("Done-evidence", done_evidence.strip()),
+            _paragraph("Risk", risk),
+            _paragraph("Done-evidence", done_evidence.strip()),
         )
     )
     return _comment(
@@ -842,12 +851,55 @@ def _items(title: str, items: Sequence[str]) -> str:
     return f"**{title}**\n{rendered}\n\n"
 
 
-def _block(title: str, text: str) -> str:
-    return f"**{title}**\n{text}\n\n"
+def _paragraph(title: str, text: str) -> str:
+    raw = [line.lstrip() for line in text.splitlines()]
+    lines: list[str] = []
+    open_run = 0
+    for index, line in enumerate(raw):
+        if open_run:
+            lines[-1] += f" {line}"
+        else:
+            line = _escape_block_opener(line)
+            lines.append(line)
+        open_run = _code_span_after(line, open_run, "\n".join(raw[index + 1 :]))
+    return f"**{title}**\n" + "\n".join(lines) + "\n\n"
 
 
-def _contained(text: str) -> str:
-    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
+def _code_span_after(line: str, open_run: int, following: str) -> int:
+    position = 0
+    while position < len(line):
+        if open_run:
+            close = _closing_run(line, position, open_run)
+            if close is None:
+                return open_run
+            position, open_run = close, 0
+        elif line[position] == "\\":
+            position += 2
+        elif link := _LINK_TAIL.match(line, position):
+            position = link.end()
+        elif line[position] == "`":
+            run = _BACKTICK_RUN.match(line, position)
+            paragraph_rest = f"{line[run.end():]}\n{following}".split("\n\n", 1)[0]
+            if _closing_run(paragraph_rest, 0, len(run.group())) is not None:
+                open_run = len(run.group())
+            position = run.end()
+        else:
+            position += 1
+    return open_run
+
+
+def _closing_run(text: str, start: int, width: int) -> int | None:
+    runs = _BACKTICK_RUN.finditer(text, start)
+    return next((run.end() for run in runs if len(run.group()) == width), None)
+
+
+def _escape_block_opener(line: str) -> str:
+    number = _ORDERED_MARKER.match(line)
+    if number is not None:
+        return f"{line[: number.end()]}\\{line[number.end():]}"
+    if line[:1] in _OPENER_CHARACTERS or _BACKTICK_FENCE.match(line):
+        return f"\\{line}"
+    return line
 
 
 def _comment(

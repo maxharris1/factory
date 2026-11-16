@@ -7,6 +7,7 @@ from collections import Counter
 
 from lib.dashboard_flow import GLOSS, PHASE_OVERRIDES, PHASES, PIPELINE, SHIPPED, ticket_phase, ticket_phases
 from lib.dashboard_pages.activity import _VERDICT
+from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.common import (
     anchor, _bot, _chip, duration, _e, github_links, _panel, _short, _span, _td, _ticket,
 )
@@ -60,6 +61,7 @@ font-family:var(--mono)}
 .tk-blk{width:8px;height:8px;background:var(--ok)}
 .tk-tn{font-size:12px;color:var(--text)}
 .tk-r{font-size:11px;color:var(--muted)}
+.tk-scroll{overflow-x:auto}
 .tk-stops{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(250px,100%),1fr));gap:8px;align-items:start}
 @media (scripting:none){#tickets[hidden]{display:block !important}}
 """
@@ -71,8 +73,15 @@ SCRIPT_TICKETS = r"""
   var WAITING = {'awaiting-ok': 1, 'waiting-max': 1};
   var WAIT_TINT = '#ff9e64';
   var BOARD_EMPTY = {Ask: 'nothing waiting on questions'};
-  var tkProject = '';
-  var tkView = 'board';
+  var tkProject = tkLoad('tk-project') || '';
+  var tkView = tkLoad('tk-view') === 'table' ? 'table' : 'board';
+
+  function tkLoad(key) {
+    try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
+  }
+  function tkSave(key, value) {
+    try { window.sessionStorage.setItem(key, value); } catch (e) {}
+  }
 
   function activeJobs(d) {
     return (d.running || []).map(function (r) { return {row: r, state: 'running'}; })
@@ -195,6 +204,13 @@ SCRIPT_TICKETS = r"""
     else if (t.round) add(parent, el('span', 'tk-round', 'round ' + t.round));
   }
 
+  function tkChips(parent, live) {
+    if (!live) return;
+    var chips = BOARD.chips[live.job_state];
+    if (chips) add(parent, chip(chips[0], chips[1]));
+    if (live.overdue) add(parent, chip(BOARD.chips.overdue[0], BOARD.chips.overdue[1]));
+  }
+
   function tkCard(c) {
     var t = c.ticket, job = c.live || c.queued;
     var stop = c.phase === 'Stop', waiting = WAITING.hasOwnProperty(t.state);
@@ -217,13 +233,15 @@ SCRIPT_TICKETS = r"""
     addGh(id, t);
     var state = add(main, el('div', 'tk-state'));
     add(state, el('span', null, t.state));
+    tkChips(state, c.live);
     if (stop) {
       if (t.stuck) add(state, chip('stuck', 'bad'));
       if (c.reason) add(main, el('div', 'tk-reason', c.reason));
       return card;
     }
     tkRound(state, t, job);
-    if (waiting && t.waiting_on) add(main, el('div', 'tk-wait', 'waiting on ' + t.waiting_on));
+    var waitLine = waiting && t.waiting_on;
+    if (waitLine) add(main, el('div', 'tk-wait', 'waiting on ' + t.waiting_on));
     if (job) {
       var run = add(main, el('div', 'tk-run'));
       add(run, bot(job.recipient));
@@ -232,9 +250,9 @@ SCRIPT_TICKETS = r"""
       ticking(add(run, el('span', 'tk-t')), c.live ? job.elapsed_seconds : job.age_seconds, 'T+ ');
       return card;
     }
-    if (!waiting) add(main, el('div', 'tk-none', 'no job running'));
-    else if (GH.on && ghRefs(t)) add(main, ghPanel(t, t));
-    if (c.verdict) {
+    if (BOARD.idle.indexOf(c.phase) >= 0) add(main, el('div', 'tk-none', 'no job running'));
+    if (waiting && GH.on && ghRefs(t)) add(main, ghPanel(t, t));
+    if (c.verdict && !(waitLine && c.verdict.kind === 'waiting')) {
       var said = add(main, el('div', 'tk-run'));
       add(said, chip(c.verdict.kind, VERDICT[c.verdict.kind] || 'muted'));
       add(said, el('span', 'tk-out', c.verdict.outcome));
@@ -258,22 +276,25 @@ SCRIPT_TICKETS = r"""
   }
 
   function renderBoard(d) {
-    if (tkProject && !(d.tickets || []).some(function (r) { return r.repo === tkProject; })) tkProject = '';
+    if (tkProject && !(d.tickets || []).some(function (r) { return r.repo === tkProject; })) {
+      tkProject = '';
+      tkSave('tk-project', '');
+    }
     var b = boardOf(d, tkProject);
 
     var filter = byId('ticket-filter');
     if (filter) {
       filter.replaceChildren();
       var group = tkGroup(filter, 'tk-group', 'Project');
-      tkButton(group, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; });
+      tkButton(group, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; tkSave('tk-project', ''); });
       b.projects.forEach(function (p) {
         tkButton(group, p.short + ' ' + p.count, 'data-project', p.repo, tkProject === p.repo,
-                 function () { tkProject = p.repo; });
+                 function () { tkProject = p.repo; tkSave('tk-project', p.repo); });
       });
       add(filter, el('span', 'tk-grow'));
       var view = tkGroup(filter, 'tk-group tk-view', 'View');
       ['board', 'table'].forEach(function (name) {
-        tkButton(view, name, 'data-view', name, tkView === name, function () { tkView = name; });
+        tkButton(view, name, 'data-view', name, tkView === name, function () { tkView = name; tkSave('tk-view', name); });
       });
     }
 
@@ -324,7 +345,7 @@ SCRIPT_TICKETS = r"""
     if (!root) return;
     root.hidden = tkView !== 'table';
     if (!rows.length) { add(root, el('p', 'empty', 'no tracked tickets')); return; }
-    var table = add(root, el('table'));
+    var table = add(add(root, el('div', 'tk-scroll')), el('table'));
     var head = add(add(table, el('thead')), el('tr'));
     ['ticket', 'tracker', 'state', 'round', 'gates', 'stuck'].forEach(function (h) { add(head, el('th', null, h)); });
     var tbody = add(table, el('tbody'));
@@ -351,6 +372,11 @@ PHASE_GLYPH = {
     "Stop": {"effect": "static", "tint": "#f7768e", "seed": 76},
 }
 WAITING = ("awaiting-ok", "waiting-max")
+IDLE = ("Plan", "Build", "Review")
+JOB_CHIPS = {
+    **{name: TILE_STATE[name]["chip"] for name in ("claimed", "stale", "dead")},
+    "overdue": ["overdue", "bad"],
+}
 _WAIT_TINT = "#ff9e64"
 _EMPTY = {"Ask": "nothing waiting on questions"}
 _ROUND = re.compile(r"([0-9]+)/([0-9]+)")
@@ -363,6 +389,7 @@ def _phase_glyph(phase: str) -> dict:
 def board_constants() -> dict:
     return {
         "pipeline": PIPELINE, "phases": PHASES, "overrides": PHASE_OVERRIDES, "shipped": SHIPPED, "gloss": GLOSS,
+        "idle": IDLE, "chips": JOB_CHIPS,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -468,6 +495,13 @@ def _round(ticket: dict, job: dict | None) -> str:
     return _span("tk-round", f"round {ticket['round']}") if ticket["round"] else ""
 
 
+def _chips(live: dict | None) -> str:
+    if not live:
+        return ""
+    chips = [JOB_CHIPS.get(str(live.get("job_state")))] + [JOB_CHIPS["overdue"] if live.get("overdue") else None]
+    return "".join(_chip(text, tone) for text, tone in filter(None, chips))
+
+
 def _card(card: dict) -> str:
     ticket, live = card["ticket"], card["live"]
     job = live or card["queued"]
@@ -483,14 +517,15 @@ def _card(card: dict) -> str:
         strip = px.px_job_strip(live, height=8) if live else ""
     name = _ticket(ticket)
     ident = f'<a href="job.html#{anchor(job["job"])}">{_e(name)}</a>' if job else _span("tk-tid", name)
-    state = _span(None, ticket["state"])
+    state = _span(None, ticket["state"]) + _chips(live)
     lines = ""
     if stop:
         state += _chip("stuck", "bad") if ticket["stuck"] else ""
         lines = f'<div class="tk-reason">{_e(card["reason"])}</div>' if card["reason"] else ""
     else:
         state += _round(ticket, job)
-        if waiting and ticket.get("waiting_on"):
+        wait_line = waiting and ticket.get("waiting_on")
+        if wait_line:
             lines += f'<div class="tk-wait">{_e("waiting on " + str(ticket["waiting_on"]))}</div>'
         if job:
             where = _span("tk-dev", "queued") if not live else (
@@ -499,9 +534,9 @@ def _card(card: dict) -> str:
             since = _span("tk-t", "T+ " + duration(job["elapsed_seconds"] if live else job.get("age_seconds")))
             lines += f'<div class="tk-run">{_bot(job["recipient"])}{where}{since}</div>'
         else:
-            lines += "" if waiting else '<div class="tk-none">no job running</div>'
+            lines += '<div class="tk-none">no job running</div>' if card["phase"] in IDLE else ""
             verdict = card["verdict"]
-            if verdict:
+            if verdict and not (wait_line and verdict["kind"] == "waiting"):
                 lines += (
                     f'<div class="tk-run">{_chip(verdict["kind"], _VERDICT.get(verdict["kind"], "muted"))}'
                     f'{_span("tk-out", verdict["outcome"])}</div>'
@@ -613,7 +648,7 @@ def _tickets(snapshot: dict) -> str:
             + "</tr>"
             for row in rows
         )
-        inner = f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+        inner = f'<div class="tk-scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
     return _panel("tickets", "Tickets", inner, count=f"{len(rows)} tracked", hidden=True)
 
 

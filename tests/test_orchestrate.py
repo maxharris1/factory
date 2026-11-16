@@ -604,6 +604,7 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
     assert modules <= {
         "__future__",
         "importlib",
+        "re",
         "collections.abc",
         "dataclasses",
         "pathlib",

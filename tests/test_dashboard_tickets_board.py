@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import sqlite3
@@ -398,7 +399,7 @@ def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> 
     assert "queued" in _text(queued) and not _all(queued, lambda n: n["tag"] == "canvas")
     idle = _card(board, "#".join(tickets[VERDICT[0]]))
     assert not _all(idle, lambda n: _job_link(n) or n["tag"] == "canvas")
-    assert "no job running" in _text(idle)
+    assert "no job running" not in _text(idle)
     assert _text(_one(idle, _cls("chip"))) == "routed" and VERDICT[1] in _text(idle)
     assert {_text(node) for node in _all(_dom(board), _cls("tk-tag"))} == {"github", "linear"}
 
@@ -617,3 +618,204 @@ def test_a_held_card_with_no_job_keeps_the_comment_and_ok_controls(tmp_path: Pat
     assert _all(form, lambda n: n["tag"] == "textarea")
     (okbox,) = _all(panel, lambda n: "gh-okbox" in n["attrs"].get("class", "").split())
     assert "hidden" not in okbox["attrs"]
+
+
+def _troubled(snapshot: dict) -> tuple[dict, dict[str, list[tuple[str, str]]]]:
+    tickets = _state_tickets()
+    found = copy.deepcopy(snapshot)
+    troubles = {"planning": ("claimed", False), "building": ("stale", False), "review": ("dead", False),
+                "fixing": ("running", True)}
+    for row in found["running"]:
+        state = next(s for s, (repo, ticket) in tickets.items() if (row["repo"], row["ticket_id"]) == (repo, ticket))
+        row["job_state"], row["overdue"] = troubles[state]
+    expect = {"planning": [("claimed", "warn")], "building": [("stale", "warn")], "review": [("dead", "bad")],
+              "fixing": [("overdue", "bad")]}
+    return found, {"#".join(tickets[state]): chips for state, chips in expect.items()}
+
+
+def _state_chips(card: dict) -> list[tuple[str, str]]:
+    return [(_text(node), next(c for c in node["attrs"]["class"].split() if c != "chip"))
+            for node in _all(_one(card, _cls("tk-state")), _cls("chip"))]
+
+
+def test_troubled_jobs_show_their_lanes_chip_beside_the_state(snapshot: dict) -> None:
+    healthy = _server(snapshot)["pipeline"]
+    for key in _troubled(snapshot)[1]:
+        assert _state_chips(_card(healthy, key)) == []
+    found, expect = _troubled(snapshot)
+    board = _server(found)["pipeline"]
+    for key, chips in expect.items():
+        assert _state_chips(_card(board, key)) == chips, key
+
+
+@layout.needs_node
+def test_script_troubled_chips_match_the_server(tmp_path: Path, snapshot: dict) -> None:
+    found, expect = _troubled(snapshot)
+    out = _script(tmp_path, found)
+    assert out["html"]["pipeline"] == _server(found)["pipeline"]
+    for key, chips in expect.items():
+        assert _state_chips(_card(out["html"]["pipeline"], key)) == chips, key
+
+
+def _idle(snapshot: dict) -> dict:
+    return {**snapshot, "running": [], "queued": []}
+
+
+def _says_no_job(markup: str) -> dict[str, bool]:
+    return {key: "no job running" in _text(_card(markup, key)) for key in _placed(markup)}
+
+
+def test_no_job_running_only_in_plan_build_and_review(snapshot: dict) -> None:
+    server = _server(_idle(snapshot))
+    phases = flow.ticket_phases(flow.load_chart(CHART))
+    says = _says_no_job(server["pipeline"] + server["shipped"])
+    for row in snapshot["tickets"]:
+        phase = "Stop" if row["stuck"] else phases[row["state"]]
+        if phase != "Shipped":
+            assert says[_key(row)] == (phase in ("Plan", "Build", "Review")), (row["state"], phase)
+
+
+@layout.needs_node
+def test_script_no_job_running_matches_the_server(tmp_path: Path, snapshot: dict) -> None:
+    found = _idle(snapshot)
+    out = _script(tmp_path, found)
+    server = _server(found)
+    for ident in ("pipeline", "shipped"):
+        assert out["html"][ident] == server[ident], ident
+
+
+def _waiting_verdicts(snapshot: dict) -> tuple[dict, str, str]:
+    tickets = _state_tickets()
+    found = copy.deepcopy(_idle(snapshot))
+    waiting, other = tickets["waiting-max"], tickets["awaiting-ok"]
+    for row in found["tickets"]:
+        if (row["repo"], row["ticket_id"]) in (waiting, other):
+            row["waiting_on"] = APPROVER
+    found["poller"]["verdicts"] = [
+        {"repo": waiting[0], "ticket_id": waiting[1], "outcome": "waiting-max", "kind": "waiting", "seq": 2,
+         "age_seconds": None},
+        {"repo": other[0], "ticket_id": other[1], "outcome": "queued-review", "kind": "routed", "seq": 3,
+         "age_seconds": None},
+    ]
+    return found, "#".join(waiting), "#".join(other)
+
+
+def _check_waiting(markup: str, waiting: str, other: str) -> None:
+    card = _card(markup, waiting)
+    assert f"waiting on {APPROVER}" in _text(card)
+    assert not _all(card, _cls("chip")) and "tk-run" not in str(card)
+    shown = _card(markup, other)
+    assert f"waiting on {APPROVER}" in _text(shown)
+    assert _text(_one(shown, _cls("chip"))) == "routed" and "queued-review" in _text(shown)
+
+
+def test_a_waiting_card_drops_its_waiting_verdict_row(snapshot: dict) -> None:
+    found, waiting, other = _waiting_verdicts(snapshot)
+    _check_waiting(_server(found)["pipeline"], waiting, other)
+
+
+@layout.needs_node
+def test_script_waiting_card_drops_its_waiting_verdict_row(tmp_path: Path, snapshot: dict) -> None:
+    found, waiting, other = _waiting_verdicts(snapshot)
+    out = _script(tmp_path, found)
+    assert out["html"]["pipeline"] == _server(found)["pipeline"]
+    _check_waiting(out["html"]["pipeline"], waiting, other)
+
+
+def _scroll_table(markup: str) -> None:
+    (wrap,) = _all(_dom(markup), _cls("tk-scroll"))
+    assert [kid["tag"] for kid in wrap["kids"]] == ["table"]
+    assert not [n for n in _all(_dom(markup), lambda n: n["tag"] == "table") if n not in wrap["kids"]]
+
+
+def test_the_table_scrolls_sideways_inside_its_own_wrapper(snapshot: dict) -> None:
+    _scroll_table(_server(snapshot)["tickets"])
+    assert ".tk-scroll{overflow-x:auto}" in page.CSS
+
+
+@layout.needs_node
+def test_script_table_has_the_same_wrapper(tmp_path: Path, snapshot: dict) -> None:
+    out = _script(tmp_path, snapshot)
+    _scroll_table(out["html"]["tickets"])
+    assert out["html"]["tickets"] == _server(snapshot)["tickets"]
+
+
+def _stored(tmp_path: Path, snapshot: dict, store: dict | None, actions: list) -> dict:
+    storage = (
+        "{getItem(k) { throw new Error('denied'); }, setItem(k, v) { throw new Error('denied'); }}" if store is None
+        else "{data: " + json.dumps(store) + ", getItem(k) { return k in this.data ? this.data[k] : null; }, "
+        "setItem(k, v) { this.data[k] = String(v); }}"
+    )
+    harness = HARNESS.replace("global.window = global;\n",
+                              "global.window = global;\nglobal.sessionStorage = " + storage + ";\n").replace(
+        "    } else if (kind === 'press') {",
+        "    } else if (kind === 'store') {\n"
+        "      steps.push({store: global.sessionStorage.data || null});\n"
+        "    } else if (kind === 'press') {",
+    )
+    assert "global.sessionStorage = " in harness and "kind === 'store'" in harness
+    html = render_pages(snapshot)["job.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         "job", "", json.dumps(IDS), json.dumps(actions)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _rows(markup: str) -> int:
+    return len(_all(_one(_dom(markup), lambda n: n["tag"] == "tbody"), lambda n: n["tag"] == "tr"))
+
+
+def _pressed(markup: str, attr: str) -> list[str]:
+    return [n["attrs"][attr] for n in _all(_dom(markup), _attr(attr)) if n["attrs"]["aria-pressed"] == "true"]
+
+
+@layout.needs_node
+def test_a_stored_project_and_view_come_back_after_a_reload(tmp_path: Path, snapshot: dict) -> None:
+    repo = snapshot["tickets"][0]["repo"]
+    out = _stored(tmp_path, snapshot, {"tk-project": repo, "tk-view": "table"},
+                  [["snap", ["ticket-filter", "pipeline", "tickets"]], ["press", ["data-project", ""]],
+                   ["press", ["data-view", "board"]], ["store", None]])
+    first = out["steps"][0]
+    assert _pressed(first["snap"]["ticket-filter"], "data-project") == [repo]
+    assert _pressed(first["snap"]["ticket-filter"], "data-view") == ["table"]
+    assert first["hidden"] == {"ticket-filter": False, "pipeline": True, "tickets": False}
+    assert _rows(first["snap"]["tickets"]) == sum(r["repo"] == repo for r in snapshot["tickets"])
+    assert out["steps"][-1]["store"] == {"tk-project": "", "tk-view": "board"}
+
+
+@layout.needs_node
+def test_presses_are_stored_for_the_session(tmp_path: Path, snapshot: dict) -> None:
+    repo = snapshot["tickets"][0]["repo"]
+    out = _stored(tmp_path, snapshot, {}, [["press", ["data-project", repo]], ["press", ["data-view", "table"]],
+                                           ["store", None]])
+    assert out["steps"][-1]["store"] == {"tk-project": repo, "tk-view": "table"}
+
+
+@layout.needs_node
+def test_a_stored_project_gone_from_the_snapshot_falls_back_to_all(tmp_path: Path, snapshot: dict) -> None:
+    out = _stored(tmp_path, snapshot, {"tk-project": "gone/repo", "tk-view": "board"},
+                  [["snap", ["ticket-filter", "tickets"]], ["store", None]])
+    snap = out["steps"][0]["snap"]
+    assert _pressed(snap["ticket-filter"], "data-project") == [""]
+    assert _rows(snap["tickets"]) == len(snapshot["tickets"])
+    assert out["steps"][-1]["store"]["tk-project"] == ""
+
+
+@layout.needs_node
+def test_the_board_works_when_storage_throws(tmp_path: Path, snapshot: dict) -> None:
+    repo = snapshot["tickets"][0]["repo"]
+    out = _stored(tmp_path, snapshot, None, [["snap", ["ticket-filter", "pipeline"]],
+                                             ["press", ["data-project", repo]], ["press", ["data-view", "table"]],
+                                             ["snap", ["ticket-filter", "pipeline", "tickets"]]])
+    server = _server(snapshot)
+    first, last = out["steps"][0], out["steps"][-1]
+    assert first["snap"]["pipeline"] == server["pipeline"] and first["hidden"]["pipeline"] is False
+    assert _pressed(last["snap"]["ticket-filter"], "data-project") == [repo]
+    assert last["hidden"] == {"ticket-filter": False, "pipeline": True, "tickets": False}

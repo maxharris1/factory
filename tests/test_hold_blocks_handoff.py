@@ -79,6 +79,62 @@ def test_the_factory_repo_holds_a_trust_path_pr_without_a_ready_mark(
     assert [row["action"] for row in grok_jobs(queue)] == ["awaiting-ok"]
 
 
+@pytest.mark.parametrize(
+    "files",
+    [
+        ("skills/pstack/skills/x/SKILL.md", "skills/skills.lock"),
+        ("grok/prompt.md", ".claude/skills/a/SKILL.md"),
+        ("factory.md", "skills/factory/SKILL.md"),
+    ],
+    ids=["skills", "grok", "factory-md-prose"],
+)
+def test_the_factory_repo_ships_a_skills_grok_or_prose_pr_without_an_ok(
+    tmp_path: Path,
+    files: tuple[str, ...],
+) -> None:
+    config, _ = root_config()
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(approve(), factory=config, files=files, trust=False))
+
+    assert actions.handoffs == [HEAD]
+    assert workflow_state(queue) == "merge-queue"
+    assert not any(row["action"] == "awaiting-ok" for row in grok_jobs(queue))
+
+
+def test_the_factory_repo_holds_a_factory_md_trust_change_until_max_oks_it(
+    tmp_path: Path,
+) -> None:
+    config, _ = root_config()
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    actions.states.clear()
+
+    def trust_edit(*comments):
+        return snapshot(*comments, factory=config, files=("factory.md",), trust=True)
+
+    dispatcher.process(trust_edit(approve()))
+    assert_root_held(queue, actions)
+
+    dispatcher.process(trust_edit(approve(), ok(HEAD, author=MAX)))
+    assert actions.handoffs == [HEAD]
+    assert workflow_state(queue) == "merge-queue"
+
+
+def test_an_unread_factory_md_comparison_holds_the_factory_repo(tmp_path: Path) -> None:
+    config, _ = root_config()
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(approve(), factory=config, files=("factory.md",), trust=None))
+    assert actions.handoffs == []
+    assert workflow_state(queue) == "review"
+
+    dispatcher.process(snapshot(approve(), factory=config, files=("factory.md",), trust=False))
+    assert actions.handoffs == [HEAD]
+
+
 def test_a_label_only_hold_blocks_a_handoff(tmp_path: Path) -> None:
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
