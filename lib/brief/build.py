@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from lib.brief.common import (
     GH,
     QUESTIONS_LINES,
@@ -73,6 +75,15 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
         "CI after `ready` is the full-suite gate.",
         *QUESTIONS_LINES,
     ]
+    if facts["pre_ready"] is not None:
+        spec = facts["pre_ready"]
+        fence = "`" * (max((len(run) for run in re.findall("`+", spec.command)), default=0) + 1)
+        command = f"{fence} {spec.command} {fence}" if len(fence) > 1 else f"`{spec.command}`"
+        notes.append(
+            f"Before `ready` counts, the factory runs {command} (timeout {spec.timeout_seconds}s) "
+            "in your worktree at the head you name. `ready` is not accepted until it passes at the "
+            "pushed head. Run it yourself before you post."
+        )
     detail = detail_of(job)
     notes.extend(resume_lines(detail))
     if job.request.attempt > 1:

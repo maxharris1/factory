@@ -37,6 +37,11 @@ review.start_before_ci is optional (issue #262): a boolean, default false.
 True queues the review as soon as a trusted ready lands while CI is still
 running on that head. Ship still needs green CI on the approved head.
 
+review.block_on is optional (issue #490): any-failure (the default) or
+user-impact. user-impact gives the review brief pstack's blocking bar from
+round 1, files [follow-up] findings from round 1, and limits a later round
+to a check of the fix. Refused with tickets: linear, which has no filer.
+
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It acts on ship: merge and ship:
@@ -108,6 +113,7 @@ _GLOB = re.compile(r"^[A-Za-z0-9._*?/@+=~-]+$")
 DEFAULT_HOLD_LABEL = "factory:hold"
 DEFAULT_HOLD_APPROVER = "max"
 FINISH_LINES = ("ready-for-review", "merge")
+BLOCK_ON = ("any-failure", "user-impact")
 
 # The most factory.md prose a brief carries (about four screens).
 CONTEXT_LIMIT = 16_000
@@ -141,6 +147,15 @@ class HoldConfig:
 
 
 @dataclass(frozen=True)
+class PreReady:
+    command: str
+    timeout_seconds: int
+
+
+PRE_READY_MAX_TIMEOUT = 900
+
+
+@dataclass(frozen=True)
 class FactoryConfig:
     base_branch: str
     tickets: str
@@ -164,8 +179,10 @@ class FactoryConfig:
     followup_from_round: int | None = None
     auto_extra_rounds: int = 0
     start_before_ci: bool = False
+    block_on: str = "any-failure"
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
+    pre_ready: PreReady | None = None
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -240,6 +257,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         followup_from_round,
         auto_extra_rounds,
         start_before_ci,
+        pre_ready,
+        block_on,
     ) = _review(
         data, findings, unknown
     )
@@ -275,6 +294,10 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
             Finding(
                 "error", "tickets is linear and review.followup_from_round is set"
             )
+        )
+    if tickets == "linear" and block_on == "user-impact":
+        findings.append(
+            Finding("error", "tickets is linear and review.block_on is user-impact")
         )
 
     if hold is not None and ship is not None and ship.startswith("after:"):
@@ -316,6 +339,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         followup_from_round=followup_from_round,
         auto_extra_rounds=auto_extra_rounds,
         start_before_ci=start_before_ci,
+        pre_ready=pre_ready,
+        block_on=block_on,
         max_holders_per_path=max_holders_per_path,
         exclusive_paths=exclusive_paths,
     )
@@ -392,20 +417,28 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, int, bool]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None, str]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None, 0, False
+        return None, None, None, None, 0, False, None, "any-failure"
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None, 0, False
+        return None, None, None, None, 0, False, None, "any-failure"
     findings.extend(
         _unknown(
             review,
-            {"rounds", "verify", "followup_from_round", "auto_extra_rounds", "start_before_ci"},
+            {
+                "rounds",
+                "verify",
+                "followup_from_round",
+                "auto_extra_rounds",
+                "start_before_ci",
+                "pre_ready",
+                "block_on",
+            },
             "review",
             unknown,
         )
@@ -440,7 +473,43 @@ def _review(
         _followup_from_round(review, findings, unknown),
         _auto_extra_rounds(review, findings, unknown),
         _start_before_ci(review, findings, unknown),
+        _pre_ready(review, findings, unknown),
+        _block_on(review, findings, unknown),
     )
+
+
+def _pre_ready(review: dict, findings: list[Finding], unknown: str) -> PreReady | None:
+    if "pre_ready" not in review:
+        return None
+    value = review["pre_ready"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "review.pre_ready must be a mapping"))
+        return None
+    findings.extend(_unknown(value, {"command", "timeout_seconds"}, "review.pre_ready", unknown))
+    command = value.get("command")
+    timeout = value.get("timeout_seconds")
+    ok = True
+    if not isinstance(command, str) or not command.strip():
+        findings.append(Finding("error", "review.pre_ready.command must be a non-empty string"))
+        ok = False
+    if not is_strict_int(timeout) or not 1 <= timeout <= PRE_READY_MAX_TIMEOUT:
+        findings.append(
+            Finding(
+                "error",
+                "review.pre_ready.timeout_seconds must be an integer from 1 to "
+                f"{PRE_READY_MAX_TIMEOUT}",
+            )
+        )
+        ok = False
+    return PreReady(command, int(timeout)) if ok else None
+
+
+def _block_on(review: dict, findings: list[Finding], unknown: str) -> str:
+    value = review.get("block_on", "any-failure")
+    if not isinstance(value, str) or value not in BLOCK_ON:
+        findings.append(Finding(unknown, "review.block_on must be any-failure or user-impact"))
+        return "any-failure"
+    return value
 
 
 def _start_before_ci(review: dict, findings: list[Finding], unknown: str) -> bool:

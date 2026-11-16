@@ -426,7 +426,7 @@ def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_pat
                                            "link": "health.html#waiter-x", "detail": "down (never seen)"})
     snapshot["attention"]["count"] += 1
     attention = _server(snapshot)["attention"]
-    rows = re.findall(r'<div class="at-row">(.*?)</a></div>', attention)
+    rows = re.findall(r'<div class="at-row" data-attn="[^"]+">(.*?)</a></div>', attention)
     assert len(rows) == snapshot["attention"]["count"]
     for row in rows:
         assert row.startswith('<span class="at-px" aria-hidden="true"><canvas class="px" data-px="static" '

@@ -155,7 +155,6 @@ SCRIPT = r"""
       });
     });
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
-    var focused = document.activeElement;
     var root = panel('relay', 'Relay', relayCount(shown));
     if (!root) return;
     var bar = add(root, el('div', 'rl-filter'));
@@ -167,7 +166,6 @@ SCRIPT = r"""
       b.setAttribute('aria-pressed', rlFilter === f[0] ? 'true' : 'false');
       b.setAttribute('data-relay', f[0]);
       b.addEventListener('click', function () { rlFilter = f[0]; if (latest) render(latest); });
-      if (focused && focused.getAttribute('data-relay') === f[0]) b.focus();
     });
     if (!all.length) add(root, el('p', 'empty', 'no handoffs or verdicts yet'));
     else if (!shown.length) add(root, el('p', 'empty', 'no ticket matches this filter'));
@@ -204,8 +202,9 @@ SCRIPT = r"""
     var hrefs = jobHrefs(d);
     var rows = add(root, el('div', 'at-rows'));
     items.forEach(function (x) {
-      var key = x.kind + ':' + (x.component || x.repo + '#' + x.ticket_id);
+      var key = attentionKey(x);
       var row = add(rows, el('div', 'at-row'));
+      row.setAttribute('data-attn', key);
       var blk = add(row, el('span', 'at-px'));
       blk.setAttribute('aria-hidden', 'true');
       add(blk, PX.strip('attention-' + key, {effect: 'static', tint: ATTENTION_TINT, cell: 4, height: 24}));
@@ -361,17 +360,21 @@ def _px():
     return shell
 
 
+def _attention_key(row: dict) -> str:
+    return f"{row['kind']}:{row.get('component') or str(row['repo']) + '#' + str(row['ticket_id'])}"
+
+
 def _attention(snapshot: dict) -> str:
     attention = snapshot["attention"]
     hrefs = _job_hrefs(snapshot)
 
     def draw(row: dict) -> str:
         component = row.get("component")
-        key = f"{row['kind']}:{component or str(row['repo']) + '#' + str(row['ticket_id'])}"
+        key = _attention_key(row)
         strip = _px().px_strip(f"attention-{key}", effect="static", tint=_ATTENTION_TINT, cell=4, height=24)
         href = _health_link(row.get("link")) if component else hrefs.get(_thread_key(row), "job.html")
         return (
-            f'<div class="at-row"><span class="at-px" aria-hidden="true">{strip}</span>'
+            f'<div class="at-row" data-attn="{_e(key)}"><span class="at-px" aria-hidden="true">{strip}</span>'
             + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
             + _span("at-subj", component or _ticket(row))
             + _span("at-what", row["detail"])

@@ -159,7 +159,6 @@ SCRIPT_HEAD = r"""
   var prevKeys = {};
   var nextKeys = {};
   var openDetails = {};
-  var trails = [];
   var caretState = 'boot';
 
   function el(tag, cls, text) {
@@ -256,12 +255,6 @@ __TELEMETRY__
 
 
 SCRIPT_TAIL = r"""
-  // Long paths scroll; keep the current step (at the right end) in view.
-  function scrollTrails() {
-    trails.forEach(function (box) { if (box.scrollWidth) box.scrollLeft = box.scrollWidth; });
-    trails = [];
-  }
-
   var PAGES = {
     main: [renderKpis, renderLanes, renderJustHappened, renderIntake],
     job: [renderBoard, renderTickets, renderJobView],
@@ -271,15 +264,95 @@ SCRIPT_TAIL = r"""
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
+  function nodeKey(node) {
+    var parts = [];
+    var attrs = node.attributes;
+    for (var i = 0; i < attrs.length; i++) {
+      var name = attrs[i].name;
+      if (name === 'id' || name === 'href' || name.slice(0, 5) === 'data-') parts.push(name + '=' + attrs[i].value);
+    }
+    if (parts.length) return node.tagName + '[' + parts.sort().join('][') + ']';
+    var cls = (node.getAttribute('class') || '').split(' ').filter(function (c) { return c && c !== 'fresh'; });
+    return node.tagName + '.' + (cls[0] || '');
+  }
+  function locator(node) {
+    var chain = [], keys = [];
+    for (var n = node; n && n !== body; n = n.parentNode) { chain.push(n); keys.push(nodeKey(n)); }
+    chain.push(body);
+    return {chain: chain, keys: keys, text: node.textContent};
+  }
+  function twins(parent, keys, k, hits) {
+    var kids = parent.children;
+    for (var i = 0; i < kids.length; i++) {
+      if (nodeKey(kids[i]) !== keys[k]) continue;
+      if (k === 0) hits.push(kids[i]); else twins(kids[i], keys, k - 1, hits);
+    }
+  }
+  function keyed(key) { return key.indexOf('[') > 0; }
+  function owner(node, root) {
+    for (var n = node.parentNode; n !== root; n = n.parentNode) if (keyed(nodeKey(n))) return nodeKey(n);
+    return null;
+  }
+  function owned(node, key, mine, root, hits) {
+    var kids = node.children;
+    for (var i = 0; i < kids.length; i++) {
+      if (nodeKey(kids[i]) === key && owner(kids[i], root) === mine) hits.push(kids[i]);
+      owned(kids[i], key, mine, root, hits);
+    }
+    return hits;
+  }
+  function locate(at) {
+    var i = 0;
+    while (!at.chain[i].isConnected) i++;
+    if (!i) return {root: at.chain[0], node: at.chain[0]};
+    var hits = [];
+    twins(at.chain[i], at.keys, i - 1, hits);
+    if (!hits.length) {
+      var mine = at.keys.slice(1, i).filter(keyed)[0] || null;
+      hits = owned(at.chain[i], at.keys[0], mine, at.chain[i], []);
+    }
+    var same = hits.filter(function (h) { return h.textContent === at.text; });
+    return {root: at.chain[i], node: same[0] || (hits.length === 1 ? hits[0] : null)};
+  }
+  function scrolled(node, out) {
+    var kids = node.children;
+    for (var i = 0; i < kids.length; i++) {
+      var c = kids[i];
+      if (c.scrollLeft || c.scrollTop) out.push({at: locator(c), left: c.scrollLeft, top: c.scrollTop});
+      scrolled(c, out);
+    }
+    return out;
+  }
+  function keepPlace(redraw) {
+    var active = document.activeElement;
+    var focus = active && active !== body ? locator(active) : null;
+    var boxes = scrolled(body, []);
+    redraw();
+    boxes.forEach(function (b) {
+      var box = locate(b.at).node;
+      if (box) { box.scrollLeft = b.left; box.scrollTop = b.top; }
+    });
+    if (!focus || active.isConnected) return;
+    var found = locate(focus);
+    var target = found.node;
+    if (!target) {
+      for (target = found.root; target && target !== body && target.hidden; target = target.parentNode) {}
+      if (!target || target === body) return;
+      if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    }
+    target.focus({preventScroll: true});
+  }
+
   function render(d) {
     latest = d;
     tickers = [];
     nextKeys = {};
-    RENDERERS.forEach(function (draw) {
-      try { draw(d); } catch (err) { if (window.console) console.error('dashboard panel', err); }
+    keepPlace(function () {
+      RENDERERS.forEach(function (draw) {
+        try { draw(d); } catch (err) { if (window.console) console.error('dashboard panel', err); }
+      });
+      PX.bind();
     });
-    scrollTrails();
-    PX.bind();
     prevKeys = nextKeys;
     firstRender = false;
     healthKey = agedHealth(d).key;

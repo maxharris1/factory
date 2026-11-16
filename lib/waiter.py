@@ -140,14 +140,17 @@ from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
 from lib import device_deploy, job_token
 from lib.harness_env import ApproverProfileExposed, harness_environ
-from lib.handoff_check import ReadError, expected_for, gh_reader
+from lib.handoff_check import Expected, Read, ReadError, expected_for, gh_reader, ready_head
 from lib.handoff_check import problems as handoff_problems
 from lib.handoff_marker import handoff_marker
 from lib.heal import Webhook
 from lib.health import LOADED_VERSION, checkout_sha
-from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
+from lib.orch_yml import Approvals, OrchConfig, approvals, load_orch_yml
+from lib.pre_ready import ContextUnavailable, check_environ, spec_for
+from lib.pre_ready import run as run_pre_ready
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import (
+    PRE_READY_FAILED,
     ClaimProofError,
     Job,
     Proof,
@@ -171,7 +174,15 @@ from lib.wait import (
     lock_backoff,
     retry_locked,
 )
-from lib.worktrees import pid_alive, pid_gone, process_start, url_template
+from lib.worktrees import (
+    WorktreeError,
+    detached_checkout,
+    pid_alive,
+    pid_gone,
+    process_start,
+    url_template,
+    work_root,
+)
 
 GH_ARGV_PREFIX = ("gh", "api", "-X", "GET")
 GH_TIMEOUT_SECONDS = 30.0
@@ -1211,14 +1222,11 @@ class Waiter:
             errors = [item.message for item in findings if item.severity == "error"]
             if config is None or errors:
                 raise ValueError(f"{self.orch_yml}: {errors[0] if errors else 'invalid configuration'}")
-            found = handoff_problems(
-                expected_for(job_from_row(row), self.bot),
-                comment_id,
-                gh_reader(),
-                config.trusted_logins,
-            )
+            expected = expected_for(job_from_row(row), self.bot)
+            read = gh_reader()
+            found = handoff_problems(expected, comment_id, read, config.trusted_logins)
             if not found:
-                return None
+                return self._refused_by_pre_ready(job_id, comment_id, proof, config, expected, read)
             detail = "; ".join(found)
             retry_locked(
                 lambda: self.queue.record_invalid_handoff(
@@ -1226,12 +1234,59 @@ class Waiter:
                     proof=proof,
                 )
             )
-        except (ReadError, ValueError, QueueError, sqlite3.Error, OSError) as exc:
+        except (
+            ReadError, ContextUnavailable, WorktreeError, ApproverProfileExposed, ValueError,
+            QueueError, sqlite3.Error, OSError,
+        ) as exc:
             reason = f"could not check handoff {comment_id}: {_one_line(exc)}"
             self.log(f"job {job_id}: {reason}")
             return reason
         reason = f"submitted-invalid {comment_id}: {detail}"
         self.log(f"job {job_id}: {reason}")
+        return reason
+
+    def _refused_by_pre_ready(
+        self,
+        job_id: str,
+        comment_id: str,
+        proof: Proof | None,
+        config: OrchConfig,
+        expected: Expected,
+        read: Read,
+    ) -> str | None:
+        """#503: a fitting ready runs the base factory.md's review.pre_ready
+        at the ready's head, in a throwaway worktree of the shared clone (the
+        remote run's checkout is on its device)."""
+        head = ready_head(expected, comment_id, read)
+        if head is None:
+            return None
+        spec = spec_for(GhContextSource(config), expected.repo)
+        if spec is None:
+            return None
+        with detached_checkout(
+            work_root(None), expected.repo, head, url_template(None)
+        ) as checkout:
+            result = run_pre_ready(
+                spec, checkout, head, check_environ(os.environ, approvals(config))
+            )
+        if result.passed:
+            retry_locked(
+                lambda: self.queue.record_pre_ready_passed(
+                    job_id, comment_id=comment_id, head=head, proof=proof
+                )
+            )
+            return None
+        detail = f"pre_ready failed: {result.reason}"
+        retry_locked(
+            lambda: self.queue.record_invalid_handoff(
+                job_id, owner=self.recipient, comment_id=comment_id, detail=detail,
+                proof=proof, event=PRE_READY_FAILED,
+            )
+        )
+        reason = f"pre_ready failed {comment_id}: {result.reason}"
+        self.log(f"job {job_id}: {reason}")
+        if result.tail:
+            self.log(f"job {job_id}: pre_ready output:\n{result.tail}")
         return reason
 
     def _forget_remote(self, job_dir: Path) -> None:
