@@ -153,6 +153,41 @@ def test_a_timed_out_upload_leaves_no_scp_or_ssh_running(tmp_path, monkeypatch) 
             os.kill(pid, signal.SIGKILL)
 
 
+def test_an_interrupted_upload_leaves_no_scp_or_ssh_running(tmp_path) -> None:
+    bin_dir, pids = hanging_scp(tmp_path)
+    page = tmp_path / "status.json"
+    page.write_text("{}")
+    send = (
+        "import signal\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+        "from lib.dashboard_push import SshTransport\n"
+        "SshTransport('pc-wsl-cursor-bot', '/srv/d', method='scp', timeout=60)"
+        f".send([Path({str(page)!r})])\n"
+    )
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PYTHONPATH": str(ROOT),
+    }
+    caller = subprocess.Popen(
+        [sys.executable, "-c", send], env=env, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not pids.exists() or len(pids.read_text().split()) < 2:
+            assert time.monotonic() < deadline, "fake scp and ssh did not start"
+            time.sleep(0.01)
+        caller.send_signal(signal.SIGINT)
+        _, stderr = caller.communicate(timeout=10)
+        assert "KeyboardInterrupt" in stderr
+        assert running(pids) == []
+    finally:
+        if caller.poll() is None:
+            caller.kill()
+        for pid in running(pids) if pids.exists() else []:
+            os.kill(pid, signal.SIGKILL)
+
+
 def test_a_poll_cycle_push_that_times_out_keeps_cycles_on_time_and_leaves_no_ssh(
     tmp_path,
 ) -> None:

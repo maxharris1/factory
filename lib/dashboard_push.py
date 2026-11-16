@@ -113,25 +113,36 @@ def run_in_own_group(
     check: bool = False,
     **kwargs: object,
 ) -> subprocess.CompletedProcess:
-    """`subprocess.run`, except that a timeout kills the program's whole
-    process group: scp and rsync run ssh as a child, and killing only the
-    program leaves that ssh running."""
+    """`subprocess.run`, except that a timeout or an interruption kills the
+    program's whole process group: scp and rsync run ssh as a child, and
+    killing only the program leaves that ssh running."""
     if capture_output:
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     with subprocess.Popen(argv, start_new_session=True, **kwargs) as process:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+        except BaseException:
+            kill_group(process)
             raise
     result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if check:
         result.check_returncode()
     return result
+
+
+def kill_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
 
 
 class SshTransport:
