@@ -346,8 +346,8 @@ FOLLOW_UP_KINDS = ("review-followups",)
 
 
 def wording_follow_up_rounds(rule_id: str) -> None:
-    later = {"followup_from": 2, "round_number": 2, "auto_extra": 0}
-    first = {"followup_from": 2, "round_number": 1, "auto_extra": 0}
+    later = {"followup_from": 2, "round_number": 2, "auto_extra": 0, "block_on": "any-failure"}
+    first = {"followup_from": 2, "round_number": 1, "auto_extra": 0, "block_on": "any-failure"}
     phrase = brief_rules.RULE_PHRASES[rule_id]
     assert phrase in brief_rules.review_rules(later)
     assert phrase not in brief_rules.review_rules(first)
@@ -409,6 +409,18 @@ def refused(rule_id: str, check: Callable[[Path], None]) -> Callable[[], None]:
     return lambda: (carried(rule_id), in_a_fresh_flow(check))
 
 
+USER_IMPACT_KINDS = ("review-user-impact", "review-user-impact-round-2")
+
+
+def wording_user_impact(rule_id: str) -> None:
+    phrase = brief_rules.RULE_PHRASES[rule_id]
+    for round_number in (1, 2):
+        facts = {"followup_from": None, "round_number": round_number, "auto_extra": 0}
+        assert phrase in brief_rules.review_rules({**facts, "block_on": "user-impact"})
+        assert phrase not in brief_rules.review_rules({**facts, "block_on": "any-failure"})
+    carried(rule_id, USER_IMPACT_KINDS, side="box")
+
+
 ENFORCED: dict[str, Callable[[], None]] = {
     "rule-post-only": refused("rule-post-only", refuses_posts_outside_the_job),
     "review-one-reviewer": refused("review-one-reviewer", refuses_a_verdict_from_the_builder),
@@ -433,6 +445,8 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "review-low-risk-rounds": wording("review-low-risk-rounds"),
     "review-gate-retries": wording("review-gate-retries"),
     "review-follow-ups": lambda: wording_follow_up_rounds("review-follow-ups"),
+    "review-user-impact-bar": lambda: wording_user_impact("review-user-impact-bar"),
+    "review-user-impact-approve": lambda: wording_user_impact("review-user-impact-approve"),
     "review-ship-pinned": wording("review-ship-pinned"),
     "review-ac-met": wording("review-ac-met"),
     "review-ac-unmet": wording("review-ac-unmet"),
@@ -540,7 +554,7 @@ def test_every_relative_file_a_brief_names_exists(kind: str) -> None:
             assert any((root / rel).is_file() for root in roots), f"{kind} names missing {rel}"
 
 
-REVIEW_FACTS = {"round": "2/3", "cap": 3, "head": HEADS[0], "risk": "low", "followup_from": None, "round_number": 2}
+REVIEW_FACTS = {"round": "2/3", "cap": 3, "head": HEADS[0], "risk": "low", "followup_from": None, "round_number": 2, "block_on": "any-failure"}
 
 
 def template(kind: str) -> str:

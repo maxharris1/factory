@@ -1,7 +1,8 @@
 """Follow-up filings (issue #259): record at T3/T4, then file and link once.
 
 T3 and T4 record a pending row for a trusted verdict they accept whose
-`[follow-up]` items fall from factory.md review.followup_from_round on. The
+`[follow-up]` items fall from factory.md review.followup_from_round on, or
+from round 1 under review.block_on: user-impact. The
 drain runs after the comment pass: pending -> filed (the issue exists) ->
 commented (the PR links it). Each tracker write first looks for its marker,
 so a crash between a write and its status update never writes twice.
@@ -18,6 +19,7 @@ from lib.followups import (
     followup_findings,
     followup_issue,
     followup_marker,
+    followup_start,
     followups_active,
     link_comment,
     link_marker,
@@ -35,7 +37,8 @@ class FollowupsMixin:
     ) -> None:
         if ticket.factory.tickets != "github" or round_number is None:
             return
-        if not followups_active(ticket.factory.followup_from_round, round_number):
+        start = followup_start(ticket.factory.followup_from_round, ticket.factory.block_on)
+        if not followups_active(start, round_number):
             return
         findings = followup_findings(comment.body)
         if not findings:
