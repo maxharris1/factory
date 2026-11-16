@@ -649,11 +649,24 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   `forward refused: port PORT already forwarded on HOST; retry in Ns`.
   After `LINEAR_WEBHOOK_REFUSED_LIMIT` refusals in a row (default 3), the
   loop writes `linear-webhook-tunnel.held` (`PORT HOST`) beside `ORCH_DB`
-  (default: the state directory's `orch.db`) and starts no more ssh for that
-  port and host (issue #427). `orch health` then shows the tunnel down, whatever
+  (default: the state directory's `orch.db`) and starts no tunnel while it
+  stays (issue #427). `orch health` then shows the tunnel down, whatever
   answers the public URL, with `port held by another owner: PORT on HOST`, and self-heal
-  raises one alert and does not restart it. Free the port and run `start`,
-  or move this device to another port and run `restart`.
+  raises one alert and does not restart it.
+- A held tunnel recovers by itself (issue #581). At once, and then every
+  `LINEAR_WEBHOOK_HELD_RETRY_SEC` (default 300, whole seconds), the loop
+  reclaims and probes. The reclaim is one ssh to the tunnel host that runs
+  `ss -Hltnp "sport = :PORT"`, logs each listener as the holder, and sends
+  SIGTERM to those named `sshd` or `sshd-session`. These are the tunnel's
+  own stale sessions: sshd on the tunnel host can keep a dead tunnel's
+  forward for hours, and ss names only the ssh user's own processes. Any
+  other holder is left alone and logged as `held by <users>`. The probe is
+  `ssh -o ExitOnForwardFailure=yes -R 127.0.0.1:PORT:127.0.0.1:PORT HOST true`.
+  When it succeeds, the loop removes the held record and starts the tunnel.
+  Until then the record stays as written, so health never sees a gap.
+  `status` shows the last holder. `start` removes the record and the loop
+  retries at once; `restart` keeps it. To move this device to another port,
+  set it and run `restart`.
 - After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`
   (default 5), doubling up to `LINEAR_WEBHOOK_RETRY_MAX_SEC` (default 60). A
   longer run resets the wait.

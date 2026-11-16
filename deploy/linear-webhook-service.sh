@@ -58,11 +58,21 @@
 # A tunnel refused with "remote port forwarding failed" is logged as such.
 # After LINEAR_WEBHOOK_REFUSED_LIMIT refusals in a row (default 3) the loop
 # writes linear-webhook-tunnel.held (`PORT HOST`) beside ORCH_DB (default
-# STATE/orch.db), where orch health reads it, and starts no more ssh for that
-# port and host: health reports "port held by another owner" and self-heal
-# raises one alert instead of restarting (issue #427). A loop started on
-# another port or host removes the record; on the same port and host it waits
-# until `start` removes it. restart keeps it.
+# STATE/orch.db), where orch health reads it: health reports "port held by
+# another owner" and self-heal raises one alert instead of restarting (issue
+# #427). While held, the loop starts no tunnel. At once and then every
+# LINEAR_WEBHOOK_HELD_RETRY_SEC it reclaims and probes (issue #581):
+#   reclaim: one ssh to HOST runs `ss -Hltnp "sport = :PORT"`, logs each
+#     listener as the holder (kept in linear-webhook-tunnel.holder for
+#     status), and sends SIGTERM to those named sshd or sshd-session. ss names
+#     only the ssh user's own processes, so this ends only the tunnel's own
+#     stale sessions (sshd there may keep a dead tunnel's forward for hours);
+#     any other holder is left alone and logged as `held by <users>`.
+#   probe: `ssh -o ExitOnForwardFailure=yes -R ... HOST true`. Exit 0 removes
+#     the record and the loop starts the tunnel again; otherwise the record
+#     stays, untouched, so health sees no gap and dates the outage from it.
+# start removes the record and the waiting loop retries at once; restart
+# keeps it. A loop started on another port or host removes it.
 #
 # stop finds every loop for this state directory: each process whose argv is
 # `.../linear-webhook-service.sh _listener-loop|_tunnel-loop` (any copy of the
@@ -80,8 +90,10 @@
 #                                the same on both ends of the tunnel; default:
 #                                the number in ~/.config/factory/linear-webhook.port
 #                                (this device's setting), else 8787
-#   LINEAR_WEBHOOK_REFUSED_LIMIT refusals in a row before the tunnel gives up
+#   LINEAR_WEBHOOK_REFUSED_LIMIT refusals in a row before the tunnel is held
 #                                (default 3)
+#   LINEAR_WEBHOOK_HELD_RETRY_SEC whole seconds between a held tunnel's
+#                                reclaim and probe runs (default 300)
 #   LINEAR_WEBHOOK_TUNNEL_HOST   ssh alias for the tunnel (default
 #                                pc-wsl-cursor-bot; empty runs no tunnel)
 #   LINEAR_WEBHOOK_RETRY_SEC, LINEAR_WEBHOOK_RETRY_MAX_SEC   backoff (above)
@@ -131,6 +143,8 @@ if [[ -z "$PORT" && -r "$PORT_FILE" ]]; then
 fi
 PORT="${PORT:-8787}"
 HELD="$(dirname "${ORCH_DB:-${STATE}/orch.db}")/linear-webhook-tunnel.held"
+HOLDER="${STATE}/linear-webhook-tunnel.holder"
+HELD_RETRY="${LINEAR_WEBHOOK_HELD_RETRY_SEC:-300}"
 REFUSED_LIMIT="${LINEAR_WEBHOOK_REFUSED_LIMIT:-3}"
 TUNNEL_HOST="${LINEAR_WEBHOOK_TUNNEL_HOST-pc-wsl-cursor-bot}"
 RETRY="${LINEAR_WEBHOOK_RETRY_SEC:-5}"
@@ -166,8 +180,9 @@ need_flock() {
 check_settings() {
     local number='^[0-9]+([.][0-9]+)?$'
     if ! [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ && "$RETRY" =~ $number && "$RETRY_MAX" =~ $number &&
-        "$START_WAIT" =~ ^[0-9]+$ && "$STOP_WAIT" =~ ^[0-9]+$ && "$REFUSED_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
-        say "LINEAR_WEBHOOK_PORT (or ${PORT_FILE}), *_SEC, *_WAIT and *_LIMIT must be numbers" >&2
+        "$START_WAIT" =~ ^[0-9]+$ && "$STOP_WAIT" =~ ^[0-9]+$ && "$REFUSED_LIMIT" =~ ^[1-9][0-9]*$ &&
+        "$HELD_RETRY" =~ ^[1-9][0-9]*$ ]]; then
+        say "LINEAR_WEBHOOK_PORT (or ${PORT_FILE}), *_SEC, *_WAIT and *_LIMIT must be numbers (LINEAR_WEBHOOK_HELD_RETRY_SEC whole seconds, at least 1)" >&2
         exit 2
     fi
     if [[ -n "$TUNNEL_HOST" && ! "$TUNNEL_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]; then
@@ -309,8 +324,63 @@ held_here() {
     [[ "$(cat "$HELD" 2>/dev/null)" == "${PORT} ${TUNNEL_HOST}" ]]
 }
 
+# Runs on the tunnel host (see the header); @PORT@ becomes the checked PORT.
+read -r -d '' RECLAIM <<'EOF' || true
+listeners=$(ss -Hltnp "sport = :@PORT@") || exit 1
+[ -n "$listeners" ] || exit 0
+own='\("sshd(-session)?",pid=[0-9]+'
+printf '%s\n' "$listeners" | sed 's/^/holder: /'
+printf '%s\n' "$listeners" | grep -vE "$own" |
+    sed -E -e 's/.*(users:.*)/held by \1/' -e t -e 's/.*/held by another user/'
+pids=$(printf '%s\n' "$listeners" | grep -oE "$own" | sed 's/.*=//')
+[ -n "$pids" ] || exit 0
+echo "ending sshd" $pids
+kill -TERM $pids
+i=0
+while [ "$i" -lt 10 ] && [ -n "$(ss -Hltn "sport = :@PORT@")" ]; do
+    sleep 1
+    i=$((i + 1))
+done
+EOF
+
+# End this user's sshd sessions still forwarding PORT on TUNNEL_HOST, and
+# log every holder; HOLDER keeps the last report for status.
+reclaim() {
+    local errors="$1" line
+    run_child ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 "$TUNNEL_HOST" "${RECLAIM//@PORT@/$PORT}" \
+        >"${HOLDER}.tmp" 2>"$errors"
+    cat "$errors" >&2 2>/dev/null || true
+    while IFS= read -r line; do
+        say "reclaim on ${TUNNEL_HOST}: ${line}"
+    done <"${HOLDER}.tmp"
+    if ((STATUS == 0)); then
+        mv -f "${HOLDER}.tmp" "$HOLDER"
+    else
+        rm -f "${HOLDER}.tmp"
+        stopping || say "reclaim on ${TUNNEL_HOST} exited ${STATUS}"
+    fi
+}
+
+# Can the forward bind now? The held record stays on disk throughout.
+probe() {
+    run_child ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=30 \
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+        -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" true 2>"$1"
+    cat "$1" >&2 2>/dev/null || true
+    ((STATUS == 0))
+}
+
+# Wait HELD_RETRY seconds, or less once start clears the held record.
+held_wait() {
+    local until=$((SECONDS + HELD_RETRY))
+    while held_here && ! stopping && ((SECONDS < until)); do
+        pause "$RETRY_MAX"
+    done
+}
+
 tunnel_loop() {
-    local delay="$RETRY" started errors refused=0 waiting=""
+    local delay="$RETRY" started errors refused=0
     [[ -n "$TUNNEL_HOST" ]] || {
         say "LINEAR_WEBHOOK_TUNNEL_HOST is empty; no tunnel" >&2
         exit 1
@@ -320,12 +390,18 @@ tunnel_loop() {
     held_here || rm -f "$HELD"
     while ! stopping; do
         if held_here; then
-            [[ -n "$waiting" ]] || say "port ${PORT} on ${TUNNEL_HOST} is held by another owner; not starting ssh until start clears ${HELD}"
-            waiting=1
-            pause "$RETRY_MAX"
-            continue
+            reclaim "$errors"
+            stopping && break
+            if ! probe "$errors"; then
+                stopping && break
+                say "port ${PORT} on ${TUNNEL_HOST} is held by another owner; next reclaim and probe in ${HELD_RETRY}s (start retries at once)"
+                held_wait
+                continue
+            fi
+            rm -f "$HELD" "$HOLDER"
+            say "port ${PORT} on ${TUNNEL_HOST} is free again; resuming the tunnel"
+            delay="$RETRY"
         fi
-        waiting=""
         started="$SECONDS"
         say "starting ssh -R 127.0.0.1:${PORT}:127.0.0.1:${PORT} ${TUNNEL_HOST}"
         if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
@@ -344,7 +420,7 @@ tunnel_loop() {
             refused=$((refused + 1))
             if ((refused >= REFUSED_LIMIT)); then
                 printf '%s %s\n' "$PORT" "$TUNNEL_HOST" >"$HELD"
-                say "forward refused ${refused} times: port ${PORT} on ${TUNNEL_HOST} is held by another owner; giving up (free the port or set ${PORT_FILE}, then run start)"
+                say "forward refused ${refused} times: port ${PORT} on ${TUNNEL_HOST} is held by another owner; reclaiming it, then probing every ${HELD_RETRY}s"
                 refused=0
                 continue
             fi
@@ -650,8 +726,10 @@ status() {
         pid="$(head -n 1 "$(pid_file "$mode")" 2>/dev/null || true)"
         if lock_held "$mode"; then
             echo "${mode}: running (lock held; pidfile names ${pid:-nothing})"
-            [[ "$mode" != tunnel ]] || ! held_here ||
-                echo "tunnel: port ${PORT} on ${TUNNEL_HOST} held by another owner; run start once it is free"
+            if [[ "$mode" == tunnel ]] && held_here; then
+                echo "tunnel: port ${PORT} on ${TUNNEL_HOST} held by another owner; reclaim and probe every ${HELD_RETRY}s, or run start to retry now"
+                [[ ! -s "$HOLDER" ]] || sed 's/^/tunnel: last reclaim: /' "$HOLDER"
+            fi
         else
             echo "${mode}: not running"
             status=3
