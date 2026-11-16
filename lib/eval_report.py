@@ -79,6 +79,8 @@ snapshot prints as unrecorded:
 - PRs capped: capped now, or a capped review_events outcome
 - PRs dirty after approval: tickets with an update-from-main job
 - duplicate handoffs: duplicate-verdict handled comments
+- refused approvals: rejected-approve-* handled comments (#508). A snapshot
+  from before #508 has no approve_rule_floor table and prints unrecorded
 - BLOCKED stops: tickets in blocked
 - tickets succeeded: merged or done; Aut0 counts at handed-off (Ready for
   Review)
@@ -89,8 +91,8 @@ snapshot prints as unrecorded:
   lib.remote.preflight raises (PREFLIGHT_FAILURE). An unreachable device
   counts: preflight is a job's first ssh call
 - slot-hours lost: telemetry elapsed time of failed and cancelled jobs
-- hand-written gos, ac=unmet with APPROVE, submitted-invalid, repeat-block
-  and unsatisfiable stops: nothing records these yet
+- hand-written gos, submitted-invalid, repeat-block and unsatisfiable
+  stops: nothing records these yet
 
 This module does not correct, reflect, run blinded evals, or maintain.
 """
@@ -1001,7 +1003,6 @@ PREFLIGHT_FAILURE = re.compile(
 REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
 UNRECORDED_METRICS = (
     "hand-written-gos",
-    "ac-unmet-approve",
     "submitted-invalid",
     "repeat-block-stops",
     "unsatisfiable-stops",
@@ -1070,6 +1071,17 @@ def _metric_values(
                 tables,
                 ("handled_comments",),
                 "SELECT COUNT(*) FROM handled_comments WHERE outcome = 'duplicate-verdict'",
+            ),
+        )
+    )
+    values.append(
+        (
+            "refused-approvals",
+            _scalar(
+                connection,
+                tables,
+                ("handled_comments", "approve_rule_floor"),
+                "SELECT COUNT(*) FROM handled_comments WHERE outcome LIKE 'rejected-approve-%'",
             ),
         )
     )

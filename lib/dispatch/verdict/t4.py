@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from lib.approve_rule import ApproveRefusal, approve_refusal
 from lib.dispatch.constants import MERGED_BEFORE_HANDOFF
 from lib.dispatch.helpers import (
     _comment_link,
@@ -20,6 +21,7 @@ from lib.dispatch.types import (
     RetryableStateError,
     TrackedTicket,
 )
+from lib.handoff import parse_comment
 
 
 class T4Mixin:
@@ -52,6 +54,9 @@ class T4Mixin:
         replayed = self._replay_held_base_update(ticket, comment)
         if replayed is not None:
             return replayed
+        refusal = self._approve_refusal(comment, fields)
+        if refusal is not None:
+            return True, refusal.outcome
         approved_head = fields["head"]
         state, review_round = self._review_context(ticket)
         reported_round = _round_number(fields.get("round"))
@@ -229,6 +234,15 @@ class T4Mixin:
         except Exception as exc:
             self._ship_raised(ticket, approve, exc)
             return True, f"failed-{type(exc).__name__}"
+
+    def _approve_refusal(
+        self, comment: Comment, fields: Mapping[str, str]
+    ) -> ApproveRefusal | None:
+        with self._connect() as connection:
+            since = connection.execute("SELECT since FROM approve_rule_floor").fetchone()[0]
+        if comment.created_at < since:
+            return None
+        return approve_refusal(fields, parse_comment(comment.body).body)
 
     def _approve_ci_red_fix(
         self,

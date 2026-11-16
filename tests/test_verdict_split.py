@@ -36,6 +36,7 @@ RULE_MODULE = {
     "_held_approval_gate": "t4",
     "_ship_approval": "t4",
     "_ship_covered": "t4",
+    "_approve_refusal": "t4",
     "_t_blocked": "blocked",
     "_blocked_by_another": "blocked",
     "_blocked_review_recorded": "blocked",

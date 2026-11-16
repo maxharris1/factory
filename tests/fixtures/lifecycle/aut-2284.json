@@ -6,6 +6,6 @@
   "comments": [
     ["aut-2284-go", "linear:grok", "2026-11-11T15:00:00Z", "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building risk=high -->"],
     ["aut-2284-ready", "maxharris1", "2026-11-11T16:10:00Z", "<!-- orch:v1 kind=ready from=claude-bot role=builder head=1111111111111111111111111111111111111111 -->"],
-    ["aut-2284-approve", "maxharris1", "2026-11-11T16:40:00Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=1111111111111111111111111111111111111111 verdict=APPROVE risk=high -->"]
+    ["aut-2284-approve", "maxharris1", "2026-11-11T16:40:00Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=1111111111111111111111111111111111111111 ac=met verdict=APPROVE risk=high -->"]
   ]
 }
