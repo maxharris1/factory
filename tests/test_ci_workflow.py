@@ -124,3 +124,28 @@ def test_macos_runs_on_every_non_pr_event_and_on_prs_the_changes_job_flags() -> 
     assert "pytest tests/test_process_discovery.py -p no:xdist -s -rs" in [
         step.get("run") for step in macos["steps"]
     ]
+
+
+@pytest.mark.parametrize("source", ["lib/remote.py", "tests/test_process_discovery.py"])
+def test_a_pr_renaming_a_macos_path_away_runs_the_macos_job(tmp_path: Path, source: str) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "lib").mkdir()
+    (repo / "tests").mkdir()
+    (repo / source).write_text("def body():\n    return 1\n" * 20, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "mv", source, "lib/renamed.py")
+    _git(repo, "commit", "-q", "-m", "rename")
+    head = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "diff", "--name-status", "-M", f"{base}...{head}").startswith("R100")
+    output = tmp_path / "github_output"
+    output.write_text("", encoding="utf-8")
+    env = {**os.environ, "BASE_SHA": base, "HEAD_SHA": head, "GITHUB_OUTPUT": str(output)}
+    result = subprocess.run(
+        ["bash", "-c", _changes_step()["run"]], cwd=repo, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == ["macos=true"]

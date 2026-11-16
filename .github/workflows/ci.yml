@@ -49,7 +49,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          changed=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
           if grep -qxF \
             -e .github/workflows/ci.yml \
             -e lib/job_run.py \
