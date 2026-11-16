@@ -112,6 +112,7 @@ class QuestionsMixin:
                     **paused,
                 },
             )
+            self._cancel_paused_step(connection, ticket, comment, action, recipient)
             self.queue.enqueue_in_transaction(
                 connection,
                 self._grok_request(
@@ -136,6 +137,32 @@ class QuestionsMixin:
             )
             connection.commit()
         return "waiting-max"
+
+    def _cancel_paused_step(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        action: str,
+        recipient: str,
+    ) -> None:
+        if recipient == "grok":
+            return
+        rows = connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+              AND action = ? AND recipient = ?
+            """,
+            (ticket.repo.lower(), ticket.ticket_id, action, recipient),
+        ).fetchall()
+        for row in rows:
+            self.queue.cancel(row["id"], f"paused-by:{comment.id}", connection=connection)
+            if self.log is not None:
+                self.log(
+                    f"skipped {action}: paused by {comment.id} "
+                    f"({ticket.repo}#{ticket.ticket_id})"
+                )
 
     def _t5_answers(
         self,
@@ -406,7 +433,8 @@ class QuestionsMixin:
         replay that met a plan of another round, or a ready at a head the PR
         does not have, left the ticket with no runnable work. A held step
         whose source comment the read lacks is queued again: nothing shows
-        it was answered.
+        it was answered. A step that waits on Max, or that his answers
+        resumed, stays cancelled: only those answers run it again (#449).
         """
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
         if self._is_stuck(ticket) or self._review_context(ticket)[0] in FINISHED_STATES:
@@ -444,6 +472,8 @@ class QuestionsMixin:
                 continue
             job = _job(row)
             if job.request.action == "review" and self._open_fix_for_head(job):
+                continue
+            if self._resumed_by_answers(job) or self._waiting_max(job):
                 continue
             if source is None or self._answered_by(
                 ticket,
