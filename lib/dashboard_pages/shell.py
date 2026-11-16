@@ -1138,7 +1138,7 @@ STATUS_LINKS = {
     "webhook": "index.html#linear-webhook",
     "feeder": "index.html#feeder",
     "components": "health.html#components",
-    "version": "health.html#components",
+    "version": "health.html#drift",
 }
 
 

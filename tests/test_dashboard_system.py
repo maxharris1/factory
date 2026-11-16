@@ -128,6 +128,22 @@ def test_status_line_links_land_on_system_panels(tmp_path: Path) -> None:
 
 
 
+def _version_href(statusline: str) -> list[str]:
+    return re.findall(r'href="([^"]+)" data-seg="version"', statusline)
+
+
+def test_version_segment_links_to_the_drift_panel(tmp_path: Path) -> None:
+    html = render_pages(_snapshot(tmp_path))["health.html"]
+    assert _version_href(_no_script(html)) == ["health.html#drift"]
+    assert 'id="drift"' in _no_script(html)
+
+
+@needs_node
+def test_script_version_segment_links_to_the_drift_panel(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud"])
+    assert _version_href(out["html"]["statusline"]) == ["health.html#drift"]
+
+
 def test_drift_colours_newest_older_and_unknown(tmp_path: Path) -> None:
     html = _no_script(render_pages(_snapshot(tmp_path))["health.html"])
     drift = _section(html, "drift")
