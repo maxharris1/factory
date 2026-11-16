@@ -1,0 +1,10 @@
+decision	choice	why
+playbook	figure-it-out with Feature steps, one owner, no fan-out	the current router requires figure-it-out; the work is prose plus one test file
+delegation	the owner wrote the diff, no poteto-agent	two short prose files and one test file under a 60-minute budget; the review gives the separation
+tests first	new tests in tests/test_router_skills.py ran red on main's routers (18 failed) before the rewrite	baseline for ac-5
+<kit> placeholder	deslop is <kit>/deslop/SKILL.md, checked against skills.lock kit:	the brief's skill list does not carry deslop, and an absolute path is unknowable
+external-actions row	folded into the questions row; not kept as its own table row	posting one handoff is a brief rule, not a headless limit
+agent-prefix row	moved to a prose line; test_pstack_agents reads that line	not a headless limit, but the install fact still matters to Claude
+repeat test	deleted test_reviewer_skill_puts_repeat_in_a_header_that_parses	ac-3 removes the restated rule; test_brief_review covers repeat= and unsat= in the brief
+lock	bump_pin at the same commit and version	only the three factory: hashes changed; verify_pin is clean
+mutation proof	17 mutations, each caught by test_router_skills.py	ac-5

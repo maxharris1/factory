@@ -109,6 +109,7 @@ from markdown_it.token import Token
 
 from lib import attention
 from lib.branch_stack import stack_wait, stacked_pulls
+from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
@@ -1535,7 +1536,7 @@ def _brief(
             body,
             fence,
             "",
-            f"### factory.md (from `{config.base_branch}`)",
+            f"{FACTORY_MD_HEADING}`{config.base_branch}`)",
             prose or "(no prose sections)",
         ]
     )

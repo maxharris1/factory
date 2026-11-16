@@ -105,16 +105,13 @@ def test_a_stale_verdict_handled_late_does_not_answer_the_newer_review(
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
     board.poll()
     board.finish("claude")
-    pr.push(older, ci="failure")
-    board.ready(pr, older, "first-return")
-    board.poll()
-    board.finish("claude")
 
-    revise = VERDICT.format(round="1/3", head=older, verdict="REVISE", risk="high")
+    newer = sha(3)
+    revise = VERDICT.format(round="1/3", head=newer, verdict="REVISE", risk="high")
     board.post(pr, "old-stale-revise", revise, "codex-login")
     hidden = pr.comments.pop()
-    pr.push(older, ci="pending")
-    board.ready(pr, older, "new-review-ready")
+    pr.push(newer, ci="pending")
+    board.ready(pr, newer, "new-review-ready")
     board.poll()
     board.finish("codex")
     pr.push(sha(2), ci="pending")
@@ -122,8 +119,8 @@ def test_a_stale_verdict_handled_late_does_not_answer_the_newer_review(
     board.poll()
     assert board.outcome("old-stale-revise").startswith("stale-")
 
-    pr.push(older, ci="failure")
-    board.ready(pr, older, "red-ready-before-new-verdict")
+    pr.push(newer, ci="failure")
+    board.ready(pr, newer, "red-ready-before-new-verdict")
     board.poll()
     board.post(pr, "new-revise", revise, "codex-login")
     board.poll()
@@ -193,12 +190,9 @@ def test_an_upgrade_backfills_the_post_time_of_a_verdict_recorded_before_it(
     board.poll()
     assert board.outcome("approve-older") == "approve-ci-red-fix"
     board.finish("claude")
-    pr.push(older, ci="failure")
-    board.ready(pr, older, "first-return")
-    board.poll()
-    board.finish("claude")
-    pr.push(older, ci="pending")
-    board.ready(pr, older, "new-review-ready")
+    newer = sha(3)
+    pr.push(newer, ci="pending")
+    board.ready(pr, newer, "new-review-ready")
     board.poll()
     board.finish("codex")
     pr.push(sha(2), ci="pending")
@@ -211,10 +205,15 @@ def test_an_upgrade_backfills_the_post_time_of_a_verdict_recorded_before_it(
         ).fetchone()[0]
     assert posted_at == hidden.created_at
 
-    pr.push(older, ci="failure")
-    board.ready(pr, older, "red-ready-before-new-verdict")
+    pr.push(newer, ci="failure")
+    board.ready(pr, newer, "red-ready-before-new-verdict")
     board.poll()
-    board.post(pr, "new-revise", revise, "codex-login")
+    board.post(
+        pr,
+        "new-revise",
+        VERDICT.format(round="1/3", head=newer, verdict="REVISE", risk="high"),
+        "codex-login",
+    )
     board.poll()
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]

@@ -66,6 +66,10 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
         "held-base-update",
     }
 )
+# A transition that only an approval won in another state can take: fixing ->
+# ship ships the APPROVE a review left on red CI (T2ReadyCovered), so a path
+# that skips review never takes it.
+EARNED_IN = {("fixing", "ship"): "review"}
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
 GLOSS = {
@@ -342,7 +346,10 @@ def _every_path_visits(chart: dict | None, origin: str | None, target: str, via:
     if chart is None or origin is None or origin == target:
         return False
     adjacency = _adjacency(chart)
-    avoiding = {name: [nxt for nxt in nexts if nxt != via] for name, nexts in adjacency.items()}
+    avoiding = {
+        name: [nxt for nxt in nexts if via not in (nxt, EARNED_IN.get((name, nxt)))]
+        for name, nexts in adjacency.items()
+    }
     return target in _reach(adjacency, origin) and target not in _reach(avoiding, origin)
 
 

@@ -513,7 +513,7 @@ def brief_comment(
     files = [_one_line(item, "likely file") for item in likely_files]
     body = "".join(
         (
-            _block("Goal", goal.strip()),
+            _block("Goal", _contained(goal.strip())),
             _items("Acceptance criteria", [f"[ ] {item}" for item in criteria]),
             _items("Likely files", files),
             _block("Risk", risk),
@@ -844,6 +844,10 @@ def _items(title: str, items: Sequence[str]) -> str:
 
 def _block(title: str, text: str) -> str:
     return f"**{title}**\n{text}\n\n"
+
+
+def _contained(text: str) -> str:
+    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
 
 
 def _comment(

@@ -138,6 +138,7 @@ CHART_TRANSITIONS = frozenset(
         ("building", "waiting-max"),
         ("review", "fixing"),
         ("fixing", "review"),
+        ("fixing", "ship"),
         ("fixing", "fixing"),
         ("fixing", "stuck"),
         ("review", "capped"),
