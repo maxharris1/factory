@@ -1,9 +1,8 @@
 """The fix job: a REVISE verdict or a red CI run, fixed as a class.
 
 A fix whose `instruction` links a comment is a review-fix: the open findings
-from the evidence bundle are inlined, each fixed by its rule, and a red CI
-named in `ci_failure` is fixed in the same round. Any other instruction is a
-CI-fix.
+from the evidence bundle are inlined, each fixed by its rule. Any other
+instruction is a CI-fix.
 """
 
 from __future__ import annotations
