@@ -209,10 +209,7 @@ SCRIPT_COMPONENTS = r"""
     add(root, el('p', 'sys-note sys-legend', 'up: a beat within ' + (t.stale_beats || 3) + ' intervals (' + (t.beat_seconds || 15) +
       ' s each; device probes every ' + (t.probe_seconds || 60) + ' s) · stale: within ' + (t.down_beats || 8) +
       ' · down: older, stopped or never seen · unknown: this snapshot is too old to tell'));
-    var box = add(root, el('details', 'sys-details'));
-    box.open = openDetails.process !== false;
-    if (box.addEventListener) box.addEventListener('toggle', function () { openDetails.process = box.open; });
-    add(box, el('summary', null, 'process details'));
+    var box = details(root, 'process', 'process details', 'sys-details');
     var ptable = add(add(box, el('div', 'sys-scroll')), el('table', 'sys-table wide'));
     var phead = add(add(ptable, el('thead')), el('tr'));
     ['component', 'bot', 'device', 'state', 'last seen (ET)', 'ago', 'pid', 'version', 'started (ET)'].forEach(function (t) { add(phead, el('th', null, t)); });
@@ -553,7 +550,7 @@ def _components(snapshot: dict) -> str:
         " · unknown: this snapshot is too old to tell"
     )
     details = (
-        '<details class="sys-details" open><summary>process details</summary>'
+        '<details class="sys-details"><summary>process details</summary>'
         '<div class="sys-scroll"><table class="sys-table wide"><thead><tr>'
         + "".join(f"<th>{_e(text)}</th>" for text in heads)
         + "</tr></thead><tbody>"

@@ -24,7 +24,8 @@ from lib.dashboard_flow import load_chart
 from lib.dashboard_page import CSS, render_pages
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
-from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, _text, needs_node
+from tests import test_dashboard_tickets_board as board
+from tests.test_dashboard_layout import BAR, NODE, _no_script, _run_page, _section, _text, needs_node
 from tests.test_project_rules import FIXTURES, fixture_world
 
 NEWEST = "aaaaaaaaaaaa"
@@ -163,7 +164,7 @@ def test_matrix_rows_by_kind_and_columns_by_device(tmp_path: Path) -> None:
     assert kinds == ["poller", "waiter · claude-bot", "waiter · codex-bot", "linear-listener",
                      "device-probe"]
     assert "UP 4s" in _text(matrix.group(1))
-    assert "process details" in html and "<details class=\"sys-details\" open>" in html
+    assert '<details class="sys-details"><summary>process details</summary>' in html
 
 
 @needs_node
@@ -223,6 +224,47 @@ def test_script_process_table_times_drop_the_et_their_header_already_names(tmp_p
     assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
     assert _cells(out["html"]["components"], "health-linear-listener--box")[4::4] == ["never", "—"]
     assert "waiter codex-bot @ box · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
+
+
+DETAILS_HARNESS = board.HARNESS.replace(
+    "    } else if (kind === 'record') {",
+    "    } else if (kind === 'details') {\n"
+    "      const node = pick({cls: 'sys-details'});\n"
+    "      if (arg === 'toggle') { node.open = !node.open; fire(node, 'toggle'); }\n"
+    "      steps.push({open: !!node.open, kept: node === global.lastDetails});\n"
+    "      global.lastDetails = node;\n"
+    "    } else if (kind === 'record') {",
+)
+
+
+def _details_steps(tmp_path: Path, actions: list) -> list[dict]:
+    snapshot = _snapshot(tmp_path)
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["health.html"], flags=re.S)
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "harness.js").write_text(DETAILS_HARNESS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         "health", "", json.dumps(BAR + ["hud", "components"]), json.dumps(actions)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [step for step in json.loads(result.stdout)["steps"] if "open" in step]
+
+
+def test_process_details_start_closed(tmp_path: Path) -> None:
+    components = _section(_no_script(render_pages(_snapshot(tmp_path))["health.html"]), "components")
+    assert re.findall(r"<details[^>]*>", components) == ['<details class="sys-details">']
+
+
+@needs_node
+def test_script_process_details_start_closed_and_stay_open_once_opened(tmp_path: Path) -> None:
+    left = _details_steps(tmp_path / "left", [["details", "look"], ["hashchange", None], ["details", "look"]])
+    assert left == [{"open": False, "kept": False}, {"open": False, "kept": False}]
+    opened = _details_steps(tmp_path / "opened", [["details", "look"], ["details", "toggle"],
+                                                  ["hashchange", None], ["details", "look"]])
+    assert opened == [{"open": False, "kept": False}, {"open": True, "kept": True},
+                      {"open": True, "kept": False}]
 
 
 def _with_no_waiters(snapshot: dict, count: int) -> dict:
