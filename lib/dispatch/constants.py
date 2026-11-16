@@ -39,6 +39,7 @@ GROK_WAKE_REASONS = (
     "awaiting-ok",
     "go-not-from-approver",
 )
+GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})
 CORE_KINDS = ("go", "plan", "ready", "retry")
 RETRY_REJECTION_NOTES = {
     "rejected-retry-author": (

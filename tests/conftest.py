@@ -403,3 +403,10 @@ def _skills_home(tmp_path_factory: pytest.TempPathFactory):
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+
+@pytest.fixture
+def every_wake_reaches_grok(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib.dispatcher import Dispatcher
+
+    monkeypatch.setattr(Dispatcher, "grok_wake_skip", frozenset())

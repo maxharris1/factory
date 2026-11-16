@@ -21,6 +21,7 @@ from tests.test_dispatcher import (
     handled_outcome,
     job_count,
 )
+from tests.test_hooks import skipped_keys
 from tests.test_rounds_and_caps import HEADS
 from tests.test_slash_go import jobs
 from tests.test_unsatisfiable_criterion import revise, to_first_review
@@ -297,13 +298,15 @@ def parked(tmp_path: Path) -> AppFlow:
 @pytest.mark.parametrize(
     ("author", "outcome", "wake"),
     [
-        ("claude-login", "rejected-answers-author", "rejected"),
+        ("claude-login", "rejected-answers-author", None),
         (APP_BOT, "answers-while-repeat-block", "go-not-from-approver"),
         ("grok-login", "answers-while-repeat-block", "go-not-from-approver"),
     ],
     ids=["worker", "factory-app", "factory-login"],
 )
-def test_an_answers_does_not_leave_the_repeat_block(tmp_path: Path, author: str, outcome: str, wake: str) -> None:
+def test_an_answers_does_not_leave_the_repeat_block(
+    tmp_path: Path, author: str, outcome: str, wake: str | None
+) -> None:
     flow = parked(tmp_path)
     before = jobs(flow)
 
@@ -312,7 +315,8 @@ def test_an_answers_does_not_leave_the_repeat_block(tmp_path: Path, author: str,
     assert flow.state()["workflow_state"] == "waiting-max"
     assert flow.state()["paused_action"] == "fix"
     added = [job for job in jobs(flow) if job not in before]
-    assert added == [(wake, "grok", "answers-1")]
+    assert added == ([] if wake is None else [(wake, "grok", "answers-1")])
+    assert skipped_keys(flow.queue) == ([("rejected", "answers-1")] if wake is None else [])
 
 
 def test_a_factory_go_or_a_builder_ready_does_not_leave_the_repeat_block(tmp_path: Path) -> None:

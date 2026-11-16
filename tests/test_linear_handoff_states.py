@@ -43,6 +43,9 @@ from tests.test_github_actions import (
 )
 from tests.test_live_poll import RFR, config, phase_issue
 
+
+pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+
 NO_READY_NOTE = "linear-not-moved: team has no Ready for Review state"
 
 

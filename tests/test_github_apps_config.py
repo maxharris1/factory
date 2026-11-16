@@ -15,7 +15,7 @@ from lib import cli
 from lib.dispatcher import CIResult, Dispatcher
 from lib.evidence.criteria import canonical_brief
 from lib.hook_t7 import T7Hook
-from lib.orch_yml import approvals, load_orch_yml
+from lib.orch_yml import approvals, bot_approver_findings, load_orch_yml
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import (
     ANSWERS,
@@ -154,13 +154,47 @@ def test_switch_on_refuses_an_app_with_no_installation_for_a_project_owner(tmp_p
     assert config is not None, findings
 
 
-def test_switch_on_requires_the_factory_app(tmp_path: Path) -> None:
-    apps = "".join(
-        app_block(bot, 100 + index) for index, bot in enumerate(LOGINS) if bot != "grok-bot"
+def two_worker_apps(*, enabled: bool = True, codex_app: bool = True) -> str:
+    workers = ("claude-bot", "codex-bot") if codex_app else ("claude-bot",)
+    trusted = {LOGINS[bot]: f"[{bot}]" for bot in workers}
+    trusted["maxharris1"] = "[grok-bot, cursor-bot]" if codex_app else "[grok-bot, codex-bot, cursor-bot]"
+    return (
+        "poll_seconds: 30\n"
+        "projects:\n"
+        "  - repo: owner/repo\n"
+        "trusted_logins:\n"
+        + "".join(f"  {login}: {bots}\n" for login, bots in trusted.items())
+        + "approver_logins:\n  - maxharris1\n"
+        + f"github_app:\n  enabled: {'true' if enabled else 'false'}\n  apps:\n"
+        + "".join(app_block(bot, 101 + index) for index, bot in enumerate(workers))
     )
-    assert "github_app.enabled requires github_app.apps.grok-bot" in errors(tmp_path, orch_text(apps=apps))
-    config, findings = load(tmp_path, orch_text(apps=app_block("grok-bot", 7)))
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_switch_on_accepts_apps_for_the_worker_bots_only(tmp_path: Path, enabled: bool) -> None:
+    config, findings = load(tmp_path, two_worker_apps(enabled=enabled))
     assert config is not None, findings
+    assert config.github_app is not None
+    assert sorted(config.github_app.apps) == ["claude-bot", "codex-bot"]
+    assert dict(approvals(config).app_logins) == {
+        CLAUDE.casefold(): "claude-bot",
+        CODEX.casefold(): "codex-bot",
+    }
+    assert cli._check_config(["--orch", str(tmp_path / "orch.yml")]) == 0
+
+
+@pytest.mark.parametrize(
+    ("codex_app", "bots"), [(True, "cursor-bot"), (False, "codex-bot, cursor-bot")]
+)
+def test_a_worker_bot_with_no_app_on_an_approver_login_is_still_reported(
+    tmp_path: Path, codex_app: bool, bots: str
+) -> None:
+    config, findings = load(tmp_path, two_worker_apps(codex_app=codex_app))
+    assert config is not None, findings
+    assert [item.message for item in bot_approver_findings(config)] == [
+        f"login maxharris1 carries harness bot {bots} and is in approver_logins: "
+        "that bot could lift its own cap"
+    ]
 
 
 def test_an_unknown_app_is_refused(tmp_path: Path) -> None:
@@ -472,3 +506,24 @@ def test_a_worker_app_is_trusted_only_for_worker_kinds(tmp_path: Path, enabled: 
     worker_kind = kind in ("plan", "questions", "ready", "verdict", "stuck")
     assert trusted is (worker_kind or not enabled)
     assert dispatcher._trusted(ticket(), comment("c-2", "", author=FACTORY), {**fields, "from": "grok-bot", "role": "orchestrator"}, "grok-bot", role="orchestrator")
+
+
+@pytest.mark.parametrize(
+    ("author", "kind", "bot", "expected"),
+    [
+        *((CLAUDE, kind, "claude-bot", True) for kind in ("plan", "questions", "ready", "verdict", "stuck")),
+        *((CLAUDE, kind, "claude-bot", False) for kind in ("answers", "go", "ok", "decline", "brief")),
+        (CLAUDE, "ready", "codex-bot", False),
+        (CLAUDE, "go", "grok-bot", False),
+        *(("maxharris1", kind, "grok-bot", True) for kind in ("go", "answers", "ok", "brief", "stuck")),
+        *(("maxharris1", kind, "cursor-bot", True) for kind in ("plan", "ready", "verdict")),
+    ],
+)
+def test_two_worker_apps_scope_only_their_own_logins(
+    tmp_path: Path, author: str, kind: str, bot: str, expected: bool
+) -> None:
+    dispatcher, _ = dispatcher_for(tmp_path, two_worker_apps())
+    role = "orchestrator" if bot == "grok-bot" else "builder"
+    fields = {"kind": kind, "from": bot, "role": role}
+
+    assert dispatcher._trusted(ticket(), comment("c-1", "", author=author), fields, bot, role=role) is expected

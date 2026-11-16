@@ -323,11 +323,9 @@ def _ship_failed(
         if claimed is not None and claimed[1] == "shipped":
             return True, "shipped"
     dispatcher.wake_grok_once(
-        repo=ticket.repo,
-        ticket_id=ticket.ticket_id,
+        ticket,
         reason="ship-failed",
         source_comment_id=comment.id,
-        timeout_seconds=ticket.job_timeout_minutes * 60,
         detail=dispatcher._project_wake_detail(ticket, detail),
     )
     return True, "ship-failed"

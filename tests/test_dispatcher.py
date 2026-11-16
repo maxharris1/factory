@@ -33,6 +33,7 @@ from lib.orch_yml import Approvals, load_orch_yml
 from lib.poll_source import IntakeRisks
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 from tests.test_hooks import DECLINE, VerdictTemplate, approve, in_review, say
+from tests.test_hooks import skip_facts
 from tests.test_hooks import setup as setup_with_hooks
 from tests.test_hooks import ticket as approver_ticket
 
@@ -92,6 +93,13 @@ class FakeReviewActions:
         self.events: list[str] = []
         self.titles: list[tuple[str, str]] = []
         self.title_error: Exception | None = None
+
+        self.notices: list[str] = []
+
+    def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
+        del ticket
+        if not any(marker in notice.splitlines() for notice in self.notices):
+            self.notices.append(body)
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         self.states.append(state)
@@ -599,9 +607,8 @@ def test_one_github_login_may_speak_only_for_its_declared_marker(
             ci={head: CIResult("success")},
         )
     )
-    rejected = queue.claim("grok")
-    assert rejected is not None
-    assert rejected.request.action == "rejected"
+    assert queue.claim("grok") is None
+    assert len(skip_facts(queue, "rejected")) == 1
 
 
 def test_real_orch_trust_routes_linear_go_and_github_pr_handoffs(
@@ -1419,11 +1426,9 @@ def test_reconcile_delivers_grok_job_once_and_finishes_it(
     dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
     if action == "stuck":
         dispatcher.wake_grok_once(
-            repo="owner/repo",
-            ticket_id="42",
+            approver_ticket(),
             reason="stuck",
             source_comment_id="source-1",
-            timeout_seconds=60,
             detail="ticket is stuck",
         )
         queued = queue.outstanding()[0]
@@ -1884,11 +1889,9 @@ def test_transient_blocked_wake_does_not_overwrite_stuck_reason(
     delivery = FailNTimesGrokDelivery(3)
     dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
     dispatcher.wake_grok_once(
-        repo="owner/repo",
-        ticket_id="42",
+        approver_ticket(),
         reason="blocked",
         source_comment_id="blocked-1",
-        timeout_seconds=10,
         detail="reviewer blocked",
         head="a" * 40,
     )
@@ -2006,11 +2009,9 @@ def test_grok_logical_key_includes_action(tmp_path: Path) -> None:
     )
     dispatcher.reconcile_jobs()
     dispatcher.wake_grok_once(
-        repo="Owner/Repo",
-        ticket_id="42",
+        replace(approver_ticket(), repo="Owner/Repo"),
         reason="stuck",
         source_comment_id="source-1",
-        timeout_seconds=60,
         detail="ticket is stuck",
     )
     dispatcher.reconcile_jobs()
@@ -3099,7 +3100,7 @@ def wake_project_bot(request: JobRequest) -> object:
 @pytest.mark.parametrize(
     ("drive", "actions"),
     [
-        (drive_wake_sites, {"capped", "ship-failed", "rejected", "done"}),
+        (drive_wake_sites, {"capped", "ship-failed"}),
         (drive_invalid_go, {"clarify"}),
         (drive_declined_3, {"stuck"}),
         (drive_ci_red_3, {"stuck"}),
@@ -3798,11 +3799,8 @@ def test_t4_handoff_and_after_never_merge(
     if ship == "handoff":
         assert actions.handoffs == [head]
         assert actions.approvals == []
-        done = queue.claim("grok")
-        assert done is not None
-        assert done.request.action == "done"
-        detail = json.loads(done.request.detail or "{}")
-        assert detail["project_bot"] == "grok-bot"
+        assert queue.claim("grok") is None
+        [detail] = skip_facts(queue, "done")
         assert detail["outcome"] == "handed-off"
     else:
         assert actions.handoffs == []
@@ -4594,10 +4592,8 @@ def test_handoff_retries_when_no_external_write_started(
         ).fetchone()[0]
     assert intent == "completed"
     assert outcome == "handed-off"
-    wake = queue.claim("grok")
-    assert wake is not None
-    assert wake.request.action == "done"
     assert queue.claim("grok") is None
+    assert len(skip_facts(queue, "done")) == 1
 
 
 def test_completed_intent_replays_label_write_before_stale_gates(
@@ -7744,7 +7740,8 @@ def test_a_built_retry_job_is_the_last_attempt(tmp_path: Path, state: str, actio
 
 
 def rejected_wakes(queue: SQLiteJobQueue) -> list[dict]:
-    return [json.loads(row["detail"]) for row in jobs_of(queue, "rejected")]
+    assert jobs_of(queue, "rejected") == []
+    return skip_facts(queue, "rejected")
 
 
 def test_retry_on_live_ticket_is_noop(tmp_path: Path) -> None:

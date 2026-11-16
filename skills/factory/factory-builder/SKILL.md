@@ -1,59 +1,51 @@
 ---
 name: factory-builder
-description: Route a factory plan, build or fix job through pstack. Names the exact pstack files to read and how the job's handoffs, branch and gates map onto pstack's steps. Use when an orch brief starts a builder job.
+description: Route a factory plan, build or fix job through pstack. The builder is the owner of one PR. Names the pstack files to read, the owner's duties, and the few places a headless job differs from pstack. Use when an orch brief starts a builder job.
 ---
 
 # Factory builder
 
-Read `<pstack>/skills/poteto-mode/SKILL.md` in full, then the playbook below, at the absolute paths the brief gives. `<pstack>` is the folder that holds pstack's `skills/` and `docs/`. It is the deployed factory checkout's `skills/pstack`, never the job's worktree. Then read your harness adapter. Claude reads `<pstack>/docs/harness/claude-code.md`. Codex reads `skills/factory/harness/codex.md`.
+Read `<pstack>/skills/poteto-mode/SKILL.md` in full, then the playbook it picks, at the absolute paths the brief gives. `<pstack>` is the deployed factory checkout's `skills/pstack`, and `<kit>` is its `skills/cursor-team-kit`, never the job's worktree. Then read your harness adapter. Claude reads `<pstack>/docs/harness/claude-code.md`. Codex reads `skills/factory/harness/codex.md`.
 
-This skill routes to pstack and never replaces it. Where it differs from pstack, the table at the bottom names the pstack line and the reason. The brief wins over this skill where the two differ.
+This skill routes to pstack and never replaces it. The brief wins over this skill where the two differ.
+
+## Role
+
+The builder is the owner of one PR, as `<pstack>/skills/poteto-mode/playbooks/autopilot-full.md` step 2 defines it. The poller, not the owner, babysits CI and merges.
 
 ## Playbook
 
-Always `<pstack>/skills/figure-it-out/SKILL.md`, for every plan, build and fix job (Max, "Careful playbook always"). Fix and CI-fix jobs take the existing plan and acceptance criteria as Phase A and run at the lowest rigor. Borrow the matching steps of `<pstack>/skills/poteto-mode/playbooks/feature.md` inside its phases.
+poteto-mode's Playbooks list picks the playbook that fits the job. Feature (`<pstack>/skills/poteto-mode/playbooks/feature.md`) is for new or changed behavior. Bug fix (`<pstack>/skills/poteto-mode/playbooks/bug-fix.md`) is for a defect. Refactoring (`<pstack>/skills/poteto-mode/playbooks/refactoring.md`) is for a change of structure. `<pstack>/skills/figure-it-out/SKILL.md` is for large or cross-cutting work. A plan job stops after the playbook's design steps and posts the plan. A fix or CI-fix job keeps the plan's criteria and runs the same playbook from its verify step.
 
-## Human touchpoints
+## Owner duties
 
-The job has no live operator. "The operator", `AskQuestion` and the Always-pause list all become a `questions` handoff on the PR, then stop. Max's gates are in the brief. Apply poteto-mode's classification first, and ask only for a product call no run can settle.
+1. Delegate the code. Delegate code-writing to a helper as Feature step 4 and Bug fix step 3 say (Refactoring step 5 for mechanical edits). Helpers take their models from the brief's model lines. A helper returns a diff or a commit. It never posts, pushes or opens a PR.
+2. Reach code-ready before `ready`, as Autopilot-full step 2 says, in this order:
+   - Strip slop with `<kit>/deslop/SKILL.md` over the diff.
+   - Run the comments pass with `<pstack>/skills/no-comments/SKILL.md`. It spawns `<pstack>/agents/comment-sicko.md`.
+   - Rebase on the current base and push the ticket branch with `--force-with-lease` only. The ticket branch has one writer, so it is not a shared branch. Never rewrite the base.
+   - Run the repo's checks for the touched paths on the committed head.
+   - Prove the change with `<pstack>/skills/principle-prove-it-works/SKILL.md`, and paste the run in the handoff.
+3. Post `ready` with the head you pushed. The handoff lists every SKILL.md you read, by path, under "Skills read:".
+
+## Factory facts
+
+- The PR title is `#<issue>: type(scope): subject`, a Conventional Commits title after the issue prefix. Edit the feeder's PR with `gh pr edit`, run as the brief says. Keep the `Fixes #<issue>` line in the body.
+- Claude spawns `poteto-agent` and `comment-sicko` unprefixed, not as the adapter's `pstack:poteto-agent`, because `orch install-skills` links pstack's agents into `~/.claude/agents/`.
+- figure-it-out's decision trail goes in `docs/decisions/<issue>-trail.tsv`, one file per ticket.
+
+Unclear intent is a `questions` handoff. Classify the fork per poteto-mode first, and ask only for a product call no run can settle. Use your own bot in `from=`. Every other handoff header comes from the brief, with its placeholders filled.
 
 <!-- orch:v1 kind=questions from=claude-bot role=builder -->
 
-Use your own bot in `from=`. Every other handoff header comes from the brief, with its placeholders filled.
-
-## Helpers
-
-Delegate code per `feature.md` step 4. Helpers run on the job's own harness, never Grok through Cursor, because Cursor jobs are off. Take model lines from the brief. Helpers never post to GitHub, never push and never open a PR. They return a diff or a commit. Only the main job pushes the ticket branch.
-
-## Commits, PR and branch
-
-Follow `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md` as written, with these changes:
-
-- The PR already exists. Edit it with `gh pr edit`. Never create a second one.
-- Title per the table below. Use pstack's body sections and keep the `Fixes #<issue>` line.
-- Rebase into small, ordered commits any time on the ticket branch, and push with `--force-with-lease` only. Never rewrite the base. Today's brief still says no force-push, and the brief wins until T09 changes it.
-- Skip only a step that needs a missing Cursor feature, with the adapter's own line (`Skipped in Claude Code: <step>. <reason>.` or `Skipped in Codex: <step>. <reason>.`). Cursor jobs stay off.
-
-## Before ready
-
-1. `<pstack>/skills/principle-prove-it-works/SKILL.md`. Run the real check and paste its output in the handoff.
-2. `deslop`: read `skills/cursor-team-kit/deslop/SKILL.md`, beside `<pstack>` in the deployed factory checkout, and follow it over the diff.
-3. `<pstack>/skills/no-comments/SKILL.md`, which spawns `<pstack>/agents/comment-sicko.md` over the diff.
-
-The handoff lists every SKILL.md you read, by path, under "Skills read:".
-
 ## Where the factory differs from pstack
+
+Each row is a step a headless job cannot take.
 
 | pstack says | factory job does | why |
 | --- | --- | --- |
 | `<pstack>/skills/poteto-mode/SKILL.md`, "Gates the operator named and the Always-pause list in Autonomy still need the operator." | Post a `questions` handoff and stop | No live operator. The handoff is the only channel. |
-| `<pstack>/skills/poteto-mode/SKILL.md`, "Reversible work and external actions (team chat, ticket updates, kicking off evals) proceed without asking." | Post one handoff comment and message no other bot | The brief's rule. The poller reads one handoff per job. |
-| `<pstack>/skills/poteto-mode/SKILL.md`, "force-push to shared branches" | Force-push the ticket branch with `--force-with-lease` when the brief allows it | The ticket branch has one writer. Max, "Rebase any time on the ticket branch". |
-| `<pstack>/skills/poteto-mode/SKILL.md`, "Use **figure-it-out** whenever no bundled playbook fits." | Use `figure-it-out` even when Feature or Bug fix fits | Max, "Careful playbook always". |
-| `<pstack>/skills/poteto-mode/playbooks/feature.md`, "using your configured feature model (default `grok-4.7-xhigh-fast`)" | Helpers use the job's harness and the brief's model lines | Cursor jobs are off. The model map is T10. |
-| `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "A subagent that opens a PR runs `/deslop` and `/no-comments`, and posts the URL." | Helpers never open a PR, post or push | One writer per branch. The main job owns the handoff. |
-| `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "Conventional Commits `type(scope): subject`" | Title is `#<issue>: type(scope): subject`, for example `#115: fix(titles): …`. Edit the feeder's PR. | Max's rule, factory #115. The `#<issue>: ` prefix goes before the Conventional Commits title and does not replace it. The feeder opened the PR. |
-| `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "Open every PR ready, never as a draft." | Leave the PR draft and never mark it ready yourself. The poller marks it ready on APPROVE. | pstack opens a PR when the work is done. The feeder opens it before any work exists (`lib/feeder.py:576`). On Aut0, marking ready is the handoff to people. |
-| `<pstack>/skills/poteto-mode/SKILL.md`, "Before commit → the `deslop` skill" | Read `skills/cursor-team-kit/deslop/SKILL.md` and follow it | pstack names `deslop` but does not ship it. The factory vendors it from cursor-team-kit (MIT), hash-pinned in `skills/skills.lock`. |
-| `<pstack>/docs/harness/claude-code.md`, "`pstack:poteto-agent`, `pstack:comment-sicko`" | Claude spawns `poteto-agent` and `comment-sicko`, unprefixed | `orch install-skills` links pstack's agents into `~/.claude/agents/` instead of loading pstack with `--plugin-dir`, so the names carry no plugin prefix (`docs/decisions/178-plugin-dir-and-deslop.md`). |
-| `<pstack>/skills/figure-it-out/SKILL.md`, "commit the trail so the reviewer can read it in the PR" | Commit the trail to `docs/decisions/<issue>-trail.tsv` | One file per ticket, so two PRs never edit the same lines (`docs/decisions/README.md`). |
+| `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "Open every PR ready, never as a draft." | Edit the feeder's draft PR and never mark it ready | The feeder opens the PR before any work exists. The poller marks it ready on APPROVE. |
+| `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "Work from a git worktree off main." | Work in the job's worktree on the ticket branch. A helper that edits files gets its own worktree. | `orch job run` already made the checkout, and the branch has one writer. |
+| `<pstack>/skills/poteto-mode/playbooks/autopilot-full.md`, "babysits to green per `playbooks/babysit.md`, and merges once steps 4 and 5 clear it." | Stop at the handoff. Never babysit, merge or wait on CI. | The poller watches CI, queues fix jobs and merges. |
+| `<pstack>/skills/figure-it-out/SKILL.md`, "but a multi-hour run earns one checkpoint." | The plan handoff is the checkpoint. A build job goes on without another. | Max reads the plan before `go`, and the brief's wall-clock budget bounds the run. |

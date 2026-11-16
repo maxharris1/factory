@@ -35,6 +35,7 @@ from tests.test_dispatcher import (
     comment,
     seed_review_job,
 )
+from tests.test_hooks import skip_facts
 
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
@@ -229,7 +230,8 @@ def test_a_non_ui_pr_still_auto_merges(tmp_path: Path) -> None:
 
     assert actions.merges == [(True, HEAD)]
     assert actions.states == ["merged"]
-    assert [row["action"] for row in grok_jobs(queue)] == ["done"]
+    assert grok_jobs(queue) == []
+    assert len(skip_facts(queue, "done")) == 1
 
 
 def test_a_repo_with_no_hold_configured_merges_without_reading_holds(
@@ -868,7 +870,7 @@ def test_with_the_t8_hook_installed_the_ok_is_not_rejected(tmp_path: Path) -> No
     assert not any(row["action"] == "rejected" for row in grok_jobs(queue))
 
 
-def test_an_untrusted_ok_is_rejected_once_and_wakes_grok(tmp_path: Path) -> None:
+def test_an_untrusted_ok_is_rejected_once_with_a_notice(tmp_path: Path) -> None:
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
 
@@ -876,8 +878,8 @@ def test_an_untrusted_ok_is_rejected_once_and_wakes_grok(tmp_path: Path) -> None
     dispatcher.process(held)
     dispatcher.process(held)
 
-    rejected = [row for row in grok_jobs(queue) if row["action"] == "rejected"]
-    assert len(rejected) == 1
+    assert [row for row in grok_jobs(queue) if row["action"] == "rejected"] == []
+    assert len(skip_facts(queue, "rejected")) == 1
     assert actions.merges == []
 
 

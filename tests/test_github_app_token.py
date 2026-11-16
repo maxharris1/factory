@@ -754,3 +754,43 @@ def test_with_one_owner_the_helpers_need_no_path_and_skip_broker_files(tmp_path:
     (tmp_path / broker.PUSHED_FILE).write_text("{}", encoding="utf-8")
     (tmp_path / ".maxharris1.json.tmp.json").write_text("{}", encoding="utf-8")
     assert broker.select_token(tmp_path, None, NOW) == f"{SENTINEL}_MAX"
+
+
+def test_only_the_configured_worker_apps_get_tokens_and_a_bot_with_no_app_gets_none(
+    tmp_path: Path,
+) -> None:
+    from lib.orch_yml import load_orch_yml
+    from tests.test_github_apps_config import two_worker_apps
+
+    orch = tmp_path / "orch.yml"
+    orch.write_text(two_worker_apps(), encoding="utf-8")
+    config, findings = load_orch_yml(orch)
+    assert config is not None and config.github_app is not None, findings
+    bots = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
+    mint, clock, pushes = FakeMint(), Clock(), []
+    args = dict(
+        now=clock,
+        mint=mint,
+        holders={bot: Holder(None, None) for bot in bots},
+        remotes={bot: [Remote("pc", bot, f"pc-{bot}")] for bot in bots},
+        push=lambda remote, owner, payload: pushes.append(remote.user) or True,
+        out=io.StringIO(),
+    )
+    root = tmp_path / "tokens"
+
+    assert broker.refresh(config.github_app.apps.values(), root, **args) == 0
+    assert sorted(bot for bot, _, _ in mint.calls) == ["claude-bot", "claude-bot", "codex-bot", "codex-bot"]
+    assert sorted(path.name for path in root.iterdir()) == ["claude-bot", "codex-bot"]
+    assert sorted(set(pushes)) == ["claude-bot", "codex-bot"]
+
+    clock.now = NOW + timedelta(hours=1) - broker.REFRESH_MARGIN
+    assert broker.refresh(config.github_app.apps.values(), root, **args) == 0
+    assert sorted(bot for bot, _, _ in mint.calls[4:]) == ["claude-bot", "claude-bot", "codex-bot", "codex-bot"]
+
+    no_app = root / "cursor-bot"
+    environ = {"PATH": "/usr/bin", "GH_TOKEN": "inherited"}
+    assert broker.gh_env(no_app, ["api", "repos/maxharris1/factory"], environ, clock.now) == {"PATH": "/usr/bin"}
+    answer = io.StringIO()
+    request = io.StringIO("protocol=https\nhost=github.com\npath=maxharris1/factory.git\n\n")
+    assert broker.credential(no_app, "get", request, answer, clock.now) == 0
+    assert answer.getvalue() == ""
