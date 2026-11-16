@@ -7,10 +7,6 @@ The poller files a trusted verdict's `[follow-up]` items as one new ticket
 (followup_issue) and links it from the PR (link_comment). Each write carries
 a hidden marker keyed on the verdict comment id, so a retry after a crash
 finds the earlier write instead of repeating it.
-
-With review.block_on: user-impact (issue #490) every finding below the
-blocking bar is `[follow-up]` from round 1, so followup_start moves the
-filing round to 1 while the variant rule keeps followup_from_round.
 """
 
 from __future__ import annotations

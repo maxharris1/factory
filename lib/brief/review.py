@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from lib.brief.common import _HEAD, _URL, evidence_part, fenced
-from lib.followups import followups_active
+from lib.followups import followup_start, followups_active
 
 MAX_LISTED_COMMITS = 50
 _CI_WHILE_RUNNING = (
@@ -22,12 +22,17 @@ PSTACK_FIX_ROUND = (
 )
 
 
+def filing_active(facts: dict) -> bool:
+    return followups_active(followup_start(facts["followup_from"], facts["block_on"]), facts["round_number"] or 1)
+
+
 def _tags(facts: dict) -> str:
-    if facts["block_on"] == "user-impact":
-        return "`[blocking]` or `[follow-up]`"
-    if followups_active(facts["followup_from"], facts["round_number"]):
-        return "`[blocking]`, `[follow-up]` or `[minor]`"
-    return "`[blocking]` or `[minor]`"
+    tags = ["`[blocking]`"]
+    if filing_active(facts):
+        tags.append("`[follow-up]`")
+    if facts["block_on"] != "user-impact":
+        tags.append("`[minor]`")
+    return ", ".join(tags[:-1]) + " or " + tags[-1]
 
 
 def evidence_sections(detail: dict[str, object], facts: dict) -> list[str]:

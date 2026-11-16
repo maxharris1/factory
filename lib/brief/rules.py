@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from lib.brief.common import GH
+from lib.brief.review import filing_active
 from lib.followups import followups_active
 from lib.queue import Job
 
@@ -39,7 +40,7 @@ def review_rules(facts: dict) -> str:
         if followups_active(followup_from, facts["round_number"])
         else ""
     )
-    if user_impact:
+    if user_impact and filing_active(facts):
         followup = (
             "- Blocking bar (`review.block_on: user-impact`): only an unmet acceptance criterion, a failed gate, "
             "a bug a user or the factory would hit in normal operation on a path this PR changed, or a shipped "
@@ -48,7 +49,7 @@ def review_rules(facts: dict) -> str:
             "- A verdict whose only findings are `[follow-up]` is `APPROVE` with `ac=met`; "
             "the poller files the `[follow-up]` findings as one ticket. Builders do not fix `[follow-up]` findings.\n"
         )
-    elif variant:
+    elif filing_active(facts):
         followup = (
             f"{variant}"
             "- A verdict whose only findings are `[follow-up]` or `[minor]` is `APPROVE` with `ac=met`; "
