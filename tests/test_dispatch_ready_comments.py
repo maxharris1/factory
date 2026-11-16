@@ -15,6 +15,7 @@ from tests.test_review_before_ci import (
     CI_LOG,
     board_with,
     built_with_ci_pending,
+    ci_failure,
     instruction,
     reviewed_at_pending_ci,
 )
@@ -127,7 +128,7 @@ def test_a_stale_verdict_handled_late_does_not_answer_the_newer_review(
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["new-revise"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
     first = board.claim("claude")
     board.queue.finish(first.id, owner="claude", handoff_comment_id="first-fix")
     assert board.queue.claim("claude") is None
@@ -218,7 +219,7 @@ def test_an_upgrade_backfills_the_post_time_of_a_verdict_recorded_before_it(
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["new-revise"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 def _handled_ready_at_a_newer_head(board, pr) -> str:
@@ -261,7 +262,7 @@ def test_an_upgrade_never_counts_a_handled_non_verdict_as_the_reviews_verdict(
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 ORCHESTRATOR_QUESTIONS = (
@@ -304,7 +305,7 @@ def test_a_hidden_handled_non_verdict_comment_never_answers_the_review(
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 def _upgrade_from(board, missing: str) -> None:
@@ -406,7 +407,7 @@ def test_a_blocked_report_handled_by_a_hook_never_answers_the_review(
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}
 
 
 def test_an_interrupted_retry_never_takes_the_earlier_attempts_verdict(tmp_path: Path) -> None:

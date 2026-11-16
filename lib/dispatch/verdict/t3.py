@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope
+from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.queue import JobRequest
@@ -14,7 +14,7 @@ from lib.queue import JobRequest
 @dataclass(frozen=True)
 class ReviseCIGate:
     outcome: tuple[bool, str] | None = None
-    ci_failure: str = ""
+    ci_failure: tuple[str, ...] = ()
 
 
 class T3Mixin:
@@ -42,14 +42,14 @@ class T3Mixin:
         repeat = self._repeat_trigger(ticket, comment, reported_round)
         if repeat is not None:
             return self._t3_repeat(ticket, comment, repeat, reported_round)
-        instruction = _comment_link(comment)
+        ci_failure: tuple[str, ...] = ()
         if ticket.factory.start_before_ci:
             gate = self._revise_ci_gate(ticket, comment, reported_round)
             if gate.outcome is not None:
                 return gate.outcome
-            instruction += gate.ci_failure
+            ci_failure = gate.ci_failure
         outcome, state = self._record_revise(
-            ticket, comment, fields, reported_round, instruction
+            ticket, comment, fields, reported_round, ci_failure
         )
         if state is None:
             self._wake_comment_problem(ticket, comment, "stale", outcome)
@@ -65,7 +65,7 @@ class T3Mixin:
         comment: Comment,
         fields: Mapping[str, str],
         reported_round: int | None,
-        instruction: str,
+        ci_failure: tuple[str, ...],
     ) -> tuple[str, str | None]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -117,6 +117,15 @@ class T3Mixin:
             next_state = "capped" if round_number >= cap else "fixing"
             answered = None
             if next_state == "fixing":
+                detail = self._job_detail(
+                    ticket,
+                    action="fix",
+                    head=ticket.current_head,
+                    round_number=round_number + 1,
+                    cap=cap,
+                    instruction=_comment_link(comment),
+                    ci_failure=ci_failure,
+                )
                 request = JobRequest(
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
@@ -126,14 +135,7 @@ class T3Mixin:
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     generation=int(state["generation"]),
                     head=ticket.current_head,
-                    detail=self._job_detail(
-                        ticket,
-                        action="fix",
-                        head=ticket.current_head,
-                        round_number=round_number + 1,
-                        cap=cap,
-                        instruction=instruction,
-                    ),
+                    detail=detail,
                 )
                 _, answered = self._enqueue_step(
                     connection,
@@ -314,6 +316,4 @@ class T3Mixin:
             return ReviseCIGate()
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return ReviseCIGate(outcome=(True, "stuck-ci-red-3"))
-        return ReviseCIGate(
-            ci_failure=f"\n\nCI failed on {head}:\n{result.log or ''}".rstrip()
-        )
+        return ReviseCIGate(ci_failure=red_checks(ticket, head))
