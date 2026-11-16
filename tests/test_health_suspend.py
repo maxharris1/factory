@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from lib import heal, health
 NOW = 1_800_000_000.0
 BOOT = "8cd10924-c547-44ff-9fc4-1decdc2c833e"
 REBOOT = "0f0e0d0c-0b0a-4908-8706-050403020100"
+THIRD_BOOT = "33333333-3333-4333-8333-333333333333"
 DEVICES = {"box", "pc"}
 SUSPEND = 360.0
 
@@ -250,3 +252,54 @@ def test_a_failed_check_on_a_pid_reused_from_an_earlier_boot_stays_visible(
     (item,) = [c for c in report.components if c.component == component]
     assert (item.state, item.pid) == ("stale", 303)
     assert item.reason.endswith(" 1s ago")
+
+
+def without_checked_boot(db: Path) -> None:
+    with sqlite3.connect(health.health_path(db)) as connection:
+        connection.execute(f"ALTER TABLE {health.TABLE} DROP COLUMN checked_boot")
+
+
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_previous_release_failed_check_after_its_current_boot_success_stays_visible(
+        tmp_path: Path, component: str, device: str, interval: float) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat(component, device, pid=101, interval=interval)
+    clocks.advance(wall=1.0, monotonic=1.0)
+    store.checked(component, device, pid=202, interval=interval)
+    without_checked_boot(db)
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime())
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.pid) == ("stale", 202)
+    assert item.reason.endswith(" 1s ago")
+
+
+@pytest.mark.parametrize("written_before_upgrade", [False, True])
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_current_boot_success_outranks_an_earlier_boot_failure_ahead_on_the_wall(
+        tmp_path: Path, component: str, device: str, interval: float,
+        written_before_upgrade: bool) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                               uptime=clocks.uptime)
+    store.beat(component, device, pid=303, interval=interval)
+    clocks.boot = REBOOT
+    clocks.wall += 30.0
+    clocks.monotonic = 10.0
+    store.checked(component, device, pid=303, interval=interval)
+    if written_before_upgrade:
+        without_checked_boot(db)
+        store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                                   uptime=clocks.uptime)
+    clocks.boot = THIRD_BOOT
+    clocks.wall = NOW - 30.0
+    clocks.monotonic = 10.0
+    store.beat(component, device, pid=202, interval=interval)
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime())
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.reason, item.pid) == ("up", "", 202)

@@ -168,7 +168,7 @@ def test_a_ready_held_for_pending_ci_is_recorded_until_it_is_handled(tmp_path: P
 
     assert board.outcome(ready) is None
     assert ci_waits(board) == [{
-        "repo": "owner/repo", "ticket_id": "42", "comment_id": ready, "head": sha(1), "pr": "42",
+        "repo": "owner/repo", "ticket_id": "42", "comment_id": ready, "head": sha(1),
         "reason": "ci-pending", "checks": list(CHECKS), "since": since,
     }]
 

@@ -121,8 +121,6 @@ WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending")
-_LINKABLE_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-_LINKABLE_PR = re.compile(r"[1-9][0-9]{0,9}")
 ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", "edited-comment", *FEEDER_ATTENTION_REASONS)
 
 HANDOFF_SAVINGS_DEFINITION = (
@@ -842,24 +840,22 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
 def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str], dict]:
     found = {}
     for row in connection.execute(
-        "SELECT repo, ticket_id, pr, reason, checks, since FROM ci_waits"
+        "SELECT repo, ticket_id, reason, checks, since FROM ci_waits"
     ):
         try:
             names = json.loads(row["checks"])
         except ValueError:
             names = []
-        repo, pr = str(row["repo"]), str(row["pr"])
-        found[(repo.casefold(), str(row["ticket_id"]))] = {
+        found[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = {
             "reason": _enum(row["reason"], CI_WAIT_REASONS),
             "checks": [_clean(name, 80) for name in names] if isinstance(names, list) else [],
-            "pr": pr if _LINKABLE_REPO.fullmatch(repo) and _LINKABLE_PR.fullmatch(pr) else None,
             "waiting_seconds": _age(now, row["since"]),
         }
     return found
 
 
 def _ticket_ref(
-    sources: dict[tuple[str, str], tuple[str, str | None]],
+    sources: dict[tuple[str, str], tuple[str | None, str | None]],
     repo: object,
     ticket_id: object,
     repo_limit: int = 100,
@@ -869,7 +865,7 @@ def _ticket_ref(
     ref = {"repo": _clean(repo, repo_limit), "ticket_id": _clean(ticket_id, 64)}
     found = sources.get((str(repo).casefold(), str(ticket_id)))
     if found is not None:
-        ref["source"] = found[0] if SOURCE.fullmatch(found[0]) else None
+        ref["source"] = found[0] if found[0] is not None and SOURCE.fullmatch(found[0]) else None
         ref["pr"] = _clean(found[1], 16) if found[1] is not None else None
     return ref
 
@@ -1051,6 +1047,11 @@ def _read_db(
     tables = _tables(connection)
     jobs = "jobs" in tables
     sources = read_sources(connection)
+    if "tracked_tickets" in tables:
+        for repo, ticket_id in connection.execute(
+            "SELECT repo, ticket_id FROM tracked_tickets WHERE tracker = 'github'"
+        ):
+            sources.setdefault((str(repo).casefold(), str(ticket_id)), (None, str(ticket_id)))
 
     totals = {state: 0 for state in STATES}
     groups: dict[tuple[str, str], dict] = {}

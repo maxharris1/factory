@@ -210,12 +210,11 @@ class ReadyMixin:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO ci_waits (repo, ticket_id, comment_id, head, pr, reason, checks, since)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id) DO UPDATE SET
                     comment_id = excluded.comment_id,
                     head = excluded.head,
-                    pr = excluded.pr,
                     reason = excluded.reason,
                     checks = excluded.checks,
                     since = CASE WHEN ci_waits.head = excluded.head
@@ -226,7 +225,6 @@ class ReadyMixin:
                     ticket.ticket_id,
                     comment.id,
                     head,
-                    ticket.pr_number,
                     reason,
                     json.dumps(list(result.pending) if result is not None else []),
                     self.queue.now(),

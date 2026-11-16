@@ -463,7 +463,6 @@ class SchemaMixin:
                     ticket_id TEXT NOT NULL,
                     comment_id TEXT NOT NULL,
                     head TEXT NOT NULL,
-                    pr TEXT,
                     reason TEXT NOT NULL,
                     checks TEXT NOT NULL,
                     since REAL NOT NULL,
