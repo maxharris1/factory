@@ -39,8 +39,8 @@ dashboard:
 #   release_claimed_minutes: 5
 # Optional approval credential (#122, docs/decisions/122-approver-credential.md)
 # and per-bot GitHub Apps (#170, docs/decisions/170-four-github-apps.md).
-# Each worker bot posts as its own App (#509); Grok stays on Max's login, and
-# any bot may still have one. A capped-ticket go and a hold ok then count
+# Each worker bot posts as its own App (#509); any bot may still have one.
+# A capped-ticket go and a hold ok then count
 # only from approver_logins. enabled: false (the default) keeps today's
 # trusted_logins trust. With enabled: true, each App's bot_login must be a
 # trusted_logins key for its own bot alone, and every App needs an

@@ -163,9 +163,6 @@ TAG_ENV = "ORCH_WORKER_TAG"
 # first thing on stdout whatever the profile prints.
 WORKER_ENV_MARK = "ORCH-WORKER-ENV"
 WORKER_ENV_END = "ORCH-WORKER-ENV-END"
-# The start script's own exit status when it cannot make or enter the job
-# directory, drop a login profile's token variable, or record the worker:
-# the harness never ran.
 START_REFUSED = 125
 # The harness's own exit status says nothing about whether it ran (#99 A2).
 # The start writes its worker tag to the launch record (`launch_record`)

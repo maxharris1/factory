@@ -190,9 +190,6 @@ class GitHubApp:
 
 @dataclass(frozen=True)
 class GitHubApps:
-    """The configured bots' Apps, keyed by the bot each speaks for (#170). enabled
-    is the switch: false keeps today's trusted_logins trust."""
-
     apps: Mapping[str, GitHubApp]
     enabled: bool = False
 
