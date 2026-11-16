@@ -6,10 +6,7 @@ import pytest
 
 from tests.regenerate_brief_snapshots import render_snapshot
 
-DO_NOT_POLL = (
-    "Do not poll, watch or wait on GitHub Actions or any other CI from inside this job: "
-    "the factory's own review and CI gate check CI after `ready`."
-)
+DO_NOT_POLL = "Never poll, watch or wait on GitHub Actions or any other CI from inside this job."
 
 
 def variants() -> list[str]:
@@ -28,13 +25,14 @@ def section(request: pytest.FixtureRequest) -> str:
 
 def test_runs_only_affected_tests_plus_a_smoke_run(section: str) -> None:
     assert "Run only the tests affected by the files you touched while resolving the merge" in section
-    assert "plus a short smoke run" in section
+    assert "plus a short smoke run, in the foreground; never in the background or in chunks." in section
     assert "Do not run the full suite unless those affected tests are the full suite." in section
     assert "then run the tests." not in section
 
 
 def test_says_not_to_poll_or_wait_on_ci(section: str) -> None:
     assert DO_NOT_POLL in section.splitlines()
+    assert section.count("wait on") == 1
 
 
 def test_pushes_posts_ready_and_finishes(section: str) -> None:
@@ -48,7 +46,7 @@ def test_keeps_merge_commit_no_rebase_no_force_push(section: str) -> None:
 
 def test_rules_and_finish_sections_stay() -> None:
     for text in variants():
-        assert "Never start another factory job or message another bot." in text
+        assert "Never start another factory job." in text
         assert text.index("## What to do") < text.index("## Finish the job")
 
 

@@ -29,7 +29,8 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         f"1. {read_ticket_line(facts)} {plan_line}",
         f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
         "Test first.",
-        "3. Run only the tests for the files you touched plus a short smoke set. "
+        "3. Run only the tests for the files you touched plus a short smoke set, in the foreground; "
+        "never the whole suite, in the background or in chunks. "
         "Before `ready`, run the router's \"Before ready\" steps.",
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
@@ -67,12 +68,9 @@ def _title_line(facts: dict) -> str:
 
 def builder_notes(job: Job, facts: dict) -> list[str]:
     notes = [
-        "Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. "
-        "Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you "
+        "CI runs the full suite and is the gate: a red CI comes back to you "
         "as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.",
-        "Never run the whole test suite locally, in the background, or in chunks, and never poll, "
-        "watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. "
-        "CI after `ready` is the full-suite gate.",
+        "Never poll, watch or wait on GitHub Actions or any other CI from inside this job.",
         *QUESTIONS_LINES,
     ]
     if facts["pre_ready"] is not None:

@@ -7,15 +7,11 @@ import pytest
 from tests.regenerate_brief_snapshots import render_snapshot
 
 SCOPE = (
-    "Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. "
-    "Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you "
+    "CI runs the full suite and is the gate: a red CI comes back to you "
     "as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost."
 )
-NEVER_FULL_SUITE = (
-    "Never run the whole test suite locally, in the background, or in chunks, and never poll, "
-    "watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. "
-    "CI after `ready` is the full-suite gate."
-)
+NEVER_FULL_SUITE = "Never poll, watch or wait on GitHub Actions or any other CI from inside this job."
+FOREGROUND = "in the foreground; never"
 BUILDER_KINDS = ["build", "fix", "ci-fix", "merge-only", "resume", "retry"]
 
 
@@ -31,13 +27,18 @@ def test_builder_briefs_scope_tests_to_touched_files_and_never_wait_on_the_suite
         lines = section.splitlines()
         assert SCOPE in lines
         assert NEVER_FULL_SUITE in lines
+        assert section.count("in the foreground") == 1
+        assert section.count("wait on") == 1
+        step = next(line for line in lines if FOREGROUND in line)
+        assert step.startswith(("3. ", "4. ")) and "in the background or in chunks" in step
         assert "however long they take" not in section
 
 
 def test_build_step_names_the_scope() -> None:
     for section in sections("build"):
         assert (
-            "3. Run only the tests for the files you touched plus a short smoke set. "
+            "3. Run only the tests for the files you touched plus a short smoke set, in the foreground; "
+            "never the whole suite, in the background or in chunks. "
             "Before `ready`, run the router's \"Before ready\" steps."
         ) in section.splitlines()
 
@@ -48,6 +49,7 @@ def test_fix_step_names_the_scope(kind: str) -> None:
         assert "3. Run the tests." not in section
         step = next(line for line in section.splitlines() if line.startswith("3. "))
         assert "the tests for the files you touched, plus a short smoke set" in step
+        assert "in the foreground; never the whole suite, in the background or in chunks." in step
         assert "Then run the router's \"Before ready\" steps." in step
 
 

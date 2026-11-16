@@ -10,10 +10,7 @@ from lib.github_actions import TOKEN_VARIABLES
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
 BUILDER_KINDS = sorted(kind for kind in CASES if CASES[kind][0] != "review")
-QUESTIONS_LINES = (
-    "If something left open needs a decision, post a `questions` handoff.",
-    "If the ticket lists a dependency that has not merged, post `questions` before any work.",
-)
+QUESTIONS_LINES = ("If the ticket lists a dependency that has not merged, post `questions` before any work.",)
 
 
 def _briefs(kind: str) -> tuple[str, str]:
@@ -67,10 +64,12 @@ def test_builder_self_check_names_the_vendored_skill(kind: str) -> None:
 
 
 @pytest.mark.parametrize("kind", BUILDER_KINDS)
-def test_builder_briefs_carry_both_questions_lines(kind: str) -> None:
+def test_builder_briefs_carry_the_questions_lines_once(kind: str) -> None:
     for text in _briefs(kind):
         for line in QUESTIONS_LINES:
-            assert line in text
+            assert text.count(line) == 1
+        assert "If a product question blocks the work, post a questions handoff instead" in text
+        assert "If something left open needs a decision" not in text
 
 
 @pytest.mark.parametrize("kind", ["review", "review-round-3"])
