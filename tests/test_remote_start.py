@@ -1550,3 +1550,44 @@ def test_r1_gap_fake_ssh_joins_remote_arguments_like_ssh(tmp_path: Path) -> None
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "a b c\n"  # one string, re-split by the remote shell
+
+
+SCRUBBED = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+@pytest.mark.parametrize(
+    ("job_env", "expected"),
+    [
+        ({}, dict.fromkeys(SCRUBBED)),
+        ({"GH_TOKEN": "job-token"}, {**dict.fromkeys(SCRUBBED), "GH_TOKEN": "job-token"}),
+    ],
+)
+def test_remote_start_drops_profile_tokens_and_keeps_only_the_jobs_own(
+    tmp_path: Path, job_env: dict[str, str], expected: dict[str, str | None]
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        "".join(f"export {name}=profile-{name}\n" for name in SCRUBBED), encoding="utf-8"
+    )
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    report = tmp_path / "report.json"
+    dump = (
+        "import json, os\n"
+        f"json.dump({{k: os.environ.get(k) for k in {SCRUBBED!r}}}, open({str(report)!r}, 'w'))\n"
+    )
+    script = remote.start_script(target, [sys.executable, "-c", dump], job_env)
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(report.read_text(encoding="utf-8")) == expected

@@ -128,6 +128,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from lib.github_app_token import TOKEN_VARIABLES
 from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
 from lib.ssh_mux import Multiplexer
 
@@ -171,10 +172,12 @@ START_REFUSED = 125
 # the login PATH; a start with no record of its tag never ran the harness.
 # A login profile's tracing (set -x or -v, a DEBUG trap) would echo the
 # job's and the worker's environment values to stderr, so the start turns it
-# off first.
+# off first. A token variable the profile exports is dropped before the
+# job's own environment is applied (#509).
 _UNTRACE = "set +xvT; trap - DEBUG; "
 _START_ENTER = (
     f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
+    f"unset {' '.join(TOKEN_VARIABLES)}; "
     f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
     f"shift; "
 )
