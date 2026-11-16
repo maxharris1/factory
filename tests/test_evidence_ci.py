@@ -128,6 +128,29 @@ def test_a_timestamped_credential_value_on_the_line_after_its_name_is_redacted()
     assert tail.splitlines()[-1] == "FAILED x"
 
 
+def test_a_yaml_block_scalar_credential_is_scrubbed_as_the_dispatcher_scrubs_it():
+    log = (
+        "2026-11-10T19:50:00Z env:\n"
+        "2026-11-10T19:50:00Z   password: |\n"
+        "2026-11-10T19:50:01Z     synthetic-swordfish\n"
+        "2026-11-10T19:50:01Z\n"
+        "2026-11-10T19:50:01Z     second-line-swordfish\n"
+        "2026-11-10T19:50:01Z   api_key: >-\n"
+        "2026-11-10T19:50:01Z     folded-swordfish\n"
+        "2026-11-10T19:50:02Z FAILED x\n"
+    )
+
+    tail = _tail(log).log_tail or ""
+
+    assert "swordfish" not in tail
+    assert tail.splitlines() == [
+        "env:",
+        "  <credential omitted>",
+        "  <credential omitted>",
+        "FAILED x",
+    ]
+
+
 def test_a_name_above_the_cut_still_hides_the_value_below_it():
     tail = _tail("password:\n  synthetic-swordfish\nFAILED x\n", limit=2).log_tail or ""
 
