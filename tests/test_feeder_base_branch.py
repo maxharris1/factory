@@ -159,3 +159,60 @@ def test_without_an_override_a_ticket_opens_on_factory_ref(tmp_path: Path) -> No
 
     assert [ref.ticket_id for ref in fed] == ["AUT-7"]
     assert github.pulls[(REPO, 501)]["base"] == "dev"
+
+
+def partly_fed(tmp_path: Path):
+    """AUT-7's PR opens on the feature branch, its Linear comment fails, and
+    the feature branch is then deleted, so the retry is held."""
+    github, linear = BaseReadingGitHub(), FakeLinear()
+    github.branches[(REPO, FEATURE)] = FEATURE_SHA
+    linear.issues = [in_project("AUT-7", "proj-upload")]
+
+    def feeder(orch: str):
+        return make_feeder(tmp_path, orch=orch, github=github, linear=linear, factory_text=LINEAR_FACTORY_MD)[0]
+
+    post = linear.post_linear_comment
+
+    def unavailable(*args):
+        raise RuntimeError("temporary comment failure")
+
+    linear.post_linear_comment = unavailable
+    assert feeder(OVERRIDDEN).feed_once().errors == 1
+    linear.post_linear_comment = post
+    del github.branches[(REPO, FEATURE)]
+    assert feeder(OVERRIDDEN).feed_once().blocked == 1
+    return github, linear, feeder
+
+
+def test_a_partly_fed_ticket_keeps_its_base_and_stays_held_after_the_override_is_removed(
+    tmp_path: Path,
+) -> None:
+    github, linear, feeder = partly_fed(tmp_path)
+
+    result = feeder(ORCH).feed_once()
+
+    row = rows(tmp_path / "orch.db")["AUT-7"]
+    assert (list(result.fed), result.blocked) == ([], 1)
+    assert row["base_branch"] == github.pulls[(REPO, 501)]["base"] == FEATURE
+    assert row["state"] == "waiting-blocked"
+    assert FEATURE in row["waiting_reason"]
+    assert linear.posted.get("uuid-AUT-7", []) == []
+
+
+def test_a_partly_fed_ticket_that_returns_after_losing_its_signal_keeps_its_base(
+    tmp_path: Path,
+) -> None:
+    github, linear, feeder = partly_fed(tmp_path)
+    issue = linear.issues
+    linear.issues = []
+    feeder(ORCH).feed_once()
+    linear.issues = issue
+    github.branches[(REPO, FEATURE)] = FEATURE_SHA
+
+    result = feeder(ORCH).feed_once()
+
+    assert [ref.ticket_id for ref in result.fed] == ["AUT-7"]
+    assert rows(tmp_path / "orch.db")["AUT-7"]["base_branch"] == FEATURE
+    assert len(github.pulls) == 1
+    (brief, *_) = linear.posted["uuid-AUT-7"]
+    assert f"off `{FEATURE}`" in brief.body

@@ -1123,7 +1123,7 @@ class Feeder:
                         tier = excluded.tier,
                         risk = CASE WHEN state IN ({unstarted}) THEN excluded.risk
                                     ELSE risk END,
-                        base_branch = CASE WHEN state IN ({unstarted}) THEN excluded.base_branch
+                        base_branch = CASE WHEN branch IS NULL THEN excluded.base_branch
                                            ELSE base_branch END,
                         harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
                                        ELSE excluded.harness END,
@@ -1154,10 +1154,12 @@ class Feeder:
                 "ON CONFLICT(id) DO UPDATE SET at = excluded.at",
                 (now,),
             )
-            # A ticket that lost its signal before it was fed is forgotten; a
-            # fed one is kept forever, so it is never fed (or opened) twice.
+            # A ticket that lost its signal before its feed began is forgotten;
+            # one with a branch is kept forever, so it is never opened twice
+            # or on another base.
             connection.execute(
-                f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted})",
+                f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted}) "
+                "AND branch IS NULL",
                 (now,),
             )
             connection.commit()
@@ -1289,7 +1291,7 @@ class Feeder:
             raise ValueError(f"ticket risk {risk!r} is not low or high")
         template = candidate.template
         state = go_state_for(issue.body, template.plan_first)
-        self._record(candidate, branch=branch)
+        self._record(candidate, branch=branch, base_branch=base)
         if number is None:
             if not branch_found:
                 start = self.github.create_start_commit(
