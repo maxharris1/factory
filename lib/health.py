@@ -26,14 +26,11 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   it runs no ssh, so the tunnel is down whatever answers the public URL, with
   the reason "port held by another owner: PORT on HOST".
 
-A row is (component, device, bot, pid, started_at, last_seen, version,
-interval_seconds, stopped_at, checked_at, cycle_started_at, last_cycle_seconds,
-seen_boot, seen_monotonic, checked_boot), one per process: the key holds the
-pid, so one waiter exiting never removes another's row. Every value is an
-allowlisted name, a device listed in machines.yml, a number, a 12-digit git SHA (`HealthStore.beat`
+A row (`_COLUMNS`) is one per process: the key holds the pid, so one waiter
+exiting never removes another's row. Every value is an allowlisted name, a
+device listed in machines.yml, a number, a 12-digit git SHA (`HealthStore.beat`
 refuses anything else) or the kernel's boot id (`read_uptime` keeps only its
-UUID form), so no argv,
-environment value, path, URL or token can reach a row. A beat also removes
+UUID form), so no argv, environment value, path, URL or token can reach a row. A beat also removes
 rows other processes left for the same component and bot once they are
 down.
 
@@ -1302,7 +1299,7 @@ def _without_earlier_boots_once_this_boot_succeeded(
         group: list[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
     if uptime is None or all(r.seen_boot != uptime.boot for r in group):
         return group
-    return [r for r in group if (r.checked_boot or r.seen_boot) in (None, uptime.boot)]
+    return [r for r in group if (r.checked_boot or r.seen_boot) == uptime.boot]
 
 
 def _checked(row: Heartbeat) -> float:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 
@@ -253,9 +254,16 @@ def test_a_failed_check_on_a_pid_reused_from_an_earlier_boot_stays_visible(
     assert item.reason.endswith(" 1s ago")
 
 
+def without_checked_boot(db: Path) -> None:
+    with sqlite3.connect(health.health_path(db)) as connection:
+        connection.execute(f"ALTER TABLE {health.TABLE} DROP COLUMN checked_boot")
+
+
+@pytest.mark.parametrize("written_before_upgrade", [False, True])
 @pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
 def test_a_current_boot_success_outranks_an_earlier_boot_failure_ahead_on_the_wall(
-        tmp_path: Path, component: str, device: str, interval: float) -> None:
+        tmp_path: Path, component: str, device: str, interval: float,
+        written_before_upgrade: bool) -> None:
     clocks = Clocks()
     db = tmp_path / "orch.db"
     store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
@@ -265,6 +273,10 @@ def test_a_current_boot_success_outranks_an_earlier_boot_failure_ahead_on_the_wa
     clocks.wall += 30.0
     clocks.monotonic = 10.0
     store.checked(component, device, pid=303, interval=interval)
+    if written_before_upgrade:
+        without_checked_boot(db)
+        store = health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                                   uptime=clocks.uptime)
     clocks.boot = THIRD_BOOT
     clocks.wall = NOW - 30.0
     clocks.monotonic = 10.0
