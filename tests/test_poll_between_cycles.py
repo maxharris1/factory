@@ -14,6 +14,7 @@ from lib.cli import StopAtBoundary, _AfterPoll
 from lib.dashboard_push import ROOT, PollPusher, PushError, SshTransport
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.poll import PollLoop, sleep_on_either_clock
+from tests.procs import alive
 from tests.test_health import make_db, machines_file
 
 INTERVAL = 0.5
@@ -126,15 +127,7 @@ def hanging_scp(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def running(pids: Path) -> list[int]:
-    alive = []
-    for pid in map(int, pids.read_text().split()):
-        try:
-            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        except FileNotFoundError:
-            continue
-        if state not in ("Z", "X"):
-            alive.append(pid)
-    return alive
+    return [pid for pid in map(int, pids.read_text().split()) if alive(pid)]
 
 
 def test_a_timed_out_upload_leaves_no_scp_or_ssh_running(tmp_path, monkeypatch) -> None:
