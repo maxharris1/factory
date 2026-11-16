@@ -1,6 +1,3 @@
-"""#587: a ship: handoff ticket already in external review, its PR out of
-draft and no factory work open, is handed-off, never left building."""
-
 from __future__ import annotations
 
 import dataclasses
@@ -39,7 +36,6 @@ class ReviewFlow(Flow):
             connection.commit()
 
     def reviewed_then_drifted(self) -> None:
-        """Built, reviewed with APPROVE 1/3, then the row drifted back to building."""
         assert self.go() == "queued-build"
         self.finish("claude", f"ready-{HEADS[1][:6]}")
         assert self.ready(HEADS[1]) == "queued-review"

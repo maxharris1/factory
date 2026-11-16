@@ -71,7 +71,7 @@ class T4Mixin:
             ticket, comment.id
         )
         stale_state = state not in ("review", "awaiting-ok") and not held_fix
-        if stale_state and self._reconcile_handoff(ticket, handling=comment.id):
+        if stale_state and self._reconcile_handoff(ticket, reading_comment_id=comment.id):
             return True, "handed-off-reconciled"
         if stale_state or reported_round != review_round + 1:
             self._wake_comment_problem(
