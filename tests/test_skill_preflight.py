@@ -486,6 +486,50 @@ def test_an_unreachable_device_gets_no_placement_until_its_backoff_ends(
     assert placed_on(device.db, third) == "pc", "the backoff has ended"
 
 
+@pytest.mark.parametrize("timeout_minutes", [1, 5])
+def test_an_unreachable_start_waits_out_its_backoff_with_the_dispatcher_reconciling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, timeout_minutes: int
+) -> None:
+    from lib.dispatcher import Dispatcher
+    from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
+
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    deploy(device.checkout)
+    now = [1_800_000_000.0]
+    device.queue.clock = lambda: now[0]
+    pool = device.waiter.pool
+
+    class Devices:
+        config = pool.config
+
+        def reconcile(self, now, on_offline):
+            return None
+
+    dispatcher = Dispatcher(
+        device.db, device.queue, trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(), grok_delivery=FakeGrokDelivery(), devices=Devices(),
+    )
+    device.ssh.offline("fakepc-claude-bot").touch()
+    job_id = enqueue(device.queue, "a", timeout_seconds=timeout_minutes * 60)
+    assert device.waiter.step() is None
+    assert state(device.db, job_id) == "queued"
+
+    started = now[0]
+    expiry = UNREACHABLE_BACKOFF_SECONDS
+    for offset in [*range(60, expiry + 1, 60), expiry + 1, expiry + timeout_minutes * 60 - 1]:
+        now[0] = started + offset
+        dispatcher.reconcile_jobs()
+        assert [job.id for job in device.queue.outstanding()] == [job_id], f"at +{offset}s"
+        assert state(device.db, job_id) == "queued"
+
+    device.ssh.offline("fakepc-claude-bot").unlink()
+    assert device.waiter.step() == job_id
+    assert attempt_of(device.db, job_id) == 1
+    with sqlite3.connect(device.db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ticket_state WHERE stuck = 1").fetchone()[0] == 0
+
+
 def placed_on(db: Path, job_id: str) -> str:
     with sqlite3.connect(db) as connection:
         return str(connection.execute(

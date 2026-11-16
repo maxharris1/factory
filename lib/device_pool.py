@@ -756,6 +756,25 @@ def placement_blocks(queue: SQLiteJobQueue) -> Blocked:
         return placement_blocked(connection, queue.now())
 
 
+def backed_off_through(queue: SQLiteJobQueue, config: MachinesConfig) -> dict[str, float]:
+    now = queue.now()
+    with queue.connect() as connection:
+        if not _has_table(connection, BACKOFF_TABLE):
+            return {}
+        until = {
+            str(device): min(float(at), now)
+            for device, at in connection.execute(f"SELECT device, until FROM {BACKOFF_TABLE}")
+        }
+    through: dict[str, float] = {}
+    for device in config.devices:
+        if device.name not in until:
+            continue
+        for harness in HARNESSES:
+            if device.eligible(harness):
+                through[harness] = max(through.get(harness, 0.0), until[device.name])
+    return through
+
+
 def used_slots(queue: SQLiteJobQueue, config: MachinesConfig | None) -> dict[str, int]:
     """Slots in use per device, as claims see them (issue #90)."""
     with queue.connect() as connection:
