@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slot tile</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 100%; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; color: #c0caf5">
+<sc-if value="{{ isJob }}" hint-placeholder-val="{{ true }}">
+<a href="TicketR2.dc.html" title="{{ title }}" style="display: block; box-sizing: border-box; width: 100%; min-height: 124px; background: #24283b; border: 1px solid {{ borderColor }}; color: #c0caf5; text-decoration: none">
+<dc-import name="PixelStrip" effect="{{ effect }}" tint="{{ stripTint }}" progress="{{ progress }}" cell="{{ cell }}" still="{{ still }}" seed="{{ seed }}" beat="{{ beat }}" strip-height="16" hint-size="100%,16px"></dc-import>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 6px; min-width: 0">
+<span style="display: inline-block; padding: 0 6px; border: 1px solid {{ botBorder }}; background: {{ botFill }}; color: {{ botTint }}; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">{{ botLabel }}</span>
+<span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 1.25; font-weight: 600; color: #c0caf5">{{ ticket }}</span>
+<sc-if value="{{ showState }}" hint-placeholder-val="{{ false }}">
+<span style="display: inline-block; padding: 0 6px; border: 1px solid {{ stateBorder }}; background: {{ stateFill }}; color: {{ stateColor }}; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">{{ stateLabel }}</span>
+</sc-if>
+</div>
+<div style="display: flex; align-items: center; gap: 7px; min-height: 18px">
+<sc-if value="{{ showGlyph }}" hint-placeholder-val="{{ true }}">
+<span aria-hidden="true" style="display: grid; grid-template-columns: 5px 5px; grid-template-rows: 5px 5px; gap: 1px"><span style="background: {{ g0 }}"></span><span style="background: {{ g1 }}"></span><span style="background: {{ g2 }}"></span><span style="background: {{ g3 }}"></span></span>
+</sc-if>
+<span role="img" aria-label="{{ text }}" style="display: flex; white-space: pre; font-size: 14px; line-height: 1.25; font-weight: 500"><sc-for list="{{ letters }}" as="ch" hint-placeholder-count="8"><span style="color: {{ ch.color }}">{{ ch.c }}</span></sc-for></span>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; color: #8b93b8">
+<span style="color: #a9b1d6">{{ action }}</span>
+<sc-if value="{{ showRound }}" hint-placeholder-val="{{ true }}">
+<span title="{{ roundTitle }}" style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="display: flex; gap: 2px"><sc-for list="{{ pips }}" as="pip" hint-placeholder-count="3"><span style="width: 6px; height: 6px; background: {{ pip.color }}"></span></sc-for></span><span>{{ round }}</span></span>
+</sc-if>
+<span style="flex: 1 1 0"></span>
+<span style="white-space: nowrap">T+ <b style="font-weight: 600; color: #c0caf5">{{ elapsedText }}</b></span>
+</div>
+<div style="display: flex; align-items: center; gap: 8px">
+<div aria-hidden="true" style="flex: 1 1 0; height: 3px; background: #414868"><div style="height: 3px; width: {{ hbPct }}; background: {{ hbColor }}"></div></div>
+<span style="white-space: nowrap; color: {{ hbTextColor }}">hb {{ hbText }}</span>
+</div>
+</div>
+</a>
+</sc-if>
+<sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+<div style="position: relative; box-sizing: border-box; width: 100%; min-height: 124px; display: flex; flex-direction: column; border: 1px dashed {{ emptyBorder }}">
+<sc-if value="{{ isHeld }}" hint-placeholder-val="{{ false }}">
+<div aria-hidden="true" style="position: absolute; inset: -1px; pointer-events: none">
+<div style="position: absolute; left: 0; right: 0; top: 0; height: 2px; background-image: repeating-linear-gradient(90deg, #ff9e64 0 8px, transparent 8px 16px); background-position: {{ marchPos }} 0"></div>
+<div style="position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background-image: repeating-linear-gradient(90deg, #ff9e64 0 8px, transparent 8px 16px); background-position: {{ marchNeg }} 0"></div>
+<div style="position: absolute; top: 0; bottom: 0; right: 0; width: 2px; background-image: repeating-linear-gradient(180deg, #ff9e64 0 8px, transparent 8px 16px); background-position: 0 {{ marchPos }}"></div>
+<div style="position: absolute; top: 0; bottom: 0; left: 0; width: 2px; background-image: repeating-linear-gradient(180deg, #ff9e64 0 8px, transparent 8px 16px); background-position: 0 {{ marchNeg }}"></div>
+</div>
+</sc-if>
+<dc-import name="PixelStrip" effect="{{ effect }}" tint="#9ece6a" cell="{{ cell }}" still="{{ still }}" seed="{{ seed }}" strip-height="16" hint-size="100%,16px"></dc-import>
+<div style="flex: 1 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; font-weight: 500; letter-spacing: 0.12em; color: {{ emptyColor }}">{{ emptyLabel }}</div>
+</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"mode":{"editor":"enum","options":["plan","build","review","fix","claimed","stale","dead","idle","held"],"default":"build","section":"State"},"bot":{"editor":"enum","options":["claude","codex","cursor","grok"],"default":"claude","section":"State"},"progress":{"editor":"range","min":0,"max":1,"step":0.01,"default":0.14,"section":"State"},"verbs":{"editor":"boolean","default":true,"section":"Motion"},"still":{"editor":"boolean","default":false,"section":"Motion"},"cell":{"editor":"int","min":2,"max":8,"default":4,"unit":"px","section":"Motion"},"ticket":{"editor":null,"default":"factory#124"},"round":{"editor":null,"default":"1/1"},"elapsed":{"editor":null,"default":"4m 06s"},"hb":{"editor":null,"default":"6s"},"seed":{"editor":null,"default":1},"$preview":{"width":200,"height":124}}'>
+class Component extends DCLogic {
+  componentDidMount() {
+    var self = this;
+    var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+    this._sysStill = !!(mq && mq.matches);
+    /* 8 Hz tick: glyph, letter sweep, verb, counters, held border */
+    this._iv = window.setInterval(function () {
+      if (!self._moving) return;
+      var tick = (self.state && self.state.tick) || 0;
+      self.setState({ tick: tick + 1 });
+    }, 125);
+  }
+
+  componentWillUnmount() {
+    if (this._iv) window.clearInterval(this._iv);
+  }
+
+  _n(v, d) {
+    if (v === null || v === undefined || v === '') return d;
+    var n = Number(v);
+    return isFinite(n) ? n : d;
+  }
+
+  /* "4m 06s" or "13s" to seconds; -1 when it cannot be read */
+  _secs(s) {
+    var m = /(\d+)\s*m\s*(\d+)\s*s/.exec(String(s || ''));
+    if (m) return Number(m[1]) * 60 + Number(m[2]);
+    m = /(\d+)\s*s/.exec(String(s || ''));
+    if (m) return Number(m[1]);
+    return -1;
+  }
+
+  _fmt(total) {
+    var mm = Math.floor(total / 60), ss = total % 60;
+    if (mm <= 0) return ss + 's';
+    return mm + 'm ' + (ss < 10 ? '0' : '') + ss + 's';
+  }
+
+  renderVals() {
+    var p = this.props;
+    var mode = String(p.mode || 'build');
+    var tick = (this.state && this.state.tick) || 0;
+    var still = p.still === true || p.still === 'true' || !!this._sysStill;
+    var verbsOn = !(p.verbs === false || p.verbs === 'false');
+    var seed = this._n(p.seed, 1);
+    var ticket = p.ticket == null ? 'factory#124' : String(p.ticket);
+    var round = p.round == null ? '' : String(p.round);
+
+    var bots = {
+      claude: ['claude', '#e0af68', '224,175,104'],
+      codex: ['codex', '#7aa2f7', '122,162,247'],
+      cursor: ['cursor', '#bb9af7', '187,154,247'],
+      grok: ['grok', '#73daca', '115,218,202']
+    };
+    var bot = bots[String(p.bot || 'claude')] || bots.claude;
+    var botTint = bot[1];
+
+    var running = mode === 'plan' || mode === 'build' || mode === 'review' || mode === 'fix';
+    var isJob = running || mode === 'claimed' || mode === 'stale' || mode === 'dead';
+    /* motion rule: only active work moves */
+    this._moving = !still && (running || mode === 'held');
+
+    var secs = Math.floor(tick / 8);
+    var effects = {
+      plan: 'field', build: 'fill', review: 'scan', fix: 'patch',
+      claimed: 'spin3', stale: 'decay', dead: 'static', idle: 'twinkle', held: 'off'
+    };
+
+    /* status chip only when something is not normal */
+    var stateLabel = '', stateRgb = '158,206,106', stateColor = '#9ece6a';
+    if (mode === 'claimed') { stateLabel = 'claimed'; stateRgb = '255,158,100'; stateColor = '#ff9e64'; }
+    else if (mode === 'stale') { stateLabel = 'stale'; stateRgb = '255,158,100'; stateColor = '#ff9e64'; }
+    else if (mode === 'dead') { stateLabel = 'dead'; stateRgb = '247,118,142'; stateColor = '#f7768e'; }
+
+    var verbs = {
+      plan: ['Pondering', 'Sketching', 'Scheming'],
+      build: ['Assembling', 'Stacking', 'Forging'],
+      review: ['Scrutinizing', 'Combing', 'Squinting'],
+      fix: ['Patching', 'Mending', 'Tinkering']
+    };
+    var action = running ? mode : 'build';
+    var text = action, textColor = '#8b93b8', shimmer = false;
+    if (running) {
+      var list = verbs[mode];
+      text = verbsOn ? list[Math.floor((secs + seed * 1.7) / 4) % list.length] + '…' : mode;
+      textColor = '#c0caf5';
+      shimmer = !still;
+    } else if (mode === 'claimed') {
+      text = 'waiting to start';
+    } else if (mode === 'stale') {
+      text = 'no heartbeat';
+      textColor = '#ff9e64';
+    } else if (mode === 'dead') {
+      text = 'runner dead';
+      textColor = '#f7768e';
+    }
+
+    var letters = [];
+    var pos = shimmer ? (tick % (text.length + 10)) - 2 : -99;
+    for (var i = 0; i < text.length; i++) {
+      var dist = Math.abs(i - pos);
+      letters.push({ c: text.charAt(i), color: dist === 0 ? '#ffffff' : dist === 1 ? botTint : textColor });
+    }
+
+    var order = [2, 0, 1, 3];
+    var litCell = running ? (still ? 2 : order[Math.floor(tick / 2) % 4]) : -1;
+    var g = [];
+    for (var q = 0; q < 4; q++) g.push(q === litCell ? botTint : '#414868');
+
+    /* round pips: done, current, remaining */
+    var pips = [];
+    var rm = /^(\d+)\s*\/\s*(\d+)$/.exec(round);
+    if (rm) {
+      var cur = Number(rm[1]), cap = Math.min(6, Number(rm[2]));
+      for (var k = 1; k <= cap; k++) pips.push({ color: k < cur ? '#c0caf5' : k === cur ? '#7dcfff' : '#414868' });
+    }
+
+    /* live counters: T+ counts up, a heartbeat lands every 15 s */
+    var e0 = this._secs(p.elapsed);
+    var elapsedText = e0 < 0 ? String(p.elapsed || '—') : this._fmt(e0 + (running ? secs : 0));
+    var h0 = this._secs(p.hb);
+    if (h0 < 0) h0 = 0;
+    var hbAge = running ? (h0 + secs) % 15 : h0;
+    var beat = running ? Math.floor((h0 + secs) / 15) : 0;
+    var hbText = hbAge + 's', hbPct = Math.max(8, 100 - hbAge * 6) + '%', hbColor = '#9ece6a', hbTextColor = '#8b93b8';
+    if (mode === 'claimed') { hbText = '—'; hbPct = '0%'; }
+    else if (mode === 'stale') { hbText = '94s'; hbPct = '100%'; hbColor = '#ff9e64'; hbTextColor = '#ff9e64'; }
+    else if (mode === 'dead') { hbText = '6m'; hbPct = '100%'; hbColor = '#f7768e'; hbTextColor = '#f7768e'; }
+
+    var progress = Math.max(0, Math.min(1, this._n(p.progress, 0.14) + (running ? secs / 1800 : 0)));
+    var march = (Math.floor(tick / 4) * 4) % 16;
+
+    return {
+      isJob: isJob,
+      isEmpty: !isJob,
+      isHeld: mode === 'held',
+      title: ticket + ' · ' + action + (round ? ' · round ' + round : ''),
+      borderColor: mode === 'dead' ? '#f7768e' : 'transparent',
+      effect: effects[mode] || 'off',
+      stripTint: mode === 'dead' ? '#f7768e' : botTint,
+      progress: progress,
+      cell: this._n(p.cell, 4),
+      still: still,
+      seed: seed,
+      beat: beat,
+      botLabel: bot[0],
+      botTint: botTint,
+      botBorder: 'rgba(' + bot[2] + ',0.4)',
+      botFill: 'rgba(' + bot[2] + ',0.09)',
+      ticket: ticket,
+      showState: stateLabel !== '',
+      stateLabel: stateLabel,
+      stateColor: stateColor,
+      stateBorder: 'rgba(' + stateRgb + ',0.4)',
+      stateFill: 'rgba(' + stateRgb + ',0.09)',
+      showGlyph: running,
+      g0: g[0], g1: g[1], g2: g[2], g3: g[3],
+      text: text,
+      letters: letters,
+      action: action,
+      showRound: pips.length > 0,
+      pips: pips,
+      round: round,
+      roundTitle: 'round ' + round,
+      elapsedText: elapsedText,
+      hbText: hbText,
+      hbPct: hbPct,
+      hbColor: hbColor,
+      hbTextColor: hbTextColor,
+      emptyBorder: mode === 'held' ? 'transparent' : '#414868',
+      emptyColor: mode === 'held' ? '#ff9e64' : '#8b93b8',
+      emptyLabel: mode === 'held' ? 'held' : 'idle',
+      marchPos: march + 'px',
+      marchNeg: (0 - march) + 'px'
+    };
+  }
+}
+</script>
+</body>
+</html>
