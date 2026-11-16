@@ -149,6 +149,7 @@ COUNTERS_ONLY = "counters"
 
 Log = Callable[[str], None]
 Connect = Callable[[], sqlite3.Connection]
+Guard = Callable[[sqlite3.Connection], None]
 
 COLUMNS = (
     "job_id",
@@ -1324,8 +1325,10 @@ class Session:
         device: str = "box",
         rollout_home: str | None = None,
         text: bool = True,
+        guard: Guard | None = None,
     ):
         self.connect = connect
+        self.guard = guard
         self.device = device
         self.rollout_home = rollout_home  # a box Codex run's CODEX_HOME (#151)
         self.usage: dict[str, Reading] = {}
@@ -1491,6 +1494,9 @@ class Session:
             marks = ", ".join("?" for _ in COLUMNS)
             with closing(self.connect()) as connection:
                 with connection:
+                    if self.guard is not None:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self.guard(connection)
                     ensure_table(connection)
                     connection.execute(
                         f"INSERT OR REPLACE INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({marks})",
@@ -1579,12 +1585,16 @@ def start_session(
     max_log_bytes: int = MAX_LOG_BYTES,
     worker_env: bool = False,
     device: str = "box",
+    guard: Guard | None = None,
 ) -> Session | None:
     """A session for one `orch job run`, or None when ORCH_TELEMETRY is off.
 
     worker_env: the command runs on a remote device, whose start reports
     the harness's environment first (lib/remote.py `start_script`); until
-    that report is read, every text is hidden."""
+    that report is read, every text is hidden.
+
+    guard: runs in each summary write's transaction and refuses it by
+    raising."""
     env = os.environ if environ is None else environ
     if not enabled(env):
         return None
@@ -1614,4 +1624,5 @@ def start_session(
         device=device,
         rollout_home=codex_home(dict(env)) if harness == "codex" and not worker_env else None,
         text=text_enabled(env),
+        guard=guard,
     )

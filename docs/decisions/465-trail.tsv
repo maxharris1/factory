@@ -1,0 +1,5 @@
+decision	choice	why
+where to guard	a guard callable on telemetry.Session, run in each summary write transaction; orch job run passes require_proof with its claim proof	telemetry stays free of queue imports; one check covers flush, finish and the usage readings in the same write, and reuses the rule every other job write already follows
+locking	BEGIN IMMEDIATE before the guard	the queue takes the write lock before require_proof, so a reclaim cannot land between the check and the INSERT
+refused write	rolled back and logged once as summary not written	telemetry already never stops a run; a retired run has nothing of its own left to report
+regression	the successor snapshot in test_claim_token now includes job_telemetry, plus the reviewer repro seeding tokens_in=123	the parametrized reclaim test then fails for prepare and started stages on main, so every stage is covered
