@@ -1,0 +1,7 @@
+decision	choice	why
+deploy rule	a target that needs a deploy goes deploying in the pass that saw it, whatever the device job count; the deploying mark still blocks placement during the move	same shape as #366 for the box; the device deploy restarts no service, so no step is left that needs the busy wait the ticket keeps for such steps
+running job safety	rely on remote jobs working in <workdir_root>/jobs/<id>, which machines_yml keeps outside factory_root	the deploy writes only factory_root and the bot home skills; the job checkout and its slot row are untouched
+dry run	keeps the lagging or missing state and writes nothing	it reports what would deploy without claiming deploying
+ac-3 proof	real git deploy script under the local fake ssh with a running job and its slot on pc, then report() reads device-deploy.state.json	the test failed on the old code (lagging, busy (1 jobs)) and passes on the new
+deploying ownership (review f-1)	device_sync.upsert leaves a deploying row unless the writer passes replaces_deploying=True; device_deploy._write and self_deploy._mark_deploying do	a job claimed before the pass can fail its preflight during the move, and the waiter lagging write had replaced deploying with lagging, which lifted the whole-device block; one guard in the shared writer covers both waiter writers
+f-1 proof	the reviewer repro as a test in tests/test_device_deploy.py, with the real preflight restored, plus a parametrized upsert test	the overlap test failed on 2b7de09 (lagging, not deploying) and passes with the guard

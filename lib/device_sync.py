@@ -4,18 +4,17 @@ One `device_sync` row per remote deploy target, keyed (device, bot): each
 bot on a remote device has its own factory checkout (machines.yml
 factory_root, e.g. /Users/{bot}/factory), so the unit is a bot's checkout.
 The table lives in orch.db beside `device_slots`, so the deploy pass
-(lib/device_deploy.py) marks a target lagging and counts the device's slots
-in one BEGIN IMMEDIATE transaction, and DevicePool.claim reads the same
-rows in its own: no job lands on a device between "this device is idle" and
-"this device is being updated".
+(lib/device_deploy.py) marks a target deploying in one BEGIN IMMEDIATE
+transaction, and DevicePool.claim reads the same rows in its own: no job
+lands on a device while its checkout is being updated.
 
 States:
 
 * synced: HEAD is the target, on main, and every pinned skill file matches.
-* lagging: not synced; waiting for the device to have no jobs. The lagging
-  bot's harness is not placed on the device, so it drains.
+* lagging: not synced, until the next deploy pass moves it. The lagging
+  bot's harness is not placed on the device.
 * deploying: a deploy runs now. No harness is placed on the device.
-* missing: the checkout does not exist; the next idle pass clones it.
+* missing: the checkout does not exist; the next pass clones it.
 * refused: the deploy would discard local work (staged or modified files,
   an untracked or ignored file in the checkout's way, a merge or rebase in
   progress, local commits) or failed. Escalated once.
@@ -167,6 +166,7 @@ def upsert(
     state: str,
     detail: str,
     now: float,
+    replaces_deploying: bool = False,
 ) -> None:
     """Write one row in the caller's transaction; `since` restarts only when the state changes."""
     if state not in STATES:
@@ -188,8 +188,9 @@ def upsert(
             state = excluded.state,
             detail = excluded.detail,
             checked_at = excluded.checked_at
+        WHERE {TABLE}.state != '{DEPLOYING}' OR ?
         """,
-        (device, bot, harness, checkout, target, sha, state, detail, now, now),
+        (device, bot, harness, checkout, target, sha, state, detail, now, now, replaces_deploying),
     )
 
 

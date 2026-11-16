@@ -413,7 +413,8 @@ def _mark_deploying(
         connection.execute("BEGIN IMMEDIATE")
         device_sync.upsert(connection, device=device, bot="", harness="",
                            checkout=str(checkout), target=new, sha=old,
-                           state=device_sync.DEPLOYING, detail="", now=now)
+                           state=device_sync.DEPLOYING, detail="", now=now,
+                           replaces_deploying=True)
         connection.commit()
 
 
