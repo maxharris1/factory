@@ -43,7 +43,8 @@ stdout on a pipe and hands the pipe to a `Session` here:
   the pinned skill files the run read (`SkillReads`), each relative to the
   placed device's skills tree and kept only when skills/skills.lock lists
   it, so the column holds names from that closed set alone, in counters
-  mode too. NULL when the run has no known skills tree.
+  mode too. NULL when the run has no known skills tree or skills.lock
+  cannot be read.
 * The one exception (#147, Max, 2026-11-13): the live run (`LiveRun`), so
   the agent's task-list text, its current and last finished task, and its
   sub-agents' description and type. Never a prompt, a result, a summary or
@@ -1002,10 +1003,7 @@ class LiveRun:
         return [agent for agent in agents if id(agent) in chosen]
 
 
-# --- pinned skill reads: which locked skill files the run read (#505) ---------------
-
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
-# sed's and awk's script operand is never a locked path, so the lock drops it.
 _READ_VERBS = frozenset({"cat", "head", "tail", "nl", "less", "more", "bat", "sed", "awk"})
 _SHELL_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "}", "!"})
 _OPERATORS = ";&|()<>\n"
@@ -1014,7 +1012,6 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 
 
 def _simple_commands(script: str) -> list[list[str]]:
-    """The script's simple commands, split at ; & | ( ) and newlines; redirection targets dropped."""
     lexer = shlex.shlex(script, posix=True, punctuation_chars=_OPERATORS)
     lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
     commands: list[list[str]] = [[]]
@@ -1082,10 +1079,9 @@ class SkillReads:
 
     def _script(self, script: str, base: str | None) -> None:
         for words in _simple_commands(script):
-            base = self._simple(words, base)
+            base = self._cwd_after(words, base)
 
-    def _simple(self, words: list[str], base: str | None) -> str | None:
-        """Record the command's reads; the working directory after it."""
+    def _cwd_after(self, words: list[str], base: str | None) -> str | None:
         words = list(itertools.dropwhile(lambda word: word in _SHELL_WORDS or _ASSIGNMENT.match(word), words))
         if not words:
             return base
@@ -1105,7 +1101,6 @@ class SkillReads:
 
 
 def skill_reads(root: str | None, log: Log) -> SkillReads | None:
-    """A run's skill reads under `root`, its skills tree; None (unrecorded) with no root or no lock."""
     if root is None:
         return None
     try:

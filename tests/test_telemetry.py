@@ -1681,8 +1681,6 @@ def test_cli_job_run_writes_the_live_run_and_counters_only_writes_none(tmp_path:
     assert rows["on"]["skill_reads"] == rows["counters"]["skill_reads"] == "[]"
 
 
-# --- pinned skill reads, from the harness's own tool calls (#505) ---------------------------
-
 
 @pytest.mark.parametrize(
     "name, root, expected",

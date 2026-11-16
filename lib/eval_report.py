@@ -92,13 +92,14 @@ list. The rest are lifetime counts:
 - tickets succeeded: merged or done; Aut0 counts at handed-off (Ready for
   Review)
 - skill reads per job kind (plan, build, fix, review; #505), over done
-  and failed jobs, merge-only fixes left out: the share of jobs that read the factory-builder or factory-reviewer router and the mean
-  count of distinct skill files read, from job_telemetry.skill_reads (paths
-  under the deployed skills tree, logged from file reads). The Skill tool
-  count is not used. A job with no telemetry row or no skill_reads value is
-  counted in skill-reads-unrecorded-<kind> and left out of both means; a
-  kind with no recorded job, or a snapshot from before the column, prints
-  unrecorded
+  and failed jobs, merge-only fixes left out: the share of jobs that read
+  the factory-builder or factory-reviewer router and the mean count of
+  distinct skill files read, from job_telemetry.skill_reads (paths under
+  the deployed skills tree, from file reads and Skill tool calls). The
+  Skill tool count is not used. A job with no telemetry row or no
+  skill_reads value is counted in skill-reads-unrecorded-<kind> and left
+  out of both means; a kind with no recorded job, or a snapshot from
+  before the column, prints unrecorded
 - helpers per job: #100's job_telemetry tool counts (Agent and Task) over
   Claude jobs. D25 sets no helper cap, so the max is printed too
 - preflight failures: requeued-unstarted job events whose reason is one
