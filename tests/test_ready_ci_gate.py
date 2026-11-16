@@ -370,7 +370,6 @@ NO_CI_BASE = "feature/upload-only-intake"
 
 
 def on_base(board, base: str, *, ci_branches: tuple[str, ...] | None = ("dev", "main")) -> set[str]:
-    """The PR targets base. A pending head reports nothing until it is added to the returned set."""
     board.factory = replace(board.factory, ci_branches=ci_branches)
     reported: set[str] = set()
     snapshot = board.snapshot

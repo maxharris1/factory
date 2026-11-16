@@ -17,8 +17,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
     verdict = _revise_verdict_url(detail, facts)
     if verdict:
         return [*_review_fix(detail, facts, verdict), *builder_notes(job, facts)]
-    # A CI-fix exists only because a check reported red on this head, so CI is the gate.
-    return [*_ci_fix(detail, facts), *builder_notes(job, {**facts, "no_ci_base": None})]
+    return [*_ci_fix(detail, facts), *builder_notes(job, facts, ci_reported_red=True)]
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:

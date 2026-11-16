@@ -72,7 +72,6 @@ CI_STATUSES = ("pending", "success", "failure", "not-run")
 
 
 def no_ci_base(factory: FactoryConfig, pr_base: str | None) -> str | None:
-    """The PR's base when factory.md lists CI branches and this base is not one."""
     if factory.ci_branches is None or pr_base is None or pr_base in factory.ci_branches:
         return None
     return pr_base

@@ -189,7 +189,6 @@ def _plain_repo(repo: str) -> str | None:
 
 
 def local_checks(facts: dict) -> str:
-    """The base's local checks in plain English, as in "typecheck, Jest and pgTAP"."""
     checks = facts["local_checks"]
     if not checks:
         return "the repo's checks"

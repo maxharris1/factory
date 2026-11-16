@@ -55,11 +55,11 @@ def base_step(number: int, facts: dict) -> str:
     )
 
 
-def builder_notes(job: Job, facts: dict) -> list[str]:
+def builder_notes(job: Job, facts: dict, *, ci_reported_red: bool = False) -> list[str]:
     gate = (
         f"CI does not run on `{facts['no_ci_base']}`. Run {local_checks(facts)} locally at the head you push, "
         "paste each command and its result in the ready, and say that CI did not run."
-        if facts["no_ci_base"]
+        if facts["no_ci_base"] and not ci_reported_red
         else "CI runs the full suite and is the gate: a red CI comes back to you as a fix job."
     )
     notes = [
