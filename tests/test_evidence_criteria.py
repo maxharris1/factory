@@ -550,3 +550,28 @@ def test_f2_an_inline_code_goal_renders_as_written(goal):
     assert f"<p><strong>Goal</strong>\n{markdown.renderInline(goal)}</p>" in markdown.render(body)
     bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
     assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Comments survive.")]
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "See [x](https://example.com/`)\\\nnext `word`",
+        "See ![x](a.png \"t`\")  \nnext `word`",
+        "See [x](<https://example.com/`>)\\\n# next `word`",
+        "See [x](https://example.com/(`))\\\nnext `word`",
+    ],
+)
+def test_f2_a_backtick_in_a_link_destination_keeps_the_hard_break(goal):
+    body = brief_comment(
+        risk="low",
+        goal=goal,
+        acceptance_criteria=["Scripts are removed.", "Safe HTML remains."],
+        likely_files=[],
+        done_evidence="Tests pass.",
+    )
+    markdown = MarkdownIt("commonmark")
+    rendered_goal = markdown.renderInline(goal)
+    assert "<br />" in rendered_goal
+    assert f"<p><strong>Goal</strong>\n{rendered_goal}</p>" in markdown.render(body)
+    bundle = _bundle(comments=(Comment(id="1", author="factory-app[bot]", body=body, created_at=1.0),))
+    assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Scripts are removed."), ("ac-2", "Safe HTML remains.")]

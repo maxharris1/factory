@@ -43,6 +43,10 @@ STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
 _ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
 _BACKTICK_FENCE = re.compile(r"^`{3,}[^`]*$")
 _BACKTICK_RUN = re.compile(r"`+")
+_LINK_TAIL = re.compile(
+    r"""\]\(\s*(?:<(?:\\.|[^<>\\\n])*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))*)"""
+    r"""(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)"""
+)
 _OPENER_CHARACTERS = frozenset("-+*_=#>~<[")
 
 RECOMMENDED_NEXT = {
@@ -871,6 +875,8 @@ def _code_span_after(line: str, open_run: int, following: str) -> int:
             position, open_run = close, 0
         elif line[position] == "\\":
             position += 2
+        elif link := _LINK_TAIL.match(line, position):
+            position = link.end()
         elif line[position] == "`":
             run = _BACKTICK_RUN.match(line, position)
             paragraph_rest = f"{line[run.end():]}\n{following}".split("\n\n", 1)[0]
