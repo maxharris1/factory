@@ -69,6 +69,16 @@ function journeyFmt(sec) {
   return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
 }
 
+var JOURNEY_ET = null;
+
+function journeyClock(epoch) {
+  if (epoch === null || epoch === undefined || !isFinite(epoch)) return '';
+  if (!JOURNEY_ET) {
+    JOURNEY_ET = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  }
+  return JOURNEY_ET.format(new Date(epoch * 1000));
+}
+
 function journeyLayout(model, scale) {
   var visits = (model && model.visits) || [];
   var n = visits.length, LX0 = 24, PW = 176;
@@ -343,7 +353,7 @@ function journeyText(ctx, L, opts, hops, revealX, arrived) {
     ctx.fillText('ahead · ' + hops + '+ hops to shipped', L.nowX * 4 + 12, 311);
   }
 
-  tag = 'NOW · ' + (opts.nowClock || '');
+  tag = 'NOW · ' + (opts.nowClock ? opts.nowClock + ' ET' : '');
   ctx.font = '700 10px ' + JOURNEY_FONT;
   tw = ctx.measureText(tag).width;
   ctx.fillStyle = '#7dcfff';

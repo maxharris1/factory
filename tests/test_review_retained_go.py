@@ -5,10 +5,9 @@ from pathlib import Path
 from tests.merge_queue_support import sha
 from tests.test_dispatch_ready_comments import _restart
 from tests.test_review_before_ci import (
-    CI_LOG,
     board_with,
     built_with_ci_pending,
-    instruction,
+    ci_failure,
     reviewed_at_pending_ci,
 )
 
@@ -36,4 +35,4 @@ def test_a_hidden_duplicate_go_never_answers_the_review_after_an_upgrade(
 
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
-    assert CI_LOG in instruction(fixes[0])
+    assert ci_failure(fixes[0]) == {"failed_checks": ["pytest"]}

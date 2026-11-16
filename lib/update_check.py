@@ -23,12 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib.feeder_gates import path_matches
+from lib.hold import MergeStep, MergeUpdate
 
 MARKER_SIZE = 61
 _MARKER_RUN = re.compile(rb"([<|=>])\1*")
 _LINE = re.compile(rb"[^\n]*\n|[^\n]+")
 TIMEOUT_SECONDS = 120.0
 _REGULAR_MODES = ("100644", "100755")
+_TREE_ID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,75 @@ def rebase_scope(
     if ancestry != 1:
         raise ValueError("git merge-base --is-ancestor failed")
     return RebaseScope(last, _merge_base(clone, last, base_ref), _merge_base(clone, new, base_ref))
+
+
+def merge_update(clone: Path, approved_head: str, head: str, base_ref: str) -> MergeUpdate:
+    """What lib.hold.ok_carries needs to judge whether an ok at
+    approved_head covers head (issue #574). Raises ValueError (or an
+    OSError or SubprocessError) when the clone cannot answer."""
+    approved = _resolve(clone, approved_head)
+    new = _resolve(clone, head)
+    ancestry = _run(clone, "merge-base", "--is-ancestor", approved, new).returncode
+    if ancestry == 1:
+        return MergeUpdate(approved, (), frozenset(), frozenset())
+    if ancestry != 0:
+        raise ValueError("git merge-base --is-ancestor failed")
+    chain = _output(
+        clone, "rev-list", "--first-parent", "--parents", "--reverse", f"{approved}..{new}"
+    ).decode("ascii")
+    steps = []
+    for line in chain.splitlines():
+        commit, *parents = line.split()
+        on_base = all(_on_base(clone, parent, base_ref) for parent in parents[1:])
+        hand_merged = (
+            _hand_merged_paths(clone, commit, *parents)
+            if len(parents) == 2 and on_base
+            else frozenset()
+        )
+        steps.append(MergeStep(commit, tuple(parents), on_base, hand_merged))
+    return MergeUpdate(
+        approved,
+        tuple(steps),
+        _own_files(clone, approved, base_ref),
+        _own_files(clone, new, base_ref),
+    )
+
+
+def _on_base(clone: Path, commit: str, base_ref: str) -> bool:
+    code = _run(clone, "merge-base", "--is-ancestor", commit, base_ref).returncode
+    if code not in (0, 1):
+        raise ValueError(f"git merge-base --is-ancestor {commit} failed")
+    return code == 0
+
+
+def _hand_merged_paths(clone: Path, merge: str, first: str, second: str) -> frozenset[str]:
+    merged = _run(
+        clone, "merge-tree", "--write-tree", "--name-only", "-z", "--no-messages", first, second
+    )
+    if merged.returncode not in (0, 1):
+        raise ValueError("git merge-tree failed")
+    tree, *conflicted = merged.stdout.split(b"\0")
+    if not _TREE_ID.fullmatch(tree):
+        raise ValueError("git merge-tree wrote no tree")
+    changed = _output(
+        clone, "diff-tree", "-r", "--no-renames", "--name-only", "-z", tree.decode("ascii"), merge
+    )
+    return frozenset(
+        path.decode("utf-8") for path in (*conflicted, *changed.split(b"\0")) if path
+    )
+
+
+def _own_files(clone: Path, head: str, base_ref: str) -> frozenset[str]:
+    fork = _merge_base(clone, head, base_ref)
+    listed = _output(clone, "diff-tree", "-r", "--no-renames", "--name-only", "-z", fork, head)
+    return frozenset(path.decode("utf-8") for path in listed.split(b"\0") if path)
+
+
+def _output(clone: Path, *args: str) -> bytes:
+    result = _run(clone, *args)
+    if result.returncode != 0:
+        raise ValueError(f"git {args[0]} failed")
+    return result.stdout
 
 
 def _resolve(clone: Path, name: str) -> str:

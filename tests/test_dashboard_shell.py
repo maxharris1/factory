@@ -636,7 +636,7 @@ def _place_harness() -> str:
         "      const scroll = [];\n"
         "      (function walk(n) { if (n.scrollLeft || n.scrollTop) scroll.push([n.className.split(' ')[0], n.scrollLeft || 0, n.scrollTop || 0, n.isConnected]);\n"
         "        n.children.forEach(walk); })(body);\n"
-        "      steps.push({where: {tag: node ? node.tagName : 'BODY', attrs: node ? node.attrs : {}, path,\n"
+        "      steps.push({where: {tag: node ? node.tagName : 'BODY', attrs: node ? node.attrs : {}, cls: node ? node.className : '', path,\n"
         "        same: node === kept, connected: !!kept && kept.isConnected}, scroll});\n"
         "    } else if (kind === 'poll') {",
     ).replace("const steps = [];", "const steps = [];\nlet kept = null;")
@@ -779,7 +779,7 @@ def test_a_run_log_row_keeps_focus_when_it_stops_being_current(tmp_path: Path) -
     steps = _place(tmp_path, snapshot, "job.html", _ids("job.html"),
                    [["put", at], ["where", None], ["poll", _next(snapshot, _ship)], ["where", None]], hash_="#job-h-review")
     before, after = (step["where"] for step in steps)
-    assert "now" in before["path"], before
+    assert "now" in before["cls"].split() and "now" not in after["cls"].split(), (before, after)
     assert (after["tag"], after["attrs"].get("data-visit")) == ("button", "4"), after
     assert after["path"][:-1] == before["path"][:-1], (before, after)
     assert not after["connected"], "the focused row was rebuilt, not kept"

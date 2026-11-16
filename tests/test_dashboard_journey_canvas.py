@@ -1,7 +1,9 @@
 import json
+import os
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -48,8 +50,8 @@ function hash(text) {
   for (var i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
   return h;
 }
-var api = new Function(input.script + '\nreturn { journeyBars: journeyBars, drawJourney: drawJourney };')();
-var out = { bars: {}, frames: {} };
+var api = new Function(input.script + '\nreturn { journeyBars: journeyBars, drawJourney: drawJourney, journeyClock: journeyClock };')();
+var out = { bars: {}, frames: {}, clocks: (input.clocks || []).map(function (t) { return api.journeyClock(t); }) };
 out.bars.even = api.journeyBars(input.model, 'even');
 out.bars.scale = api.journeyBars(input.model, 'scale');
 Object.keys(input.frames).forEach(function (name) {
@@ -83,7 +85,7 @@ def _model(path=PATH, hops=len(FUTURE)) -> dict:
 
 
 FRAME = {"scale": "even", "selected": 3, "flash": 0, "beat": -1, "reduced": False,
-         "still": False, "startClock": "1:47 PM", "nowClock": "3:48 PM"}
+         "still": False, "startClock": "13:47", "nowClock": "15:48"}
 FRAMES = {
     "t0": dict(FRAME, t=0),
     "t1_5": dict(FRAME, t=1.5, flash=0.5),
@@ -94,12 +96,15 @@ FRAMES = {
 }
 
 
-def _run(tmp_path: Path, model: dict, frames: dict = FRAMES) -> dict:
+def _run(tmp_path: Path, model: dict, frames: dict = FRAMES, clocks: list = (), tz: str = "UTC") -> dict:
     data = tmp_path / "input.json"
-    data.write_text(json.dumps({"script": SCRIPT, "model": model, "frames": frames}))
+    data.write_text(json.dumps({"script": SCRIPT, "model": model, "frames": frames, "clocks": list(clocks)}))
     harness = tmp_path / "harness.js"
     harness.write_text(HARNESS)
-    done = subprocess.run([NODE, str(harness), str(data)], capture_output=True, text=True, timeout=30, check=True)
+    done = subprocess.run(
+        [NODE, str(harness), str(data)], capture_output=True, text=True, timeout=30, check=True,
+        env={**os.environ, "TZ": tz},
+    )
     return json.loads(done.stdout)
 
 
@@ -148,10 +153,38 @@ def test_bars_up_to_now_carry_their_names_and_nothing_ahead_is_named(tmp_path: P
     assert past <= set(frames["t10"]["texts"])
     assert not past & set(frames["t0"]["texts"])
     texts = frames["t10"]["texts"]
-    assert "NOW · 3:48 PM" in texts
-    assert "1:47 PM" in texts
+    assert "NOW · 15:48 ET" in texts
+    assert "13:47" in texts
+    assert [text for text in texts if re.search(r"\bET\b", text)] == ["NOW · 15:48 ET"]
     assert f"ahead · {len(FUTURE)}+ hops to shipped" in texts
     assert {"SHIPPED", "SHIP", "REVIEW", "BUILD", "PLAN", "ASK", "STOPPED"} <= set(texts)
+
+
+def _epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso).timestamp()
+
+
+CLOCKS = {
+    "2026-11-16T15:04:00+00:00": "10:04",
+    "2026-07-01T15:04:00+00:00": "11:04",
+    "2026-11-16T04:05:00+00:00": "23:05",
+    "2026-11-16T05:07:00+00:00": "00:07",
+}
+
+
+@needs_node
+@pytest.mark.parametrize("tz", ["UTC", "Asia/Tokyo"])
+def test_journey_clock_reads_us_eastern_whatever_the_host_zone(tmp_path: Path, tz: str) -> None:
+    clocks = [_epoch(iso) for iso in CLOCKS] + [None]
+    out = _run(tmp_path, _model(), {}, clocks, tz)
+    assert out["clocks"] == [*CLOCKS.values(), ""]
+
+
+@needs_node
+def test_now_tag_without_a_clock_names_no_zone(tmp_path: Path) -> None:
+    texts = _run(tmp_path, _model(), {"t10": dict(FRAME, t=10, nowClock="")})["frames"]["t10"]["texts"]
+    assert "NOW · " in texts
+    assert not any(re.search(r"\bET\b", text) for text in texts)
 
 
 @needs_node

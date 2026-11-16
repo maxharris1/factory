@@ -53,6 +53,7 @@ from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.handoff import format_header
 from lib.harness_env import harness_env
+from lib.hold import MergeUpdate
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
@@ -103,7 +104,13 @@ from lib.queue import (
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
-from lib.update_check import RebaseScope, UpdateClass, classify as classify_update, rebase_scope
+from lib.update_check import (
+    RebaseScope,
+    UpdateClass,
+    classify as classify_update,
+    merge_update,
+    rebase_scope,
+)
 from lib.wait import (
     WaitError,
     open_queue,
@@ -1036,6 +1043,7 @@ def _runtime(
         rebase_classifier=_rebase_check,
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
+        hold_carry=_hold_carry,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1066,6 +1074,13 @@ def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | N
         worktrees.work_root(None), repo, (last, head), worktrees.url_template(None)
     )
     return rebase_scope(clone, last, head, f"refs/remotes/origin/{base}")
+
+
+def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
+    )
+    return merge_update(clone, approved, head, f"refs/remotes/origin/{base}")
 
 
 def _feeder(
