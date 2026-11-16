@@ -518,10 +518,10 @@ FLOWMAP_PLACES = {
     "intake": (0, 0), "questions": (0, 1), "waiting-max": (0, 2),
     "planning": (1, 0), "plan-check": (1, 1),
     "building": (2, 0), "fixing": (2, 1),
-    "review": (3, 0), "capped": (3, 1), "blocked": (3, 2),
+    "review": (3, 0), "capped": (3, 1),
     "ship": (4, 0), "awaiting-ok": (4, 1), "waiting-external": (4, 2),
     "merged": (5, 0), "post-merge": (5, 1), "done": (5, 2), "handed-off": (5, 3),
-    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4),
+    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4), "blocked": (3, 4),
 }
 FLOWMAP_COLUMNS = {"Ask": 0, "Plan": 1, "Build": 2, "Review": 3, "Ship": 4, "Shipped": 5}
 FLOWMAP_HEADS = (("Ask", 0, 1), ("Plan", 1, 1), ("Build", 2, 1), ("Review", 3, 1), ("Ship", 4, 2))
@@ -596,6 +596,7 @@ def flowmap_layout(chart: dict) -> dict:
     overflow it), and a wire route for every ordered pair of states so
     an off-chart hop has one too. `edges` lists the chart's transitions."""
     places = _flowmap_places(chart)
+    phases = ticket_phases(chart)
     adjacency = _adjacency(chart)
     nodes = []
     for state in chart["states"]:
@@ -609,7 +610,7 @@ def flowmap_layout(chart: dict) -> dict:
             "row": row,
             "x": _col_x(column),
             "y": _row_y(row),
-            "stop": row >= STOP_ROW and not exits,
+            "stop": row >= STOP_ROW and phases[name] == "Stop",
             "end": not exits,
         })
     loops = {edge["from"] for edge in chart["edges"] if edge["from"] == edge["to"]}
