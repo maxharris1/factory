@@ -396,8 +396,9 @@ pause Linear calls for `Retry-After`; T4 and T8 budget or backoff deferrals
 retry next cycle. The ticket's factory PR supplies the current head and CI, and
 its issue comments are joined with the Linear comments. That PR is the one the
 feeder recorded, else the newest PR on the issue's own branch, open first. A
-PR that only names the key or is linked from Linear is never bound (#600). `ready`, `verdict`, and
-`stuck` go on PR issue comments, never reviews or inline comments.
+PR that only names the key or is linked from Linear is never bound (#600).
+`ready`, `verdict`, and `stuck` go on PR issue comments, never reviews or
+inline comments.
 `projects[].grok_bot` routes stop and terminal results. When a webhook wake's
 `target_bot` is set, only that project bot handles it; when it is `null`, Grok
 Bot handles it for the repo's project.

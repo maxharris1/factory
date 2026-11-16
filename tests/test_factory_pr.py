@@ -1,5 +1,3 @@
-"""Issue #600: a Linear ticket stays bound to the PR the factory made for it."""
-
 import json
 import sqlite3
 from pathlib import Path
@@ -17,7 +15,6 @@ BRANCH = "max/aut-2233-fix-login"
 
 
 def contested_issue() -> dict:
-    """AUT-2233 as Linear had it: someone else's PR 1338, titled with the key, linked too."""
     issue = linear_issue(identifier="AUT-2233")
     issue["gitBranchName"] = BRANCH
     issue["attachments"] = {
@@ -31,8 +28,6 @@ def contested_issue() -> dict:
 
 
 class TitleSearchGh(FakeGh):
-    """A title search for the key finds only the other PR, 1338."""
-
     def __init__(self) -> None:
         super().__init__(FACTORY.format(tickets="linear", ship="handoff"))
         self.branch_pulls = []

@@ -161,7 +161,6 @@ PINNED_READS = [
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
     SEARCHES + [("issue", "AUT-3"), ("issue", "AUT-1"), ("issue", "AUT-2")],
 ]
-# #600 adds one branch-PR read per Linear ticket (three) to each cycle.
 PINNED_GH_CALLS = [16, 16, 16]
 
 

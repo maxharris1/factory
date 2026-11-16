@@ -1863,9 +1863,6 @@ class LivePollSource:
         *,
         fresh: bool = False,
     ) -> str | None:
-        """#600: the PR the feeder recorded, else the newest PR on the issue's
-        own branch, open first. A PR that only names the key or is linked from
-        Linear can be someone else's, so neither binds the ticket."""
         recorded = self.fed_pulls.get(repo, identifier)
         if recorded is not None:
             return recorded
@@ -1888,12 +1885,12 @@ class LivePollSource:
             ),
             "GitHub branch pulls",
         )
-        ranked = sorted(
-            (item.get("state") == "open", _positive_int(item.get("number"), "pull request number"))
-            for item in pulls
-            if isinstance(item, dict) and _on_branch(item, repo, branch)
+        factory_pull = max(
+            (item for item in pulls if isinstance(item, dict) and _on_branch(item, repo, branch)),
+            key=_open_then_newest,
+            default=None,
         )
-        return str(ranked[-1][1]) if ranked else None
+        return None if factory_pull is None else str(factory_pull["number"])
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
@@ -2116,6 +2113,10 @@ def _json(text: str, source: str) -> object:
 
 def _json_object(text: str, source: str) -> dict[str, Any]:
     return _object(_json(text, source), source)
+
+
+def _open_then_newest(pull: Mapping[str, Any]) -> tuple[bool, int]:
+    return pull.get("state") == "open", _positive_int(pull.get("number"), "pull request number")
 
 
 def _on_branch(pull: Mapping[str, Any], repo: str, branch: str) -> bool:
