@@ -267,6 +267,10 @@ class RouteError(RuntimeError):
         self.source_comment_id = source_comment_id
 
 
+class PollCycleFailed(RuntimeError):
+    pass
+
+
 class ShipError(RuntimeError):
     """A ship that did not complete.
 

@@ -77,6 +77,7 @@ export const step = (action, from, to) => {
   if (action === "T9Pass") return "post-merge passes";
   if (action === "T9Fail") return "post-merge fails, follow-up filed";
   if (action === "MaxOkAnotherRound") return "Max okays one more round";
+  if (action === "MaxOkAfterHandoff") return "approver's go at the cap, one more round";
   if (action === "MaxGoAfterBlocked") return "approver's go, fresh review at the same round";
   if (action === "ReenterAfterHandoff") return "trusted ready at a new head, within the effective cap";
   // A merge seen in any state ends the ticket (#108); the chart draws only the

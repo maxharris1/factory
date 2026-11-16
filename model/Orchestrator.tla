@@ -526,6 +526,19 @@ MaxOkAnotherRound ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0, !.extra = 1]
 
+\* #118. An approver's go on a handed-off ticket whose next round would pass
+\* the effective cap is the same extra round, and the approved round counts as
+\* completed. Bounded at 1 for TLC: a go at the cap after a second handoff is
+\* not modeled.
+MaxOkAfterHandoff ==
+  /\ state = "handed-off"
+  /\ counts.round + 1 >= cap + counts.extra
+  /\ counts.extra = 0
+  /\ state' = "fixing"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0, !.extra = 1]
+
 \* #188. Only an approver's go leaves blocked. It queues a fresh review at the
 \* same round, since BLOCKED consumes none.
 MaxGoAfterBlocked ==
@@ -665,6 +678,7 @@ Next ==
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ MaxGoAfterBlocked \/ ReenterAfterHandoff \/ MergeObserved
+  \/ MaxOkAfterHandoff
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
@@ -766,6 +780,12 @@ HandedOffDecided ==
   /\ state = "handed-off" => ENABLED MergeObserved
   /\ state = "handed-off" /\ counts.round + 1 < cap + counts.extra =>
        ENABLED ReenterAfterHandoff
+  /\ state = "handed-off" /\ counts.round + 1 >= cap + counts.extra
+     /\ counts.extra = 0 => ENABLED MaxOkAfterHandoff
+
+\* #118. Leaving handoff for more work counts the approved round as completed.
+HandoffCountsApprovedRound ==
+  [][MaxOkAfterHandoff \/ ReenterAfterHandoff => counts'.round = counts.round + 1]_vars
 
 \* #130. A ticket in merge-queue can always leave it: merged, abandoned,
 \* updating, or back to work on a go or a ready. An update can always end:
