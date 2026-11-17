@@ -894,12 +894,11 @@ def _without_checkout_paths(health: dict) -> dict:
 
 
 def _ship_rule(labels: list[str]) -> str:
-    """The ship labels as one list of ways, then the condition they all
-    share: "merge, handoff, or after an approver, when QA covers the head"."""
-    ways = [label.removeprefix("ship = ").split(", ", 1) for label in labels]
-    text = "{}, {}, or {}".format(*(way[0] for way in ways))
-    shared = {way[1] if len(way) > 1 else "" for way in ways}
-    return f"{text}, when {shared.pop()}" if len(shared) == 1 and "" not in shared else text
+    parts = [label.removeprefix("ship = ").partition(", ") for label in labels]
+    text = "{}, {}, or {}".format(*(way for way, _, _ in parts))
+    conditions = {condition for _, _, condition in parts}
+    shared = conditions.pop() if len(conditions) == 1 else ""
+    return f"{text}, when {shared}" if shared else text
 
 
 _CHART_RULES = (

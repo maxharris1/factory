@@ -297,10 +297,6 @@ def ticket_phases(chart: dict | None) -> dict[str, str]:
 
 
 def hops_to_shipped(chart: dict | None, state: str | None) -> int | None:
-    """The fewest chart transitions from `state` to a SHIPPED state. An
-    EARNED_IN transition counts out of `state` itself, whose history is
-    unknown, and further on only once the walk has passed the state that
-    earns it."""
     if chart is None or state is None:
         return None
     adjacency = _adjacency(chart)
@@ -315,9 +311,10 @@ def hops_to_shipped(chart: dict | None, state: str | None) -> int | None:
         name, passed = node
         if name in SHIPPED:
             return hops[node]
+        at_origin = hops[node] == 0
         for nxt in adjacency[name]:
             need = EARNED_IN.get((name, nxt))
-            if need is not None and hops[node] and need not in passed:
+            if need is not None and not at_origin and need not in passed:
                 continue
             ahead = (nxt, passed | (earners & {nxt}))
             if ahead not in hops:
