@@ -5,7 +5,6 @@ import json
 import re
 import sqlite3
 import time
-import urllib.parse
 from collections import Counter
 from pathlib import Path
 
@@ -13,14 +12,12 @@ import pytest
 
 import lib.dashboard_page as page
 from lib.dashboard import RELAY_STEPS, _VERDICT_TIMES, collect_snapshot, render_pages
-from lib.dashboard_pages.common import duration
-from lib.dashboard_pages.ticket_detail import resolve_ticket
+from lib.dashboard_pages.common import duration, ticket_page_href
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_pixelstrip import _node as _px_node
-from tests.test_dashboard_ticket_records import walk
 from tests.test_dispatcher import retry, seed_state, setup, ticket
 
 IDS = layout.BAR + ["hud", "attention", "relay"]
@@ -234,7 +231,7 @@ def test_the_relay_holds_the_twelve_tickets_that_moved_last_newest_first(tmp_pat
     assert '<span class="count">12 of 15 tickets · newest activity first</span>' in relay
     assert relay.endswith('<p class="rl-note">The relay shows the 12 tickets that moved most recently. '
                           "A stopped ticket stays listed until it moves again.</p>")
-    assert _relay_links(relay)["owner/repo#1"] == "job.html"
+    assert _relay_links(relay)["owner/repo#1"] == "ticket.html#t=owner%2Frepo%231"
 
 
 def test_stopped_tickets_keep_their_places_and_the_oldest_movers_drop_out(tmp_path: Path) -> None:
@@ -298,6 +295,8 @@ def test_a_merge_with_no_job_moves_its_ticket_to_the_top(tmp_path: Path) -> None
 
 
 def test_each_thread_says_where_its_ticket_stopped_shipped_or_waits(tmp_path: Path) -> None:
+    from tests.test_dashboard_ticket_records import walk  # module-level import is circular via telemetry
+
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         add_ticket(connection, "maxharris1/cleffy", "90", state="stuck", stuck=1, stuck_reason="gaps-twice")
@@ -329,16 +328,13 @@ def _relay_links(relay: str) -> dict[str, str]:
 def _assert_relay_links_open(snapshot: dict, relay: str) -> None:
     links = _relay_links(relay)
     assert len(links) == len(snapshot["relay"]["threads"])
-    assert links["aut0-code/aut0#AUT-7"] == "job.html"
-    assert links["maxharris1/cleffy#20"] == "job.html"
+    assert links["aut0-code/aut0#AUT-7"] == "ticket.html#t=aut0-code%2Faut0%23AUT-7"
+    assert links["maxharris1/cleffy#20"] == "ticket.html#t=MaxHarris1%2FCleffy%2320"
     assert links["maxharris1/cleffy#13"] == "ticket.html#t=maxharris1%2Fcleffy%2313"
-    for key, href in links.items():
-        if href != "job.html":
-            address = urllib.parse.unquote(href.removeprefix("ticket.html#t="))
-            assert href.startswith("ticket.html#t=") and resolve_ticket(snapshot, address) is not None, key
+    assert all(href.startswith("ticket.html#t=") for href in links.values()), links
 
 
-def test_a_relay_ticket_opens_its_ticket_page_only_while_a_job_is_live(snapshot: dict) -> None:
+def test_a_relay_ticket_opens_its_ticket_page_with_or_without_a_job(snapshot: dict) -> None:
     _assert_relay_links_open(snapshot, _server(snapshot)["relay"])
 
 
@@ -574,7 +570,9 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
     assert [key for key, _ in rows] == [
         "maxharris1/factory#114", "maxharris1/factory#124", "maxharris1/factory#100", "maxharris1/factory#107"]
     for key, row in rows:
-        assert re.fullmatch(r'<a class="rl-tk" href="job\.html">[^<]*</a><span class="rl-steps">.*</span>', row), key
+        repo, _, ticket_id = key.rpartition("#")
+        href = ticket_page_href({"repo": repo, "ticket_id": ticket_id})
+        assert re.fullmatch(rf'<a class="rl-tk" href="{re.escape(href)}">[^<]*</a><span class="rl-steps">.*</span>', row), key
     row124 = dict(rows)["maxharris1/factory#124"]
     assert re.findall(r'class="(rl-step [^"]*|rl-verdict)"', row124) == [
         "rl-verdict", "rl-step rl-claude", "rl-verdict", "rl-step rl-codex", "rl-step rl-grok b2b", "rl-verdict"]
@@ -688,10 +686,13 @@ def test_attention_rows_are_full_rows_with_a_still_block_in_the_chip_tone_and_a_
     down = next(row for row in rows if "waiter x" in row)
     assert '<span class="at-subj">waiter x</span><span class="at-what">down (never seen)</span>' in down
     assert down.endswith('<a class="at-go" href="health.html#waiter-x">open in System</a>')
+    item = {(x["repo"], x["ticket_id"]): x for x in snapshot["attention"]["items"]}
     running = next(row for row in rows if "cleffy#14" in row)
-    assert running.endswith('<a class="at-go" href="job.html#job-r-cursor">open ticket</a>')
+    page_of = ticket_page_href(item[("maxharris1/cleffy", "14")])
+    assert running.endswith(f'<a class="at-go" href="{page_of}">open ticket</a>')
     stuck = next(row for row in rows if "AUT-7" in row)
-    assert stuck.endswith('<a class="at-go" href="job.html">open ticket</a>')
+    page_of = ticket_page_href(item[("aut0-code/aut0", "AUT-7")])
+    assert stuck.endswith(f'<a class="at-go" href="{page_of}">open ticket</a>')
 
 
 @layout.needs_node

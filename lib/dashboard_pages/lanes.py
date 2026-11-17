@@ -9,8 +9,8 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    anchor, _bot, checks_link, checks_named, _chip, duration, _e, github_links, _job_label, _panel,
-    _short, _span, _ticket, _tile_label, _when,
+    _bot, checks_link, checks_named, _chip, duration, _e, github_links, _job_label, _panel,
+    _short, _span, _ticket, _tile_label, _when, ticket_page_href,
 )
 
 
@@ -247,7 +247,7 @@ SCRIPT = r"""
     var name = PX.state(r);
     var spec = LANES.tiles[name] || LANES.tiles.unknown;
     var who = BOTS[r.recipient] ? r.recipient : 'other';
-    var tile = link('tile ' + who + (spec.bad ? ' bad' : ''), 'job.html#' + anchor(r.job));
+    var tile = link('tile ' + who + (spec.bad ? ' bad' : ''), ticketPageHref(r));
     tile.title = ticketIn(r.repo, r) + ' · ' + r.action + (r.round ? ' · round ' + r.round : '') + ' (job ' + r.job + ')';
     add(tile, PX.jobStrip(r, 16));
     var bodyEl = add(tile, el('div', 'tile-body'));
@@ -342,7 +342,7 @@ SCRIPT = r"""
     var ul = add(laneBody, el('ul', 'qrail'));
     rows.forEach(function (r, i) {
       var li = add(ul, el('li'));
-      var a = add(li, link(null, 'job.html#' + anchor(r.job)));
+      var a = add(li, link(null, ticketPageHref(r)));
       add(a, bot(r.recipient));
       add(a, el('span', 'ticket', jobLabel(r)));
       tierChip(a, r.tier);
@@ -696,7 +696,7 @@ def _slot(row: dict, seed: int = 1) -> str:
         f'<span class="hbt{level}">{_e(hb_text)}</span>'
     )
     return (
-        f'<a class="tile {who}{" bad" if spec.get("bad") else ""}" href="job.html#{anchor(row["job"])}" '
+        f'<a class="tile {who}{" bad" if spec.get("bad") else ""}" href="{_e(ticket_page_href(row))}" '
         f'title="{_e(title)}">{px_job_strip(row, 16)}<div class="tile-body">'
         f'<div class="tile-l1">{line1}</div><div class="tile-l2">{line2}</div>'
         f'<div class="tile-l3">{line3}</div><div class="tile-l4">{line4}</div></div></a>'
@@ -740,7 +740,7 @@ def _queue_lane(snapshot: dict) -> str:
                                  height=12, speed=queue_speed(row["age_seconds"]))
                 chip = ""
             items.append(
-                f'<li><a href="job.html#{anchor(row["job"])}">{_bot(row["recipient"])}'
+                f'<li><a href="{_e(ticket_page_href(row))}">{_bot(row["recipient"])}'
                 f'{_span("ticket", _job_label(row))}{_tier_chip(row.get("tier"))}</a>'
                 f'{_span("what", row["action"])}'
                 f'{_when(row["age_seconds"], "waiting ")}{chip}'

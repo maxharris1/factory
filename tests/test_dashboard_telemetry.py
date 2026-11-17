@@ -19,8 +19,11 @@ import pytest
 from lib import dashboard_telemetry, telemetry
 from lib.dashboard import collect_snapshot, redact, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
-from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, needs_node
+from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
+from tests.test_dashboard_ticket_detail import TICKET_IDS, _quote, _ticket_server
 from tests.test_telemetry import readable
+
+CODEX = "maxharris1/cleffy#13"
 
 STEPS = [
     {"at": NOW - 50, "kind": "tool", "status": "ok", "label": "edit 2 files"},
@@ -77,8 +80,7 @@ def test_a_database_without_the_table_shows_no_telemetry(tmp_path: Path) -> None
     assert snapshot["telemetry"]["state"] == "none"
     assert snapshot["telemetry"]["totals"]["jobs"] == 0
     pages = render_pages(snapshot)
-    job = _no_script(pages["job.html"])
-    article = _section(job, "job-r-codex-")
+    article = _ticket_server(snapshot, CODEX)
     assert '<span class="t">Live run</span>' in article and '<p class="empty">no telemetry</p>' in article
     assert "lr-tile" not in article
     tokens = _section(_no_script(pages["efficiency.html"]), "tokens")
@@ -106,7 +108,7 @@ def test_a_running_job_gets_its_counters_and_no_step_feed(tmp_path: Path) -> Non
         ("error", "command", 40),
         ("running", "mcp:github.get_pr", 5),
     ]
-    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
+    article = _ticket_server(snapshot, CODEX)
     for needle in ("<b>25k</b><span>tokens in · 99% cached</span>", "<b>1.2k</b><span>tokens out</span>",
                    "<b>no data</b><span>cost so far</span>", "<b>2 files · 7 commands</b><span>touched and run</span>"):
         assert needle in article, needle
@@ -121,7 +123,7 @@ def test_a_job_with_a_row_but_no_events_shows_its_tiles(tmp_path: Path) -> None:
                   tokens_out=0, files_touched=0, commands=0)
     snapshot = collect_snapshot(db, log, now=NOW)
     assert _running(snapshot)["13"]["telemetry"]["events"] == 0
-    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
+    article = _ticket_server(snapshot, CODEX)
     assert "<b>no data</b><span>tokens in</span>" in article
     assert "<b>0 files · 0 commands</b><span>touched and run</span>" in article
 
@@ -159,6 +161,8 @@ def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: 
     assert "walr" not in text
     html = render_pages(snapshot)["job.html"]
     assert GH_CLASSIC not in html and "<script>" not in _no_script(html).split("<body", 1)[1]
+    article = _ticket_server(snapshot, CODEX)
+    assert GH_CLASSIC not in article and "<script>" not in article
 
 
 def _strict(text: str) -> object:
@@ -446,7 +450,7 @@ def test_a_secret_is_redacted_whole_before_any_later_transform(tmp_path: Path, s
 
 
 @needs_node
-def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path) -> None:
+def test_script_draws_the_counters_on_the_ticket_page_and_the_rollup(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     add_telemetry(db, "r-codex-review")
     add_telemetry(
@@ -454,12 +458,12 @@ def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path
         updated_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
     )
     snapshot = collect_snapshot(db, log, now=NOW)
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-r-codex-")
-    view = out["text"]["jobview"]
+    out = _run_page(tmp_path, snapshot, "ticket", TICKET_IDS, hash_="#t=" + _quote(CODEX))
+    view = out["text"]["ticketview"]
     for needle in ("Live run", "25k", "tokens in · 99% cached", "1.2k", "2 files · 7 commands"):
         assert needle in view, needle
-    assert re.search(r'div\.lr\n', out["dump"]["jobview"])
-    html = out["html"]["jobview"]
+    assert re.search(r'div\.lr\n', out["dump"]["ticketview"])
+    html = out["html"]["ticketview"]
     for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools"):
         assert gone not in html, gone
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
@@ -473,8 +477,8 @@ def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path
 def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     snapshot = collect_snapshot(db, log, now=NOW)
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-r-codex-")
-    assert "no telemetry" in out["text"]["jobview"]
+    out = _run_page(tmp_path, snapshot, "ticket", TICKET_IDS, hash_="#t=" + _quote(CODEX))
+    assert "no telemetry" in out["text"]["ticketview"]
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     assert "no telemetry" in eff["text"]["tokens"]
 
@@ -710,7 +714,7 @@ def test_no_command_or_argument_text_reaches_the_row_status_json_or_the_job_moda
     assert reason == EXIT_REASONS[harness]
 
     own = [json.dumps(row), json.dumps(item), reason]
-    published = [status.read_text(), render_pages(snapshot)["job.html"]]
+    published = [status.read_text(), render_pages(snapshot)["job.html"], _ticket_server(snapshot, CODEX)]
     for text in own:
         assert not any(piece in text for piece in _fragments(secret)), text
     for text in own + published:
