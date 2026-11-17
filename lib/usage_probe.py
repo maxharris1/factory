@@ -33,7 +33,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from lib import codex_rollout
+from lib import codex_rollout, telemetry
 from lib.job_token import PROOF_ENV
 from lib.remote import LOGIN_SHELL, TAG_ENV, ByteTransport, RemoteTarget, Transport, ssh_argv
 from lib.usage_readings import (
@@ -59,6 +59,10 @@ TIMEOUT_SECONDS = 30.0
 LOGIN_NAME = "orch-usage"
 
 Run = Callable[..., subprocess.CompletedProcess]
+
+
+def claude_binary(flags: telemetry.StreamFlags) -> str | None:
+    return flags.argv[0] if flags.harness == "claude" else None
 
 
 class ProbeFailed(Exception):

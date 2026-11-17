@@ -2058,10 +2058,11 @@ def _job_run_command(argv: list[str]) -> int:
     else:
         sessions.append(session)
         command = session.flags.argv
-        if session.flags.harness != "claude":
+        binary = usage_probe.claude_binary(session.flags)
+        if binary is None:
             log(f"usage probe: skipped ({session.flags.reason})")
         else:
-            target, binary, probe_env = placed.target, command[0], dict(environment)
+            target, probe_env = placed.target, dict(environment)
             usage_read = usage_probe.start_claude(
                 session.add_usage,
                 session.clock,
