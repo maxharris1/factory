@@ -1214,7 +1214,6 @@ _WAKE_DELIVERIES: dict[Driver, Callable[[OrchConfig], tuple[GrokDelivery, list[s
 
 
 def _wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
-    """The one delivery for config.driver and the env names it reads."""
     return _WAKE_DELIVERIES[config.driver](config)
 
 

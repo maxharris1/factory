@@ -1,5 +1,3 @@
-"""Deliver queued wakes to the driver: Grok's webhook or a Claude Code routine."""
-
 from __future__ import annotations
 
 import json
@@ -144,8 +142,6 @@ class WebhookGrokDelivery:
 
 
 class ClaudeDriverDelivery:
-    """Wake a Claude Code scheduled task through its API-trigger fire URL."""
-
     def __init__(
         self,
         *,
@@ -223,7 +219,6 @@ def _send(
     transport: WebhookTransport,
     timeout: float,
 ) -> WebhookResult:
-    """One wake POST. Errors name env vars, never the URL or a credential."""
     url = environ.get(url_env)
     if not url:
         raise GrokDeliveryError(
