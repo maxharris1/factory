@@ -1024,6 +1024,42 @@ def test_a_queued_ticket_says_who_it_waits_for_and_holds_still(tmp_path: Path) -
                                              ("not started", "last heartbeat")], render
 
 
+def _requeued_after_a_run(tmp_path: Path) -> dict:
+    import sqlite3
+    from lib.dashboard import collect_snapshot
+    from lib.device_pool import DevicePool
+    from lib.job_state import requeue_link_drop
+    from lib.machines_yml import MachinesConfig
+    from lib.queue import SQLiteJobQueue
+    from tests.test_dashboard import NOW, add_job, seeded
+    from tests.test_dashboard_telemetry import add_telemetry
+
+    db, log = seeded(tmp_path)
+    DevicePool(SQLiteJobQueue(db, clock=lambda: NOW), MachinesConfig(devices=()))
+    with sqlite3.connect(db) as connection:
+        add_job(connection, "r-retry", action="fix", recipient="codex", state="failed", ticket_id="52")
+    add_telemetry(db, "r-retry", finished_at=NOW - 30, exit_code=0, exit_reason="done")
+    with sqlite3.connect(db) as connection:
+        assert requeue_link_drop(connection, "r-retry", now=NOW - 5, reason="SSH link dropped")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert _row(snapshot, "r-retry")["telemetry"]["tokens_in"] == 24763
+    return snapshot
+
+
+@needs_node
+def test_a_requeued_ticket_s_live_run_says_not_started_yet_over_the_last_run(tmp_path: Path) -> None:
+    snapshot = _requeued_after_a_run(tmp_path)
+    views = {**_both(tmp_path, snapshot, "maxharris1/cleffy#52"),
+             "job server": _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-retry"),
+             "job script": _script_view(tmp_path, snapshot, "r-retry")}
+    for render, markup in views.items():
+        if render in ("server", "script"):
+            assert "queued for codex" in _tracker(markup), render
+        live = _section(markup, "liverun-job-r-retry")
+        assert live.endswith('<p class="empty">not started yet</p></section>'), render
+        assert "24,763" not in live and 'class="lr"' not in live, render
+
+
 @needs_node
 def test_the_queued_tracker_counts_up(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)

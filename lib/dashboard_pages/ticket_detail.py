@@ -545,10 +545,12 @@ def _lr_moving(row: dict) -> bool:
 
 def live_run(row: dict, queued: bool = False) -> str:
     """The Live run panel's body (RunTape.dc.html)."""
+    if queued:
+        return '<p class="empty">not started yet</p>'
     t = row.get("telemetry")
     mode = live_mode(t)
     if mode == "none":
-        return f'<p class="empty">{"not started yet" if queued else "no telemetry"}</p>'
+        return '<p class="empty">no telemetry</p>'
     tint = row.get("recipient") if row.get("recipient") in _px().PX_BOT_TINTS else None
     style = f' style="--lr:var(--{tint})"' if tint else ""
     if mode == "counters":
@@ -1236,9 +1238,10 @@ _SCRIPT = r"""
     return c.col;
   }
   function liveRun(r, queued) {
+    if (queued) return el('p', 'empty', 'not started yet');
     var t = r.telemetry;
     var mode = liveMode(t);
-    if (mode === 'none') return el('p', 'empty', queued ? 'not started yet' : 'no telemetry');
+    if (mode === 'none') return el('p', 'empty', 'no telemetry');
     var box = el('div', 'lr');
     if (PX.table.bots.hasOwnProperty(r.recipient)) box.setAttribute('style', '--lr:var(--' + r.recipient + ')');
     if (mode === 'live') {
