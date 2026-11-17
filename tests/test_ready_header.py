@@ -61,3 +61,48 @@ def test_old_and_new_readies_fit_a_build_job_with_a_round(header: str) -> None:
     }
     found = problems(expected, "101", answers.__getitem__, {"maxharris1": frozenset({"claude-bot"})})
     assert found == []
+
+
+
+def _qa_problems(action: str, extra: dict, role: str | None) -> list[str]:
+    expected = expected_for(job(action, **extra), "claude-bot")
+    role_attr = "" if role is None else f" role={role}"
+    header = (
+        f"<!-- orch:v1 kind=qa from=claude-bot{role_attr} head={HEAD} ac=met "
+        "result=PASS scope=full runner=cursor-cloud arm=primary -->"
+    )
+    answers = {
+        "repos/owner/repo/issues/comments/101": {
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+            "user": {"login": "maxharris1"},
+            "body": header + "\n**QA round 1 of 3: PASS**\n",
+        },
+        "repos/owner/repo/pulls/42": {"head": {"sha": HEAD, "ref": "factory/issue-42"}},
+    }
+    return problems(expected, "101", answers.__getitem__, {"maxharris1": frozenset({"claude-bot"})})
+
+
+JOBS = [
+    ("build", {}, "ready"),
+    ("fix", {"round": "2/3"}, "ready"),
+    ("update-from-main", {"round": "2/3"}, "ready"),
+    ("plan", {}, "plan"),
+    ("review", {"round": "1/3"}, "verdict"),
+]
+
+
+@pytest.mark.parametrize("role", ["qa", None])
+@pytest.mark.parametrize(("action", "extra", "kind"), JOBS)
+def test_a_qa_is_never_a_jobs_handoff(action: str, extra: dict, kind: str, role: str | None) -> None:
+    assert f"kind=qa is not {kind} (or questions)" in _qa_problems(action, extra, role)
+
+
+@pytest.mark.parametrize("role", ["builder", "reviewer"])
+@pytest.mark.parametrize(("action", "extra", "kind"), JOBS)
+def test_a_qa_in_a_jobs_role_is_refused_as_a_bad_header(
+    action: str, extra: dict, kind: str, role: str
+) -> None:
+    assert (
+        "comment 101 has no valid orch:v1 header (role on kind=qa must be qa)"
+        in _qa_problems(action, extra, role)
+    )

@@ -6,6 +6,8 @@ show as labels and which Aut0 carries in the header instead, and reviewer.
 A go's builder and reviewer route that ticket (issue #206). A verdict may
 name repeat=<ac-n|f-n> and unsat=<ac-n>. A plan may name lines=<n>, its
 expected changed lines, and unsat=<ac-n>, the criterion it left unmapped.
+A qa reports a QA run at a full 40-character head (issue #758). It alone
+carries the QA_KEYS: result, scope, lanes, env, runner, arm and attempt.
 
 labels_for returns the labels a later dispatcher would apply. It does
 not write anything. tickets linear, and the Aut0 repo, return no labels.
@@ -32,7 +34,23 @@ KINDS = (
     "done",
     "stuck",
     "retry",
+    "qa",
 )
+
+
+def _one_of(*values: str) -> re.Pattern[str]:
+    return re.compile("|".join(re.escape(value) for value in values))
+
+
+QA_KEYS = {
+    "result": _one_of("PASS", "FAIL", "BLOCKED"),
+    "scope": _one_of("full", "targeted", "smoke"),
+    "lanes": re.compile(r"[1-3]"),
+    "env": _one_of("full-stack", "supabase", "none"),
+    "runner": _one_of("claude-cloud", "cursor-cloud"),
+    "arm": _one_of("primary", "shootout"),
+    "attempt": re.compile(r"[1-9][0-9]{0,8}"),
+}
 
 # state and builder are how Aut0 keeps orch:state and orch:builder in the header.
 KEYS = (
@@ -50,6 +68,7 @@ KEYS = (
     "repeat",
     "unsat",
     "lines",
+    *QA_KEYS,
 )
 
 # Kebab-case forms of the section 4.1 states.
@@ -95,6 +114,7 @@ REQUIRED_BY_KIND = {
     "done": frozenset(),
     "stuck": frozenset(),
     "retry": frozenset(),
+    "qa": frozenset({"head", "result", "scope", "runner", "arm"}),
 }
 
 _HTML_LINE = re.compile(r"^<!--\s*orch:v1\b\s*(.*?)\s*-->$")
@@ -157,11 +177,18 @@ def parse_header_line(line: str) -> dict[str, str]:
         raise HandoffError("unsat is only valid on kind=plan or kind=verdict")
     if kind != "plan" and "lines" in found:
         raise HandoffError("lines is only valid on kind=plan")
-    if kind not in ("plan", "verdict") and "ac" in found:
-        raise HandoffError("ac is only valid on kind=plan or kind=verdict")
+    qa_only = [key for key in QA_KEYS if key in found]
+    if kind != "qa" and qa_only:
+        raise HandoffError(f"{qa_only[0]} is only valid on kind=qa")
+    if kind not in ("plan", "verdict", "qa") and "ac" in found:
+        raise HandoffError("ac is only valid on kind=plan, kind=verdict or kind=qa")
     for key in sorted(REQUIRED_BY_KIND[kind]):
         if key not in found:
             raise HandoffError(f"missing required key {key!r}")
+    if kind == "qa" and len(found["head"]) != 40:
+        raise HandoffError("qa needs a 40-character head")
+    if kind == "qa" and found.get("role", "qa") != "qa":
+        raise HandoffError("role on kind=qa must be qa")
     if kind == "verdict" and found.get("verdict") == "APPROVE" and "head" not in found:
         raise HandoffError("missing required key 'head'")
     if kind == "verdict" and found.get("verdict") == "APPROVE" and found.get("ac") == "unmet":
@@ -317,5 +344,9 @@ def _check_value(key: str, value: str) -> None:
     if key == "unsat":
         if _UNSAT.fullmatch(value) is None:
             raise HandoffError(f"bad unsat {value!r}")
+        return
+    if key in QA_KEYS:
+        if QA_KEYS[key].fullmatch(value) is None:
+            raise HandoffError(f"bad {key} {value!r}")
         return
     raise HandoffError(f"unknown key {key!r}")

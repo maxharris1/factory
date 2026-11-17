@@ -45,7 +45,21 @@ def test_kinds_and_example_keys_match_spec_section_5() -> None:
     key_line = next(line for line in spec.splitlines() if "header keys in the example" in line)
     example_keys = tuple(re.findall(r"`([a-z]+)`", key_line))
     assert example_keys == KEYS[:8]
-    assert KEYS[8:] == ("state", "builder", "reviewer", "repeat", "unsat", "lines")
+    assert KEYS[8:] == (
+        "state",
+        "builder",
+        "reviewer",
+        "repeat",
+        "unsat",
+        "lines",
+        "result",
+        "scope",
+        "lanes",
+        "env",
+        "runner",
+        "arm",
+        "attempt",
+    )
     assert set(REQUIRED_BY_KIND) == set(KINDS)
 
 
@@ -356,3 +370,109 @@ def test_writer_rejects_injected_values(value: str) -> None:
 def test_verdict_and_ac_only_on_verdict_kind(line: str) -> None:
     with pytest.raises(HandoffError):
         parse_header_line(line)
+
+
+QA_HEAD = "3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"
+QA_HEADER = (
+    f"<!-- orch:v1 kind=qa from=grok-bot role=qa round=1/3 head={QA_HEAD} ac=met "
+    "result=PASS scope=full lanes=3 env=full-stack runner=cursor-cloud arm=primary attempt=1 -->"
+)
+QA_REQUIRED = f"kind=qa head={QA_HEAD} result=PASS scope=full runner=cursor-cloud arm=primary"
+
+
+def test_the_qa_example_parses_every_field() -> None:
+    parsed = parse_comment(QA_HEADER + "\n**QA round 1 of 3: PASS**\n")
+    assert parsed.fields == (
+        ("kind", "qa"),
+        ("from", "grok-bot"),
+        ("role", "qa"),
+        ("round", "1/3"),
+        ("head", QA_HEAD),
+        ("ac", "met"),
+        ("result", "PASS"),
+        ("scope", "full"),
+        ("lanes", "3"),
+        ("env", "full-stack"),
+        ("runner", "cursor-cloud"),
+        ("arm", "primary"),
+        ("attempt", "1"),
+    )
+    assert parsed.body == "**QA round 1 of 3: PASS**\n"
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_a_qa_header_round_trips(visible: bool) -> None:
+    fields = parse_header_line(QA_HEADER)
+    line = format_header(fields, visible=visible)
+    assert parse_header_line(line) == fields
+    if not visible:
+        assert line == QA_HEADER
+
+
+def test_a_qa_needs_only_its_required_keys() -> None:
+    assert parse_header_line(f"<!-- orch:v1 {QA_REQUIRED} -->") == {
+        "kind": "qa",
+        "head": QA_HEAD,
+        "result": "PASS",
+        "scope": "full",
+        "runner": "cursor-cloud",
+        "arm": "primary",
+    }
+
+
+@pytest.mark.parametrize(
+    ("attrs", "message"),
+    [
+        (QA_REQUIRED.replace(f" head={QA_HEAD}", ""), "missing required key 'head'"),
+        (QA_REQUIRED.replace(" result=PASS", ""), "missing required key 'result'"),
+        (QA_REQUIRED.replace(" scope=full", ""), "missing required key 'scope'"),
+        (QA_REQUIRED.replace(" runner=cursor-cloud", ""), "missing required key 'runner'"),
+        (QA_REQUIRED.replace(" arm=primary", ""), "missing required key 'arm'"),
+        (QA_REQUIRED.replace(QA_HEAD, QA_HEAD[:7]), "qa needs a 40-character head"),
+        (QA_REQUIRED.replace(QA_HEAD, QA_HEAD[:39]), "qa needs a 40-character head"),
+        (QA_REQUIRED.replace("result=PASS", "result=pass"), "bad result 'pass'"),
+        (QA_REQUIRED.replace("result=PASS", "result=APPROVE"), "bad result 'APPROVE'"),
+        (QA_REQUIRED.replace("scope=full", "scope=partial"), "bad scope 'partial'"),
+        (QA_REQUIRED + " lanes=0", "bad lanes '0'"),
+        (QA_REQUIRED + " lanes=4", "bad lanes '4'"),
+        (QA_REQUIRED + " lanes=x", "bad lanes 'x'"),
+        (QA_REQUIRED + " env=staging", "bad env 'staging'"),
+        (QA_REQUIRED.replace("runner=cursor-cloud", "runner=cursor"), "bad runner 'cursor'"),
+        (QA_REQUIRED.replace("arm=primary", "arm=secondary"), "bad arm 'secondary'"),
+        (QA_REQUIRED + " attempt=0", "bad attempt '0'"),
+        (QA_REQUIRED + " attempt=01", "bad attempt '01'"),
+        (QA_REQUIRED + " attempt=-1", "bad attempt '-1'"),
+        (QA_REQUIRED + " attempt=1000000000", "bad attempt '1000000000'"),
+        (QA_REQUIRED + " role=builder", "role on kind=qa must be qa"),
+    ],
+)
+def test_a_bad_qa_header_is_refused(attrs: str, message: str) -> None:
+    with pytest.raises(HandoffError, match=re.escape(message)):
+        parse_header_line(f"<!-- orch:v1 {attrs} -->")
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        f"kind=ready head={QA_HEAD}",
+        f"kind=verdict verdict=REVISE head={QA_HEAD}",
+        "kind=go",
+        "kind=plan round=1/2 ac=met",
+    ],
+)
+@pytest.mark.parametrize(
+    "attr",
+    [
+        "result=PASS",
+        "scope=full",
+        "lanes=3",
+        "env=full-stack",
+        "runner=cursor-cloud",
+        "arm=primary",
+        "attempt=1",
+    ],
+)
+def test_qa_keys_are_refused_on_every_other_kind(base: str, attr: str) -> None:
+    key = attr.split("=", 1)[0]
+    with pytest.raises(HandoffError, match=re.escape(f"{key} is only valid on kind=qa")):
+        parse_header_line(f"<!-- orch:v1 {base} {attr} -->")
