@@ -837,6 +837,37 @@ def test_a_report_kept_in_an_older_table_interrupts_the_omissions_stored_after_m
     assert codex["five_hour"]["state"] == "no reading"
 
 
+HISTORICAL_UPSERT = (
+    "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    " ON CONFLICT (harness, bot, device, window) DO UPDATE SET used = excluded.used,"
+    " resets_at = excluded.resets_at, observed_at = excluded.observed_at, job_id = excluded.job_id"
+    " WHERE excluded.observed_at > usage_readings.observed_at"
+)
+
+
+def _historical_report(db: Path, device: str, at: float) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.executemany(HISTORICAL_UPSERT, [
+            ("codex", "codex-bot", device, "five_hour", 0.1, FIVE_HOUR_RESET, at, "j"),
+            ("codex", "codex-bot", device, "seven_day", 0.68, SEVEN_DAY_RESET, at, "j"),
+        ])
+
+
+def test_a_historical_writers_report_over_a_migrated_omission_interrupts_the_streak(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    _historical_report(db, "laptop", CAPTURED)
+    _codex_polls(db, [("laptop", _seven_day_only(CAPTURED + 100), CAPTURED + 100),
+                      ("box", _seven_day_only(CAPTURED + 200), CAPTURED + 200)], CAPTURED + 200)
+    _historical_report(db, "laptop", CAPTURED + 500)
+    polls = _polled_at_its_time([("box", _seven_day_only, 600), ("box", _seven_day_only, 700)])
+    assert _codex_polls(db, polls, CAPTURED + 710)["five_hour"]["state"] == "no reading"
+    third = _polled_at_its_time([("box", _seven_day_only, 800)])
+    assert _codex_polls(db, third, CAPTURED + 810)["five_hour"]["state"] == "not on plan"
+
+
 def test_an_older_table_read_only_is_no_reading_not_no_telemetry(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     with sqlite3.connect(db) as connection:
