@@ -131,12 +131,12 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _git_branch(name: object) -> bool:
+def _github_branch(name: object) -> bool:
     return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
 
 
 def _branch_path(branch: str) -> str:
-    if not _git_branch(branch):
+    if not _github_branch(branch):
         raise GitHubAdapterError("branch name is not safe")
     return quote(branch, safe="/")
 
@@ -380,7 +380,7 @@ class GitHubIntakeClient(GitHubReviewActions):
                 continue
             base = item.get("base")
             ref = base.get("ref") if isinstance(base, dict) else None
-            if not _git_branch(ref):
+            if not _github_branch(ref):
                 raise GitHubAdapterError(f"open PR #{number} base branch is not readable")
             found[number] = ref
         return found
@@ -412,7 +412,7 @@ class GitHubIntakeClient(GitHubReviewActions):
         pull = self._json(f"{_repo_path(repo)}/pulls/{int(number)}")
         base = pull.get("base") if isinstance(pull, dict) else None
         ref = base.get("ref") if isinstance(base, dict) else None
-        if not _git_branch(ref):
+        if not _github_branch(ref):
             raise GitHubAdapterError("pull request base branch is not readable")
         return ref
 

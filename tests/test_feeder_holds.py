@@ -804,7 +804,7 @@ def test_branch_reads_accept_a_git_valid_name_and_encode_it() -> None:
 
 
 @pytest.mark.parametrize("name", ["-x", "a..b", "a b", "a:b", "a.lock", "x/", "a@{1}", "@", ""])
-def test_branch_reads_refuse_a_name_git_refuses(name: str) -> None:
+def test_branch_reads_refuse_a_name_github_refuses(name: str) -> None:
     client = GitHubIntakeClient(RecordedGh())
     with pytest.raises(GitHubAdapterError, match="not safe"):
         client.branch_sha(HOME, name)
