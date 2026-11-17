@@ -23,11 +23,12 @@
 # poller-service.sh stop also finds a poller whose pidfile is elsewhere (as
 # orch-poll.service's is) by the poll lock it holds open. Export then exits
 # 1, leaving the host retired and stopped, unless `orch move-db unlocked`
-# can take orch.db.lock (the lock beside orch.db). Then it copies orch.db to
-# <export>/orch.db and the job-detail/ beside it to <export>/job-detail,
-# checks that copy is still drained, writes <export>/manifest.json (`orch
-# move-db manifest`, which records each job-detail file's sha256 and refuses
-# a spilled job row whose file is missing), copies the checkout's
+# can take orch.db.lock and every waiter-<bot>.lock beside orch.db. Then it
+# copies orch.db to <export>/orch.db and the job-detail/ beside it to
+# <export>/job-detail, checks that copy is still drained, writes
+# <export>/manifest.json (`orch move-db manifest`, which records each
+# job-detail file's sha256 and refuses a spilled job row whose file is
+# missing), copies the checkout's
 # machines.yml to <export>/machines.<this host>.yml and prints <export>.
 # <export> defaults to ~/.local/share/factory/orch-move/<UTC time>, outside
 # the state directory, and must not exist yet.
@@ -210,7 +211,7 @@ export_db() {
     service "${HERE}/self-heal.sh" wait-idle
     linear stop
     ((FAILED == 0)) || exit 1
-    "$ORCH" move-db unlocked --db "$db" || refuse "a poller still holds ${db}.lock after the stops; wrote no export"
+    "$ORCH" move-db unlocked --db "$db" || refuse "a poller or waiter still holds its lock beside ${db} after the stops; wrote no export"
 
     "$ORCH" backup-db --db "$db" --backup "${EXPORT}/orch.db" >/dev/null
     if [[ -d "$(dirname "$db")/job-detail" ]]; then

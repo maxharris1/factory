@@ -126,6 +126,7 @@ from lib.update_check import (
     rebase_scope,
 )
 from lib.wait import (
+    OWNING_BOTS,
     WaitError,
     open_queue,
     owned_job,
@@ -263,9 +264,9 @@ move-db unlocked --db PATH
   integrity_check, the manifest has a retired line, each job-detail file
   the manifest names is beside the copy with its sha256, and every spilled
   job row has its file; otherwise it exits 1 saying which failed.
-  unlocked reads the live database's poll lock, never the database: it
-  exits 0 when no poller holds PATH.lock (or there is none), 1 when one
-  does.
+  unlocked reads the live database's locks, never the database: it exits
+  0 when no poller holds PATH.lock and no `orch wait` holds a
+  waiter-<bot>.lock beside PATH, 1 (naming each held lock) when one does.
 
 db-backup <label> [--db PATH] [--dir PATH]
   Run this before any manual write to orch.db (#654). Copies the database
@@ -1305,9 +1306,14 @@ def _lock_path(database: Path) -> Path:
     return database.with_name(database.name + ".lock")
 
 
-def _poll_lock_free(database: Path) -> bool:
+def _held_locks(database: Path) -> list[Path]:
+    waiters = [waiter.lock_path(database, bot) for bot in OWNING_BOTS]
+    return [path for path in [_lock_path(database), *waiters] if not _lock_free(path)]
+
+
+def _lock_free(path: Path) -> bool:
     try:
-        handle = _lock_path(database).open("rb")
+        handle = path.open("rb")
     except FileNotFoundError:
         return True
     with handle:
@@ -2476,10 +2482,11 @@ def _move_db(argv: list[str]) -> int:
     unlocked.add_argument("--db", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "unlocked":
-        if _poll_lock_free(args.db):
-            return 0
-        print(f"orch move-db unlocked: a poller still holds {_lock_path(args.db)}", file=sys.stderr)
-        return 1
+        held = _held_locks(args.db)
+        for path in held:
+            role = "poller" if path == _lock_path(args.db) else "waiter"
+            print(f"orch move-db unlocked: a {role} still holds {path}", file=sys.stderr)
+        return 1 if held else 0
     try:
         if args.command == "drained":
             facts = db_facts(args.db)

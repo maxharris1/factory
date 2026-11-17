@@ -1254,8 +1254,9 @@ fails the export like a failed stop. `poller-service.sh stop` finds the
 poller by the `orch.db.lock` it holds open when its pidfile is not
 `~/.local/state/factory/poller.pid`, as with `orch-poll.service`. Before the
 copy, `orch move-db unlocked` checks that no process still holds
-`orch.db.lock`, the lock every `orch poll` on that database holds, and fails
-the export if one does. The export
+`orch.db.lock`, the lock every `orch poll` on that database holds, or a
+`waiter-<bot>.lock` beside `orch.db`, the lock every `orch wait` holds, and
+fails the export if one does. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
@@ -1265,8 +1266,10 @@ refuses a copy with a spilled job row whose file is missing.
 
 `orch poll` and `orch wait` check `orch-retired` again once they hold their
 lock, and exit 79 if it exists. `export` writes `orch-retired` before it
-checks the poll lock, so a launch already under way when the export began
-exits instead of polling or claiming (#775).
+checks those locks. A poller or waiter that took its lock before then still
+holds it, so `export` fails and writes no manifest. One that takes its lock
+after sees `orch-retired` and exits (#775). A successful export therefore
+leaves no `orch poll` or `orch wait` on that database able to poll or claim.
 
 Before `import`, you can confirm this on the source host by hand. Check that
 `~/.config/factory/orch-retired` exists and that no `orch poll` or `orch wait`

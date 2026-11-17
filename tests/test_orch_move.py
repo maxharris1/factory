@@ -402,6 +402,34 @@ def test_move_db_unlocked_reads_the_poll_lock(tmp_path: Path) -> None:
     assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
 
 
+@pytest.mark.parametrize("share", [True, False], ids=["plain-wait", "autostart"])
+def test_move_db_unlocked_reads_every_waiter_lock(tmp_path: Path, share: bool) -> None:
+    db = tmp_path / "orch.db"
+    take = "share_waiter_lock" if share else "hold_waiter_lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import sys, time\nsys.path.insert(0, {str(ROOT)!r})\nfrom lib import waiter\n"
+            f"waiter.{take}({str(db)!r}, 'codex-bot')\nprint('held', flush=True)\ntime.sleep(60)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline() == "held\n"
+        held = subprocess.run(
+            [sys.executable, str(ROOT / "bin/orch"), "move-db", "unlocked", "--db", str(db)],
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+    assert held.returncode == 1
+    assert f"a waiter still holds {tmp_path / 'waiter-codex-bot.lock'}" in held.stderr
+    assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
+
+
 def test_move_db_drained_counts_running_jobs_and_held_slots(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1037,3 +1065,57 @@ def test_orch_wait_on_a_retired_host_exits_79_without_claiming(
     with sqlite3.connect(db) as connection:
         assert connection.execute("SELECT state FROM jobs").fetchall() == [("queued",)]
     assert health.read_heartbeats(db) is None
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_export_refuses_while_a_plain_wait_past_the_retired_guard_can_still_claim(
+    tmp_path: Path,
+) -> None:
+    box = Host(tmp_path, "box")
+    _seed(tmp_path, box.db)
+    _real_poller_service(box)
+    shutil.copy(ROOT / "deploy/waiter-service.sh", box.checkout / "deploy/waiter-service.sh")
+    ready, gate = tmp_path / "ready", tmp_path / "gate"
+    driver = tmp_path / "driver" / "orch"
+    _executable(
+        driver,
+        f'''#!{sys.executable}
+import sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+from lib import cli
+checked = cli._retired
+def paused():
+    retired = checked()
+    Path({str(ready)!r}).touch()
+    while not Path({str(gate)!r}).exists():
+        time.sleep(0.01)
+    return retired
+cli._retired = paused
+raise SystemExit(cli.main(sys.argv[1:]))
+''',
+    )
+    waiter = subprocess.Popen(
+        [sys.executable, str(driver), "wait", "claude-bot", "--db", str(box.db),
+         "--machines", str(ROOT / "machines.yml")],
+        env=box.env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _until(lambda: ready.exists() or waiter.poll() is not None, "the wait never reached its retired guard")
+        assert waiter.poll() is None, waiter.communicate()
+        assert not box.retired.exists()
+
+        result = box.move("export", "--to", "pc", "--dir", str(tmp_path / "export"), ORCH_WAITER_STOP_WAIT="1")
+
+        assert result.returncode == 1, result.stderr
+        assert f"a waiter still holds {box.state / 'waiter-claude-bot.lock'}" in result.stderr
+        assert not (tmp_path / "export/manifest.json").exists()
+        assert box.retired.exists()
+        assert waiter.poll() is None
+    finally:
+        gate.touch()
+        waiter.kill()
+        waiter.wait(timeout=10)
