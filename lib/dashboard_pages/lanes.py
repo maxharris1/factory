@@ -80,19 +80,15 @@ a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
 .tile.empty{display:flex;flex-direction:column;background:transparent}
 .tile.empty .lbl{flex:1 0 auto;display:flex;align-items:center;justify-content:center;
 font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
-.rail{min-width:0;align-self:center;display:flex;align-items:center;gap:8px;height:24px}
-.rail .sq{display:flex;gap:3px}
-.rail i{box-sizing:border-box;width:8px;height:8px;border:1px dashed #414868}
-.rail .lbl{font:12px/1.3 var(--mono);color:#8b93b8;white-space:nowrap}
-.rail.off i{border:0;background:#24283b}
+.tile.empty.free{margin:0;border:1px dashed var(--line-hi)}
+.tile.empty.free .lbl{color:var(--muted)}
 @media (max-width:640px){.lane{flex-direction:column;align-items:stretch;padding:10px;gap:10px}
 .lane-head,.tiles,.lane-body{flex:none}
 .lane-head{flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .lh1,.lh2{display:contents}
 .lh2 .sub{margin-left:auto;white-space:nowrap}
 .lh2 .harness{flex-basis:100%}
-.tiles{grid-template-columns:1fr}
-.rail{align-self:auto}}
+.tiles{grid-template-columns:1fr}}
 .pair{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
 .pair>.panel{min-width:0}
 #just-happened{flex:3 1 560px}#intake{flex:2 1 380px}
@@ -317,13 +313,11 @@ SCRIPT = r"""
     return tile;
   }
 
-  function idleRail(count, off) {
-    var rail = el('div', 'rail' + (off ? ' off' : ''));
-    var sq = add(rail, el('span', 'sq'));
-    sq.setAttribute('aria-hidden', 'true');
-    for (var i = 0; i < count; i++) add(sq, el('i'));
-    add(rail, el('span', 'lbl', count + (off ? ' off' : ' idle')));
-    return rail;
+  function idleTile(key, off, seed) {
+    var tile = el('div', 'tile empty free');
+    add(tile, PX.strip(key, {state: off ? 'held' : 'idle', seed: seed, height: 16}));
+    add(tile, el('div', 'lbl', off ? 'off' : 'idle'));
+    return tile;
   }
 
   function queueLane(d) {
@@ -429,7 +423,7 @@ SCRIPT = r"""
       if (!dev.used && !free) free = 1;
       heldTiles += held;
       if (dev.enabled) idleTiles += free;
-      if (free) add(grid, idleRail(free, !dev.enabled));
+      for (var i = 0; i < free; i++) { seed += 1; add(grid, idleTile('slot-' + dev.name + '-' + seed, !dev.enabled, seed)); }
     });
     if (lanes.wakes.length) {
       var row = add(box, el('div', 'lane'));
@@ -710,11 +704,11 @@ def _held_tile(key: str, seed: int) -> str:
     return f'<div class="tile empty px-held">{strip}<div class="lbl">held</div></div>'
 
 
-def _idle_rail(count: int, off: bool) -> str:
-    return (
-        f'<div class="rail{" off" if off else ""}"><span class="sq" aria-hidden="true">{"<i></i>" * count}</span>'
-        f'<span class="lbl">{_e(f"{count} off" if off else f"{count} idle")}</span></div>'
-    )
+def _idle_tile(key: str, off: bool, seed: int) -> str:
+    from lib.dashboard_pages.shell import px_strip
+
+    strip = px_strip(key, state="held" if off else "idle", seed=seed, height=16)
+    return f'<div class="tile empty free">{strip}<div class="lbl">{"off" if off else "idle"}</div></div>'
 
 
 def _queue_lane(snapshot: dict) -> str:
@@ -818,8 +812,9 @@ def _lanes(snapshot: dict) -> str:
         held_tiles += device["used"] - len(device["jobs"])
         if device["enabled"]:
             idle_tiles += free
-        if free:
-            tiles.append(_idle_rail(free, not device["enabled"]))
+        for _ in range(free):
+            seed += 1
+            tiles.append(_idle_tile(f"slot-{device['name']}-{seed}", not device["enabled"], seed))
         rows.append(
             f'<div class="lane{"" if device["enabled"] else " disabled"}" data-device="{_e(device["name"])}">'
             f'<div class="lane-head"><div class="lh1"><span class="name">{_e(device["name"])}</span>'
