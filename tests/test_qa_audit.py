@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from lib.qa_audit import AskedScenario, Gap, LaneEvidence, audit
 
 START = "a" * 40
@@ -152,8 +154,13 @@ def test_a_malformed_result_fails_closed_instead_of_raising() -> None:
 
     gaps = _run([lane])
 
-    assert {g.kind for g in gaps} == {"lane-commit", "lane-method", "scenario-missing"}
-    assert {g.scenario for g in gaps if g.kind == "scenario-missing"} == {"s-1", "s-2"}
+    assert [(g.kind, g.scenario) for g in gaps] == [
+        ("lane-commit", None),
+        ("lane-method", None),
+        ("evidence-malformed", None),
+        ("scenario-missing", "s-1"),
+        ("scenario-missing", "s-2"),
+    ]
 
 
 def test_a_malformed_scenario_entry_is_skipped_and_its_artifacts_still_checked() -> None:
@@ -163,7 +170,84 @@ def test_a_malformed_scenario_entry_is_skipped_and_its_artifacts_still_checked()
 
     gaps = _run(lanes)
 
-    assert [(g.kind, g.scenario) for g in gaps] == [("artifact-mismatch", "s-1")]
+    assert [(g.kind, g.scenario) for g in gaps] == [("evidence-malformed", None), ("evidence-malformed", "s-1"), ("artifact-mismatch", "s-1")]
+
+
+def test_a_mismatch_list_turned_into_a_dict_yields_a_gap_instead_of_clean() -> None:
+    lane = _lane([_entry(S1), _entry(S2)], mismatches=[{"path": S1.after, "reason": "sha256"}])
+    assert [(g.kind, g.scenario, g.lane) for g in _run([lane])] == [("artifact-mismatch", "s-1", 1)]
+
+    lane.manifest["mismatches"] = {"path": S1.after, "reason": "sha256"}
+    gaps = _run([lane])
+
+    assert gaps != "clean"
+    assert ("evidence-malformed", None, 1) in [(g.kind, g.scenario, g.lane) for g in gaps]
+
+
+ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("mismatches", "readable"),
+    [
+        ({"path": S1.after, "reason": "sha256"}, []),
+        (None, []),
+        (ABSENT, []),
+        (S1.after, []),
+        ([None], []),
+        ([{"path": 3}], []),
+        ([{"path": 3}, {"path": S1.after, "reason": "sha256"}], [("artifact-mismatch", "s-1", 1)]),
+    ],
+    ids=["dict", "none", "absent", "string", "list-with-none", "list-with-int-path", "partly-readable"],
+)
+def test_a_malformed_mismatch_list_yields_one_evidence_malformed_gap_for_the_lane(mismatches: object, readable: list) -> None:
+    lane = _lane([_entry(S1), _entry(S2)])
+    if mismatches is ABSENT:
+        del lane.manifest["mismatches"]
+    else:
+        lane.manifest["mismatches"] = mismatches
+
+    gaps = _run([lane])
+
+    assert [(g.kind, g.scenario, g.lane) for g in gaps] == [("evidence-malformed", None, 1), *readable]
+
+
+def test_a_manifest_that_is_not_a_mapping_yields_an_evidence_malformed_gap() -> None:
+    lane = _lane([_entry(S1), _entry(S2)])
+    lane = LaneEvidence(lane=1, commit=START, method=METHOD, result=lane.result, manifest=[lane.manifest])
+
+    gaps = _run([lane])
+
+    assert gaps != "clean"
+    assert [(g.kind, g.scenario, g.lane) for g in gaps if g.kind == "evidence-malformed"] == [("evidence-malformed", None, 1)]
+
+
+@pytest.mark.parametrize("artifacts", [{"path": S1.after}, None, [S1.after]], ids=["dict", "none", "list-with-string"])
+def test_a_verified_scenario_with_malformed_artifacts_yields_an_evidence_malformed_gap_naming_it(artifacts: object) -> None:
+    lane = _lane([_entry(S1), _entry(S2)])
+    lane.result["scenarios"][0]["artifacts"] = artifacts
+
+    gaps = _run([lane])
+
+    assert [(g.kind, g.scenario, g.lane) for g in gaps] == [("evidence-malformed", "s-1", 1)]
+
+
+@pytest.mark.parametrize("artifacts", [{"path": S1.after}, None, [S1.after]], ids=["dict", "none", "list-with-string"])
+def test_a_failed_scenario_with_malformed_artifacts_yields_no_gap(artifacts: object) -> None:
+    lane = _lane([_entry(S1, "failed"), _entry(S2)])
+    lane.result["scenarios"][0]["artifacts"] = artifacts
+
+    assert _run([lane]) == "clean"
+
+
+def test_a_scenario_marked_verified_twice_with_malformed_artifacts_yields_one_gap() -> None:
+    lane = _lane([_entry(S1), _entry(S1), _entry(S2)])
+    lane.result["scenarios"][0]["artifacts"] = None
+    lane.result["scenarios"][1]["artifacts"] = None
+
+    gaps = _run([lane])
+
+    assert [(g.kind, g.scenario, g.lane) for g in gaps] == [("evidence-malformed", "s-1", 1)]
 
 
 def test_the_audit_never_changes_a_result_or_manifest() -> None:

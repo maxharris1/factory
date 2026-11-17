@@ -1105,15 +1105,23 @@ none), and a short detail.
 | `scenario-missing` | 2 | scenario | No lane reports the scenario with one of the four results. |
 | `artifact-missing` | 3 | scenario and lane | A required file of a verified scenario is not in the manifest. |
 | `artifact-mismatch` | 4 | scenario and lane | The manifest lists a mismatch for a file a verified scenario relies on. |
+| `evidence-malformed` | 4 | lane, or scenario and lane | The manifest's mismatch list, or a verified scenario's artifact list, is missing or not a list of entries that each name a path. |
 | `head-moved` | 5 | neither | The head moved after the run started. |
 
 A file that is both missing and listed as a `missing` mismatch yields one
-`artifact-missing` gap, and a run yields at most one gap per lane,
-scenario and file. `head-moved` has its own kind because the caller treats
-it differently: the evidence may be sound, but it covers an old head.
+`artifact-missing` gap, and a run yields at most one gap of each kind per
+lane, scenario and file. `head-moved` has its own kind because the caller
+treats it differently: the evidence may be sound, but it covers an old
+head.
 
-The result and manifest are untrusted. A field of the wrong type or a
-malformed entry is skipped, so it produces gaps and never a false
+The result and manifest are untrusted. Some malformed fields can only add
+gaps when skipped. These are the commit, the method, the manifest's file
+list and the result's scenario entries, and the audit skips them. Skipping
+a malformed mismatch list, or a verified scenario's malformed artifact
+list, could hide a gap instead. Each of these yields an
+`evidence-malformed` gap, and the audit still checks any path it can read
+in them. A manifest that is not a mapping, or has no mismatch list, counts
+as a malformed mismatch list. So no malformed input yields a false
 `"clean"`. The audit does no I/O, imports nothing that does, and never
 changes a result. It checks that evidence exists and matches, not what a
 screenshot shows. Nothing calls it yet. A later ticket wires it into the

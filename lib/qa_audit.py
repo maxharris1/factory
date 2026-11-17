@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-GapKind = Literal["lane-commit", "lane-method", "scenario-missing", "artifact-missing", "artifact-mismatch", "head-moved"]
+GapKind = Literal["lane-commit", "lane-method", "scenario-missing", "artifact-missing", "artifact-mismatch", "evidence-malformed", "head-moved"]
 
 REPORTED = frozenset({"verified", "failed", "inconclusive", "needs-human"})
 
@@ -39,6 +39,7 @@ class _Entry:
     id: str
     result: str
     paths: tuple[str, ...]
+    artifacts_well_formed: bool
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class _View:
     entries: tuple[_Entry, ...]
     files: frozenset[str]
     mismatched: frozenset[str]
+    mismatches_well_formed: bool
 
 
 def audit(
@@ -59,7 +61,7 @@ def audit(
     for scenario in asked:
         by_id.setdefault(scenario.id, scenario)
     gaps = (
-        [gap for view in views for gap in _lane_claims(view)]
+        [gap for view in views for gap in _lane_claims(view) + _malformed(view)]
         + _unreported(views, by_id)
         + [gap for view in views for gap in _receipts(view, by_id)]
         + _head_moved(start_commit, current_head)
@@ -71,7 +73,7 @@ def _view(lane: LaneEvidence) -> _View:
     result = lane.result if isinstance(lane.result, Mapping) else {}
     manifest = lane.manifest if isinstance(lane.manifest, Mapping) else {}
     entries = tuple(
-        _Entry(item["id"], item["result"], tuple(_paths(item.get("artifacts"))))
+        _Entry(item["id"], item["result"], tuple(_paths(item.get("artifacts"))), _well_formed(item.get("artifacts")))
         for item in _items(result.get("scenarios"))
         if isinstance(item.get("id"), str) and isinstance(item.get("result"), str)
     )
@@ -82,6 +84,7 @@ def _view(lane: LaneEvidence) -> _View:
         entries=entries,
         files=frozenset(_paths(manifest.get("files"))),
         mismatched=frozenset(_paths(manifest.get("mismatches"))),
+        mismatches_well_formed=_well_formed(manifest.get("mismatches")),
     )
 
 
@@ -93,6 +96,10 @@ def _paths(raw: object) -> Iterator[str]:
     return (item["path"] for item in _items(raw) if isinstance(item.get("path"), str))
 
 
+def _well_formed(raw: object) -> bool:
+    return isinstance(raw, list) and all(isinstance(item, Mapping) and isinstance(item.get("path"), str) for item in raw)
+
+
 def _lane_claims(view: _View) -> list[Gap]:
     lane = view.evidence
     gaps = []
@@ -100,6 +107,19 @@ def _lane_claims(view: _View) -> list[Gap]:
         gaps.append(Gap("lane-commit", None, lane.lane, f"Lane {lane.lane}'s result does not name the commit its brief named."))
     if view.method != lane.method:
         gaps.append(Gap("lane-method", None, lane.lane, f"Lane {lane.lane}'s result does not name the method its brief named."))
+    return gaps
+
+
+def _malformed(view: _View) -> list[Gap]:
+    lane = view.evidence.lane
+    gaps = []
+    if not view.mismatches_well_formed:
+        gaps.append(Gap("evidence-malformed", None, lane, f"Lane {lane}'s manifest mismatches is not a list of entries that each name a path."))
+    unreadable = dict.fromkeys(entry.id for entry in view.entries if entry.result == "verified" and not entry.artifacts_well_formed)
+    gaps += [
+        Gap("evidence-malformed", sid, lane, f"Lane {lane} marks {sid} verified but its artifacts are not a list of entries that each name a path.")
+        for sid in unreadable
+    ]
     return gaps
 
 
