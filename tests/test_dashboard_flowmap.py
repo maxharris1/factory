@@ -262,3 +262,24 @@ def test_a_bridge_never_passes_through_a_human_wait_state():
         for b in names:
             path = flow.chart_path(CHART, [a, b])
             assert HUMAN_WAITS.isdisjoint(path[1:-1]), (a, b, path)
+
+
+def _halted():
+    model = _model()
+    model["visits"] = model["visits"][:9]
+    model["visits"][-1]["current"] = True
+    return {**model, "state": "stuck", "next": flow.successors(CHART, "stuck")}
+
+
+def test_a_path_ending_in_a_stop_state_lies_still_on_a_red_checker():
+    frames = [_draw(_halted(), {"t": t, "reduced": False}) for t in (0, 1.3, 7.3)]
+    assert frames[0] == frames[1] == frames[2]
+    assert "#542d39" in frames[0]["fills"] and flow.STOP_RED in frames[0]["fills"]
+    assert "#b8e5ff" not in frames[0]["fills"], "no marching crest on a halted node"
+    assert "#542d39" not in _draw(_model(), {"t": 0, "reduced": False})["fills"]
+
+
+def test_a_tint_overrides_the_current_node_band():
+    plain = _draw(_model(), {"t": 0, "reduced": True})["fills"]
+    green = _draw(_model(), {"t": 0, "reduced": True, "tint": "#9ece6a"})["fills"]
+    assert "rgb(158,206,106)" in green and "rgb(158,206,106)" not in plain
