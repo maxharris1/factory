@@ -63,6 +63,10 @@ class CommentsMixin:
             self._title_pull(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
+            self._follow_current_pull(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         if ticket.closed and self._watched(ticket):
             self._abandon_closed(ticket)
             return

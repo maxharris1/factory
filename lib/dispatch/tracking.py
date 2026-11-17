@@ -11,7 +11,7 @@ from lib.dispatch.constants import (
     STOPPED_STATES,
     WATCHED_STATES,
 )
-from lib.dispatch.helpers import _matching_head, _spread
+from lib.dispatch.helpers import _matching_head, _post_to, _spread
 from lib.dispatch.eval_log import remember_repo
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, PollSource, TicketRef, TrackedTicket
@@ -153,6 +153,41 @@ class TrackingMixin:
         if entered:
             self.merged_this_poll.add(repo.lower())
         return entered
+
+    def _follow_current_pull(self, ticket: TrackedTicket) -> None:
+        if ticket.pr_number is None:
+            with self._connect() as connection:
+                connection.execute(
+                    f"UPDATE {SOURCES_TABLE} SET pr_number = NULL WHERE repo = ? AND ticket_id = ?",
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            return
+        new = ticket.pr_number
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id, head, json_extract(detail, '$.pr_number') AS pr_number FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND recipient != 'grok'
+                  AND json_extract(detail, '$.pr_number') != ?
+                ORDER BY created_at, id
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, new),
+            ).fetchall()
+            for row in rows:
+                if row["head"] is not None:
+                    self.queue.cancel(
+                        str(row["id"]),
+                        f"rebound:{row['pr_number']}->{new}",
+                        connection=connection,
+                    )
+                    continue
+                connection.execute(
+                    "UPDATE jobs SET detail = json_set(detail, '$.pr_number', ?, '$.post_to', ?) "
+                    "WHERE id = ?",
+                    (new, _post_to(new), row["id"]),
+                )
 
     def _title_pull(self, ticket: TrackedTicket) -> None:
         """Record the ticket's source issue and, once per PR, prefix its title.
