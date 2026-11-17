@@ -1688,6 +1688,12 @@ CLI's own output, captured by `orch job run` for every job and stored in
   `token_count` whose `rate_limits` is null or missing, or that leaves a
   window out, reads that window as `no reading`.
 
+A window that a reply with other limits leaves null or out, in 3 fresh
+readings in a row (none more than 24 hours after the one before), reads
+`not on plan`, shown as "not on this plan": that plan has no such limit, as
+with a Codex plan that reports only its 7-day window. Its `used` stays null,
+and the other window alone is then the account's headroom.
+
 A newer `no reading` replaces older numbers. A window that has reset, or a
 reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked`, and a database without the
 table shows `no telemetry`.

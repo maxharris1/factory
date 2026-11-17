@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -91,13 +92,13 @@ def test_a_login_without_limits_gives_no_reading(out: bytes) -> None:
         Reading("five_hour", None, None, CAPTURED), Reading("seven_day", None, None, CAPTURED)]
 
 
-@pytest.mark.parametrize("five_hour", [None, "missing", {"utilization": 3}])
-def test_a_null_or_missing_window_is_no_reading_never_zero(five_hour: object) -> None:
+@pytest.mark.parametrize(("five_hour", "absent"), [(None, 1), ("missing", 1), ({"utilization": 3}, 0)])
+def test_a_null_or_missing_window_is_no_reading_never_zero(five_hour: object, absent: int) -> None:
     limits = {"seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
     if five_hour != "missing":
         limits["five_hour"] = five_hour
     assert parse_get_usage(reply(limits), CAPTURED) == [
-        Reading("five_hour", None, None, CAPTURED), Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED)]
+        Reading("five_hour", None, None, CAPTURED, absent), Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED)]
 
 
 @pytest.mark.parametrize(
@@ -151,7 +152,7 @@ def test_codex_windows_are_mapped_by_minutes_and_reset_in_seconds_counts_from_th
                                "secondary": {"used_percent": 1, "window_minutes": 60, "resets_at": FIVE_HOUR_RESET}},
                "timestamp": "2026-11-14T16:25:30Z"}
     assert parse_codex(swapped, CAPTURED) == [
-        Reading("five_hour", None, None, EMITTED), Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED)]
+        Reading("five_hour", None, None, EMITTED, 1), Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED)]
 
 
 @pytest.mark.parametrize("stamp", [None, "soon", "2026-11-14T16:25:30", "2026-11-14T16:40:00Z"])
@@ -614,7 +615,8 @@ def test_bad_rows_never_reach_the_snapshot(tmp_path: Path) -> None:
     with sqlite3.connect(db) as connection:
         usage_readings.ensure_table(connection)
         connection.executemany(
-            "INSERT INTO usage_readings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 ("claude", "claude-bot", "box", "five_hour", 7.0, FIVE_HOUR_RESET, CAPTURED, "j"),
                 ("claude", "claude-bot", "box", "seven_day", 0.2, "soon", CAPTURED, "j"),
@@ -628,6 +630,103 @@ def test_bad_rows_never_reach_the_snapshot(tmp_path: Path) -> None:
     claude = usage["accounts"][0]
     assert claude["five_hour"]["used"] is None and claude["five_hour"]["state"] == "no reading"
     assert claude["seven_day"]["state"] == "no reading" and claude["state"] == "no reading"
+
+
+# --- a window the plan does not have ------------------------------------------------------
+
+
+def _iso(at: float) -> str:
+    return datetime.fromtimestamp(at, timezone.utc).isoformat()
+
+
+def _seven_day_only(at: float) -> dict:
+    return {"rate_limits": {"primary": {"used_percent": 68, "window_minutes": 10080, "resets_at": SEVEN_DAY_RESET},
+                            "secondary": None}, "timestamp": _iso(at)}
+
+
+def _codex_reads(db: Path, events: list[dict], now: float) -> dict:
+    with sqlite3.connect(db) as connection:
+        for event in events:
+            usage_readings.store(connection, harness="codex", bot="codex-bot", device="box", job_id="j",
+                                 readings=parse_codex(event, now))
+        return _accounts(read_usage(connection, now, BOX))["codex"]
+
+
+THREE_READINGS = [_seven_day_only(CAPTURED + offset) for offset in (0, 600, 1200)]
+
+
+def test_a_window_left_out_of_three_fresh_readings_is_not_on_the_plan(tmp_path: Path) -> None:
+    codex = _codex_reads(tmp_path / "orch.db", THREE_READINGS, CAPTURED + 1260)
+    assert codex["five_hour"]["state"] == "not on plan" and codex["five_hour"]["used"] is None
+    assert codex["seven_day"] == {"used": 0.68, "resets_at": SEVEN_DAY_RESET, "observed_at": CAPTURED + 1200,
+                                  "state": "ok"}
+    assert codex["headroom"] == 0.32 and codex["state"] == "ok"
+    assert set(codex) == {"bot", "harness", "devices", "state", "five_hour", "seven_day", "headroom",
+                          "observed_at", "age_seconds", "limited_until", "limit_label"}
+    assert set(codex["five_hour"]) == set(codex["seven_day"]) == {"used", "resets_at", "observed_at", "state"}
+
+
+GAP = usage_readings.STALE_SECONDS + 1
+
+
+@pytest.mark.parametrize(("offsets", "later", "state"), [
+    ([0], 60, "no reading"),
+    ([0, 600], 60, "no reading"),
+    ([0, 0, 0], 60, "no reading"),
+    ([0, 600, 1200], GAP, "stale"),
+    ([0, 600, 600 + GAP], 60, "no reading"),
+])
+def test_fewer_than_three_fresh_readings_without_a_window_stay_no_reading(
+    tmp_path: Path, offsets: list[int], later: int, state: str
+) -> None:
+    events = [_seven_day_only(CAPTURED + offset) for offset in offsets]
+    codex = _codex_reads(tmp_path / "orch.db", events, CAPTURED + offsets[-1] + later)
+    assert codex["five_hour"]["state"] == state and codex["five_hour"]["used"] is None
+
+
+def test_readings_without_rate_limits_never_say_not_on_the_plan(tmp_path: Path) -> None:
+    events = [{"rate_limits": None, "timestamp": _iso(CAPTURED + offset)} for offset in (0, 600, 1200)]
+    codex = _codex_reads(tmp_path / "orch.db", events, CAPTURED + 1260)
+    assert codex["five_hour"]["state"] == codex["seven_day"]["state"] == "no reading"
+
+
+def test_a_claude_window_null_in_three_replies_is_not_on_the_plan(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    limits = {"five_hour": None, "seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
+    with sqlite3.connect(db) as connection:
+        for offset in (0, 600, 1200):
+            usage_readings.store(connection, harness="claude", bot="claude-bot", device="box", job_id="j",
+                                 readings=parse_get_usage(reply(limits), CAPTURED + offset))
+        claude = _accounts(read_usage(connection, CAPTURED + 1260, BOX))["claude"]
+    assert claude["five_hour"]["state"] == "not on plan" and claude["headroom"] == 0.76
+
+
+OLD_DDL = (
+    "CREATE TABLE usage_readings (harness TEXT NOT NULL, bot TEXT NOT NULL, device TEXT NOT NULL,"
+    " window TEXT NOT NULL, used REAL, resets_at INTEGER, observed_at REAL NOT NULL, job_id TEXT NOT NULL,"
+    " PRIMARY KEY (harness, bot, device, window))"
+)
+
+
+def test_an_older_table_gets_the_absent_count_on_store(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    codex = _codex_reads(db, THREE_READINGS, CAPTURED + 1260)
+    assert codex["five_hour"]["state"] == "not on plan"
+
+
+def test_an_older_table_read_only_is_no_reading_not_no_telemetry(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+        connection.execute(
+            "INSERT INTO usage_readings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("codex", "codex-bot", "box", "five_hour", None, None, CAPTURED, "j"))
+        usage = read_usage(connection, CAPTURED + 60, BOX)
+    assert usage["state"] == "ok"
+    codex = _accounts(usage)["codex"]
+    assert codex["state"] == "no reading" and codex["five_hour"]["state"] == "no reading"
 
 
 # --- no credential file ---------------------------------------------------------------------

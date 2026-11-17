@@ -20,7 +20,10 @@ without a window (a null or missing window, a login without limits, a
 RESET_HORIZON_SECONDS of now) gives that window an explicit no-reading
 (`used` and `resets_at` None), which replaces any older numbers. A Codex
 reading is observed at its event's own time, so rereading the same event
-never makes it fresher. `Session._write`
+never makes it fresher. A window left out of NOT_ON_PLAN_READINGS
+fresh readings in a row that report other limits (a null or missing window
+in a reply with limits) is `not on plan`: the plan has no such limit.
+`Session._write`
 (lib/telemetry.py) stores them in `usage_readings` in the same transaction
 as the job's telemetry row, on the existing heartbeat flush. A reading is
 keyed by harness, bot (the account's OS user) and device, and an older
@@ -57,6 +60,7 @@ GET_USAGE_ID = "orch-usage"
 RESET_HORIZON_SECONDS = 30 * 24 * 3600
 CLOCK_SKEW_SECONDS = 300
 STALE_SECONDS = 24 * 3600
+NOT_ON_PLAN_READINGS = 3
 MAX_REPLY_BYTES = 256 * 1024
 
 DDL = f"""
@@ -69,18 +73,24 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     resets_at INTEGER,
     observed_at REAL NOT NULL,
     job_id TEXT NOT NULL,
+    absent INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (harness, bot, device, window)
 )
 """
 
 _UPSERT = f"""
-INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id, absent)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (harness, bot, device, window) DO UPDATE SET
     used = excluded.used,
     resets_at = excluded.resets_at,
     observed_at = excluded.observed_at,
-    job_id = excluded.job_id
+    job_id = excluded.job_id,
+    absent = CASE
+        WHEN excluded.absent > 0 AND excluded.observed_at - {TABLE}.observed_at <= {STALE_SECONDS}
+        THEN {TABLE}.absent + 1
+        ELSE excluded.absent
+    END
 WHERE excluded.observed_at > {TABLE}.observed_at
 """
 
@@ -91,14 +101,24 @@ class Reading:
     used: float | None
     resets_at: int | None
     observed_at: float
+    absent: int = 0
 
 
-def missing(window: str, observed_at: float) -> Reading:
-    return Reading(window, None, None, observed_at)
+def missing(window: str, observed_at: float, absent: int = 0) -> Reading:
+    return Reading(window, None, None, observed_at, absent)
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
+    """Create the table, or add `absent` to an older one; a runner that
+    loses a concurrent migration gets `duplicate column name`."""
     connection.execute(DDL)
+    if "absent" in {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}:
+        return
+    try:
+        connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN absent INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 def _number(value: object) -> float | None:
@@ -137,8 +157,8 @@ def iso_time(value: object) -> float | None:
 def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
     """The 5-hour and 7-day readings in Claude Code's `get_usage` reply.
 
-    A null window or a bad reset gives that window a no-reading, and a
-    login without limits (`rate_limits_available` not true) gives both.
+    A null window (counted as absent) or a bad reset gives that window a
+    no-reading, and a login without limits (`rate_limits_available` not true) gives both.
     An error reply, or no reply, is no observation at all."""
     for line in stdout[:MAX_REPLY_BYTES].splitlines():
         try:
@@ -159,6 +179,9 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
         found = []
         for window in WINDOWS:
             info = limits.get(window)
+            if info is None:
+                found.append(missing(window, now, 1))
+                continue
             resets = iso_time(info.get("resets_at")) if isinstance(info, dict) else None
             resets_at = reset_time(int(resets), now) if resets is not None else None
             if resets_at is None:
@@ -178,7 +201,8 @@ def parse_codex(found: object, now: float) -> list[Reading]:
     CLOCK_SKEW_SECONDS) gives nothing. A reset is `resets_at` (epoch
     seconds), else the event time plus `resets_in_seconds`. A window the
     event does not report, or reports without a valid reset, is a
-    no-reading; null `rate_limits` makes both windows no-readings."""
+    no-reading, counted as absent only when the event reports another
+    window; null `rate_limits` makes both windows no-readings."""
     if not isinstance(found, dict):
         return []
     emitted = iso_time(found.get("timestamp"))
@@ -204,7 +228,7 @@ def parse_codex(found: object, now: float) -> list[Reading]:
             if resets_at is None
             else Reading(window, used_percent(info.get("used_percent")), resets_at, observed)
         )
-    return [readings.get(window) or missing(window, observed) for window in WINDOWS]
+    return [readings.get(window) or missing(window, observed, 1 if readings else 0) for window in WINDOWS]
 
 
 def store(
@@ -222,14 +246,16 @@ def store(
     connection.executemany(
         _UPSERT,
         [
-            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id)
+            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, r.absent)
             for r in readings
         ],
     )
     lane_limit.reevaluate(connection, harness, bot, readings)
 
 
-def from_row(window: object, used: object, resets_at: object, observed_at: object) -> Reading | None:
+def from_row(
+    window: object, used: object, resets_at: object, observed_at: object, absent: object = 0
+) -> Reading | None:
     """A stored row, re-validated; None when any key value is not what `store` writes."""
     if window not in WINDOWS:
         return None
@@ -237,19 +263,25 @@ def from_row(window: object, used: object, resets_at: object, observed_at: objec
     if observed is None:
         return None
     if resets_at is None:
-        return missing(str(window), observed) if used is None else None
+        count = absent if type(absent) is int and absent >= 0 else 0
+        return missing(str(window), observed, count) if used is None else None
     if isinstance(resets_at, bool) or not isinstance(resets_at, int):
         return None
     return Reading(str(window), used_fraction(used), resets_at, observed)
 
 
 def window_state(reading: Reading, now: float) -> str:
-    """`ok`; `stale` once the window has reset or the reading is old; else `no reading`."""
+    """`stale` once the window has reset or the reading is old; else `ok`;
+    `not on plan` once absent from NOT_ON_PLAN_READINGS readings; else `no reading`."""
     if (reading.resets_at is not None and reading.resets_at <= now) or (
         now - reading.observed_at > STALE_SECONDS
     ):
         return "stale"
-    return "ok" if reading.used is not None else "no reading"
+    if reading.used is not None:
+        return "ok"
+    if reading.resets_at is None and reading.absent >= NOT_ON_PLAN_READINGS:
+        return "not on plan"
+    return "no reading"
 
 
 def headroom(readings: list[Reading], now: float) -> float | None:

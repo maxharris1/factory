@@ -159,13 +159,15 @@ SCRIPT = r"""
   function usageTone(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }
   function accountView(e, now) {
     var fresh = WINDOWS.filter(function (w) { return e[w].state === 'ok'; });
+    var planned = WINDOWS.filter(function (w) { return e[w].state !== 'not on plan'; });
     var v = {entry: e, limit: e.limit_label, pct: null, tone: null, tag: null, lit: 0};
     if (e.state === 'no telemetry') {
       v.windows = WINDOWS.map(function () { return [e.state, 'muted']; });
       v.resets = [e.state, 'muted'];
     } else {
       v.windows = WINDOWS.map(function (w) {
-        return fresh.indexOf(w) >= 0 ? [halfUp(e[w].used * 100) + '% used', null] : [e[w].state, 'muted'];
+        if (fresh.indexOf(w) >= 0) return [halfUp(e[w].used * 100) + '% used', null];
+        return [e[w].state === 'not on plan' ? 'not on this plan' : e[w].state, 'muted'];
       });
       var ends = fresh.filter(function (w) { return e[w].resets_at !== null; })
         .map(function (w) { return e[w].resets_at; });
@@ -176,7 +178,7 @@ SCRIPT = r"""
         (e.limit_label || (e.state === 'no telemetry' ? 'no telemetry' : 'no reading'));
       return v;
     }
-    var only = fresh.length === 1 ? WINDOW_NAMES[fresh[0]] : null;
+    var only = fresh.length === 1 && planned.length > 1 ? WINDOW_NAMES[fresh[0]] : null;
     v.pct = halfUp(e.headroom * 100);
     v.lit = Math.floor((2 * v.pct + 5) / 10);
     v.tone = only ? 'neutral' : usageTone(e.headroom);
@@ -362,12 +364,14 @@ def _tone(room: float) -> str:
 def _view(entry: dict, now: float) -> dict:
     state = entry["state"]
     fresh = [w for w in WINDOWS if entry[w]["state"] == "ok"]
+    planned = [w for w in WINDOWS if entry[w]["state"] != "not on plan"]
     if state == "no telemetry":
         windows = [(state, "muted")] * len(WINDOWS)
         resets = (state, "muted")
     else:
         windows = [(f"{_half_up(entry[w]['used'] * 100)}% used", None) if w in fresh
-                   else (entry[w]["state"], "muted") for w in WINDOWS]
+                   else ("not on this plan" if entry[w]["state"] == "not on plan" else entry[w]["state"], "muted")
+                   for w in WINDOWS]
         ends = [entry[w]["resets_at"] for w in fresh if entry[w]["resets_at"] is not None]
         resets = (f"in {duration(min(ends) - now)}", None) if ends else ("no reading", "muted")
     view = {"entry": entry, "windows": windows, "resets": resets, "limit": entry["limit_label"],
@@ -375,7 +379,7 @@ def _view(entry: dict, now: float) -> dict:
     if entry["limit_label"] or not fresh:
         reason = entry["limit_label"] or ("no telemetry" if state == "no telemetry" else "no reading")
         return {**view, "label": f"{entry['harness']} headroom: {reason}"}
-    only = WINDOW_NAMES[fresh[0]] if len(fresh) == 1 else None
+    only = WINDOW_NAMES[fresh[0]] if len(fresh) == 1 and len(planned) > 1 else None
     pct = _half_up(entry["headroom"] * 100)
     lit = (2 * pct + 5) // 10
     window = "" if only is None else f", from the {only} window only"
