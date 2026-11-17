@@ -796,7 +796,7 @@ def collect_snapshot(
         db["record_keys"][key]: {
             **record,
             "jobs": [
-                {name: value for name, value in item.items() if name != "flow"}
+                {name: value for name, value in item.items() if name not in ("flow", "record")}
                 for item in db["ticket_jobs"].get(key, [])
             ],
         }
@@ -1548,7 +1548,10 @@ def _read_db(
     ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
     ticket_jobs: dict[tuple[str, str], list[dict]] = {}
     for item in [*sorted(running, key=lambda item: item["elapsed_seconds"]), *queued]:
-        ticket_jobs.setdefault(ticket_of[id(item)], []).append(item)
+        key = ticket_of[id(item)]
+        if key in record_keys:
+            item["record"] = record_keys[key]
+        ticket_jobs.setdefault(key, []).append(item)
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)

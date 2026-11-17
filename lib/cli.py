@@ -1308,7 +1308,7 @@ def _poll_lock(path: Path, pidfile: Path | None = None):
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
-    lock_path = _lock_path(path)
+    lock_path = Path(f"{path.resolve()}.lock")
     handle = lock_path.open("a+", encoding="utf-8")
     written = False
     try:

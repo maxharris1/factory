@@ -1154,7 +1154,8 @@ environment file.
 
 ### Poller service without systemd
 
-`orch poll` holds the database's single-poller lock (`orch.db.lock`); while it
+`orch poll` holds the database's single-poller lock (`orch.db.lock`, beside
+the database file a symlinked `ORCH_DB` points to); while it
 holds it, it writes its own pid to `--pidfile`, else `$ORCH_POLL_PIDFILE`,
 else `poller.pid` beside the database, and removes that file on exit,
 including SIGTERM (exit 143). A second poller is refused and does not touch
@@ -1192,7 +1193,7 @@ changes neither. Run `poller-service.sh stop` before re-running
 `start` and `ensure` also probe `orch.db.lock` with `flock` before
 launching, beside the `ORCH_DB` that `run-poller.sh` ends up with after
 sourcing its env files (`run-poller.sh --print-db`), else the caller's
-`ORCH_DB`: while it is held, a poller runs even if its pid is
+`ORCH_DB`, with symlinks resolved as `orch poll` resolves them: while it is held, a poller runs even if its pid is
 not visible from this shell, so they launch nothing (`start` says
 `orch poll already running (poll lock held)`).
 [`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh) runs
