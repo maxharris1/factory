@@ -139,8 +139,10 @@ def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
     out = tmp_path / "out"
     paths = write_snapshot_pages(out, _snapshot(tmp_path))
     assert dashboard.PAGES == PAGES
-    assert paths == (out / "status.json", *(out / name for name in PAGES))
-    assert sorted(path.name for path in out.iterdir()) == sorted(("status.json", *PAGES))
+    assert paths == (out / "status.json", *(out / name for name in PAGES), out / "tickets.json")
+    assert sorted(path.name for path in out.iterdir()) == sorted(
+        ("status.json", *PAGES, "tickets.json")
+    )
 
 
 def test_every_page_links_every_other_page(tmp_path: Path) -> None:
@@ -926,7 +928,7 @@ def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     calls = [eval(line) for line in remote_log.read_text().splitlines()]  # noqa: S307
-    names = ("status.json", *PAGES)
+    names = ("status.json", *PAGES, "tickets.json")
     assert [call[0] for call in calls] == ["scp"] * len(names) + ["ssh"]
     assert calls[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
         f"mv -f -- .{name}.push-tmp {name}" for name in names

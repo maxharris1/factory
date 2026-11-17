@@ -59,10 +59,17 @@ import yaml
 from lib import health as component_health
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_flow import JobStep, Transition, job_flow, load_chart
+from lib.dashboard_flow import (
+    JobStep,
+    Transition,
+    job_flow,
+    load_chart,
+    shipped_facts,
+    stop_facts,
+)
 from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
-from lib.dashboard_telemetry import read_telemetry
+from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import CI_WAIT_REASONS
 from lib.dashboard_page import PAGES, render_pages
@@ -92,6 +99,10 @@ from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
+# The snapshot key that carries the ticket records. The writer publishes it as
+# tickets.json and keeps it out of status.json and the pages.
+RECORDS = "ticket_records"
+TICKETS_SCHEMA = 1
 LOG_TAIL_LINES = 50
 LOG_TAIL_BYTES = 256 * 1024
 RAW_LINE_LIMIT = 4096
@@ -730,6 +741,16 @@ def collect_snapshot(
         if flag is not None:
             item["no_waiter"] = flag.harness
             item["no_waiter_link"] = f"health.html#{flag.anchor}"
+    records = {
+        f"{record['repo']}#{record['ticket_id']}": {
+            **record,
+            "jobs": [
+                {name: value for name, value in item.items() if name != "flow"}
+                for item in db["ticket_jobs"].get(key, [])
+            ],
+        }
+        for key, record in db["ticket_records"].items()
+    }
 
     snapshot = {
         "schema": SCHEMA,
@@ -790,6 +811,7 @@ def collect_snapshot(
         "projects": _projects(orch, rules, now),
         "rules": rules_and_limits(chart),
         "usage": usage,
+        RECORDS: records,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 
@@ -1240,8 +1262,12 @@ def _read_db(
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             ci_wait = ci_waits.get(key)
             no_ci = no_ci_bases.get(key)
+            reason = (
+                _clean(row["stuck_reason"], 200) if row["stuck_reason"] is not None else None
+            )
             ticket_info[key] = TicketInfo(
-                _enum(row["tracker"], TRACKERS), stuck, state
+                _enum(row["tracker"], TRACKERS), stuck, state,
+                ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
             )
             tickets.append(
                 {
@@ -1262,11 +1288,7 @@ def _read_db(
                     {
                         **ref,
                         "state": state,
-                        "reason": (
-                            _clean(row["stuck_reason"], 200)
-                            if row["stuck_reason"] is not None
-                            else None
-                        ),
+                        "reason": reason,
                     }
                 )
             if stuck or str(row["workflow_state"]) in PAUSED_STATES:
@@ -1294,6 +1316,16 @@ def _read_db(
         item["flow"] = flows[key]
         if key in retries:
             item["retries"] = retries[key]
+    spent = ticket_totals(connection)
+    ticket_records = {
+        key: _ticket_record(info, flows[key], tracked_at.get(key), spent.get(key), chart)
+        for key, info in ticket_info.items()
+    }
+    # Each tracked ticket's live jobs: running newest first, then queued oldest first.
+    ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
+    ticket_jobs: dict[tuple[str, str], list[dict]] = {}
+    for item in [*sorted(running, key=lambda item: item["elapsed_seconds"]), *queued]:
+        ticket_jobs.setdefault(ticket_of[id(item)], []).append(item)
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
@@ -1525,6 +1557,8 @@ def _read_db(
         },
         "running": running,
         "queued": queued,
+        "ticket_records": ticket_records,
+        "ticket_jobs": ticket_jobs,
         "box_running": box_running,
         "running_on": running_on,
         "overdue_jobs": overdue,
@@ -1566,6 +1600,54 @@ class TicketInfo(NamedTuple):
     tracker: str | None
     stuck: bool
     state: str | None
+    repo: str = ""
+    ticket_id: str = ""
+    round: int = 0
+    reason: str | None = None
+
+
+def _ticket_record(
+    info: TicketInfo,
+    flow: dict,
+    tracked_at: float | None,
+    totals: dict | None,
+    chart: dict | None,
+) -> dict:
+    """A tracked ticket's tickets.json record, less its live jobs. Shaped so
+    the ticket page's `_detail_model({"flow": record}, chart)` reads it as it
+    reads a job row."""
+    visits = flow["visits"]
+    shipped = shipped_facts(chart, flow)
+    if shipped is not None:
+        began = tracked_at if tracked_at is not None else (
+            visits[0]["started_at"] if visits else None
+        )
+        shipped.update(
+            intake_to_ship_seconds=(
+                None if shipped["at"] is None or began is None
+                else int(max(0.0, shipped["at"] - began))
+            ),
+            revise_rounds=info.round,
+            **(totals or {"jobs": 0, "tokens_in": None, "tokens_out": None, "cost_usd": None}),
+        )
+    stopped = stop_facts(chart, flow, str(info.state), info.stuck)
+    if stopped is not None:
+        stopped["reason"] = info.reason
+    return {
+        "repo": info.repo,
+        "ticket_id": info.ticket_id,
+        "state": flow["state"],
+        "state_age_seconds": flow["state_age_seconds"],
+        "round": info.round,
+        "hops": max(0, len(visits) - 1),
+        "off_chart_count": sum(1 for visit in visits if visit["off_chart"]),
+        "terminal": flow["terminal"],
+        "hops_to_shipped": flow["hops_to_shipped"],
+        "all_durations_known": flow["all_durations_known"],
+        "visits": visits,
+        "shipped": shipped,
+        "stopped": stopped,
+    }
 
 
 def _ticket_flows(
@@ -1734,18 +1816,22 @@ def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
 
 
 def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
-    """Write status.json and every page (PAGES) from one snapshot, as a set.
+    """Write status.json, every page (PAGES) and tickets.json from one
+    snapshot, as a set.
 
-    Each is written to a temp file in the same directory and fsynced, then
-    renamed into place, status.json first. If a later rename fails, every
-    file already renamed is put back as it was (or removed if there was
-    none), so the directory never mixes files from this snapshot with files
-    from an earlier one. Returns every path, status.json first, then the
-    pages in PAGES order.
+    The ticket records (RECORDS) go to tickets.json only; status.json and the
+    pages are written from the rest of the snapshot. Each file is written to
+    a temp file in the same directory and fsynced, then renamed into place,
+    status.json first. If a later rename fails, every file already renamed is
+    put back as it was (or removed if there was none), so the directory never
+    mixes files from this snapshot with files from an earlier one. Returns
+    every path: status.json, then the pages in PAGES order, then tickets.json.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"}
-    texts.update(render_pages(snapshot))
+    status = {key: value for key, value in snapshot.items() if key != RECORDS}
+    texts = {"status.json": json.dumps(status, indent=2, sort_keys=True, allow_nan=False) + "\n"}
+    texts.update(render_pages(status))
+    texts["tickets.json"] = tickets_json(snapshot)
     targets = [out_dir / name for name in texts]
     temps: list[str] = []
     try:
@@ -1773,6 +1859,22 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
             except FileNotFoundError:
                 pass
     return tuple(targets)
+
+
+def tickets_json(snapshot: dict) -> str:
+    """The ticket records as compact JSON, with <, > and & written as JSON
+    escapes so no markup survives in the file even outside a JSON parser."""
+    text = json.dumps(
+        {
+            "schema": TICKETS_SCHEMA,
+            "generated_at_epoch": snapshot.get("generated_at_epoch"),
+            "tickets": snapshot.get(RECORDS, {}),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026") + "\n"
 
 
 def _temp_name(path: Path, temps: list[str], *, suffix: str = ".tmp") -> str:

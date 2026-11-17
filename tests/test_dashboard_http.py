@@ -2,7 +2,7 @@
 
 Each test serves a scratch directory on loopback through `make_server`
 (the tailnet-only bind is enforced by `load_config`, tested in
-tests/test_deploy.py) and checks that only the snapshot files (status.json and the four pages)
+tests/test_deploy.py) and checks that only the snapshot files (status.json, the pages and tickets.json)
 are served, never anything outside the directory, never a listing.
 """
 
@@ -87,6 +87,19 @@ def test_serves_status_json(get) -> None:
     assert status == 200
     assert body.decode() == STATUS
     assert headers["content-type"] == "application/json"
+
+
+def test_serves_tickets_json_with_the_locked_down_headers(site: Path, get) -> None:
+    assert get("/tickets.json")[0] == 404  # not written yet
+    tickets = '{"generated_at_epoch":1.0,"schema":1,"tickets":{}}\n'
+    (site / "tickets.json").write_text(tickets, encoding="utf-8")
+    status, headers, body = get("/tickets.json")
+    assert status == 200
+    assert body.decode() == tickets
+    assert headers["content-type"] == "application/json"
+    assert headers["cache-control"] == "no-store"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in headers["content-security-policy"]
 
 
 def test_responses_carry_locked_down_headers(get) -> None:
