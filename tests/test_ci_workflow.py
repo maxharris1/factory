@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -165,6 +166,16 @@ jq -r "$2" <<<"$response"
 """
 
 
+FAKE_DATE = """#!/usr/bin/env bash
+[[ "$1" == +%s ]] && exec cat "$CLOCK"
+exec "$REAL_DATE" "$@"
+"""
+
+FAKE_SLEEP = """#!/usr/bin/env bash
+echo $(( $(cat "$CLOCK") + $1 )) > "$CLOCK"
+"""
+
+
 def _pickup_step() -> dict:
     steps = _workflow()["jobs"]["macos-pickup"]["steps"]
     assert len(steps) == 1
@@ -189,13 +200,20 @@ def _jobs(macos: tuple[str, datetime] | None, conclusion: str | None = None) -> 
 
 
 def _run_pickup(
-    tmp_path: Path, responses: list[str], *, poll_seconds: int = 0
+    tmp_path: Path, responses: list[str], *, clock: datetime | None = None
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    gh = bin_dir / "gh"
-    gh.write_text(FAKE_GH, encoding="utf-8")
-    gh.chmod(0o755)
+    fakes = {"gh": FAKE_GH}
+    clock_env = {}
+    if clock is not None:
+        fakes |= {"date": FAKE_DATE, "sleep": FAKE_SLEEP}
+        (tmp_path / "clock").write_text(f"{int(clock.timestamp())}\n", encoding="utf-8")
+        clock_env = {"CLOCK": str(tmp_path / "clock"), "REAL_DATE": shutil.which("date")}
+    for name, script in fakes.items():
+        fake = bin_dir / name
+        fake.write_text(script, encoding="utf-8")
+        fake.chmod(0o755)
     (tmp_path / "responses").write_text("\n".join(responses) + "\n", encoding="utf-8")
     log = tmp_path / "gh.log"
     log.write_text("", encoding="utf-8")
@@ -203,7 +221,8 @@ def _run_pickup(
     env = {
         **os.environ,
         **{key: str(value) for key, value in step.get("env", {}).items()},
-        "POLL_SECONDS": str(poll_seconds),
+        **({} if clock is not None else {"POLL_SECONDS": "0"}),
+        **clock_env,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "GH_LOG": str(log),
         "GH_RESPONSES": str(tmp_path / "responses"),
@@ -270,7 +289,7 @@ def test_a_failed_macos_fails_the_watchdog_so_a_failed_jobs_rerun_reruns_both(tm
 
 
 def test_a_failed_poll_past_the_pickup_deadline_never_cancels_the_run(tmp_path: Path) -> None:
-    created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=598)
+    created = datetime(2026, 11, 16, 15, 49, 22, tzinfo=timezone.utc)
     result, calls = _run_pickup(
         tmp_path,
         [
@@ -279,7 +298,7 @@ def test_a_failed_poll_past_the_pickup_deadline_never_cancels_the_run(tmp_path: 
             _jobs(("in_progress", created)),
             _jobs(("completed", created), "success"),
         ],
-        poll_seconds=2,
+        clock=created + timedelta(seconds=585),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "::error" not in result.stdout
