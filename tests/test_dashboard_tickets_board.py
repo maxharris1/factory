@@ -30,7 +30,7 @@ JOBS = {"planning": ("j-plan01", "plan", "claude", None),
 QUEUED = ("plan-check", "j-queue1")
 VERDICT = ("post-merge", "queued-review")
 BOARD = ["ticket-filter", "pipeline", "shipped", "tickets"]
-IDS = layout.BAR + ["hud", *BOARD, "jobview", "flow-template"]
+IDS = layout.BAR + ["hud", *BOARD, "flow-template"]
 COLUMNS = ["Ask", "Plan", "Build", "Review", "Ship", "Stop"]
 GLYPHS = {"Ask": ("twinkle", "#a9b1d6"), "Plan": ("field", "#a9b1d6"), "Build": ("fill", "#a9b1d6"),
           "Review": ("scan", "#a9b1d6"), "Ship": ("off", "#a9b1d6"), "Stop": ("static", "#f7768e")}
@@ -376,7 +376,7 @@ def test_card_strips_show_the_step_and_bot_and_never_move_when_stopped_or_waitin
     waiting = _card(board, "#".join(tickets["awaiting-ok"]))
     assert (_canvas(waiting)["data-px"], _canvas(waiting)["data-tint"]) == ("static", "#ff9e64")
     assert not page.PX_EFFECTS["static"]
-    assert f"waiting on {APPROVER}" in _text(waiting)
+    assert f"waits on {APPROVER}" in _text(waiting)
     stuck = _card(board, "#".join(STUCK))
     assert "stuck" in _text(_one(stuck, _cls("chip")))
     assert "cancelled: superseded by sanctioned intake" in _text(stuck)
@@ -398,7 +398,8 @@ def test_cards_show_round_bot_device_time_and_link_their_ticket_page(snapshot: d
     assert "round —" in _text(planning) and not _all(planning, _cls("tk-pips"))
     queued = _card(board, "#".join(tickets[QUEUED[0]]))
     assert _id_link(queued)["attrs"]["href"] == _page_of(tickets[QUEUED[0]])
-    assert "queued" in _text(queued) and not _all(queued, lambda n: n["tag"] == "canvas")
+    assert "queued" in _text(queued) and _text(_one(queued, _cls("tk-run"))).startswith("for")
+    assert (_canvas(queued)["data-px"], _canvas(queued).get("data-still")) == ("conveyor", "true")
     idle = _card(board, "#".join(tickets[VERDICT[0]]))
     assert not _all(idle, lambda n: n["tag"] == "canvas")
     assert _id_link(idle)["attrs"]["href"] == _page_of(tickets[VERDICT[0]])
@@ -746,25 +747,26 @@ def _idle(snapshot: dict) -> dict:
     return {**snapshot, "running": [], "queued": []}
 
 
-def _says_no_job(markup: str) -> dict[str, bool]:
-    return {key: "no job running" in _text(_card(markup, key)) for key in _placed(markup)}
+def _check_in_state(markup: str, rows: list[dict]) -> None:
+    by_key = {_key(row): row for row in rows}
+    cards = _all(_dom(markup), _cls("tk-card"))
+    assert cards
+    for card in cards:
+        row = by_key[card["attrs"]["data-ticket"]]
+        assert "no job running" not in _text(card), row["state"]
+        assert _text(_one(card, _cls("tk-in"))).startswith(f"in {row['state']}"), row["state"]
 
 
-def test_no_job_running_only_in_plan_build_and_review(snapshot: dict) -> None:
-    server = _server(_idle(snapshot))
-    phases = flow.ticket_phases(flow.load_chart(CHART))
-    says = _says_no_job(server["pipeline"] + server["shipped"])
-    for row in snapshot["tickets"]:
-        phase = "Stop" if row["stuck"] else phases[row["state"]]
-        if phase != "Shipped":
-            assert says[_key(row)] == (phase in ("Plan", "Build", "Review")), (row["state"], phase)
+def test_no_card_says_no_job_running_and_each_says_its_time_in_state(snapshot: dict) -> None:
+    _check_in_state(_server(_idle(snapshot))["pipeline"], snapshot["tickets"])
 
 
 @layout.needs_node
-def test_script_no_job_running_matches_the_server(tmp_path: Path, snapshot: dict) -> None:
+def test_script_idle_cards_match_the_server(tmp_path: Path, snapshot: dict) -> None:
     found = _idle(snapshot)
     out = _script(tmp_path, found)
     server = _server(found)
+    _check_in_state(out["html"]["pipeline"], snapshot["tickets"])
     for ident in ("pipeline", "shipped"):
         assert out["html"][ident] == server[ident], ident
 
@@ -787,10 +789,10 @@ def _waiting_verdicts(snapshot: dict) -> tuple[dict, str, str]:
 
 def _check_waiting(markup: str, waiting: str, other: str) -> None:
     card = _card(markup, waiting)
-    assert f"waiting on {APPROVER}" in _text(card)
+    assert f"waits on {APPROVER}" in _text(card)
     assert not _all(card, _cls("chip")) and "tk-run" not in str(card)
     shown = _card(markup, other)
-    assert f"waiting on {APPROVER}" in _text(shown)
+    assert f"waits on {APPROVER}" in _text(shown)
     assert _text(_one(shown, _cls("chip"))) == "routed" and "queued-review" in _text(shown)
 
 
@@ -937,7 +939,7 @@ def test_a_ready_held_for_ci_shows_waiting_on_ci_instead_of_no_job(tmp_path: Pat
     assert "checks pending" in _text(linear) and not _all(linear, lambda n: n["tag"] == "a")
 
     idle = _card(board, "#".join(NO_JOB))
-    assert "no job running" in _text(idle) and "waiting on CI" not in _text(idle)
+    assert _text(_one(idle, _cls("tk-in"))).startswith("in building") and "waiting on CI" not in _text(idle)
     assert "data-wait" not in idle["attrs"] and not _all(idle, lambda n: n["tag"] == "canvas")
 
 
@@ -995,3 +997,185 @@ def test_script_draws_a_base_without_ci_like_the_server(tmp_path: Path) -> None:
     _check_no_ci(out["html"]["pipeline"])
     for ident in BOARD:
         assert out["html"][ident] == server[ident], ident
+
+
+STALE = ("maxharris1/cleffy", "131")
+LIVE = {("maxharris1/factory", "474"): ("fixing", 665), ("maxharris1/factory", "478"): ("building", 372)}
+QUEUED_FOR = ("maxharris1/factory", "472")
+IDLE_AGES = {("maxharris1/factory", "471"): 840, ("maxharris1/factory", "470"): 300}
+HELD = ("maxharris1/factory", "490")
+STOPPED = ("maxharris1/cleffy", "103")
+STOPPED_AGE = 3 * 86400 + 2 * 3600
+ASK_AGES = dict(zip((f"{n}" for n in range(479, 487)), (180, 840, 540, None, 1320, 60, 1800, 300)))
+BUILD_ORDER = ["maxharris1/cleffy#131", "maxharris1/factory#474", "maxharris1/factory#478",
+               "maxharris1/factory#472", "maxharris1/factory#471", "maxharris1/factory#470"]
+ASK_ORDER = [f"maxharris1/factory#{n}" for n in (485, 483, 480, 481, 486, 479, 484, 482)]
+
+
+def order_snapshot(tmp_path: Path) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        def ticket(repo: str, ticket_id: str, state: str, age: int | None, **kw) -> None:
+            add_ticket(connection, repo, ticket_id, state=state, **kw)
+            if age is not None:
+                connection.execute(
+                    "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+                    "VALUES (?, ?, NULL, ?, ?, 'poller')", (repo, ticket_id, state, NOW - age))
+
+        for (repo, ticket_id), age in IDLE_AGES.items():
+            ticket(repo, ticket_id, "building", age)
+        ticket(*QUEUED_FOR, "building", 60)
+        add_job(connection, "j-queued", recipient="codex", repo=QUEUED_FOR[0], ticket_id=QUEUED_FOR[1],
+                created_at=NOW - 90)
+        for (repo, ticket_id), (state, elapsed) in LIVE.items():
+            ticket(repo, ticket_id, state, None, review_round=1)
+            add_job(connection, f"j-{ticket_id}", state="running", repo=repo, ticket_id=ticket_id,
+                    created_at=NOW - elapsed, last_activity_at=NOW - 6, detail='{"round":"1/1"}')
+        ticket(*STALE, "building", None)
+        add_job(connection, "j-stale", state="running", repo=STALE[0], ticket_id=STALE[1],
+                created_at=NOW - 1180, last_activity_at=NOW - 250, detail='{"round":"1/1"}')
+        for ticket_id, age in ASK_AGES.items():
+            ticket("maxharris1/factory", ticket_id, "intake", age)
+        ticket(*HELD, "awaiting-ok", 420)
+        connection.execute(
+            "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, held_at) "
+            "VALUES (?, ?, 'abc123', ?, 'label', 'c-hold', ?)", (*HELD, APPROVER, NOW - 420))
+        ticket(*STOPPED, "planning", STOPPED_AGE, stuck=1,
+               stuck_reason="cancelled: superseded by sanctioned intake (Factory 2026-11-13)")
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+@pytest.fixture(scope="module")
+def ordered(tmp_path_factory) -> dict:
+    return order_snapshot(tmp_path_factory.mktemp("order"))
+
+
+def _column(markup: str, phase: str) -> dict:
+    return _one(_dom(markup), _attr("data-phase", phase))
+
+
+def _check_order(markup: str) -> None:
+    assert _placed_in(_column(markup, "Build")) == BUILD_ORDER
+    assert _placed_in(_column(markup, "Ask")) == ASK_ORDER
+
+
+def test_a_ticket_row_carries_its_records_time_in_state(ordered: dict) -> None:
+    from lib.dashboard import RECORDS
+
+    ages = {_key(row): row["state_age_seconds"] for row in ordered["tickets"]}
+    assert ages == {key: record["state_age_seconds"] for key, record in ordered[RECORDS].items()}
+    assert ages["#".join(STOPPED)] == STOPPED_AGE and ages["maxharris1/factory#482"] is None
+    assert all(ages["#".join(key)] == age for key, age in IDLE_AGES.items())
+
+
+def test_live_jobs_come_first_then_queued_then_idle_longest_first(ordered: dict) -> None:
+    _check_order(_server(ordered)["pipeline"])
+
+
+@layout.needs_node
+def test_script_orders_cards_like_the_server(tmp_path: Path, ordered: dict) -> None:
+    out = _script(tmp_path, ordered)
+    _check_order(out["html"]["pipeline"])
+    for ident in BOARD:
+        assert out["html"][ident] == _server(ordered)[ident], ident
+
+
+def _check_idle(markup: str) -> None:
+    assert "no job running" not in _text(_dom(markup))
+    assert _text(_one(_card(markup, "maxharris1/factory#471"), _cls("tk-in"))) == "in building 14m 00s"
+    assert _text(_one(_card(markup, "maxharris1/factory#470"), _cls("tk-in"))) == "in building 5m 00s"
+    assert _text(_one(_card(markup, "maxharris1/factory#482"), _cls("tk-in"))) == "in intake"
+    held = _card(markup, "#".join(HELD))
+    assert _text(_one(held, _cls("tk-in"))) == "in awaiting-ok 7m 00s"
+    assert _text(_one(held, _cls("tk-wait"))) == f"waits on {APPROVER}"
+    assert "waiting on" not in _text(held)
+    stopped = _card(markup, "#".join(STOPPED))
+    state = _one(stopped, _cls("tk-state"))
+    assert [_text(kid) for kid in state["kids"]] == ["stuck", "in planning 3d 2h"]
+    assert "superseded by sanctioned intake" in _text(_one(stopped, _cls("tk-reason")))
+
+
+def test_idle_cards_say_how_long_they_sat_in_their_state(ordered: dict) -> None:
+    _check_idle(_server(ordered)["pipeline"])
+
+
+@layout.needs_node
+def test_script_idle_cards_say_how_long_they_sat_in_their_state(tmp_path: Path, ordered: dict) -> None:
+    _check_idle(_script(tmp_path, ordered)["html"]["pipeline"])
+
+
+def _check_queued_and_stale(markup: str) -> None:
+    queued = _card(markup, "#".join(QUEUED_FOR))
+    assert [_text(kid) for kid in _one(queued, _cls("tk-state"))["kids"]][:2] == ["building", "queued"]
+    run = _one(queued, _cls("tk-run"))
+    assert [_text(kid) for kid in run["kids"]] == ["for", "codex", "waiting 1m 30s"]
+    assert "bot" in _one(run, _cls("codex"))["attrs"]["class"].split()
+    strip = _canvas(queued)
+    assert (strip["data-px"], strip["data-tint"], strip.get("data-still")) == ("conveyor", "codex", "true")
+    stale = _card(markup, "#".join(STALE))
+    assert "tk-stale" in stale["attrs"]["class"].split()
+    assert _state_chips(stale) == [("stale", "warn")]
+    assert _text(_one(stale, _cls("tk-hb"))) == "no heartbeat for 4m 10s"
+    assert "T+ 19m 40s" in _text(_one(stale, _cls("tk-run")))
+    assert _canvas(stale)["data-px"] == "decay" and not page.PX_EFFECTS["decay"]
+    for key in LIVE:
+        card = _card(markup, "#".join(key))
+        assert "tk-stale" not in card["attrs"]["class"] and not _all(card, _cls("tk-hb"))
+
+
+def test_queued_and_stale_cards_say_what_they_wait_on(ordered: dict) -> None:
+    _check_queued_and_stale(_server(ordered)["pipeline"])
+    assert ".tk-card.tk-stale{border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);box-shadow:none}" in page.CSS
+
+
+@layout.needs_node
+def test_script_queued_and_stale_cards_match_the_server(tmp_path: Path, ordered: dict) -> None:
+    _check_queued_and_stale(_script(tmp_path, ordered)["html"]["pipeline"])
+
+
+def _check_cap(markup: str) -> None:
+    ask = _column(markup, "Ask")
+    cards = [kid for kid in ask["kids"] if isinstance(kid, dict) and _cls("tk-card")(kid)]
+    assert [c["attrs"]["data-ticket"] for c in cards] == ASK_ORDER[:6]
+    (more,) = [kid for kid in ask["kids"] if isinstance(kid, dict) and kid["tag"] == "details"]
+    assert "open" not in more["attrs"] and more["attrs"]["class"] == "tk-more"
+    assert _text(_one(more, lambda n: n["tag"] == "summary")) == "+2 more"
+    assert _placed_in(more) == ASK_ORDER[6:]
+    assert _text(_one(ask, _cls("tk-count"))) == "8"
+    build = _column(markup, "Build")
+    assert not _all(build, lambda n: n["tag"] == "details") and len(_all(build, _cls("tk-card"))) == 6
+
+
+def test_a_column_shows_six_cards_and_folds_the_rest(ordered: dict) -> None:
+    _check_cap(_server(ordered)["pipeline"])
+
+
+@layout.needs_node
+def test_script_column_cap_matches_the_server(tmp_path: Path, ordered: dict) -> None:
+    _check_cap(_script(tmp_path, ordered)["html"]["pipeline"])
+
+
+MORE_HARNESS = HARNESS.replace(
+    "    } else if (kind === 'press') {",
+    "    } else if (kind === 'more') {\n"
+    "      const node = find(body, n => n.className === 'tk-more');\n"
+    "      if (arg === 'toggle') { node.open = !node.open; fire(node, 'toggle'); }\n"
+    "      steps.push({open: !!node.open, kept: node === global.lastMore});\n"
+    "      global.lastMore = node;\n"
+    "    } else if (kind === 'press') {",
+)
+
+
+@layout.needs_node
+def test_script_more_box_stays_open_across_redraws(tmp_path: Path, ordered: dict) -> None:
+    assert "kind === 'more'" in MORE_HARNESS
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(ordered)["job.html"], flags=re.S)
+    actions = [["more", "look"], ["hashchange", None], ["more", "look"], ["more", "toggle"],
+               ["hashchange", None], ["more", "look"]]
+    out = layout.run_harness(tmp_path, MORE_HARNESS, script, ordered, "job", IDS, actions)
+    assert [step for step in out["steps"] if "open" in step] == [
+        {"open": False, "kept": False}, {"open": False, "kept": False}, {"open": True, "kept": True},
+        {"open": True, "kept": False}]

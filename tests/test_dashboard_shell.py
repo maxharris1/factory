@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +25,7 @@ import lib.dashboard_page as page
 from lib.attention import ensure_table
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages.common import ticket_page_href
+from lib.dashboard_pages.ticket_detail import ticket_view
 from lib.health import CODE_COMPONENTS
 from tests.test_dashboard import NOW, add_ticket, make_db, seeded
 from tests import test_dashboard_activity as activity
@@ -42,6 +44,8 @@ SHELL = ["caret", "band", "attention-strip", "statusline"]
 # The harness clock starts 3 s after the snapshot; this puts it back, so
 # every ticking age reads as the server wrote it.
 AT_SNAPSHOT = [["advance", -3]]
+REVIEW_PAGE = ticket_page_href({"repo": "maxharris1/cleffy", "ticket_id": "40"})
+REVIEW_HASH = REVIEW_PAGE.removeprefix("ticket.html")
 
 
 @pytest.fixture
@@ -98,7 +102,8 @@ def _with(base: dict, items: list[dict]) -> dict:
     return out
 
 
-WORST = [("stuck", "aut0#AUT-7", "job.html"), ("overdue", "cleffy#14", "job.html#job-r-cursor")]
+WORST = [("stuck", "aut0#AUT-7", ticket_page_href({"repo": "aut0-code/aut0", "ticket_id": "AUT-7"})),
+         ("overdue", "cleffy#14", ticket_page_href({"repo": "maxharris1/cleffy", "ticket_id": "14"}))]
 STRIPS = {
     1: ([("1 stuck", "bad")], None, "1 stuck"),
     2: ([("1 stuck", "bad"), ("1 overdue", "bad")], None, "1 stuck · 1 overdue"),
@@ -921,14 +926,14 @@ def test_current_item_style_is_the_artboards() -> None:
     assert ".nav a{padding:6px 12px;color:var(--hdr-text-2);text-decoration:none;font:500 14px/1.2 var(--sans)}" in css
 
 
-def test_anchors_stay_and_shell_links_only_name_the_five_files(base: dict) -> None:
+def test_slots_open_the_ticket_page_and_shell_links_only_name_the_six_pages(base: dict) -> None:
     pages = render_pages(base)
-    assert re.search(r'<article class="jobpage" id="job-r-codex-">', pages["job.html"])
-    assert 'href="job.html#job-r-codex-"' in pages["index.html"]
+    codex = next(row for row in base["running"] if row["job"] == "r-codex-")
+    assert f'href="{ticket_page_href(codex)}"' in pages["index.html"]
     for name, html in pages.items():
         shell = html[html.index('<header class="topbar"') : html.index("</header>")] + _footer(html)
         for href in re.findall(r'href="([^"#]+)', shell):
-            assert href in dict(NAV), (name, href)
+            assert href in PAGES, (name, href)
 
 
 def test_main_keeps_the_ticket_box_model() -> None:
@@ -973,7 +978,11 @@ def test_every_shell_link_lands_on_an_anchor_its_page_renders(base: dict, change
                  + _footer(html))
         for href in re.findall(r'href="([^"]+#[^"]+)"', shell) + list(targets.values()):
             target, anchor = href.split("#")
-            assert anchor in ids[target], (name, href)
+            if target == "ticket.html":
+                address = urllib.parse.unquote(anchor.removeprefix("t="))
+                assert 'class="jobpage ticketpage"' in ticket_view(snapshot, address), (name, href)
+            else:
+                assert anchor in ids[target], (name, href)
 
 
 @needs_node
@@ -1050,7 +1059,7 @@ def _job(tmp_path: Path) -> dict:
 
 
 def _ids(page_name: str) -> list[str]:
-    return {"activity.html": activity.IDS, "job.html": JOB}.get(page_name, BAR)
+    return {"activity.html": activity.IDS, "job.html": JOB, "ticket.html": BAR + ["hud", "ticketview"]}.get(page_name, BAR)
 
 
 @needs_node
@@ -1069,10 +1078,10 @@ SAME_CONTROL = [
     ("activity.html", "", {"in": "relay", "tag": "button", "attr": {"data-relay": "needs"}}, "data-relay"),
     ("job.html", "", {"in": "ticket-filter", "attr": {"data-view": "table"}}, "data-view"),
     ("job.html", "", {"in": "ticket-filter", "attr": {"data-project": ""}}, "data-project"),
-    ("job.html", "#job-h-review", {"in": "runlog", "attr": {"data-visit": "2"}}, "data-visit"),
-    ("job.html", "#job-h-review", {"in": "journey", "attr": {"data-visit": "3"}}, "data-visit"),
-    ("job.html", "#job-h-review", {"in": "jobview", "attr": {"data-scale": "even"}}, "data-scale"),
-    ("job.html", "#job-h-review", {"in": "jobview", "attr": {"data-replay": "1"}}, "data-replay"),
+    ("ticket.html", REVIEW_HASH, {"in": "runlog", "attr": {"data-visit": "2"}}, "data-visit"),
+    ("ticket.html", REVIEW_HASH, {"in": "journey", "attr": {"data-visit": "3"}}, "data-visit"),
+    ("ticket.html", REVIEW_HASH, {"in": "ticketview", "attr": {"data-scale": "even"}}, "data-scale"),
+    ("ticket.html", REVIEW_HASH, {"in": "ticketview", "attr": {"data-replay": "1"}}, "data-replay"),
     ("index.html", "", {"in": "statusline", "cls": "sl-vital", "tag": "a"}, "href"),
     ("index.html", "", {"in": "attention-strip", "cls": "attn-count"}, "href"),
 ]
@@ -1118,8 +1127,8 @@ def test_a_redraw_never_takes_focus(tmp_path: Path) -> None:
 
 @needs_node
 @pytest.mark.parametrize(("page_name", "hash_", "box", "axis"), [
-    ("job.html", "#job-h-review", {"cls": "jd-box", "has": "jd-journey"}, "left"),
-    ("job.html", "#job-h-review", {"cls": "jd-box", "has": "jd-flowmap"}, "left"),
+    ("ticket.html", REVIEW_HASH, {"cls": "jd-box", "has": "jd-journey"}, "left"),
+    ("ticket.html", REVIEW_HASH, {"cls": "jd-box", "has": "jd-flowmap"}, "left"),
     ("health.html", "", {"in": "log", "cls": "sys-log"}, "top"),
     ("health.html", "", {"in": "components", "cls": "sys-scroll"}, "left"),
     ("efficiency.html", "", {"cls": "ef-scroll"}, "left"),
@@ -1151,8 +1160,8 @@ def _ship(snapshot: dict) -> None:
 def test_a_run_log_row_keeps_focus_when_it_stops_being_current(tmp_path: Path) -> None:
     snapshot = _job(tmp_path)
     at = {"in": "runlog", "attr": {"data-visit": "4"}, "focus": True}
-    steps = _place(tmp_path, snapshot, "job.html", _ids("job.html"),
-                   [["put", at], ["where", None], ["poll", _next(snapshot, _ship)], ["where", None]], hash_="#job-h-review")
+    steps = _place(tmp_path, snapshot, "ticket.html", _ids("ticket.html"),
+                   [["put", at], ["where", None], ["poll", _next(snapshot, _ship)], ["where", None]], hash_=REVIEW_HASH)
     before, after = (step["where"] for step in steps)
     assert "now" in before["cls"].split() and "now" not in after["cls"].split(), (before, after)
     assert (after["tag"], after["attrs"].get("data-visit")) == ("button", "4"), after
@@ -1163,7 +1172,7 @@ def test_a_run_log_row_keeps_focus_when_it_stops_being_current(tmp_path: Path) -
 @needs_node
 def test_a_ticket_link_keeps_focus_when_its_card_moves_to_another_column(tmp_path: Path) -> None:
     snapshot = _job(tmp_path)
-    href = ticket_page_href(next(t for t in snapshot["tickets"] if t["ticket_id"] == "40"))
+    href = REVIEW_PAGE
 
     def advance(later: dict) -> None:
         next(t for t in later["tickets"] if t["ticket_id"] == "40")["state"] = "ship"
@@ -1287,7 +1296,8 @@ def _ticket_items(snapshot: dict) -> dict:
     return out
 
 
-TICKET_HREFS = ["job.html#job-r-codex-", "job.html#job-g-grok-c", "job.html"]
+TICKET_HREFS = [ticket_page_href({"repo": repo, "ticket_id": tid}) for repo, tid in
+                (("maxharris1/cleffy", "13"), ("maxharris1/Cleffy", "12"), ("aut0-code/aut0", "AUT-7"))]
 STRIP_HREFS = TICKET_HREFS[:2]
 
 
@@ -1346,18 +1356,13 @@ def test_the_skip_link_moves_focus_to_main_without_a_hash(tmp_path: Path, base: 
 
 @pytest.mark.parametrize(("name", "label"), [
     ("index.html", "Lanes"), ("activity.html", "Activity"), ("efficiency.html", "Efficiency"), ("health.html", "System"),
+    ("job.html", "Tickets"),
 ])
-def test_four_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
+def test_five_pages_have_one_hidden_h1_with_the_nav_label(base: dict, name: str, label: str) -> None:
     html = render_pages(base)[name]
     assert re.findall(r"<h1\b[^>]*>.*?</h1>", html) == [f'<h1 class="vh">{label}</h1>']
     assert f'<a href="{name}" aria-current="page">{label}</a>' in html
     assert '<main id="hud" tabindex="-1"><h1 class="vh">' in html
-
-
-def test_the_tickets_page_keeps_its_headings(base: dict) -> None:
-    html = render_pages(base)["job.html"]
-    assert 'class="vh">Tickets<' not in html
-    assert re.findall(r"<h1\b[^>]*>", html) == ["<h1>"] * 4
 
 
 def test_the_strip_and_status_line_are_labelled(base: dict) -> None:

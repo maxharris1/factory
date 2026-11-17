@@ -1,7 +1,7 @@
-"""Render the #149 screenshots of job.html#job-h-review with a live telemetry
-row (tests/test_dashboard_live_run.LIVE_ROW: a plan of 6 with 2 done and 1 in
-progress, one running sub-agent) at 1440 and 375 px wide, full page, through
-headless Chromium over CDP.
+"""Render the #149 screenshots of ticket.html#t=maxharris1%2Fcleffy%2340 with a
+live telemetry row (tests/test_dashboard_live_run.LIVE_ROW: a plan of 6 with 2
+done and 1 in progress, one running sub-agent) at 1440 and 375 px wide, full
+page, through headless Chromium over CDP.
 
     python3 -m tests.render_live_run_screenshots [path/to/chrome]
 
@@ -22,17 +22,19 @@ from pathlib import Path
 from lib.dashboard import write_snapshot_pages
 from tests.render_board_screenshots import DRIVER, OUT, _chrome, _Quiet
 from tests.test_dashboard import NOW
-from tests.test_dashboard_live_run import LIVE_ROW, _snapshot
+from tests.test_dashboard_live_run import ADDRESS, LIVE_ROW, _snapshot
+from tests.test_dashboard_ticket_detail import _quote
 
 WIDTHS = (1440, 375)
-LIVE_DRIVER = DRIVER.replace("'.html' }", "'.html#job-h-review' }").replace(
+HASH = "#t=" + _quote(ADDRESS)
+LIVE_DRIVER = DRIVER.replace("'.html' }", f"'.html{HASH}' }}").replace(
     "`${out}/issue-142-${page === 'job' ? 'tickets' : page}-${width}.png`",
     "`${out}/issue-149-ticket-detail-${width}.png`",
 )
 
 
 def main() -> None:
-    assert LIVE_DRIVER.count("issue-149") == 1 and "#job-h-review" in LIVE_DRIVER
+    assert LIVE_DRIVER.count("issue-149") == 1 and HASH in LIVE_DRIVER
     with tempfile.TemporaryDirectory() as tmp:
         site = Path(tmp) / "site"
         site.mkdir()
@@ -43,7 +45,7 @@ def main() -> None:
         try:
             subprocess.run(
                 ["node", "-e", LIVE_DRIVER, _chrome(), f"http://127.0.0.1:{server.server_port}", str(OUT),
-                 str(int(NOW * 1000)), *(f"job:{width}" for width in WIDTHS)],
+                 str(int(NOW * 1000)), *(f"ticket:{width}" for width in WIDTHS)],
                 check=True, timeout=180,
             )
         finally:

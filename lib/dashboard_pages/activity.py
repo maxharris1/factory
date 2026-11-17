@@ -3,8 +3,7 @@ from __future__ import annotations
 import re
 
 from lib.dashboard_pages.common import (
-    _BOTS, _chip, _e, github_links, _job_hrefs, _panel, _span, _thread_key, _ticket, duration, ticket_href,
-    ticket_page_href,
+    _BOTS, _chip, _e, github_links, _panel, _span, _thread_key, _ticket, duration, ticket_page_href,
 )
 
 
@@ -283,7 +282,6 @@ SCRIPT = r"""
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
     var root = panel('relay', 'Relay', relayCount(shown.length, d.relay.tracked));
     if (!root) return;
-    var hrefs = jobHrefs(d);
     var bar = add(root, el('div', 'rl-filter'));
     bar.setAttribute('role', 'group');
     bar.setAttribute('aria-label', 'Filter the relay');
@@ -303,7 +301,7 @@ SCRIPT = r"""
         var row = add(rows, el('div', 'rl-row'));
         row.setAttribute('data-thread', t.key);
         var id = add(row, el('span', 'rl-id'));
-        add(id, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
+        add(id, link('rl-tk', ticketPageHref(t.ref))).textContent = ticketOf(t.ref);
         var items = t.steps.map(function (s) { return function (p) { relayStep(p, s); }; });
         if (t.ending) items.push(function (p) { t.ending(p, t.at); });
         relayMore(id, 'rl-more rl-more-phone', t, items.length - RELAY_PHONE_WINDOW);
@@ -344,7 +342,6 @@ SCRIPT = r"""
                      items.length + (items.length === 1 ? ' item' : ' items') + (items.length ? ' · worst first' : ''));
     if (!root) return;
     if (!items.length) { add(root, el('p', 'empty', 'all clear')); return; }
-    var hrefs = jobHrefs(d);
     var rows = add(root, el('div', 'at-rows'));
     items.forEach(function (x) {
       var key = attentionKey(x);
@@ -357,7 +354,7 @@ SCRIPT = r"""
       add(row, chip(x.kind, tone));
       add(row, el('span', 'at-subj', x.component || ticketOf(x)));
       add(row, el('span', 'at-what', x.detail));
-      add(row, link('at-go', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
+      add(row, link('at-go', x.component ? healthLink(x.link) : ticketPageHref(x))).textContent =
         x.component ? 'open in System' : 'open ticket';
       if (!x.component) addGh(row, x);
       mark('attention', key, row);
@@ -589,9 +586,9 @@ def _windowed(key: str, items: list[str]) -> str:
     return _more("rl-more", key, hidden) + early + early_phone + _SEP.join(items[phone:])
 
 
-def _relay_row(thread: dict, live: bool) -> str:
+def _relay_row(thread: dict) -> str:
     items = _items(thread)
-    href = ticket_page_href(thread["ref"]) if live else "job.html"
+    href = ticket_page_href(thread["ref"])
     return (
         f'<div class="rl-row" data-thread="{_e(thread["key"])}"><span class="rl-id">'
         f'<a class="rl-tk" href="{_e(href)}">{_e(_ticket(thread["ref"]))}</a>'
@@ -602,13 +599,12 @@ def _relay_row(thread: dict, live: bool) -> str:
 
 def _relay(snapshot: dict) -> str:
     threads = relay_threads(snapshot)
-    hrefs = _job_hrefs(snapshot)
     buttons = "".join(
         f'<button class="rl-btn" type="button" aria-pressed="{"true" if key == "all" else "false"}" '
         f'data-relay="{key}">{text}</button>'
         for key, text in _RELAY_FILTERS
     )
-    rows = "".join(_relay_row(t, t["key"] in hrefs) for t in threads)
+    rows = "".join(_relay_row(t) for t in threads)
     body = f'<div class="rl-rows">{rows}</div>' if rows else '<p class="empty">no handoffs or verdicts yet</p>'
     legend = (
         '<div class="rl-legend">'
@@ -639,14 +635,13 @@ def _attention_key(row: dict) -> str:
 
 def _attention(snapshot: dict) -> str:
     attention = snapshot["attention"]
-    hrefs = _job_hrefs(snapshot)
 
     def draw(row: dict) -> str:
         component = row.get("component")
         key = _attention_key(row)
         tone = _ATTENTION.get(row["kind"], "muted")
         strip = _px().px_strip(f"attention-{key}", effect="static", tint=_TONE_TINT[tone], cell=4, height=24)
-        href = _health_link(row.get("link")) if component else ticket_href(hrefs, row)
+        href = _health_link(row.get("link")) if component else ticket_page_href(row)
         return (
             f'<div class="at-row" data-attn="{_e(key)}"><span class="at-px" aria-hidden="true">{strip}</span>'
             + _chip(row["kind"], tone)
