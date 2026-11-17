@@ -391,16 +391,16 @@ def _probe_lanes(tmp_path: Path) -> dict:
 
 
 def _assert_probe_chips(lanes: str) -> None:
-    chips = dict(re.findall(r'data-device="([^"]+)"><div class="lane-head"><div class="name">[^<]*</div>'
-                            r'<span class="chip ([^"]+)">', lanes))
-    words = dict(re.findall(r'data-device="([^"]+)"><div class="lane-head"><div class="name">[^<]*</div>'
-                            r'<span class="chip [^"]+">([^<]*)</span>', lanes))
-    assert words == {"box": "PROBE DOWN", "pc": "ONLINE", "off": "DISABLED", "later": "PLACEHOLDER",
-                     "ghost": "UNLISTED"}
-    assert chips["box"] == "bad" and chips["pc"] == "ok"
+    found = re.findall(r'data-device="([^"]+)"><div class="lane-head"><div class="lh1"><span class="name">[^<]*</span>'
+                       r'<span class="chip ([^"]+)">([^<]*)</span>', lanes)
+    assert {name: word for name, _, word in found} == {"box": "PROBE DOWN", "off": "DISABLED",
+                                                       "later": "PLACEHOLDER", "ghost": "UNLISTED"}
+    assert {name: tone for name, tone, _ in found}["box"] == "bad"
+    assert re.search(r'data-device="pc"><div class="lane-head"><div class="lh1"><span class="name">pc</span>'
+                     r'<div class="lane-meter"', lanes)
 
 
-def test_probe_down_replaces_online_but_not_disabled_placeholder_or_unlisted(tmp_path: Path) -> None:
+def test_probe_down_chips_but_a_healthy_device_has_none(tmp_path: Path) -> None:
     _assert_probe_chips(_section(_no_script(render_pages(_probe_lanes(tmp_path))["index.html"]), "lanes"))
 
 
@@ -735,7 +735,7 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
       return {device: lane.getAttribute('data-device'), tiles: [].map.call(lane.querySelectorAll('.tile'),
         function (t) { var b = t.getBoundingClientRect(); return [b.top, b.bottom]; })};
     })""")
-    assert {row["device"]: len(row["tiles"]) for row in rows} == {"box": 5, "pc": 6, "mac": 4}
+    assert {row["device"]: len(row["tiles"]) for row in rows} == {"box": 5, "pc": 6, "mac": 3}
     for row in rows:
         assert len({top for top, _ in row["tiles"]}) <= 2, f"{row['device']} wraps onto a second row"
     wrapped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes a.tile .tile-l1, #lanes a.tile .tile-l3'),
@@ -915,3 +915,205 @@ def test_held_tile_is_still_script(tmp_path: Path) -> None:
     snapshot = _counted(tmp_path)
     out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])
     _still_held(out["html"]["lanes"], render_pages(snapshot)["index.html"])
+
+
+def _rail_lanes(tmp_path: Path) -> dict:
+    snapshot = _base(tmp_path)
+    template = snapshot["running"][0]
+    snapshot["running"] = [_row(template, "build", device="pc", job="pc-build"),
+                           _row(template, "stale", device="pc", job="pc-stale")]
+    snapshot["slots"]["devices"] = [
+        {"name": "box", "slot_max": 4, "held": 0, "enabled": True, "placeholder": False, "harnesses": ["claude"]},
+        {"name": "pc", "slot_max": 5, "held": 3, "enabled": True, "placeholder": False,
+         "harnesses": ["claude", "codex"]},
+        {"name": "mac", "slot_max": 3, "held": 0, "enabled": False, "placeholder": False, "harnesses": []},
+    ]
+    snapshot["health"] = {"components": [], "counts": {}}
+    return snapshot
+
+
+def _lane(lanes: str, name: str) -> str:
+    match = re.search(rf'<div class="lane[^"]*" data-device="{name}">.*?(?=<div class="lane[ "]|$)', lanes, re.S)
+    assert match, name
+    return match.group(0)
+
+
+def _rail(lane: str) -> tuple[str, int, str]:
+    (rail,) = re.findall(r'<div class="(rail[^"]*)"><span class="sq" aria-hidden="true">((?:<i></i>)*)</span>'
+                         r'<span class="lbl">([^<]*)</span></div>', lane)
+    return rail[0], rail[1].count("<i>"), rail[2]
+
+
+def _assert_no_work_lane(lanes: str) -> None:
+    box = _lane(lanes, "box")
+    assert not re.search(r'class="tile[ "]', box)
+    assert _rail(box) == ("rail", 4, "4 idle")
+    assert re.search(r'<div class="tiles"><div class="rail">.*?</div></div></div>$', box)
+
+
+def _assert_mixed_lane(lanes: str) -> None:
+    pc = _lane(lanes, "pc")
+    tiles = pc[pc.index('<div class="tiles">') :]
+    cells = re.findall(r'class="(tile [^"]*|rail[^"]*)"', tiles)
+    assert cells == ["tile claude", "tile claude", "tile empty px-held", "rail"], cells
+    assert tiles.index("job-pc-build") < tiles.index("job-pc-stale")
+    assert _rail(pc) == ("rail", 2, "2 idle")
+    assert re.search(r'<span class="lbl">2 idle</span></div></div></div>$', pc)
+    assert '<div class="lbl">idle</div>' not in lanes and '<div class="lbl">off</div>' not in lanes
+
+
+def _assert_disabled_lane(lanes: str) -> None:
+    mac = _lane(lanes, "mac")
+    assert _rail(mac) == ("rail off", 3, "3 off")
+    assert "idle" not in mac and ">DISABLED</span>" in mac
+    assert ("", "6", "idle") in _header_counts(lanes)
+
+
+def _assert_two_line_heads(lanes: str) -> None:
+    heads = {m[0]: m[1:] for m in re.findall(
+        r'data-device="([^"]+)"><div class="lane-head"><div class="lh1"><span class="name">\1</span>(.*?)'
+        r'<div class="lane-meter" aria-hidden="true" style="width:(\d+)px">.*?</div></div>'
+        r'<div class="lh2">(.*?)</div></div>', lanes, re.S)}
+    assert heads == {
+        "box": ("", "48", '<span class="sub">0 / 4 slots</span><span class="harness">claude</span>'),
+        "pc": ("", "60", '<span class="sub">3 / 5 slots</span><span class="harness">claude · codex</span>'),
+        "mac": ('<span class="chip muted">DISABLED</span>', "36", '<span class="sub">0 / 3 slots</span>'),
+    }, heads
+
+
+RAIL_CHECKS = (_assert_no_work_lane, _assert_mixed_lane, _assert_disabled_lane, _assert_two_line_heads)
+
+
+@pytest.mark.parametrize("check", RAIL_CHECKS, ids=lambda c: c.__name__)
+def test_idle_slots_fold_into_a_rail_server(tmp_path: Path, check) -> None:
+    check(_server_lanes(_rail_lanes(tmp_path)))
+
+
+@needs_node
+@pytest.mark.parametrize("check", RAIL_CHECKS, ids=lambda c: c.__name__)
+def test_idle_slots_fold_into_a_rail_script(tmp_path: Path, check) -> None:
+    check(_run_page(tmp_path, _rail_lanes(tmp_path), "main", BAR + ["hud", "lanes"])["html"]["lanes"])
+
+
+def test_a_healthy_device_has_no_online_chip(tmp_path: Path) -> None:
+    html = render_pages(_rail_lanes(tmp_path))["index.html"]
+    assert "ONLINE" not in html
+    pc = _lane(_section(_no_script(html), "lanes"), "pc")
+    assert 'class="chip' not in pc[: pc.index('<div class="tiles">')]
+
+
+def test_rail_and_head_rules_come_from_the_artboard() -> None:
+    for rule in (
+        ".rail{min-width:0;align-self:center;display:flex;align-items:center;gap:8px;height:24px}",
+        ".rail .sq{display:flex;gap:3px}",
+        ".rail i{box-sizing:border-box;width:8px;height:8px;border:1px dashed #414868}",
+        ".rail .lbl{font:12px/1.3 var(--mono);color:#8b93b8;white-space:nowrap}",
+        ".rail.off i{border:0;background:#24283b}",
+        ".lane-head{flex:0 0 224px;min-width:0;display:flex;flex-direction:column;gap:6px}",
+        ".lh1{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}",
+        ".lh2{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}",
+    ):
+        assert rule in CSS, rule
+    assert not re.search(r"\.rail[^{}]*\{[^}]*animation", CSS)
+    phone = CSS[CSS.index("@media (max-width:640px){.lane{") :]
+    phone = phone[: phone.index("}}") + 2]
+    for rule in (".lane{flex-direction:column;align-items:stretch;padding:10px;gap:10px}",
+                 ".tiles{grid-template-columns:1fr}", ".rail{align-self:auto}"):
+        assert rule in phone, (rule, phone)
+
+
+@needs_chrome
+def test_a_no_work_lane_is_its_head_and_the_rail_at_1440(tmp_path: Path, browser: Browser) -> None:
+    browser.open(_page_with_status_stub(_rail_lanes(tmp_path), "index.html"), 1440)
+    box = browser.eval("""(function () {
+      var lane = document.querySelector('#lanes .lane[data-device=box]'), cs = getComputedStyle(lane);
+      var head = lane.querySelector('.lane-head').getBoundingClientRect();
+      var rail = lane.querySelector('.tiles > .rail:last-child').getBoundingClientRect();
+      return {content: lane.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+              outer: lane.getBoundingClientRect().height, railLeft: rail.left, headRight: head.right,
+              railTop: rail.top, headBottom: head.bottom, railHeight: rail.height};
+    })()""")
+    print("no-work lane at 1440:", box)
+    assert 36 <= box["content"] <= 48, box
+    assert box["railLeft"] >= box["headRight"] and box["railTop"] < box["headBottom"], box
+    assert box["railHeight"] == 24, box
+    pc = browser.eval("""(function () {
+      var tiles = [].slice.call(document.querySelectorAll('#lanes .lane[data-device=pc] .tiles > *'));
+      return tiles.map(function (t) { var b = t.getBoundingClientRect();
+        return {cls: t.className, top: b.top, bottom: b.bottom, left: b.left}; });
+    })()""")
+    assert pc[-1]["cls"] == "rail", pc
+    assert all(pc[-1]["top"] > t["top"] and pc[-1]["bottom"] < t["bottom"] for t in pc[:-1]), pc
+    assert all(a["left"] < b["left"] for a, b in zip(pc, pc[1:])), pc
+
+
+@needs_chrome
+def test_each_device_is_one_block_at_375(tmp_path: Path, browser: Browser) -> None:
+    snapshot = _rail_lanes(tmp_path)
+    snapshot["queued"] = [dict(snapshot["queued"][0], job=f"q-{i}", no_waiter=None, no_waiter_link=None)
+                          for i in range(2)]
+    browser.open(_page_with_status_stub(snapshot, "index.html"), 375)
+    assert browser.eval("document.documentElement.scrollWidth") <= 375
+    lanes = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
+      var cs = getComputedStyle(lane), box = lane.getBoundingClientRect();
+      var rect = function (e) { var b = e.getBoundingClientRect(); return {top: b.top, bottom: b.bottom, left: b.left, width: b.width}; };
+      return {device: lane.getAttribute('data-device'),
+              inner: box.width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+              innerLeft: box.left + parseFloat(cs.paddingLeft),
+              head: rect(lane.querySelector('.lane-head')),
+              tiles: [].map.call(lane.querySelectorAll('.tiles > .tile'), rect),
+              rail: lane.querySelector('.rail') ? rect(lane.querySelector('.rail')) : null};
+    })""")
+    assert [lane["device"] for lane in lanes] == ["box", "pc", "mac"]
+    for lane in lanes:
+        assert lane["rail"], lane
+        assert abs(lane["rail"]["left"] - lane["innerLeft"]) < 1, lane
+        top = lane["head"]["bottom"]
+        for tile in lane["tiles"]:
+            assert abs(tile["left"] - lane["innerLeft"]) < 1 and abs(tile["width"] - lane["inner"]) < 1, lane
+            assert tile["top"] >= top, lane
+            top = tile["bottom"]
+        assert lane["rail"]["top"] >= top, lane
+    assert len(next(lane for lane in lanes if lane["device"] == "pc")["tiles"]) == 3
+    rows = browser.eval("""[].map.call(document.querySelectorAll('#queue ul.qrail > li'), function (li) {
+      var b = li.getBoundingClientRect(); return [b.top, b.bottom]; })""")
+    assert len(rows) == 2 and rows[1][0] >= rows[0][1], rows
+
+
+def _crowded_heads(tmp_path: Path) -> dict:
+    snapshot = _rail_lanes(tmp_path)
+    snapshot["running"] = [dict(snapshot["running"][0], device="box"), dict(snapshot["running"][1], device="ghost")]
+    snapshot["slots"]["devices"] = [
+        {"name": "box", "slot_max": 10, "held": 0, "enabled": True, "placeholder": False, "harnesses": ["claude"]},
+        {"name": "pc", "slot_max": 24, "held": 0, "enabled": True, "placeholder": True, "harnesses": ["codex"]},
+        {"name": "mac", "slot_max": 16, "held": 0, "enabled": False, "placeholder": False, "harnesses": []},
+        {"name": "build-runner-with-a-long-hostname", "slot_max": 12, "held": 0, "enabled": True,
+         "placeholder": False, "harnesses": ["claude", "codex", "grok"]},
+    ]
+    snapshot["health"] = {"components": [
+        {"component": "device-probe", "device": name, "state": "down"}
+        for name in ("box", "build-runner-with-a-long-hostname", "ghost")
+    ], "counts": {}}
+    return snapshot
+
+
+@needs_chrome
+def test_device_heads_stay_clear_of_their_tiles_at_1440(tmp_path: Path, browser: Browser) -> None:
+    browser.open(_page_with_status_stub(_crowded_heads(tmp_path), "index.html"), 1440)
+    heads = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]'), function (lane) {
+      var head = lane.querySelector('.lane-head'), box = head.getBoundingClientRect();
+      var first = lane.querySelector('.tiles > *, .lane-body');
+      var spill = [].filter.call(head.querySelectorAll('*'), function (e) {
+        var b = e.getBoundingClientRect();
+        return b.width && (b.left < box.left - 0.5 || b.right > box.right + 0.5);
+      }).map(function (e) { return e.className + ' ' + e.getBoundingClientRect().right; });
+      return {device: lane.getAttribute('data-device'), right: box.right, spill: spill,
+              chip: !!head.querySelector('.chip'),
+              next: first ? first.getBoundingClientRect().left : null};
+    })""")
+    devices = {h["device"]: h for h in heads}
+    assert {"box", "pc", "mac", "ghost", "build-runner-with-a-long-hostname"} <= set(devices), heads
+    assert all(devices[d]["chip"] for d in ("box", "pc", "mac", "ghost", "build-runner-with-a-long-hostname")), heads
+    for head in heads:
+        assert not head["spill"], head
+        assert head["next"] is None or head["right"] <= head["next"], head

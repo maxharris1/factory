@@ -25,12 +25,15 @@ CSS = """\
 .lane{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:flex-start;padding:12px;background:var(--bg);box-shadow:var(--elev)}
 .lane.disabled{color:var(--muted);box-shadow:none;outline:1px dashed var(--line-hi);outline-offset:-1px;
 background:repeating-linear-gradient(135deg,var(--dim) 0 8px,var(--bg) 8px 16px)}
-.lane-head{flex:0 0 168px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
-.lane-head .name{font:600 14px/1.2 var(--mono);letter-spacing:-.01em;color:var(--text)}
+.lane-head{flex:0 0 224px;min-width:0;display:flex;flex-direction:column;gap:6px}
+.lh1{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.lh2{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}
+.lh2 .sub{font-variant-numeric:tabular-nums}
+.lane-head .name{min-width:0;overflow-wrap:anywhere;font:600 14px/1.2 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .lane.disabled .name{color:var(--muted)}
 .lane-head .sub,.lane-body .sub{font:12px/1.3 var(--mono);color:var(--muted)}
 .lane-head .harness{font-size:12px;line-height:1.3;color:var(--muted)}
-.lane-meter{display:block}
+.lane-meter{display:block;flex:none;max-width:100%}
 .lane-meter .px{height:8px}
 .lane-body{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:6px}
 .lane-body .px{height:12px}
@@ -74,11 +77,22 @@ a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
 .tile.ci .tile-l1 .gh{flex:none}
 .tile.ci .tile-l4{flex-wrap:wrap;gap:2px 8px;color:var(--text-2)}
 .tile.ci .tile-l4 .what{min-width:0;overflow-wrap:anywhere}
-.tile.empty{position:relative;display:flex;margin:0;flex-direction:column;background:transparent;border:1px dashed var(--line-hi)}
-.tile.empty.px-held{border-color:transparent}
+.tile.empty{display:flex;flex-direction:column;background:transparent}
 .tile.empty .lbl{flex:1 0 auto;display:flex;align-items:center;justify-content:center;
-font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--muted)}
-.tile.empty.px-held .lbl{color:var(--warn)}
+font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
+.rail{min-width:0;align-self:center;display:flex;align-items:center;gap:8px;height:24px}
+.rail .sq{display:flex;gap:3px}
+.rail i{box-sizing:border-box;width:8px;height:8px;border:1px dashed #414868}
+.rail .lbl{font:12px/1.3 var(--mono);color:#8b93b8;white-space:nowrap}
+.rail.off i{border:0;background:#24283b}
+@media (max-width:640px){.lane{flex-direction:column;align-items:stretch;padding:10px;gap:10px}
+.lane-head,.tiles,.lane-body{flex:none}
+.lane-head{flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.lh1,.lh2{display:contents}
+.lh2 .sub{margin-left:auto;white-space:nowrap}
+.lh2 .harness{flex-basis:100%}
+.tiles{grid-template-columns:1fr}
+.rail{align-self:auto}}
 .pair{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
 .pair>.panel{min-width:0}
 #just-happened{flex:3 1 560px}#intake{flex:2 1 380px}
@@ -195,7 +209,7 @@ SCRIPT = r"""
     if (dev.placeholder) return chip('PLACEHOLDER', 'warn');
     if (!dev.listed) return chip('UNLISTED', 'warn');
     if (down) return chip('PROBE DOWN', 'bad');
-    return chip('ONLINE', 'ok');
+    return null;
   }
 
   function verbAt(name, secs, seed) {
@@ -296,12 +310,20 @@ SCRIPT = r"""
     return mark('lanes', r.job, tile);
   }
 
-  function emptyTile(key, kind, seed) {
-    var held = kind === 'held';
-    var tile = el('div', 'tile empty' + (held ? ' px-held' : ''));
-    add(tile, PX.strip(key, {state: kind === 'idle' ? 'idle' : 'held', seed: seed, height: 16}));
-    add(tile, el('div', 'lbl', kind));
+  function heldTile(key, seed) {
+    var tile = el('div', 'tile empty px-held');
+    add(tile, PX.strip(key, {state: 'held', seed: seed, height: 16}));
+    add(tile, el('div', 'lbl', 'held'));
     return tile;
+  }
+
+  function idleRail(count, off) {
+    var rail = el('div', 'rail' + (off ? ' off' : ''));
+    var sq = add(rail, el('span', 'sq'));
+    sq.setAttribute('aria-hidden', 'true');
+    for (var i = 0; i < count; i++) add(sq, el('i'));
+    add(rail, el('span', 'lbl', count + (off ? ' off' : ' idle')));
+    return rail;
   }
 
   function queueLane(d) {
@@ -383,28 +405,31 @@ SCRIPT = r"""
       var row = add(box, el('div', 'lane' + (dev.enabled ? '' : ' disabled')));
       row.setAttribute('data-device', dev.name);
       var head = add(row, el('div', 'lane-head'));
-      add(head, el('div', 'name', dev.name));
+      var lh1 = add(head, el('div', 'lh1'));
+      add(lh1, el('span', 'name', dev.name));
       var down = probeDown(d, dev.name);
-      add(head, deviceChip(dev, down));
+      var devChip = deviceChip(dev, down);
+      if (devChip) add(lh1, devChip);
       var slots = dev.slot_max === null || dev.slot_max === undefined ? Math.max(1, dev.used) : Math.max(1, dev.slot_max);
-      var meter = add(head, el('div', 'lane-meter'));
+      var meter = add(lh1, el('div', 'lane-meter'));
       meter.setAttribute('aria-hidden', 'true');
-      meter.setAttribute('style', 'width:' + (16 * slots) + 'px');
+      meter.setAttribute('style', 'width:' + (12 * slots) + 'px');
       add(meter, PX.strip('meter-' + dev.name, {effect: 'meter', tint: down ? '#f7768e' : '#9ece6a', used: dev.used,
                                                   slots: slots, seed: 21 + index, height: 8,
                                                   still: down || !dev.enabled}));
-      add(head, el('div', 'sub', dev.used + ' / ' + (dev.slot_max === null || dev.slot_max === undefined ? '?' : dev.slot_max) + ' slots'));
-      if (dev.harnesses.length) add(head, el('div', 'harness', dev.harnesses.join(' · ')));
+      var lh2 = add(head, el('div', 'lh2'));
+      add(lh2, el('span', 'sub', dev.used + ' / ' + (dev.slot_max === null || dev.slot_max === undefined ? '?' : dev.slot_max) + ' slots'));
+      if (dev.harnesses.length) add(lh2, el('span', 'harness', dev.harnesses.join(' · ')));
       var grid = add(row, el('div', 'tiles'));
       var seed = 0;
       dev.jobs.forEach(function (r) { seed += 1; add(grid, slotTile(r, seed)); });
       var held = dev.used - dev.jobs.length;
-      for (var h = 0; h < held; h++) { seed += 1; add(grid, emptyTile('slot-' + dev.name + '-' + seed, 'held', seed)); }
+      for (var h = 0; h < held; h++) { seed += 1; add(grid, heldTile('slot-' + dev.name + '-' + seed, seed)); }
       var free = Math.max(0, (dev.slot_max || 0) - dev.used);
       if (!dev.used && !free) free = 1;
       heldTiles += held;
       if (dev.enabled) idleTiles += free;
-      for (var i = 0; i < free; i++) { seed += 1; add(grid, emptyTile('slot-' + dev.name + '-' + seed, dev.enabled ? 'idle' : 'off', seed)); }
+      if (free) add(grid, idleRail(free, !dev.enabled));
     });
     if (lanes.wakes.length) {
       var row = add(box, el('div', 'lane'));
@@ -605,7 +630,7 @@ def _device_chip(device: dict, down: bool) -> str:
         return _chip("UNLISTED", "warn")
     if down:
         return _chip("PROBE DOWN", "bad")
-    return _chip("ONLINE", "ok")
+    return ""
 
 
 def _letters(text: str) -> str:
@@ -678,12 +703,18 @@ def _slot(row: dict, seed: int = 1) -> str:
     )
 
 
-def _empty_tile(key: str, kind: str, seed: int) -> str:
+def _held_tile(key: str, seed: int) -> str:
     from lib.dashboard_pages.shell import px_strip
 
-    held = kind == "held"
-    strip = px_strip(key, state="idle" if kind == "idle" else "held", seed=seed, height=16)
-    return f'<div class="tile empty{" px-held" if held else ""}">{strip}<div class="lbl">{_e(kind)}</div></div>'
+    strip = px_strip(key, state="held", seed=seed, height=16)
+    return f'<div class="tile empty px-held">{strip}<div class="lbl">held</div></div>'
+
+
+def _idle_rail(count: int, off: bool) -> str:
+    return (
+        f'<div class="rail{" off" if off else ""}"><span class="sq" aria-hidden="true">{"<i></i>" * count}</span>'
+        f'<span class="lbl">{_e(f"{count} off" if off else f"{count} idle")}</span></div>'
+    )
 
 
 def _queue_lane(snapshot: dict) -> str:
@@ -770,7 +801,7 @@ def _lanes(snapshot: dict) -> str:
             still=down or not device["enabled"],
         )
         harness = (
-            f'<div class="harness">{_e(" · ".join(device["harnesses"]))}</div>'
+            f'<span class="harness">{_e(" · ".join(device["harnesses"]))}</span>'
             if device["harnesses"] else ""
         )
         tiles = []
@@ -780,21 +811,22 @@ def _lanes(snapshot: dict) -> str:
             tiles.append(_slot(row, seed))
         for _ in range(device["used"] - len(device["jobs"])):
             seed += 1
-            tiles.append(_empty_tile(f"slot-{device['name']}-{seed}", "held", seed))
+            tiles.append(_held_tile(f"slot-{device['name']}-{seed}", seed))
         free = max(0, (cap or 0) - device["used"])
         if not device["used"] and not free:
             free = 1
         held_tiles += device["used"] - len(device["jobs"])
         if device["enabled"]:
             idle_tiles += free
-        for _ in range(free):
-            seed += 1
-            tiles.append(_empty_tile(f"slot-{device['name']}-{seed}", "idle" if device["enabled"] else "off", seed))
+        if free:
+            tiles.append(_idle_rail(free, not device["enabled"]))
         rows.append(
             f'<div class="lane{"" if device["enabled"] else " disabled"}" data-device="{_e(device["name"])}">'
-            f'<div class="lane-head"><div class="name">{_e(device["name"])}</div>{_device_chip(device, down)}'
-            f'<div class="lane-meter" aria-hidden="true" style="width:{16 * slots}px">{meter}</div>'
-            f'<div class="sub">{device["used"]} / {"?" if cap is None else cap} slots</div>{harness}</div>'
+            f'<div class="lane-head"><div class="lh1"><span class="name">{_e(device["name"])}</span>'
+            f'{_device_chip(device, down)}'
+            f'<div class="lane-meter" aria-hidden="true" style="width:{12 * slots}px">{meter}</div></div>'
+            f'<div class="lh2"><span class="sub">{device["used"]} / {"?" if cap is None else cap} slots</span>'
+            f'{harness}</div></div>'
             f'<div class="tiles">{"".join(tiles)}</div></div>'
         )
     if wakes:
