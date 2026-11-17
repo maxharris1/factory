@@ -308,7 +308,7 @@ _FENCE = "fenced"
 
 
 def darwin_record(tag: str) -> str:
-    """The start's record file name in the job directory: one per start (#679: Linux too)."""
+    """The start's record file name in the job directory: one per start."""
     return f".orch-worker-{tag}.pid"
 
 
@@ -608,8 +608,9 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
 
 
 def fenced_check_script(target: RemoteTarget) -> str:
-    """check_script, after taking the tag's run directory as launch_script's mkdir would,
-    and on Linux the start's record (_check_body's claim)."""
+    """check_script, after taking the tag's run directory (as launch_script's mkdir
+    would) and, on Linux, the start's record (_check_body's claim).
+    """
     tag = target.require_tag()
     return _sh(
         f"t={tag}; R={shlex.quote(run_dir(target))}; "
