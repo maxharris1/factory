@@ -22,6 +22,7 @@ from lib.dispatcher import (
     TrackedTicket,
     _comment_order,
 )
+from lib.dispatch.types import CheckRow
 from lib.github_actions import (
     GH,
     GhResult,
@@ -1403,6 +1404,100 @@ def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
         FailedCheck("lint"),
         FailedCheck("commit status"),
     )
+
+
+def epoch(stamp: str) -> float:
+    return datetime.fromisoformat(stamp).replace(tzinfo=timezone.utc).timestamp()
+
+
+def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-failure-actions.json"))
+    gh.route(STATUS, served("status-failure.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.checks == (
+        CheckRow(
+            "pytest",
+            "completed",
+            "failure",
+            started_at=epoch("2026-11-10T19:50:00"),
+            completed_at=epoch("2026-11-10T19:55:00"),
+            log_url="https://github.com/owner/repo/actions/runs/123456/job/31000000004",
+            run_id="123456",
+            job_id="31000000004",
+        ),
+        CheckRow(
+            "lint",
+            "completed",
+            "failure",
+            started_at=epoch("2026-11-10T19:50:00"),
+            completed_at=epoch("2026-11-10T19:56:00"),
+        ),
+    )
+    assert gh.keys() == [CHECKS, STATUS]
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "row_status", "started"),
+    [
+        ("in_progress", None, "in_progress", True),
+        ("queued", None, "queued", False),
+        ("waiting", None, "queued", False),
+        ("requested", None, "queued", False),
+        ("pending", None, "queued", False),
+        ("in_progress", "success", "completed", True),
+    ],
+)
+def test_ci_status_maps_each_check_run_status_onto_the_board_statuses(
+    status: str, conclusion: str | None, row_status: str, started: bool
+) -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, concluded_run(status, conclusion))
+    gh.route(STATUS, served("status-empty.json"))
+
+    (row,) = actions.ci_status("owner/repo", HEAD).checks
+
+    assert (row.status, row.conclusion) == (row_status, conclusion)
+    assert (row.started_at is not None) is started
+
+
+def test_ci_status_keeps_the_latest_attempt_check_only() -> None:
+    actions, gh = adapter()
+    gh.route(STATUS, served("status-empty.json"))
+    page = json.loads((FIXTURES / "check-runs-failure-actions.json").read_text())
+    first = dict(page["check_runs"][0])
+    rerun = dict(
+        first,
+        id=31000000009,
+        status="in_progress",
+        conclusion=None,
+        completed_at=None,
+        started_at="2026-11-10T20:10:00Z",
+        details_url="https://github.com/owner/repo/actions/runs/123456/job/31000000009",
+    )
+    gh.route(CHECKS, GhResult(0, json.dumps({"total_count": 2, "check_runs": [first, rerun]}), ""))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.status == "pending"
+    assert [(row.name, row.status, row.job_id) for row in result.checks] == [
+        ("pytest", "in_progress", "31000000009")
+    ]
+
+
+def test_ci_status_is_the_same_gate_whatever_the_check_times_hold() -> None:
+    actions, gh = adapter()
+    page = json.loads((FIXTURES / "check-runs-failure-actions.json").read_text())
+    page["check_runs"][0].update(started_at="soon", completed_at=17)
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.status == "failure"
+    assert (result.checks[0].started_at, result.checks[0].completed_at) == (None, None)
 
 
 RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")

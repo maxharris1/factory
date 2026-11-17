@@ -74,6 +74,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatch.helpers import _base_mismatch
+from lib.dispatch.types import CheckRow
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -668,6 +669,7 @@ class GitHubReviewActions:
         if not runs and not total:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
+        checks = tuple(map(_check_row, runs))
         failed: list[FailedCheck] = []
         pending: list[str] = []
         passed = False
@@ -701,8 +703,13 @@ class GitHubReviewActions:
                 "failure",
                 "failed: " + ", ".join(check.name for check in failed),
                 failed=tuple(failed),
+                checks=checks,
             )
-        return CIResult("success" if passed and not pending else "pending", pending=tuple(pending))
+        return CIResult(
+            "success" if passed and not pending else "pending",
+            pending=tuple(pending),
+            checks=checks,
+        )
 
     def _warn_contradiction(
         self, repo: str, head: str, run: dict[str, Any], name: str, status: Any, conclusion: Any
@@ -962,6 +969,39 @@ def _failed_check(name: str, details: object) -> FailedCheck:
     if match is None:
         return FailedCheck(name)
     return FailedCheck(name, run_id=match.group(2), job_id=match.group(3), run_url=match.group(1))
+
+
+def _check_row(run: dict[str, Any]) -> CheckRow:
+    conclusion = run.get("conclusion")
+    status = _board_status(run.get("status"), conclusion)
+    details = run.get("details_url")
+    job = _ACTIONS_JOB.match(details) if isinstance(details, str) else None
+    return CheckRow(
+        name=str(run.get("name")),
+        status=status,
+        conclusion=conclusion if isinstance(conclusion, str) else None,
+        started_at=None if status == "queued" else _epoch(run.get("started_at")),
+        completed_at=_epoch(run.get("completed_at")) if status == "completed" else None,
+        log_url=None if job is None else details,
+        run_id=None if job is None else job.group(2),
+        job_id=None if job is None else job.group(3),
+    )
+
+
+def _board_status(status: object, conclusion: object) -> str:
+    """queued, in_progress or completed. A conclusion decides it, as in the gate (#720);
+    GitHub's waiting, requested and pending are all still queued."""
+    if conclusion is not None:
+        return "completed"
+    return "in_progress" if status == "in_progress" else "queued"
+
+
+def _epoch(value: object) -> float | None:
+    """A display time: unreadable is None, never an error that changes the gate."""
+    try:
+        return _created_at(value)
+    except GitHubAdapterError:
+        return None
 
 
 def _workflow_identity(run: dict[str, Any]) -> str:
