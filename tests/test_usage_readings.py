@@ -43,7 +43,7 @@ from lib.usage_readings import (
     parse_rate_limit_event,
 )
 from tests import child_reaper, test_telemetry_argv
-from tests.pool_helpers import CLAIM_PROOF
+from tests.pool_helpers import CLAIM_PROOF, LOCAL_BOX_MACHINES
 from tests.test_dashboard import make_db
 from tests.test_telemetry import _orch, _running_job
 from tests.test_telemetry_argv import CLAUDE_BOT
@@ -655,7 +655,7 @@ def _box_run(tmp_path: Path, mode: str, command: list[str] | None = None, env: d
     _, job = _running_job(tmp_path)
     wrapper = _probe_bin(tmp_path / "bin", mode)
     run = _orch(
-        "job", "run", "claude-bot", job.id, "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
         "--", *(command or [str(wrapper), *CLAUDE_BOT]),
         env={"ORCH_JOB_STATE_DIR": str(tmp_path / "state"), TAG_ENV: TAG_VALUE, "PROBE_TEST": ENV_VALUE,
              **(env or {})},
