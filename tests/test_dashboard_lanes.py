@@ -264,22 +264,45 @@ def _held_for_ci(snapshot: dict) -> dict:
     snapshot["tickets"][0].update(pr="13", ci_wait={
         "reason": "ci-pending", "checks": ["build", "lint"], "waiting_seconds": 125,
     })
+    snapshot["tickets"][2].update(ci_wait={
+        "reason": "approved-ci-pending", "checks": [], "waiting_seconds": 3700,
+    })
     return snapshot
 
 
-def _assert_ci_lane(lanes: str, ticket: dict) -> None:
-    assert re.findall(r'data-device="([^"]+)"', lanes)[:2] == ["queue", "ci-wait"]
-    lane = re.split(r'<div class="lane[ "]', lanes.split('data-device="ci-wait"')[1])[0]
-    for needle in ("waiting on CI", "1 ticket", f"#{ticket['ticket_id']}", "build, lint",
-                   'href="https://github.com/aut0-code/aut0/pull/13/checks"', "waiting 2m 0"):
-        assert needle in lane, needle
+def _ci_cards(lanes: str) -> list[str]:
+    devices = re.findall(r'data-device="([^"]+)"', lanes)
+    assert devices[-1] == "ci-wait" and devices.count("ci-wait") == 1, devices
+    lane = lanes.split('data-device="ci-wait"')[1]
+    assert "waiting on CI" in lane and "2 tickets" in lane
+    return re.split(r'<div class="tile ci', lane)[1:]
 
 
-def test_a_ready_held_for_ci_gets_a_lane_after_the_queue(tmp_path: Path) -> None:
+def _assert_ci_lane(lanes: str, snapshot: dict) -> None:
+    pending, approved = _ci_cards(lanes)
+    for needle in ("AUT-7", 'href="https://github.com/aut0-code/aut0/pull/13"', "waiting on CI", "then review",
+                   "round 1", "build, lint", 'href="https://github.com/aut0-code/aut0/pull/13/checks"',
+                   "waiting 2m 0"):
+        assert needle in pending, needle
+    for needle in ("cleffy#13", 'href="https://github.com/maxharris1/cleffy/pull/13"', "then merge",
+                   "checks pending", 'href="https://github.com/maxharris1/cleffy/pull/13/checks"', "waiting 1h 01m"):
+        assert needle in approved, needle
+    assert "round" not in approved
+
+
+def test_each_ticket_held_for_ci_gets_a_card_in_a_lane_after_the_devices(tmp_path: Path) -> None:
     base = _base(tmp_path)
     assert 'data-device="ci-wait"' not in render_pages(base)["index.html"]
     snapshot = _held_for_ci(base)
-    _assert_ci_lane(_section(_no_script(render_pages(snapshot)["index.html"]), "lanes"), snapshot["tickets"][0])
+    _assert_ci_lane(_section(_no_script(render_pages(snapshot)["index.html"]), "lanes"), snapshot)
+
+
+def test_the_ci_lane_follows_the_grok_wakes_lane_too(tmp_path: Path) -> None:
+    snapshot = _held_for_ci(_tiles(tmp_path))
+    snapshot["running"].append(_row(snapshot["running"][0], "build", job="wake-1", device=None))
+    lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+    devices = re.findall(r'data-device="([^"]+)"', lanes)
+    assert devices[-2:] == ["grok-wakes", "ci-wait"], devices
 
 
 @needs_node
@@ -288,7 +311,7 @@ def test_the_page_script_draws_the_ci_lane_like_the_server(tmp_path: Path) -> No
     snapshot = _held_for_ci(base)
     server = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
     script = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
-    _assert_ci_lane(script, snapshot["tickets"][0])
+    _assert_ci_lane(script, snapshot)
     assert _shape(script) == _shape(server[server.index(">") + 1 : server.rindex("<")])
     bare = _run_page(tmp_path, base, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
     assert 'data-device="ci-wait"' not in bare
@@ -684,7 +707,7 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
 
 
 def write_screenshots(out: Path) -> list[Path]:
-    html = _page_with_status_stub(fifteen_slot_snapshot(Path(tempfile.mkdtemp())), "index.html")
+    html = _page_with_status_stub(_held_for_ci(fifteen_slot_snapshot(Path(tempfile.mkdtemp()))), "index.html")
     chrome = Browser()
     try:
         paths = []
