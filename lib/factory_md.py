@@ -84,6 +84,15 @@ may hold one Touches: path; a path matching exclusive_paths keeps one
 holder. A bad max_holders_per_path is an error under check-config and a
 warning elsewhere that falls back to 1.
 
+qa is optional (issue #759): what the project's QA lane runs. The block
+needs enabled, a boolean. Enabled, it also needs runners (one or two of
+claude-cloud and cursor-cloud, the first primary, each with a claude_cloud
+or cursor_cloud block holding an environment and an optional model), a
+profile, lane.boot and lane.base_url. The other keys are optional.
+enabled: false still checks the values it holds. check-config refuses a bad
+block; with strict=False its problems are warnings and qa is off. Off is
+always FactoryConfig.qa None.
+
 Unknown fields are errors by default, as check-config reads them. The
 poller, feeder and waiter read factory.md with strict=False (issue #288):
 an unknown field is a warning there, so a just-merged factory.md naming a
@@ -99,6 +108,7 @@ at CONTEXT_LIMIT characters.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -155,15 +165,42 @@ _TOP_KEYS = {
     "feeder",
     "plan",
     "ci",
+    "qa",
 }
 _CI_KEYS = {"branches", "local_checks"}
 _PLAN_KEYS = {"max_lines", "max_criteria"}
 DEFAULT_PLAN_MAX_LINES = 400
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
-TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci")
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
+QA_RUNNERS = ("claude-cloud", "cursor-cloud")
+QA_GATES = ("report", "block")
+QA_PROFILES = ("full-stack", "supabase", "none")
+QA_VIDEO = ("multi-step", "always", "never")
+QA_TRACE = ("on-failure", "always", "never")
+_QA_KEYS = {
+    "enabled",
+    "gate",
+    "runners",
+    "shootout",
+    "profile",
+    "lanes",
+    "paths",
+    "full_rerun_lines",
+    "setup",
+    "lane",
+    "fixtures",
+    "outside",
+    "secrets",
+    "verify",
+    "timeout_minutes",
+    "evidence",
+    *(name.replace("-", "_") for name in QA_RUNNERS),
+}
+_URL = re.compile(r"^https?://\S+$")
+_NAME_RULE = "a name, not a value or URL"
 
 
 @dataclass(frozen=True)
@@ -180,6 +217,46 @@ class PreReady:
 
 
 PRE_READY_MAX_TIMEOUT = 900
+
+
+@dataclass(frozen=True)
+class QaRunner:
+    name: str
+    environment: str
+    model: str | None = None
+
+
+@dataclass(frozen=True)
+class QaLane:
+    boot: str
+    base_url: str
+    doctor: tuple[str, ...] = ()
+    recover: str | None = None
+
+
+@dataclass(frozen=True)
+class QaEvidence:
+    video: str = "multi-step"
+    trace: str = "on-failure"
+
+
+@dataclass(frozen=True)
+class QaConfig:
+    runners: tuple[QaRunner, ...]
+    lane: QaLane
+    profile: str
+    gate: str = "report"
+    shootout: bool = False
+    lanes: int = 1
+    paths: tuple[str, ...] = ()
+    full_rerun_lines: int = 400
+    setup: str | None = None
+    fixtures_load: str | None = None
+    outside: tuple[str, ...] = ()
+    secrets: tuple[str, ...] = ()
+    verify: str | None = None
+    timeout_minutes: int = 60
+    evidence: QaEvidence = QaEvidence()
 
 
 @dataclass(frozen=True)
@@ -215,6 +292,7 @@ class FactoryConfig:
     plan_max_criteria: int = DEFAULT_PLAN_MAX_CRITERIA
     ci_branches: tuple[str, ...] | None = None
     ci_local_checks: tuple[str, ...] = ()
+    qa: QaConfig | None = None
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -241,7 +319,15 @@ def _trust_sections(text: str | None) -> dict[str, object] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return {key: data.get(key) for key in TRUST_KEYS}
+    return {key: _typed(data.get(key)) for key in TRUST_KEYS}
+
+
+def _typed(value: object) -> object:
+    if isinstance(value, dict):
+        return {_typed(key): _typed(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_typed(item) for item in value]
+    return (type(value), value)
 
 
 def default_finish_line(ship: str) -> str:
@@ -325,6 +411,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     max_holders_per_path, exclusive_paths = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
     ci_branches, ci_local_checks = _ci(data, findings, unknown)
+    qa, qa_findings = _qa(data, strict)
+    findings.extend(qa_findings)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -402,6 +490,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         plan_max_criteria=plan_max_criteria,
         ci_branches=ci_branches,
         ci_local_checks=ci_local_checks,
+        qa=qa,
     )
     return config, findings
 
@@ -862,6 +951,216 @@ def _ci(
         if not isinstance(item, str) or CHECK_LABEL.fullmatch(item) is None:
             findings.append(Finding("error", f"ci.local_checks[{index}] must be a short label"))
     return tuple(str(item) for item in branches), tuple(str(item) for item in checks)
+
+
+def _qa(data: dict, strict: bool) -> tuple[QaConfig | None, list[Finding]]:
+    if "qa" not in data:
+        return None, []
+    problems: list[Finding] = []
+    qa = _qa_config(data["qa"], problems)
+    if strict or not any(item.severity == "error" for item in problems):
+        return qa, problems
+    warnings = [Finding("warning", item.message) for item in problems]
+    return None, [*warnings, Finding("warning", "qa is off: its block is invalid")]
+
+
+def _qa_config(value: object, problems: list[Finding]) -> QaConfig | None:
+    if not isinstance(value, dict):
+        problems.append(Finding("error", "qa must be a mapping"))
+        return None
+    problems.extend(_unknown(value, _QA_KEYS, "qa", "error"))
+    enabled = value.get("enabled")
+    if "enabled" not in value:
+        problems.append(Finding("error", "missing required field 'qa.enabled'"))
+    elif not isinstance(enabled, bool):
+        problems.append(Finding("error", "qa.enabled must be true or false"))
+    required = enabled is True
+    gate = _qa_choice(value.get("gate"), "qa.gate", QA_GATES, problems) or "report"
+    runners = _qa_runners(value, required, problems)
+    shootout = value.get("shootout", False)
+    if not isinstance(shootout, bool):
+        problems.append(Finding("error", "qa.shootout must be true or false"))
+    elif shootout and len(runners) != 2:
+        problems.append(Finding("error", "qa.shootout needs two runners"))
+    elif shootout and gate != "report":
+        problems.append(Finding("error", "qa.shootout needs gate: report"))
+    if required and value.get("profile") is None:
+        problems.append(Finding("error", "missing required field 'qa.profile'"))
+    profile = _qa_choice(value.get("profile"), "qa.profile", QA_PROFILES, problems)
+    lane = _qa_lane(value.get("lane"), required, problems)
+    fixtures = _qa_mapping(value.get("fixtures"), "qa.fixtures", {"load"}, problems)
+    evidence = _qa_mapping(value.get("evidence"), "qa.evidence", {"video", "trace"}, problems)
+    verify = value.get("verify")
+    if verify is not None and (not isinstance(verify, str) or _SKILL.fullmatch(verify) is None):
+        problems.append(Finding("error", "qa.verify must be a skill name"))
+    lanes = _qa_int(value.get("lanes"), "qa.lanes", 1, 3, 1, problems)
+    paths = _path_list(value.get("paths"), "qa.paths", problems)
+    full_rerun_lines = _qa_int(
+        value.get("full_rerun_lines"), "qa.full_rerun_lines", 1, None, 400, problems
+    )
+    timeout_minutes = _qa_int(
+        value.get("timeout_minutes"), "qa.timeout_minutes", 5, 120, 60, problems
+    )
+    setup = _qa_text(value.get("setup"), "qa.setup", problems)
+    fixtures_load = _qa_text(fixtures.get("load"), "qa.fixtures.load", problems)
+    outside = _qa_list(value.get("outside"), "qa.outside", _is_env_name, _NAME_RULE, problems)
+    secrets = _qa_list(value.get("secrets"), "qa.secrets", _is_env_name, _NAME_RULE, problems)
+    video = _qa_choice(evidence.get("video"), "qa.evidence.video", QA_VIDEO, problems)
+    trace = _qa_choice(evidence.get("trace"), "qa.evidence.trace", QA_TRACE, problems)
+    if not required or any(item.severity == "error" for item in problems):
+        return None
+    assert lane is not None
+    assert profile is not None
+    return QaConfig(
+        runners=runners,
+        lane=lane,
+        profile=profile,
+        gate=gate,
+        shootout=shootout,
+        lanes=lanes,
+        paths=paths,
+        full_rerun_lines=full_rerun_lines,
+        setup=setup,
+        fixtures_load=fixtures_load,
+        outside=outside,
+        secrets=secrets,
+        verify=verify,
+        timeout_minutes=timeout_minutes,
+        evidence=QaEvidence(video=video or "multi-step", trace=trace or "on-failure"),
+    )
+
+
+def _qa_runners(qa: dict, required: bool, problems: list[Finding]) -> tuple[QaRunner, ...]:
+    raw = qa.get("runners")
+    names: list[str] = []
+    if raw is None:
+        if required:
+            problems.append(Finding("error", "missing required field 'qa.runners'"))
+    elif not isinstance(raw, list) or not 1 <= len(raw) <= 2:
+        problems.append(Finding("error", "qa.runners must be a list of one or two runners"))
+    else:
+        for index, name in enumerate(raw):
+            if name not in QA_RUNNERS:
+                problems.append(
+                    Finding("error", f"qa.runners[{index}] must be {_either(QA_RUNNERS)}")
+                )
+            elif name in names:
+                problems.append(Finding("error", f"qa.runners names {name} twice"))
+            else:
+                names.append(name)
+    runners: dict[str, QaRunner] = {}
+    for name in QA_RUNNERS:
+        key = name.replace("-", "_")
+        field = f"qa.{key}"
+        if key in qa and name not in names:
+            problems.append(Finding("error", f"{field} is set but qa.runners does not name {name}"))
+            continue
+        if name not in names:
+            continue
+        block = _qa_mapping(qa.get(key), field, {"environment", "model"}, problems)
+        environment = block.get("environment")
+        model = _model(block["model"], f"{field}.model", problems) if "model" in block else None
+        if environment is None:
+            problems.append(Finding("error", f"missing required field '{field}.environment'"))
+        elif not isinstance(environment, str) or _MODEL.fullmatch(environment) is None:
+            problems.append(Finding("error", f"{field}.environment must be a token"))
+        else:
+            runners[name] = QaRunner(name, environment, model)
+    return tuple(runners[name] for name in names if name in runners)
+
+
+def _qa_lane(value: object, required: bool, problems: list[Finding]) -> QaLane | None:
+    lane = _qa_mapping(value, "qa.lane", {"boot", "doctor", "recover", "base_url"}, problems)
+    boot = _qa_text(lane.get("boot"), "qa.lane.boot", problems)
+    recover = _qa_text(lane.get("recover"), "qa.lane.recover", problems)
+    doctor = _qa_list(lane.get("doctor"), "qa.lane.doctor", _is_filled, "a non-empty string", problems)
+    base_url = lane.get("base_url")
+    if base_url is not None and (not isinstance(base_url, str) or _URL.fullmatch(base_url) is None):
+        problems.append(Finding("error", "qa.lane.base_url must be an http:// or https:// URL"))
+    for key in ("boot", "base_url"):
+        if required and lane.get(key) is None:
+            problems.append(Finding("error", f"missing required field 'qa.lane.{key}'"))
+    if boot is None or not isinstance(base_url, str):
+        return None
+    return QaLane(boot=boot, base_url=base_url, doctor=doctor, recover=recover)
+
+
+def _qa_mapping(value: object, field: str, keys: set[str], problems: list[Finding]) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        problems.append(Finding("error", f"{field} must be a mapping"))
+        return {}
+    problems.extend(_unknown(value, keys, field, "error"))
+    return value
+
+
+def _qa_choice(
+    value: object, field: str, allowed: tuple[str, ...], problems: list[Finding]
+) -> str | None:
+    if value is None:
+        return None
+    if value not in allowed:
+        problems.append(Finding("error", f"{field} must be {_either(allowed)}"))
+        return None
+    return str(value)
+
+
+def _either(allowed: tuple[str, ...]) -> str:
+    return ", ".join(allowed[:-1]) + " or " + allowed[-1]
+
+
+def _qa_int(
+    value: object,
+    field: str,
+    low: int,
+    high: int | None,
+    default: int,
+    problems: list[Finding],
+) -> int:
+    if value is None:
+        return default
+    if not is_strict_int(value) or value < low or (high is not None and value > high):
+        rule = "a positive integer" if high is None else f"an integer from {low} to {high}"
+        problems.append(Finding("error", f"{field} must be {rule}"))
+        return default
+    return int(value)
+
+
+def _qa_text(value: object, field: str, problems: list[Finding]) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        problems.append(Finding("error", f"{field} must be a non-empty string"))
+        return None
+    return value
+
+
+def _qa_list(
+    value: object, field: str, valid: Callable[[object], bool], rule: str, problems: list[Finding]
+) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        problems.append(Finding("error", f"{field} must be a list"))
+        return ()
+    for index, item in enumerate(value):
+        if not valid(item):
+            problems.append(Finding("error", f"{field}[{index}] must be {rule}"))
+    return tuple(value)
+
+
+def _is_filled(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_env_name(value: object) -> bool:
+    return (
+        _is_filled(value)
+        and "=" not in value
+        and "://" not in value
+        and not any(char.isspace() for char in value)
+    )
 
 
 def _positive(
