@@ -14,7 +14,7 @@ import pytest
 from lib.brief import brief_kind
 from lib.github_actions import _comment
 from lib.queue import _job
-from lib.update_check import UpdateClass
+from lib.update_check import UpdateClass, UpdateScope
 from tests.merge_queue_support import Board, sha
 from tests.test_dispatcher import READY
 
@@ -419,3 +419,90 @@ def test_a_failed_update_whose_ready_waits_on_ci_is_done_from_that_ready(
     row = board.state("42")
     assert (row["approved_head"], row["update_failures"]) == (sha(2), 0)
     assert len(board.jobs("review")) == 1
+
+
+def died_after_push(tmp_path: Path, *, ci: str = "success", **options) -> tuple[Board, object]:
+    board, pr, _approve = conflicted(tmp_path, **options)
+    job = board.claim("claude")
+    pr.push(sha(2), ci=ci)
+    board.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    return board, pr
+
+
+def test_an_update_that_dies_after_pushing_queues_one_scoped_review_there(
+    tmp_path: Path,
+) -> None:
+    scope = UpdateScope(sha(1), sha(2), ())
+    board, pr = died_after_push(tmp_path)
+    board.verdict = UpdateClass(False, "edits outside conflict resolution", scope)
+    board.poll()
+
+    [review] = [job for job in board.jobs("review") if job["head"] == sha(2)]
+    assert review["recipient"] == "codex"
+    detail = json.loads(review["detail"])
+    assert (detail["round"], detail["kind"], detail["update_merge"]) == ("1/3", "update", sha(2))
+    assert board.classified == [("owner/repo", "main", sha(1), sha(2))]
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"], row["update_from_head"]) == (
+        "review",
+        None,
+        None,
+    )
+
+    for _ in range(3):
+        board.poll()
+    assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
+    assert len(board.jobs("update-from-main")) == 1
+    assert board.actions.merges == []
+    assert not [line for line in board.log if "does not cover" in line]
+
+
+def test_an_update_that_dies_after_pushing_red_ci_queues_one_ci_fix(tmp_path: Path) -> None:
+    board, pr = died_after_push(tmp_path, ci="failure")
+    for _ in range(4):
+        board.poll()
+
+    [fix] = [job for job in board.jobs("fix") if job["head"] == sha(2)]
+    assert fix["recipient"] == "claude"
+    assert board.classified == []
+    assert [job["head"] for job in board.jobs("review")] == [sha(1)]
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == ("fixing", None)
+    assert not [line for line in board.log if "does not cover" in line]
+
+
+def test_an_update_that_dies_after_pushing_waits_for_ci_first(tmp_path: Path) -> None:
+    board, pr = died_after_push(tmp_path, ci="pending")
+    board.poll()
+    board.poll()
+    assert board.classified == []
+    assert board.state("42")["workflow_state"] == "merge-queue"
+
+    pr.ci[sha(2)] = "success"
+    board.poll()
+    assert board.classified == [("owner/repo", "main", sha(1), sha(2))]
+
+
+def test_a_trivial_update_that_dies_after_pushing_carries_the_approval(tmp_path: Path) -> None:
+    board, pr = died_after_push(tmp_path)
+    board.poll()
+    board.poll()
+
+    assert [job["head"] for job in board.jobs("review")] == [sha(1)]
+    assert board.actions.merges == [(True, sha(2))]
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == ("merged", sha(2))
+
+
+def test_a_done_update_with_no_ready_after_pushing_queues_one_review(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.verdict = UpdateClass(False, "edits outside conflict resolution")
+    pr.push(sha(2))
+    finish_with(board, pr, "Merged main; nothing else to report.")
+    board.poll()
+
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == ("review", None)
+    for _ in range(3):
+        board.poll()
+    assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
