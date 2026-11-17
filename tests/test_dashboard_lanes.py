@@ -754,6 +754,7 @@ def _counted(tmp_path: Path, held: int = 3) -> dict:
     template = snapshot["running"][0]
     snapshot["running"] = [_row(template, "build"), _row(template, "review")]
     snapshot["queued"] = [dict(snapshot["queued"][0], job=f"q-{i}") for i in range(3)]
+    snapshot["queue"]["totals"]["queued"] = 3
     snapshot["slots"]["devices"] = [
         {"name": "box", "slot_max": 4, "held": held, "enabled": True, "placeholder": False, "harnesses": ["claude"]},
         {"name": "pc", "slot_max": 3, "held": 0, "enabled": True, "placeholder": False, "harnesses": ["codex"]},

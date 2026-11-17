@@ -178,7 +178,6 @@ def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> 
     for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
                   "Handoff savings", "poller.log", "scripted share"):
         assert words.lower() not in _text(_no_script(html)).lower(), words
-    # #140: the lanes with the queue lane first, then Just happened beside Intake.
     assert html.index('id="lanes"') < html.index('id="queue"')
     assert html.index('id="queue"') < html.index('data-device="box"') < html.index('id="just-happened"')
     assert html.index('id="just-happened"') < html.index('id="intake"')
