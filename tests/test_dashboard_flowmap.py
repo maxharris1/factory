@@ -36,7 +36,7 @@ def test_every_state_has_a_node_inside_the_canvas():
     assert set(NODES) == {state["name"] for state in CHART["states"]}
     for node in NODES.values():
         assert 0 <= node["x"] * 4 and (node["x"] + NW) * 4 <= 1000, node
-        assert 0 <= node["y"] * 4 and (node["y"] + NH) * 4 <= 352, node
+        assert 0 <= node["y"] * 4 and (node["y"] + NH) * 4 <= 416, node
 
 
 def test_no_two_nodes_overlap():
@@ -54,7 +54,7 @@ def test_every_chart_edge_has_a_route_that_crosses_no_node():
     assert keys <= set(LAYOUT["routes"])
     for key, points in LAYOUT["routes"].items():
         for x, y in _cells(points):
-            assert 0 <= x < 250 and 0 <= y < 88, (key, x, y)
+            assert 0 <= x < 250 and 0 <= y < 104, (key, x, y)
             for name, node in NODES.items():
                 assert not _inside(node, x, y), f"{key} crosses {name} at {(x, y)}"
 
@@ -66,45 +66,105 @@ def test_stop_states_sit_on_the_bottom_rail():
         assert node["stop"] == (name in stops), name
         if name in stops:
             assert node["y"] > rail
-        elif node["row"] < 4:
+        else:
             assert node["y"] + NH <= rail
 
 
-def test_artboard_places_kept_and_new_states_take_free_rows():
-    assert (NODES["review"]["col"], NODES["review"]["row"]) == (3, 0)
-    assert (NODES["handed-off"]["col"], NODES["handed-off"]["row"]) == (5, 3)
-    assert NODES["merge-queue"]["col"] == NODES["updating"]["col"] == 4
-    assert NODES["merge-queue"]["row"] == 3
+SHIP_COLUMN = ["ship", "merge-queue", "updating", "awaiting-ok", "waiting-external"]
+RAIL = ["refused", "abandoned", "stuck", "blocked"]
 
 
-PLACES_BEFORE_BLOCKED_MOVED = {
-    "intake": (0, 0), "questions": (0, 1), "waiting-max": (0, 2),
-    "planning": (1, 0), "plan-check": (1, 1),
-    "building": (2, 0), "fixing": (2, 1),
-    "review": (3, 0), "capped": (3, 1),
-    "ship": (4, 0), "awaiting-ok": (4, 1), "waiting-external": (4, 2),
-    "merge-queue": (4, 3), "updating": (4, 4),
-    "merged": (5, 0), "post-merge": (5, 1), "done": (5, 2), "handed-off": (5, 3),
-    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4),
-}
+def _place(node):
+    return node["col"], node["row"]
 
 
-def test_blocked_moves_to_the_stop_rail_and_nothing_else_moves():
-    blocked = NODES["blocked"]
-    assert (blocked["col"], blocked["row"]) == (3, 4)
-    assert blocked["stop"] and not blocked["end"]
-    assert blocked["y"] > LAYOUT["rail"]["y"]
-    others = {name: (node["col"], node["row"]) for name, node in NODES.items() if name != "blocked"}
-    assert others == PLACES_BEFORE_BLOCKED_MOVED
+def test_ship_column_holds_five_states_above_the_stop_rail():
+    assert flow.STOP_ROW == 5
+    assert LAYOUT["grid"] == {"w": 250, "h": 104, "cell": 4}
+    assert [_place(NODES[name]) for name in SHIP_COLUMN] == [(4, row) for row in range(5)]
+    assert [_place(NODES[name]) for name in RAIL] == [(col, 5) for col in range(4)]
+    assert not any(NODES[name]["stop"] for name in SHIP_COLUMN)
+
+
+def _chart_with(state, group, edges):
+    text = flow.CHART_PATH.read_text(encoding="utf-8")
+    text = text.replace("  s21: capped\n", f"  s21: capped\n  s22: {state}\n")
+    text = text.replace("  class s21 yellow\n", f"  class s21 yellow\n  class s22 {group}\n")
+    text = text.replace("  s3 --> s3: CI red, fix\n", "  s3 --> s3: CI red, fix\n" + "".join(f"  {e}: go\n" for e in edges))
+    chart = flow.parse_chart(text)
+    assert state in {s["name"] for s in chart["states"]}
+    return flow.flowmap_layout(chart)
+
+
+def test_a_sixth_live_ship_state_grows_the_grid_and_the_rail_moves_down():
+    layout = _chart_with("launch-pad", "teal", ["s14 --> s22", "s22 --> s7"])
+    nodes = {node["name"]: node for node in layout["nodes"]}
+    assert _place(nodes["launch-pad"]) == (4, 5)
+    assert not nodes["launch-pad"]["stop"]
+    assert [_place(nodes[name]) for name in RAIL] == [(col, 6) for col in range(4)]
+    rail = layout["rail"]["y"]
+    for node in nodes.values():
+        if node["stop"]:
+            assert node["y"] > rail, node["name"]
+        else:
+            assert node["y"] + NH <= rail, node["name"]
+    assert layout["grid"]["h"] == 120
+
+
+def test_an_unknown_stop_state_with_no_exit_goes_on_the_rail():
+    layout = _chart_with("parked", "tan", ["s9 --> s22"])
+    parked = next(node for node in layout["nodes"] if node["name"] == "parked")
+    assert _place(parked) == (4, 5)
+    assert parked["stop"] and parked["end"]
+    assert parked["y"] > layout["rail"]["y"]
+    assert layout["grid"] == LAYOUT["grid"]
+
+
+def _box(node):
+    return node["x"] * 4, node["y"] * 4, (node["x"] + NW) * 4, (node["y"] + NH) * 4
+
+
+def _overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def test_merge_queue_and_updating_wires_cross_no_other_node():
+    ends = {"merge-queue", "updating"}
+    edges = [(e["from"], e["to"]) for e in CHART["edges"] if {e["from"], e["to"]} & ends]
+    assert len(edges) == 11
+    for a, b in edges:
+        for x, y in _cells(LAYOUT["routes"][f"{a}>{b}"]):
+            for name, node in NODES.items():
+                if name not in (a, b):
+                    assert not _inside(node, x, y), f"{a}>{b} crosses {name} at {(x, y)}"
+
+
+def test_no_node_covers_a_column_head_or_the_stop_label():
+    label = LAYOUT["stop_label"]
+    boxes = [(h["x"], 0, h["x"] + h["w"], 24) for h in LAYOUT["heads"]]
+    boxes.append((label["x"], label["y"], label["x"] + 11 * 8, label["y"] + 14))
+    for name, node in NODES.items():
+        for box in boxes:
+            assert not _overlap(_box(node), box), (name, box)
+
+
+def test_no_live_wire_touches_the_stop_rail():
+    rail = LAYOUT["rail"]["y"]
+    live = [name for name, node in NODES.items() if not node["stop"]]
+    for a in live:
+        for b in live:
+            key = f"{a}>{b}"
+            if key in LAYOUT["routes"]:
+                assert all(y != rail for _, y in _cells(LAYOUT["routes"][key])), key
 
 
 STUB = r"""
-var calls = {strokes: [], fills: [], strokeRects: 0, texts: []};
+var calls = {strokes: [], fills: [], strokeRects: 0, texts: [], fonts: {}};
 var ctx = {
   set fillStyle(v) { this._f = v; calls.fills.push(v); }, get fillStyle() { return this._f; },
   set strokeStyle(v) { this._s = v; calls.strokes.push(v); }, get strokeStyle() { return this._s; },
   fillRect: function () {}, strokeRect: function () { calls.strokeRects++; },
-  fillText: function (s) { calls.texts.push(String(s)); },
+  fillText: function (s) { calls.texts.push(String(s)); calls.fonts[String(s)] = this.font; },
   measureText: function (s) { return {width: s.length * 6}; },
   lineWidth: 1, font: '', textAlign: '', textBaseline: ''
 };
@@ -157,6 +217,12 @@ def test_draw_flowmap_paints_path_in_who_colours(opts):
     assert "#5386a6" in calls["fills"]
     assert calls["texts"].count("\u00d72") == 2
     assert [str(n) for n in range(1, hops + 1)] == [x for x in calls["texts"] if x.isdigit()]
+
+
+def test_long_glosses_draw_a_size_smaller():
+    fonts = _draw(_model(), {"t": 0, "reduced": True})["fonts"]
+    assert fonts["approved, waiting to merge"].startswith("400 8px ")
+    assert fonts["merging base in"].startswith("400 9px ")
 
 
 def test_script_is_safe_to_splice():

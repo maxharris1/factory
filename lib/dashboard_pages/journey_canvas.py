@@ -14,7 +14,7 @@ LANE = {
     "plan-check": "plan",
     "building": "build",
     "fixing": "build",
-    "updating": "build",
+    "updating": "ship",
     "review": "review",
     "capped": "review",
     "ship": "ship",
