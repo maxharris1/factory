@@ -13,9 +13,9 @@ steps below. On the box (a local device) a finished job's slot is
 released as below; when machines.yml sets it `enabled: false`, each
 running job whose worker started is handed to `on_lost` as below. A box
 orphan keeps the pids of its `orch job run` and its worker: while either
-lives it is sent SIGTERM, through the runner (which stops the command and
-every process it started) or through the worker once that runner is gone,
-and SIGKILL on each later poll; its row is forgotten once both are gone.
+lives it is sent SIGTERM, through the runner or through the worker once
+that runner is gone, and SIGKILL on each later poll; its row is forgotten
+once both are gone.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot

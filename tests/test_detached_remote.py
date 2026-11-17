@@ -249,7 +249,7 @@ def test_darwin_launch_records_the_start_and_polls_it(
     monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
     assert word(box.send(box.launch(lines=30, pause=0.1))) == "started"
     wrapper, start = (int(x) for x in (box.run_dir() / "pid").read_text().split())
-    record = Path(box.target.job_dir) / remote.darwin_record(box.target.require_tag())
+    record = Path(box.target.job_dir) / remote.start_record(box.target.require_tag())
     fields = wait_file(record).split()
     assert fields[0] == str(start) and fields[2] == box.target.tag
     assert box.poll()[0][1] == "running"
@@ -267,7 +267,7 @@ def test_a_poll_never_fences_the_darwin_start_it_follows(
     gate, paused = tmp_path / "gate", tmp_path / "paused"
     gate.touch()
     mac.pause_starts(gate, paused)
-    record = Path(box.target.job_dir) / remote.darwin_record(box.target.require_tag())
+    record = Path(box.target.job_dir) / remote.start_record(box.target.require_tag())
     try:
         assert word(box.send(box.launch(lines=1, pause=0))) == "started"
         deadline = time.monotonic() + 10

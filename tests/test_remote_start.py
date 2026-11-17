@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -682,7 +683,7 @@ def test_monitor_releases_a_remote_slot_no_worker_was_started_for_without_ssh(
 TAG = "d" * 32
 
 
-def lost_setup(tmp_path: Path, check: int = 255, *, reload: bool = False):
+def lost_setup(tmp_path: Path, check: int = 255, *, reload: bool = False, tag: str = TAG):
     now = [0.0]
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
@@ -708,7 +709,7 @@ def lost_setup(tmp_path: Path, check: int = 255, *, reload: bool = False):
     dispatcher.process(snapshot)
     job, placement = pool.claim("claude")
     pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
-    pool.attach_worker(job.id, owner="claude", remote=True, tag=TAG)
+    pool.attach_worker(job.id, owner="claude", remote=True, tag=tag)
     return now, queue, pool, transport, dispatcher, job
 
 
@@ -1142,11 +1143,12 @@ class LocalShell:
 def test_a_launch_still_in_transit_when_its_device_is_disabled_never_starts(
     tmp_path: Path,
 ) -> None:
-    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True)
+    tag = uuid.uuid4().hex
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True, tag=tag)
     monitor = dispatcher.devices
     monitor.transport = LocalShell()
     monitor.alive = lambda *_: False
-    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, TAG)
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
     assert target is not None
     marker = tmp_path / "late-worker.pid"
     worker = (
@@ -1177,7 +1179,9 @@ def test_a_launch_still_in_transit_when_its_device_is_disabled_never_starts(
 
 def test_a_check_that_cannot_fence_the_launch_never_says_gone(tmp_path: Path) -> None:
     config = config_of(machines_file(tmp_path))
-    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", TAG)
+    target = device_monitor.remote_target(
+        config.device("pc"), "claude", "job-1", uuid.uuid4().hex
+    )
     assert target is not None
     jobs = Path(target.job_dir).parent
     jobs.mkdir(parents=True)
@@ -1192,11 +1196,12 @@ def test_a_check_that_cannot_fence_the_launch_never_says_gone(tmp_path: Path) ->
 def test_a_launch_that_got_there_first_keeps_its_orphan_until_it_is_stopped(
     tmp_path: Path,
 ) -> None:
-    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True)
+    tag = uuid.uuid4().hex
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True, tag=tag)
     monitor = dispatcher.devices
     monitor.transport = LocalShell()
     monitor.alive = lambda *_: False
-    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, TAG)
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
     assert target is not None
     marker = tmp_path / "early-worker.pid"
     worker = (
@@ -1220,7 +1225,7 @@ def test_a_launch_that_got_there_first_keeps_its_orphan_until_it_is_stopped(
         disable_pc(tmp_path)
         poll_at(now, dispatcher, 0.0)
         assert state(queue, job.id) == "failed"
-        assert orphans(queue) == [(job.id, "pc", TAG)]
+        assert orphans(queue) == [(job.id, "pc", tag)]
 
         deadline = time.monotonic() + 10
         while remote.check_worker(monitor.transport, target) != remote.GONE:
@@ -1282,11 +1287,12 @@ def test_a_launch_that_owns_its_tag_when_the_check_scans_never_starts_its_worker
                 ["sh", "-c", argv[-1]], timeout=timeout, env=env, capture_output=True
             ).returncode
 
-    now, queue, pool, transport, dispatcher, job = lost_setup(root, reload=True)
+    tag = uuid.uuid4().hex
+    now, queue, pool, transport, dispatcher, job = lost_setup(root, reload=True, tag=tag)
     monitor = dispatcher.devices
     monitor.alive = lambda *_: False
     monitor.transport = PausingShell()
-    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, TAG)
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
     assert target is not None
     marker = root / "worker-started"
     start = remote.start_script(

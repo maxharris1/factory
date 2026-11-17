@@ -307,7 +307,7 @@ _DARWIN_KEEPER = (
 _FENCE = "fenced"
 
 
-def darwin_record(tag: str) -> str:
+def start_record(tag: str) -> str:
     """The start's record file name in the job directory: one per start."""
     return f".orch-worker-{tag}.pid"
 
@@ -531,7 +531,7 @@ def start_script(
     )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
-    darwin_file = shlex.quote(darwin_record(tag))
+    record_file = shlex.quote(start_record(tag))
     darwin = (
         f"{_DARWIN_BOOT} || exit {START_REFUSED}; "
         "set -- $(ps -o pgid= -p $$ 2>/dev/null); "
@@ -543,7 +543,7 @@ def start_script(
         "< /dev/null > /dev/null 2>&1 & echo $!); "
         f'p=$k; {_LSTART}; [ -n "$k" ] && [ -n "$*" ] '
         f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
-        f'&& (set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
+        f'&& (set -C; echo "$$ $c {tag} $s" > {record_file}) 2>/dev/null '
         f'|| {{ kill -KILL "$k"; exit {START_REFUSED}; }}; '
         f"{login}"
     )
@@ -554,7 +554,7 @@ def start_script(
         f"[ -r /proc/self/environ ] || exit {START_REFUSED}; "
         f"read -r b < /proc/sys/kernel/random/boot_id || exit {START_REFUSED}; "
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
-        f'(set -C; echo "$$ $b {tag}" > {darwin_file}) 2>/dev/null || exit {START_REFUSED}; '
+        f'(set -C; echo "$$ $b {tag}" > {record_file}) 2>/dev/null || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
         f"{login}"
     )
@@ -579,7 +579,7 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
         target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
     )
     record = (
-        f'r={directory}/.orch-worker-$t.pid; if [ ! -e "$r" ]; then '
+        f'r={directory}/{start_record("$t")}; if [ ! -e "$r" ]; then '
         f"mkdir -p -- {directory} 2>/dev/null; "
         f'(set -C; echo {_FENCE} > "$r") 2>/dev/null; [ -e "$r" ] || exit 3; fi; '
         if claim
@@ -609,7 +609,7 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
 
 def fenced_check_script(target: RemoteTarget) -> str:
     """check_script, after taking the tag's run directory (as launch_script's mkdir
-    would) and, on Linux, the start's record (_check_body's claim).
+    would) and, on Linux, the start's record.
     """
     tag = target.require_tag()
     return _sh(
