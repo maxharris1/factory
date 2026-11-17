@@ -14,13 +14,17 @@ from lib.dispatcher import TrackedTicket
 from lib.evidence import criteria_evidence
 from lib.github_actions import GhResult
 from lib.evidence.criteria import EMPTY
+from lib.orchestrate import brief_comment
 from lib.poll_source import LINEAR_ISSUE_QUERY, LivePollSource
 from tests.test_dispatcher import BRIEF, comment
-from tests.test_evidence_wiring import CIFlow, claim, evidence
+from tests.test_evidence_wiring import REVISE, CIFlow, claim, evidence
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue, linear_transport_for
 from tests.test_rounds_and_caps import HEADS
 
 SECTION = "## Acceptance criteria\n- {name} first.\n- {name} second.\n"
+PROSE = "Make the widgets faster.\n"
+FIVE = [f"Criterion {n} holds." for n in range(1, 6)]
+EDITED = "## Acceptance criteria\n" + "".join(f"- {text}\n" for text in FIVE[:4])
 ISSUE = re.compile(r"repos/acme/widgets/issues/(\d+)")
 
 
@@ -40,14 +44,18 @@ class IssueGh(FakeGh):
         return sum(any(ISSUE.fullmatch(part) for part in call) for call in self.calls)
 
 
-def brief_comment_json(number: int, text: str) -> dict:
+def comment_json(number: int, body: str) -> dict:
     return {
         "id": number,
         "user": {"login": "grok-login"},
-        "body": f"<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=high -->\n{text}",
+        "body": body,
         "created_at": f"2026-11-11T12:00:{number:02d}Z",
         "html_url": f"https://github.test/comment/{number}",
     }
+
+
+def brief_comment_json(number: int, text: str) -> dict:
+    return comment_json(number, f"<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=high -->\n{text}")
 
 
 def github_ticket(gh: IssueGh, source: LivePollSource | None = None) -> TrackedTicket:
@@ -84,16 +92,37 @@ def test_github_poll_keeps_the_pr_description_and_reads_the_source_issue_once_pe
     assert [item.text for item in bundle(ticket).criteria] == ["Issue first.", "Issue second."]
 
 
-def test_github_poll_reads_no_issue_when_a_brief_exists() -> None:
+def test_github_poll_reads_the_issue_with_a_brief_and_its_section_wins() -> None:
     gh = IssueGh()
     gh.pull = {"body": "Fixes #495", "title": "#495: x"}
     gh.comments = [brief_comment_json(1, SECTION.format(name="Brief"))]
+    gh.issue_bodies["495"] = SECTION.format(name="Issue")
 
     ticket = github_ticket(gh)
 
-    assert gh.issue_reads() == 0
-    assert ticket.issue_body is None
-    assert bundle(ticket).source == "brief"
+    assert gh.issue_reads() == 1
+    assert ticket.issue_body == SECTION.format(name="Issue")
+    assert bundle(ticket).source == "issue"
+    assert [item.text for item in bundle(ticket).criteria] == ["Issue first.", "Issue second."]
+
+
+@pytest.mark.parametrize(("new_comment", "reads", "name"), [(True, 2, "Edited"), (False, 1, "Issue")])
+def test_a_new_pr_comment_rereads_the_issue_at_the_same_head(new_comment: bool, reads: int, name: str) -> None:
+    gh = IssueGh()
+    gh.pull = {"body": "Fixes #495", "title": "#495: x"}
+    gh.comments = [brief_comment_json(1, SECTION.format(name="Brief"))]
+    gh.issue_bodies["495"] = SECTION.format(name="Issue")
+    source = LivePollSource(config(), gh_runner=gh)
+    github_ticket(gh, source)
+
+    gh.issue_bodies["495"] = SECTION.format(name="Edited")
+    if new_comment:
+        gh.comments.append(comment_json(2, "Ready."))
+    ticket = github_ticket(gh, source)
+
+    assert gh.issue_reads() == reads
+    assert ticket.issue_body == SECTION.format(name=name)
+    assert [item.text for item in bundle(ticket).criteria] == [f"{name} first.", f"{name} second."]
 
 
 def test_github_poll_with_no_source_issue_falls_back_to_the_pr_description() -> None:
@@ -186,6 +215,36 @@ def test_review_bundle_with_no_criteria_says_so_and_renders(tmp_path: Path) -> N
 
 
 def test_brief_still_wins_in_the_review_bundle(tmp_path: Path) -> None:
-    flow = SourcesFlow(tmp_path, issue_body=SECTION.format(name="Issue"))
+    flow = SourcesFlow(tmp_path, issue_body=PROSE)
     flow.comments.append(comment("brief-1", BRIEF, author="grok-login", url="u/brief-1"))
     assert reviewed(flow)["source"] == "brief"
+
+
+def scope_cut(tmp_path: Path) -> SourcesFlow:
+    flow = SourcesFlow(tmp_path, issue_body=EDITED)
+    body = brief_comment(
+        risk="high", goal="Ship it.", acceptance_criteria=FIVE, likely_files=[], done_evidence="Tests pass."
+    )
+    flow.comments.append(comment("brief-1", body, author="grok-login", url="u/brief-1"))
+    return flow
+
+
+def assert_edited(criteria: dict) -> None:
+    assert criteria["source"] == "issue"
+    assert [(item["id"], item["text"]) for item in criteria["criteria"]] == [
+        (f"ac-{n}", text) for n, text in enumerate(FIVE[:4], 1)
+    ]
+
+
+def test_review_after_a_scope_cut_lists_the_edited_criteria(tmp_path: Path) -> None:
+    assert_edited(reviewed(scope_cut(tmp_path)))
+
+
+def test_fix_after_a_scope_cut_lists_the_edited_criteria(tmp_path: Path) -> None:
+    flow = scope_cut(tmp_path)
+    assert flow.go("go-1") == "queued-build"
+    flow.finish("claude")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex")
+    assert flow.post("revise-1", REVISE.format(head=HEADS[1]), "codex-login") == "queued-review-fix"
+    assert_edited(evidence(claim(flow, "claude"))["criteria"])

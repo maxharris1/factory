@@ -3,14 +3,18 @@
 A pure function: the caller reads the issue, its comments and the PR, and
 passes them in. The criteria text comes from the first source that has any:
 
-1. the canonical brief: the latest `kind=brief` comment with `from=grok-bot`
+1. the issue body, when its "Acceptance criteria" section lists any, so an edit
+   made after the brief went up, such as a scope cut, is what gets reviewed
+   (#631);
+2. the canonical brief: the latest `kind=brief` comment with `from=grok-bot`
    and `role=orchestrator` whose author trusted_logins lets speak for
    grok-bot (with the four GitHub Apps, the Factory App login). A brief from
    anyone else is skipped, even when it comes last. The poll picks it once
-   (TrackedTicket.brief_comment), so the builder's brief and the reviewer's
-   criteria name the same comment (#495);
-2. the issue body;
-3. the PR description, only for a `ready_starts_review` project, whose PRs
+   (TrackedTicket.brief_comment), so when the issue body has no criteria
+   section, the builder's brief and the reviewer's criteria name the same
+   comment (#495);
+3. the issue body without that section;
+4. the PR description, only for a `ready_starts_review` project, whose PRs
    are built from a packet with no brief.
 
 A brief that quotes the ticket in a code block under a "Ticket" heading, as
@@ -100,6 +104,9 @@ def criteria_evidence(
 ) -> CriteriaEvidence:
     """The issue fields and acceptance criteria. See the module doc."""
     candidates: list[tuple[str, str | None, str | None]] = []
+    section = _section(issue_body.splitlines()) if issue_body is not None else None
+    if section is not None and _items(_trim(section), False):
+        candidates.append(("issue", issue_url, issue_body))
     if brief is not None:
         candidates.append(("brief", brief.url, _quoted_ticket(parse_comment(brief.body).body)))
     candidates.append(("issue", issue_url, issue_body))
