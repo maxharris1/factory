@@ -884,3 +884,91 @@ def test_a_waiter_starts_on_a_configured_box_checkout_only_at_the_box_head(
     assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
     assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
     assert any("failed for T6 to requeue after a backoff" in line for line in device.log)
+
+
+@pytest.mark.parametrize("held_at", ["origin/main", "an older origin/main"])
+@pytest.mark.parametrize("remote", [False, True], ids=["box", "pc"])
+def test_a_box_held_at_its_commit_still_starts_jobs_until_origin_main_moves_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, remote: bool, held_at: str
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=remote)
+    install(device.home)
+    deploy(lock_root)
+    head, later = box_behind_origin_main(lock_root)
+    if remote:
+        subprocess.run(["git", "clone", "-q", str(lock_root), str(device.checkout)], check=True)
+    with sqlite3.connect(device.db) as connection:
+        device_sync.upsert(connection, device="box", bot="", harness="", checkout=str(lock_root),
+                           target=later if held_at == "origin/main" else "f" * 40, sha=head,
+                           state=device_sync.HELD, detail="local edits conflict with upstream: "
+                           "orch.yml", now=time.time())
+
+    job_id, started = device.run_one()
+
+    if held_at == "origin/main":
+        assert started == job_id
+        assert len(device.spawn.calls) == 1
+        return
+    assert started is None
+    assert state(device.db, job_id) == "failed"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == (
+        f"preflight-lagging: box claude-bot {lock_root.resolve()} at {head[:12]}, "
+        f"origin/main at {later[:12]}")
+
+
+@pytest.mark.parametrize("account_newer", [False, True], ids=["cached-older", "fetched-newer"])
+def test_a_held_box_starts_jobs_on_a_configured_checkout_at_its_head_whatever_its_origin_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, account_newer: bool
+) -> None:
+    deploy(lock_root)
+    head, intermediate = box_behind_origin_main(lock_root)
+    configured = tmp_path / "account-factory"
+    subprocess.run(["git", "clone", "-q", str(lock_root), str(configured)], check=True)
+    subprocess.run([*git_in(configured), "fetch", "-q", "origin",
+                    "refs/remotes/origin/main:refs/remotes/origin/main"], check=True)
+    subprocess.run([*git_in(lock_root), "checkout", "-q", intermediate], check=True)
+    (lock_root / "latest").write_text("latest\n", encoding="utf-8")
+    subprocess.run([*git_in(lock_root), "add", "latest"], check=True)
+    subprocess.run([*git_in(lock_root), "commit", "-qm", "latest"], check=True)
+    latest = subprocess.run([*git_in(lock_root), "rev-parse", "HEAD"], check=True,
+                            capture_output=True, text=True).stdout.strip()
+    subprocess.run([*git_in(lock_root), "update-ref", "refs/remotes/origin/main", latest], check=True)
+    subprocess.run([*git_in(lock_root), "checkout", "-q", "main"], check=True)
+    if account_newer:
+        subprocess.run([*git_in(configured), "fetch", "-q", "origin",
+                        "refs/remotes/origin/main:refs/remotes/origin/main"], check=True)
+        subprocess.run([*git_in(lock_root), "update-ref", "refs/remotes/origin/main", intermediate],
+                       check=True)
+    box_upstream = intermediate if account_newer else latest
+    account_upstream = latest if account_newer else intermediate
+    assert skill_preflight.checkout_sha(configured) == head
+    assert skill_preflight.checkout_sha(configured, "refs/remotes/origin/main") == account_upstream
+    device = Device(tmp_path, monkeypatch, remote=False, box_root=configured)
+    install(device.home)
+    with sqlite3.connect(device.db) as connection:
+        device_sync.upsert(connection, device="box", bot="", harness="", checkout=str(lock_root),
+                           target=box_upstream, sha=head, state=device_sync.HELD,
+                           detail="local edits conflict with upstream: orch.yml", now=time.time())
+
+    job_id, started = device.run_one()
+
+    assert started == job_id
+    assert len(device.spawn.calls) == 1
+
+
+def test_a_held_row_excuses_only_the_checkout_it_names(tmp_path: Path, lock_root: Path) -> None:
+    deploy(lock_root)
+    head, later = box_behind_origin_main(lock_root)
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(lock_root), str(other)], check=True)
+    subprocess.run([*git_in(other), "reset", "-q", "--hard", head], check=True)
+    subprocess.run([*git_in(other), "update-ref", "refs/remotes/origin/main", later], check=True)
+    with sqlite3.connect(tmp_path / "held.db") as connection:
+        device_sync.upsert(connection, device="box", bot="", harness="", checkout=str(lock_root),
+                           target=later, sha=head, state=device_sync.HELD,
+                           detail="local edits conflict with upstream: orch.yml", now=time.time())
+        held = device_sync.held(connection, "box")
+
+    assert skill_preflight.box_behind_origin("box", "claude-bot", str(lock_root), held) is None
+    assert skill_preflight.box_behind_origin("box", "claude-bot", str(other), held) == (
+        f"preflight-lagging: box claude-bot {other} at {head[:12]}, origin/main at {later[:12]}")

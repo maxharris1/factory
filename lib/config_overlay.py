@@ -16,12 +16,17 @@ The overlay sits beside the base file rather than in a user's home: the
 poller and each bot's waiter run as different users and must read the
 same config. ORCH_NO_LOCAL_OVERLAY=1 turns overlays off (the test suite
 sets it). `overlay_keys` names what an overlay sets, never its values, for
-`orch check-config`.
+`orch check-config`, which also warns about uncommitted edits to a tracked
+base file (self-deploy holds the box when upstream changes the same lines)
+and with --digest prints a hash of each effective config to compare hosts.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -29,8 +34,10 @@ import yaml
 from lib.load import Finding, load_yaml
 
 DISABLE_ENV = "ORCH_NO_LOCAL_OVERLAY"
+GIT_TIMEOUT = 10
 KEYED_LISTS = {"projects": "repo", "devices": "name"}
 OPAQUE = frozenset({"trusted_logins", "trusted_linear_users", "linear_assignees"})
+SPELLINGS = {"linear_project_id": "linear_project_ids", "linear_project_ids": "linear_project_id"}
 
 
 class OverlayError(ValueError):
@@ -116,6 +123,44 @@ def describe(path: Path) -> str | None:
     return f"overlay {overlay_path(path).name} sets: {', '.join(keys) if keys else 'nothing'}"
 
 
+def digest(path: Path) -> str | None:
+    """sha256 of the effective config (the base with its overlay merged), or None
+    when it cannot be read."""
+    try:
+        data = load_yaml(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    merged = apply_overlay(path, data)[0]
+    if merged is None:
+        return None
+    text = json.dumps(merged, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def uncommitted_edits(path: Path) -> Finding | None:
+    """A warning when `path` is tracked in its git checkout and differs from HEAD."""
+    path = Path(path)
+    env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
+
+    def git(*args: str) -> int:
+        return subprocess.run(
+            ["git", "-C", str(path.parent), *args], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            timeout=GIT_TIMEOUT, check=False,
+        ).returncode
+
+    try:
+        if (git("ls-files", "--error-unmatch", "--", path.name) != 0
+                or git("diff", "--quiet", "HEAD", "--", path.name) != 1):
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return Finding("warning", "uncommitted edits to a tracked config file; "
+                              f"move them into {overlay_path(path).name}")
+
+
 def _dotted(prefix: str, value: object) -> list[str]:
     if isinstance(value, dict) and value:
         names: list[str] = []
@@ -150,6 +195,9 @@ def _merge_mapping(base: dict, overlay: dict, *, top: bool = False) -> dict:
             merged[key] = _merge_mapping(held, value)
         else:
             merged[key] = value
+        other = SPELLINGS.get(key)
+        if other is not None and other not in overlay:
+            merged.pop(other, None)
     return merged
 
 
