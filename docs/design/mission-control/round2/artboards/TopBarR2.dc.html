@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Top bar R2</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<header style="width: 100%; background: #1a1b26; color: #c0caf5; font-family: 'Geist', ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.5">
+<div style="{{ topStyle }}">
+<div style="display: flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 15px; line-height: 1; font-weight: 600; letter-spacing: -0.01em; color: #ced8ff; white-space: nowrap">
+<span>Factory <b style="font-weight: 600; color: #acdc7e">Mission Control</b></span>
+<span aria-hidden="true" style="display: block; width: 8px"><dc-import name="PixelStrip" effect="caret" tint="{{ linkColor }}" rate="{{ caretRate }}" cell="4" strip-height="12" hint-size="8px,12px"></dc-import></span>
+</div>
+<nav aria-label="Pages" style="{{ navStyle }}">
+<sc-for list="{{ items }}" as="item" hint-placeholder-count="5">
+<a href="{{ item.href }}" aria-current="{{ item.cur }}" style="padding: {{ item.pad }}; font-size: 14px; line-height: 1.2; font-weight: 500; text-decoration: none; white-space: nowrap; color: {{ item.fg }}; background: {{ item.bg }}; box-shadow: {{ item.shadow }}">{{ item.label }}</a>
+</sc-for>
+</nav>
+<div role="status" style="{{ linkStyle }}"><span aria-hidden="true" style="width: 8px; height: 8px; background: {{ linkColor }}"></span><span>{{ linkText }}</span></div>
+<sc-if value="{{ desktop }}" hint-placeholder-val="{{ true }}">
+<div style="margin-left: auto; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; color: #8b93b8">snapshot <span style="color: {{ ageColor }}">{{ ageText }}</span> · <span style="color: #a9b1d6">15:10:22 UTC</span> · read-only, redacted</div>
+</sc-if>
+</div>
+<dc-import name="PixelStrip" effect="field" tint="{{ bandTint }}" load="0.35" still="{{ bandStill }}" seed="21" cell="4" strip-height="24" hint-size="100%,24px"></dc-import>
+<sc-if value="{{ showBar }}" hint-placeholder-val="{{ false }}">
+<div role="alert" style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 36px; box-sizing: border-box; padding: {{ rowPad }}; background: {{ barBg }}; border-bottom: 1px solid {{ barLine }}; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5">
+<span aria-hidden="true" style="flex: none; width: 12px; height: 16px; background: {{ barColor }}"></span>
+<b style="font-weight: 700; color: {{ barColor }}">{{ barHead }}</b>
+<span style="color: #a9b1d6">{{ barText }}</span>
+</div>
+</sc-if>
+<sc-if value="{{ isRow }}" hint-placeholder-val="{{ true }}">
+<div aria-label="Needs attention" role="region" style="display: flex; align-items: center; gap: 16px; height: 36px; box-sizing: border-box; padding: 0 24px; overflow: hidden; background: rgba(247,118,142,0.09); border-bottom: 1px solid rgba(247,118,142,0.45); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: nowrap">
+<div style="flex: none; display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 12px"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="4" strip-height="16" seed="5" hint-size="12px,16px"></dc-import></span>
+<a href="ActivityR2.dc.html" style="font-weight: 700; color: #f7768e; text-decoration: none">5 need attention</a>
+</div>
+<div style="flex: none; display: flex; align-items: baseline; gap: 6px; color: #8b93b8"><span style="color: #f7768e">2 down</span><span aria-hidden="true">·</span><span style="color: #f7768e">1 stuck</span><span aria-hidden="true">·</span><span style="color: #f7768e">1 no-waiter</span><span aria-hidden="true">·</span><span style="color: #ff9e64">1 stale</span></div>
+<span aria-hidden="true" style="flex: none; width: 1px; height: 16px; background: rgba(247,118,142,0.45)"></span>
+<div style="flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden">
+<span style="flex: none; display: inline-block; padding: 0 6px; border: 1px solid rgba(247,118,142,0.4); background: rgba(247,118,142,0.09); color: #f7768e; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em">down</span>
+<a href="SystemR2.dc.html" style="flex: none; font-weight: 600; color: #c0caf5; text-decoration: none">cloudflared tunnel @ box</a>
+<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #a9b1d6">8h 02m</span>
+</div>
+<div style="flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden">
+<span style="flex: none; display: inline-block; padding: 0 6px; border: 1px solid rgba(247,118,142,0.4); background: rgba(247,118,142,0.09); color: #f7768e; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em">down</span>
+<a href="SystemR2.dc.html" style="flex: none; font-weight: 600; color: #c0caf5; text-decoration: none">waiter cursor-bot @ box</a>
+<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #a9b1d6">never seen</span>
+</div>
+<a href="ActivityR2.dc.html" style="flex: none; margin-left: auto; font-weight: 600; color: #f7768e; text-decoration: none">+3 more →</a>
+</div>
+</sc-if>
+<sc-if value="{{ isCount }}" hint-placeholder-val="{{ false }}">
+<div aria-label="Needs attention" role="region" style="display: flex; align-items: center; gap: 12px; height: 36px; box-sizing: border-box; padding: {{ rowPadFlat }}; overflow: hidden; background: rgba(247,118,142,0.09); border-bottom: 1px solid rgba(247,118,142,0.45); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: nowrap">
+<span aria-hidden="true" style="display: block; width: 12px"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="4" strip-height="16" seed="5" hint-size="12px,16px"></dc-import></span>
+<a href="#attention" style="font-weight: 700; color: #f7768e; text-decoration: none">5 need attention</a>
+<span style="color: #8b93b8">listed below</span>
+</div>
+</sc-if>
+<sc-if value="{{ isPhoneStrip }}" hint-placeholder-val="{{ false }}">
+<a href="ActivityR2.dc.html" aria-label="5 need attention: 2 down, 1 stuck, 1 no-waiter, 1 stale. Open Activity." style="display: flex; align-items: center; gap: 10px; height: 36px; box-sizing: border-box; padding: 0 12px; overflow: hidden; background: rgba(247,118,142,0.09); border-bottom: 1px solid rgba(247,118,142,0.45); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: nowrap; text-decoration: none">
+<span aria-hidden="true" style="display: block; width: 12px"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="4" strip-height="16" seed="5" hint-size="12px,16px"></dc-import></span>
+<b style="font-weight: 700; color: #f7768e">5 need attention</b>
+<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #f7768e">2 down · 1 stuck · +2</span>
+<span aria-hidden="true" style="margin-left: auto; font-weight: 700; color: #f7768e">→</span>
+</a>
+</sc-if>
+</header>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"current":{"editor":"enum","options":["lanes","tickets","activity","efficiency","system"],"default":"lanes"},"strip":{"editor":"enum","options":["row","count","none"],"default":"row"},"fresh":{"editor":"enum","options":["live","stale","paused","lost"],"default":"live"},"phone":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":116}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var p = this.props;
+    var current = String(p.current || 'lanes');
+    var fresh = String(p.fresh || 'live');
+    var strip = String(p.strip || 'row');
+    var phone = p.phone === true || p.phone === 'true';
+    var mono = "font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; ";
+    var pages = [
+      ['lanes', 'Lanes', 'LanesR2.dc.html'],
+      ['tickets', 'Tickets', 'TicketsR2.dc.html'],
+      ['activity', 'Activity', 'ActivityR2.dc.html'],
+      ['efficiency', 'Efficiency', 'EfficiencyR2.dc.html'],
+      ['system', 'System', 'SystemR2.dc.html']
+    ];
+    var items = [];
+    for (var i = 0; i < pages.length; i++) {
+      var on = pages[i][0] === current;
+      items.push({
+        label: pages[i][1],
+        href: pages[i][2],
+        cur: on ? 'page' : 'false',
+        pad: phone ? '6px 8px' : '6px 12px',
+        fg: on ? '#ced8ff' : '#b7bfea',
+        bg: on ? '#24283b' : 'transparent',
+        shadow: on ? 'inset 0 -2px 0 #9ece6a' : 'none'
+      });
+    }
+    var states = {
+      live: ['LIVE', '#9ece6a', 1, '2s ago', '#a9b1d6'],
+      stale: ['STALE', '#ff9e64', 0.4, '9m 14s ago', '#ff9e64'],
+      paused: ['PAUSED · resuming', '#8b93b8', 0, '3m 40s ago', '#a9b1d6'],
+      lost: ['LINK LOST', '#f7768e', 0, '9m 14s ago', '#f7768e']
+    };
+    var s = states[fresh] || states.live;
+    var bars = {
+      stale: ['#ff9e64', 'rgba(255,158,100,0.09)', 'rgba(255,158,100,0.45)', 'Snapshot is 9m 14s old.',
+        'The dashboard writer last published at 10:01 AM ET. Everything below is as of then.'],
+      lost: ['#f7768e', 'rgba(247,118,142,0.09)', 'rgba(247,118,142,0.45)', 'Cannot reach the dashboard.',
+        'Showing the last snapshot, from 10:01 AM ET. Retrying every 5s.']
+    };
+    var b = bars[fresh] || null;
+    var linkText = s[0];
+    if (phone && fresh === 'live') linkText = 'LIVE · 2s';
+    if (phone && fresh === 'stale') linkText = 'STALE · 9m';
+    if (phone && fresh === 'paused') linkText = 'PAUSED';
+    return {
+      items: items,
+      desktop: !phone,
+      topStyle: phone
+        ? 'display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-height: 72px; box-sizing: border-box; padding: 8px 12px 6px'
+        : 'display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; min-height: 56px; box-sizing: border-box; padding: 8px 24px',
+      navStyle: phone
+        ? 'order: 3; flex: 1 0 100%; display: flex; gap: 0; margin: 0 -8px; overflow-x: auto'
+        : 'display: flex; flex-wrap: wrap; gap: 2px',
+      linkStyle: 'display: flex; align-items: center; gap: 8px; ' + (phone ? 'margin-left: auto; ' : '') + mono +
+        'font-size: 12px; line-height: 1; font-weight: 500; letter-spacing: 0.04em; white-space: nowrap; color: ' + s[1],
+      linkText: linkText,
+      linkColor: s[1],
+      caretRate: s[2],
+      ageText: s[3],
+      ageColor: s[4],
+      bandTint: fresh === 'live' ? '#9ece6a' : '#8b93b8',
+      bandStill: fresh === 'live' ? 'false' : 'true',
+      showBar: !!b,
+      barColor: b ? b[0] : '#ff9e64',
+      barBg: b ? b[1] : 'transparent',
+      barLine: b ? b[2] : 'transparent',
+      barHead: b ? b[3] : '',
+      barText: b ? b[4] : '',
+      rowPad: phone ? '6px 12px' : '6px 24px',
+      rowPadFlat: phone ? '0 12px' : '0 24px',
+      isRow: strip === 'row' && !phone,
+      isCount: strip === 'count',
+      isPhoneStrip: strip === 'row' && phone
+    };
+  }
+}
+</script>
+</body>
+</html>
