@@ -216,10 +216,13 @@ only new placement skips it, and `orch status` marks it `draining`. Do not
 use `enabled: false` for this: a disabled device's running jobs are lost and
 stopped (issue #679). Lowering `slot_max` below the running count also stops
 new placement without touching running jobs, but a slot frees as each job
-ends. Waiters read `machines.yml` only at start, so after the edit run
+ends. Waiters read `machines.yml` only at start, so after a hand edit run
 `deploy/waiter-service.sh <bot> restart` for each bot and
 `deploy/poller-service.sh restart`; neither stops a running job. Set
 `drain: false` (or remove the line) and restart them the same way to undo it.
+The Mission Control Settings page makes the same changes (`drain`, `enabled`
+and `slot_max`) and runs those restarts itself; see "Device settings" under
+"Dashboard".
 
 [`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
 moves the first queued job for that harness, in claim order (a priority tier
@@ -2115,9 +2118,66 @@ Threat model, in short:
   it right before posting `/ok <40-char sha>`: if it moved, nothing is
   posted and the page is told the new head. The OK is refused unless the
   snapshot row is `awaiting-ok`.
-- The server still writes nothing and has no chat path. Residual risk:
-  someone who gets Max to type their device code on github.com gets a
-  session as Max; only his own devices can start a sign-in.
+- The server writes nothing but settings request files (below) and has no
+  chat path. Residual risk: someone who gets Max to type their device code on
+  github.com gets a session as Max; only his own devices can start a sign-in.
+
+**Device settings (issue #777).** The Settings page (`settings.html`, in
+the nav) lists each `machines.yml` device: name, local or remote, enabled,
+`slot_max`, harnesses, slots held and drain state, with the last results of
+changes to it. Signed in as the approver, Max can turn `enabled` and `drain`
+on or off and set `slot_max` (1 to 64). Drain is the safe way to take a
+device out of placement; turning `enabled` off on a device that holds a
+running job is refused with "drain it first".
+
+The dashboard server never edits `machines.yml` or runs a script. It
+cannot reach the orch host, and the orch host's credentials stay there:
+
+1. With GitHub actions on, set `DASHBOARD_SETTINGS_SPOOL` in `http.env`.
+   `POST /api/settings` `{device, field, expect, value}` checks the session,
+   CSRF and approver login, the field and value, that the device is in the
+   served `status.json` and that `expect` is still its value there. It then
+   writes one request file, `<id>.json` (id, actor, time, device, field,
+   expect, value; no token or session), and answers 202. Without the
+   variable, `/api/settings` is 404; setting it without
+   `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error. At most 20
+   requests wait at once.
+2. Each `self-heal.sh once` pass on the orch host runs `orch settings apply
+   --state <state dir>` after `orch heal deploy` and before health. It reads
+   the spool over the push's SSH alias when `dashboard.push.host` is set
+   (before #708, the box reading the PC), else as a local directory (after
+   #708, when the PC is the orch host). It trusts a request file only if
+   `dashboard.settings.spool_owner` owns it and neither it nor the spool is
+   group- or world-writable, so a bot that can read the spool cannot forge a
+   request.
+3. A request applies only if its actor is `dashboard.settings.approver` and
+   not a bot, the device and value are valid, the field is not set in
+   `machines.local.yml`, `expect` still matches the file, and the edited
+   file parses with exactly that one field changed. Then it copies
+   `machines.yml` to `machines.yml.bak-settings-<UTC stamp>` beside it,
+   replaces the one line (comments and other devices stay byte for byte)
+   and restarts the poller, then each waiter this account owns, through the
+   same scripts and environment as `orch heal`. Neither restart stops a
+   running job. A failed restart restores the backup and restarts again.
+   Every request, applied, refused or failed, adds one line to
+   `settings-audit.jsonl` in the state dir (actor, request and apply times,
+   device, field, previous and new values, result, error, backup), and the
+   next push shows it on the page. An id is never applied twice.
+
+Setup, by Max: create the spool as an absolute directory, not a symlink,
+owned by the dashboard user with mode 0755; the account the push SSH logs in
+as needs read access. Then add to the orch host's `orch.yml` (or
+`orch.local.yml`):
+
+```yaml
+dashboard:
+  settings:
+    spool: /home/factory-dash/settings-spool
+    spool_owner: factory-dash
+    approver: maxharris1
+```
+
+Without this block, `orch settings apply` does nothing.
 
 ## Local config overlay
 
