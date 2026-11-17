@@ -306,8 +306,6 @@ def _escalation(key: KeyState, attempts: list[float], now: float, *, broken: boo
 
 
 def _record_restart(key: KeyState, action: Action, version: str, code: int, now: float) -> None:
-    """Rule 5: a successful stale-code restart toward a commit not tried
-    before is a version update, so it stays out of attempts."""
     key.restarted_at = now
     if code != 0:
         key.failures = _recent(key.failures, now) + [now]

@@ -477,7 +477,6 @@ POLLER = "poller @ box"
 
 
 def moved(running: str, checkout: str, name: str = "poller", **kw) -> dict:
-    """A report whose checkout is `checkout`, with one component running `running`."""
     item = component(name, bot=kw.pop("bot", ""), version=running, **kw)
     item["stale_code"] = running != checkout
     return {"known": True, "code_version": checkout, "components": [item]}
