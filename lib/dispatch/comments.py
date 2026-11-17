@@ -11,6 +11,7 @@ from lib.dispatch.constants import FINISHED_STATES, WATCHED_STATES
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
     _acted_verdict,
+    _base_mismatch,
     _comment_order,
     _holds,
     _matching_head,
@@ -54,7 +55,8 @@ class CommentsMixin:
             else:
                 self._reject_route(ticket, error)
             return
-        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        self._polled[key] = ticket
         try:
             self._title_pull(ticket)
         except Exception as exc:
@@ -69,12 +71,12 @@ class CommentsMixin:
             self._cancel_answered_jobs(ticket)
             self._redrive_handoffs(ticket)
             self._process_comments(ticket, comments)
+            if _base_mismatch(self._polled.get(key, ticket)) is not None:
+                return
             self._requeue_unanswered_jobs(ticket)
             self._requeue_refused_reviews(ticket)
             self._review_after_green_rerun(ticket)
-            self._reconcile_handoff(
-                self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
-            )
+            self._reconcile_handoff(self._polled.get(key, ticket))
         except BaseException as error:
             try:
                 self._settle_external_ships(ticket)
@@ -119,6 +121,8 @@ class CommentsMixin:
             # A ready may re-read the ticket uncached (T2); later comments
             # then see the fresh head.
             ticket = self._polled.get(key, ticket)
+            if _base_mismatch(ticket) is not None:
+                return
             if self._is_handled(ticket, comment.id):
                 continue
             if self._is_abandoned(ticket.repo, ticket.ticket_id):

@@ -400,6 +400,42 @@ def test_a_ready_whose_fresh_read_shows_another_base_starts_no_review(tmp_path: 
     assert len(board.jobs("review")) == 1
 
 
+def test_a_fresh_base_mismatch_stops_later_comments_in_the_same_poll(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    on_live_base(board, lambda pr, read, fresh: replace(read, pr_base=FEATURE))
+    pr = board.open("42", sha(1))
+    board.go(pr, "go-42")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, sha(1))
+    board.poll()
+    board.finish("codex")
+    on_live_base(
+        board,
+        lambda pr, read, fresh: replace(
+            read,
+            pr_base="dev" if fresh else FEATURE,
+            current_head=sha(2) if fresh else sha(1),
+        ),
+    )
+    pr.push(sha(2))
+    ready = board.ready(pr, sha(2))
+    board.post(
+        pr,
+        "late-verdict",
+        VERDICT.format(round="1/3", head=sha(1), verdict="REVISE", risk="high"),
+        "codex-login",
+    )
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert board.outcome("late-verdict") is None
+    assert board.jobs("fix") == []
+    assert attention(tmp_path)["base-mismatch"] == (
+        f"PR #42 targets dev; the ticket base is {FEATURE}"
+    )
+
+
 def job_events(tmp_path: Path, event: str) -> list[str]:
     with sqlite3.connect(tmp_path / "d.db") as connection:
         return [

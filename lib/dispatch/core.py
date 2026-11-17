@@ -278,8 +278,8 @@ class DispatcherBase:
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         """Every read outside the poll's snapshot passes here: one showing
         a watched PR closed unmerged abandons it (#130), and one showing an
-        open PR on another base raises BaseMismatch, before anything acts
-        on the read."""
+        open PR on another base becomes the poll's ticket and raises
+        BaseMismatch, before anything acts on the read."""
         if fresh is None or fresh.merged:
             return fresh
         if fresh.closed:
@@ -288,6 +288,7 @@ class DispatcherBase:
             return fresh
         mismatch = self._sync_base_mismatch(fresh)
         if mismatch is not None:
+            self._polled[(fresh.repo.lower(), fresh.ticket_id)] = fresh
             raise BaseMismatch(mismatch, fresh)
         return fresh
 
