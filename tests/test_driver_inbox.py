@@ -1,10 +1,13 @@
+import inspect
 import sqlite3
+import typing
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib import cli
+from lib.dispatch.types import ReviewActions
 from lib.dispatcher import Dispatcher
 from lib.github_actions import GhResult, GitHubAdapterError
 from lib.grok_delivery import GrokDeliveryError
@@ -371,3 +374,11 @@ def test_the_poller_needs_a_grok_block_only_while_a_project_keeps_the_webhook(
     route = dispatcher.wake_routes["acme/widgets"]
     assert route.driver_inbox == DriverInbox("acme/widgets", 5)
     assert route.grok_webhook is False
+
+
+def test_every_review_action_takes_a_ticket_first() -> None:
+    for name in (name for name in vars(ReviewActions) if not name.startswith("_")):
+        method = getattr(ReviewActions, name)
+        first = list(inspect.signature(method).parameters)[1]
+        hints = typing.get_type_hints(method)
+        assert hints[first].__name__ == "TrackedTicket", name
