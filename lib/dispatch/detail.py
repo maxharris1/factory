@@ -338,10 +338,7 @@ class DetailMixin:
         ).reviewed_head
 
     def _fresh_issue(self, ticket: TrackedTicket) -> TrackedTicket:
-        """#631: the ticket with its source issue re-read for review or fix
-        evidence, since work can queue with no new comment since the poll's
-        cached read. Callers run it before BEGIN IMMEDIATE so the GitHub read
-        never holds the queue's write lock."""
+        """Call before BEGIN IMMEDIATE: the GitHub read must not hold the queue's write lock."""
         if ticket.read_issue_body is None:
             return ticket
         body = ticket.read_issue_body()

@@ -1608,9 +1608,6 @@ class LivePollSource:
         pull: Mapping[str, Any],
         comments: Sequence[Comment],
     ) -> str | None:
-        """#495: the source issue's body, read once per PR head and newest PR
-        comment. A read that fails is recorded and left None."""
-
         try:
             newest = comments[-1].id if comments else None
             return self._per_head(
@@ -1621,9 +1618,6 @@ class LivePollSource:
             return None
 
     def _issue_reader(self, repo: str, number: str, source: str) -> Callable[[], str | None]:
-        """#631: an uncached read of the source issue, for evidence built
-        after the poll; a ticket can queue work with no new comment."""
-
         def read() -> str | None:
             try:
                 return self._issue_body(repo, source, fresh=True)
