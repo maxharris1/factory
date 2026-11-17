@@ -173,10 +173,10 @@ class S3Storage:
             raise ValueError("endpoint must be an http or https URL")
         self.bucket = bucket
         self.region = region
-        self._endpoint = endpoint
         self._origin = f"{parts.scheme}://{parts.netloc}"
         self._host = _host(endpoint)
-        self._base_path = parts.path
+        # The endpoint path is already in wire form, so only the bucket is encoded.
+        self._bucket_path = f"{parts.path}/{_uri_encode(bucket, keep_slash=False)}"
         self._access_key_id = access_key_id
         self._secret_key = secret_key
         self._opener = opener
@@ -225,13 +225,13 @@ class S3Storage:
             "x-amz-date": amz_date,
             "x-amz-signature": signature,
         }
-        url = f"{self._endpoint}/{_uri_encode(self.bucket, keep_slash=False)}"
+        url = f"{self._origin}{self._bucket_path}"
         return UploadLink(key=key, max_bytes=max_bytes, expires_s=expires_s, url=url, fields=fields)
 
     def sign_download(self, key: str, expires_s: int) -> DownloadLink:
         _check_key(key)
         _check_expires(expires_s)
-        path = _uri_encode(f"{self._base_path}/{self.bucket}/{key}", keep_slash=True)
+        path = f"{self._bucket_path}/{_uri_encode(key, keep_slash=True)}"
         query = _presign_query(host=self._host, encoded_path=path, region=self.region,
                                access_key=self._access_key_id, secret_key=self._secret_key,
                                when=self._now().astimezone(timezone.utc), expires_s=expires_s)
