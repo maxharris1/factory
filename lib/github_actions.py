@@ -376,6 +376,23 @@ class GitHubReviewActions:
         endpoint = f"{_repo_path(ticket.repo)}/git/ref/heads/{_branch(branch)}"
         return _ref_sha(_object(self._json(endpoint)), branch)
 
+    def commits_ahead(self, ticket: TrackedTicket, *, base: str, head: str) -> int:
+        base = quote(_branch(base), safe="/")
+        compare = f"{_repo_path(ticket.repo)}/compare/{base}...{_sha(head, 'head')}"
+        ahead = _object(self._json(compare)).get("ahead_by")
+        if type(ahead) is not int:
+            raise GitHubAdapterError("the compare response has no ahead_by count")
+        return ahead
+
+    def reopen(self, ticket: TrackedTicket) -> None:
+        self._call(
+            "-X",
+            "PATCH",
+            f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}",
+            "-f",
+            "state=open",
+        )
+
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
         self._mark_ready(ticket, head)
         return None

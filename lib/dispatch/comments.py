@@ -47,6 +47,8 @@ class CommentsMixin:
     def _process(self, ticket: TrackedTicket) -> None:
         self._remember_links(ticket, ticket.comments)
         self._remember_no_ci_base(ticket)
+        if self._reopen_emptied_pull(ticket):
+            return
         try:
             ticket = self._routed(ticket)
         except RouteError as error:

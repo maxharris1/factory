@@ -8088,3 +8088,255 @@ def test_go_on_a_stuck_ticket_is_still_ticket_stuck(tmp_path: Path) -> None:
 
     assert handled_outcome(queue, "go-1") == "ticket-stuck"
     assert queued_harness_jobs(queue) == []
+
+
+BASE_705 = "c5e4c1226609516c5d948c7784c8309a61fbf698"
+REBUILT_705 = "8edaf0dfc7ad46922b9adc4fd635c7feca92e3e2"
+BRANCH_705 = "factory/issue-42"
+
+
+class BranchActions705(FakeReviewActions):
+    def __init__(self, tip: str, ahead: int) -> None:
+        super().__init__()
+        self.tip = tip
+        self.ahead = ahead
+        self.reopened: list[str] = []
+
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        assert branch == ticket.git_branch_name
+        return self.tip
+
+    def commits_ahead(self, ticket: TrackedTicket, *, base: str, head: str) -> int:
+        assert (base, head) == (ticket.pr_base, self.tip)
+        return self.ahead
+
+    def reopen(self, ticket: TrackedTicket) -> None:
+        self.reopened.append(ticket.ticket_id)
+
+
+def _pr_705(*comments: Comment, head: str, closed: bool, commits: int) -> TrackedTicket:
+    return replace(
+        ticket(*comments, head=head, ci={head: CIResult("success")}),
+        git_branch_name=BRANCH_705,
+        pr_number="42",
+        pr_base="main",
+        closed=closed,
+        pr_commits=commits,
+    )
+
+
+def _running_build_705(queue: SQLiteJobQueue, *, attempt: int = 1, key: str = "build:705") -> Job:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-705",
+            timeout_seconds=3600,
+            attempt=attempt,
+        ),
+        dedupe_key=key,
+    )
+    job = queue.claim("claude")
+    assert job is not None
+    return job
+
+
+def _jobs_705(queue: SQLiteJobQueue) -> list[tuple[str, str, int]]:
+    with queue.connect() as connection:
+        return [
+            (row["action"], row["state"], row["attempt"])
+            for row in connection.execute(
+                "SELECT action, state, attempt FROM jobs ORDER BY created_at, rowid"
+            )
+        ]
+
+
+def _stuck_705(queue: SQLiteJobQueue) -> tuple[int, str | None]:
+    with queue.connect() as connection:
+        row = connection.execute("SELECT stuck, stuck_reason FROM ticket_state").fetchone()
+    return (0, None) if row is None else (row["stuck"], row["stuck_reason"])
+
+
+@pytest.mark.job_bound
+def test_705_ac1_poller_reopens_an_emptied_pr_whose_branch_is_ahead_again(
+    tmp_path: Path,
+) -> None:
+    actions = BranchActions705(REBUILT_705, ahead=9)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+
+    dispatcher.process(_pr_705(head=BASE_705, closed=True, commits=0))
+    assert actions.reopened == ["42"]
+
+    ready = comment("ready-705", READY.format(head=REBUILT_705), author="claude-login")
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+    dispatcher.process(_pr_705(ready, head=REBUILT_705, closed=False, commits=9))
+
+    assert _outcomes(queue)["ready-705"] == "queued-review"
+    assert ("review", "queued", 1) in _jobs_705(queue)
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize(
+    ("commits", "tip", "ahead"),
+    [
+        (3, REBUILT_705, 9),
+        (0, BASE_705, 0),
+        (0, REBUILT_705, 0),
+    ],
+    ids=["closed-by-a-person", "branch-still-at-base", "branch-behind-base"],
+)
+def test_705_ac1_poller_leaves_other_closed_prs_closed(
+    tmp_path: Path, commits: int, tip: str, ahead: int
+) -> None:
+    actions = BranchActions705(tip, ahead=ahead)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    _running_build_705(queue)
+
+    dispatcher.process(_pr_705(head=BASE_705, closed=True, commits=commits))
+
+    assert actions.reopened == []
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("closed", [True, False])
+def test_705_ac2_ready_at_the_base_is_rejected_and_the_build_requeued_at_the_same_attempt(
+    tmp_path: Path, closed: bool
+) -> None:
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+    ready = comment("ready-base", READY.format(head=BASE_705), author="claude-login")
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+
+    dispatcher.process(_pr_705(ready, head=BASE_705, closed=closed, commits=0))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
+    assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+    assert _stuck_705(queue) == (0, None)
+
+
+@pytest.mark.job_bound
+def test_705_ac2_a_failed_build_whose_ready_was_at_the_base_spends_no_attempt(
+    tmp_path: Path,
+) -> None:
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+    queue.finish(build.id, owner="claude", handoff_comment_id=None)
+    ready = comment(
+        "ready-base", READY.format(head=BASE_705), author="claude-login", created_at=150
+    )
+    pr = _pr_705(ready, head=BASE_705, closed=True, commits=0)
+
+    for _ in range(2):
+        dispatcher.process(pr)
+        dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
+    assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+    assert _stuck_705(queue) == (0, None)
+
+
+@pytest.mark.job_bound
+def test_705_ac2_a_second_ready_at_the_base_marks_the_ticket_stuck(tmp_path: Path) -> None:
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    first = _running_build_705(queue)
+    ready = comment("ready-base", READY.format(head=BASE_705), author="claude-login")
+    queue.finish(first.id, owner="claude", handoff_comment_id=ready.id)
+    dispatcher.process(_pr_705(ready, head=BASE_705, closed=True, commits=0))
+
+    again = queue.claim("claude")
+    assert again is not None and again.request.attempt == 1
+    ready_again = comment(
+        "ready-base-2", READY.format(head=BASE_705), author="claude-login", created_at=2
+    )
+    queue.finish(again.id, owner="claude", handoff_comment_id=ready_again.id)
+    dispatcher.process(_pr_705(ready, ready_again, head=BASE_705, closed=True, commits=0))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base-2"] == "rejected-ready-at-base"
+    assert _stuck_705(queue) == (1, "ready-at-base-2")
+    assert [job for job in _jobs_705(queue) if job[0] == "build"] == [
+        ("build", "done", 1),
+        ("build", "done", 1),
+    ]
+
+
+@pytest.mark.job_bound
+def test_705_ac1_a_ready_job_done_accepted_while_the_pr_was_frozen_is_reviewed_after_reopen(
+    tmp_path: Path, _fake_gh_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from lib.factory_md import PreReady
+    from lib.job_token import PROOF_ENV
+    from tests.handoff_store import serve
+    from tests.pool_helpers import CLAIM_PROOF
+    from tests.test_job_done_checks import done_with, pre_ready_setup
+
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
+    db, build, orch, work = pre_ready_setup(tmp_path, _fake_gh_store, monkeypatch, "true")
+    rebuilt = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    serve(
+        _fake_gh_store,
+        "repos/owner/repo/pulls/7",
+        {
+            "number": 7,
+            "state": "closed",
+            "merged": False,
+            "commits": 0,
+            "head": {"sha": BASE_705, "ref": BRANCH_705},
+        },
+    )
+    serve(_fake_gh_store, f"repos/owner/repo/git/ref/heads/{BRANCH_705}", {"object": {"sha": rebuilt}})
+
+    assert done_with(db, build, orch) == 0
+
+    queue = SQLiteJobQueue(db, clock=time.time)
+    actions = BranchActions705(rebuilt, ahead=1)
+    dispatcher = Dispatcher(
+        db,
+        queue,
+        trusted_logins={"github": {"maxharris1": {"claude-bot"}}, "linear": {}},
+        review_actions=actions,
+        grok_delivery=FakeGrokDelivery(),
+    )
+    ready = comment("1101", READY.format(head=rebuilt), author="maxharris1", created_at=queue.now() + 1)
+
+    def pr(head: str, *, closed: bool, commits: int) -> TrackedTicket:
+        value = _pr_705(ready, head=head, closed=closed, commits=commits)
+        return replace(value, factory=replace(value.factory, pre_ready=PreReady("true", 30)))
+
+    dispatcher.process(pr(BASE_705, closed=True, commits=0))
+    assert actions.reopened == ["42"]
+    dispatcher.process(pr(rebuilt, closed=False, commits=1))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["1101"] == "queued-review"
+    assert _jobs_705(queue) == [("build", "done", 1), ("review", "queued", 1)]
+
+
+@pytest.mark.job_bound
+def test_705_ac2_a_ready_whose_fresh_read_is_at_the_base_is_rejected(tmp_path: Path) -> None:
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+    ready = comment("ready-base", READY.format(head=BASE_705), author="claude-login")
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('owner/repo', '42', 'github', 0)")
+    dispatcher._fresh_reader = lambda ref: _pr_705(ready, head=BASE_705, closed=True, commits=0)
+
+    dispatcher.process(_pr_705(ready, head=REBUILT_705, closed=False, commits=9))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
+    assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+    assert _stuck_705(queue) == (0, None)

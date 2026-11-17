@@ -388,6 +388,34 @@ def test_branch_tip_raises_on_anything_but_a_full_lowercase_sha(mutate: str) -> 
         actions.branch_tip(pr(), "main")
 
 
+def test_commits_ahead_reads_ahead_by_from_the_compare_of_base_and_head() -> None:
+    actions, gh = adapter()
+    compare = (f"{REPO}/compare/release/v1...{HEAD}",)
+    gh.route(compare, GhResult(0, json.dumps({"ahead_by": 9, "behind_by": 0}), ""))
+
+    assert actions.commits_ahead(pr(), base="release/v1", head=HEAD) == 9
+    assert gh.keys() == [compare]
+
+
+@pytest.mark.parametrize("body", [{}, {"ahead_by": "9"}, {"ahead_by": None}])
+def test_commits_ahead_raises_without_an_integer_ahead_by(body: dict[str, object]) -> None:
+    actions, gh = adapter()
+    gh.route((f"{REPO}/compare/main...{HEAD}",), GhResult(0, json.dumps(body), ""))
+
+    with pytest.raises(GitHubAdapterError):
+        actions.commits_ahead(pr(), base="main", head=HEAD)
+
+
+def test_reopen_patches_the_pull_state_to_open() -> None:
+    actions, gh = adapter()
+    reopen = ("-X", "PATCH", f"{REPO}/pulls/42", "-f", "state=open")
+    gh.route(reopen, GhResult(0, "{}", ""))
+
+    actions.reopen(pr())
+
+    assert gh.keys() == [reopen]
+
+
 @pytest.mark.parametrize(
     ("fixture", "head", "expected"),
     [
