@@ -969,7 +969,7 @@ def _route(args: Sequence[str]) -> str:
             arg
             for index, arg in enumerate(args)
             if not arg.startswith("-")
-            and (index == 0 or args[index - 1] not in ("-X", "-f", "-F", "--cache"))
+            and (index == 0 or args[index - 1] not in ("-X", "-f", "-F", "-H", "--cache"))
         ),
         "",
     )

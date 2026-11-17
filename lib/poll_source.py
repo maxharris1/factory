@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 from bisect import bisect_right
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
@@ -59,6 +60,7 @@ from lib.github_actions import (
     LinearReviewActions,
     Runner,
     _is_read,
+    _route,
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
@@ -134,6 +136,8 @@ GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
 READ_DEADLINE_SECONDS = 30.0
+TRACKED_READ_BUDGET_SECONDS = 120.0
+CYCLE_ERROR_DETAILS = 5
 HANG_STRIKES = 2
 LINEAR_CUTOFF_MARGIN_SECONDS = 1.0
 LINEAR_REQUESTS_PER_HOUR = 2_500
@@ -427,6 +431,7 @@ class LivePollSource:
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
         read_deadline_seconds: float = READ_DEADLINE_SECONDS,
+        tracked_read_budget_seconds: float = TRACKED_READ_BUDGET_SECONDS,
         risks: IntakeRisks | None = None,
         fed_pulls: FedPulls | None = None,
     ):
@@ -444,6 +449,7 @@ class LivePollSource:
         self.sleep = sleep
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
         self.read_deadline_seconds = read_deadline_seconds
+        self.tracked_read_budget_seconds = tracked_read_budget_seconds
         self._hangs: dict[str, int] = {}
         self._linear_calls = _Abandoning(HANG_STRIKES)
         self._trusted = {
@@ -468,7 +474,7 @@ class LivePollSource:
         self._linear_complexity = 0
         self._linear_candidate_cursor: tuple[str, str] | None = None
         self._linear_tracked_cursor: tuple[str, str] | None = None
-        self._cycle_errors: dict[str, int] = {}
+        self._cycle_errors: list[tuple[str, str, str]] = []
         self._cycle_deferrals: dict[str, int] = {}
         # Linear webhook mode (orch.yml linear_webhook). With no webhook
         # configured none of this is read and every cycle is as before.
@@ -555,7 +561,7 @@ class LivePollSource:
             self._linear_requests = 0
             self._linear_complexity = 0
         self._cycles_until_linear -= 1
-        self._cycle_errors = {}
+        self._cycle_errors = []
         self._cycle_deferrals = {}
         self._hangs = {}
         if self.config.linear_webhook is not None:
@@ -646,12 +652,18 @@ class LivePollSource:
             )
         self._cycle_deferrals = {}
         if self._cycle_errors:
-            sources = ", ".join(
-                f"{source} x{count}" for source, count in sorted(self._cycle_errors.items())
-            )
+            counts = Counter(repo for repo, _, _ in self._cycle_errors)
+            sources = ", ".join(f"{source} x{count}" for source, count in sorted(counts.items()))
+            details = [
+                f"{repo} {reason}" if ticket_id == "-" else f"{repo}#{ticket_id} {reason}"
+                for repo, ticket_id, reason in self._cycle_errors[:CYCLE_ERROR_DETAILS]
+            ]
+            more = len(self._cycle_errors) - CYCLE_ERROR_DETAILS
+            if more > 0:
+                details.append(f"+{more} more")
             raise PollCycleError(
-                f"poll cycle recorded {sum(self._cycle_errors.values())} source error(s): "
-                f"{sources}"
+                f"poll cycle recorded {len(self._cycle_errors)} source error(s): "
+                f"{sources}; " + "; ".join(details)
             )
 
     def github_candidates(
@@ -747,11 +759,11 @@ class LivePollSource:
             return self._searched_candidates(projects, query, exclude, reserve)
         found: tuple[TrackedTicket, ...] = ()
         if self._reconcile_due():
-            errors = sum(self._cycle_errors.values())
+            errors = len(self._cycle_errors)
             deferrals = sum(self._cycle_deferrals.values())
             found = self._searched_candidates(projects, query, exclude, reserve)
             if (
-                sum(self._cycle_errors.values()) == errors
+                len(self._cycle_errors) == errors
                 and sum(self._cycle_deferrals.values()) == deferrals
             ):
                 self._last_reconcile = self.clock()
@@ -925,6 +937,7 @@ class LivePollSource:
             + linear_refs[:start]
             + [ref for ref in tickets if ref.tracker != "linear"]
         )
+        spent: dict[str, float] = {}
         for ref in ordered:
             project = projects.get(ref.repo.lower())
             if project is None:
@@ -932,6 +945,13 @@ class LivePollSource:
                     # Its repo left orch.yml: never read, so ack its dirty rows.
                     self._note_unread(ref.ticket_id)
                 continue
+            repo = ref.repo.lower()
+            if spent.get(repo, 0.0) >= self.tracked_read_budget_seconds:
+                # Like the Linear budget deferral: unread and unacked, so a
+                # dirty Linear row is read on the next cycle.
+                self._defer(f"tracked-read budget deferred {project.repo}")
+                continue
+            started = self.clock()
             try:
                 ticket = self._tracked_ticket(ref, project)
             except Exception as exc:
@@ -940,6 +960,8 @@ class LivePollSource:
             else:
                 if ticket is not None:
                     found.append(ticket)
+            finally:
+                spent[repo] = spent.get(repo, 0.0) + self.clock() - started
         return tuple(found)
 
     def _tracked_ticket(
@@ -2003,9 +2025,10 @@ class LivePollSource:
             )
             if _is_rate_limited(status, result.stdout, result.stderr):
                 self._backoff_until = now + BACKOFF_SECONDS
+            route = f"gh api {_route(args)}"
             if status is not None:
-                raise PollSourceError(f"gh returned HTTP {status}")
-            raise PollSourceError(f"gh exited {result.returncode}")
+                raise PollSourceError(f"{route} returned HTTP {status}")
+            raise PollSourceError(f"{route} exited {result.returncode}")
         if not conditional:
             return result.stdout
         status, headers, body = (
@@ -2054,6 +2077,7 @@ class LivePollSource:
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         self._check_hangs("github")
+        route = f"gh api {_route(argv[argv.index('api') + 1 :])}" if "api" in argv else "gh"
         with self._timed(_gh_source(argv)):
             deadline = self.clock() + self.read_deadline_seconds
             attempt = 1
@@ -2066,11 +2090,11 @@ class LivePollSource:
                     if attempt >= GH_CALL_ATTEMPTS or deadline - self.clock() <= pause:
                         self._hung("github")
                         raise RetryablePollSourceError(
-                            f"gh api timed out after {attempt} attempts"
+                            f"{route} timed out after {attempt} attempts"
                         ) from None
                 except OSError as exc:
                     raise PollSourceError(
-                        f"gh could not run: {type(exc).__name__}"
+                        f"{route} could not run: {type(exc).__name__}"
                     ) from exc
                 self.sleep(pause)
                 attempt += 1
@@ -2098,15 +2122,14 @@ class LivePollSource:
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
-        self._cycle_errors[repo] = self._cycle_errors.get(repo, 0) + 1
-        if self.error_sink is None:
-            return
         reason = _safe_reason(exc)
         for name in _secret_env_names(self.config):
             value = self.environ.get(name)
             if value:
                 reason = reason.replace(value, "<secret>")
-        self.error_sink(repo, ticket_id, reason)
+        self._cycle_errors.append((repo, ticket_id, reason))
+        if self.error_sink is not None:
+            self.error_sink(repo, ticket_id, reason)
 
 
 class _Abandoning:
@@ -2332,12 +2355,15 @@ def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
 def _safe_reason(exc: Exception) -> str:
     """The poll_errors text for a source error. A PollSourceError's message
     is built here from safe parts; any other error keeps its kind and gets
-    its message scrubbed."""
+    its message scrubbed. A GitHub adapter error's safe_detail names the
+    failing route, so it stands in for the message."""
     if isinstance(exc, PollSourceError):
         return f"PollSourceError:{str(exc)}"
-    status = _status_code(str(exc))
+    safe = getattr(exc, "safe_detail", None)
+    text = safe if isinstance(safe, str) and safe else str(exc)
+    status = _status_code(text)
     kind = type(exc).__name__ if status is None else f"{type(exc).__name__}:HTTP-{status}"
-    detail = scrub_detail(str(exc))
+    detail = scrub_detail(text)
     return f"{kind}: {detail}" if detail else kind
 
 

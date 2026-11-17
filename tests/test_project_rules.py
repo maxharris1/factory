@@ -162,7 +162,7 @@ def test_round_caps_come_from_factory_md(tmp_path: Path) -> None:
             Project("acme/widgets", factory_ref="main"),
             FACTORY.format(tickets="github", ship="merge"),
             True,
-            "gh returned HTTP 404",
+            "gh api GET contents/factory.md returned HTTP 404",
         ),
     ],
     ids=["invalid-front-block", "no-factory-ref", "base-branch-mismatch", "gh-failure"],
