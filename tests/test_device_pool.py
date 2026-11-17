@@ -7,7 +7,7 @@ from types import MappingProxyType
 import pytest
 
 from lib import device_pool, device_sync
-from lib.device_pool import DevicePool, choose_device
+from lib.device_pool import DevicePool, Orphan, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.test_dispatcher import GO, comment, setup, ticket
@@ -582,3 +582,25 @@ def test_a_device_with_no_sync_row_stays_placeable(tmp_path: Path) -> None:
     claimed = pool.claim("claude")
     assert claimed is not None and claimed[1].device == "mac"
     assert device_pool.free_slots(pool.config, "claude", {}, device_pool.placement_blocks(queue)) == 2
+
+
+def test_orphans_are_read_and_forgotten_and_a_missing_table_reads_empty(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 2, "codex"))
+    assert pool.orphans() == []
+    pool.forget_orphan("never-lost")
+    enqueue(queue, "codex", "1")
+    enqueue(queue, "codex", "2")
+    first, _ = pool.claim("codex")
+    second, _ = pool.claim("codex")
+    pool.attach_worker(first.id, owner="codex", remote=True, tag="t" * 32)
+    with queue.connect() as connection:
+        device_pool.orphan_slot(connection, second.id, 300.0)
+        device_pool.orphan_slot(connection, first.id, 200.0)
+
+    assert pool.orphans() == [
+        Orphan(first.id, "pc", "codex", "codex-bot", "t" * 32, 200.0),
+        Orphan(second.id, "pc", "codex", "codex-bot", None, 300.0),
+    ]
+
+    pool.forget_orphan(first.id)
+    assert [orphan.job_id for orphan in pool.orphans()] == [second.id]

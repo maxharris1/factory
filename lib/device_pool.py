@@ -39,8 +39,10 @@ token the job's current `orch job run` holds (never the token itself). The
 contact and when it began failing, for the lost check (#662). #460
 adds `device_backoff`: a device whose start preflight could not reach it
 takes no new placement, for any harness, until its `until` time. #662
-adds `device_orphans`: the slot of a job lost with its unreachable device,
-moved there so the slot is free while its worker may still run.
+adds `device_orphans`: the slot of a job lost with its device, moved there
+so the slot is free while its worker may still run. #679 reads it back:
+the monitor stops that worker once its device answers and forgets the row
+once the worker is gone.
 
 This module starts nothing and contacts no device.
 """
@@ -122,6 +124,18 @@ class HeldSlot:
 
     placement: Placement
     job_state: str | None
+
+
+@dataclass(frozen=True)
+class Orphan:
+    """A lost job's worker that may still run on its device (#662, #679)."""
+
+    job_id: str
+    device: str
+    harness: str
+    os_user: str
+    worker_tag: str | None
+    lost_at: float
 
 
 def choose_device(
@@ -637,6 +651,31 @@ class DevicePool:
         where = f"WHERE device NOT IN ({marks})" if kept else ""
         with self.queue.connect() as connection:
             connection.execute(f"DELETE FROM {HEALTH_TABLE} {where}", kept)
+
+    def orphans(self) -> list[Orphan]:
+        """Every device_orphans row, oldest loss first."""
+        with self.queue.connect() as connection:
+            if not _has_table(connection, ORPHANS_TABLE):
+                return []
+            rows = connection.execute(
+                f"SELECT * FROM {ORPHANS_TABLE} ORDER BY lost_at, job_id"
+            ).fetchall()
+        return [
+            Orphan(
+                job_id=str(row["job_id"]),
+                device=str(row["device"]),
+                harness=str(row["harness"]),
+                os_user=str(row["os_user"]),
+                worker_tag=_text(row["worker_tag"]),
+                lost_at=float(row["lost_at"]),
+            )
+            for row in rows
+        ]
+
+    def forget_orphan(self, job_id: str) -> None:
+        with self.queue.connect() as connection:
+            if _has_table(connection, ORPHANS_TABLE):
+                connection.execute(f"DELETE FROM {ORPHANS_TABLE} WHERE job_id = ?", (job_id,))
 
     def _update_slot(
         self,

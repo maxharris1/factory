@@ -62,6 +62,7 @@ class MonitorResult:
     released: tuple[str, ...] = ()
     stopped: tuple[str, ...] = ()
     lost: tuple[str, ...] = ()
+    forgotten: tuple[str, ...] = ()
 
 
 def remote_target(
@@ -119,9 +120,12 @@ class DeviceMonitor:
         released: list[str] = []
         stopped: list[str] = []
         lost: list[str] = []
+        forgotten: list[str] = []
         groups: dict[str, list[HeldSlot]] = {}
         for slot in self.pool.held():
             groups.setdefault(slot.placement.device, []).append(slot)
+        for orphan in self.pool.orphans():
+            groups.setdefault(orphan.device, [])
         for name, slots in groups.items():
             device = self.config.device(name)
             if device is None:
@@ -132,8 +136,9 @@ class DeviceMonitor:
                         self._release(slot, released)
                 continue
             self._remote(device, slots, now, lost_after, on_lost, released, stopped, lost)
+            self._sweep_orphans(device, stopped, forgotten)
         self.pool.forget_health(keep=self.pool.used().keys())
-        return MonitorResult(tuple(released), tuple(stopped), tuple(lost))
+        return MonitorResult(tuple(released), tuple(stopped), tuple(lost), tuple(forgotten))
 
     def liveness(self, placement: Placement) -> Liveness:
         """Is the job's recorded runner gone, and then its worker? (job_state)"""
@@ -215,6 +220,27 @@ class DeviceMonitor:
             if slot.job_state == "running" and not never_started(slot.placement):
                 on_lost(slot.placement.job_id, device.name, reason)
                 lost.append(slot.placement.job_id)
+
+    def _sweep_orphans(self, device: Device, stopped: list[str], forgotten: list[str]) -> None:
+        """Stop each lost job's worker still running on device; forget it once gone.
+
+        Read after the lost step, so a job lost this poll is swept this poll.
+        """
+        for orphan in self.pool.orphans():
+            if orphan.device != device.name:
+                continue
+            target = remote_target(device, orphan.harness, orphan.job_id, orphan.worker_tag)
+            if target is None or orphan.worker_tag is None:
+                status = GONE  # no check can ever name its worker, and it holds no slot
+            else:
+                status = check_worker(self.transport, target)
+            if status == UNREACHABLE:
+                return  # one failed SSH call per down device per poll
+            if status == GONE:
+                self.pool.forget_orphan(orphan.job_id)
+                forgotten.append(orphan.job_id)
+            elif status == RUNNING and stop_worker(self.transport, target):
+                stopped.append(orphan.job_id)
 
     def _release(self, slot: HeldSlot, released: list[str]) -> None:
         if self.pool.release(slot.placement.job_id, owner=slot.placement.harness):

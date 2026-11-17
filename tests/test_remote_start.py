@@ -858,6 +858,65 @@ def test_a_disabled_device_is_stranded_with_no_offline_clock(tmp_path: Path) -> 
     assert stranded(enabled, None, 0.0, 600.0) is None
 
 
+# --- orphans: stopped once their device answers (#679) -----------------------
+
+
+STOP = ("stop", "claude-bot", "fakepc-claude-bot")
+
+
+def test_an_orphan_is_stopped_when_its_device_answers_and_forgotten_once_gone(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    poll_at(now, dispatcher, 600.0)
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+    assert STOP not in transport.calls
+
+    transport.check = 1
+    poll_at(now, dispatcher, 660.0)
+    assert transport.calls[-1] == STOP
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+
+    transport.check = 0
+    poll_at(now, dispatcher, 720.0)
+    assert orphans(queue) == []
+
+
+def test_disabling_an_answering_device_stops_the_lost_worker_in_the_same_poll(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1)
+    poll_at(now, dispatcher, 0.0)
+    assert STOP not in transport.calls
+
+    disable_pc(tmp_path, dispatcher)
+    poll_at(now, dispatcher, 60.0)
+
+    assert state(queue, job.id) == "failed"
+    assert transport.calls[-1] == STOP
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+
+
+def test_an_unreachable_device_keeps_its_orphans_for_one_check_a_poll(tmp_path: Path) -> None:
+    now, queue, pool, transport, dispatcher, first = lost_setup(tmp_path)
+    dispatcher.process(
+        ticket(comment("go-2", GO.format(state="building"), author="grok-login"), ticket_id="2")
+    )
+    second, _ = pool.claim("claude")
+    pool.attach_runner(second.id, owner="claude", pid=12, start="r", alive=lambda *_: False)
+    pool.attach_worker(second.id, owner="claude", remote=True, tag="e" * 32)
+    poll_at(now, dispatcher, 0.0)
+    poll_at(now, dispatcher, 600.0)
+    assert len(orphans(queue)) == 2
+
+    for at in (660.0, 720.0):
+        seen = len(transport.calls)
+        poll_at(now, dispatcher, at)
+        assert transport.calls[seen:] == [("check", "claude-bot", "fakepc-claude-bot")]
+        assert len(orphans(queue)) == 2
+
+
 def test_suite_guard_shadows_any_real_ssh() -> None:
     """tests/conftest.py puts a refusing ssh first on PATH for every test."""
     import shutil
