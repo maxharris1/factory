@@ -915,9 +915,6 @@ class _AfterPoll:
 
 
 def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
-    """#219: after a cycle that merged a PR of this checkout's own repo,
-    start `deploy/self-heal.sh kick`; every orch.yml delivery secret stays
-    out of its environment (self-heal.sh reads webhook.env itself)."""
     from lib import heal, self_deploy
 
     return self_deploy.MergeKick(
