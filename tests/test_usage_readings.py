@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import builtins
 import io
+import itertools
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -755,6 +757,51 @@ def test_a_claude_window_null_in_three_replies_is_not_on_the_plan(tmp_path: Path
                                  readings=parse_get_usage(reply(limits), CAPTURED + offset))
         claude = _accounts(read_usage(connection, CAPTURED + 1260, BOX))["claude"]
     assert claude["five_hour"]["state"] == "not on plan" and claude["headroom"] == 0.76
+
+
+def test_a_late_reading_that_reported_the_window_before_three_newer_omissions_keeps_not_on_the_plan(
+    tmp_path: Path,
+) -> None:
+    polls = [*_polled_at_its_time([("box", _seven_day_only, offset) for offset in (0, 60, 120, 180)]),
+             ("laptop", _both_windows(CAPTURED + 30), CAPTURED + 190)]
+    codex = _codex_polls(tmp_path / "orch.db", polls, CAPTURED + 190)
+    assert codex["five_hour"]["state"] == "not on plan"
+
+
+def test_an_earlier_polled_omission_never_hides_a_newer_reading_of_the_window(tmp_path: Path) -> None:
+    polls = [*_polled_at_its_time([("box", _seven_day_only, 0), ("box", _seven_day_only, 60)]),
+             ("laptop", _both_windows(CAPTURED + 120), CAPTURED + 100),
+             ("laptop", _seven_day_only(CAPTURED + 110), CAPTURED + 110),
+             *_polled_at_its_time([("box", _seven_day_only, 130), ("box", _seven_day_only, 140)])]
+    codex = _codex_polls(tmp_path / "orch.db", polls, CAPTURED + 150)
+    assert codex["five_hour"]["state"] == "no reading"
+
+
+def _in_source_order(events: list[tuple[str, bool, int]]) -> str:
+    newest = sorted(events, key=lambda event: event[2], reverse=True)
+    if newest[0][1]:
+        return "ok"
+    run = next((i for i, (_, reported, _) in enumerate(newest) if reported), len(newest))
+    return "not on plan" if run >= usage_readings.NOT_ON_PLAN_READINGS else "no reading"
+
+
+@pytest.mark.parametrize("events", [
+    [("box", False, 0), ("laptop", True, 30), ("box", False, 60), ("box", False, 120), ("box", False, 180)],
+    [("box", False, 0), ("box", False, 60), ("laptop", True, 120), ("laptop", False, 110), ("box", False, 130),
+     ("box", False, 140)],
+    [("box", False, 0), ("laptop", True, 50), ("box", False, 100), ("laptop", False, 150), ("box", False, 200)],
+])
+def test_the_account_streak_does_not_depend_on_delivery_order(events: list[tuple[str, bool, int]]) -> None:
+    expected = _in_source_order(events)
+    now = CAPTURED + max(offset for *_, offset in events) + 10
+    for order in itertools.permutations(events):
+        with closing(sqlite3.connect(":memory:")) as connection:
+            for device, reported, offset in order:
+                event = (_both_windows if reported else _seven_day_only)(CAPTURED + offset)
+                usage_readings.store(connection, harness="codex", bot="codex-bot", device=device, job_id="j",
+                                     readings=parse_codex(event, now))
+            codex = _accounts(read_usage(connection, now, BOX))["codex"]
+        assert codex["five_hour"]["state"] == expected, order
 
 
 OLD_DDL = (
