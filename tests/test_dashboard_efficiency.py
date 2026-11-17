@@ -253,6 +253,24 @@ def test_headroom_on_one_window_is_neutral_and_names_it(
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_a_window_not_on_the_plan_leaves_the_other_as_the_whole_plan(tmp_path: Path, render: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    [codex] = [e for e in snapshot["usage"]["accounts"] if e["harness"] == "codex"]
+    codex.update(
+        five_hour={"used": None, "resets_at": None, "observed_at": NOW - 60, "state": "not on plan"},
+        seven_day={"used": 0.68, "resets_at": int(NOW + 86400), "observed_at": NOW - 60, "state": "ok"},
+        headroom=0.32, state="ok",
+    )
+    headroom = _render(tmp_path, snapshot, render, "headroom")
+    table = headroom.split("</table>")[0]
+    assert _rows(headroom)[CODEX] == ["not on this plan", "68% used", "in 1d 0h", "32%"]
+    assert '<td class="ef-v muted">not on this plan</td>' in table
+    assert '<span class="ef-hn warn">32%</span>' in table
+    assert _meters(table)[1] == ("codex headroom 32 percent: 6 of 20 cells lit", ["warn"] * 6 + [None] * 14)
+    assert "7-day only" not in headroom
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 def test_headroom_with_no_window_shows_no_number(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path), render, "headroom")
     table = headroom.split("</table>")[0]
