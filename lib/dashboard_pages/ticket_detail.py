@@ -35,10 +35,26 @@ ET = ZoneInfo("America/New_York")
 TRACKER_NAMES = {"github": "GitHub", "linear": "Linear"}
 SECTION_ORDER = ("liverun", "journey", "next", "chart")
 JOB_TILES = {"running": ("elapsed_here", "heartbeat", "round", "hops"), "queued": ("waiting", "not_started", "round", "hops")}
-KIND_ORDER = ("running", "queued")
+LIVE_KINDS = ("running", "queued")
+RECORD_FLAGS = ("stopped", "shipped")
+ROW_FROM_TICKET = ("tracker", "source", "pr")
+_ENDED = ("journey", "chart")
 TICKET_KINDS = {
-    "running": {"started": True, "tiles": ("elapsed", "heartbeat", "round", "hops"), "sections": SECTION_ORDER},
-    "queued": {"started": False, "tiles": ("waiting", "not_started", "round", "hops"), "sections": SECTION_ORDER},
+    "running": {"started": True, "still": False, "tail": "device", "strip": {},
+                "tiles": ("elapsed", "heartbeat", "round", "hops"), "sections": SECTION_ORDER},
+    "queued": {"started": False, "still": True, "tail": "queued", "strip": {},
+               "tiles": ("waiting", "not_started", "round", "hops"), "sections": SECTION_ORDER},
+    "stopped": {"started": False, "still": True, "tail": "", "strip": {"state": "stuck"},
+                "tiles": ("stopped_for", "record_round", "hops"), "sections": _ENDED},
+    "shipped": {"started": False, "still": True, "tail": "", "strip": {"effect": "off", "done": True},
+                "tiles": ("in_state", "record_round", "hops"), "sections": _ENDED},
+    "idle": {"started": False, "still": True, "tail": "", "strip": {},
+             "tiles": ("in_state", "record_round", "hops"), "sections": ("journey", "next", "chart")},
+}
+PANELS = {
+    "none": ("No ticket chosen", ""),
+    "loading": ("Loading ticket", "Loading ticket {}… "),
+    "missing": ("Ticket not found", "{} is not a tracked ticket. "),
 }
 
 
@@ -269,7 +285,7 @@ def _verb(row: dict, motion: str) -> str:
     action = str(row.get("action") or "")
     glyph = '<span class="glyph" aria-hidden="true"><span></span><span></span><span class="lit"></span><span></span></span>'
     word = _span("verb", VERBS[motion][0] + "…") if motion in _px().PX_ACTIONS else ""
-    return f'<div class="jd-verb">{glyph}{word}{_span("phase", action.upper())}</div>'
+    return f'<div class="jd-verb">{glyph}{word}{_span("phase", action.upper()) if action else ""}</div>'
 
 
 def _tile(value: str, label: str, cls: str = "") -> str:
@@ -293,6 +309,15 @@ def _round_tile(row: dict, model: dict) -> str:
     return _tile(f'{rnd[0]} / {rnd[1]}<span class="jd-pips" aria-hidden="true">{pips}</span>', "revise round")
 
 
+def _age_tile(age: float | None, label: str) -> str:
+    return _tile("no reading" if age is None else duration(age), label)
+
+
+def _stopped_for(row: dict, model: dict) -> str:
+    at = row["flow"]["stopped"]["at"]
+    return _age_tile(None if at is None else model["now"] - at, "stopped")
+
+
 def _elapsed_label(row: dict) -> str:
     return f"T+ on {row['device']}" if row.get("device") else "T+ on this device"
 
@@ -304,6 +329,9 @@ TILES = {
     "waiting": lambda row, model: _tile(duration(row.get("age_seconds")), "waiting"),
     "not_started": lambda row, model: _tile("not started", "last heartbeat"),
     "round": _round_tile,
+    "record_round": lambda row, model: _tile("no round" if row["flow"]["round"] is None else str(row["flow"]["round"]), "revise round"),
+    "in_state": lambda row, model: _age_tile(model["state_age_seconds"], f"in {model['state']}"),
+    "stopped_for": _stopped_for,
     "hops": lambda row, model: _tile(f"{model['hops']} hops", f"{model['off_chart_count']} off-chart"),
 }
 
@@ -354,23 +382,28 @@ def _tracker_text(row: dict) -> str:
     return " ".join(p for p in (TRACKER_NAMES.get(tracker), refs) if p)
 
 
-def _ticket_tracker(row: dict, started: bool) -> str:
-    if started:
-        tail = f"on {row['device']}" if row.get("device") else ""
-    else:
-        tail = f"queued for {row.get('recipient')} · {duration(row.get('age_seconds'))}"
-    text = " · ".join(p for p in (_tracker_text(row), tail) if p)
+TRACKER_TAILS = {
+    "device": lambda row: f"on {row['device']}" if row.get("device") else "",
+    "queued": lambda row: f"queued for {row.get('recipient')} · {duration(row.get('age_seconds'))}",
+    "": lambda row: "",
+}
+
+
+def _ticket_tracker(row: dict, tail: str) -> str:
+    text = " · ".join(p for p in (_tracker_text(row), TRACKER_TAILS[tail](row)) if p)
     return _span("tracker", text) if text else ""
 
 
 def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
     row = found["row"]
     motion = _motion(row, model)
-    strip = _px().px_strip(f"ticket-hero-{found['address']}", state=motion, bot=row.get("recipient"),
-                           still=not spec["started"], cell=4, height=40, seed=2)
+    strip = _px().px_strip(f"ticket-hero-{found['address']}", **{
+        "state": motion, "bot": row.get("recipient"), "still": spec["still"], "cell": 4, "height": 40, "seed": 2,
+        **spec["strip"]})
     title = (
-        f'<h1>{_e(_tile_label(row))}</h1>{_bot(row.get("recipient"))}'
-        + _ticket_tracker(row, spec["started"])
+        f'<h1>{_e(_tile_label(row))}</h1>'
+        + (_bot(row["recipient"]) if "recipient" in row else "")
+        + _ticket_tracker(row, spec["tail"])
         + _trouble(row)
     )
     return _hero(row, model, motion, strip, title, spec["tiles"])
@@ -719,7 +752,17 @@ _PICK = {
 }
 
 
-def resolve_ticket(snapshot: dict, address: str) -> dict | None:
+def _ticket_of(snapshot: dict, row: dict) -> dict | None:
+    key = _thread_key(row)
+    return next((t for t in snapshot["tickets"] if _thread_key(t) == key), None)
+
+
+def record_row(record: dict, ticket: dict | None) -> dict:
+    refs = {k: ticket[k] for k in ROW_FROM_TICKET if k in ticket} if ticket else {}
+    return {"repo": record["repo"], "ticket_id": record["ticket_id"], "flow": record, **refs}
+
+
+def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) -> dict | None:
     repo, _, ticket_id = address.partition("#")
 
     def exact(row: dict) -> bool:
@@ -729,20 +772,27 @@ def resolve_ticket(snapshot: dict, address: str) -> dict | None:
         return str(row["repo"]).lower() == repo.lower() and str(row["ticket_id"]) == ticket_id
 
     for rule in (exact, any_case):
-        for kind in KIND_ORDER:
+        for kind in LIVE_KINDS:
             rows = [row for row in snapshot[kind] if rule(row)]
             if rows:
                 row = _PICK[kind](rows)
-                key = _thread_key(row)
-                ticket = next((t for t in snapshot["tickets"] if _thread_key(t) == key), None)
-                return {"kind": kind, "address": ticket_address(row), "row": row, "ticket": ticket}
-    return None
+                return {"kind": kind, "address": ticket_address(row), "row": row, "ticket": _ticket_of(snapshot, row)}
+    if not records:
+        return None
+    key = address if address in records else next((k for k in sorted(records) if any_case(records[k])), None)
+    if key is None:
+        return None
+    record = records[key]
+    ticket = _ticket_of(snapshot, record)
+    kind = next((flag for flag in RECORD_FLAGS if record.get(flag)), "idle")
+    return {"kind": kind, "address": key, "row": record_row(record, ticket), "ticket": ticket}
 
 
-def _ticket_article(found: dict, chart: dict | None) -> str:
+def _ticket_article(found: dict, snapshot: dict) -> str:
     row, address = found["row"], found["address"]
     spec = TICKET_KINDS[found["kind"]]
-    model = _detail_model(row, chart)
+    chart = snapshot.get("statechart")
+    model = {**_detail_model(row, chart), "now": snapshot.get("generated_at_epoch")}
     start = _first_start(model)
     part = {"row": row, "model": model, "chart": chart, "key": address, "started": spec["started"]}
     return (
@@ -754,18 +804,24 @@ def _ticket_article(found: dict, chart: dict | None) -> str:
     )
 
 
-def _no_ticket(address: str | None) -> str:
-    title = "No ticket chosen" if address is None else "Ticket not found"
-    lead = "" if address is None else f"{_e(address)} has no running or queued job. "
+def _no_ticket(address: str | None, loaded: bool) -> str:
+    title, lead = PANELS["none" if address is None else "missing" if loaded else "loading"]
     return (
         f'<section class="panel"><h1><span>{title}</span></h1>'
-        f'<p class="empty">{lead}Pick a ticket on the <a href="job.html">Tickets board</a>.</p></section>'
+        f'<p class="empty">{lead.format(_e(address))}Pick a ticket on the <a href="job.html">Tickets board</a>.</p></section>'
     )
 
 
+def _records(snapshot: dict) -> dict | None:
+    from lib.dashboard import RECORDS
+
+    return snapshot.get(RECORDS)
+
+
 def ticket_view(snapshot: dict, address: str | None) -> str:
-    found = None if address is None else resolve_ticket(snapshot, address)
-    inner = _ticket_article(found, snapshot.get("statechart")) if found else _no_ticket(address)
+    records = _records(snapshot)
+    found = None if address is None else resolve_ticket(snapshot, address, records)
+    inner = _ticket_article(found, snapshot) if found else _no_ticket(address, records is not None)
     return f'<div id="ticketview">{inner}</div>'
 
 
@@ -777,7 +833,8 @@ _SCRIPT = r"""
   var DETAIL = {verbs: __VERBS__, hb: __HB__, order: {normal: 0, human: 1, stop: 2},
                 first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__, trackers: __TRACKERS__, sections: __SECTIONS__, jobTiles: __JOBTILES__,
-                kinds: __KINDS__, kindOrder: __KINDORDER__};
+                kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
+                panels: __PANELS__};
   var SEL = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -866,8 +923,18 @@ _SCRIPT = r"""
       pips.setAttribute('aria-hidden', 'true');
       for (var i = 0; i < rnd[1]; i++) span(pips, i < rnd[0] - 1 ? 'done' : i === rnd[0] - 1 ? 'now' : null);
     },
+    record_round: function (box, r) { tile(box, r.flow.round === null ? 'no round' : String(r.flow.round), 'revise round'); },
+    in_state: function (box, r, m) { ageTile(box, m.state_age_seconds, 'in ' + m.state); },
+    stopped_for: function (box, r, m) {
+      var at = r.flow.stopped.at;
+      ageTile(box, at === null || at === undefined ? null : m.now - at, 'stopped');
+    },
     hops: function (box, r, m) { tile(box, m.hops + ' hops', m.off_chart_count + ' off-chart'); }
   };
+  function ageTile(box, age, label) {
+    if (age === null || age === undefined) tile(box, 'no reading', label);
+    else ticking(tile(box, '', label), age);
+  }
   function troubleChips(title, r) {
     var jobState = stateChip(r);
     if (jobState) add(title, jobState);
@@ -880,12 +947,14 @@ _SCRIPT = r"""
     var refs = [first, /^[0-9]+$/.test(pr) ? 'PR #' + pr : ''].filter(Boolean).join(' · ');
     return [DETAIL.trackers[r.tracker], refs].filter(Boolean).join(' ');
   }
-  function trackerSpan(title, r, started) {
+  function trackerSpan(title, r, tail) {
     var text = trackerText(r);
-    if (started) {
-      text = [text, r.device ? 'on ' + r.device : ''].filter(Boolean).join(' · ');
-      if (text) span(title, 'tracker', text);
-    } else ticking(span(title, 'tracker'), r.age_seconds, [text, 'queued for ' + r.recipient].filter(Boolean).join(' · ') + ' · ');
+    if (tail === 'queued') {
+      ticking(span(title, 'tracker'), r.age_seconds, [text, 'queued for ' + r.recipient].filter(Boolean).join(' · ') + ' · ');
+      return;
+    }
+    text = [text, tail === 'device' && r.device ? 'on ' + r.device : ''].filter(Boolean).join(' · ');
+    if (text) span(title, 'tracker', text);
   }
   function hero(c, strip, label, tags, ticket, tiles) {
     var r = c.r, m = c.m, motion = c.motion;
@@ -896,7 +965,7 @@ _SCRIPT = r"""
     var who = add(body, el('div', 'who'));
     var title = add(who, el('div', 'title'));
     add(title, el('h1', null, label));
-    add(title, bot(r.recipient));
+    if ('recipient' in r) add(title, bot(r.recipient));
     tags(title);
     if (GH.on && ghRefs(r)) add(who, ghPanel(r, ticket));
     var line = add(who, el('p', 'line'));
@@ -913,7 +982,7 @@ _SCRIPT = r"""
     [0, 1, 2, 3].forEach(function (i) { span(glyph, i === 2 ? 'lit' : null); });
     var verbs = PX.table.actions.hasOwnProperty(motion) ? DETAIL.verbs[motion] : null;
     if (verbs) span(verb, 'verb', verbs[Math.floor(Date.now() / 4000) % verbs.length] + '…');
-    span(verb, 'phase', action.toUpperCase());
+    if (action) span(verb, 'phase', action.toUpperCase());
     var box = add(body, el('div', 'jd-tiles'));
     tiles.forEach(function (name) { TILES[name](box, r, m); });
     return sec;
@@ -1471,7 +1540,7 @@ _SCRIPT = r"""
     var right = add(cols, el('div', 'jd-right'));
     sections.forEach(function (name) { add(right, SECTIONS[name](c)); });
     var jp = c.jp, cp = c.cp, start = firstStart(c.m);
-    var j = {key: c.key, r: c.r, m: c.m, still: holdsStill(c.motion), logButtons: c.logButtons, hitButtons: hitButtons,
+    var j = {key: c.key, r: c.r, m: c.m, still: !!c.still || holdsStill(c.motion), logButtons: c.logButtons, hitButtons: hitButtons,
              canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: start === null ? '' : journeyClock(start), nowClock: journeyClock(c.generated)};
     art.addEventListener('click', function (ev) {
@@ -1519,45 +1588,60 @@ _SCRIPT = r"""
     running: function (rows) { return rows.reduce(function (a, b) { return (b.elapsed_seconds || 0) < (a.elapsed_seconds || 0) ? b : a; }); },
     queued: function (rows) { return rows[0]; }
   };
-  function resolveTicket(d, address) {
+  function recordRow(rec, t) {
+    var r = {repo: rec.repo, ticket_id: rec.ticket_id, flow: rec};
+    DETAIL.rowFromTicket.forEach(function (k) { if (t && k in t) r[k] = t[k]; });
+    return r;
+  }
+  function resolveTicket(d, address, records) {
     var cut = address.indexOf('#');
     var repo = (cut < 0 ? address : address.slice(0, cut)).toLowerCase(), id = cut < 0 ? '' : address.slice(cut + 1);
     var rules = [function (r) { return ticketAddress(r) === address; },
                  function (r) { return String(r.repo).toLowerCase() === repo && String(r.ticket_id) === id; }];
     for (var i = 0; i < rules.length; i++) {
-      for (var k = 0; k < DETAIL.kindOrder.length; k++) {
-        var kind = DETAIL.kindOrder[k];
+      for (var k = 0; k < DETAIL.liveKinds.length; k++) {
+        var kind = DETAIL.liveKinds[k];
         var rows = (d[kind] || []).filter(rules[i]);
         if (!rows.length) continue;
         var row = PICK[kind](rows);
         return {kind: kind, address: ticketAddress(row), row: row, ticket: ticketRow(d, row)};
       }
     }
-    return null;
+    if (!records) return null;
+    var key = Object.prototype.hasOwnProperty.call(records, address) ? address
+      : Object.keys(records).sort().filter(function (k) { return rules[1](records[k]); })[0];
+    if (key === undefined) return null;
+    var rec = records[key], t = ticketRow(d, rec);
+    var flag = DETAIL.recordFlags.filter(function (f) { return rec[f]; })[0];
+    return {kind: flag || 'idle', address: key, row: recordRow(rec, t), ticket: t};
   }
   function ticketArticle(found, d) {
     var spec = DETAIL.kinds[found.kind];
     var r = found.row;
     var c = detailContext(found.address, r, d, spec.started);
+    c.still = spec.still;
+    c.m.now = c.generated;
     var art = el('article', 'jobpage ticketpage');
     art.setAttribute('data-ticket', found.address);
     var start = firstStart(c.m);
     add(art, crumb(tileLabel(r), start === null ? null : 'started ' + etClock(start)));
-    var strip = PX.strip('ticket-hero-' + found.address, {state: c.motion, bot: r.recipient, still: !spec.started, cell: 4, height: 40, seed: 2});
+    var strip = PX.strip('ticket-hero-' + found.address, Object.assign({state: c.motion, bot: r.recipient, still: spec.still,
+                                                                        cell: 4, height: 40, seed: 2}, spec.strip));
     add(art, hero(c, strip, tileLabel(r), function (title) {
-      trackerSpan(title, r, spec.started);
+      trackerSpan(title, r, spec.tail);
       troubleChips(title, r);
     }, found.ticket, spec.tiles));
     detailCols(art, c, spec.sections);
     return art;
   }
-  function ticketView(d, address) {
-    var found = address === null ? null : resolveTicket(d, address);
+  function ticketView(d, address, records) {
+    var found = address === null ? null : resolveTicket(d, address, records);
     if (found) return ticketArticle(found, d);
+    var panel = DETAIL.panels[address === null ? 'none' : records ? 'missing' : 'loading'];
     var sec = el('section', 'panel');
-    add(add(sec, el('h1')), el('span', null, address === null ? 'No ticket chosen' : 'Ticket not found'));
+    add(add(sec, el('h1')), el('span', null, panel[0]));
     var p = add(sec, el('p', 'empty'));
-    if (address !== null) p.appendChild(document.createTextNode(address + ' has no running or queued job. '));
+    if (panel[1]) p.appendChild(document.createTextNode(panel[1].replace('{}', function () { return address; })));
     p.appendChild(document.createTextNode('Pick a ticket on the '));
     add(p, link(null, 'job.html')).textContent = 'Tickets board';
     p.appendChild(document.createTextNode('.'));
@@ -1584,12 +1668,31 @@ _SCRIPT = r"""
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
 
+  var RECORDS = {tickets: null, epoch: null, asked: null, busy: false};
+  function loadRecords(d) {
+    var epoch = d.generated_at_epoch;
+    if (RECORDS.busy || RECORDS.asked === epoch || (RECORDS.tickets && RECORDS.epoch >= epoch)) return;
+    RECORDS.busy = true;
+    RECORDS.asked = epoch;
+    fetch('tickets.json', {cache: 'no-store', credentials: 'same-origin'}).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }).then(function (data) {
+      RECORDS.busy = false;
+      if (!data || !data.tickets || typeof data.tickets !== 'object') return;
+      RECORDS.tickets = data.tickets;
+      RECORDS.epoch = data.generated_at_epoch;
+      if (latest) render(latest);
+    }, function () { RECORDS.busy = false; });
+  }
   function renderTicketView(d) {
     if (!GH.started) { GH.started = true; ghStart(); }
-    byId('ticketview').replaceChildren(ticketView(d, hashAddress()));
+    loadRecords(d);
+    byId('ticketview').replaceChildren(ticketView(d, hashAddress(), RECORDS.tickets));
   }
 """
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,
-           "SECTIONS": SECTION_ORDER, "JOBTILES": JOB_TILES, "KINDS": TICKET_KINDS, "KINDORDER": KIND_ORDER}
+           "SECTIONS": SECTION_ORDER, "JOBTILES": JOB_TILES, "KINDS": TICKET_KINDS, "LIVEKINDS": LIVE_KINDS,
+           "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS}
 _SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT
