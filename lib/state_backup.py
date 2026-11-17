@@ -13,15 +13,22 @@ takes a dated snapshot, weekly/orch-<Monday>.db, the baseline that
 over Monday takes it on its first later cycle that week. Snapshots dated
 more than KEEP_WEEKS weeks before the current Monday are deleted; the
 newest is always kept.
+
+Moving the database to another host (deploy/orch-move.sh) compares DbFacts:
+the copy's sha256, integrity_check, per-table row counts, and the running
+jobs and held device slots that say whether the source has drained.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import sqlite3
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -108,6 +115,74 @@ def backup(db: Path, dest: Path) -> None:
     if not db.exists():
         raise BackupError(f"database {db} does not exist")
     _copy(db, dest)
+
+
+@dataclass(frozen=True)
+class DbFacts:
+    sha256: str
+    integrity: str
+    tables: dict[str, int]
+    running_jobs: int
+    held_slots: int
+
+
+def db_facts(db: Path) -> DbFacts:
+    """Read db's DbFacts through a read-only connection; BackupError when it
+    is missing or SQLite cannot read it."""
+    # device_pool imports this module through lib.queue.
+    from lib.device_pool import SLOTS_TABLE
+
+    if not db.is_file():
+        raise BackupError(f"database {db} does not exist")
+    with open(db, "rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    try:
+        connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            integrity = "; ".join(
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+            )
+            names = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            ]
+            tables = {name: _count(connection, name) for name in names}
+            running = 0
+            if "jobs" in tables:
+                running = connection.execute(
+                    "SELECT count(*) FROM jobs WHERE state = 'running'"
+                ).fetchone()[0]
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as exc:
+        raise BackupError(f"{db} is not a readable database: {exc}") from exc
+    return DbFacts(digest, integrity, tables, running, tables.get(SLOTS_TABLE, 0))
+
+
+def _count(connection: sqlite3.Connection, table: str) -> int:
+    quoted = table.replace('"', '""')
+    return int(connection.execute(f'SELECT count(*) FROM "{quoted}"').fetchone()[0])
+
+
+def write_manifest(db: Path, out: Path, *, source_host: str, to: str, retired: str) -> None:
+    """Write the move manifest for db to out; refuse, writing nothing, unless
+    db passes integrity_check."""
+    facts = db_facts(db)
+    if facts.integrity != "ok":
+        raise BackupError(f"{db} failed integrity_check: {facts.integrity}")
+    manifest = {
+        "sha256": facts.sha256,
+        "tables": facts.tables,
+        "integrity": facts.integrity,
+        "source_host": source_host,
+        "to": to,
+        "retired": retired,
+        "taken_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def week_monday(now: datetime) -> date:

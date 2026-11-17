@@ -108,8 +108,10 @@ from lib.state_backup import (
     CycleBackup,
     backup,
     backup_every,
+    db_facts,
     default_backup_path,
     restore,
+    write_manifest,
 )
 from lib.status import main as status_main
 from lib.update_check import (
@@ -151,6 +153,7 @@ commands:
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
   restore-db       restore a missing dispatcher database from its backup
+  move-db          check a dispatcher database moving to another host
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
@@ -236,6 +239,17 @@ restore-db [--db PATH] [--backup PATH]
   integrity check: exit 0 restored, 3 no backup, 1 when the database
   already exists or the backup is bad. deploy/poller-service.sh start and
   ensure run it when the database is missing.
+
+move-db drained --db PATH
+move-db manifest --db PATH --out PATH --source-host HOST --to HOST
+                 --retired LINE
+  deploy/orch-move.sh runs these on copies taken with backup-db, each
+  opened read-only. drained exits 0 when the copy has no running job and
+  no held device slot, 1 (printing both counts) when it has, and 2 when
+  it is missing or unreadable. manifest writes --out as JSON (the copy's
+  sha256, per-table row counts, integrity, the hosts, the --retired line
+  and the time) and exits 1, writing nothing, unless the copy passes
+  integrity_check.
 
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -467,6 +481,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_backup_db, argv[1:])
     if argv[0] == "restore-db":
         return _call(_restore_db, argv[1:])
+    if argv[0] == "move-db":
+        return _call(_move_db, argv[1:])
     if argv[0] == "wait":
         return _call(_wait, argv[1:])
     if argv[0] == "job":
@@ -2316,6 +2332,33 @@ def _gc(argv: list[str]) -> int:
         dry_run=args.dry_run,
     )
     return 1 if problems else 0
+
+
+def _move_db(argv: list[str]) -> int:
+    parser = _Parser(prog="orch move-db", add_help=True)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    drained = commands.add_parser("drained")
+    drained.add_argument("--db", type=Path, required=True)
+    manifest = commands.add_parser("manifest")
+    manifest.add_argument("--db", type=Path, required=True)
+    manifest.add_argument("--out", type=Path, required=True)
+    manifest.add_argument("--source-host", required=True)
+    manifest.add_argument("--to", required=True)
+    manifest.add_argument("--retired", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "drained":
+            facts = db_facts(args.db)
+            print(f"running jobs {facts.running_jobs}, held device slots {facts.held_slots}")
+            return 0 if facts.running_jobs == 0 and facts.held_slots == 0 else 1
+        write_manifest(
+            args.db, args.out, source_host=args.source_host, to=args.to, retired=args.retired
+        )
+    except (BackupError, OSError) as exc:
+        print(f"orch move-db {args.command}: {exc}", file=sys.stderr)
+        return 2 if args.command == "drained" else 1
+    print(f"wrote {args.out}")
+    return 0
 
 
 def _db_path(path: Path | None) -> Path:
