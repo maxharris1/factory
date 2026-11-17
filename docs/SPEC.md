@@ -1105,7 +1105,7 @@ none), and a short detail.
 | `scenario-missing` | 2 | scenario | No lane reports the scenario with one of the four results. |
 | `artifact-missing` | 3 | scenario and lane | A required file of a verified scenario is not in the manifest. |
 | `artifact-mismatch` | 4 | scenario and lane | The manifest lists a mismatch for a file a verified scenario relies on. |
-| `evidence-malformed` | 4 | lane, or scenario and lane | The manifest's mismatch list, or a verified scenario's artifact list, is missing or not a list of entries that each name a path. |
+| `evidence-malformed` | 4 | lane, or scenario and lane | The manifest's mismatch list, or a verified scenario's artifact list, is missing or not a list of entries that each name a path. Or the result's scenario list is missing or not a list of entries that each name an id and one of the four results. |
 | `head-moved` | 5 | neither | The head moved after the run started. |
 
 A file that is both missing and listed as a `missing` mismatch yields one
@@ -1115,14 +1115,17 @@ treats it differently: the evidence may be sound, but it covers an old
 head.
 
 The result and manifest are untrusted. Some malformed fields can only add
-gaps when skipped. These are the commit, the method, the manifest's file
-list and the result's scenario entries, and the audit skips them. Skipping
-a malformed mismatch list, or a verified scenario's malformed artifact
-list, could hide a gap instead. Each of these yields an
-`evidence-malformed` gap, and the audit still checks any path it can read
-in them. A manifest that is not a mapping, or has no mismatch list, counts
-as a malformed mismatch list. So no malformed input yields a false
-`"clean"`. The audit does no I/O, imports nothing that does, and never
+gaps when skipped. These are the commit, the method and the manifest's file
+list, and the audit skips them. Skipping a malformed mismatch list, a
+malformed scenario list or entry, or a verified scenario's malformed
+artifact list, could hide a gap instead, for example when another lane
+reports the same scenario. Each of these yields an `evidence-malformed`
+gap, and the audit still checks any entry and path it can read in them. A
+scenario entry is malformed when it is not a mapping, its id is not a
+string, or its result is not one of the four. A manifest that is not a
+mapping, or has no mismatch list, counts as a malformed mismatch list. A
+lane yields one lane-wide `evidence-malformed` gap however many of its
+lists are malformed. So no malformed input yields a false `"clean"`. The audit does no I/O, imports nothing that does, and never
 changes a result. It checks that evidence exists and matches, not what a
 screenshot shows. Nothing calls it yet. A later ticket wires it into the
 program that runs lanes.

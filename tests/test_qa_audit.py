@@ -113,10 +113,10 @@ def test_a_listed_scenario_in_no_lane_result_yields_a_gap_naming_it() -> None:
     assert [(g.kind, g.scenario) for g in gaps] == [("scenario-missing", "s-2")]
 
 
-def test_a_scenario_with_an_unknown_result_counts_as_missing() -> None:
+def test_a_scenario_with_an_unknown_result_counts_as_missing_and_malformed() -> None:
     gaps = _run([_lane([_entry(S1), _entry(S2, "pass")])])
 
-    assert [(g.kind, g.scenario) for g in gaps] == [("scenario-missing", "s-2")]
+    assert [(g.kind, g.scenario) for g in gaps] == [("evidence-malformed", None), ("scenario-missing", "s-2")]
 
 
 def test_each_of_the_four_results_counts_as_reported() -> None:
@@ -171,6 +171,53 @@ def test_a_malformed_scenario_entry_is_skipped_and_its_artifacts_still_checked()
     gaps = _run(lanes)
 
     assert [(g.kind, g.scenario) for g in gaps] == [("evidence-malformed", None), ("evidence-malformed", "s-1"), ("artifact-mismatch", "s-1")]
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        lambda e: e.update(result=None),
+        lambda e: e.update(result=3),
+        lambda e: e.update(result=["verified"]),
+        lambda e: e.update(result={"verified": True}),
+        lambda e: e.update(result="Verified"),
+        lambda e: e.update(id=None),
+        lambda e: e.update(id=["s-1"]),
+    ],
+)
+def test_a_malformed_scenario_entry_another_lane_covers_cannot_hide_its_mismatch(spoil) -> None:
+    entry = _entry(S1)
+    spoil(entry)
+    lanes = [
+        _lane([entry], mismatches=[{"path": S1.after, "reason": "sha256"}]),
+        _lane([_entry(S1, "failed"), _entry(S2, "failed")], lane=2),
+    ]
+
+    gaps = _run(lanes)
+
+    assert [(g.kind, g.scenario, g.lane) for g in gaps] == [("evidence-malformed", None, 1)]
+
+
+@pytest.mark.parametrize("scenarios", [None, "s-1", {"s-1": "verified"}, [None], ["s-1"]])
+def test_a_malformed_scenario_list_another_lane_covers_yields_a_gap_instead_of_clean(scenarios: object) -> None:
+    lanes = [
+        _lane([], scenarios=scenarios, mismatches=[{"path": S1.after, "reason": "sha256"}]),
+        _lane([_entry(S1, "failed"), _entry(S2, "failed")], lane=2),
+    ]
+
+    gaps = _run(lanes)
+
+    assert [(g.kind, g.scenario, g.lane) for g in gaps] == [("evidence-malformed", None, 1)]
+
+
+def test_a_malformed_mismatch_list_and_scenario_list_share_one_lane_gap() -> None:
+    lanes = [_lane([_entry(S1), _entry(S2)], scenarios=[_entry(S1), _entry(S2), None]), _lane([], lane=2)]
+    lanes[0].manifest["mismatches"] = {"path": S1.after}
+
+    gaps = _run(lanes)
+
+    assert [(g.kind, g.scenario, g.lane) for g in gaps] == [("evidence-malformed", None, 1)]
+    assert "mismatches" in gaps[0].detail and "scenarios" in gaps[0].detail
 
 
 def test_a_mismatch_list_turned_into_a_dict_yields_a_gap_instead_of_clean() -> None:

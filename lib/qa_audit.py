@@ -51,6 +51,7 @@ class _View:
     files: frozenset[str]
     mismatched: frozenset[str]
     mismatches_well_formed: bool
+    scenarios_well_formed: bool
 
 
 def audit(
@@ -85,6 +86,14 @@ def _view(lane: LaneEvidence) -> _View:
         files=frozenset(_paths(manifest.get("files"))),
         mismatched=frozenset(_paths(manifest.get("mismatches"))),
         mismatches_well_formed=_well_formed(manifest.get("mismatches")),
+        scenarios_well_formed=_scenarios_well_formed(result.get("scenarios")),
+    )
+
+
+def _scenarios_well_formed(raw: object) -> bool:
+    return isinstance(raw, list) and all(
+        isinstance(item, Mapping) and isinstance(item.get("id"), str) and isinstance(item.get("result"), str) and item["result"] in REPORTED
+        for item in raw
     )
 
 
@@ -113,8 +122,16 @@ def _lane_claims(view: _View) -> list[Gap]:
 def _malformed(view: _View) -> list[Gap]:
     lane = view.evidence.lane
     gaps = []
-    if not view.mismatches_well_formed:
-        gaps.append(Gap("evidence-malformed", None, lane, f"Lane {lane}'s manifest mismatches is not a list of entries that each name a path."))
+    unsound = [
+        what
+        for what, sound in (
+            ("manifest mismatches is not a list of entries that each name a path", view.mismatches_well_formed),
+            ("result scenarios is not a list of entries that each name an id and one of the four results", view.scenarios_well_formed),
+        )
+        if not sound
+    ]
+    if unsound:
+        gaps.append(Gap("evidence-malformed", None, lane, f"Lane {lane}'s {' and its '.join(unsound)}."))
     unreadable = dict.fromkeys(entry.id for entry in view.entries if entry.result == "verified" and not entry.artifacts_well_formed)
     gaps += [
         Gap("evidence-malformed", sid, lane, f"Lane {lane} marks {sid} verified but its artifacts are not a list of entries that each name a path.")
