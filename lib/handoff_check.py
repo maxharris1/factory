@@ -27,6 +27,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from urllib.parse import quote
 
 from lib.approve_rule import approve_refusal
 from lib.brief import brief_kind
@@ -240,7 +241,22 @@ def _pull(repo: str, number: int, read: Read) -> _Pull | None:
     head = pull.get("head")
     if not isinstance(head, Mapping):
         return _Pull(sha="", ref="")
-    return _Pull(sha=str(head.get("sha") or ""), ref=str(head.get("ref") or ""))
+    sha, ref = str(head.get("sha") or ""), str(head.get("ref") or "")
+    if ref and pull.get("state") == "closed" and not pull.get("merged"):
+        sha = _branch_tip(repo, ref, read) or sha
+    return _Pull(sha=sha, ref=ref)
+
+
+def _branch_tip(repo: str, ref: str, read: Read) -> str | None:
+    """GitHub freezes a closed PR's head.sha, so a branch rebuilt after
+    the PR auto-closed (#705) is read from the branch itself."""
+    try:
+        found = read(f"repos/{repo}/git/ref/heads/{quote(ref, safe='/')}")
+    except NotFound:
+        return None
+    target = found.get("object")
+    sha = target.get("sha") if isinstance(target, Mapping) else None
+    return sha if isinstance(sha, str) and sha else None
 
 
 def _same_head(reported: str, current: str | None) -> bool:

@@ -158,6 +158,7 @@ class TrackedTicket:
     intake_label: str | None = None
     changed_lines: int | None = None
     pr_base: str | None = None
+    pr_commits: int | None = None
 
     @property
     def no_ci_base(self) -> str | None:
@@ -249,6 +250,12 @@ class ReviewActions(Protocol):
         Never a local clone or a cached value: a ship counts only when this
         equals the approved head.
         """
+        ...
+
+    def commits_ahead(self, ticket: TrackedTicket, *, base: str, head: str) -> int:
+        ...
+
+    def reopen(self, ticket: TrackedTicket) -> None:
         ...
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:

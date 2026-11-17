@@ -22,6 +22,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
+from lib.dispatch.helpers import _matching_head
 from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import POLL_SECONDS
@@ -420,6 +421,28 @@ class PollMixin:
                     self.queue.now(),
                 ),
             )
+
+    def _reopen_emptied_pull(self, ticket: TrackedTicket) -> bool:
+        """GitHub auto-closes a PR whose branch has no commits beyond base and
+        freezes its head, so a rebuilt branch's ready is never read until the
+        PR is reopened (#705)."""
+        if not (
+            ticket.closed
+            and ticket.pr_commits == 0
+            and ticket.git_branch_name
+            and ticket.pr_base
+        ) or self._finished_identity(ticket.repo, ticket.ticket_id):
+            return False
+        actions = self._review_actions(ticket)
+        tip = actions.branch_tip(ticket, ticket.git_branch_name)
+        if _matching_head(tip, ticket.current_head) is not None:
+            return False
+        if actions.commits_ahead(ticket, base=ticket.pr_base, head=tip) <= 0:
+            return False
+        actions.reopen(ticket)
+        if self.log is not None:
+            self.log(f"reopened: {ticket.repo}#{ticket.ticket_id} branch is ahead at {tip}")
+        return True
 
 
 class PollLoop:

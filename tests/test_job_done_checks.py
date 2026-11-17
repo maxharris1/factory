@@ -233,6 +233,52 @@ def test_a_ready_at_the_wrong_head_fails(tmp_path: Path, store: Path, capsys) ->
     assert f"head={OTHER_HEAD} is not the head of #7 ({HEAD})" in capsys.readouterr().err
 
 
+def serve_closed_pr(store: Path, *, tip: str | None, merged: bool = False) -> None:
+    from tests.handoff_store import serve
+
+    serve(
+        store,
+        "repos/owner/repo/pulls/7",
+        {
+            "number": 7,
+            "state": "closed",
+            "merged": merged,
+            "head": {"sha": HEAD, "ref": "factory/issue-42"},
+        },
+    )
+    if tip is not None:
+        serve(store, "repos/owner/repo/git/ref/heads/factory/issue-42", {"object": {"sha": tip}})
+
+
+def test_705_a_ready_at_the_rebuilt_branch_of_an_auto_closed_pr_completes(
+    tmp_path: Path, store: Path
+) -> None:
+    db, _, job = running_job(tmp_path)
+    serve_handoff(store, job, "1011", head=OTHER_HEAD)
+    serve_closed_pr(store, tip=OTHER_HEAD)
+
+    assert done(db, job, "1011") == 0
+
+    assert row(db, job.id)["state"] == "done"
+
+
+@pytest.mark.parametrize(
+    ("tip", "merged"),
+    [(OTHER_HEAD, True), (None, False)],
+    ids=["merged-pr-keeps-its-head", "deleted-branch"],
+)
+def test_705_a_closed_pr_whose_branch_cannot_speak_for_it_keeps_its_frozen_head(
+    tmp_path: Path, store: Path, capsys, tip: str | None, merged: bool
+) -> None:
+    db, _, job = running_job(tmp_path)
+    serve_handoff(store, job, "1012", head=OTHER_HEAD)
+    serve_closed_pr(store, tip=tip, merged=merged)
+
+    assert done(db, job, "1012") == 1
+
+    assert f"head={OTHER_HEAD} is not the head of #7 ({HEAD})" in capsys.readouterr().err
+
+
 def test_a_ready_with_a_short_head_of_the_pr_completes(tmp_path: Path, store: Path) -> None:
     db, _, job = running_job(tmp_path)
     serve_handoff(store, job, "1008", head=HEAD[:12])
