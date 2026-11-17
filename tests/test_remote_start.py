@@ -6,6 +6,7 @@ the CLI, or FakeTransport in process. No test reaches a real host.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
 import os
@@ -25,6 +26,7 @@ from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
+from lib.worktrees import pid_alive, process_start
 from tests.test_dispatcher import (
     GO,
     TRUSTED_LOGINS,
@@ -905,7 +907,8 @@ def disable_box(tmp_path: Path) -> None:
 def test_disabling_the_box_loses_its_running_job_and_stops_it_within_one_poll(
     tmp_path: Path, alive: dict[int, bool], signalled: int
 ) -> None:
-    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive=alive)
+    live = dict(alive)
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive=live)
     poll_at(now, dispatcher, 0.0)
     assert state(queue, job.id) == "running"
     assert pool.used() == {"box": 1}
@@ -916,8 +919,70 @@ def test_disabling_the_box_loses_its_running_job_and_stops_it_within_one_poll(
     assert state(queue, job.id) == "failed"
     assert ("device-lost", "box: disabled") in job_events(queue, job.id)
     assert pool.used() == {}
-    assert orphans(queue) == []
+    assert orphans(queue) == [(job.id, "box", "None")]
     assert kills == [(signalled, signal.SIGTERM)]
+
+    poll_at(now, dispatcher, 120.0)
+    assert orphans(queue) == [(job.id, "box", "None")]
+    assert kills[1:] == [(pid, signal.SIGKILL) for pid in sorted(live)]
+
+    live.clear()
+    poll_at(now, dispatcher, 180.0)
+    assert orphans(queue) == []
+    assert len(kills) == 1 + len(alive)
+
+
+def test_a_lost_box_worker_that_ignores_sigterm_keeps_its_orphan_until_it_is_killed(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
+    worker = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; from pathlib import Path; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "Path(sys.argv[1]).touch(); time.sleep(120)",
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={})
+        monitor = dispatcher.devices
+        monitor.alive = pid_alive
+        monitor.kill = os.kill
+        runner = subprocess.Popen([sys.executable, "-c", "pass"])
+        runner_pid, runner_start = runner.pid, process_start(runner.pid)
+        runner.wait()
+        with queue.connect() as connection:
+            connection.execute(
+                "UPDATE device_slots SET runner_pid = ?, runner_start = ?, "
+                "worker_pid = ?, worker_start = ? WHERE job_id = ?",
+                (runner_pid, runner_start, worker.pid, process_start(worker.pid), job.id),
+            )
+            connection.commit()
+
+        disable_box(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert state(queue, job.id) == "failed"
+        assert pool.used() == {}
+        time.sleep(0.5)
+        assert worker.poll() is None
+        assert orphans(queue) == [(job.id, "box", "None")]
+
+        poll_at(now, dispatcher, 60.0)
+        assert worker.wait(timeout=10) == -signal.SIGKILL
+        assert orphans(queue) == [(job.id, "box", "None")]
+
+        poll_at(now, dispatcher, 120.0)
+        assert orphans(queue) == []
+    finally:
+        worker.kill()
+        worker.wait()
 
 
 def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:
@@ -1165,6 +1230,109 @@ def test_a_launch_that_got_there_first_keeps_its_orphan_until_it_is_stopped(
         assert orphans(queue) == []
     finally:
         remote.stop_worker(monitor.transport, target, kill=True)
+
+
+def test_a_launch_that_owns_its_tag_when_the_check_scans_never_starts_its_worker(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    bins = root / "bin"
+    bins.mkdir()
+
+    def wait_for(path: Path) -> None:
+        deadline = time.monotonic() + 15
+        while not path.exists():
+            assert time.monotonic() < deadline, f"timed out waiting for {path}"
+            time.sleep(0.01)
+
+    def helper(name: str, body: str) -> None:
+        path = bins / name
+        path.write_text(
+            f"#!{sys.executable}\nimport os, pathlib, sys, time\n"
+            f"r = pathlib.Path({str(root)!r})\n{body}"
+        )
+        path.chmod(0o755)
+
+    helper(
+        "mv",
+        "if sys.argv[-1].endswith('/current'):\n"
+        "    (r / 'launch-paused').touch()\n"
+        "    while not (r / 'allow-detach').exists(): time.sleep(.01)\n"
+        "os.execv('/usr/bin/mv', ['mv', *sys.argv[1:]])\n",
+    )
+    helper(
+        "grep",
+        "if sys.argv[1:2] == ['-lzxsF'] and not os.environ.get('ORCH_WORKER_TAG'):\n"
+        "    (r / 'scan-expanded').touch()\n"
+        "    while not (r / 'allow-scan').exists(): time.sleep(.01)\n"
+        "os.execv('/usr/bin/grep', ['grep', *sys.argv[1:]])\n",
+    )
+    helper(
+        "uname",
+        "if os.environ.get('ORCH_WORKER_TAG'):\n"
+        "    (r / 'start-paused').touch()\n"
+        "    while not (r / 'allow-start').exists(): time.sleep(.01)\n"
+        "os.execv('/usr/bin/uname', ['uname', *sys.argv[1:]])\n",
+    )
+    env = dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}")
+
+    class PausingShell:
+        def run(self, argv, *, timeout: float) -> int:
+            return subprocess.run(
+                ["sh", "-c", argv[-1]], timeout=timeout, env=env, capture_output=True
+            ).returncode
+
+    now, queue, pool, transport, dispatcher, job = lost_setup(root, reload=True)
+    monitor = dispatcher.devices
+    monitor.alive = lambda *_: False
+    monitor.transport = PausingShell()
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, TAG)
+    assert target is not None
+    marker = root / "worker-started"
+    start = remote.start_script(
+        target,
+        [sys.executable, "-c", f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(30)"],
+        {},
+    )
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=30, grace=1
+    )
+    launcher = subprocess.Popen(
+        ["sh", "-c", launch],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+    pool_thread = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        wait_for(root / "launch-paused")
+        disable_pc(root)
+        checked = pool_thread.submit(dispatcher._check_devices)
+        wait_for(root / "scan-expanded")
+        (root / "allow-detach").touch()
+        wait_for(root / "start-paused")
+        out, _ = launcher.communicate(timeout=15)
+        assert out.decode().strip() == f"{remote.LAUNCH_MARK} started"
+        (root / "allow-scan").touch()
+        checked.result(timeout=15)
+        assert state(queue, job.id) == "failed"
+        assert pool.used() == {}
+
+        (root / "allow-start").touch()
+        refused = Path(remote.run_file(target, "exit"))
+        deadline = time.monotonic() + 15
+        while not marker.exists() and not refused.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert not marker.exists() or orphans(queue), "live lost worker has no cleanup row"
+        assert refused.read_text().strip() == str(remote.START_REFUSED)
+    finally:
+        for name in ("allow-start", "allow-scan", "allow-detach"):
+            (root / name).touch()
+        subprocess.run(["sh", "-c", remote.stop_script(target, kill=True)], timeout=10)
+        pool_thread.shutdown(wait=True)
 
 
 def test_an_unreachable_device_keeps_its_orphans_for_one_check_a_poll(tmp_path: Path) -> None:

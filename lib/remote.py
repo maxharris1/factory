@@ -308,7 +308,7 @@ _FENCE = "fenced"
 
 
 def darwin_record(tag: str) -> str:
-    """The Darwin record's file name in the job directory: one per start."""
+    """The start's record file name in the job directory: one per start (#679: Linux too)."""
     return f".orch-worker-{tag}.pid"
 
 
@@ -554,6 +554,7 @@ def start_script(
         f"[ -r /proc/self/environ ] || exit {START_REFUSED}; "
         f"read -r b < /proc/sys/kernel/random/boot_id || exit {START_REFUSED}; "
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
+        f'(set -C; echo "$$ $b {tag}" > {darwin_file}) 2>/dev/null || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
         f"{login}"
     )
@@ -565,15 +566,29 @@ def check_script(target: RemoteTarget) -> str:
     return _sh(f"t={target.require_tag()}; {_check_body(target)}")
 
 
-def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
-    """check_script's test for the worker whose tag is in $t (fence: _darwin_worker)."""
+def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False) -> str:
+    """check_script's test for the worker whose tag is in $t (fence: _darwin_worker).
+
+    claim (Linux): first take the start's record as _darwin_worker's fence
+    does, or be unsure, so a start of $t not yet recorded refuses and never
+    runs after this check says gone, even one the process scan missed.
+    """
+    directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
         target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
     )
+    record = (
+        f'r={directory}/.orch-worker-$t.pid; if [ ! -e "$r" ]; then '
+        f"mkdir -p -- {directory} 2>/dev/null; "
+        f'(set -C; echo {_FENCE} > "$r") 2>/dev/null; [ -e "$r" ] || exit 3; fi; '
+        if claim
+        else ""
+    )
     return (
         f"f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
+        f"{record}"
         f"{_CAN_SCAN} || exit 3; "
         "[ -r /proc/self/stat ] || exit 3; "
         f'[ -z "$({_TAGGED})" ] || exit 1; '
@@ -593,7 +608,8 @@ def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
 
 
 def fenced_check_script(target: RemoteTarget) -> str:
-    """check_script, after taking the tag's run directory as launch_script's mkdir would."""
+    """check_script, after taking the tag's run directory as launch_script's mkdir would,
+    and on Linux the start's record (_check_body's claim)."""
     tag = target.require_tag()
     return _sh(
         f"t={tag}; R={shlex.quote(run_dir(target))}; "
@@ -601,7 +617,7 @@ def fenced_check_script(target: RemoteTarget) -> str:
         'if (umask 077 && mkdir -- "$R/$t") 2>/dev/null; then '
         f'echo {START_REFUSED} > "$R/$t/exit" 2>/dev/null || :; '
         'elif [ ! -d "$R/$t" ]; then exit 3; fi; '
-        f"{_check_body(target)}"
+        f"{_check_body(target, claim=True)}"
     )
 
 

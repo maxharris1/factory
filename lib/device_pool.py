@@ -136,6 +136,10 @@ class Orphan:
     os_user: str
     worker_tag: str | None
     lost_at: float
+    runner_pid: int | None = None
+    runner_start: str | None = None
+    worker_pid: int | None = None
+    worker_start: str | None = None
 
 
 def choose_device(
@@ -659,17 +663,7 @@ class DevicePool:
             rows = connection.execute(
                 f"SELECT * FROM {ORPHANS_TABLE} ORDER BY lost_at, job_id"
             ).fetchall()
-        return [
-            Orphan(
-                job_id=str(row["job_id"]),
-                device=str(row["device"]),
-                harness=str(row["harness"]),
-                os_user=str(row["os_user"]),
-                worker_tag=_text(row["worker_tag"]),
-                lost_at=float(row["lost_at"]),
-            )
-            for row in rows
-        ]
+        return [_orphan(row) for row in rows]
 
     def forget_orphan(self, job_id: str) -> None:
         with self.queue.connect() as connection:
@@ -750,6 +744,22 @@ def read_autostart(
     return None if pid is None else (pid, _text(tuple(row)[1]))
 
 
+def _orphan(row: sqlite3.Row) -> Orphan:
+    keys = set(row.keys())
+    return Orphan(
+        job_id=str(row["job_id"]),
+        device=str(row["device"]),
+        harness=str(row["harness"]),
+        os_user=str(row["os_user"]),
+        worker_tag=_text(row["worker_tag"]),
+        lost_at=float(row["lost_at"]),
+        runner_pid=_int(row["runner_pid"]) if "runner_pid" in keys else None,
+        runner_start=_text(row["runner_start"]) if "runner_start" in keys else None,
+        worker_pid=_int(row["worker_pid"]) if "worker_pid" in keys else None,
+        worker_start=_text(row["worker_start"]) if "worker_start" in keys else None,
+    )
+
+
 def _placement(row: sqlite3.Row) -> Placement:
     return Placement(
         job_id=str(row["job_id"]),
@@ -809,6 +819,14 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
     )
 
 
+_ORPHAN_PIDS = (
+    ("runner_pid", "INTEGER"),
+    ("runner_start", "TEXT"),
+    ("worker_pid", "INTEGER"),
+    ("worker_start", "TEXT"),
+)
+
+
 def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None:
     connection.execute(
         f"""
@@ -822,11 +840,16 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
         )
         """
     )
+    present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({ORPHANS_TABLE})")}
+    for name, kind in _ORPHAN_PIDS:
+        if name not in present:
+            connection.execute(f"ALTER TABLE {ORPHANS_TABLE} ADD COLUMN {name} {kind}")
+    pids = ", ".join(name for name, _ in _ORPHAN_PIDS)
     connection.execute(
         f"""
         INSERT OR REPLACE INTO {ORPHANS_TABLE}
-            (job_id, device, harness, os_user, worker_tag, lost_at)
-        SELECT job_id, device, harness, os_user, worker_tag, ? FROM {SLOTS_TABLE}
+            (job_id, device, harness, os_user, worker_tag, lost_at, {pids})
+        SELECT job_id, device, harness, os_user, worker_tag, ?, {pids} FROM {SLOTS_TABLE}
         WHERE job_id = ?
         """,
         (now, job_id),

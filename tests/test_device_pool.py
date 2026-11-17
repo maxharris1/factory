@@ -604,3 +604,34 @@ def test_orphans_are_read_and_forgotten_and_a_missing_table_reads_empty(tmp_path
 
     pool.forget_orphan(first.id)
     assert [orphan.job_id for orphan in pool.orphans()] == [second.id]
+
+
+def test_an_orphan_keeps_its_runner_and_worker_pids_and_a_legacy_table_gains_them(
+    tmp_path: Path,
+) -> None:
+    pool, queue = make_pool(tmp_path, device("box", 2, "claude"))
+    enqueue(queue, "claude", "1")
+    enqueue(queue, "claude", "2")
+    legacy, _ = pool.claim("claude")
+    job, _ = pool.claim("claude")
+    with queue.connect() as connection:
+        connection.execute(
+            "CREATE TABLE device_orphans (job_id TEXT PRIMARY KEY, device TEXT NOT NULL, "
+            "harness TEXT NOT NULL, os_user TEXT NOT NULL, worker_tag TEXT, lost_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO device_orphans VALUES (?, 'box', 'claude', 'claude-bot', NULL, 100.0)",
+            (legacy.id,),
+        )
+        connection.commit()
+    assert pool.orphans()[0].worker_pid is None
+
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", pid=12, start="w")
+    with queue.connect() as connection:
+        device_pool.orphan_slot(connection, job.id, 200.0)
+
+    lost = pool.orphans()[1]
+    assert (lost.runner_pid, lost.runner_start, lost.worker_pid, lost.worker_start) == (
+        11, "r", 12, "w",
+    )

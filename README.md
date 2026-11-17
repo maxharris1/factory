@@ -362,12 +362,16 @@ The poller loads `machines.yml` again on its first poll and whenever it or
 a file that fails to load keeps the last good config and is recorded as a
 `machines.yml:` poll error each poll until it is fixed. The box is covered too:
 a job running there when it is disabled is lost the same way, and its `orch job
-run` (or its worker, if that is gone) is sent SIGTERM. Each poll also checks
+run` (or its worker, if that is gone) is sent SIGTERM; its `device_orphans`
+row keeps both pids, a later poll sends SIGKILL to whichever still runs, and
+the row is deleted once both are gone. Each poll also checks
 every `device_orphans` row by its worker tag (issue #679): a lost job's worker
 still running is sent SIGTERM, a gone one's row is deleted, and an unreachable
 device gets one check per poll. Every check that lets a remote worker go first
 makes that start's run directory on the device, so a launch still in transit
-from a lost runner answers `already` and starts nothing.
+from a lost runner answers `already` and starts nothing. On Linux it also takes
+the start's own record, as on macOS, so a start already launched but not yet
+recorded refuses and never runs, even when the process scan missed it.
 An unreachable device counts against its offline clock; an error raised while
 checking (the database, say) is recorded as a `devices` poll error and never
 stops the poll.

@@ -11,10 +11,11 @@ good config, so the next poll tries again. `reconcile` then walks each
 device that holds a slot or an orphan. A remote device gets all three
 steps below. On the box (a local device) a finished job's slot is
 released as below; when machines.yml sets it `enabled: false`, each
-running job whose worker started is sent SIGTERM through its `orch job
-run` (which stops the command and every process it started), or through
-its worker when that runner is gone, and handed to `on_lost` as below.
-A box orphan names no worker tag, so its row is forgotten at once.
+running job whose worker started is handed to `on_lost` as below. A box
+orphan keeps the pids of its `orch job run` and its worker: while either
+lives it is sent SIGTERM, through the runner (which stops the command and
+every process it started) or through the worker once that runner is gone,
+and SIGKILL on each later poll; its row is forgotten once both are gone.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -65,7 +66,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from lib.config_overlay import overlay_path
-from lib.device_pool import DevicePool, HeldSlot, Placement
+from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
 from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.remote import (
@@ -203,7 +204,7 @@ class DeviceMonitor:
             if device is None:
                 continue  # renamed or removed: keep the slot, status shows it
             if device.local:
-                self._local(device, slots, on_lost, released, lost, forgotten)
+                self._local(device, slots, now, on_lost, released, stopped, lost, forgotten)
                 continue
             self._remote(device, slots, now, lost_after, on_lost, released, stopped, lost)
             self._sweep_orphans(device, stopped, forgotten)
@@ -234,8 +235,10 @@ class DeviceMonitor:
         self,
         device: Device,
         slots: list[HeldSlot],
+        now: float,
         on_lost: OnLost,
         released: list[str],
+        stopped: list[str],
         lost: list[str],
         forgotten: list[str],
     ) -> None:
@@ -247,25 +250,34 @@ class DeviceMonitor:
                 and slot.job_state == "running"
                 and not never_started(slot.placement)
             ):
-                self._stop_local(slot.placement)
                 on_lost(slot.placement.job_id, device.name, "disabled")
                 lost.append(slot.placement.job_id)
         for orphan in self.pool.orphans():
             if orphan.device == device.name:
-                self.pool.forget_orphan(orphan.job_id)
-                forgotten.append(orphan.job_id)
+                self._stop_local(orphan, now, stopped, forgotten)
 
-    def _stop_local(self, placement: Placement) -> None:
-        for pid, start in (
-            (placement.runner_pid, placement.runner_start),
-            (placement.worker_pid, placement.worker_start),
-        ):
-            if pid is not None and self.alive(pid, start):
-                try:
-                    self.kill(pid, signal.SIGTERM)
-                except OSError:
-                    continue
-                return
+    def _stop_local(
+        self, orphan: Orphan, now: float, stopped: list[str], forgotten: list[str]
+    ) -> None:
+        live = [
+            pid
+            for pid, start in (
+                (orphan.runner_pid, orphan.runner_start),
+                (orphan.worker_pid, orphan.worker_start),
+            )
+            if pid is not None and self.alive(pid, start)
+        ]
+        if not live:
+            self.pool.forget_orphan(orphan.job_id)
+            forgotten.append(orphan.job_id)
+            return
+        kill = orphan.lost_at < now
+        for pid in live if kill else live[:1]:
+            try:
+                self.kill(pid, signal.SIGKILL if kill else signal.SIGTERM)
+            except OSError:
+                continue
+        stopped.append(orphan.job_id)
 
     def _local_gone(self, slot: HeldSlot) -> bool:
         if slot.job_state == "running":
