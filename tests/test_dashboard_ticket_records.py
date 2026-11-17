@@ -356,6 +356,17 @@ def test_a_stuck_flag_on_a_live_state_stops_in_that_state(tmp_path: Path) -> Non
     }
 
 
+def test_a_stuck_flag_stops_when_its_wake_was_queued(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, CLEFFY, "93", state="building", stuck=1, stuck_reason="job-timeout")
+        add_job(connection, "w-93", action="stuck", recipient="grok", ticket_id="93", created_at=NOW - 70)
+        connection.execute(
+            "UPDATE ticket_state SET stuck_wake_job_id = 'w-93' WHERE repo = ? AND ticket_id = '93'", (CLEFFY,))
+    stopped = records(db, log, tmp_path)["maxharris1/cleffy#93"]["stopped"]
+    assert (stopped["state"], stopped["at"], stopped["stopped_in"]) == ("stuck", NOW - 70, "building")
+
+
 def test_a_stop_with_no_transition_time_has_no_stop_time(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:

@@ -1184,6 +1184,9 @@ def _relay(
         seen.append(connection.execute(
             "SELECT repo, ticket_id, MAX(COALESCE(finished_at, last_activity_at, created_at)) AS at "
             "FROM jobs GROUP BY repo, ticket_id"))
+    if "ticket_transitions" in tables:
+        seen.append(connection.execute(
+            "SELECT repo, ticket_id, MAX(at) FROM ticket_transitions GROUP BY repo, ticket_id"))
     seen.append((row["repo"], row["ticket_id"], row["recorded_at"]) for row in handled)
     stored: dict[tuple[str, str], tuple[str, str]] = {}
     moved: dict[tuple[str, str], float] = {}
@@ -1403,16 +1406,18 @@ def _read_db(
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
         no_ci_bases = _no_ci_bases(connection) if "no_ci_bases" in tables else {}
         for row in connection.execute(
-            """
+            f"""
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                    COALESCE(state.workflow_state, 'intake') AS workflow_state,
                    COALESCE(state.review_round, 0) AS review_round,
                    COALESCE(state.gate_count, 0) AS gate_count,
                    COALESCE(state.stuck, 0) AS stuck,
-                   state.stuck_reason, state.paused_action
+                   state.stuck_reason, state.paused_action,
+                   {"wake.created_at" if jobs else "NULL"} AS stuck_at
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
+            {"LEFT JOIN jobs AS wake ON wake.id = state.stuck_wake_job_id" if jobs else ""}
             """
         ):
             ref = _ticket_ref(sources, row["repo"], row["ticket_id"])
@@ -1440,6 +1445,7 @@ def _read_db(
                 _enum(row["tracker"], TRACKERS), stuck, state,
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
                 f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
+                row["stuck_at"],
             )
             tickets.append(
                 {
@@ -1738,6 +1744,7 @@ class TicketInfo(NamedTuple):
     round: int = 0
     reason: str | None = None
     key: str = ""
+    stuck_at: float | None = None
 
 
 def _record_keys(ticket_info: dict[tuple[str, str], TicketInfo]) -> dict[tuple[str, str], str]:
@@ -1785,6 +1792,8 @@ def _ticket_record(
     stopped = stop_facts(chart, flow, str(info.state), info.stuck)
     if stopped is not None:
         stopped["reason"] = info.reason
+        if info.stuck and stopped["at"] is None:
+            stopped["at"] = info.stuck_at
     return {
         "repo": info.repo,
         "ticket_id": info.ticket_id,

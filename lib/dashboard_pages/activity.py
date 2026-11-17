@@ -134,6 +134,7 @@ SCRIPT = r"""
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
     var root = panel('relay', 'Relay', relayCount(shown.length, d.relay.tracked));
     if (!root) return;
+    var hrefs = jobHrefs(d);
     var bar = add(root, el('div', 'rl-filter'));
     bar.setAttribute('role', 'group');
     bar.setAttribute('aria-label', 'Filter');
@@ -152,7 +153,7 @@ SCRIPT = r"""
       shown.forEach(function (t) {
         var row = add(rows, el('div', 'rl-row'));
         row.setAttribute('data-thread', t.key);
-        add(row, link('rl-tk', ticketPageHref(t.ref))).textContent = ticketOf(t.ref);
+        add(row, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
         var steps = add(row, el('span', 'rl-steps'));
         t.steps.forEach(function (s, i) {
           if (i) add(steps, el('span', 'rl-sep', '→')).setAttribute('aria-hidden', 'true');
@@ -279,6 +280,7 @@ def _relay_step(step: dict) -> str:
 
 def _relay(snapshot: dict) -> str:
     threads = relay_threads(snapshot)
+    hrefs = _job_hrefs(snapshot)
     buttons = "".join(
         f'<button class="rl-btn" type="button" aria-pressed="{"true" if key == "all" else "false"}" '
         f'data-relay="{key}">{text}</button>'
@@ -287,7 +289,7 @@ def _relay(snapshot: dict) -> str:
     sep = '<span class="rl-sep" aria-hidden="true">→</span>'
     rows = "".join(
         f'<div class="rl-row" data-thread="{_e(t["key"])}">'
-        f'<a class="rl-tk" href="{_e(ticket_page_href(t["ref"]))}">{_e(_ticket(t["ref"]))}</a>'
+        f'<a class="rl-tk" href="{_e(ticket_page_href(t["ref"]) if t["key"] in hrefs else "job.html")}">{_e(_ticket(t["ref"]))}</a>'
         f'<span class="rl-steps">{sep.join(_relay_step(step) for step in t["steps"])}</span></div>'
         for t in threads
     )
