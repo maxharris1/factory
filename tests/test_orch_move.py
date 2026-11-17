@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli
+from lib import cli, health
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.state_backup import backup
 from tests.pool_helpers import pool_claim
@@ -399,6 +399,34 @@ def test_move_db_unlocked_reads_the_poll_lock(tmp_path: Path) -> None:
         )
     assert held.returncode == 1
     assert f"a poller still holds {db}.lock" in held.stderr
+    assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
+
+
+@pytest.mark.parametrize("share", [True, False], ids=["plain-wait", "autostart"])
+def test_move_db_unlocked_reads_every_waiter_lock(tmp_path: Path, share: bool) -> None:
+    db = tmp_path / "orch.db"
+    take = "share_waiter_lock" if share else "hold_waiter_lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import sys, time\nsys.path.insert(0, {str(ROOT)!r})\nfrom lib import waiter\n"
+            f"waiter.{take}({str(db)!r}, 'codex-bot')\nprint('held', flush=True)\ntime.sleep(60)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline() == "held\n"
+        held = subprocess.run(
+            [sys.executable, str(ROOT / "bin/orch"), "move-db", "unlocked", "--db", str(db)],
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+    assert held.returncode == 1
+    assert f"a waiter still holds {tmp_path / 'waiter-codex-bot.lock'}" in held.stderr
     assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
 
 
@@ -929,3 +957,165 @@ def test_export_waits_for_a_self_heal_pass_and_its_device_deploy_before_its_copy
     assert refused.returncode == 79, refused.stderr
     assert "retired as the orch host" in refused.stderr
     assert heal_log.read_text(encoding="utf-8") == invoked
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_a_poller_launch_already_past_the_retired_guard_exits_once_export_finishes(
+    tmp_path: Path,
+) -> None:
+    box = Host(tmp_path, "box")
+    _real_poller_service(box)
+    db = tmp_path / "custom" / "orch.db"
+    db.parent.mkdir()
+    _seed(tmp_path, db)
+    gate, ready, launched = tmp_path / "launch-gate", tmp_path / "launch-ready", tmp_path / "launcher.pid"
+    pidfile = db.parent / "poller.pid"
+    driver = tmp_path / "driver" / "orch"
+    driver.parent.mkdir()
+    driver.write_text(DRIVER.format(root=str(ROOT)), encoding="utf-8")
+    (box.config / "orch-poll.env").write_text(
+        f'''ORCH_DB={db}
+if [ "${{1:-}}" != --print-db ]; then
+    touch "{ready}"
+    while [ ! -e "{gate}" ]; do sleep 0.01; done
+fi
+''',
+        encoding="utf-8",
+    )
+    _executable(
+        box.home / ".local/bin/orch",
+        f'''#!{sys.executable}
+import os, subprocess, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+from tests.procs import alive
+if sys.argv[1:2] == ["poll"]:
+    os.execv({sys.executable!r}, [{sys.executable!r}, {str(driver)!r}, *sys.argv[1:]])
+result = subprocess.run([{sys.executable!r}, {str(ROOT / "bin/orch")!r}, *sys.argv[1:]])
+if sys.argv[1:3] == ["move-db", "unlocked"] and result.returncode == 0:
+    Path({str(gate)!r}).touch()
+    launcher = int(Path({str(launched)!r}).read_text())
+    deadline = time.monotonic() + 10
+    while not Path({str(pidfile)!r}).exists() and alive(launcher):
+        assert time.monotonic() < deadline, "the pending launch neither started nor exited"
+        time.sleep(0.01)
+raise SystemExit(result.returncode)
+''',
+    )
+    launcher = subprocess.Popen(
+        [str(box.checkout / "deploy/run-poller.sh")],
+        env={"HOME": str(box.home), "PATH": "/usr/bin:/bin"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    launched.write_text(f"{launcher.pid}\n", encoding="utf-8")
+    try:
+        _until(ready.exists, "the launch never passed run-poller's retired guard")
+        assert not box.retired.exists()
+
+        result = box.move("export", "--to", "pc", "--dir", str(tmp_path / "export"))
+
+        assert result.returncode == 0, result.stderr
+        assert launcher.wait(timeout=10) == 79
+        assert "retired" in launcher.stderr.read()
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=10)
+    assert not pidfile.exists()
+    assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
+    assert (tmp_path / "export/manifest.json").exists()
+
+
+def _retire(home: Path) -> None:
+    (home / ".config/factory").mkdir(parents=True)
+    (home / ".config/factory/orch-retired").write_text("box 2026-01-01T00:00:00Z\n", encoding="utf-8")
+
+
+def test_orch_poll_on_a_retired_host_exits_79_without_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    _seed(tmp_path, db)
+    pidfile = tmp_path / "poller.pid"
+    _retire(tmp_path / "home")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert cli.main(["poll", "--once", "--db", str(db), "--pidfile", str(pidfile)]) == 79
+
+    assert "retired as the orch host" in capsys.readouterr().err
+    assert not pidfile.exists()
+    assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
+
+
+def test_orch_wait_on_a_retired_host_exits_79_without_claiming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    _seed(tmp_path, db)
+    _retire(tmp_path / "home")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert cli.main(["wait", "claude-bot", "--db", str(db)]) == 79
+
+    assert "retired as the orch host" in capsys.readouterr().err
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("SELECT state FROM jobs").fetchall() == [("queued",)]
+    assert health.read_heartbeats(db) is None
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_export_refuses_while_a_plain_wait_past_the_retired_guard_can_still_claim(
+    tmp_path: Path,
+) -> None:
+    box = Host(tmp_path, "box")
+    _seed(tmp_path, box.db)
+    _real_poller_service(box)
+    shutil.copy(ROOT / "deploy/waiter-service.sh", box.checkout / "deploy/waiter-service.sh")
+    ready, gate = tmp_path / "ready", tmp_path / "gate"
+    driver = tmp_path / "driver" / "orch"
+    _executable(
+        driver,
+        f'''#!{sys.executable}
+import sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+from lib import cli
+checked = cli._retired
+def paused():
+    retired = checked()
+    Path({str(ready)!r}).touch()
+    while not Path({str(gate)!r}).exists():
+        time.sleep(0.01)
+    return retired
+cli._retired = paused
+raise SystemExit(cli.main(sys.argv[1:]))
+''',
+    )
+    waiter = subprocess.Popen(
+        [sys.executable, str(driver), "wait", "claude-bot", "--db", str(box.db),
+         "--machines", str(ROOT / "machines.yml")],
+        env=box.env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _until(lambda: ready.exists() or waiter.poll() is not None, "the wait never reached its retired guard")
+        assert waiter.poll() is None, waiter.communicate()
+        assert not box.retired.exists()
+
+        result = box.move("export", "--to", "pc", "--dir", str(tmp_path / "export"), ORCH_WAITER_STOP_WAIT="1")
+
+        assert result.returncode == 1, result.stderr
+        assert f"a waiter still holds {box.state / 'waiter-claude-bot.lock'}" in result.stderr
+        assert not (tmp_path / "export/manifest.json").exists()
+        assert box.retired.exists()
+        assert waiter.poll() is None
+    finally:
+        gate.touch()
+        waiter.kill()
+        waiter.wait(timeout=10)
