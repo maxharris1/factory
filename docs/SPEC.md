@@ -483,6 +483,10 @@ grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_auth_env: FACTORY_WEBHOOK_AUTH
   webhook_key_env: FACTORY_WEBHOOK_KEY
+# driver: grok                      # or claude; absent means grok
+# claude:                           # required when driver is claude
+#   fire_url_env: FACTORY_CLAUDE_FIRE_URL
+#   fire_token_env: FACTORY_CLAUDE_FIRE_TOKEN
 trusted_logins:
   maxharris1: [grok-bot, claude-bot, codex-bot, cursor-bot]
 # Before install, Max adds the confirmed stable Linear user ID:
@@ -836,6 +840,20 @@ up a Grok wake. `grok_webhook` defaults to `true`. `false` (allowed only
 with `driver_inbox`) finishes each wake with an `inbox:` receipt and sends
 nothing to Grok's webhook. The top-level `grok` block is needed only while a
 project keeps `grok_webhook` on.
+
+`driver` (optional, issue #760) names the agent that receives wakes. It is
+`grok` or `claude`. `grok` is the default and means the same as no `driver`
+key. With `claude`, a top-level `claude:` block is required. It names two
+environment variables, `fire_url_env` and `fire_token_env`, and never holds
+their values. A `claude` wake POSTs the scheduled task's API-trigger fire URL
+with the token as a Bearer credential. The body is `{"text": ...}`, where
+`text` is the same JSON body a Grok wake sends, as a string. A wake goes to
+exactly one driver. There is no fan-out, and with `claude` nothing goes to
+Grok's webhook. A failed fire is recorded as a `grok-delivery:` poll error and
+retried on the next poll, like a failed Grok POST. That includes HTTP 429 from
+the routine limits of 30 fires per hour per task and 100 per hour per account.
+`grok_webhook: false` with `driver_inbox` keeps its meaning under either
+driver. Heal and deploy escalations still use the `grok:` webhook.
 
 ## 8. Review and merge rules
 

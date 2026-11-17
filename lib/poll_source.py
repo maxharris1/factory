@@ -2434,6 +2434,8 @@ def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
                 config.grok.webhook_auth_env,
             )
         )
+    if config.claude is not None:
+        names.extend((config.claude.fire_url_env, config.claude.fire_token_env))
     return tuple(dict.fromkeys(names))
 
 

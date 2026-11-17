@@ -40,6 +40,7 @@ from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
 from lib.dispatch.poll import sleep_on_either_clock
+from lib.dispatch.types import GrokDelivery
 from lib.dispatcher import Dispatcher, PollCycleFailed, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import (
     EvalError,
@@ -52,7 +53,12 @@ from lib.eval_report import (
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.grok_delivery import GrokDeliveryError, NoGrokWebhook, WebhookGrokDelivery
+from lib.grok_delivery import (
+    ClaudeDriverDelivery,
+    GrokDeliveryError,
+    NoGrokWebhook,
+    WebhookGrokDelivery,
+)
 from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hold import MergeUpdate
@@ -67,6 +73,7 @@ from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import (
+    Driver,
     OrchConfig,
     approvals,
     bot_approver_findings,
@@ -1080,7 +1087,11 @@ def _runtime(
         and not config.trusted_linear_users
     ):
         raise ValueError("trusted_linear_users is required for Linear polling")
-    if config.grok is None and any(project.grok_webhook for project in config.projects):
+    if (
+        config.driver == "grok"
+        and config.grok is None
+        and any(project.grok_webhook for project in config.projects)
+    ):
         raise ValueError("grok webhook env names are required for polling")
     path = _db_path(db_path)
     queue = (
@@ -1094,15 +1105,7 @@ def _runtime(
     }
     if create and not any(trusted.values()):
         trusted["github"]["init-db"] = frozenset({"init-db"})
-    cleared: list[str] = []
-    delivery: WebhookGrokDelivery | NoGrokWebhook = NoGrokWebhook()
-    if config.grok is not None:
-        cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
-        delivery = WebhookGrokDelivery(
-            url_env=config.grok.webhook_url_env,
-            key_env=config.grok.webhook_key_env,
-            auth_env=config.grok.webhook_auth_env,
-        )
+    delivery, cleared = _wake_delivery(config)
     if config.linear is not None:
         cleared.append(config.linear.api_key_env)
     t8 = T8Hook()
@@ -1182,6 +1185,37 @@ def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
         worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
     )
     return merge_update(clone, approved, head, f"refs/remotes/origin/{base}")
+
+
+def _grok_wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
+    if config.grok is None:
+        return NoGrokWebhook(), []
+    delivery = WebhookGrokDelivery(
+        url_env=config.grok.webhook_url_env,
+        key_env=config.grok.webhook_key_env,
+        auth_env=config.grok.webhook_auth_env,
+    )
+    return delivery, [config.grok.webhook_url_env, config.grok.webhook_key_env]
+
+
+def _claude_wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
+    assert config.claude is not None
+    delivery = ClaudeDriverDelivery(
+        url_env=config.claude.fire_url_env,
+        token_env=config.claude.fire_token_env,
+    )
+    return delivery, [config.claude.fire_url_env, config.claude.fire_token_env]
+
+
+_WAKE_DELIVERIES: dict[Driver, Callable[[OrchConfig], tuple[GrokDelivery, list[str]]]] = {
+    "grok": _grok_wake_delivery,
+    "claude": _claude_wake_delivery,
+}
+
+
+def _wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
+    """The one delivery for config.driver and the env names it reads."""
+    return _WAKE_DELIVERIES[config.driver](config)
 
 
 def _feeder(

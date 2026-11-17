@@ -12,6 +12,12 @@ grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_auth_env: FACTORY_WEBHOOK_AUTH
   webhook_key_env: FACTORY_WEBHOOK_KEY
+# Wakes go to the Claude Code routine only. Heal and deploy escalations
+# still use the grok webhook above.
+driver: claude
+claude:
+  fire_url_env: FACTORY_CLAUDE_FIRE_URL
+  fire_token_env: FACTORY_CLAUDE_FIRE_TOKEN
 # Cursor jobs are refused, so health expects no cursor-bot waiter.
 refused_harnesses:
   - cursor
