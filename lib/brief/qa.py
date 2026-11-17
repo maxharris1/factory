@@ -1,22 +1,12 @@
-"""The brief for one QA lane (#762).
-
-A QA lane is a cloud agent that drives the app live at one commit. It starts
-with nothing but this brief and a clone of the project's base branch, on either
-QA runner, so the brief carries pstack's whole live-lane procedure, names no
-project and no vendor, and renders the same bytes for each runner.
-
-Scenario text is data: it appears only inside one fenced JSON block. The
-lane's commands come from factory.md on the base branch and appear in fences.
-"""
-
 from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Literal
 
-from lib.brief.common import _REPO, _SKILL, BriefError, code_span, fenced
+from lib.brief.common import _REPO, _SKILL, _URL, BriefError, code_span, fenced
 from lib.factory_md import QA_RUNNERS, QaEvidence, QaLane
 
 LaneKind = Literal["head", "regression", "base-check"]
@@ -29,8 +19,6 @@ _SCENARIO_ID = re.compile(r"^s-[1-9][0-9]*$")
 _CRITERION = re.compile(r"^ac-[1-9][0-9]*$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-# common's _URL without the single quote, since each link is pasted inside one.
-_UPLOAD_URL = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+$")
 
 
 @dataclass(frozen=True)
@@ -178,7 +166,7 @@ def _check_uploads(facts: LaneFacts) -> None:
     for upload in facts.uploads:
         if upload.path not in expected:
             raise BriefError(f"upload {upload.path!r} matches no expected file")
-        if not _UPLOAD_URL.fullmatch(upload.url):
+        if not _URL.fullmatch(upload.url):
             raise BriefError(f"upload {upload.path!r} needs an https:// link")
     if RESULT not in paths:
         raise BriefError(f"no upload for {RESULT}")
@@ -410,7 +398,7 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
 def _handover(facts: LaneFacts) -> str:
     urls = {upload.path: upload.url for upload in facts.uploads}
     commands = "\n".join(
-        f"curl --fail --upload-file {_folder(facts)}/{path} '{urls[path]}'" for path in _expected_paths(facts)
+        f"curl --fail --upload-file {_folder(facts)}/{path} {shlex.quote(urls[path])}" for path in _expected_paths(facts)
     )
     return (
         "## Hand-over\n"

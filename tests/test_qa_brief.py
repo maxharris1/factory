@@ -1,9 +1,8 @@
-"""The QA lane brief: the whole live-lane procedure, the same bytes for each runner (#762)."""
-
 from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import replace
 
 import pytest
@@ -138,7 +137,7 @@ def test_brief_carries_every_point() -> None:
     assert (
         "then `result.json`" in handover
         and "did not finish" in handover
-        and [line.rsplit(" ", 1)[1].strip("'") for line in curls] == [upload.url for upload in QA_FACTS.uploads]
+        and [shlex.split(line)[-1] for line in curls] == [upload.url for upload in QA_FACTS.uploads]
         and curls[-1].startswith("curl --fail --upload-file /tmp/swarm-42/worker-1/result.json ")
     )
     assert all(phrase in brief["What a lane never does"] for phrase in (
@@ -175,8 +174,7 @@ def test_unknown_runner_is_refused() -> None:
         render_qa_brief(QA_FACTS, "codex-cloud")
 
 
-def lane(**changes: object) -> LaneFacts:
-    """QA_FACTS with changes, and uploads that match its scenarios unless the change names them."""
+def facts_with_fitted_uploads(**changes: object) -> LaneFacts:
     facts = replace(QA_FACTS, **changes)
     if "uploads" in changes:
         return facts
@@ -193,29 +191,29 @@ def _first_scenario(**changes: object) -> tuple[Scenario, ...]:
 
 
 BAD_FACTS = {
-    "short commit": lane(commit=HEAD[:12]),
-    "uppercase base commit": lane(base_commit=BASE_COMMIT.upper()),
-    "http upload": lane(
+    "short commit": facts_with_fitted_uploads(commit=HEAD[:12]),
+    "uppercase base commit": facts_with_fitted_uploads(base_commit=BASE_COMMIT.upper()),
+    "http upload": facts_with_fitted_uploads(
         uploads=(replace(QA_FACTS.uploads[0], url="http://uploads.example.com/a"), *QA_FACTS.uploads[1:])
     ),
-    "missing upload": lane(uploads=_without("s-1/start-free.png")),
-    "missing result upload": lane(uploads=_without("result.json")),
-    "upload matching no file": lane(uploads=(*QA_FACTS.uploads, replace(QA_FACTS.uploads[0], path="s-9/extra.png"))),
-    "empty scenarios": lane(scenarios=()),
-    "bad scenario id": lane(scenarios=_first_scenario(id="scenario-1")),
-    "bad criterion id": lane(scenarios=_first_scenario(criterion="ac-0")),
-    "bad save file name": lane(scenarios=_first_scenario(save=("../escape.png",))),
-    "lane four": lane(lane=4),
-    "unknown kind": lane(kind="smoke"),
-    "bad repo": lane(repo="not a repo"),
-    "bad run id": lane(run_id="run 7; rm -rf /"),
-    "bad verify": lane(verify="Verify Live"),
-    "pr zero": lane(pr=0),
+    "missing upload": facts_with_fitted_uploads(uploads=_without("s-1/start-free.png")),
+    "missing result upload": facts_with_fitted_uploads(uploads=_without("result.json")),
+    "upload matching no file": facts_with_fitted_uploads(uploads=(*QA_FACTS.uploads, replace(QA_FACTS.uploads[0], path="s-9/extra.png"))),
+    "empty scenarios": facts_with_fitted_uploads(scenarios=()),
+    "bad scenario id": facts_with_fitted_uploads(scenarios=_first_scenario(id="scenario-1")),
+    "bad criterion id": facts_with_fitted_uploads(scenarios=_first_scenario(criterion="ac-0")),
+    "bad save file name": facts_with_fitted_uploads(scenarios=_first_scenario(save=("../escape.png",))),
+    "lane four": facts_with_fitted_uploads(lane=4),
+    "unknown kind": facts_with_fitted_uploads(kind="smoke"),
+    "bad repo": facts_with_fitted_uploads(repo="not a repo"),
+    "bad run id": facts_with_fitted_uploads(run_id="run 7; rm -rf /"),
+    "bad verify": facts_with_fitted_uploads(verify="Verify Live"),
+    "pr zero": facts_with_fitted_uploads(pr=0),
 }
 
 
 def test_every_bad_fact_case_differs_from_a_valid_lane_in_one_fact() -> None:
-    render_qa_brief(lane(), "claude-cloud")
+    render_qa_brief(facts_with_fitted_uploads(), "claude-cloud")
 
 
 @pytest.mark.parametrize("case", sorted(BAD_FACTS))
