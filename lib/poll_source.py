@@ -44,7 +44,7 @@ from lib.dispatcher import (
 from lib.dispatch.types import ci_on_base, no_ci_base
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
-from lib.dispatch.errors_text import plain_fragment
+from lib.dispatch.errors_text import kept_name, redacted_fragment
 from lib.dispatch.cycle_clock import CycleClock
 from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
@@ -158,7 +158,6 @@ HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?")
 
 
 class PollSourceError(RuntimeError):
@@ -176,7 +175,7 @@ class PollCycleError(PollSourceError):
     def of(cls, errors: list[tuple[str, str, str]]) -> PollCycleError:
         counts = Counter(repo for repo, _, _ in errors)
         sources = ", ".join(
-            f"{_identifier(source)} x{count}" for source, count in sorted(counts.items())
+            f"{kept_name(source)} x{count}" for source, count in sorted(counts.items())
         )
         details = [
             _cycle_error_detail(repo, ticket_id, reason)
@@ -2403,17 +2402,11 @@ def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
     ) is not None
 
 
-def _identifier(text: str) -> str:
-    return text if _IDENTIFIER.fullmatch(text) else plain_fragment(text)
-
-
 def _cycle_error_detail(repo: str, ticket_id: str, reason: str) -> str:
     where = (
-        _identifier(repo)
-        if ticket_id == "-"
-        else f"{_identifier(repo)} ticket {_identifier(ticket_id)}"
+        kept_name(repo) if ticket_id == "-" else f"{kept_name(repo)} ticket {kept_name(ticket_id)}"
     )
-    return f"{where} {plain_fragment(reason)}".rstrip()
+    return f"{where} {redacted_fragment(reason)}".rstrip()
 
 
 def _safe_reason(exc: Exception) -> str:

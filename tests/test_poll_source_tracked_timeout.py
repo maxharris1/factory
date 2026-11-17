@@ -129,7 +129,13 @@ def test_a_source_over_its_tracked_read_budget_is_deferred_and_the_cycle_goes_on
     dispatcher.reconcile_jobs.assert_called_once_with()
 
 
-REPOS = ("acme/widgets", "acme/auth-service", "acme/session-keys")
+REPOS = (
+    "acme/widgets",
+    "acme/auth-service",
+    "acme/session-keys",
+    "acme/token-service",
+    "acme/api-key-store",
+)
 
 
 @pytest.mark.parametrize("repo", REPOS)
@@ -325,6 +331,29 @@ def test_the_poller_log_and_stored_detail_keep_secrets_in_source_errors_redacted
             "tail2of2",
         ):
             assert secret not in text
+
+
+def test_a_cycle_error_redacts_url_and_token_shapes_in_reasons_and_names() -> None:
+    error = PollCycleError.of(
+        [
+            (
+                "acme/token-service",
+                "12",
+                "PollSourceError:gh api GET https://api.github.com/repos/x exited 1 "
+                "ghp_abcdefghij1234567890",
+            ),
+            ("acme/ghp_abcdefghij1234567890", "github.com", "PollSourceError:boom"),
+        ]
+    )
+
+    detail = poll_error_detail(error)
+
+    assert (
+        "acme/token-service ticket 12 PollSourceError:gh api GET <url> exited 1 <secret>"
+    ) in detail
+    assert "acme/<secret> ticket <host> PollSourceError:boom" in detail
+    for leaked in ("ghp_abcdefghij1234567890", "api.github.com", "github.com"):
+        assert leaked not in detail
 
 
 def test_a_cycle_error_not_built_from_source_errors_is_still_cut() -> None:
