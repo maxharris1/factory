@@ -35,6 +35,7 @@ class Process:
     ppid: int
     start: str
     tagged: bool
+    group: int | None = None
 
 
 def processes(tag: str | None) -> dict[int, Process]:
@@ -42,6 +43,8 @@ def processes(tag: str | None) -> dict[int, Process]:
 
     From /proc where there is one, else from `ps` (macOS: no tag is read,
     so only the process tree counts there). With no tag, none is tagged.
+    Each process's `group` is its session on Linux, its process group on
+    macOS (whose `ps` cannot name a session).
     """
     if os.path.isdir("/proc/self"):
         return _proc_processes(tag)
@@ -73,7 +76,9 @@ def _proc_processes(tag: str | None) -> dict[int, Process]:
                     tagged = mark in handle.read().split(b"\0")
             except OSError:
                 pass
-        found[int(name)] = Process(int(name), int(fields[1]), fields[19], tagged)
+        found[int(name)] = Process(
+            int(name), int(fields[1]), fields[19], tagged, int(fields[3])
+        )
     return found
 
 
@@ -94,7 +99,7 @@ def run_tag(pid: int) -> str | None:
 def _ps_processes() -> dict[int, Process]:
     try:
         ps = subprocess.Popen(
-            ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
+            ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={**os.environ, "LC_ALL": "C"},
         )
@@ -110,12 +115,14 @@ def _ps_processes() -> dict[int, Process]:
         raise ProcessesUnknown(f"ps exited {ps.returncode}: {' '.join(stderr.split())}")
     found: dict[int, Process] = {}
     for line in stdout.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
+        parts = line.split(None, 4)
+        if len(parts) < 5 or not all(part.isdigit() for part in parts[:3]):
             continue
-        if parts[2].startswith("Z"):
+        if parts[3].startswith("Z"):
             continue
-        found[int(parts[0])] = Process(int(parts[0]), int(parts[1]), parts[3].strip(), False)
+        found[int(parts[0])] = Process(
+            int(parts[0]), int(parts[1]), parts[4].strip(), False, int(parts[2])
+        )
     found.pop(ps.pid, None)
     return found
 
@@ -131,6 +138,7 @@ class Tree:
     `responsible` (macOS), an orphan whose responsible process is the root
     belongs to it. `responsible` returns None for a process that is
     gone or not this user's, and raises ProcessesUnknown when it cannot say.
+    With `session`, every process whose `group` it is belongs to it.
     The root is taken by pid only on the first look; `known` (pid and start
     time) seeds the members instead, for a run this process did not start.
     After that a pid counts only by its start time, so a reused pid never
@@ -148,6 +156,7 @@ class Tree:
         others: frozenset[tuple[int, str]] = frozenset(),
         responsible: Callable[[int], int | None] | None = None,
         known: Mapping[int, str] | None = None,
+        session: int | None = None,
     ):
         self.root = root
         self.responsible = responsible
@@ -159,6 +168,7 @@ class Tree:
         self.known: dict[int, str] = dict(known or {})
         self.looked = known is not None
         self.foreign: set[int] = set()
+        self.session = session
 
     def track(self) -> dict[int, Process]:
         """Look again: the run's live processes, the root's own process included."""
@@ -179,6 +189,7 @@ class Tree:
                     continue
                 if (
                     process.tagged
+                    or (self.session is not None and process.group == self.session)
                     or process.ppid in members
                     or self._adopted(process, me)
                     or self._disowned(process)

@@ -41,7 +41,8 @@ worker. The remote POSIX shell scripts sent as the SSH command:
 * check: exit 1 while any process of the run lives (wherever its group or
   session now is): one of this user's that carries the job's tag, one the
   tree record `.orch-worker-<tag>.tree.pid` from this boot names with the
-  start time it has now, or a child of either (#722). The check rewrites
+  start time it has now, one still in the start's session (its record from
+  this boot names it), or a child of any of them (#722). The check rewrites
   the tree record with them (the boot id, then `<pid> <start time>` each,
   zombies left out), so a descendant that dropped the tag and left the
   session stays the run's after its parent exits; a number alone never
@@ -240,17 +241,25 @@ _BAD_GROUP = '""|0*|1|*[!0-9]*'
 
 # #722: from lines `B <boot id>` (this boot), `T <pid>` (carries the tag),
 # `X <pid>` (the run's deadline), `K ...` (the tree record: its boot id,
-# then `<pid> <start time>` per process) and `P <pid> <ppid> <start time>`
-# (every live process), prints the tree record anew when the run has a
-# member: a tagged process, a record entry from this boot whose pid has that
-# start time now, or a process whose parent is a member. The deadline is
-# never one, so neither are the checks and stops it runs.
+# then `<pid> <start time>` per process), `S <pid> <boot id> <tag>` (the
+# start's record) and `P <pid> <ppid> <start time> <session>` (every live
+# process), prints the tree record anew when the run has a member: a tagged
+# process, a record entry from this boot whose pid has that start time now,
+# a process in the start's session, or a process whose parent is a member.
+# A session number is not reused while a process is in it, so the session
+# counts unless its number now names a leader that is not the start.
+# The deadline is never a member, so neither are the checks and stops it runs.
 _TREE_AWK = (
     '$1 == "B" { b = $2 } $1 == "K" && NF == 2 { r = $2 } '
     '$1 == "T" { t[$2] = 1 } $1 == "X" { x[$2] = 1 } '
-    '$1 == "K" && NF == 3 { k[$2] = $3 } $1 == "P" && NF == 4 { u[$2] = $3; s[$2] = $4 } '
+    '$1 == "S" && NF == 4 { q = $2; qb = $3 } '
+    '$1 == "K" && NF == 3 { k[$2] = $3 } '
+    '$1 == "P" && NF == 5 { u[$2] = $3; s[$2] = $4; g[$2] = $5 } '
     'END { if (r == "" || r != b) split("", k); '
-    "for (p in u) if (!(p in x) && ((p in t) || ((p in k) && k[p] == s[p]))) m[p] = 1; "
+    'if (qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 '
+    '|| ((q in u) && !(q in t) && !((q in k) && k[q] == s[q]))) q = ""; '
+    "for (p in u) if (!(p in x) && ((p in t) || ((p in k) && k[p] == s[p]) || (q != \"\" && g[p] == q))) "
+    "m[p] = 1; "
     "do { n = 0; for (p in u) if (!(p in m) && !(p in x) && (u[p] in m)) { m[p] = 1; n = 1 } } "
     "while (n); for (p in m) n++; if (n) { print b; for (p in m) print p, s[p] } }"
 )
@@ -259,6 +268,7 @@ _TREE_AWK = (
 def _members(directory: str) -> str:
     """Define `members`: rewrite the tree record of tag $t, then print its members' pids."""
     record = f"{directory}/{tree_record('$t')}"
+    start = f"{directory}/{start_record('$t')}"
     return (
         f"k={record}; members() {{ "
         f"g=$({_TAGGED}); "
@@ -267,11 +277,12 @@ def _members(directory: str) -> str:
         'for e in $g; do e=${e#/proc/}; echo "T ${e%/environ}"; done; '
         'for e in $x; do e=${e#/proc/}; echo "X ${e%/environ}"; done; '
         "sed 's/^/K /' \"$k\" 2>/dev/null; "
+        f"sed 's/^/S /' {start} 2>/dev/null; "
         "for e in /proc/[0-9]*; do "
         '{ read -r s < "$e/stat"; } 2>/dev/null || continue; '
         "set -- ${s##*) }; "
         'case "$1" in Z|X) continue;; esac; '
-        'echo "P ${e#/proc/} $2 ${20}"; '
+        'echo "P ${e#/proc/} $2 ${20} $4"; '
         f"done; }} | awk {shlex.quote(_TREE_AWK)}); "
         'if [ -n "$o" ] || [ -e "$k" ]; then '
         '{ { [ -z "$o" ] || printf \'%s\\n\' "$o"; } > "$k.$$" '

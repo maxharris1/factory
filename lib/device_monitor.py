@@ -16,9 +16,10 @@ orphan names its whole process tree (lib/process_tree.py Tree): its `orch
 job run`, its worker, every descendant of either, and on Linux every
 process carrying the run's tag, which the slot recorded with the worker.
 Each poll rebuilds the tree from the row alone, so a restarted monitor
-finds it too: the tag, the recorded parents, and every member an earlier
-poll saw (pid and start time, kept on the row). On the poll that loses it,
-it is sent SIGTERM, through the runner or through the worker once that
+finds it too: the tag, the recorded parents, every member an earlier poll
+saw (pid and start time, kept on the row), and every process still in the
+runner's session. On the poll that loses it, it is sent SIGTERM, through
+the runner or through the worker once that
 runner is gone; each later poll stops, then kills (SIGKILL), the whole
 tree. Its row is forgotten only once no process of the run is left.
 
@@ -293,8 +294,9 @@ class DeviceMonitor:
         stopped.append(orphan.job_id)
 
     def _tree(self, orphan: Orphan) -> Tree | None:
-        """The lost run as its row names it: its tag, every member seen so far, and
-        each recorded parent still live; None when nothing names it."""
+        """The lost run as its row names it: its tag, every member seen so far,
+        each recorded parent still live, and the runner's session; None when
+        nothing names it."""
         listing = self.scan(None)
         known = dict(orphan.members)
         for pid, start in (
@@ -308,7 +310,8 @@ class DeviceMonitor:
         if tag is None and worker is not None and known.get(worker) == orphan.worker_start:
             tag = run_tag(worker)
         root = worker if worker is not None else orphan.runner_pid
-        if root is None or (tag is None and not known):
+        session = _runner_session(orphan, listing)
+        if root is None or (tag is None and not known and session is None):
             return None
         return Tree(
             root,
@@ -317,6 +320,7 @@ class DeviceMonitor:
             signal_pid=self.kill,
             responsible=_responsible_pid if sys.platform == "darwin" else None,
             known=known,
+            session=session,
         )
 
     def _local_gone(self, slot: HeldSlot) -> bool:
@@ -406,3 +410,15 @@ class DeviceMonitor:
     def _release(self, slot: HeldSlot, released: list[str]) -> None:
         if self.pool.release(slot.placement.job_id, owner=slot.placement.harness):
             released.append(slot.placement.job_id)
+
+
+def _runner_session(orphan: Orphan, listing: dict[int, Process]) -> int | None:
+    """The session the waiter started the runner in, which its pid names.
+
+    A session number is not reused while a process is in it, so it is the
+    run's unless another process now holds the runner's pid.
+    """
+    pid, start = orphan.runner_pid, orphan.runner_start
+    if pid in listing and start not in (None, listing[pid].start):
+        return None
+    return pid

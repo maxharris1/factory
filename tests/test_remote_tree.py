@@ -213,3 +213,59 @@ def test_a_tree_entry_names_a_process_only_from_this_boot_with_its_start_time(
     finally:
         process.kill()
         process.wait()
+
+
+def test_a_lost_remote_runs_untagged_orphan_born_before_any_check_is_killed(
+    tmp_path: Path,
+) -> None:
+    tag = uuid.uuid4().hex
+    now, queue, _, _, dispatcher, job = lost_setup(tmp_path, reload=True, tag=tag)
+    monitor = dispatcher.devices
+    monitor.transport = LocalShell()
+    monitor.alive = lambda *_: False
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
+    assert target is not None
+    tick, leaf_pid = tmp_path / "tick", tmp_path / "leaf.pid"
+    leaf = f"""import os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(leaf_pid)!r}).write_text(str(os.getpid()))
+while True:
+    Path({str(tick)!r}).write_text(str(time.monotonic_ns()))
+    time.sleep(.02)
+"""
+    worker = (
+        "import os, subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {leaf!r}], env={{'PATH': os.environ['PATH']}})\n"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=120, grace=1
+    )
+    unrelated = subprocess.Popen(["sleep", "120"], start_new_session=True)
+    try:
+        result = subprocess.run(
+            ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30
+        )
+        assert result.returncode == 0, result.stderr
+        wait_until(lambda: Path(remote.run_file(target, "exit")).exists(), "the worker ended")
+        wait_until(tick.exists, "the orphan started")
+        orphan = int(leaf_pid.read_text())
+        assert pid_alive(orphan, None)
+        assert remote.check_worker(monitor.transport, target) == remote.RUNNING, (
+            "an orphan in the start's session keeps the run alive"
+        )
+
+        disable_pc(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert orphans(queue), "the lost run keeps its orphan row"
+        poll_at(now, dispatcher, 60.0)
+        wait_until(lambda: not pid_alive(orphan, None), "the kill reached the orphan", 5.0)
+        poll_at(now, dispatcher, 120.0)
+        assert orphans(queue) == [], "the row is forgotten once the run is gone"
+        assert unrelated.poll() is None, "a process outside the run is never signalled"
+    finally:
+        remote.stop_worker(monitor.transport, target, kill=True)
+        kill_leftover(tmp_path)
+        unrelated.kill()
+        unrelated.wait()

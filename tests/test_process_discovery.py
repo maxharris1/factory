@@ -263,6 +263,53 @@ def test_without_responsibility_an_unseen_orphan_is_left_alone() -> None:
     assert machine.killed == []
 
 
+ORPHANS_ITS_WRITER = (
+    "import os, subprocess, sys; "
+    "p = subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[2]], "
+    "env={'PATH': os.environ['PATH']}, stdin=subprocess.DEVNULL, "
+    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+    "open(sys.argv[1], 'w').write(str(p.pid))"
+)
+
+
+def test_an_untagged_orphan_left_in_the_runs_session_dies_though_never_seen(
+    tmp_path: Path,
+) -> None:
+    ticks, other = tmp_path / "ticks", tmp_path / "other"
+    pid_file = tmp_path / "writer.pid"
+    leader = subprocess.Popen(
+        [sys.executable, "-c", ORPHANS_ITS_WRITER, str(pid_file), str(ticks), WRITER],
+        start_new_session=True,
+    )
+    assert leader.wait(timeout=10) == 0
+    writer = int(pid_file.read_text())
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", WRITER, str(other)], start_new_session=True
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (ticks.exists() and other.exists()):
+            assert time.monotonic() < deadline, "the writers started"
+            time.sleep(0.02)
+        assert _still_writes(ticks)
+
+        process_tree.Tree(leader.pid, None, known={}).end(lambda _line: None)
+        assert _still_writes(ticks), "without the session nothing names the orphan"
+
+        process_tree.Tree(leader.pid, None, known={}, session=leader.pid).end(
+            lambda _line: None
+        )
+        assert not _alive(writer) or not _still_writes(ticks), "the orphan outlived the run"
+        assert _still_writes(other), "a process outside the run is never signalled"
+    finally:
+        for pid in (writer, unrelated.pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        unrelated.wait()
+
+
 def test_cleanup_holds_while_responsibility_cannot_be_read() -> None:
     machine = FakeProcessTable(ORPHAN, responsible={ORPHAN.pid: ROOT})
     reads: list[int] = []

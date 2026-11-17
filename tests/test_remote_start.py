@@ -1321,6 +1321,87 @@ def test_the_recorded_run_tag_finds_a_survivor_whose_parents_died_before_any_pol
         runner.wait()
 
 
+UNRECORDED_ORPHAN = """\
+import os, signal, subprocess, sys, time
+from pathlib import Path
+
+here = Path(sys.argv[1])
+if sys.argv[2] == "leaf":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (here / "leaf.pid").write_text(str(os.getpid()))
+    while True:
+        (here / "tick").write_text(str(time.monotonic_ns()))
+        time.sleep(0.02)
+if sys.argv[2] == "worker":
+    def end(signum, frame):
+        subprocess.Popen([sys.executable, __file__, str(here), "leaf"],
+            env={"PATH": os.environ["PATH"]})
+        os._exit(0)
+    signal.signal(signal.SIGTERM, end)
+    (here / "ready").touch()
+    time.sleep(120)
+from lib.job_run import run
+from lib.process_tree import run_tag
+
+def started(pid):
+    (here / "worker.pid").write_text(str(pid))
+    (here / "run.tag").write_text(run_tag(pid) or "")
+
+sys.exit(run([sys.executable, __file__, str(here), "worker"], beat=lambda: None,
+    interval=60, log=print, started=started))
+"""
+
+
+def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "unrecorded_orphan.py"
+    script.write_text(UNRECORDED_ORPHAN)
+    runner = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), "runner"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        start_new_session=True,
+    )
+    worker = leaf = None
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "ready").exists():
+            assert time.monotonic() < deadline and runner.poll() is None
+            time.sleep(0.02)
+        worker = int((tmp_path / "worker.pid").read_text())
+        tag = (tmp_path / "run.tag").read_text() or None
+        now, queue, pool, dispatcher, job = real_box_job(tmp_path, runner, worker, tag)
+        runner.kill()
+        runner.wait(timeout=10)
+        disable_box(tmp_path)
+
+        poll_at(now, dispatcher, 0.0)
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "tick").exists() or pid_alive(worker, None):
+            assert time.monotonic() < deadline, "the worker did not hand off to its leaf"
+            time.sleep(0.02)
+        leaf = int((tmp_path / "leaf.pid").read_text())
+        assert process_tree.run_tag(leaf) is None
+        restart_monitor(dispatcher, pool)
+
+        poll_at(now, dispatcher, 60.0)
+        assert orphans(queue) == [(job.id, "box", "None")], "live orphan lost its cleanup row"
+        deadline = time.monotonic() + 10
+        while pid_alive(leaf, None):
+            assert time.monotonic() < deadline, "the orphan outlived its SIGKILL"
+            time.sleep(0.02)
+        tick = (tmp_path / "tick").read_text()
+
+        poll_at(now, dispatcher, 120.0)
+        time.sleep(0.1)
+        assert (tmp_path / "tick").read_text() == tick, "lost job still executes"
+        assert orphans(queue) == []
+    finally:
+        kill_all(*[pid for pid in (runner.pid, worker, leaf) if pid])
+        runner.wait()
+
+
 @pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
 def test_a_box_jobs_slot_records_the_run_tag_its_command_carries(tmp_path: Path) -> None:
     from lib import placed_run
