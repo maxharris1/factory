@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -474,7 +475,26 @@ def test_systemd_does_not_restart_a_poller_a_retired_host_refused() -> None:
     assert "\nRestartPreventExitStatus=79\n" in unit
 
 
-def _shell_commands(text: str, i: int = 0, close: str = "") -> tuple[list[tuple[int, list[str]]], int]:
+def _heredoc_bodies(text: str, i: int, pending: list[tuple[str, bool]], bodies: list[tuple[int, int]]) -> int:
+    for delimiter, strip_tabs in pending:
+        begin = i
+        while i < len(text):
+            end = text.find("\n", i)
+            end = len(text) if end < 0 else end
+            line = text[i:end]
+            i = end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                bodies.append((begin, end - len(line)))
+                break
+        else:
+            bodies.append((begin, len(text)))
+    pending.clear()
+    return min(i, len(text))
+
+
+def _shell_commands(
+    text: str, pending: list[tuple[str, bool]], bodies: list[tuple[int, int]], i: int = 0, close: str = ""
+) -> tuple[list[tuple[int, list[str]]], int]:
     commands: list[tuple[int, list[str]]] = []
     words: list[str] = []
     word: str | None = None
@@ -502,9 +522,21 @@ def _shell_commands(text: str, i: int = 0, close: str = "") -> tuple[list[tuple[
         words = []
 
     def substitution(begin: int, closer: str) -> int:
-        inner, after = _shell_commands(text, begin, closer)
+        inner, after = _shell_commands(text, pending, bodies, begin, closer)
         commands.extend(inner)
         return after
+
+    def arithmetic(j: int) -> int:
+        level = 2
+        while j < len(text) and level:
+            if text.startswith("$(", j) and not text.startswith("$((", j):
+                j = substitution(j + 2, ")")
+            elif text[j] == "`":
+                j = substitution(j + 1, "`")
+            else:
+                level += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+        return j
 
     while i < len(text):
         c = text[i]
@@ -533,6 +565,8 @@ def _shell_commands(text: str, i: int = 0, close: str = "") -> tuple[list[tuple[
                     escaped = text[i + 1:i + 2]
                     word += escaped if escaped in '"\\$`' else "" if escaped == "\n" else "\\" + escaped
                     i += 2
+                elif text.startswith("$((", i):
+                    i = arithmetic(i + 3)
                 elif text.startswith("$(", i):
                     i = substitution(i + 2, ")")
                 elif text[i] == "`":
@@ -541,16 +575,55 @@ def _shell_commands(text: str, i: int = 0, close: str = "") -> tuple[list[tuple[
                     word += text[i]
                     i += 1
             i += 1
+        elif text.startswith("$'", i):
+            begin_word()
+            i += 2
+            while i < len(text) and text[i] != "'":
+                escaped = text[i] == "\\"
+                word += text[i + escaped:i + escaped + 1]
+                i += 1 + escaped
+            i += 1
+        elif text.startswith("$((", i):
+            begin_word()
+            i = arithmetic(i + 3)
         elif text.startswith("$(", i):
             end_command()
             i = substitution(i + 2, ")")
         elif c == "`":
             end_command()
             i = substitution(i + 1, "`")
+        elif text.startswith("((", i) and word is None and not words:
+            i = arithmetic(i + 2)
+        elif text.startswith("<<<", i):
+            end_word()
+            i += 3
+        elif text.startswith("<<", i):
+            end_word()
+            i += 2
+            strip_tabs = text.startswith("-", i)
+            i += strip_tabs
+            while i < len(text) and text[i] in " \t":
+                i += 1
+            delimiter = ""
+            while i < len(text) and text[i] not in " \t\n;&|()<>":
+                if text[i] in "'\"":
+                    quote_end = text.find(text[i], i + 1)
+                    quote_end = len(text) if quote_end < 0 else quote_end
+                    delimiter += text[i + 1:quote_end]
+                    i = quote_end + 1
+                elif text[i] == "\\":
+                    delimiter += text[i + 1:i + 2]
+                    i += 2
+                else:
+                    delimiter += text[i]
+                    i += 1
+            pending.append((delimiter, strip_tabs))
         elif c in ";&|()\n":
             depth += {"(": 1, ")": -1}.get(c, 0)
             end_command()
             i += 1
+            if c == "\n" and pending:
+                i = _heredoc_bodies(text, i, pending, bodies)
         elif c in " \t":
             end_word()
             i += 1
@@ -571,10 +644,53 @@ def _runs_orch_poll(command: list[str]) -> bool:
     return False
 
 
+def _orch_poll_launch_starts(text: str) -> list[int]:
+    bodies: list[tuple[int, int]] = []
+    commands, _ = _shell_commands(text, [], bodies)
+    starts = [start for start, words in commands if _runs_orch_poll(words)]
+    # A heredoc body may be a script (bash <<EOF) or a unit file (cat > x.service <<EOF), and a
+    # stray quote in it must not hide the rest, so it counts whole and line by line.
+    for begin, end in bodies:
+        body = text[begin:end]
+        starts += [begin + start for start in _orch_poll_launch_starts(body)]
+        for line in re.finditer(r".+", body):
+            if _orch_poll_launch_starts(line.group()) or _unit_orch_poll_launches(line.group()):
+                starts.append(begin + line.start())
+    return starts
+
+
 def _orch_poll_launches(text: str) -> list[str]:
-    commands, _ = _shell_commands(text)
-    starts = sorted({text.rfind("\n", 0, start) + 1 for start, words in commands if _runs_orch_poll(words)})
+    starts = sorted({text.rfind("\n", 0, start) + 1 for start in _orch_poll_launch_starts(text)})
     return [text[start:].split("\n", 1)[0].strip() for start in starts]
+
+
+def _unit_orch_poll_launches(text: str) -> list[str]:
+    hits = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        first = logical = lines[i]
+        while logical.endswith("\\") and i + 1 < len(lines):
+            i += 1
+            logical = logical[:-1] + " " + lines[i]
+        i += 1
+        key = re.match(r"[ \t]*Exec\w*[ \t]*=", logical)
+        if not key:
+            continue
+        try:
+            words = shlex.split(logical[key.end():])
+        except ValueError:
+            words = logical[key.end():].split()
+        command: list[str] = []
+        for word in words + [";"]:
+            if word != ";":
+                command.append(word.lstrip("@-:+!") if not command else word)
+            elif _runs_orch_poll(command):
+                hits.append(first.strip())
+                break
+            else:
+                command = []
+    return hits
 
 
 @pytest.mark.parametrize(
