@@ -483,7 +483,7 @@ def _shell_code_lines(text: str) -> list[str]:
     printed = subprocess.run(["bash", "--pretty-print", "/dev/stdin"], input=text, capture_output=True,
                              text=True, timeout=30)
     assert printed.returncode == 0, printed.stderr
-    return printed.stdout.split("\n")
+    return printed.stdout.replace("\\\n", " ").split("\n")
 
 
 def _unit_code_lines(text: str) -> list[str]:
@@ -596,6 +596,8 @@ HIDDEN_LAUNCHERS = [
     "cat <<UNIT > /dev/null\n`orch poll --once`\nUNIT\n",
     "bash <<'EOF'\necho 'a\nb'; orch poll --once\nEOF\n",
     "cat <<'EOF' | bash\necho it\\'s; orch poll --once\nEOF\n",
+    "bash <<'EOF'\norch \\\n  poll --once\nEOF\n",
+    "cat <<'EOF' | bash\norch \\\n  poll --once\nEOF\n",
     "echo $((1 << 2))\necho 'a\nb'; orch poll --once\n",
     "echo \"$((1 << 2))\"\necho 'a\nb'; orch poll --once\n",
     "x=1; ((x <<= 1))\necho 'a\nb'; orch poll --once\n",
