@@ -1071,6 +1071,54 @@ exception, so lane data never reaches error text. Intake
 deletes only the staging folder it made. It does not judge whether a
 result is acceptable, delete old evidence, or serve it to people.
 
+### QA receipts audit
+
+A QA lane reports on its own work, so no claim it makes is trusted until a
+fixed program has checked its evidence (issue #788). `lib/qa_audit.py`,
+`audit(lanes, asked, *, start_commit, current_head)`, does that check before
+the factory posts a verdict. Each lane is a `LaneEvidence`: the lane number,
+the commit and method its brief named, its parsed `result.json`, and its
+`manifest.json` from intake. `asked` lists one `AskedScenario` per scenario
+the job asked for: its id and the lane-folder paths of its after
+screenshot, its pass test's recorded output, and its video when it asked
+for one. The audit returns `"clean"`, or a tuple of gaps in check order.
+Each gap has a kind, the scenario and lane it concerns (either may be
+none), and a short detail.
+
+1. Every lane's result names the commit and the method its brief named.
+2. Every asked scenario appears in some lane's result as `verified`,
+   `failed`, `inconclusive` or `needs-human`.
+3. Every scenario a lane marks `verified` has its after screenshot, its
+   pass test output and, when it asked for one, its video in that lane's
+   manifest.
+4. No manifest lists a mismatch for an artifact a verified scenario relies
+   on: its required files and every artifact its own entry lists. A
+   mismatch on an artifact of a scenario that is not verified, or on a file
+   no verified scenario relies on, is not a gap.
+5. The pull request's current head is still the commit the run started
+   with.
+
+| Kind | Check | Concerns | Meaning |
+| --- | --- | --- | --- |
+| `lane-commit` | 1 | lane | The result's commit is absent or is not the brief's commit. |
+| `lane-method` | 1 | lane | The result's method is absent or is not the brief's method. |
+| `scenario-missing` | 2 | scenario | No lane reports the scenario with one of the four results. |
+| `artifact-missing` | 3 | scenario and lane | A required file of a verified scenario is not in the manifest. |
+| `artifact-mismatch` | 4 | scenario and lane | The manifest lists a mismatch for a file a verified scenario relies on. |
+| `head-moved` | 5 | neither | The head moved after the run started. |
+
+A file that is both missing and listed as a `missing` mismatch yields one
+`artifact-missing` gap, and a run yields at most one gap per lane,
+scenario and file. `head-moved` has its own kind because the caller treats
+it differently: the evidence may be sound, but it covers an old head.
+
+The result and manifest are untrusted. A field of the wrong type or a
+malformed entry is skipped, so it produces gaps and never a false
+`"clean"`. The audit does no I/O, imports nothing that does, and never
+changes a result. It checks that evidence exists and matches, not what a
+screenshot shows. Nothing calls it yet. A later ticket wires it into the
+program that runs lanes.
+
 ## 8. Review and merge rules
 
 - **One reviewer**, from a **different model family** than the builder, gives the **final factory verdict**.
