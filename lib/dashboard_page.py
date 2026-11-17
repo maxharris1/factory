@@ -26,7 +26,7 @@ from lib.dashboard_pages.common import (  # noqa: F401
 from lib.dashboard_pages.efficiency import _savings  # noqa: F401
 from lib.dashboard_pages.lanes import (  # noqa: F401
     _FEEDER_STATE, TILE_STATE, _feeder, _intake, _just_happened, _lanes, _linear_webhook,
-    _queue_lane, _slot, intake_split, lane_devices, lanes_script, probe_down, queue_speed,
+    _queue_lane, _slot, intake_groups, lane_devices, lanes_script, probe_down, queue_speed,
 )
 from lib.dashboard_pages.shell import (  # noqa: F401
     _PAGE_NAMES, _PANELS, _PX_BAD, _PX_HEX, _PX_LINK, PAGES, PX_ACTIONS, PX_BOT_TINTS, PX_BROKEN,
