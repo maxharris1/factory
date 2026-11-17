@@ -29,10 +29,8 @@ tailscale_name (compared case-insensitively): that would give one host
 two slot budgets.
 
 A device schedules only when it is enabled (the default), has no
-REPLACE_WITH_ placeholder, and lists the harness. A placeholder is not
-an error: check-config warns that it skips the device, naming the field,
-and it always names a disabled device. Unknown fields are refused so v1
-stays closed. Nothing here checks that a device is reachable. A gitignored
+REPLACE_WITH_ placeholder, and lists the harness. Unknown fields are
+refused so v1 stays closed. Nothing here checks that a device is reachable. A gitignored
 machines.local.yml beside the file is merged in before validation
 (lib/config_overlay.py).
 

@@ -169,7 +169,8 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders] [--digest]
   With no paths, checks orch.yml, machines.yml and the example factory.md
   files. When --orch is given, machines.yml is checked only with --machines.
-  --allow-placeholders permits and reports REPLACE_WITH_ install values only.
+  --allow-placeholders permits and reports REPLACE_WITH_ install values in
+  orch.yml only; a machines.yml device with one is always skipped with a warning.
   Warns about uncommitted edits to a tracked orch.yml or machines.yml.
   --digest prints the sha256 of each effective config (base plus overlay).
   A disabled or placeholder device is named on stderr and never scheduled.
