@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from lib import remote
-from lib.device_monitor import DeviceMonitor
+from lib.device_monitor import DeviceMonitor, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig, load_machines_yml
@@ -802,6 +802,60 @@ def test_a_device_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
     with queue.connect() as connection:
         rows = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
     assert [tuple(row) for row in rows] == [("devices", "OperationalError: boom")]
+
+
+# --- disabled in machines.yml: lost within one poll (#679) --------------------
+
+
+def disable_pc(tmp_path: Path, dispatcher: Dispatcher) -> None:
+    config = config_of(machines_file(tmp_path, box_enabled=False, pc=False))
+    dispatcher.devices.config = dispatcher.devices.pool.config = config
+
+
+def assert_lost(queue: SQLiteJobQueue, pool: DevicePool, job_id: str, reason: str) -> None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT state, failure_handled FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert (row["state"], row["failure_handled"]) == ("failed", 0)
+    assert ("device-lost", f"pc: {reason}; worker tag {TAG}") in job_events(queue, job_id)
+    assert pool.placement(job_id) is None
+    assert pool.used() == {}
+    assert orphans(queue) == [(job_id, "pc", TAG)]
+
+
+def test_disabling_an_answering_device_loses_its_running_job_within_one_poll(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "running"
+
+    disable_pc(tmp_path, dispatcher)
+    poll_at(now, dispatcher, 60.0)
+
+    assert_lost(queue, pool, job.id, "disabled")
+
+
+def test_disabling_an_unreachable_device_loses_its_job_long_before_the_offline_limit(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert pool.health("pc") == (None, 0.0)
+    assert state(queue, job.id) == "running"
+
+    disable_pc(tmp_path, dispatcher)
+    poll_at(now, dispatcher, 60.0)
+
+    assert_lost(queue, pool, job.id, "disabled")
+
+
+def test_a_disabled_device_is_stranded_with_no_offline_clock(tmp_path: Path) -> None:
+    disabled = config_of(machines_file(tmp_path, pc=False)).device("pc")
+    enabled = config_of(machines_file(tmp_path, pc=True)).device("pc")
+    assert stranded(disabled, None, 0.0, 600.0) == "disabled"
+    assert stranded(enabled, None, 0.0, 600.0) is None
 
 
 def test_suite_guard_shadows_any_real_ssh() -> None:

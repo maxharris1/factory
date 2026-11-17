@@ -94,6 +94,8 @@ def stranded(
     device: Device, failing_since: float | None, now: float, limit: float
 ) -> str | None:
     """Why device's running jobs are lost now, or None while they may still run."""
+    if not device.enabled:
+        return "disabled"
     if failing_since is None or now - failing_since < limit:
         return None
     return f"unreachable {int((now - failing_since) // 60)} min"
@@ -203,9 +205,9 @@ class DeviceMonitor:
                 stopped.append(placement.job_id)
         if answered is None and held and probe is not None:
             answered = probe_device(self.transport, probe)
-        if answered is None:
-            return
-        failing_since = self.pool.record_contact(device.name, ok=answered, at=now)
+        failing_since = None
+        if answered is not None:
+            failing_since = self.pool.record_contact(device.name, ok=answered, at=now)
         reason = stranded(device, failing_since, now, lost_after)
         if reason is None:
             return
