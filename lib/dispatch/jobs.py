@@ -10,11 +10,11 @@ from pathlib import Path
 
 from lib import device_sync, lane_limit, skill_preflight
 from lib.device_pool import (
-    LINK_DROP_TAG,
     UNREACHABLE_BACKOFF_SECONDS,
     back_off,
     backed_off_through,
     box_device,
+    device_lost_detail,
     free_slots,
     orphan_slot,
     placement_blocks,
@@ -679,8 +679,7 @@ class JobsMixin:
                 """,
                 (now, now, job_id),
             )
-            tag = slot["worker_tag"]
-            detail = f"{device}: {reason}" + ("" if tag is None else f"{LINK_DROP_TAG}{tag}")
+            detail = device_lost_detail(device, reason, slot["worker_tag"])
             self._record_job_event(connection, job, DEVICE_LOST, detail, now)
             orphan_slot(connection, job_id, now)
             back_off(

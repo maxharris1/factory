@@ -273,7 +273,7 @@ class DevicePool:
             if row is None:
                 connection.commit()
                 return None
-            dropped = _link_dropped_on(connection, str(row["id"]))
+            dropped = _lost_on(connection, str(row["id"]))
             if dropped == device.name:
                 device = choose_device(
                     self.config,
@@ -855,9 +855,12 @@ def link_drop_detail(device: str, minutes: str, tag: str) -> str:
     return f"{device}: no certain answer for {minutes}{LINK_DROP_TAG}{tag}"
 
 
-def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
-    """#218: the device job_id's latest run lost its link to, or None.
-    #662: a run lost with its unreachable device (device-lost) counts too."""
+def device_lost_detail(device: str, reason: str, tag: str | None) -> str:
+    return f"{device}: {reason}" + ("" if tag is None else f"{LINK_DROP_TAG}{tag}")
+
+
+def _lost_on(connection: sqlite3.Connection, job_id: str) -> str | None:
+    """#218: the device job_id's latest run lost its link to, or None."""
     table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
     ).fetchone()
