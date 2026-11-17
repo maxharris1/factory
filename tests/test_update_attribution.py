@@ -389,8 +389,8 @@ def test_an_unattributed_ready_is_no_later_workers_handoff(tmp_path: Path, keep_
     board.poll()
 
     jobs = [(r["id"] == job.id, r["state"], r["handoff_comment_id"]) for r in board.jobs("update-from-main")]
-    assert board.state("42")["update_failures"] == 0
-    assert jobs == [(True, "queued", None)]
+    assert board.state("42")["update_failures"] == 1, "the dropped update's own failure (#662)"
+    assert jobs == [(True, "failed", None), (False, "queued", None)]
 
 
 def test_a_ready_after_a_lagging_refusal_charges_no_update_failure(tmp_path: Path) -> None:

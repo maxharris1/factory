@@ -764,7 +764,11 @@ class JobsMixin:
                 connection.commit()
             if job.request.action == "review" and self._review_retry_waits(job):
                 return
-            if link_drop.used < MAX_LINK_DROP_REQUEUES and not queue_owned:
+            if (
+                link_drop.used < MAX_LINK_DROP_REQUEUES
+                and not queue_owned
+                and job.request.action != "update-from-main"
+            ):
                 self._requeue_link_dropped(job, link_drop)
                 return
         if job.request.action == "update-from-main":

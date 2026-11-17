@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 
 from lib.brief import brief_kind
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
 from lib.dispatch.core import DispatcherBase
 from lib.factory_md import PreReady
 from lib.github_actions import _comment
@@ -23,6 +25,7 @@ from lib.update_check import UpdateClass, UpdateScope, classify
 from tests.merge_queue_support import Board, sha
 from tests.test_update_check import Repo
 from tests.test_dispatcher import READY
+from tests.test_remote_start import FakeTransport, config_of, machines_file
 
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
@@ -475,6 +478,61 @@ def test_an_update_that_dies_after_pushing_red_ci_queues_one_ci_fix(tmp_path: Pa
     assert [job["head"] for job in board.jobs("review")] == [sha(1)]
     row = board.state("42")
     assert (row["workflow_state"], row["approved_head"]) == ("fixing", None)
+    assert not [line for line in board.log if "does not cover" in line]
+
+
+def lost_after_push(tmp_path: Path, *, ci: str) -> tuple[Board, object]:
+    """The update job runs on the pc, pushes sha(2), and the pc stops answering."""
+    board, pr, _approve = conflicted(tmp_path)
+    board.verdict = UpdateClass(
+        False, "edits outside conflict resolution", UpdateScope(sha(1), sha(2), ())
+    )
+    config = config_of(machines_file(tmp_path, box_enabled=False))
+    pool = DevicePool(board.queue, config)
+    board.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(check=255), alive=lambda *_: True
+    )
+    job, placement = pool.claim("claude")
+    assert (job.request.action, placement.device) == ("update-from-main", "pc")
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True)
+    pr.push(sha(2), ci=ci)
+    board.poll()
+    board.now[0] += 600
+    board.poll()
+    with board.queue.connect() as connection:
+        lost = connection.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'device-lost'",
+            (job.id,),
+        ).fetchone()[0]
+    assert lost == 1
+    assert pool.used() == {}
+    return board, pr
+
+
+def test_an_update_lost_with_its_device_after_pushing_queues_one_scoped_review_there(
+    tmp_path: Path,
+) -> None:
+    board, pr = lost_after_push(tmp_path, ci="success")
+
+    [review] = [job for job in board.jobs("review") if job["head"] == sha(2)]
+    assert json.loads(review["detail"])["kind"] == "update"
+    for _ in range(3):
+        board.poll()
+    assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
+    assert len(board.jobs("update-from-main")) == 1
+    assert not [line for line in board.log if "does not cover" in line]
+
+
+def test_an_update_lost_with_its_device_after_pushing_red_ci_queues_one_ci_fix(
+    tmp_path: Path,
+) -> None:
+    board, pr = lost_after_push(tmp_path, ci="failure")
+    for _ in range(4):
+        board.poll()
+
+    assert [job["head"] for job in board.jobs("fix")] == [sha(2)]
+    assert len(board.jobs("update-from-main")) == 1
     assert not [line for line in board.log if "does not cover" in line]
 
 
