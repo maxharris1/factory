@@ -290,6 +290,13 @@ def _family_errors(config: FactoryConfig) -> list[str]:
     ]
 
 
+def _base_mismatch(ticket: TrackedTicket) -> str | None:
+    base = ticket.factory.base_branch
+    if ticket.pr_base is None or ticket.pr_base == base:
+        return None
+    return f"PR #{ticket.pr_number} targets {ticket.pr_base}; the ticket base is {base}"
+
+
 def _redrive_eligible(exc: BaseException, policy: str) -> bool:
     """Whether a failed ship gets its one re-drive (issue #47, issue #83)."""
     if not isinstance(exc, ShipError):

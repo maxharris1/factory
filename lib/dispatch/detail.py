@@ -260,6 +260,8 @@ class DetailMixin:
         nothing and the ticket would stall silently, so it is flagged
         needs-attention instead. A job that is queued clears the flag.
         """
+        if request.action in ("review", "fix") or json.loads(request.detail or "{}").get("resume"):
+            ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             job, answered = self._enqueue_step(
@@ -334,6 +336,17 @@ class DetailMixin:
             current_round=through_round + 1,
             bases={},
         ).reviewed_head
+
+    def _fresh_issue(self, ticket: TrackedTicket) -> TrackedTicket:
+        """Call before BEGIN IMMEDIATE: the GitHub read must not hold the queue's write lock."""
+        if ticket.read_issue_body is None:
+            return ticket
+        body = ticket.read_issue_body()
+        return replace(
+            ticket,
+            issue_body=ticket.issue_body if body is None else body,
+            read_issue_body=None,
+        )
 
     def _with_evidence(
         self,

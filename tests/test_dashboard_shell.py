@@ -282,14 +282,14 @@ SEGMENTS = [
     ("components-unreadable", _health(known=False, error="cannot read orch.health.db"), "components",
      "components unknown", "bad", "health.html#components"),
     ("version-current", _health({}, _waiter(1)), "version", "abc1234 · 0 behind", "ok",
-     "health.html#components"),
+     "health.html#drift"),
     ("version-behind", _health({"stale_code": True, "version": "0ld0ld0ld"},
                                _waiter(1, stale_code=True, version="0ld0ld0ld"), _waiter(2)),
-     "version", "abc1234 · 2 behind", "warn", "health.html#components"),
+     "version", "abc1234 · 2 behind", "warn", "health.html#drift"),
     ("version-unknown-checkout", _health({}, code="unknown"), "version", "version unknown", "warn",
-     "health.html#components"),
+     "health.html#drift"),
     ("version-unknown-component", _health({"version": "unknown"}, _waiter(1)), "version",
-     "abc1234 · 0 behind", "ok", "health.html#components"),
+     "abc1234 · 0 behind", "ok", "health.html#drift"),
 ]
 
 

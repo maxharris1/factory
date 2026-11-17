@@ -235,7 +235,7 @@ def test_before_factory_md_the_brief_says_so_and_points_at_the_base_branch() -> 
     text = render_brief(job(), bot="claude-bot", factory_root=FACTORY_ROOT, context=None, context_note="gh api failed")
     section = text[text.index("## Additional context from factory.md") :]
     assert "not loaded (gh api failed)" in section
-    assert "base branch dev" in section
+    assert "read `factory.md` from branch dev of" in section
     assert "not from the PR head" in section
     assert "Never apply migrations" not in text
 

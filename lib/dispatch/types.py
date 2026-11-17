@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
@@ -118,6 +118,7 @@ class TrackedTicket:
     # are the source issue's text and the PR description, None when unread.
     brief_comment: Comment | None = None
     issue_body: str | None = None
+    read_issue_body: Callable[[], str | None] | None = field(default=None, compare=False, repr=False)
     pr_body: str | None = None
     grok_bot: str = "grok-bot"
     linear_issue_id: str | None = None
@@ -322,6 +323,12 @@ class RouteError(RuntimeError):
     def __init__(self, message: str, source_comment_id: str):
         super().__init__(message)
         self.source_comment_id = source_comment_id
+
+
+class BaseMismatch(RuntimeError):
+    def __init__(self, message: str, ticket: TrackedTicket):
+        super().__init__(message)
+        self.ticket = ticket
 
 
 class PollCycleFailed(RuntimeError):

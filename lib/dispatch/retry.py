@@ -110,6 +110,7 @@ class RetryMixin:
             return True, "rejected-retry-author"
         if not parse_comment(comment.body).body.strip():
             return True, "rejected-retry-no-reason"
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             outcome, state = self._retry_in_transaction(connection, ticket, comment)

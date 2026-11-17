@@ -26,6 +26,8 @@ Do the thing.
 - not a criterion
 """
 
+PROSE = "Do the thing, then tell us how it went.\n"
+
 
 def _brief(author: str, body: str, *, sender: str = "grok-bot", at: float = 1.0, cid: str = "1") -> Comment:
     header = f"<!-- orch:v1 kind=brief from={sender} role=orchestrator risk=high -->"
@@ -62,14 +64,35 @@ def test_linear_key_is_the_issue_number():
     assert bundle.issue_key == "AUT0-12"
 
 
-def test_trusted_brief_wins_over_issue_and_pr():
+def test_issue_with_a_section_wins_over_brief_and_pr():
     brief = _brief("factory-app[bot]", "## Acceptance criteria\n- [ ] From the brief.\n")
     bundle = _bundle(
         comments=(brief,), issue_body=TICKET, pr_body="- [ ] From the PR.", ready_starts_review=True
     )
+    assert bundle.source == "issue"
+    assert bundle.source_url == "https://github.com/o/r/issues/162"
+    assert [c.text for c in bundle.criteria] == ["First criterion.", "Second criterion."]
+
+
+@pytest.mark.parametrize(
+    "issue_body", [PROSE, "Do the thing.\n- [ ] From the issue.\n", "## Acceptance criteria\nTBD\n"]
+)
+def test_trusted_brief_wins_over_an_issue_with_no_section_and_pr(issue_body):
+    brief = _brief("factory-app[bot]", "## Acceptance criteria\n- [ ] From the brief.\n")
+    bundle = _bundle(
+        comments=(brief,), issue_body=issue_body, pr_body="- [ ] From the PR.", ready_starts_review=True
+    )
     assert bundle.source == "brief"
     assert bundle.source_url == brief.url
     assert bundle.criteria == (Criterion("ac-1", "From the brief."),)
+
+
+def test_issue_edited_after_the_brief_gives_the_edited_criteria():
+    criteria = [f"Criterion {n} holds." for n in range(1, 6)]
+    edited = "## What\nDo the thing.\n\n## Acceptance criteria\n" + "".join(f"- {c}\n" for c in criteria[:4])
+    bundle = _bundle(comments=(_orchestrate_brief(criteria, ["lib/a.py"]),), issue_body=edited)
+    assert bundle.source == "issue"
+    assert bundle.criteria == tuple(Criterion(f"ac-{n}", c) for n, c in enumerate(criteria[:4], 1))
 
 
 def test_issue_body_when_no_trusted_brief():
@@ -98,7 +121,7 @@ def test_blank_source_falls_through():
 def test_outsider_brief_before_trusted_one_picks_trusted():
     outsider = _brief("mallory", "## Acceptance criteria\n- [ ] Ship it now.\n", at=1.0, cid="1")
     trusted = _brief("factory-app[bot]", "## Acceptance criteria\n- [ ] The real one.\n", at=2.0, cid="2")
-    bundle = _bundle(comments=(outsider, trusted), issue_body=TICKET)
+    bundle = _bundle(comments=(outsider, trusted), issue_body=PROSE)
     assert bundle.source == "brief"
     assert bundle.source_url == trusted.url
     assert bundle.criteria == (Criterion("ac-1", "The real one."),)
@@ -234,7 +257,7 @@ def _feeder_brief(ticket: str, prose: str) -> Comment:
         rounds_low=1, rounds_high=3, verify="none", ship="handoff", skills=(),
     )
     body = feeder_brief(
-        issue, FactoryContext(config=config, body=prose), number=7, branch="factory/issue-162",
+        issue, FactoryContext(config=config, body=prose), number=7, branch="factory/issue-162", base="main",
         risk="low", state="building", visible=False,
     )
     return Comment(id="1", author="factory-app[bot]", body=body, created_at=1)
@@ -373,7 +396,7 @@ def _orchestrate_brief(criteria: list[str], likely_files: list[str], goal: str =
 @pytest.mark.parametrize("likely_files", [["lib/a.py", "lib/b.py"], []])
 def test_orchestrate_brief_round_trips_its_criteria(likely_files):
     criteria = ["The first one holds.", "The second one holds."]
-    bundle = _bundle(comments=(_orchestrate_brief(criteria, likely_files),), issue_body=TICKET)
+    bundle = _bundle(comments=(_orchestrate_brief(criteria, likely_files),), issue_body=PROSE)
     assert bundle.source == "brief"
     assert bundle.criteria == (Criterion("ac-1", criteria[0]), Criterion("ac-2", criteria[1]))
     assert "lib/a.py" not in bundle.text

@@ -83,7 +83,7 @@ def _feeder_comment() -> str:
         body="Ship it.\n\n## Acceptance criteria\n- ac-1: The button shows.", labels=(), created_at=0.0,
         applied_by="max", url="https://github.com/acme/widgets/issues/41",
     )
-    return feeder_brief(issue, context, number=12, branch="factory/issue-41", risk="high", state="building", visible=False)
+    return feeder_brief(issue, context, number=12, branch="factory/issue-41", base="main", risk="high", state="building", visible=False)
 
 
 def _polled(*comments: tuple[str, str]):

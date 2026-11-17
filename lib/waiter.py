@@ -425,9 +425,9 @@ class GhContextSource:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            return ContextResult(None, None, f"gh api failed: {type(exc).__name__}")
+            return ContextResult(None, ref, f"gh api failed: {type(exc).__name__}")
         if done.returncode != 0:
-            return ContextResult(None, None, f"gh api exited {done.returncode}")
+            return ContextResult(None, ref, f"gh api exited {done.returncode}")
         try:
             payload = json.loads(done.stdout)
             if not isinstance(payload, dict) or payload.get("encoding") != "base64":
@@ -437,15 +437,15 @@ class GhContextSource:
                 raise ValueError("not base64")
             text = base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
         except (ValueError, UnicodeError):
-            return ContextResult(None, None, f"{repo} factory.md is not base64 content")
+            return ContextResult(None, ref, f"{repo} factory.md is not base64 content")
         context, findings = parse_factory_context(text, strict=False)
         if context is None:
             errors = [item.message for item in findings if item.severity == "error"]
-            return ContextResult(None, None, f"{repo} factory.md: {errors[0] if errors else 'invalid'}")
+            return ContextResult(None, ref, f"{repo} factory.md: {errors[0] if errors else 'invalid'}")
         if context.config.base_branch != ref:
             return ContextResult(
                 None,
-                None,
+                ref,
                 f"{repo} factory.md base_branch is {context.config.base_branch}, "
                 f"not factory_ref {ref}",
             )

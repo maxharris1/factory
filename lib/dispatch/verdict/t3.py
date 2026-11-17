@@ -67,6 +67,7 @@ class T3Mixin:
         reported_round: int | None,
         ci_failure: tuple[str, ...],
     ) -> tuple[str, str | None]:
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(

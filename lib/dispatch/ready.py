@@ -20,7 +20,7 @@ from lib.dispatch.helpers import (
     _scope,
     failed_checks,
 )
-from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.types import BaseMismatch, CIResult, Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
@@ -103,7 +103,7 @@ class ReadyMixin:
                 approved is not None and _matching_head(reported_head, approved)
             ):
                 return True, "ready-already-shipped"
-            reentry = _approved_round(shipped, review_round)
+            reentry = self._completed_round(ticket)
             if reentry + 1 > self._effective_cap(ticket):
                 self._flag_ready_after_cap(ticket, comment, reported_head)
                 return True, "ready-after-cap"
@@ -116,6 +116,8 @@ class ReadyMixin:
         if head is None:
             try:
                 fresh = self._fresh_ticket(ticket)
+            except BaseMismatch:
+                return False, "base-mismatch"
             except Exception:
                 return False, "pr-head-unavailable"
             if fresh is not None and fresh.merged:
@@ -233,13 +235,15 @@ class ReadyMixin:
             result = ticket.ci.get(head) or ticket.ci.get(reported_head)
             connection.execute(
                 """
-                INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ci_waits
+                    (repo, ticket_id, comment_id, head, reason, checks, since, next_round)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id) DO UPDATE SET
                     comment_id = excluded.comment_id,
                     head = excluded.head,
                     reason = excluded.reason,
                     checks = excluded.checks,
+                    next_round = excluded.next_round,
                     since = CASE WHEN ci_waits.head = excluded.head
                                  THEN ci_waits.since ELSE excluded.since END
                 """,
@@ -250,8 +254,15 @@ class ReadyMixin:
                     outcome,
                     json.dumps(list(result.pending) if result is not None else []),
                     self.queue.now(),
+                    self._completed_round(ticket) + 1,
                 ),
             )
+
+    def _completed_round(self, ticket: TrackedTicket) -> int:
+        state, completed = self._review_context(ticket)
+        if state in ("handed-off", "merge-queue"):
+            return _approved_round(self._shipped_approval(ticket), completed)
+        return completed
 
     def _watch_ci_silence(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)

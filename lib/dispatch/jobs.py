@@ -25,6 +25,7 @@ from lib.dispatch.helpers import (
     _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
     _asks_questions,
+    _base_mismatch,
     _comment_order,
     _detail_project_bot,
     _detail_round,
@@ -37,7 +38,14 @@ from lib.dispatch.helpers import (
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, HandoffCandidate, RouteError, TicketRef, TrackedTicket
+from lib.dispatch.types import (
+    BaseMismatch,
+    Comment,
+    HandoffCandidate,
+    RouteError,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
@@ -743,6 +751,14 @@ class JobsMixin:
             return
         if self._restored_failure_waits(job):
             return
+        polled = self._polled.get(key)
+        if polled is not None and _base_mismatch(polled) is not None:
+            self._record_job_event_once(
+                job,
+                "base-mismatch",
+                "the PR targets another base; no T6 retry until it is retargeted",
+            )
+            return
         queue_owned = (
             job.request.action == "fix"
             and _merge_only(job.request.detail)
@@ -766,7 +782,6 @@ class JobsMixin:
         if job.request.action == "update-from-main":
             # #130: a failed update counts toward update-failed-2 in place of
             # the generic retry; the queue queues the next attempt.
-            polled = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
             self._update_failed(
                 repo=job.request.repo,
                 ticket_id=job.request.ticket_id,
@@ -1046,9 +1061,12 @@ class JobsMixin:
                 return _NO_READ_SINCE_FAILURE
             return None
         try:
-            fresh = self._observed(
-                self._fresh_reader(TicketRef(job.request.repo, job.request.ticket_id, tracker))
-            )
+            try:
+                fresh = self._observed(
+                    self._fresh_reader(TicketRef(job.request.repo, job.request.ticket_id, tracker))
+                )
+            except BaseMismatch as mismatch:
+                fresh = mismatch.ticket
             if fresh is None:
                 return None
             fresh = self._routed(fresh)
