@@ -159,11 +159,8 @@ class Target:
 
 
 def targets(config: MachinesConfig | None) -> list[Target]:
-    """Every remote checkout the fleet keeps in sync, once each; never the local box.
-
-    Bots that share one checkout share one target, so no two passes write
-    to the same directory at once."""
-    found: dict[tuple[str, str], Target] = {}
+    """Every remote bot checkout the fleet keeps in sync; never the local box."""
+    found: list[Target] = []
     for device in config.devices if config is not None else ():
         if device.local or not device.schedulable:
             continue
@@ -173,10 +170,8 @@ def targets(config: MachinesConfig | None) -> list[Target]:
             remote = remote_target(device, harness, PROBE_JOB)
             if bot is None or not checkout or remote is None:
                 continue
-            found.setdefault(
-                (device.name, checkout), Target(device.name, harness, bot, checkout, remote)
-            )
-    return list(found.values())
+            found.append(Target(device.name, harness, bot, checkout, remote))
+    return found
 
 
 def deploy_script(target: Target, *, url: str, sha: str) -> str:
@@ -245,7 +240,7 @@ def _why_not_synced(observed: Observed, sha: str) -> str:
     return "pinned skills do not match after the deploy"
 
 
-def _each(work: Callable[[Target], object], items: Sequence[Target]) -> list:
+def _each(work: Callable, items: Sequence) -> list:
     if not items:
         return []
     with ThreadPoolExecutor(max_workers=len(items)) as pool:
@@ -309,8 +304,12 @@ def run_pass(
             return Result(target, device_sync.SYNCED, "", after.sha)
         return Result(target, device_sync.REFUSED, refused or _why_not_synced(after, sha), after.sha)
 
-    for result in _each(finish, deploying):
-        results[result.target.key] = result
+    by_checkout: dict[tuple[str, str], list[Target]] = {}
+    for target in deploying:
+        by_checkout.setdefault((target.device, target.checkout), []).append(target)
+    for group in _each(lambda group: [finish(t) for t in group], list(by_checkout.values())):
+        for result in group:
+            results[result.target.key] = result
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         when = now()
