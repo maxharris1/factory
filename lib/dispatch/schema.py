@@ -560,8 +560,6 @@ class SchemaMixin:
                 )
                 """
             )
-            # #763: one row per QA decision and runner at a head. QaMixin is
-            # its only writer.
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS qa_runs (

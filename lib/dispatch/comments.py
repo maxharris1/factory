@@ -184,9 +184,8 @@ class CommentsMixin:
                 self._mark_handled(ticket, comment.id, outcome)
                 continue
             if kind == "qa":
-                outcome = self._qa_record(ticket, comment, fields)
-                if outcome is not None:
-                    self._mark_handled(ticket, comment.id, outcome)
+                if ticket.factory.qa is not None:
+                    self._mark_handled(ticket, comment.id, self._qa_record(ticket, comment, fields))
                 continue
             if kind not in (
                 "go",

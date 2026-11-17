@@ -1,8 +1,7 @@
 """QA runs (#763): decide each head's QA scope, queue the qa jobs, keep qa_runs.
 
-QaMixin is the only writer of qa_runs. Every method returns before any read or
-write when the ticket's factory.md has no qa block, so a project with QA off
-behaves as before. decide_scope is pure: the caller gathers the facts.
+QaMixin is the only writer of qa_runs. decide_scope is pure: the caller
+gathers the facts.
 """
 
 from __future__ import annotations
@@ -30,8 +29,6 @@ _SCENARIO_ROW = re.compile(r"^\s*\|\s*(qa-[1-9][0-9]*)\s*\|(.*)\|\s*$")
 
 @dataclass(frozen=True)
 class Prior:
-    """A primary run at another head that verified something."""
-
     run_id: str
     head: str
     result: str
@@ -39,12 +36,6 @@ class Prior:
 
 @dataclass(frozen=True)
 class ScopeInput:
-    """live_ids is None when no live scenario exists or the section is
-    invalid. touched and lines are about qa.paths in the diff since the
-    baseline, or since the merge-base without one; unknown git facts are
-    touched=True and lines=None. unpassed are the live ids whose newest
-    primary report did not mark them Verified."""
-
     live_ids: tuple[str, ...] | None
     baseline: Prior | None
     same_patch_pass: Prior | None
@@ -98,12 +89,6 @@ class QaMixin:
     def _queue_qa(
         self, ticket: TrackedTicket, comment: Comment, *, head: str | None, review_round: int
     ) -> None:
-        """Decide QA for a head the dispatcher just queued a review for.
-
-        A head is decided once, so a retry or a resume at the same head
-        queues no second run. QA never changes the review path, so an error
-        here is recorded and swallowed.
-        """
         qa = ticket.factory.qa
         if qa is None or head is None:
             return
@@ -185,7 +170,8 @@ class QaMixin:
             return None
         try:
             return self.qa_diff(ticket.repo, ticket.factory.base_branch, since, head)
-        except Exception:
+        except Exception as exc:
+            self.record_poll_error(ticket.repo, ticket.ticket_id, f"qa-diff:{type(exc).__name__}")
             return None
 
     def _queue_qa_run(
@@ -266,7 +252,6 @@ class QaMixin:
         return tuple(qa_id for qa_id in live_ids if not latest.get(qa_id, False))
 
     def _qa_live_ids(self, ticket: TrackedTicket) -> tuple[str, ...] | None:
-        # Imported here: lib.evidence imports lib.dispatcher at module level.
         from lib.evidence.scenarios import InvalidSection, live_scenarios
 
         found = live_scenarios(
@@ -287,15 +272,7 @@ class QaMixin:
 
     def _qa_record(
         self, ticket: TrackedTicket, comment: Comment, fields: dict[str, str]
-    ) -> str | None:
-        """Record a kind=qa comment on its run; None leaves it unhandled (QA off).
-
-        At the current head it reports the open row for its runner and arm.
-        At any other head it marks that head's row stale and changes nothing
-        else, since a new head already cancelled it.
-        """
-        if ticket.factory.qa is None:
-            return None
+    ) -> str:
         if not (
             fields.get("from") == ORCHESTRATOR
             and fields.get("role", "qa") == "qa"
@@ -339,10 +316,6 @@ class QaMixin:
         return "qa-reported" if row is not None else "qa-unmatched"
 
     def _qa_follow(self, ticket: TrackedTicket) -> None:
-        """Once per poll: a new head cancels the open runs at older heads and
-        their queued jobs; each open run follows its job's state. The queue
-        cannot cancel a running job, so its run is cancelled and its late
-        report is recorded stale."""
         if ticket.factory.qa is None:
             return
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -384,8 +357,6 @@ class QaMixin:
         self._wake_on_qa_fail(ticket, failed)
 
     def _wake_on_qa_fail(self, ticket: TrackedTicket, failed: list[sqlite3.Row]) -> None:
-        """One qa-failed wake per primary FAIL report with a [blocking] line
-        at a head with a trusted APPROVE, whichever came first."""
         comments = {comment.id: comment for comment in ticket.comments}
         for row in failed:
             report = comments.get(row["comment_id"])
@@ -430,7 +401,6 @@ class QaMixin:
         return False
 
     def _qa_job_failed(self, job: Job) -> None:
-        """T6 for a qa job: cancel its run, never retry, never mark stuck."""
         now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -469,7 +439,6 @@ def _prior(connection: sqlite3.Connection, where: str, args: tuple) -> Prior | N
 
 
 def _scenario_rows(body: str) -> list[tuple[str, bool]]:
-    """A report's `| qa-n | ac-n | Result | ... |` rows; a Verified cell passes."""
     rows = []
     for line in body.splitlines():
         match = _SCENARIO_ROW.match(line)

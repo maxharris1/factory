@@ -488,7 +488,5 @@ class HoldCarry(Protocol):
     def __call__(self, repo: str, base: str, approved: str, head: str) -> MergeUpdate: ...
 
 
-# #763: (repo, base branch, since head or None, head). patch_id is git
-# patch-id --stable of merge-base..head; files are (path, changed lines) from
-# since, or from the merge-base when since is None.
-QaDiff = Callable[[str, str, str | None, str], HeadDiff]
+class QaDiff(Protocol):
+    def __call__(self, repo: str, base: str, since: str | None, head: str) -> HeadDiff: ...

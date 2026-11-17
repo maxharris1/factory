@@ -101,8 +101,6 @@ class DispatcherBase:
         self.update_classifier = update_classifier
         self.rebase_classifier = rebase_classifier
         self.hold_carry = hold_carry
-        # #763: git facts for QA scope. None, or any error, means unknown,
-        # and unknown runs more QA, never less.
         self.qa_diff = qa_diff
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()
