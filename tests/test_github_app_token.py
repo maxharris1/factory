@@ -555,6 +555,10 @@ def test_an_owner_that_is_not_a_login_never_becomes_a_path_or_script() -> None:
 SERVICE = ROOT / "deploy" / "app-token-service.sh"
 
 
+def _no_such_user(name: str):
+    raise KeyError(name)
+
+
 def test_refresh_reads_orch_and_machines_and_sends_to_enabled_remote_devices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -578,6 +582,7 @@ def test_refresh_reads_orch_and_machines_and_sends_to_enabled_remote_devices(
     mint, pushes = FakeMint(), []
     monkeypatch.setattr(broker, "github_mint", mint)
     monkeypatch.setattr(broker, "ssh_push", lambda remote, owner, payload: pushes.append((remote, owner)) or True)
+    monkeypatch.setattr("pwd.getpwnam", _no_such_user)
     root = tmp_path / "tokens"
 
     status = broker.main(["refresh", "--orch", str(orch), "--machines", str(machines), "--token-root", str(root)])

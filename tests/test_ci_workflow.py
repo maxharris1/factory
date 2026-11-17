@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -405,7 +407,7 @@ esac
 """
 
 
-def _run_sync(tmp_path: Path, start: str, counts: list[str]) -> list[str]:
+def _sync_env(tmp_path: Path, start: str, counts: list[str]) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "gh").write_text(FAKE_SYNC_GH, encoding="utf-8")
@@ -423,14 +425,20 @@ def _run_sync(tmp_path: Path, start: str, counts: list[str]) -> list[str]:
         "GH_LOG": str(log),
         "GH_RESPONSES": str(tmp_path / "responses"),
         "GH_VALUE": str(tmp_path / "value"),
+        "LOG": str(tmp_path / "sync.log"),
     }
+    return env
+
+
+def _run_sync(tmp_path: Path, start: str, counts: list[str]) -> list[str]:
+    env = _sync_env(tmp_path, start, counts)
     result = subprocess.run(
         ["bash", str(SYNC_SCRIPT), "loop"], env=env, capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return [
         call.split("value=", 1)[1]
-        for call in log.read_text(encoding="utf-8").splitlines()
+        for call in Path(env["GH_LOG"]).read_text(encoding="utf-8").splitlines()
         if call.startswith("api -X PATCH repos/maxharris1/factory/actions/variables/FACTORY_LINUX_RUNNER ")
     ]
 
@@ -455,6 +463,62 @@ def test_the_sync_loop_overflows_only_after_two_full_checks(
     tmp_path: Path, start: str, counts: list[str], writes: list[str]
 ) -> None:
     assert _run_sync(tmp_path, start, counts) == writes
+
+
+def _runner_reads(env: dict[str, str]) -> list[str]:
+    return [line for line in Path(env["GH_LOG"]).read_text(encoding="utf-8").splitlines()
+            if "actions/runners" in line]
+
+
+def _ensure(env: dict[str, str]) -> None:
+    result = subprocess.run(
+        ["bash", str(SYNC_SCRIPT), "ensure"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_ensure_starts_the_loop_when_an_old_pidfile_names_an_unrelated_live_process(
+    tmp_path: Path,
+) -> None:
+    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
+    state = tmp_path / ".local/state/factory"
+    state.mkdir(parents=True)
+    hold = tmp_path / ".config/factory/runner-pool-sync-hold"
+    with subprocess.Popen(["sleep", "30"]) as reused:
+        try:
+            (state / "runner-pool-sync.pid").write_text(f"{reused.pid}\n", encoding="utf-8")
+            _ensure(env)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not (
+                hold.exists()
+                and subprocess.run(["flock", "-n", str(state / "runner-pool-sync.lock"), "true"]).returncode == 0
+            ):
+                time.sleep(0.05)
+        finally:
+            reused.kill()
+    assert _runner_reads(env), "ensure left the overflow loop stopped"
+
+
+def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: Path) -> None:
+    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
+    lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
+    lock.parent.mkdir(parents=True)
+    with lock.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        _ensure(env)
+        time.sleep(0.5)
+        second = subprocess.run(["bash", str(SYNC_SCRIPT), "loop"], env=env, timeout=30)
+    assert second.returncode == 0
+    assert _runner_reads(env) == []
+
+
+@pytest.mark.parametrize(
+    "doc", ["docs/F2-03-RUNNER-CHECKLIST.md", "docs/decisions/711-self-hosted-runners.md"]
+)
+def test_the_runner_docs_name_a_dedicated_user_for_the_mac_and_no_bot_runner(doc: str) -> None:
+    text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+    assert "`maxs-macbook-pro` runs as `gharunner`" in text
+    assert re.search(r"runs as `(claude|codex|cursor|grok)-bot`", text) is None
 
 
 def test_no_ci_job_uses_a_github_hosted_runner() -> None:

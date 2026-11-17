@@ -12,14 +12,16 @@ POOL='["self-hosted","Linux","X64","factory-linux"]'
 HOSTED='"ubuntu-latest"'
 EVERY=${EVERY:-30}
 LOG=${LOG:-$HOME/.local/state/factory/runner-pool-sync.log}
-PIDF=$HOME/.local/state/factory/runner-pool-sync.pid
-mkdir -p "$(dirname "$LOG")"
+LOCK=$HOME/.local/state/factory/runner-pool-sync.lock
+mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
 if [ "${1:-}" = ensure ]; then
   [ -e "$HOME/.config/factory/runner-pool-sync-hold" ] && exit 0
-  [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null && exit 0
-  nohup "$0" loop >>"$LOG" 2>&1 </dev/null & echo $! > "$PIDF"; exit 0
+  flock -n "$LOCK" true || exit 0
+  nohup "$0" loop >>"$LOG" 2>&1 </dev/null & exit 0
 fi
-gh_() { env -u GH_TOKEN gh "$@"; }
+exec 9>>"$LOCK"
+flock -n 9 || exit 0
+gh_() { env -u GH_TOKEN gh "$@" 9>&-; }
 set_var() {
   if gh_ api "repos/$REPO/actions/variables/$VAR" >/dev/null 2>&1; then
     gh_ api -X PATCH "repos/$REPO/actions/variables/$VAR" -f name="$VAR" -f value="$1" >/dev/null
@@ -41,5 +43,5 @@ while :; do
   else
     echo "$(date -Is) runner list failed; leaving $VAR=$cur"
   fi
-  sleep "$EVERY"
+  sleep "$EVERY" 9>&-
 done

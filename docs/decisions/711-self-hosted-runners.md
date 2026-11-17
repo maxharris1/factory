@@ -17,11 +17,11 @@ Unset means the pool, so local is the default. [`deploy/runner-pool-sync.sh`](..
 - **macOS** has no overflow. `macos` stays on `[self-hosted, macOS, factory-mac]`, and `macos-pickup` still cancels the run red after 10 minutes.
 - **Billing.** An overflowed job is billed like any hosted job. While the account is billing-blocked it fails in seconds and the run goes red; rerun failed jobs once the pool has room.
 - **D21 still holds.** The credential checks in `tests/test_ci_workflow.py` apply to every job whose fallback is self-hosted, since that is where it runs by default.
-- **Restarts.** `runner-pool-sync.sh ensure` starts the loop unless its pidfile names a live process. `box-1` is restarted by `~/.local/bin/box-runner-ensure.sh` from the box login's `.bashrc`. A hold file (`~/.config/factory/runner-pool-sync-hold`) stops the loop. The checklist has the commands.
+- **Restarts.** `runner-pool-sync.sh ensure` starts the loop unless a running loop holds its `flock` lock, which the kernel drops when the loop exits. `box-1` is restarted by `~/.local/bin/box-runner-ensure.sh` from the box login's `.bashrc`. A hold file (`~/.config/factory/runner-pool-sync-hold`) stops the loop. The checklist has the commands.
 
-## Interim exception
+## Mac runner user
 
-Until Max runs `sudo bash ~/factory-runner-mac-setup.sh` on the Mac, `maxs-macbook-pro` runs as `codex-bot` under `caffeinate`, not as a dedicated runner user. That breaks ac-3 for the Mac only, and only for the `macos` job, which runs `tests/test_process_discovery.py` from same-repo branches. The script moves it to a standard `gharunner` user as a boot-time LaunchDaemon.
+`maxs-macbook-pro` runs as `gharunner`, a dedicated runner user, not a bot login. The `macos` job on head `25396e56` printed `runner maxs-macbook-pro as gharunner` in its "Runner identity" step. Max's remaining check is the checklist's Mac isolation check: `gharunner` holds no `admin` group.
 
 ## Merge rule
 

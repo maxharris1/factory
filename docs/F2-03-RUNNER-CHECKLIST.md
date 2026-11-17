@@ -110,10 +110,12 @@ overflow to GitHub". The switch is the repo Actions variable
 - **Log.** `~/.local/state/factory/runner-pool-sync.log` on the box, one
   line per flip (`online=N idle=N -> <value>`).
 - **Restarts.** `runner-pool-sync.sh ensure` starts the loop in the
-  background unless its pidfile
-  (`~/.local/state/factory/runner-pool-sync.pid`) names a live process, so
-  it is safe to run any time. Run it after a box restart, from the same
-  place that runs `box-runner-ensure.sh`.
+  background unless a running loop holds its lock
+  (`flock` on `~/.local/state/factory/runner-pool-sync.lock`). The kernel
+  drops the lock when the loop exits, so a crash or restart never leaves a
+  stale claim, and a second loop exits at once. It is safe to run any time.
+  Run it after a box restart, from the same place that runs
+  `box-runner-ensure.sh`.
 - **Hold it.** `touch ~/.config/factory/runner-pool-sync-hold` stops the
   loop at its next check and makes `ensure` a no-op. Remove the file and
   run `ensure` to resume.
@@ -259,11 +261,10 @@ Same rules, with these differences:
   independent of factory jobs; turning the Mac back on for jobs is a
   separate decision.
 - Create a separate **standard (non-admin)** macOS user, `gharunner`.
-- **Interim state on 2026-11-17.** `maxs-macbook-pro` runs as `codex-bot`
-  under `caffeinate`, which breaks the per-host rule above. That ends when
-  Max runs `sudo bash ~/factory-runner-mac-setup.sh` from his own home on
-  the Mac. It moves the runner to `gharunner` as a boot-time LaunchDaemon.
-  Until then, the Mac's isolation check below fails.
+- **State on 2026-11-17.** `maxs-macbook-pro` runs as `gharunner`. The
+  `macos` job on head `25396e56` printed
+  `runner maxs-macbook-pro as gharunner` in its "Runner identity" step.
+  The Mac's isolation check below still needs Max's `id` output.
 - No system Python is needed. CI installs Python with `astral-sh/setup-uv`
   into the runner user's home. `actions/setup-python` fails on self-hosted
   runners other than Ubuntu (on macOS it writes to `/Users/runner`, and it
@@ -288,7 +289,8 @@ a token.
 - The `checks` job's "Runner identity" step prints `runner <name> as gha-runner*`.
 
 On the Mac: `ps -axo user,comm | grep Runner.Listener` shows `gharunner`,
-and the `macos` job's "Runner identity" step shows `gharunner`.
+`id -Gn gharunner` lists no `admin` group, and the `macos` job's "Runner
+identity" step shows `gharunner`.
 
 Settings > Actions > Runners lists all five runners as Idle with the
 labels above.
