@@ -26,14 +26,14 @@ CSS = """\
 .lane.disabled{color:var(--muted);box-shadow:none;outline:1px dashed var(--line-hi);outline-offset:-1px;
 background:repeating-linear-gradient(135deg,var(--dim) 0 8px,var(--bg) 8px 16px)}
 .lane-head{flex:0 0 224px;min-width:0;display:flex;flex-direction:column;gap:6px}
-.lh1{display:flex;align-items:center;gap:10px}
+.lh1{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .lh2{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}
 .lh2 .sub{font-variant-numeric:tabular-nums}
-.lane-head .name{font:600 14px/1.2 var(--mono);letter-spacing:-.01em;color:var(--text)}
+.lane-head .name{min-width:0;overflow-wrap:anywhere;font:600 14px/1.2 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .lane.disabled .name{color:var(--muted)}
 .lane-head .sub,.lane-body .sub{font:12px/1.3 var(--mono);color:var(--muted)}
 .lane-head .harness{font-size:12px;line-height:1.3;color:var(--muted)}
-.lane-meter{display:block;flex:none}
+.lane-meter{display:block;flex:none;max-width:100%}
 .lane-meter .px{height:8px}
 .lane-body{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:6px}
 .lane-body .px{height:12px}

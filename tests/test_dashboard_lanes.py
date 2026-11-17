@@ -921,7 +921,7 @@ def test_rail_and_head_rules_come_from_the_artboard() -> None:
         ".rail .lbl{font:12px/1.3 var(--mono);color:#8b93b8;white-space:nowrap}",
         ".rail.off i{border:0;background:#24283b}",
         ".lane-head{flex:0 0 224px;min-width:0;display:flex;flex-direction:column;gap:6px}",
-        ".lh1{display:flex;align-items:center;gap:10px}",
+        ".lh1{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}",
         ".lh2{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}",
     ):
         assert rule in CSS, rule
@@ -989,3 +989,42 @@ def test_each_device_is_one_block_at_375(tmp_path: Path, browser: Browser) -> No
     rows = browser.eval("""[].map.call(document.querySelectorAll('#queue ul.qrail > li'), function (li) {
       var b = li.getBoundingClientRect(); return [b.top, b.bottom]; })""")
     assert len(rows) == 2 and rows[1][0] >= rows[0][1], rows
+
+
+def _crowded_heads(tmp_path: Path) -> dict:
+    snapshot = _rail_lanes(tmp_path)
+    snapshot["running"] = [dict(snapshot["running"][0], device="box"), dict(snapshot["running"][1], device="ghost")]
+    snapshot["slots"]["devices"] = [
+        {"name": "box", "slot_max": 10, "held": 0, "enabled": True, "placeholder": False, "harnesses": ["claude"]},
+        {"name": "pc", "slot_max": 24, "held": 0, "enabled": True, "placeholder": True, "harnesses": ["codex"]},
+        {"name": "mac", "slot_max": 16, "held": 0, "enabled": False, "placeholder": False, "harnesses": []},
+        {"name": "build-runner-with-a-long-hostname", "slot_max": 12, "held": 0, "enabled": True,
+         "placeholder": False, "harnesses": ["claude", "codex", "grok"]},
+    ]
+    snapshot["health"] = {"components": [
+        {"component": "device-probe", "device": name, "state": "down"}
+        for name in ("box", "build-runner-with-a-long-hostname", "ghost")
+    ], "counts": {}}
+    return snapshot
+
+
+@needs_chrome
+def test_device_heads_stay_clear_of_their_tiles_at_1440(tmp_path: Path, browser: Browser) -> None:
+    browser.open(_page_with_status_stub(_crowded_heads(tmp_path), "index.html"), 1440)
+    heads = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]'), function (lane) {
+      var head = lane.querySelector('.lane-head'), box = head.getBoundingClientRect();
+      var first = lane.querySelector('.tiles > *, .lane-body');
+      var spill = [].filter.call(head.querySelectorAll('*'), function (e) {
+        var b = e.getBoundingClientRect();
+        return b.width && (b.left < box.left - 0.5 || b.right > box.right + 0.5);
+      }).map(function (e) { return e.className + ' ' + e.getBoundingClientRect().right; });
+      return {device: lane.getAttribute('data-device'), right: box.right, spill: spill,
+              chip: !!head.querySelector('.chip'),
+              next: first ? first.getBoundingClientRect().left : null};
+    })""")
+    devices = {h["device"]: h for h in heads}
+    assert {"box", "pc", "mac", "ghost", "build-runner-with-a-long-hostname"} <= set(devices), heads
+    assert all(devices[d]["chip"] for d in ("box", "pc", "mac", "ghost", "build-runner-with-a-long-hostname")), heads
+    for head in heads:
+        assert not head["spill"], head
+        assert head["next"] is None or head["right"] <= head["next"], head
