@@ -139,8 +139,10 @@ def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
     out = tmp_path / "out"
     paths = write_snapshot_pages(out, _snapshot(tmp_path))
     assert dashboard.PAGES == PAGES
-    assert paths == (out / "status.json", *(out / name for name in PAGES))
-    assert sorted(path.name for path in out.iterdir()) == sorted(("status.json", *PAGES))
+    assert paths == (out / "status.json", *(out / name for name in PAGES), out / "tickets.json")
+    assert sorted(path.name for path in out.iterdir()) == sorted(
+        ("status.json", *PAGES, "tickets.json")
+    )
 
 
 def test_every_page_links_every_other_page(tmp_path: Path) -> None:
@@ -170,7 +172,7 @@ def test_static_server_serves_every_page() -> None:
 
 def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> None:
     html = _pages(tmp_path)["index.html"]
-    for panel in ("kpis", "lanes", "queue", "just-happened", "intake"):
+    for panel in ("lanes", "queue", "just-happened", "intake"):
         assert f'id="{panel}"' in html, panel
     # Moved to the Activity and Efficiency pages.
     for panel in ("health", "handoffs", "verdicts", "tickets", "log", "savings"):
@@ -178,8 +180,7 @@ def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> 
     for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
                   "Handoff savings", "poller.log", "scripted share"):
         assert words.lower() not in _text(_no_script(html)).lower(), words
-    # #140: status, then the lanes with the queue lane first, then Just happened beside Intake.
-    assert html.index('id="kpis"') < html.index('id="lanes"') < html.index('id="queue"')
+    assert html.index('id="lanes"') < html.index('id="queue"')
     assert html.index('id="queue"') < html.index('data-device="box"') < html.index('id="just-happened"')
     assert html.index('id="just-happened"') < html.index('id="intake"')
     assert 'id="queue" data-device="queue"' in _section(html, "lanes")
@@ -852,7 +853,7 @@ def attention_count(out: dict) -> str:
 @needs_node
 def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     snapshot = _held_more_than_running(tmp_path)
-    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "just-happened", "intake"])
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes", "just-happened", "intake"])
     assert "LIVE" in out["text"]["link-text"]
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
@@ -944,7 +945,7 @@ def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     calls = [eval(line) for line in remote_log.read_text().splitlines()]  # noqa: S307
-    names = ("status.json", *PAGES)
+    names = ("status.json", *PAGES, "tickets.json")
     assert [call[0] for call in calls] == ["scp"] * len(names) + ["ssh"]
     assert calls[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
         f"mv -f -- .{name}.push-tmp {name}" for name in names

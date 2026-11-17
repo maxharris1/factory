@@ -25,6 +25,7 @@ from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1_800_000_000.0
+TRACKED_AT = NOW - 3600
 
 # Fake secrets, built at runtime so no literal token shape sits in the repo.
 WEBHOOK_SECRET = "Zx9Qp" * 6
@@ -228,7 +229,7 @@ def add_ticket(
     connection.execute(
         "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
         "VALUES (?, ?, ?, ?)",
-        (repo, ticket_id, tracker, NOW - 3600),
+        (repo, ticket_id, tracker, TRACKED_AT),
     )
     connection.execute(
         """
@@ -604,6 +605,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "projects",  # per-project ship mode and round caps (#152)
         "rules",
         "usage",  # subscription headroom per bot account (#151)
+        "ticket_records",
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)
@@ -1394,12 +1396,13 @@ def test_write_snapshot_is_atomic_and_leaves_no_temp_files(
     monkeypatch.setattr(dashboard.os, "replace", spy)
     paths = dashboard.write_snapshot_pages(out, snapshot)
     names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html",
-             "health.html"]
+             "health.html", "tickets.json"]
     assert [target for _, target in replaced] == names
     assert all(source.startswith(".") for source, _ in replaced)
     assert paths == tuple(out / name for name in names)
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
-    assert json.loads((out / "status.json").read_text(encoding="utf-8")) == snapshot
+    status = {key: value for key, value in snapshot.items() if key != "ticket_records"}
+    assert json.loads((out / "status.json").read_text(encoding="utf-8")) == status
 
 
 def test_failed_write_keeps_the_previous_file(tmp_path: Path, monkeypatch) -> None:
@@ -1508,7 +1511,7 @@ def test_cli_snapshot_writes_both_files(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html",
-             "health.html"]
+             "health.html", "tickets.json"]
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert status["queue"]["totals"]["queued"] == 2

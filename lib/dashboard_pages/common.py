@@ -34,7 +34,7 @@ CSS_PANEL = """\
 .panel{grid-column:span 4;position:relative;min-width:0;padding:14px 16px 16px;
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
-#kpis,#ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
+#ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
 .panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
@@ -103,7 +103,6 @@ color:var(--text);box-shadow:var(--elev);font:600 13px/1.2 var(--mono)}
 
 
 CSS_TAIL = """\
-@keyframes px-march{to{background-position:16px 0,-16px 100%,100% 16px,0 -16px}}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue{grid-column:1/-1}}
@@ -111,8 +110,7 @@ CSS_TAIL = """\
 .topbar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
-.fresh{outline:2px solid var(--brand);outline-offset:-2px}
-.px-held::after{animation:none}}
+.fresh{outline:2px solid var(--brand);outline-offset:-2px}}
 """
 
 
@@ -308,10 +306,10 @@ __TELEMETRY__
 
 SCRIPT_TAIL = r"""
   var PAGES = {
-    main: [renderKpis, renderLanes, renderJustHappened, renderIntake],
+    main: [renderLanes, renderJustHappened, renderIntake],
     job: [renderBoard, renderTickets, renderJobView],
     activity: [renderAttention, renderRelay],
-    efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens],
+    efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
@@ -736,9 +734,12 @@ def checks_link(ticket: dict) -> str:
 
 
 def _panel(
-    ident: str, title: str, inner: str, *, count: object = None, extra: str = "", hidden: bool = False
+    ident: str, title: str, inner: str, *, count: object = None, count_html: str | None = None,
+    extra: str = "", hidden: bool = False,
 ) -> str:
     head = _span(None, title) + ("" if count is None else _span("count", count))
+    if count_html is not None:
+        head += f'<span class="count">{count_html}</span>'
     classes = f"panel {extra}".strip()
     return (
         f'<section class="{classes}" id="{ident}" aria-label="{_e(title)}"{" hidden" if hidden else ""}>'

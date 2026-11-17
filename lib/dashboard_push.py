@@ -9,7 +9,7 @@ with BatchMode, so it never prompts, and it relies entirely on the SSH login
 Max provisioned: optionally `-F <ssh_config>` names his ssh_config file. No
 key path, password or token is read, passed or configured here.
 
-Both methods publish the files (status.json and the pages) as one step. Every file is first uploaded to
+Both methods publish the files (status.json, the pages and tickets.json) as one step. Every file is first uploaded to
 a dot-prefixed temp name in the served directory; only after all uploads
 succeed does one `ssh host 'cd -- dir && mv -f -- .a.push-tmp a && mv -f --
 .b.push-tmp b && ...'` rename them over the live names, back to back on the
@@ -82,7 +82,7 @@ SSH_OPTIONS = ("-o", "BatchMode=yes")
 SEND_TIMEOUT_SECONDS = 20
 RSYNC_IO_TIMEOUT_SECONDS = 10
 TEMP_SUFFIX = ".push-tmp"
-# Names of the files sent (status.json and the pages): plain, no leading '-'.
+# Names of the files sent (status.json, the pages, tickets.json): plain, no leading '-'.
 FILE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 ROOT = Path(__file__).resolve().parent.parent
 

@@ -189,11 +189,14 @@ def home(tmp_path: Path):
         path.chmod(0o755)
     yield home
     _service(home, "stop")
-    for pid in _processes_of(home):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    deadline = time.monotonic() + 10
+    while (survivors := _processes_of(home)) and time.monotonic() < deadline:
+        for pid in survivors:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.05)
 
 
 def _env(home: Path, **extra: str) -> dict[str, str]:
@@ -1093,6 +1096,7 @@ def test_the_held_record_stays_until_a_probe_succeeds(home: Path) -> None:
     assert runs == [False, True, False], "health saw the held record vanish before the probe won"
 
 
+@pytest.mark.timeout(30)
 def test_two_devices_sharing_the_tunnel_user_never_end_each_others_live_tunnel(
     home: Path, tmp_path: Path,
 ) -> None:
@@ -1111,3 +1115,9 @@ def test_two_devices_sharing_the_tunnel_user_never_end_each_others_live_tunnel(
     assert "ending sshd" not in _tunnel_log(home)
     assert (other / "linear-webhook-tunnel.held").exists()
     assert not (_state(home) / "linear-webhook-tunnel.held").exists()
+
+    stopped = _service(home, "stop", ORCH_STATE_DIR=str(other))
+    assert stopped.returncode == 0, f"device B stop failed: {stopped.stdout}{stopped.stderr}"
+    stopped = _service(home, "stop")
+    assert stopped.returncode == 0, f"device A stop failed: {stopped.stdout}{stopped.stderr}"
+    assert _processes_of(home) == [], "a fake ssh or loop outlived both devices' stop"

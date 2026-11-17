@@ -10,8 +10,9 @@ when configured, pushes it out. Paths:
          poll_seconds are used)
   --machines else the checkout's machines.yml, when present
 
-`snapshot` writes status.json and the five pages (index.html, job.html,
-activity.html, efficiency.html, health.html); `push` sends them all.
+`snapshot` writes status.json, the five pages (index.html, job.html,
+activity.html, efficiency.html, health.html) and tickets.json (a record per
+tracked ticket); `push` sends them all.
 `push --status-only` sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
 last cycle ended, reported as poll health. `--poll-seconds` (30 or 60) is the
@@ -57,7 +58,7 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="orch dashboard", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
-    snapshot = commands.add_parser("snapshot", help="write status.json and the pages")
+    snapshot = commands.add_parser("snapshot", help="write status.json, the pages and tickets.json")
     push = commands.add_parser("push", help="snapshot and push when configured")
     for sub in (snapshot, push):
         sub.add_argument("--db", type=Path)

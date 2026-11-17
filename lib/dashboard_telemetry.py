@@ -341,6 +341,46 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
     }
 
 
+def ticket_totals(connection: sqlite3.Connection) -> dict[tuple[str, str], dict]:
+    """{(repo casefolded, ticket id): {jobs, tokens_in, tokens_out, cost_usd}}
+    over every job a ticket ever had, with no time window. Tokens add up the
+    metered jobs (`_tokens_known`) and cost the priced ones; each is None when
+    no job of the ticket has any, so a missing reading never shows as 0."""
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "jobs" not in tables:
+        return {}
+    present = (
+        {str(row[1]) for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+        if TABLE in tables
+        else set()
+    )
+    joined = "job_id" in present
+    columns = ", ".join(
+        f"t.{name} AS {name}" if joined and name in present else f"NULL AS {name}"
+        for name in ("tokens_in", "tokens_cached", "tokens_out", "tokens_unknown", "cost_usd")
+    )
+    totals: dict[tuple[str, str], dict] = {}
+    for row in connection.execute(
+        f"SELECT jobs.repo, jobs.ticket_id, {columns} FROM jobs"
+        + (f" LEFT JOIN {TABLE} t ON t.job_id = jobs.id" if joined else "")
+    ):
+        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+        item = totals.setdefault(
+            key, {"jobs": 0, "tokens_in": None, "tokens_out": None, "cost_usd": None}
+        )
+        item["jobs"] += 1
+        if _tokens_known(row):
+            item["tokens_in"] = (item["tokens_in"] or 0) + _count(row["tokens_in"])
+            item["tokens_out"] = (item["tokens_out"] or 0) + _count(row["tokens_out"])
+        cost = _money(row["cost_usd"])
+        if cost is not None:
+            item["cost_usd"] = round((item["cost_usd"] or 0.0) + cost, 4)
+    return totals
+
+
 def attach(items: Iterable[dict], read: dict, now: float) -> None:
     """Give each running or queued job its summary (None: no telemetry)."""
     rows = read["rows"]
@@ -446,7 +486,7 @@ def rollup_panel(snapshot: dict) -> str:
     """Efficiency: tokens and cost per job, per harness and per repo."""
     rollup = snapshot.get("telemetry") or _empty_rollup("none")
     totals = rollup["totals"]
-    count = f"last {rollup['window_days']} days"
+    heading = f"Cost, last {rollup['window_days']} days"
     if not totals["jobs"]:
         inner = '<p class="empty">no telemetry</p>'
     else:
@@ -482,8 +522,8 @@ def rollup_panel(snapshot: dict) -> str:
             + '<h3 class="tele-head">recent jobs</h3>' + _recent_table(rollup["recent"])
         )
     return (
-        '<section class="panel" id="tokens" aria-label="Tokens and cost">'
-        f"<h2>{_span(None, 'Tokens and cost')}{_span('count', count)}</h2>{inner}</section>"
+        f'<section class="panel" id="tokens" aria-label="{_e(heading)}">'
+        f"<h2>{_span(None, heading)}{_span('count', 'as reported by each harness')}</h2>{inner}</section>"
     )
 
 
@@ -551,7 +591,7 @@ TELEMETRY_SCRIPT = r"""
   }
   function renderTokens(d) {
     var r = d.telemetry || {window_days: 7, totals: {jobs: 0}, by_harness: [], by_repo: [], recent: []};
-    var root = panel('tokens', 'Tokens and cost', 'last ' + r.window_days + ' days');
+    var root = panel('tokens', 'Cost, last ' + r.window_days + ' days', 'as reported by each harness');
     if (!root) return;
     var t = r.totals || {jobs: 0};
     if (!t.jobs) { add(root, el('p', 'empty', 'no telemetry')); return; }

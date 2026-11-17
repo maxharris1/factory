@@ -661,7 +661,6 @@ def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> No
     assert 'title="round 1/1"' in card.group(0) and "round 0" not in text
     assert "hb —" in text and '<i style="width:0%">' in card.group(0)
     assert "no heartbeat" in index and "runner dead" in index
-    assert '<div class="kpi bad" data-kpi="stuck / overdue"><b>2</b><span>stuck / overdue</span>' in index
 
 
 @needs_node
@@ -672,13 +671,12 @@ def test_the_page_script_draws_the_same_states(tmp_path: Path) -> None:
     snapshot = collect_snapshot(
         db, log, now=CLAIMED_AT + 12 * 60, alive=lambda pid, _start: pid in live
     )
-    out = _run_page(tmp_path, snapshot, "main", BAR + ["kpis", "lanes"])
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["lanes"])
     lanes = out["text"]["lanes"]
     for needle in ("claimed", "waiting to start", "1/1", "no heartbeat", "runner dead", "running"):
         assert needle in lanes, (needle, lanes)
     assert "round 0" not in lanes
     assert attention_count(out) == "2"
-    assert "2stuck / overdue" in out["text"]["kpis"]
     dump = out["dump"]["lanes"]
     card = dump[dump.index(f"job-{ids['claimed'][:8]}") :]
     card = card[: card.index("a.tile", 1)] if "a.tile" in card[1:] else card
