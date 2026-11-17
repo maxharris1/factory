@@ -99,6 +99,30 @@ def _newest_harness_job(
     return None if row is None else _job(row)
 
 
+def _clear_stuck(
+    connection: sqlite3.Connection,
+    ticket: TrackedTicket,
+    state: str,
+    at: float,
+    **also: object,
+) -> None:
+    write_workflow_state(
+        connection,
+        ticket.repo,
+        ticket.ticket_id,
+        state,
+        source="retry",
+        at=at,
+        also={
+            "stuck": 0,
+            "stuck_reason": None,
+            "stuck_source_comment_id": None,
+            "stuck_wake_job_id": None,
+            **also,
+        },
+    )
+
+
 class RetryMixin:
     def _t_retry(
         self,
@@ -159,20 +183,7 @@ class RetryMixin:
             state = None
             if row is not None and row["stuck"]:
                 state = row["workflow_state"]
-                write_workflow_state(
-                    connection,
-                    ticket.repo,
-                    ticket.ticket_id,
-                    state,
-                    source="retry",
-                    at=now,
-                    also={
-                        "stuck": 0,
-                        "stuck_reason": None,
-                        "stuck_source_comment_id": None,
-                        "stuck_wake_job_id": None,
-                    },
-                )
+                _clear_stuck(connection, ticket, state, now)
                 self._supersede_stuck(connection, key, keep=job.id)
             if self._posted_handoff(job, ticket) is not None:
                 return self._record_retry(
@@ -218,23 +229,15 @@ class RetryMixin:
             )
             update_failures = UPDATE_FAILURES_TO_STOP - 1
         plan_check = None if state == "planning" else row["plan_check_comment_id"]
-        write_workflow_state(
+        _clear_stuck(
             connection,
-            ticket.repo,
-            ticket.ticket_id,
+            ticket,
             state,
-            source="retry",
-            at=self.queue.now(),
-            also={
-                "stuck": 0,
-                "stuck_reason": None,
-                "stuck_source_comment_id": None,
-                "stuck_wake_job_id": None,
-                "generation": generation,
-                "plan_gap_count": gaps,
-                "plan_check_comment_id": plan_check,
-                "update_failures": update_failures,
-            },
+            self.queue.now(),
+            generation=generation,
+            plan_gap_count=gaps,
+            plan_check_comment_id=plan_check,
+            update_failures=update_failures,
         )
         self._supersede_stuck(connection, key)
         if step == "update" and state != "updating":
