@@ -11,7 +11,7 @@ import pytest
 
 from lib import heal, health
 from lib.grok_delivery import WebhookResult
-from lib.heal import DEFER, ESCALATE, RESTART, SKIP, Facts, KeyState, Webhook
+from lib.heal import DEFER, DRAIN, ESCALATE, RESTART, SKIP, Facts, KeyState, Webhook
 
 NOW = 1_800_000_000.0
 CHECKOUT = "ba9876543210"
@@ -468,3 +468,130 @@ def test_a_held_tunnel_that_needs_attention_alerts_once_and_is_never_restarted(
         passes.append(kinds(actions))
     assert passes[0] == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
     assert all(actions == [(SKIP, "tunnel @ box")] for actions in passes[1:])
+
+
+# --- version updates and the restart budget (issue #748) --------------------------------------
+
+COMMITS = [letter * 12 for letter in "abcdefg"]
+POLLER = "poller @ box"
+
+
+def moved(running: str, checkout: str, name: str = "poller", **kw) -> dict:
+    """A report whose checkout is `checkout`, with one component running `running`."""
+    item = component(name, bot=kw.pop("bot", ""), version=running, **kw)
+    item["stale_code"] = running != checkout
+    return {"known": True, "code_version": checkout, "components": [item]}
+
+
+def saved(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "self-heal.state.json").read_text(encoding="utf-8"))["keys"]
+
+
+def restart_lines(tmp_path: Path) -> list[str]:
+    return [line for line in log_lines(tmp_path) if " self-heal: restart " in line]
+
+
+def test_more_than_three_version_updates_in_the_window_all_restart(tmp_path: Path) -> None:
+    runs = Runs()
+    for step in range(5):
+        data = moved(COMMITS[step], COMMITS[step + 1], pid=100 + step)
+        run_heal(tmp_path, data, now=NOW + step * 180, runs=runs)
+    lines = restart_lines(tmp_path)
+    assert len(lines) == 5
+    for step, line in enumerate(lines):
+        assert line.endswith(f"(stale code: running {COMMITS[step]}, "
+                             f"checkout {COMMITS[step + 1]}) exit=0 0.0s")
+    assert not any("backoff" in line for line in log_lines(tmp_path))
+    assert not any(" escalate " in line for line in log_lines(tmp_path))
+    assert saved(tmp_path)[POLLER]["attempts"] == []
+
+
+def test_a_free_update_still_lets_the_next_new_commit_restart() -> None:
+    states = {POLLER: KeyState(restarted_at=NOW - 300, target=COMMITS[1])}
+    (action,) = heal.decide(moved(COMMITS[1], COMMITS[2]), states, facts(), NOW)
+    assert (action.kind, action.reason) == (
+        RESTART, f"stale code: running {COMMITS[1]}, checkout {COMMITS[2]}")
+
+
+def test_a_version_update_that_never_lands_backs_off_and_escalates(tmp_path: Path) -> None:
+    stuck = moved(COMMITS[0], COMMITS[1])
+    for step in range(6):
+        run_heal(tmp_path, stuck, now=NOW + step * 120)
+    assert len(restart_lines(tmp_path)) == 4
+    need = f"stale code: running {COMMITS[0]}, checkout {COMMITS[1]}"
+    assert f"2027-01-15T08:08:00Z self-heal: skip {POLLER} (backoff: 3 restarts in 30m ({need}))" \
+        in log_lines(tmp_path)
+    escalations = [line for line in log_lines(tmp_path) if " escalate " in line]
+    assert len(escalations) == 1 and f"escalate {POLLER} (backoff: 3 restarts in 30m)" in escalations[0]
+
+
+def test_failed_stale_restarts_count_even_toward_new_commits(tmp_path: Path) -> None:
+    runs = Runs(code=1)
+    posts = Posts()
+    for step in range(4):
+        run_heal(tmp_path, moved(COMMITS[0], COMMITS[step + 1]), now=NOW + step * 120,
+                 runs=runs, posts=posts)
+    assert len(runs.calls) == 3
+    assert len(saved(tmp_path)[POLLER]["failures"]) == 3
+    assert log_lines(tmp_path)[-2].endswith(
+        f"skip {POLLER} (backoff: 3 restarts in 30m (stale code: running {COMMITS[0]}, "
+        f"checkout {COMMITS[4]}))")
+    (_, _, body), = posts.calls
+    assert body["components"][0]["reason"] == "backoff: 3 restarts in 30m"
+
+
+def test_a_component_that_crashes_on_each_new_version_backs_off(tmp_path: Path) -> None:
+    runs = Runs()
+    passes = [moved(COMMITS[0], COMMITS[1]), moved(COMMITS[1], COMMITS[1], state="down"),
+              moved(COMMITS[1], COMMITS[2]), moved(COMMITS[2], COMMITS[2], state="down"),
+              moved(COMMITS[2], COMMITS[3]), moved(COMMITS[3], COMMITS[3], state="down"),
+              moved(COMMITS[3], COMMITS[3], state="down")]
+    for step, data in enumerate(passes):
+        run_heal(tmp_path, data, now=NOW + step * 120, runs=runs)
+    assert len(runs.calls) == 6
+    assert log_lines(tmp_path)[-2].endswith(
+        f"skip {POLLER} (backoff: 3 restarts in 30m (down: down))")
+    assert log_lines(tmp_path)[-1].endswith(f"escalate {POLLER} (backoff: 3 restarts in 30m) escalated")
+
+
+def test_a_component_held_back_restarts_once_onto_the_latest_checkout(tmp_path: Path) -> None:
+    listener = "linear-listener @ box"
+    busy = facts(listener_busy=True)
+    for step in range(4):
+        actions, runs, _ = run_heal(tmp_path, moved(COMMITS[0], COMMITS[step + 1], "linear-listener"),
+                                    now=NOW + step * 120, host=busy)
+        assert kinds(actions) == [(DEFER, listener)] and runs.calls == []
+    actions, runs, _ = run_heal(tmp_path, moved(COMMITS[0], COMMITS[4], "linear-listener"),
+                                now=NOW + 4 * 120)
+    assert kinds(actions) == [(RESTART, listener)] and len(runs.calls) == 1
+    (line,) = restart_lines(tmp_path)
+    assert f"checkout {COMMITS[4]})" in line
+    assert saved(tmp_path)[listener]["target"] == COMMITS[4]
+    actions, runs, _ = run_heal(tmp_path, moved(COMMITS[4], COMMITS[4], "linear-listener", pid=9),
+                                now=NOW + 5 * 120)
+    assert actions == [] and runs.calls == []
+
+
+@pytest.mark.parametrize("name, bot, restarted, host, expected", [
+    ("poller", "", NOW - 300, facts(held=frozenset({"poller"})), [(SKIP, "held stopped")]),
+    ("poller", "", NOW - 30, facts(), []),
+    ("linear-listener", "", NOW - 300, facts(listener_busy=True),
+     [(DEFER, "stale code, busy with a delivery")]),
+    ("waiter", "codex-bot", NOW - 300, facts(),
+     [(DRAIN, "stale code, waiting for the waiter to stop claiming")]),
+], ids=["held", "settling", "busy-listener", "unacked-waiter"])
+def test_guards_still_hold_after_free_updates(name: str, bot: str, restarted: float,
+                                              host: Facts, expected: list) -> None:
+    data = moved(COMMITS[1], COMMITS[2], name, bot=bot)
+    states = {data["components"][0]["label"]: KeyState(restarted_at=restarted, target=COMMITS[1])}
+    actions = heal.decide(data, states, host, NOW)
+    assert [(a.kind, a.reason) for a in actions] == expected
+
+
+def test_a_free_updates_process_change_is_not_flapping() -> None:
+    states: dict[str, KeyState] = {}
+    for step, pid in enumerate((10, 11, 12, 13)):
+        at = NOW + step * 120
+        heal.observe(report(component(pid=pid)), states, at)
+        states[component()["label"]].restarted_at = at + 1
+    assert states[component()["label"]].changes == []
