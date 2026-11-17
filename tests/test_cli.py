@@ -616,6 +616,65 @@ def test_retry_refuses_a_ticket_that_is_not_stuck(
     assert retry_gh() == []
 
 
+def _fix_running_on_pc(tmp_path: Path, *, failing: bool, pc_enabled: bool) -> tuple[Path, Path]:
+    from lib.device_pool import DevicePool
+    from lib.queue import JobRequest
+    from tests.test_remote_start import config_of, machines_file
+
+    queue = _retry_db(tmp_path, stuck=False)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="fix",
+            recipient="claude",
+            source_comment_id="c-1",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="fix:k",
+    )
+    pool = DevicePool(queue, config_of(machines_file(tmp_path, box_enabled=False)))
+    assert pool.claim("claude") is not None
+    if failing:
+        pool.record_contact("pc", ok=False, at=100.0)
+    (tmp_path / "now").mkdir()
+    return queue.path, machines_file(tmp_path / "now", box_enabled=False, pc=pc_enabled)
+
+
+@pytest.mark.parametrize(
+    ("failing", "pc_enabled", "code"),
+    [(True, True, 0), (False, False, 0), (False, True, 1)],
+    ids=["unreachable", "disabled", "reachable"],
+)
+def test_retry_posts_for_a_job_stranded_on_its_device(
+    tmp_path: Path, retry_gh, capsys, failing: bool, pc_enabled: bool, code: int
+) -> None:
+    db, machines = _fix_running_on_pc(tmp_path, failing=failing, pc_enabled=pc_enabled)
+
+    assert cli.main(
+        ["retry", "owner/repo#42", "--reason", "why", "--db", str(db), "--machines", str(machines)]
+    ) == code
+
+    assert len(retry_gh()) == 1 - code
+    if code:
+        assert "not stuck (state fixing); nothing to retry" in capsys.readouterr().err
+
+
+def test_retry_reads_device_health_alone_without_a_machines_file(
+    tmp_path: Path, retry_gh, capsys
+) -> None:
+    db, _ = _fix_running_on_pc(tmp_path, failing=True, pc_enabled=True)
+
+    code = cli.main(
+        ["retry", "owner/repo#42", "--reason", "why", "--db", str(db),
+         "--machines", str(tmp_path / "missing.yml")]
+    )
+
+    assert code == 0
+    assert len(retry_gh()) == 1
+    assert "missing.yml" in capsys.readouterr().err
+
+
 def _plan_done_with_event(tmp_path: Path, event: str | None):
     from lib.queue import JobRequest
 

@@ -1075,7 +1075,7 @@ def test_a_relay_filter_button_keeps_focus_across_two_snapshots(tmp_path: Path) 
 
 
 SAME_CONTROL = [
-    ("activity.html", "", {"in": "relay", "tag": "button", "attr": {"data-relay": "scripted"}}, "data-relay"),
+    ("activity.html", "", {"in": "relay", "tag": "button", "attr": {"data-relay": "needs"}}, "data-relay"),
     ("job.html", "", {"in": "ticket-filter", "attr": {"data-view": "table"}}, "data-view"),
     ("job.html", "", {"in": "ticket-filter", "attr": {"data-project": ""}}, "data-project"),
     ("ticket.html", REVIEW_HASH, {"in": "runlog", "attr": {"data-visit": "2"}}, "data-visit"),

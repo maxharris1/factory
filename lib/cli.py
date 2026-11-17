@@ -59,7 +59,7 @@ from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
 from lib.scratch import remove as remove_scratch
-from lib.device_monitor import DeviceMonitor
+from lib.device_monitor import DeviceMonitor, retry_stranded
 from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.job_state import record_job_event
@@ -414,7 +414,7 @@ status [--db PATH] [--machines PATH] [--orch PATH]
   state. --db defaults to ORCH_DB. Exits 1 when the database or a given
   config file cannot be read, else 0.
 
-retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH]
+retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH] [--machines PATH]
   Post a grok-bot kind=retry comment ("Retry requested: TEXT") on a GitHub
   ticket (owner/repo#n or its PR or issue URL) through gh with the token
   variables unset; the dispatcher then resumes the step that got stuck for
@@ -422,7 +422,10 @@ retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH]
   trusted_logins login for grok-bot. With --db or $ORCH_DB readable, it
   first refuses (exit 1, nothing posted) a ticket that is not stuck or has
   a queued or running harness job; --force skips that check, and the
-  dispatcher still refuses either case. Linear tickets are out of scope.
+  dispatcher still refuses either case. A running job on a remote device
+  that is disabled in --machines (default machines.yml) or failed its last
+  probe is not refused: the dispatcher settles it as lost and requeues it
+  (#663). Linear tickets are out of scope.
   Prints the new comment id. Exits 2 on a bad ticket or empty reason, 1
   when refused or the post fails.
 """
@@ -1472,6 +1475,7 @@ def _retry(argv: list[str]) -> int:
     parser.add_argument("--reason", required=True)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--db", type=Path)
+    parser.add_argument("--machines", type=Path, default=ROOT / "machines.yml")
     args = parser.parse_args(argv)
     reason = args.reason.strip()
     if not reason:
@@ -1488,7 +1492,9 @@ def _retry(argv: list[str]) -> int:
         return 2
     repo, number = match["repo"], int(match["ticket"])
     if not args.force:
-        refusal = _retry_refusal(args.db or os.environ.get(DB_ENV), repo, number, prog)
+        refusal = _retry_refusal(
+            args.db or os.environ.get(DB_ENV), repo, number, prog, args.machines
+        )
         if refusal is not None:
             print(f"{prog}: {repo}#{number} {refusal}", file=sys.stderr)
             return 1
@@ -1508,7 +1514,9 @@ def _retry(argv: list[str]) -> int:
     return 0
 
 
-def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> str | None:
+def _retry_refusal(
+    db: Path | str | None, repo: str, number: int, prog: str, machines: Path
+) -> str | None:
     path = Path(db) if db else None
     if path is None or not path.is_file():
         print(
@@ -1559,6 +1567,20 @@ def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> 
                 if {"jobs", "job_events"} <= tables
                 else None
             )
+            placed = (
+                connection.execute(
+                    "SELECT slots.device, health.failing_since FROM jobs "
+                    "JOIN device_slots AS slots ON slots.job_id = jobs.id "
+                    "LEFT JOIN device_health AS health ON health.device = slots.device "
+                    "WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? "
+                    "AND jobs.recipient != 'grok' AND jobs.state = 'running' "
+                    "AND jobs.action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
+                    "ORDER BY jobs.created_at LIMIT 1",
+                    (repo.lower(), str(number)),
+                ).fetchone()
+                if {"jobs", "device_slots", "device_health"} <= tables
+                else None
+            )
         finally:
             connection.close()
     except sqlite3.Error as exc:
@@ -1567,12 +1589,28 @@ def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> 
             file=sys.stderr,
         )
         return None
+    if placed is not None and _retry_stranded(placed[0], placed[1], machines, prog):
+        return None
     replan = state == (0, "planning") and lost_plan is not None
     if not replan and (state is None or not state[0]):
         return f"not stuck (state {state[1] if state else 'untracked'}); nothing to retry"
     if job is not None:
         return f"has job {job[0]} {job[1]} -> {job[2]} {job[3]}; nothing to retry until it ends"
     return None
+
+
+def _retry_stranded(
+    device_name: str, failing_since: float | None, machines: Path, prog: str
+) -> bool:
+    try:
+        config = _machines_config(machines, required=True)
+    except (ValueError, OSError) as exc:
+        print(f"{prog}: warning: {exc}; checking device health alone", file=sys.stderr)
+        return failing_since is not None
+    device = None if config is None else config.device(device_name)
+    if device is None or device.local:
+        return False
+    return retry_stranded(device, failing_since, time.time()) is not None
 
 
 def _done_settled(

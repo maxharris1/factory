@@ -8,13 +8,16 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal
 
+from lib.device_monitor import retry_stranded
+from lib.device_pool import HEALTH_TABLE
 from lib.dispatch.constants import UPDATE_FAILURES_TO_STOP
 from lib.dispatch.helpers import _comment_link, _queue_state, _scope
 from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import parse_comment
-from lib.queue import Job, JobRequest, _job
+from lib.job_state import requeue_link_drop
+from lib.queue import SLOTS_TABLE, Job, JobRequest, _job
 
 RetryStep = Literal["replay", "ci-fix", "plan", "build", "update"]
 
@@ -96,6 +99,30 @@ def _newest_harness_job(
     return None if row is None else _job(row)
 
 
+def _clear_stuck(
+    connection: sqlite3.Connection,
+    ticket: TrackedTicket,
+    state: str,
+    at: float,
+    **also: object,
+) -> None:
+    write_workflow_state(
+        connection,
+        ticket.repo,
+        ticket.ticket_id,
+        state,
+        source="retry",
+        at=at,
+        also={
+            "stuck": 0,
+            "stuck_reason": None,
+            "stuck_source_comment_id": None,
+            "stuck_wake_job_id": None,
+            **also,
+        },
+    )
+
+
 class RetryMixin:
     def _t_retry(
         self,
@@ -149,6 +176,25 @@ class RetryMixin:
                 return outcome, None
             return outcome, row["workflow_state"]
         reason = None if row is None else row["stuck_reason"]
+        now = self.queue.now()
+        lost = self._lose_stranded_job(connection, key, now)
+        if lost is not None:
+            job, detail = lost
+            state = None
+            if row is not None and row["stuck"]:
+                state = row["workflow_state"]
+                _clear_stuck(connection, ticket, state, now)
+                self._supersede_stuck(connection, key, keep=job.id)
+            if self._posted_handoff(job, ticket) is not None:
+                return self._record_retry(
+                    connection, ticket, comment, reason, job, "retried-stranded-posted"
+                ), state
+            requeue_link_drop(
+                connection, job.id, now=now, reason=f"retry {comment.id}: {detail}"
+            )
+            return self._record_retry(
+                connection, ticket, comment, reason, job, "queued-retry-stranded"
+            ), state
         if row is None or not row["stuck"]:
             if self._unlanded_plan(connection, ticket) is not None:
                 job = self._replan_in_transaction(connection, ticket, comment)
@@ -183,41 +229,17 @@ class RetryMixin:
             )
             update_failures = UPDATE_FAILURES_TO_STOP - 1
         plan_check = None if state == "planning" else row["plan_check_comment_id"]
-        write_workflow_state(
+        _clear_stuck(
             connection,
-            ticket.repo,
-            ticket.ticket_id,
+            ticket,
             state,
-            source="retry",
-            at=self.queue.now(),
-            also={
-                "stuck": 0,
-                "stuck_reason": None,
-                "stuck_source_comment_id": None,
-                "stuck_wake_job_id": None,
-                "generation": generation,
-                "plan_gap_count": gaps,
-                "plan_check_comment_id": plan_check,
-                "update_failures": update_failures,
-            },
+            self.queue.now(),
+            generation=generation,
+            plan_gap_count=gaps,
+            plan_check_comment_id=plan_check,
+            update_failures=update_failures,
         )
-        connection.execute(
-            """
-            UPDATE jobs SET failure_handled = 1
-            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
-              AND state = 'failed' AND failure_handled = 0
-            """,
-            key,
-        )
-        for wake in connection.execute(
-            """
-            SELECT id FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'stuck'
-              AND state = 'queued'
-            """,
-            key,
-        ).fetchall():
-            self.queue.cancel(str(wake["id"]), "retried", connection=connection)
+        self._supersede_stuck(connection, key)
         if step == "update" and state != "updating":
             return self._record_retry(
                 connection, ticket, comment, reason, None, f"retried-{state}"
@@ -248,6 +270,55 @@ class RetryMixin:
             job,
             f"queued-retry-{request.action}",
         ), state
+
+    def _supersede_stuck(
+        self, connection: sqlite3.Connection, key: tuple[str, str], keep: str | None = None
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE jobs SET failure_handled = 1
+            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+              AND state = 'failed' AND failure_handled = 0 AND id IS NOT ?
+            """,
+            (*key, keep),
+        )
+        for wake in connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'stuck'
+              AND state = 'queued'
+            """,
+            key,
+        ).fetchall():
+            self.queue.cancel(str(wake["id"]), "retried", connection=connection)
+
+    def _lose_stranded_job(
+        self, connection: sqlite3.Connection, key: tuple[str, str], now: float
+    ) -> tuple[Job, str] | None:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return None
+        row = connection.execute(
+            f"""
+            SELECT jobs.id, slots.device, health.failing_since
+            FROM jobs
+            JOIN {SLOTS_TABLE} AS slots ON slots.job_id = jobs.id
+            LEFT JOIN {HEALTH_TABLE} AS health ON health.device = slots.device
+            WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? AND jobs.recipient != 'grok'
+              AND jobs.action IN ({", ".join("?" for _ in _HARNESS_ACTIONS)})
+              AND jobs.state = 'running'
+            ORDER BY jobs.created_at, jobs.rowid
+            LIMIT 1
+            """,
+            (*key, *_HARNESS_ACTIONS),
+        ).fetchone()
+        device = None if row is None else config.device(str(row["device"]))
+        if device is None or device.local:
+            return None
+        reason = retry_stranded(device, row["failing_since"], now)
+        if reason is None:
+            return None
+        return self._lose_running_job(connection, str(row["id"]), device.name, reason, now)
 
     def _unlanded_plan(
         self, connection: sqlite3.Connection, ticket: TrackedTicket
