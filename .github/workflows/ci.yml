@@ -81,7 +81,7 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 13
+    timeout-minutes: 30
     permissions:
       actions: write
     steps:
@@ -91,18 +91,25 @@ jobs:
           POLL_SECONDS: 15
         run: |
           set -euo pipefail
-          created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           while true; do
-            job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
-              --jq '.jobs[] | select(.name == "macos") | "\(.status) \(.created_at)"') || job=""
-            if [[ -n "$job" ]]; then
-              read -r status created_at <<<"$job"
-              case "$status" in in_progress | completed) exit 0 ;; esac
-            fi
-            if (( $(date +%s) - $(date -d "$created_at" +%s) >= PICKUP_SECONDS )); then
-              echo "::error title=macos runner pickup::No macos-latest runner picked up the macos job within $((PICKUP_SECONDS / 60)) minutes (queued since $created_at). GitHub's hosted macOS pool is short of capacity, not a test failure. Cancelling this run. Rerun failed jobs to retry. See docs/decisions/628-macos-runner-pickup.md."
-              gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
-              exit 1
+            if job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+              --jq '.jobs[] | select(.name == "macos") | "\(.status) \(.conclusion) \(.created_at)"') && [[ -n "$job" ]]; then
+              read -r status conclusion created_at <<<"$job"
+              case "$status" in
+                completed)
+                  [[ "$conclusion" == success ]] && exit 0
+                  echo "::error title=macos failed::The macos job finished $conclusion. This watchdog fails with it so rerunning failed jobs reruns the watchdog too."
+                  exit 1
+                  ;;
+                in_progress) ;;
+                *)
+                  if (( $(date +%s) - $(date -d "$created_at" +%s) >= PICKUP_SECONDS )); then
+                    echo "::error title=macos runner pickup::No macos-latest runner picked up the macos job within $((PICKUP_SECONDS / 60)) minutes (queued since $created_at). GitHub's hosted macOS pool is short of capacity, not a test failure. Cancelling this run. Rerun failed jobs to retry. See docs/decisions/628-macos-runner-pickup.md."
+                    gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+                    exit 1
+                  fi
+                  ;;
+              esac
             fi
             sleep "$POLL_SECONDS"
           done

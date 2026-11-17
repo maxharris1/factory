@@ -171,15 +171,26 @@ def _pickup_step() -> dict:
     return steps[0]
 
 
-def _jobs(macos: tuple[str, datetime] | None) -> str:
-    jobs = [{"name": "macos-pickup", "status": "in_progress", "created_at": "2020-01-01T00:00:00Z"}]
+def _jobs(macos: tuple[str, datetime] | None, conclusion: str | None = None) -> str:
+    jobs = [
+        {"name": "macos-pickup", "status": "in_progress", "conclusion": None, "created_at": "2020-01-01T00:00:00Z"}
+    ]
     if macos is not None:
         status, created = macos
-        jobs.append({"name": "macos", "status": status, "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ")})
+        jobs.append(
+            {
+                "name": "macos",
+                "status": status,
+                "conclusion": conclusion,
+                "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
     return json.dumps({"total_count": len(jobs), "jobs": jobs})
 
 
-def _run_pickup(tmp_path: Path, responses: list[str]) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+def _run_pickup(
+    tmp_path: Path, responses: list[str], *, poll_seconds: int = 0
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
@@ -192,7 +203,7 @@ def _run_pickup(tmp_path: Path, responses: list[str]) -> tuple[subprocess.Comple
     env = {
         **os.environ,
         **{key: str(value) for key, value in step.get("env", {}).items()},
-        "POLL_SECONDS": "0",
+        "POLL_SECONDS": str(poll_seconds),
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "GH_LOG": str(log),
         "GH_RESPONSES": str(tmp_path / "responses"),
@@ -206,14 +217,20 @@ def _run_pickup(tmp_path: Path, responses: list[str]) -> tuple[subprocess.Comple
     return result, log.read_text(encoding="utf-8").splitlines()
 
 
-def test_the_pickup_watchdog_passes_once_a_runner_picks_up_macos(tmp_path: Path) -> None:
+def test_the_pickup_watchdog_passes_once_a_picked_up_macos_succeeds(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
     result, calls = _run_pickup(
-        tmp_path, [_jobs(None), _jobs(("queued", now)), _jobs(("in_progress", now))]
+        tmp_path,
+        [
+            _jobs(None),
+            _jobs(("queued", now)),
+            _jobs(("in_progress", now)),
+            _jobs(("completed", now), "success"),
+        ],
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "::error" not in result.stdout
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert all(
         call.startswith("api repos/acme/factory/actions/runs/4242/attempts/2/jobs?per_page=100 --jq ")
         for call in calls
@@ -233,9 +250,40 @@ def test_the_pickup_watchdog_cancels_the_run_when_macos_stays_queued(tmp_path: P
 
 def test_the_pickup_watchdog_tolerates_a_failed_api_call(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
-    result, calls = _run_pickup(tmp_path, ["FAIL", _jobs(("completed", now))])
+    result, calls = _run_pickup(tmp_path, ["FAIL", _jobs(("completed", now), "success")])
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(calls) == 2
+    assert not any(call.startswith("run cancel") for call in calls)
+
+
+def test_a_failed_macos_fails_the_watchdog_so_a_failed_jobs_rerun_reruns_both(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    result, calls = _run_pickup(
+        tmp_path, [_jobs(("in_progress", now)), _jobs(("completed", now), "failure")]
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    error = [line for line in result.stdout.splitlines() if line.startswith("::error title=macos failed::")]
+    assert len(error) == 1, result.stdout
+    assert "failure" in error[0]
+    assert len(calls) == 2
+    assert not any(call.startswith("run cancel") for call in calls)
+
+
+def test_a_failed_poll_past_the_pickup_deadline_never_cancels_the_run(tmp_path: Path) -> None:
+    created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=598)
+    result, calls = _run_pickup(
+        tmp_path,
+        [
+            _jobs(("queued", created)),
+            "FAIL",
+            _jobs(("in_progress", created)),
+            _jobs(("completed", created), "success"),
+        ],
+        poll_seconds=2,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::error" not in result.stdout
+    assert len(calls) == 4
     assert not any(call.startswith("run cancel") for call in calls)
 
 
@@ -249,6 +297,6 @@ def test_the_pickup_watchdog_mirrors_the_macos_job_and_fires_before_its_timeout(
     step = _pickup_step()
     pickup_seconds = int(step["env"]["PICKUP_SECONDS"])
     assert pickup_seconds == 600
-    assert pickup_seconds / 60 < pickup["timeout-minutes"] <= 15
+    assert pickup["timeout-minutes"] > pickup_seconds / 60 + jobs["macos"]["timeout-minutes"]
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert "${{" not in step["run"]
