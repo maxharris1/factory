@@ -11,8 +11,8 @@ NAME = page_name(__file__)
 GOLDEN = {
     "tickets.CSS": "2432d51bbb001fc4a892b4c21146fe1904cb0717c8daffef5334b00f3abcc0b0",
     "tickets.SCRIPT_TICKETS": "65c4eadb63677f53077c2fa065d25035f89efd98abee7775421df74fd7dd3359",
-    "ticket_detail.CSS": "8c6af76772cf24486e8009cb75a344e1dd85f7acc1abc0231d494625ab4411c4",
-    "ticket_detail.SCRIPT": "e6253dc3886088079b5c2014aa4631f04de9d02e4d1f021b85d3acb3dbd0485a",
+    "ticket_detail.CSS": "da37e77fbd8ab2d98c0a4bb0f507928b81a8d437688d9ef38f35a6517293d143",
+    "ticket_detail.SCRIPT": "a6b429229374219c10e8244ae524ee57ca4562ed7898c80763c982fcc992715d",
     "__BOARD__": "988b51ce050bf3873af75787819c57711326377eaed5a138918d033658a9ef31",
     "__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",
     "seeded/__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",

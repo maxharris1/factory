@@ -1505,7 +1505,7 @@ STILL_TICKET = r"""
 (async () => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   document.querySelector('details.jd-chart').open = true;
-  await sleep(3300);
+  await sleep(4600);
   const shot = () => [...document.querySelectorAll('.jd-hero canvas.px, canvas.jd-journey, canvas.jd-flowmap')]
     .map(c => c.toDataURL());
   const a = shot();
@@ -1532,3 +1532,103 @@ def test_a_ticket_without_a_job_holds_its_hero_strip_and_journey_still(tmp_path:
         chrome.close()
         server.shutdown()
     assert still == {"running": False, "idle": True, "stopped": True, "shipped": True}
+
+
+def _ended_case(tmp_path: Path, case: str) -> tuple[dict, str]:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    address = RECORD[case.split()[0]]
+    if case == "stopped a while ago":
+        snapshot[RECORDS][address]["state_age_seconds"] = 5400
+    return snapshot, address
+
+
+ENDED_CAPTION = {
+    "shipped": ("shipped · 2 hops · 1h 30m", "merged · shipped", "jd-cap shipped",
+                "at " + ticket_detail._et_clock(NOW - 3600)),
+    "stopped": ("stopped in intake", "stuck · stopped", "jd-cap stopped", "—"),
+    "stopped a while ago": ("stopped in intake · 1h 30m ago", "stuck · stopped", "jd-cap stopped", "for 1h 30m"),
+}
+
+
+@needs_node
+@pytest.mark.parametrize("case", ENDED_CAPTION)
+def test_an_ended_journey_s_caption_leads_with_how_it_ended(tmp_path: Path, case: str) -> None:
+    lead, state, cls, took = ENDED_CAPTION[case]
+    snapshot, address = _ended_case(tmp_path, case)
+    views = _both(tmp_path, snapshot, address)
+    captions = {render: re.search(r'<div class="jd-cap[^"]*"[^>]*>.*?</div>', markup, re.S).group(0)
+                for render, markup in views.items()}
+    assert captions["server"] == captions["script"]
+    caption = captions["server"]
+    assert caption.startswith(f'<div class="{cls}" aria-live="polite"><span class="end" style="--m:')
+    parts = [html.unescape(p) for p in re.findall(r">([^<]+)<", caption)]
+    assert parts[0] == lead and parts[2] == state and took in parts, parts
+    assert "now" not in " ".join(parts)
+    label = re.search(r'<canvas class="jd-journey"[^>]*aria-label="([^"]*)"', views["server"]).group(1)
+    assert html.unescape(label).endswith("; ended: " + lead)
+    assert re.search(r'<canvas class="jd-journey"[^>]*aria-label="([^"]*)"', views["script"]).group(1) == label
+
+
+@needs_node
+@pytest.mark.parametrize(("kind", "replay", "keys"), [
+    ("shipped", True, ["path taken · script", "path taken · codex", "visited", "off-chart jump", "ended here"]),
+    ("stopped", False, ["path taken · script", "visited", "off-chart jump", "fall to a stop state", "stopped here"]),
+])
+def test_an_ended_journey_has_no_now_and_a_stopped_one_no_replay(tmp_path: Path, kind: str, replay: bool, keys) -> None:
+    snapshot, address = _ended_case(tmp_path, kind)
+    for render, markup in _both(tmp_path, snapshot, address).items():
+        assert ("data-replay" in markup) is replay, render
+        assert _chart_keys(markup) == keys, render
+
+
+@needs_node
+@pytest.mark.parametrize("kind", ["shipped", "stopped"])
+def test_picking_a_step_on_an_ended_ticket_keeps_the_log_and_the_journey_in_step(tmp_path: Path, kind: str) -> None:
+    snapshot, address = _ended_case(tmp_path, kind)
+    hash_ = "#t=" + _quote(address)
+    first = snapshot[RECORDS][address]["visits"][0]["state"]
+    journey = re.search(r'<ol class="journey">(.*?)</ol>', _ticket_server(snapshot, address), re.S).group(1)
+    label = html.unescape(re.search(r'data-visit="0"[^>]*aria-label="([^"]*)"', journey).group(1))
+    for target, attr in (("runlog", {"data-visit": "0"}), ("journey", {"data-visit": "0", "aria-label": label})):
+        clicks = [["click", {"attr": attr}]]
+        view = _ticket_script(tmp_path, snapshot, hash_, clicks)
+        for cls in ("runlog", "journey"):
+            assert [i for i, _, p in _rows(view, cls) if p == "true"] == ["0"], (target, cls)
+        caption = _caption(view)
+        assert "|01 of " in caption and f"|{first}|" in caption, caption
+
+
+ENDED_STILL = r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  document.querySelector('details.jd-chart').open = true;
+  await sleep(__WAIT__);
+  const shot = () => [...document.querySelectorAll('canvas.jd-journey, canvas.jd-flowmap')].map(c => c.toDataURL());
+  const a = shot();
+  await sleep(600);
+  return {frames: a, still: a.length === 2 && a.every((x, i) => x === shot()[i])};
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_ended_journeys_rest_and_reduced_motion_shows_the_rested_frame(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"ended": _with_shipped(_snapshot(tmp_path))})
+    found = {}
+    try:
+        for reduced in (False, True):
+            chrome = _Chrome(tmp_path / f"profile-{reduced}")
+            try:
+                if reduced:
+                    chrome.send("Emulation.setEmulatedMedia", chrome.session,
+                                features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
+                for kind, wait in (("stopped", 50), ("shipped", 4800)):
+                    _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/ended/ticket.html#t={_quote(RECORD[kind])}",
+                          _journey_drawn("article.ticketpage"))
+                    found[kind, reduced] = chrome.run(ENDED_STILL.replace("__WAIT__", str(wait)))
+            finally:
+                chrome.close()
+    finally:
+        server.shutdown()
+    for kind in ("stopped", "shipped"):
+        assert found[kind, False]["still"] and found[kind, True]["still"], kind
+        assert found[kind, False]["frames"] == found[kind, True]["frames"], kind

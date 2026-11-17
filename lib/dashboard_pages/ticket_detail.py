@@ -132,6 +132,9 @@ CSS = """\
 .jd-cap .idx{color:var(--muted)}
 .jd-cap .st{font-size:13px;font-weight:600;color:var(--text)}
 .jd-cap.now .st{color:var(--accent)}
+.jd-cap.shipped .st{color:#9ece6a}
+.jd-cap.stopped .st{color:#f7768e}
+.jd-cap .end{font-size:13px;font-weight:600;white-space:nowrap;color:var(--m)}
 .jd-cap .who{padding:0 6px;border:1px solid var(--m);color:var(--m);font-size:11px;line-height:1.6;white-space:nowrap}
 .jd-cap .dur{color:var(--text);white-space:nowrap}
 .jd-cap .note{flex:1 1 240px;min-width:0;font:13px/1.5 var(--sans);color:var(--text-2)}
@@ -205,6 +208,7 @@ def _who_tint(who: object) -> str:
 
 def _detail_model(row: dict, chart: dict | None) -> dict:
     flow = row.get("flow") or {}
+    ended = next((flag for flag in RECORD_FLAGS if flow.get(flag)), None)
     phases = ticket_phases(chart)
     visits = [
         {**visit, "index": i, "stop": phases.get(visit["state"]) == "Stop"}
@@ -237,6 +241,8 @@ def _detail_model(row: dict, chart: dict | None) -> dict:
         "hops_to_shipped": flow.get("hops_to_shipped"),
         "all_durations_known": bool(flow.get("all_durations_known")),
         "state_age_seconds": flow.get("state_age_seconds"),
+        "ended": ended,
+        "end": flow[ended] if ended else None,
     }
 
 
@@ -607,7 +613,26 @@ def _liverun(row: dict, started: bool) -> str:
 
 def _journey_label(model: dict) -> str:
     path = " → ".join(v["state"] for v in model["visits"]) or "no visits"
+    if model["ended"]:
+        return f"Journey: {path}; ended: {_end_text(model)}"
     return f"Journey: {path}; now {model['state'] or 'unknown'}"
+
+
+END_TINT = {"shipped": "#9ece6a", "stopped": STOP_TINT}
+
+
+def _end_text(model: dict) -> str:
+    end, visits = model["end"], model["visits"]
+    if model["ended"] == "shipped":
+        parts = [f"shipped · {model['hops']} hop{'' if model['hops'] == 1 else 's'}"]
+        if end.get("intake_to_ship_seconds") is not None:
+            parts.append(duration(end["intake_to_ship_seconds"]))
+        return " · ".join(parts)
+    where = end.get("stopped_in")
+    if not where:
+        where = visits[-2]["state"] if len(visits) > 1 and visits[-1]["stop"] else visits[-1]["state"] if visits else end["state"]
+    age = model["state_age_seconds"]
+    return f"stopped in {where}" + ("" if age is None else f" · {duration(age)} ago")
 
 
 _LEGEND_WHO = ("script", "claude", "codex", "cursor", "grok")
@@ -619,6 +644,10 @@ def _legend_who(model: dict) -> list[str]:
 
 
 def _caption_dur(visit: dict, model: dict) -> str:
+    if visit["current"] and model["ended"] == "shipped":
+        return "—" if visit["started_at"] is None else f"at {_et_clock(visit['started_at'])}"
+    if visit["current"] and model["ended"] == "stopped":
+        return "—" if model["state_age_seconds"] is None else f"for {duration(model['state_age_seconds'])}"
     if visit["current"]:
         return _now_dur(model)
     return "—" if visit["duration_seconds"] is None else f"took {duration(visit['duration_seconds'])}"
@@ -630,13 +659,20 @@ def _caption(model: dict) -> str:
         return '<div class="jd-cap" aria-live="polite"></div>'
     visit = visits[model["selected"]]
     index = f"{visit['index'] + 1:02d} of {len(visits)}"
+    tag = (model["ended"] or "now") if visit["current"] else ""
+    lead = (
+        f'<span class="end" style="--m:{END_TINT[model["ended"]]}">{_e(_end_text(model))}</span>' if model["ended"] else ""
+    )
     return (
-        f'<div class="jd-cap{" now" if visit["current"] else ""}" aria-live="polite">'
+        f'<div class="jd-cap{" " + tag if tag else ""}" aria-live="polite">{lead}'
         f'{_span("idx", index)}'
-        f'{_span("st", visit["state"] + (" · now" if visit["current"] else ""))}'
+        f'{_span("st", visit["state"] + (" · " + tag if tag else ""))}'
         f'<span class="who" style="--m:{_who_tint(visit["who"])}">{_e(visit["who"])}</span>'
         f'{_span("dur", _caption_dur(visit, model))}{_span("note", _reason(visit))}</div>'
     )
+
+
+REPLAY = '<button type="button" data-replay="1">replay</button>'
 
 
 def _journey(row: dict, model: dict) -> str:
@@ -661,7 +697,7 @@ def _journey(row: dict, model: dict) -> str:
         f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>{_caption(model)}'
         '<div class="jd-ctl"><div class="axis" role="group" aria-label="Time axis">'
         '<button type="button" data-scale="even" aria-pressed="true">even steps</button>'
-        f'{scale}</div><button type="button" data-replay="1">replay</button><span class="gap"></span>{legend}</div></section>'
+        f'{scale}</div>{"" if model["ended"] == "stopped" else REPLAY}<span class="gap"></span>{legend}</div></section>'
     )
 
 
@@ -700,7 +736,9 @@ def _chart(key: str, model: dict, chart: dict | None) -> str:
     legend = "".join(f'<span><i class="line" style="background:{TINT[w]}"></i>path taken · {w}</span>' for w in _legend_who(model))
     legend += '<span><i class="line" style="background:#5386a6"></i>visited</span>'
     legend += f'<span><i class="off" style="--m:{TINT["script"]}"></i>off-chart jump</span>'
-    legend += '<span><i class="now"></i>now</span><span><i class="next"></i>can come next</span>'
+    for cls, bg, text in CHART_KEYS[model["ended"] or "live"]:
+        tint = f' style="background:{bg}"' if bg else ""
+        legend += f'<span><i class="{cls}"{tint}></i>{text}</span>'
     return (
         f'<details class="jd-chart" data-key="full-chart:{_e(key)}"><summary>Full state chart '
         f'{_span("count", CHART_SUB.format(n=n))}</summary>'
@@ -708,6 +746,13 @@ def _chart(key: str, model: dict, chart: dict | None) -> str:
         f'aria-label="{_e("Full state chart; path: " + " → ".join(v["state"] for v in model["visits"]))}"></canvas></div>'
         f'<div class="jd-legend">{legend}</div></details>'
     )
+
+
+CHART_KEYS = {
+    "live": (("now", None, "now"), ("next", None, "can come next")),
+    "shipped": (("now", None, "ended here"),),
+    "stopped": (("line", STOP_TINT, "fall to a stop state"), ("now", None, "stopped here")),
+}
 
 
 SECTIONS = {
@@ -834,7 +879,7 @@ _SCRIPT = r"""
                 first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__, trackers: __TRACKERS__, sections: __SECTIONS__, jobTiles: __JOBTILES__,
                 kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
-                panels: __PANELS__};
+                panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__};
   var SEL = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -842,6 +887,7 @@ _SCRIPT = r"""
   function whoTint(w) { return JOURNEY.tint[w] || JOURNEY.tint.script; }
   function detailModel(r, chart) {
     var flow = r.flow || {};
+    var ended = DETAIL.recordFlags.filter(function (f) { return flow[f]; })[0] || null;
     var phases = chart ? phaseTable(chart).states : {};
     var visits = (flow.visits || []).map(function (v, i) {
       var o = {};
@@ -864,8 +910,30 @@ _SCRIPT = r"""
       off_chart_count: visits.filter(function (v) { return v.off_chart; }).length,
       hops_to_shipped: flow.hops_to_shipped === undefined ? null : flow.hops_to_shipped,
       all_durations_known: !!flow.all_durations_known,
-      state_age_seconds: flow.state_age_seconds === undefined ? null : flow.state_age_seconds
+      state_age_seconds: flow.state_age_seconds === undefined ? null : flow.state_age_seconds,
+      ended: ended, end: ended ? flow[ended] : null
     };
+  }
+  function endText(m) {
+    var end = m.end, visits = m.visits, n = visits.length;
+    if (m.ended === 'shipped') {
+      var known = end.intake_to_ship_seconds !== null && end.intake_to_ship_seconds !== undefined;
+      return 'shipped · ' + m.hops + (m.hops === 1 ? ' hop' : ' hops') + (known ? ' · ' + dur(end.intake_to_ship_seconds) : '');
+    }
+    var where = end.stopped_in;
+    if (!where) where = n > 1 && visits[n - 1].stop ? visits[n - 2].state : n ? visits[n - 1].state : end.state;
+    return 'stopped in ' + where + (m.state_age_seconds === null ? '' : ' · ' + dur(m.state_age_seconds) + ' ago');
+  }
+  function flowModel(m) {
+    var visits = m.visits, state = m.state, next = m.next.map(function (n) { return n.to; });
+    if (m.ended === 'stopped') {
+      state = m.end.state;
+      if (!visits.length || visits[visits.length - 1].state !== state) {
+        visits = visits.concat([{index: visits.length, state: state, who: 'script', off_chart: false, current: true, stop: true}]);
+      }
+      next = (m.end.ways_out || []).map(function (w) { return w.to; });
+    } else if (m.ended === 'shipped') next = [];
+    return {visits: visits, state: state, next: next};
   }
   function roundOf(r) {
     var m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(String(r.round === null || r.round === undefined ? '' : r.round));
@@ -1359,13 +1427,17 @@ _SCRIPT = r"""
   function fillCaption(cap, m, i) {
     cap.replaceChildren();
     var v = m.visits[i];
-    cap.className = 'jd-cap' + (v && v.current ? ' now' : '');
+    var tag = v && v.current ? m.ended || 'now' : '';
+    cap.className = 'jd-cap' + (tag ? ' ' + tag : '');
     if (!v) return;
+    if (m.ended) span(cap, 'end', endText(m)).setAttribute('style', '--m:' + DETAIL.endTint[m.ended]);
     span(cap, 'idx', pad(v.index + 1) + ' of ' + m.visits.length);
-    span(cap, 'st', v.state + (v.current ? ' · now' : ''));
+    span(cap, 'st', v.state + (tag ? ' · ' + tag : ''));
     span(cap, 'who', v.who).setAttribute('style', '--m:' + (JOURNEY.tint[v.who] || JOURNEY.tint.script));
     var d = span(cap, 'dur');
-    if (v.current) nowDur(m, d);
+    if (v.current && m.ended === 'shipped') d.textContent = v.started_at === null || v.started_at === undefined ? '—' : 'at ' + etClock(v.started_at);
+    else if (v.current && m.ended === 'stopped') d.textContent = m.state_age_seconds === null ? '—' : 'for ' + dur(m.state_age_seconds);
+    else if (v.current) nowDur(m, d);
     else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : 'took ' + dur(v.duration_seconds);
     span(cap, 'note', reasonOf(v));
   }
@@ -1377,7 +1449,7 @@ _SCRIPT = r"""
     canvas.setAttribute('height', '336');
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', 'Journey: ' + (m.visits.map(function (v) { return v.state; }).join(' → ') || 'no visits') +
-      '; now ' + (m.state || 'unknown'));
+      (m.ended ? '; ended: ' + endText(m) : '; now ' + (m.state || 'unknown')));
     var ol = add(box, el('ol', 'journey'));
     m.visits.forEach(function (v) {
       var li = add(ol, el('li'));
@@ -1406,7 +1478,7 @@ _SCRIPT = r"""
     }
     ctlButton(axis, 'even steps', 'data-scale', 'even', scale === 'even');
     if (m.all_durations_known) ctlButton(axis, 'to scale', 'data-scale', 'scale', scale === 'scale');
-    ctlButton(ctl, 'replay', 'data-replay', '1', null);
+    if (m.ended !== 'stopped') ctlButton(ctl, 'replay', 'data-replay', '1', null);
     span(ctl, 'gap');
     legendWho(m).forEach(function (w) { legendItem(ctl, null, JOURNEY.tint[w], w).className = 'key'; });
     legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key';
@@ -1450,8 +1522,7 @@ _SCRIPT = r"""
     legendWho(m).forEach(function (w) { legendItem(legend, 'line', null, 'path taken · ' + w, JOURNEY.tint[w]); });
     legendItem(legend, 'line', null, 'visited', '#5386a6');
     legendItem(legend, 'off', JOURNEY.tint.script, 'off-chart jump');
-    legendItem(legend, 'now', null, 'now');
-    legendItem(legend, 'next', null, 'can come next');
+    DETAIL.chartKeys[m.ended || 'live'].forEach(function (k) { legendItem(legend, k[0], null, k[2], k[1]); });
     box.addEventListener('toggle', function () { openDetails[key] = box.open; });
     return {sec: box, canvas: canvas};
   }
@@ -1502,13 +1573,13 @@ _SCRIPT = r"""
         var beat = s.beatStart === null || reducedMotion ? -1 : (now - s.beatStart) / 1000;
         drawJourney(ctx, j.m, {t: reducedMotion ? 1e6 : (now - s.tPlay) / 1000, scale: s.scale, selected: s.selected,
           flash: flash, beat: beat >= 0 && beat <= 1 ? beat : -1, reduced: reducedMotion, still: j.still,
-          startClock: j.startClock, nowClock: j.nowClock});
+          startClock: j.startClock, nowClock: j.nowClock, endClock: j.endClock});
       }
     }
     if (j.flowCanvas && j.flow.open && j.flowCanvas.getContext && FLOWMAP) {
       var fctx = j.flowCanvas.getContext('2d');
-      if (fctx) drawFlowMap(fctx, FLOWMAP, {visits: j.m.visits, state: j.m.state, next: j.m.next.map(function (n) { return n.to; })},
-                            {t: now / 1000, reduced: reducedMotion || j.still});
+      if (fctx) drawFlowMap(fctx, FLOWMAP, flowModel(j.m), {t: now / 1000, reduced: reducedMotion || j.still || !!j.m.ended,
+                                                            tint: j.m.ended === 'shipped' ? DETAIL.endTint.shipped : null});
     }
   }
   function journeyFrame() {
@@ -1540,9 +1611,11 @@ _SCRIPT = r"""
     var right = add(cols, el('div', 'jd-right'));
     sections.forEach(function (name) { add(right, SECTIONS[name](c)); });
     var jp = c.jp, cp = c.cp, start = firstStart(c.m);
-    var j = {key: c.key, r: c.r, m: c.m, still: !!c.still || holdsStill(c.motion), logButtons: c.logButtons, hitButtons: hitButtons,
-             canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
-             startClock: start === null ? '' : journeyClock(start), nowClock: journeyClock(c.generated)};
+    var endAt = c.m.end ? c.m.end.at : null;
+    var j = {key: c.key, r: c.r, m: c.m, still: !c.m.ended && (!!c.still || holdsStill(c.motion)), logButtons: c.logButtons,
+             hitButtons: hitButtons, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
+             startClock: start === null ? '' : journeyClock(start), nowClock: journeyClock(c.generated),
+             endClock: endAt === null || endAt === undefined ? '' : journeyClock(endAt)};
     art.addEventListener('click', function (ev) {
       var t = ev.target.closest('button');
       if (!t) return;
@@ -1703,6 +1776,7 @@ _SCRIPT = r"""
 """
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,
            "SECTIONS": SECTION_ORDER, "JOBTILES": JOB_TILES, "KINDS": TICKET_KINDS, "LIVEKINDS": LIVE_KINDS,
-           "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS}
+           "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS,
+           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT}
 _SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

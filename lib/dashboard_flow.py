@@ -743,8 +743,6 @@ function fmPerim(n, NW, NH) {
 }
 
 function drawFlowMap(ctx, layout, model, opts) {
-  var reduced = !!(opts && opts.reduced);
-  var t = reduced ? 0 : ((opts && opts.t) || 0);
   var NW = layout.node.w, NH = layout.node.h, px = layout.grid.cell;
   var W = layout.grid.w * px, H = layout.grid.h * px;
   var put = function (x, y) { ctx.fillRect(x * px, y * px, px, px); };
@@ -767,6 +765,9 @@ function drawFlowMap(ctx, layout, model, opts) {
   var curName = model && model.state && byName[model.state] ? model.state : null;
   var cur = curName ? byName[curName] : null;
   if (cur) cur.current = true;
+  var halted = !!(cur && cur.def.stop);
+  var reduced = halted || !!(opts && opts.reduced);
+  var t = reduced ? 0 : ((opts && opts.t) || 0);
 
   var wire = [], heads = [], hops = [], cols = [], taken = {}, a, b, id, cells, jump, hex, rgb, mid;
   for (i = 1; i < path.length; i++) {
@@ -842,7 +843,7 @@ function drawFlowMap(ctx, layout, model, opts) {
     for (j = 0; j < heads[i].length; j++) put(heads[i][j][0], heads[i][j][1]);
   }
 
-  var tintRgb = fmHex(FM_TINT[curWho] || FM_TINT.script);
+  var tintRgb = fmHex((opts && opts.tint) || FM_TINT[curWho] || FM_TINT.script);
   var tint = fmRgb(tintRgb[0], tintRgb[1], tintRgb[2]);
   var tintDim = fmMix(tintRgb, 0.3);
   var march = Math.floor(t * 14), band = Math.floor(t * 10), perim, edge, dashed;
@@ -874,6 +875,13 @@ function drawFlowMap(ctx, layout, model, opts) {
         }
       }
       for (j = 1; j < NW - 1; j++) {
+        if (halted) {
+          ctx.fillStyle = j % 2 === 0 ? FM_RED : '#542d39';
+          put(d.x + j, d.y + NH - 3);
+          ctx.fillStyle = j % 2 === 0 ? '#542d39' : FM_RED;
+          put(d.x + j, d.y + NH - 2);
+          continue;
+        }
         k = (((j - band) % 12) + 12) % 12;
         ctx.fillStyle = k < 3 ? tint : tintDim;
         put(d.x + j, d.y + NH - 3);
