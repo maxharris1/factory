@@ -491,8 +491,6 @@ def append_message(
             raise EvalError(f"bad {name} {value!r}")
     pr_field = "" if pr is None else f" pr={pr}"
     line = f"{_format_time(at)} repo={repo}{pr_field} message from={sender} to={recipient} kind={kind}\n"
-    # A last-byte check before the write races the dispatcher's torn append and glues this
-    # line onto its fragment, so always lead with a newline. The report skips blank lines.
     with log.open("ab") as handle:
         handle.write(f"\n{line}".encode("utf-8"))
 

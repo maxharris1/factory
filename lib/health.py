@@ -469,7 +469,7 @@ class HealthStore:
                     (component, bot, pid, now, DOWN_BEATS, boot, monotonic, DOWN_BEATS,
                      monotonic),
                 )
-                _forget_unstamped_checks(connection, component, device, bot, boot)
+                _forget_previous_release_checks(connection, component, device, bot, boot)
         finally:
             connection.close()
 
@@ -505,7 +505,7 @@ class HealthStore:
                     (component, device, bot, pid, _real(started_at, now), version,
                      float(interval), now, boot),
                 )
-                _forget_unstamped_checks(connection, component, device, bot, boot)
+                _forget_previous_release_checks(connection, component, device, bot, boot)
         finally:
             connection.close()
 
@@ -555,12 +555,8 @@ class HealthStore:
             connection.close()
 
 
-def _forget_unstamped_checks(connection: sqlite3.Connection, component: str, device: str,
-                             bot: str, boot: str | None) -> None:
-    """Drop the check rows a previous release wrote with no boot stamp. One
-    written before this boot could carry a wall clock ahead of this boot's, so
-    only rows a previous-release writer adds after this write stay, and the
-    reader can rank those by checked_at."""
+def _forget_previous_release_checks(connection: sqlite3.Connection, component: str, device: str,
+                                    bot: str, boot: str | None) -> None:
     if component in CHECKS and boot is not None:
         connection.execute(
             f"DELETE FROM {TABLE} WHERE component = ? AND device = ? AND bot = ? "
@@ -1340,8 +1336,6 @@ def _latest_checks(rows: Sequence[Heartbeat], uptime: Uptime | None) -> list[Hea
 
 def _without_earlier_boots_once_this_boot_succeeded(
         group: list[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
-    """Rows with no boot stay: every current write drops them, so any left
-    were written after the group's newest stamped row."""
     if uptime is None or all(r.seen_boot != uptime.boot for r in group):
         return group
     return [r for r in group if (r.checked_boot or r.seen_boot) in (uptime.boot, None)]
