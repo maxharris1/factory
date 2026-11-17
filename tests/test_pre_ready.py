@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -109,6 +110,20 @@ def test_the_command_sees_no_token_proof_or_queue_variables(tmp_path: Path) -> N
     names = {line.partition("=")[0] for line in result.tail.splitlines()}
     assert names.isdisjoint({"GH_TOKEN", "GITHUB_TOKEN", "ORCH_JOB_PROOF", "ORCH_DB"})
     assert "KEPT_VARIABLE" in names
+
+
+def test_orch_python_names_the_interpreter_orch_runs_under(tmp_path: Path) -> None:
+    repo, head = checkout(tmp_path)
+    caller = {"PATH": "/usr/bin:/bin", "ORCH_PYTHON": "/elsewhere/python3"}
+
+    result = run(
+        PreReady('"$ORCH_PYTHON" -c "import sys; print(sys.executable)"', 10),
+        repo,
+        head,
+        check_environ(caller, None),
+    )
+
+    assert (result.passed, os.path.abspath(result.tail)) == (True, os.path.abspath(sys.executable))
 
 
 def test_long_output_is_cut_to_its_last_lines(tmp_path: Path) -> None:

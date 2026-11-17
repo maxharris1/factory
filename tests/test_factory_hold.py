@@ -33,6 +33,9 @@ EXPECTED_PATHS = (
     "lib/hold.py",
     "lib/orch_yml.py",
     "lib/harness_env.py",
+    "lib/dispatch/holds.py",
+    "lib/approver_commands.py",
+    "lib/github_app_token.py",
     ".github/**",
     "factory.md",
 )
@@ -42,6 +45,9 @@ HELD = (
     "lib/hold.py",
     "lib/orch_yml.py",
     "lib/harness_env.py",
+    "lib/dispatch/holds.py",
+    "lib/approver_commands.py",
+    "lib/github_app_token.py",
     ".github/workflows/ci.yml",
     ".github/workflows/new.yml",
     "factory.md",
@@ -49,6 +55,7 @@ HELD = (
 
 NOT_HELD = (
     "lib/dispatcher.py",
+    "lib/dispatch/comments.py",
     "lib/hold_extra.py",
     "skills/other/x.md",
     "skills/factory/SKILL.md",

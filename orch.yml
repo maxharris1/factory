@@ -23,22 +23,21 @@ trusted_logins:
     - cursor-bot
 # Who may give a capped-ticket go or a hold ok once github_app.enabled is
 # true (#122, docs/decisions/122-approver-credential.md). Until then
-# trusted_logins decides, as before. Each bot gets its own App (#170,
-# docs/decisions/170-four-github-apps.md); Max fills in the real numbers
-# after he creates them. orch never opens private_key_file. Fake numbers:
+# trusted_logins decides, as before. Each worker bot gets its own App (#170,
+# #509, docs/decisions/509-worker-apps.md). Grok stays on Max's login. orch
+# never opens private_key_file. The numbers below are fake. To switch on,
+# Max creates the two Apps and fills in the real app_id, installations and
+# private_key_file. He lists an installation for every project owner
+# (maxharris1, aut0-code). He adds each App's bot_login as a trusted_logins
+# key, as in factory-claude[bot]: [claude-bot] and factory-codex[bot]:
+# [codex-bot], because check-config refuses enabled: true otherwise. Then he
+# sets enabled: true and runs orch check-config, which must end ok.
 approver_logins:
   - maxharris1
 # approver_gh_config_dir: /home/grok/.config/factory/gh-approver
 # github_app:
 #   enabled: false
 #   apps:
-#     grok-bot:
-#       bot_login: factory-grok[bot]
-#       app_id: 111111
-#       installations:
-#         maxharris1: 1000001
-#         aut0-code: 1000002
-#       private_key_file: /home/box/.config/factory/apps/factory.pem
 #     claude-bot:
 #       bot_login: factory-claude[bot]
 #       app_id: 222222
@@ -53,13 +52,6 @@ approver_logins:
 #         maxharris1: 3000001
 #         aut0-code: 3000002
 #       private_key_file: /home/box/.config/factory/apps/codex.pem
-#     cursor-bot:
-#       bot_login: factory-cursor[bot]
-#       app_id: 444444
-#       installations:
-#         maxharris1: 4000001
-#         aut0-code: 4000002
-#       private_key_file: /home/box/.config/factory/apps/cursor.pem
 # Before install, Max must add the confirmed stable Linear user ID under
 # trusted_linear_users. The poller refuses Linear polling without it.
 # intake (issue #85, docs/SPEC.md section 7): the backlog feeder turns a

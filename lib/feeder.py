@@ -165,6 +165,7 @@ STATES = (
     "done",
     "closed",
 )
+FEED_NOT_BEGUN = "branch IS NULL"
 UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
@@ -178,6 +179,7 @@ _COLUMNS = (
     ("capped_release", "INTEGER NOT NULL DEFAULT 0"),
     ("tier", "INTEGER"),
     ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
+    ("base_branch", "TEXT"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -478,6 +480,13 @@ class _Candidate:
     @property
     def harness(self) -> str:
         return self.context.config.builder_harness
+
+    @property
+    def base(self) -> str | None:
+        intake = self.project.intake
+        if intake is not None and intake.base_branches and self.issue.linear_project is None:
+            return None
+        return self.project.base_for(self.issue.linear_project) or self.context.config.base_branch
 
     @property
     def tier(self) -> int | None:
@@ -1103,8 +1112,9 @@ class Feeder:
                     f"""
                     INSERT INTO {FEEDER_TABLE} (
                         repo, issue, tracker, title, harness, state, urgent, bug, tier,
-                        risk, issue_created_at, first_seen_at, seen_at, touches, conflicts
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        risk, issue_created_at, first_seen_at, seen_at, touches, conflicts,
+                        base_branch
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
                         touches = excluded.touches,
@@ -1114,6 +1124,8 @@ class Feeder:
                         tier = excluded.tier,
                         risk = CASE WHEN state IN ({unstarted}) THEN excluded.risk
                                     ELSE risk END,
+                        base_branch = CASE WHEN {FEED_NOT_BEGUN} THEN excluded.base_branch
+                                           ELSE base_branch END,
                         harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
                                        ELSE excluded.harness END,
                         seen_at = excluded.seen_at
@@ -1135,6 +1147,7 @@ class Feeder:
                         json.dumps(
                             [[ref.tracker, ref.repo, ref.key] for ref in sorted(candidate.lines.conflicts_with)]
                         ),
+                        candidate.base,
                     ),
                 )
             connection.execute(
@@ -1142,10 +1155,11 @@ class Feeder:
                 "ON CONFLICT(id) DO UPDATE SET at = excluded.at",
                 (now,),
             )
-            # A ticket that lost its signal before it was fed is forgotten; a
-            # fed one is kept forever, so it is never fed (or opened) twice.
+            # A ticket that lost its signal before its feed began is forgotten;
+            # a begun one is kept forever, so it is never opened twice.
             connection.execute(
-                f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted})",
+                f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted}) "
+                f"AND {FEED_NOT_BEGUN}",
                 (now,),
             )
             connection.commit()
@@ -1241,6 +1255,12 @@ class Feeder:
         if not _BRANCH.fullmatch(branch) or ".." in branch:
             raise ValueError(f"branch name {branch!r} is not safe")
         repo = candidate.project.repo
+        base = row["base_branch"] or candidate.base
+        if base is None:
+            raise _Held(Wait(f"{_ticket_name(issue)} has no Linear project to pick its base branch"))
+        base_sha = self.github.branch_sha(repo, base)
+        if base_sha is None:
+            raise _Held(Wait(f"base branch {base} does not exist on {repo}"))
         number: int | None = None
         if row["pr_number"]:
             number = int(row["pr_number"])
@@ -1258,7 +1278,7 @@ class Feeder:
             branch_found = number is not None or self.github.branch_sha(repo, branch) is not None
         if branch_found:
             wait = self._stack_hold(
-                repo, issue.key, config.base_branch, branch, number,
+                repo, issue.key, base, branch, number,
                 where=f"branch {branch}", project_bot=candidate.project.grok_bot,
                 ticket_url=issue.url,
                 held=f"{_ticket_name(issue)} was not fed", until="it feeds",
@@ -1271,20 +1291,17 @@ class Feeder:
             raise ValueError(f"ticket risk {risk!r} is not low or high")
         template = candidate.template
         state = go_state_for(issue.body, template.plan_first)
-        self._record(candidate, branch=branch)
+        self._record(candidate, branch=branch, base_branch=base)
         if number is None:
             if not branch_found:
-                base = self.github.branch_sha(repo, config.base_branch)
-                if base is None:
-                    raise ValueError(f"base branch {config.base_branch} not found")
                 start = self.github.create_start_commit(
-                    repo, base, f"Start {_ticket_name(issue)}: {issue.title}"[:200]
+                    repo, base_sha, f"Start {_ticket_name(issue)}: {issue.title}"[:200]
                 )
                 self.github.create_branch(repo, branch, start)
             number = self.github.open_draft_pull(
                 repo,
                 branch=branch,
-                base=config.base_branch,
+                base=base,
                 title=_pull_title(issue),
                 body=_pull_body(issue),
             )
@@ -1314,8 +1331,8 @@ class Feeder:
         brief_id = row["brief_comment_id"] or _existing(existing, "brief", authors)
         if brief_id is None:
             brief_id = post(
-                _brief(issue, candidate.context, number=number, branch=branch, risk=risk,
-                       state=state, visible=linear, template=template)
+                _brief(issue, candidate.context, number=number, branch=branch, base=base,
+                       risk=risk, state=state, visible=linear, template=template)
             )
         self._record(candidate, brief_comment_id=brief_id)
         go_id = row["go_comment_id"] or _existing(existing, "go", authors)
@@ -1512,6 +1529,7 @@ def _brief(
     *,
     number: int,
     branch: str,
+    base: str,
     risk: str,
     state: str,
     visible: bool,
@@ -1545,7 +1563,7 @@ def _brief(
             "",
             f"- Goal: {' '.join(issue.title.split())[:180]}",
             f"- Ticket: {issue.url or _ticket_name(issue)}",
-            f"- PR: #{number} on branch `{branch}` off `{config.base_branch}`",
+            f"- PR: #{number} on branch `{branch}` off `{base}`",
             f"- Risk: {risk} (from the ticket's {source or 'intake record'})",
             f"- Start: {state} ({why})",
             f"- Builder: {config.builder_harness}; reviewer: {config.reviewer_harness}",
