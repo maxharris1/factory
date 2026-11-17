@@ -9,6 +9,11 @@ import yaml
 
 from lib.factory_md import (
     EXAMPLE_PATHS,
+    FactoryConfig,
+    QaConfig,
+    QaEvidence,
+    QaLane,
+    QaRunner,
     load_factory_md,
     parse_factory_context,
     parse_factory_md,
@@ -885,3 +890,226 @@ def test_removing_a_ci_branch_is_a_trust_change() -> None:
     base = ROOT_FACTORY_MD.replace("---\n", "---\nci:\n  branches: [main, dev]\n", 1)
     head = ROOT_FACTORY_MD.replace("---\n", "---\nci:\n  branches: [main]\n", 1)
     assert trust_front_matter_changed(base, head) is True
+
+
+TICKET_QA = """qa:
+  enabled: true
+  gate: report              # report | block
+  runners: [claude-cloud, cursor-cloud]   # one or two. first is primary
+  shootout: true
+  profile: full-stack       # full-stack | supabase | none
+  lanes: 3                  # 1 to 3
+  paths: [src/**, supabase/**]
+  full_rerun_lines: 400
+  setup: scripts/qa/cloud-setup.sh
+  claude_cloud:
+    environment: qa-example
+    model: claude-opus-4
+  cursor_cloud:
+    environment: qa-example
+    model: gpt-5
+  lane:
+    boot: bash scripts/qa/boot-lane.sh
+    doctor: [bash scripts/qa/doctor.sh]
+    recover: bash scripts/qa/recover.sh
+    base_url: http://127.0.0.1:8080
+  fixtures:
+    load: node scripts/qa-packs/load.mjs
+  outside: [PDF_RENDERER_URL]
+  secrets: [AWS_ACCESS_KEY_ID]
+  verify: verify-example
+  timeout_minutes: 60
+  evidence:
+    video: multi-step       # multi-step | always | never
+    trace: on-failure       # on-failure | always | never
+"""
+
+MIN_QA = {
+    "enabled": True,
+    "runners": ["claude-cloud"],
+    "profile": "none",
+    "claude_cloud": {"environment": "qa-env"},
+    "lane": {"boot": "bash boot.sh", "base_url": "http://127.0.0.1:8080"},
+}
+
+BOTH_RUNNERS = {
+    "runners": ["claude-cloud", "cursor-cloud"],
+    "cursor_cloud": {"environment": "qa-env"},
+}
+
+
+def with_qa(qa: object) -> dict:
+    data = copy.deepcopy(VALID)
+    data["qa"] = qa
+    return data
+
+
+def qa_text(qa: object) -> str:
+    return "---\n" + yaml.safe_dump(with_qa(qa), sort_keys=False) + "---\n"
+
+
+def test_no_qa_block_parses_as_today() -> None:
+    today = FactoryConfig(
+        base_branch="main",
+        tickets="github",
+        builder_harness="claude",
+        reviewer_harness="codex",
+        rounds_low=1,
+        rounds_high=3,
+        verify="none",
+        ship="merge",
+        skills=(),
+    )
+    text = "---\n" + yaml.safe_dump(VALID, sort_keys=False) + "---\n"
+    assert parse_factory_md(text) == (today, [])
+    assert parse_factory_md(qa_text({"enabled": False, "lanes": 2})) == (today, [])
+    assert today.qa is None
+
+
+def test_ticket_qa_block_parses() -> None:
+    text = "---\n" + yaml.safe_dump(VALID, sort_keys=False) + TICKET_QA + "---\n"
+    config, findings = parse_factory_md(text)
+    assert findings == []
+    assert config is not None
+    assert config.qa == QaConfig(
+        runners=(
+            QaRunner("claude-cloud", "qa-example", "claude-opus-4"),
+            QaRunner("cursor-cloud", "qa-example", "gpt-5"),
+        ),
+        lane=QaLane(
+            boot="bash scripts/qa/boot-lane.sh",
+            base_url="http://127.0.0.1:8080",
+            doctor=("bash scripts/qa/doctor.sh",),
+            recover="bash scripts/qa/recover.sh",
+        ),
+        profile="full-stack",
+        gate="report",
+        shootout=True,
+        lanes=3,
+        paths=("src/**", "supabase/**"),
+        full_rerun_lines=400,
+        setup="scripts/qa/cloud-setup.sh",
+        fixtures_load="node scripts/qa-packs/load.mjs",
+        outside=("PDF_RENDERER_URL",),
+        secrets=("AWS_ACCESS_KEY_ID",),
+        verify="verify-example",
+        timeout_minutes=60,
+        evidence=QaEvidence(video="multi-step", trace="on-failure"),
+    )
+
+
+def test_qa_defaults_apply() -> None:
+    config, findings = parse_factory_md(qa_text(MIN_QA))
+    assert findings == []
+    assert config is not None
+    assert config.qa == QaConfig(
+        runners=(QaRunner("claude-cloud", "qa-env"),),
+        lane=QaLane(boot="bash boot.sh", base_url="http://127.0.0.1:8080"),
+        profile="none",
+    )
+    qa = config.qa
+    assert (qa.gate, qa.shootout, qa.lanes, qa.full_rerun_lines, qa.timeout_minutes) == (
+        "report",
+        False,
+        1,
+        400,
+        60,
+    )
+    assert (qa.evidence.video, qa.evidence.trace) == ("multi-step", "on-failure")
+
+
+def test_unknown_qa_runner_model_only_warns() -> None:
+    qa = {**MIN_QA, "claude_cloud": {"environment": "qa-env", "model": "mystery-model"}}
+    config, findings = parse_factory_md(qa_text(qa))
+    assert config is not None and config.qa is not None
+    assert config.qa.runners == (QaRunner("claude-cloud", "qa-env", "mystery-model"),)
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", "unknown model name 'mystery-model' (qa.claude_cloud.model)")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"color": "blue"}, "unknown field 'qa.color'"),
+        ({"profile": "mobile"}, "qa.profile must be full-stack, supabase or none"),
+        ({"lanes": 0}, "qa.lanes must be an integer from 1 to 3"),
+        ({"lanes": 4}, "qa.lanes must be an integer from 1 to 3"),
+        ({"runners": ["gemini-cloud"]}, "qa.runners[0] must be claude-cloud or cursor-cloud"),
+        ({"runners": ["claude-cloud", "claude-cloud"]}, "qa.runners names claude-cloud twice"),
+        (
+            {"runners": ["claude-cloud", "cursor-cloud"]},
+            "missing required field 'qa.cursor_cloud.environment'",
+        ),
+        (
+            {"cursor_cloud": {"environment": "qa-env"}},
+            "qa.cursor_cloud is set but qa.runners does not name cursor-cloud",
+        ),
+        ({"shootout": True}, "qa.shootout needs two runners"),
+        ({**BOTH_RUNNERS, "shootout": True, "gate": "block"}, "qa.shootout needs gate: report"),
+        ({"secrets": ["AWS_ACCESS_KEY_ID=abc"]}, "qa.secrets[0] must be a name, not a value or URL"),
+        ({"outside": ["https://pdf.example"]}, "qa.outside[0] must be a name, not a value or URL"),
+        ({"lane": {"base_url": "http://127.0.0.1:8080"}}, "missing required field 'qa.lane.boot'"),
+    ],
+    ids=[
+        "unknown-key",
+        "bad-profile",
+        "lanes-0",
+        "lanes-4",
+        "unknown-runner",
+        "repeated-runner",
+        "listed-runner-without-block",
+        "block-for-unlisted-runner",
+        "shootout-one-runner",
+        "shootout-gate-block",
+        "secret-value",
+        "outside-url",
+        "no-lane-boot",
+    ],
+)
+def test_bad_qa_block_is_refused(tmp_path: Path, changes: dict, message: str) -> None:
+    config, findings = load_factory_md(write_factory(tmp_path, with_qa({**MIN_QA, **changes})))
+    assert config is None
+    assert ("error", message) in [(f.severity, f.message) for f in findings]
+
+
+def test_check_config_refuses_a_bad_qa_block(tmp_path: Path) -> None:
+    path = write_factory(tmp_path, with_qa({**MIN_QA, "lanes": 4}))
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin/orch"), "check-config", "--factory", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert result.returncode != 0
+    assert "qa.lanes must be an integer from 1 to 3" in result.stdout + result.stderr
+
+
+def test_lenient_bad_qa_block_turns_qa_off() -> None:
+    config, findings = parse_factory_md(qa_text({**MIN_QA, "color": "blue", "lanes": 9}), strict=False)
+    assert config is not None
+    assert config.qa is None
+    assert config.base_branch == "main"
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", "unknown field 'qa.color'"),
+        ("warning", "qa.lanes must be an integer from 1 to 3"),
+        ("warning", "qa is off: its block is invalid"),
+    ]
+
+
+def _with_root_qa(text: str, qa: str) -> str:
+    return text.replace("---\n", f"---\n{qa}", 1)
+
+
+def test_trust_change_when_only_qa_differs() -> None:
+    base = _with_root_qa(ROOT_FACTORY_MD, "qa:\n  enabled: false\n")
+    head = _with_root_qa(ROOT_FACTORY_MD, "qa:\n  enabled: true\n")
+    assert trust_front_matter_changed(base, head) is True
+    assert trust_front_matter_changed(ROOT_FACTORY_MD, head) is True
+
+
+def test_no_trust_change_when_qa_is_identical() -> None:
+    base = _with_root_qa(ROOT_FACTORY_MD, "qa:\n  enabled: true\n")
+    head = _with_root_qa(_edit("## Review\n", "## Review\nA new Review sentence.\n"), "qa:\n  enabled: true\n")
+    assert trust_front_matter_changed(base, head) is False
