@@ -618,7 +618,7 @@ def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
         (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
             assert sink not in script, (name, sink)
-        assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "STATUS_URL"], name
+        assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"], name
         assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script)), name
 
 
