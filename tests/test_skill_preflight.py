@@ -503,7 +503,7 @@ def test_an_unreachable_start_waits_out_its_backoff_with_the_dispatcher_reconcil
     class Devices:
         config = pool.config
 
-        def reconcile(self, now, on_offline):
+        def reconcile(self, now, lost_after, on_lost):
             return None
 
     dispatcher = Dispatcher(
@@ -546,7 +546,7 @@ def test_reconciling_during_an_unreachable_preflight_never_charges_an_attempt(
     class Devices:
         config = pool.config
 
-        def reconcile(self, now, on_offline):
+        def reconcile(self, now, lost_after, on_lost):
             return None
 
     dispatcher = Dispatcher(

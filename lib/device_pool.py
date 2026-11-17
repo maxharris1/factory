@@ -36,9 +36,11 @@ lib/remote.py, so a check never trusts a stored process number). #80 adds
 the job, if one did. #96 adds `run_token_hash`: the hash of the secret
 token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
-contact and when it began failing, for the 60-minute offline check. #460
+contact and when it began failing, for the lost check (#662). #460
 adds `device_backoff`: a device whose start preflight could not reach it
-takes no new placement, for any harness, until its `until` time.
+takes no new placement, for any harness, until its `until` time. #662
+adds `device_orphans`: the slot of a job lost with its unreachable device,
+moved there so the slot is free while its worker may still run.
 
 This module starts nothing and contacts no device.
 """
@@ -71,6 +73,7 @@ from lib.schema import HARNESSES
 
 HEALTH_TABLE = "device_health"
 BACKOFF_TABLE = "device_backoff"
+ORPHANS_TABLE = "device_orphans"
 UNREACHABLE_BACKOFF_SECONDS = 5 * 60
 # Columns F2-02 added to the F2-01 slot table, added in place on an old database.
 _SLOT_COLUMNS = (
@@ -766,6 +769,32 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
         """,
         (device, until, reason),
     )
+
+
+def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None:
+    """Move job_id's slot into device_orphans, in the caller's transaction (#662)."""
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ORPHANS_TABLE} (
+            job_id TEXT PRIMARY KEY,
+            device TEXT NOT NULL,
+            harness TEXT NOT NULL,
+            os_user TEXT NOT NULL,
+            worker_tag TEXT,
+            lost_at REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT OR REPLACE INTO {ORPHANS_TABLE}
+            (job_id, device, harness, os_user, worker_tag, lost_at)
+        SELECT job_id, device, harness, os_user, worker_tag, ? FROM {SLOTS_TABLE}
+        WHERE job_id = ?
+        """,
+        (now, job_id),
+    )
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
 
 
 def placement_blocked(connection: sqlite3.Connection, now: float) -> Blocked:

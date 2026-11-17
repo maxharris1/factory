@@ -616,8 +616,8 @@ class SQLiteJobQueue:
         timed out (#87 r3 F2.1): failing it would let T6 start attempt 2
         beside a remote worker that may still run. It leaves running only
         through the poller's dead path, once its runner is gone and the
-        device confirms its worker gone (lib/job_state.py), or as stuck when
-        the device stays offline for an hour. An autostart claim with no runner
+        device confirms its worker gone (lib/job_state.py), or as lost when
+        the device stays unreachable (#662). An autostart claim with no runner
         and no heartbeat since its placement is never timed out either (#460):
         its waiter may still be in preflight, and the poller's claimed release
         requeues it with no attempt charged. The checks are in the same

@@ -1,4 +1,4 @@
-"""Slot release and the 60-minute offline check (docs/SPEC.md F2-02).
+"""Slot release and the lost check (docs/SPEC.md F2-02, #662).
 
 The dispatcher runs `DeviceMonitor.reconcile` once per poll, before T6
 looks at timeouts. It does two things with the device pool's held slots.
@@ -19,14 +19,16 @@ whose job is no longer running (done, failed or timed out) and whose
   check that cannot tell, or a remote start with no recorded tag keeps
   the slot.
 
-Offline. Each remote device still holding a slot is probed every poll:
+Lost. Each remote device still holding a slot is probed every poll:
 the worker checks above count, and a device that needed none (its jobs
 run, or their runners still live) gets one plain SSH round trip. The
 first failed probe after a good one starts the device's offline clock; a
-good probe stops it, and a device that holds no slot is forgotten. Once a device has failed every probe for
-OFFLINE_SECONDS (60 minutes), each job still running on it is failed and
-its ticket marked stuck, which wakes Grok Bot once (the ticket's stuck
-flag). Its slot stays held: the worker is not confirmed gone.
+good probe stops it, and a device that holds no slot is forgotten. Once a
+device has failed every probe for `lost_after` seconds (orch.yml
+job_states.unreachable_lost_minutes, 10 by default; `stranded`), each job
+still running on it is handed to `on_lost`: the dispatcher fails it as
+lost, moves its slot to device_orphans and backs the device off, and T6
+requeues it under the link-drop budget.
 """
 
 from __future__ import annotations
@@ -50,10 +52,8 @@ from lib.remote import (
 )
 from lib.worktrees import pid_alive
 
-OFFLINE_SECONDS = 3600.0
-
 Log = Callable[[str], None]
-OnOffline = Callable[[str, str, float], None]  # job_id, device, offline seconds
+OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
 
 
@@ -61,7 +61,7 @@ Alive = Callable[[int | None, str | None], bool]
 class MonitorResult:
     released: tuple[str, ...] = ()
     stopped: tuple[str, ...] = ()
-    offline: tuple[str, ...] = ()
+    lost: tuple[str, ...] = ()
 
 
 def remote_target(
@@ -90,6 +90,15 @@ def remote_target(
         return None
 
 
+def stranded(
+    device: Device, failing_since: float | None, now: float, limit: float
+) -> str | None:
+    """Why device's running jobs are lost now, or None while they may still run."""
+    if failing_since is None or now - failing_since < limit:
+        return None
+    return f"unreachable {int((now - failing_since) // 60)} min"
+
+
 class DeviceMonitor:
     def __init__(
         self,
@@ -98,18 +107,16 @@ class DeviceMonitor:
         transport: Transport,
         *,
         alive: Alive = pid_alive,
-        offline_seconds: float = OFFLINE_SECONDS,
     ):
         self.pool = pool
         self.config = config
         self.transport = transport
         self.alive = alive
-        self.offline_seconds = offline_seconds
 
-    def reconcile(self, now: float, on_offline: OnOffline) -> MonitorResult:
+    def reconcile(self, now: float, lost_after: float, on_lost: OnLost) -> MonitorResult:
         released: list[str] = []
         stopped: list[str] = []
-        offline: list[str] = []
+        lost: list[str] = []
         groups: dict[str, list[HeldSlot]] = {}
         for slot in self.pool.held():
             groups.setdefault(slot.placement.device, []).append(slot)
@@ -122,9 +129,9 @@ class DeviceMonitor:
                     if self._local_gone(slot):
                         self._release(slot, released)
                 continue
-            self._remote(device, slots, now, on_offline, released, stopped, offline)
+            self._remote(device, slots, now, lost_after, on_lost, released, stopped, lost)
         self.pool.forget_health(keep=self.pool.used().keys())
-        return MonitorResult(tuple(released), tuple(stopped), tuple(offline))
+        return MonitorResult(tuple(released), tuple(stopped), tuple(lost))
 
     def liveness(self, placement: Placement) -> Liveness:
         """Is the job's recorded runner gone, and then its worker? (job_state)"""
@@ -159,10 +166,11 @@ class DeviceMonitor:
         device: Device,
         slots: list[HeldSlot],
         now: float,
-        on_offline: OnOffline,
+        lost_after: float,
+        on_lost: OnLost,
         released: list[str],
         stopped: list[str],
-        offline: list[str],
+        lost: list[str],
     ) -> None:
         answered: bool | None = None
         probe: RemoteTarget | None = None
@@ -198,12 +206,13 @@ class DeviceMonitor:
         if answered is None:
             return
         failing_since = self.pool.record_contact(device.name, ok=answered, at=now)
-        if failing_since is None or now - failing_since < self.offline_seconds:
+        reason = stranded(device, failing_since, now, lost_after)
+        if reason is None:
             return
         for slot in slots:
             if slot.job_state == "running":
-                on_offline(slot.placement.job_id, device.name, now - failing_since)
-                offline.append(slot.placement.job_id)
+                on_lost(slot.placement.job_id, device.name, reason)
+                lost.append(slot.placement.job_id)
 
     def _release(self, slot: HeldSlot, released: list[str]) -> None:
         if self.pool.release(slot.placement.job_id, owner=slot.placement.harness):

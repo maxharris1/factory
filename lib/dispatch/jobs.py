@@ -10,9 +10,13 @@ from pathlib import Path
 
 from lib import device_sync, lane_limit, skill_preflight
 from lib.device_pool import (
+    LINK_DROP_TAG,
+    UNREACHABLE_BACKOFF_SECONDS,
+    back_off,
     backed_off_through,
     box_device,
     free_slots,
+    orphan_slot,
     placement_blocks,
     used_slots,
 )
@@ -49,6 +53,7 @@ from lib.dispatch.types import (
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
+    DEVICE_LOST,
     LAGGING_WAIT_SECONDS,
     LINK_DROP_BACKOFF_SECONDS,
     MAX_LINK_DROP_REQUEUES,
@@ -317,8 +322,8 @@ class JobsMixin:
         The queue refuses to time out a running job whose slot records a
         remote start, so T6 never queues attempt 2 beside it. The job
         leaves running through the dead path once its runner and worker are
-        confirmed gone (then T6 retries as before), or as stuck when its
-        device stays offline for an hour. This only records the hold, once
+        confirmed gone (then T6 retries as before), or as lost when its
+        device stays unreachable (#662). This only records the hold, once
         per job, so `orch status` and the dashboard's job events show why a
         stale job has not been retried. A failure here never stops the poll.
         """
@@ -354,16 +359,19 @@ class JobsMixin:
         self._log_job_event(job, "timeout-held", detail)
 
     def _check_devices(self) -> None:
-        """F2-02: free gone workers' slots; a device offline 60 minutes is stuck.
+        """F2-02: free gone workers' slots; #662: lose the running jobs of a
+        device unreachable for job_states.unreachable_lost_seconds.
 
-        Runs before T6 looks at timeouts, so a job on a device that has been
-        offline for the full hour goes stuck at once instead of being retried.
-        A failure here is recorded and never stops the poll.
+        Runs before T6 looks at timeouts, so T6 sees a lost job as a link
+        drop in the same poll. A failure here is recorded and never stops
+        the poll.
         """
         if self.devices is None:
             return
         try:
-            self.devices.reconcile(self.queue.now(), self._device_offline)
+            self.devices.reconcile(
+                self.queue.now(), self.job_states.unreachable_lost_seconds, self._device_lost
+            )
         except Exception as exc:
             self.record_poll_error("devices", "-", exc)
 
@@ -643,64 +651,44 @@ class JobsMixin:
             f"{job.request.action}: {event}: {detail}"
         )
 
-    def _device_offline(self, job_id: str, device: str, seconds: float) -> None:
-        """Fail a job running on an offline device and mark its ticket stuck.
+    def _device_lost(self, job_id: str, device: str, reason: str) -> None:
+        """#662: fail a running job lost with its unreachable device, unhandled.
 
-        One transaction: the job leaves running (failure already handled, so
-        T6 never retries it) and the ticket's stuck flag wakes Grok Bot once.
-        The job is never done, and its slot stays held. #218: a link-dropped
-        job is left to `_check_job_states`, which fails it once its worker
-        is past its device-enforced deadline.
+        One transaction: the job leaves running, DEVICE_LOST is recorded in
+        the link-drop detail format, its slot moves to device_orphans (the
+        worker may still run there) and the device is backed off. T6 then
+        requeues the same row under the link-drop budget.
         """
         now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM jobs WHERE id = ?",
-                (job_id,),
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            slot = connection.execute(
+                f"SELECT worker_tag FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
             ).fetchone()
-            if row is None or str(row["state"]) != "running":
+            if row is None or str(row["state"]) != "running" or slot is None:
                 connection.commit()
                 return
             job = _job(row)
-            if link_drop_end(connection, job_id) is not None:
-                connection.commit()
-                return
             connection.execute(
                 """
                 UPDATE jobs
                 SET state = 'failed', finished_at = ?, last_activity_at = ?,
-                    failure_handled = 1
+                    failure_handled = 0
                 WHERE id = ? AND state = 'running'
                 """,
                 (now, now, job_id),
             )
-            self._set_stuck_in_transaction(
-                connection,
-                repo=job.request.repo,
-                ticket_id=job.request.ticket_id,
-                source_comment_id=job.request.source_comment_id,
-                timeout_seconds=job.request.timeout_seconds,
-                reason="device-offline",
-            )
-            self._ensure_stuck_wake_in_transaction(
-                connection,
-                repo=job.request.repo,
-                ticket_id=job.request.ticket_id,
-                detail=json.dumps(
-                    {
-                        "project_bot": _detail_project_bot(job.request.detail),
-                        "job_id": job.id,
-                        "detail": (
-                            f"device {device} offline {int(seconds // 60)} minutes "
-                            f"during the {job.request.action} job"
-                        ),
-                    },
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
+            tag = slot["worker_tag"]
+            detail = f"{device}: {reason}" + ("" if tag is None else f"{LINK_DROP_TAG}{tag}")
+            self._record_job_event(connection, job, DEVICE_LOST, detail, now)
+            orphan_slot(connection, job_id, now)
+            back_off(
+                connection, device, until=now + UNREACHABLE_BACKOFF_SECONDS,
+                reason=f"{reason}; job {job_id} lost",
             )
             connection.commit()
+        self._log_job_event(job, DEVICE_LOST, detail)
 
     def _t6(self, job: Job) -> None:
         # One dispatcher runs T6 at a time: orch poll holds the single-poller

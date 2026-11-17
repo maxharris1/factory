@@ -473,6 +473,7 @@ def requeue_unreachable(
 
 
 LINK_DROP = "link-drop"
+DEVICE_LOST = "device-lost"
 REQUEUED_LINK_DROP = "requeued-link-drop"
 MAX_LINK_DROP_REQUEUES = 6
 LINK_DROP_BACKOFF_SECONDS = (60, 120, 300, 600, 600, 600)
@@ -481,18 +482,22 @@ DEVICE_CLOCK_SKEW_SECONDS = 4.5 * 60
 
 def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, float] | None:
     """(detail, recorded_at) when the row's latest run end since its last
-    REQUEUED_LINK_DROP is a link drop of the run its slot still names."""
+    REQUEUED_LINK_DROP is a link drop or device loss of the run its slot
+    still names."""
     if not has_job_events(connection):
         return None
     row = connection.execute(
         f"""
         SELECT event, detail, recorded_at FROM {JOB_EVENTS_TABLE}
-        WHERE job_id = ? AND event IN (?, ?, ?, ?, ?)
+        WHERE job_id = ? AND event IN (?, ?, ?, ?, ?, ?)
         ORDER BY id DESC LIMIT 1
         """,
-        (job_id, RUN_DIED, RUN_EXITED, LINK_DROP, REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT),
+        (
+            job_id, RUN_DIED, RUN_EXITED, LINK_DROP, DEVICE_LOST, REQUEUED_LINK_DROP,
+            REQUEUED_USAGE_LIMIT,
+        ),
     ).fetchone()
-    if row is None or row[0] != LINK_DROP:
+    if row is None or row[0] not in (LINK_DROP, DEVICE_LOST):
         return None
     detail = str(row[1])
     slot = connection.execute(
@@ -681,7 +686,7 @@ def _lag_since_run(
     if not has_job_events(connection):
         return None
     ends = (PREFLIGHT_LAGGING, LAG_BLOCKED, REQUEUED_LAGGING, RUN_DIED, RUN_EXITED, LINK_DROP,
-            REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT)
+            DEVICE_LOST, REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT)
     marks = ", ".join("?" for _ in ends)
     rows = connection.execute(
         f"""
