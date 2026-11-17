@@ -153,6 +153,8 @@ CSS = """\
 .jd-ctl .key{display:flex;align-items:center;gap:6px}
 .jd-ctl .key i{width:12px;height:8px;background:var(--m)}
 .jd-ctl .key i.off{width:4px;height:12px;background:repeating-linear-gradient(180deg,var(--m) 0 4px,transparent 4px 8px)}
+.jd-ctl .endnote{display:none;font-weight:600;color:var(--m)}
+.jd-panel .count .tap{display:none}
 .jd-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-legend span{display:flex;align-items:center;gap:6px}
 .jd-legend i{width:10px;height:10px;background:var(--m)}
@@ -248,6 +250,15 @@ PHONE_CSS = """\
 .ticketpage .runlog .visit{min-height:44px;padding:8px 6px}
 .ticketpage .jd-foot{margin:10px 0 0}
 .ticketpage .jd-next .head{flex-wrap:wrap;gap:2px 8px}
+.ticketpage canvas.jd-journey{width:auto;max-width:100%}
+.ticketpage .journey{width:auto}
+.ticketpage .jd-cap{padding:8px 12px}
+.ticketpage .jd-cap .idx,.ticketpage .jd-cap .note,.ticketpage .jd-cap .end{display:none}
+.ticketpage .jd-ctl{gap:6px 10px;padding:0 12px 8px}
+.ticketpage .jd-ctl .axis,.ticketpage .jd-ctl .gap,.ticketpage .jd-ctl .key.stop,.ticketpage .jd-ctl .key.hop,.ticketpage .jd-ctl .endnote~.key{display:none}
+.ticketpage .jd-ctl .endnote{display:inline}
+.ticketpage .count .desk{display:none}
+.ticketpage .count .tap{display:inline}
 .ticketpage .jd-chart{padding:0 12px}
 .ticketpage .jd-chart summary{padding:12px 0;line-height:1.5}
 .ticketpage .jd-chart .jd-box{margin-top:0}
@@ -952,6 +963,8 @@ def _caption(model: dict) -> str:
 
 
 REPLAY = '<button type="button" data-replay="1">replay</button>'
+JOURNEY_SUB = "this ticket through time · pick a step for its reason"
+JOURNEY_TAP = "tap a step for its reason"
 
 
 def _journey(row: dict, model: dict) -> str:
@@ -967,16 +980,19 @@ def _journey(row: dict, model: dict) -> str:
         else ""
     )
     legend = "".join(f'<span class="key"><i style="--m:{TINT[w]}"></i>{w}</span>' for w in _legend_who(model))
-    legend += f'<span class="key"><i style="--m:{STOP_TINT}"></i>stopped</span>'
-    legend += f'<span class="key"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
+    legend += f'<span class="key stop"><i style="--m:{STOP_TINT}"></i>stopped</span>'
+    legend += f'<span class="key hop"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
+    endnote = (
+        f'<span class="endnote" style="--m:{END_TINT[model["ended"]]}">{_e(_end_text(model))}</span>' if model["ended"] else ""
+    )
     return (
         f'<section class="jd-panel" data-sec="journey"><h2>{_span("t", "Journey")}'
-        f'{_span("count", "this ticket through time · pick a step for its reason")}</h2>'
+        f'<span class="count">{_span("desk", JOURNEY_SUB)}{_span("tap", JOURNEY_TAP)}</span></h2>'
         f'<div class="jd-box"><canvas class="jd-journey" width="1000" height="336" role="img" '
         f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>{_caption(model)}'
         '<div class="jd-ctl"><div class="axis" role="group" aria-label="Time axis">'
         '<button type="button" data-scale="even" aria-pressed="true">even steps</button>'
-        f'{scale}</div>{"" if model["ended"] == "stopped" else REPLAY}<span class="gap"></span>{legend}</div></section>'
+        f'{scale}</div>{"" if model["ended"] == "stopped" else REPLAY}{endnote}<span class="gap"></span>{legend}</div></section>'
     )
 
 
@@ -1139,11 +1155,15 @@ _SCRIPT = r"""
                 chartSub: __CHARTSUB__, trackers: __TRACKERS__,
                 kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
                 panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__, how: __HOW__,
-                endPhases: __ENDPHASES__, readOnly: __READONLY__};
+                endPhases: __ENDPHASES__, readOnly: __READONLY__,
+                phone: __PHONE__, journeySub: __JOURNEYSUB__, journeyTap: __JOURNEYTAP__};
   var SEL = {};
   var chartScroll = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  var phoneQuery = window.matchMedia ? window.matchMedia(DETAIL.phone) : null;
+  var journeyResize = typeof ResizeObserver === 'function' ? new ResizeObserver(fitJourneys) : null;
+  if (phoneQuery && phoneQuery.addEventListener) phoneQuery.addEventListener('change', fitJourneys);
 
   function whoTint(w) { return JOURNEY.tint[w] || JOURNEY.tint.script; }
   function detailModel(r, chart) {
@@ -1899,7 +1919,10 @@ _SCRIPT = r"""
     span(cap, 'note', reasonOf(v));
   }
   function journeyPanel(r, m, hits, scales, scale) {
-    var sec = jdPanel(null, 'journey', 'Journey', 'this ticket through time · pick a step for its reason');
+    var sec = jdPanel(null, 'journey', 'Journey', '');
+    var count = sec.children[0].children[1];
+    span(count, 'desk', DETAIL.journeySub);
+    span(count, 'tap', DETAIL.journeyTap);
     var box = add(sec, el('div', 'jd-box'));
     var canvas = add(box, el('canvas', 'jd-journey'));
     canvas.setAttribute('width', '1000');
@@ -1936,11 +1959,12 @@ _SCRIPT = r"""
     ctlButton(axis, 'even steps', 'data-scale', 'even', scale === 'even');
     if (m.all_durations_known) ctlButton(axis, 'to scale', 'data-scale', 'scale', scale === 'scale');
     if (m.ended !== 'stopped') ctlButton(ctl, 'replay', 'data-replay', '1', null);
+    if (m.ended) span(ctl, 'endnote', endText(m)).setAttribute('style', '--m:' + DETAIL.endTint[m.ended]);
     span(ctl, 'gap');
     legendWho(m).forEach(function (w) { legendItem(ctl, null, JOURNEY.tint[w], w).className = 'key'; });
-    legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key';
-    legendItem(ctl, 'off', DETAIL.hop, 'off-chart hop').className = 'key';
-    return {sec: sec, canvas: canvas, cap: cap};
+    legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key stop';
+    legendItem(ctl, 'off', DETAIL.hop, 'off-chart hop').className = 'key hop';
+    return {sec: sec, box: box, canvas: canvas, cap: cap};
   }
   function nextPanel(m) {
     var sub = m.terminal || !m.state ? 'no way out' : m.next.length + ' ways out of ' + m.state;
@@ -2030,14 +2054,26 @@ _SCRIPT = r"""
       buttons.forEach(function (b) {
         var on = Number(b.getAttribute('data-visit')) === i;
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
-        if (on && fromChart && buttons === j.logButtons && b.scrollIntoView) b.scrollIntoView({block: 'nearest'});
+        if (on && fromChart && !j.g.compact && buttons === j.logButtons && b.scrollIntoView) b.scrollIntoView({block: 'nearest'});
       });
     });
     fillCaption(j.cap, j.m, i);
     drawOne(j, Date.now());
   }
+  function fitJourney(j) {
+    var g = phoneQuery && phoneQuery.matches ? JOURNEY_GEOM.compact((j.box.clientWidth || 327) / 4) : JOURNEY_GEOM.wide;
+    if (g === j.g) return;
+    j.g = g;
+    j.canvas.width = g.w * 4;
+    j.canvas.height = g.h * 4;
+    placeHits(j);
+    drawOne(j, Date.now());
+  }
+  function fitJourneys() {
+    journeys.forEach(function (j) { if (j.canvas.isConnected) fitJourney(j); });
+  }
   function placeHits(j) {
-    var bars = journeyBars(j.m, SEL[j.key].scale);
+    var bars = journeyBars(j.m, SEL[j.key].scale, j.g);
     var buttons = j.hitButtons;
     for (var k = 0; k < buttons.length && k < bars.length; k++) {
       var b = bars[k], st = buttons[k].style;
@@ -2051,7 +2087,7 @@ _SCRIPT = r"""
       if (ctx) {
         var flash = s.flashAt === null || reducedMotion ? 0 : Math.max(0, 1 - (now - s.flashAt) / 260);
         var beat = s.beatStart === null || reducedMotion ? -1 : (now - s.beatStart) / 1000;
-        drawJourney(ctx, j.m, {t: reducedMotion ? 1e6 : (now - s.tPlay) / 1000, scale: s.scale, selected: s.selected,
+        drawJourney(ctx, j.m, {g: j.g, t: reducedMotion ? 1e6 : (now - s.tPlay) / 1000, scale: s.scale, selected: s.selected,
           flash: flash, beat: beat >= 0 && beat <= 1 ? beat : -1, reduced: reducedMotion, still: j.still,
           startClock: j.startClock, nowClock: j.nowClock, endClock: j.endClock});
       }
@@ -2063,7 +2099,10 @@ _SCRIPT = r"""
     }
   }
   function journeyFrame() {
-    journeys = journeys.filter(function (j) { return j.canvas.isConnected; });
+    journeys = journeys.filter(function (j) {
+      if (!j.canvas.isConnected && journeyResize) journeyResize.unobserve(j.box);
+      return j.canvas.isConnected;
+    });
     if (!journeys.length) return false;
     var now = Date.now();
     journeys.forEach(function (j) { drawOne(j, now); });
@@ -2096,7 +2135,7 @@ _SCRIPT = r"""
     var jp = c.jp, cp = c.cp, start = firstStart(c.m);
     var endAt = c.m.end ? c.m.end.at : null;
     var j = {key: c.key, r: c.r, m: c.m, still: !c.m.ended && (!!c.still || holdsStill(c.motion)), logButtons: c.logButtons,
-             hitButtons: hitButtons, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
+             hitButtons: hitButtons, box: jp.box, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: start === null ? '' : journeyClock(start), nowClock: journeyClock(c.generated),
              endClock: endAt === null || endAt === undefined ? '' : journeyClock(endAt)};
     art.addEventListener('click', function (ev) {
@@ -2113,8 +2152,9 @@ _SCRIPT = r"""
       drawOne(j, Date.now());
     });
     if (cp.canvas) cp.sec.addEventListener('toggle', function () { drawOne(j, Date.now()); });
-    placeHits(j);
+    fitJourney(j);
     journeys.push(j);
+    if (journeyResize) journeyResize.observe(j.box);
     PX.onFrame(journeyFrame);
   }
 
@@ -2229,6 +2269,7 @@ _SCRIPT = r"""
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,
            "KINDS": TICKET_KINDS, "LIVEKINDS": LIVE_KINDS,
            "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS,
-           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT, "HOW": HOW, "ENDPHASES": END_PHASES, "READONLY": READ_ONLY}
+           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT, "HOW": HOW, "ENDPHASES": END_PHASES, "READONLY": READ_ONLY,
+           "PHONE": PHONE, "JOURNEYSUB": JOURNEY_SUB, "JOURNEYTAP": JOURNEY_TAP}
 _SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

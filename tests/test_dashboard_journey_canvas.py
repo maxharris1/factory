@@ -50,14 +50,15 @@ function hash(text) {
   for (var i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
   return h;
 }
-var api = new Function(input.script + '\nreturn { journeyBars: journeyBars, drawJourney: drawJourney, journeyClock: journeyClock };')();
+var api = new Function(input.script + '\nreturn { journeyBars: journeyBars, drawJourney: drawJourney, journeyClock: journeyClock, JOURNEY_GEOM: JOURNEY_GEOM };')();
+var g = input.cells ? api.JOURNEY_GEOM.compact(input.cells) : undefined;
 var out = { bars: {}, frames: {}, clocks: (input.clocks || []).map(function (t) { return api.journeyClock(t); }) };
-out.bars.even = api.journeyBars(input.model, 'even');
-out.bars.scale = api.journeyBars(input.model, 'scale');
+out.bars.even = api.journeyBars(input.model, 'even', g);
+out.bars.scale = api.journeyBars(input.model, 'scale', g);
 Object.keys(input.frames).forEach(function (name) {
   var ctx = stubContext();
   try {
-    api.drawJourney(ctx, input.model, input.frames[name]);
+    api.drawJourney(ctx, input.model, Object.assign({ g: g }, input.frames[name]));
     out.frames[name] = {
       error: null,
       texts: ctx.calls.filter(function (c) { return c[0] === 'fillText'; }).map(function (c) { return c[1]; }),
@@ -97,9 +98,10 @@ FRAMES = {
 }
 
 
-def _run(tmp_path: Path, model: dict, frames: dict = FRAMES, clocks: list = (), tz: str = "UTC") -> dict:
+def _run(tmp_path: Path, model: dict, frames: dict = FRAMES, clocks: list = (), tz: str = "UTC",
+         cells: int | None = None) -> dict:
     data = tmp_path / "input.json"
-    data.write_text(json.dumps({"script": SCRIPT, "model": model, "frames": frames, "clocks": list(clocks)}))
+    data.write_text(json.dumps({"script": SCRIPT, "model": model, "frames": frames, "clocks": list(clocks), "cells": cells}))
     harness = tmp_path / "harness.js"
     harness.write_text(HARNESS)
     done = subprocess.run(
@@ -361,3 +363,49 @@ def test_a_long_live_journey_to_scale_keeps_every_bar_positive(tmp_path: Path) -
     bars = _run(tmp_path, _model(path), {"t": dict(FRAME, t=10, scale="scale")})["bars"]["scale"]
     assert all(b["w"] > 0 for b in bars), [b for b in bars if b["w"] <= 0]
     assert bars[-1]["x"] + bars[-1]["w"] <= 24 * 4 + 176 * 4
+
+
+COMPACT_LANES = ["SHP", "SHIP", "REV", "BLD", "PLN", "ASK", "STOP"]
+PHONE_CELLS = {375: 81, 320: 68}
+COMPACT = {
+    "live": (_model(), [*COMPACT_LANES, "13:47", "NOW · 15:48 ET"]),
+    "shipped": (_model(SHIPPED, hops=0, ended="shipped"), [*COMPACT_LANES, "06:04", "merged 07:56"]),
+    "stopped": (_model(STOPPED, hops=3, ended="stopped"), [*COMPACT_LANES, "06:04", "stopped 07:56"]),
+}
+
+
+@needs_node
+@pytest.mark.parametrize("width", PHONE_CELLS)
+@pytest.mark.parametrize("kind", COMPACT)
+def test_a_compact_journey_draws_inside_its_cells_with_short_lanes_and_no_names(tmp_path: Path, kind: str, width: int) -> None:
+    cells = PHONE_CELLS[width]
+    model, texts = COMPACT[kind]
+    frame = dict(FRAME if kind == "live" else ENDED, t=10, selected=1)
+    out = _run(tmp_path, model, {"t10": frame, "t1_5": dict(frame, t=1.5)}, cells=cells)
+    for name, drawn in out["frames"].items():
+        assert drawn["error"] is None, (name, drawn["error"])
+        for colour, x, y, w, h in drawn["fills"]:
+            assert x >= 0 and y >= 0 and x + w <= cells * 4 and y + h <= 240, (name, colour, x, y, w, h)
+        assert drawn["fills"][0][1:] == [0, 0, cells * 4, 240], "the background is the whole compact canvas"
+    assert out["frames"]["t10"]["texts"] == texts
+    bars = out["bars"]["even"]
+    assert out["bars"]["scale"] == bars, "compact steps are always even"
+    assert len({b["w"] for b in bars}) == 1
+    assert all(b["h"] == 220 and b["x"] + b["w"] <= cells * 4 for b in bars)
+
+
+@needs_node
+def test_a_long_live_journey_stays_on_the_narrowest_phone_canvas(tmp_path: Path) -> None:
+    path = [("fixing" if i % 2 else "review", "claude", 60, False, False) for i in range(40)]
+    out = _run(tmp_path, _model(path), {"t10": dict(FRAME, t=10)}, cells=PHONE_CELLS[320])
+    bars = out["bars"]["even"]
+    assert len(bars) == 40 and bars[-1]["x"] + bars[-1]["w"] <= PHONE_CELLS[320] * 4
+    assert all(x + w <= PHONE_CELLS[320] * 4 for _, x, _, w, _ in out["frames"]["t10"]["fills"])
+
+
+@needs_node
+def test_a_compact_now_tag_is_pulled_inside_the_canvas(tmp_path: Path) -> None:
+    path = [("review", "codex", 60, False, False)] * 12
+    out = _run(tmp_path, _model(path), {"t10": dict(FRAME, t=10, nowClock="15:48 yesterday")}, cells=56)
+    tag = _frame_rects(out["frames"]["t10"], "#7dcfff")
+    assert [r for r in tag if r[1] == 0 and r[3] == 14 and r[0] + r[2] == 56 * 4], tag

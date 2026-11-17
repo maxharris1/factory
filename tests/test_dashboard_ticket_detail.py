@@ -28,7 +28,7 @@ from lib.dashboard_pages.journey_canvas import TINT
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
-from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
+from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
 from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
@@ -565,7 +565,7 @@ def test_the_no_script_control_strip_holds_the_axis_replay_and_legend_in_one_row
     strip = re.search(r'<div class="jd-ctl">(.*)</div></section>$', journey, re.S).group(1)
     assert re.search(r'<div class="axis" role="group" aria-label="Time axis">.*data-scale="even".*data-scale="scale".*</div>'
                      r'<button type="button" data-replay="1">replay</button><span class="gap"></span>', strip, re.S)
-    assert re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', strip) == PATH_KEYS
+    assert re.findall(r'<span class="key[^"]*"><i[^>]*></i>([^<]+)</span>', strip) == PATH_KEYS
     assert "jd-legend" not in journey
 
 
@@ -767,7 +767,7 @@ def test_the_script_says_a_queued_job_has_not_started_yet(tmp_path: Path) -> Non
 
 
 def _keys(markup: str) -> list[str]:
-    return re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', markup)
+    return re.findall(r'<span class="key[^"]*"><i[^>]*></i>([^<]+)</span>', markup)
 
 
 def _chart_keys(markup: str) -> list[str]:
@@ -2049,3 +2049,264 @@ def test_on_a_phone_live_run_stacks_task_plan_sub_agents_then_tiles_two_by_two(t
     for width, lr in found.items():
         assert lr["head"] < lr["plan"] < lr["agents"] < lr["tiles"], (width, lr)
         assert (lr["xs"], lr["ys"]) == (2, 2), (width, lr)
+
+
+def _fit(box_width: int) -> int:
+    return min(max(box_width // 4, 56), 250) * 4
+
+
+REPLAY = '<button type="button" data-replay="1">replay</button>'
+
+
+def _ctl(markup: str) -> str:
+    return re.search(r'<div class="jd-ctl">.*</div></section>$', _journey(markup), re.S).group(0)
+
+
+def _end_span(markup: str) -> tuple[str, str] | None:
+    match = re.search(r'<div class="jd-cap[^"]*"[^>]*><span class="end" style="--m:([^"]*)">([^<]*)</span>', markup)
+    return match and match.groups()
+
+
+@needs_node
+@pytest.mark.parametrize("kind", ["running", "shipped", "stopped"])
+def test_both_renders_hold_the_same_journey_controls_with_an_end_note_for_ended_tickets(tmp_path: Path, kind: str) -> None:
+    views = _both(tmp_path, _with_shipped(_snapshot(tmp_path)), ADDRESS[kind])
+    ctls = {render: _ctl(markup) for render, markup in views.items()}
+    assert ctls["server"] == ctls["script"], ctls
+    for render, markup in views.items():
+        notes = re.findall(r'<span class="endnote" style="--m:([^"]*)">([^<]*)</span>', ctls[render])
+        end = _end_span(markup)
+        if kind in LIVE:
+            assert end is None and notes == [], (render, notes)
+        else:
+            assert notes == [end], (render, notes, end)
+            after = REPLAY if kind == "shipped" else "</div>"
+            assert after + '<span class="endnote"' in ctls[render], (render, ctls[render])
+        assert "tap a step for its reason" in _journey(markup), render
+
+
+def _media_harness(phone: bool) -> str:
+    """The page harness with the phone query answered, a laid-out box, and scrollIntoView counted per click."""
+    swaps = {
+        "global.window = global;": (
+            "global.window = global;\n"
+            f"global.matchMedia = q => ({{matches: {json.dumps(phone)} && q === {json.dumps(ticket_detail.PHONE)}, media: q,"
+            " addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}});\n"
+            "global.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };\n"
+            "global.scrolledIntoView = 0;"),
+        "  scrollIntoView() {}": (
+            "  scrollIntoView() { global.scrolledIntoView += 1; }\n"
+            "  get clientWidth() { return 327; }\n"
+            "  getBoundingClientRect() { return {x: 0, y: 0, left: 0, top: 0, right: 327, bottom: 240, width: 327, height: 240}; }"),
+        "const node = pick(arg);": "const node = pick(arg); const scrolled = global.scrolledIntoView;",
+        "prevented: fire(node, 'click').defaultPrevented});":
+            "prevented: fire(node, 'click').defaultPrevented, scrolls: global.scrolledIntoView - scrolled});",
+    }
+    harness = HARNESS
+    for old, new in swaps.items():
+        assert harness.count(old) == 1, old
+        harness = harness.replace(old, new)
+    return harness
+
+
+@needs_node
+def test_on_a_phone_picking_a_bar_selects_it_and_leaves_the_run_log_where_it_is(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = LIVE["running"][0]
+    visit = _review(snapshot)["flow"]["visits"][2]
+    label = html.unescape(re.search(r'<ol class="journey">.*?data-visit="2"[^>]*aria-label="([^"]*)"',
+                                    _ticket_server(snapshot, address), re.S).group(1))
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    found = {}
+    for phone in (False, True):
+        found[phone] = run_harness(tmp_path / ("phone" if phone else "desktop"), _media_harness(phone), script, snapshot,
+                                   "ticket", TICKET_IDS, [["click", {"attr": {"data-visit": "2", "aria-label": label}}]],
+                                   "#t=" + _quote(address), tickets_json(snapshot))
+    view = found[True]["html"]["ticketview"]
+    for cls in ("runlog", "journey"):
+        assert [i for i, _, p in _rows(view, cls) if p == "true"] == ["2"], cls
+    caption = _caption(view)
+    assert f"|{visit['state']}|" in caption and f"|{visit['who']}|" in caption, caption
+    assert f"|took {duration(visit['duration_seconds'])}|" in caption, caption
+    scrolls = {phone: out["steps"][0]["scrolls"] for phone, out in found.items()}
+    assert scrolls[False] > 0, "a desktop bar pick scrolls its log row into view"
+    assert scrolls[True] == 0, "a phone bar pick leaves the run log where it is"
+
+
+JOURNEY_FIT = r"""
+(async () => {
+  await new Promise(r => setTimeout(r, 300));
+  const sec = document.querySelector('article.ticketpage [data-sec=journey]');
+  const canvas = sec.querySelector('.jd-box canvas.jd-journey');
+  const box = canvas.closest('.jd-box');
+  const ctl = sec.querySelector('.jd-ctl');
+  const shown = n => n.offsetParent !== null;
+  const end = sec.querySelector('.jd-cap .end');
+  const note = ctl.querySelector('.endnote');
+  return {canvas: [canvas.width, canvas.height], css: canvas.getBoundingClientRect().width,
+          box: box.clientWidth, boxScroll: box.scrollWidth,
+          axis: [...ctl.querySelectorAll('.axis')].some(shown),
+          hits: [...new Set([...sec.querySelectorAll('ol.journey button[data-visit]')].map(b => b.offsetHeight))],
+          endnote: note && {shown: shown(note), text: note.textContent, style: note.getAttribute('style')},
+          end: end && {shown: true, text: end.textContent, style: end.getAttribute('style')},
+          capShown: [...sec.querySelectorAll('.jd-cap .idx, .jd-cap .note, .jd-cap .end')]
+            .filter(n => getComputedStyle(n).display !== 'none').map(n => n.className),
+          subtitle: sec.querySelector('h2').innerText, page: document.documentElement.scrollWidth};
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_on_a_phone_the_journey_fits_its_box_with_no_axis_and_an_end_note(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    found = {}
+    try:
+        for kind in ("running", "shipped", "stopped"):
+            for width in (375, 320, 1440):
+                _ticket_at(chrome, base, ADDRESS[kind], width)
+                _wait(chrome, _journey_drawn("article.ticketpage"))
+                found[kind, width] = chrome.run(JOURNEY_FIT)
+    finally:
+        chrome.close()
+        server.shutdown()
+    for (kind, width), fit in found.items():
+        at = (kind, width, fit)
+        if width < 700:
+            assert fit["canvas"] == [_fit(fit["box"]), 240], at
+            assert fit["css"] <= fit["box"] == fit["boxScroll"], at
+            assert not fit["axis"], at
+            assert fit["hits"] == [220], at
+            assert fit["capShown"] == [], at
+            assert "tap a step for its reason" in fit["subtitle"] and "pick a step" not in fit["subtitle"], at
+            assert fit["page"] == width, at
+        else:
+            assert fit["canvas"] == [1000, 336] and fit["axis"], at
+            assert "pick a step for its reason" in fit["subtitle"] and "tap a step" not in fit["subtitle"], at
+        if kind in LIVE:
+            assert fit["endnote"] is None, at
+        else:
+            assert fit["endnote"] == {**fit["end"], "shown": width < 700}, at
+
+
+TAP_AT = r"""
+(i => {
+  const b = document.querySelector(`article.ticketpage ol.journey button[data-visit="${i}"]`);
+  b.closest('.jd-box').scrollIntoView({block: 'center'});
+  window.oldTicket = document.querySelector('article.ticketpage');
+  const r = b.getBoundingClientRect();
+  return {x: r.x + r.width / 2, y: r.y + r.height / 2, scrollY: window.scrollY};
+})"""
+
+TAPPED = r"""
+(async () => {
+  await new Promise(r => setTimeout(r, 300));
+  const art = document.querySelector('article.ticketpage');
+  const sec = art.querySelector('[data-sec=journey]');
+  const canvas = sec.querySelector('canvas.jd-journey');
+  const text = s => (n => n && n.textContent)(sec.querySelector('.jd-cap ' + s));
+  return {caption: {st: text('.st'), who: text('.who'), dur: text('.dur')},
+          log: [...art.querySelectorAll('.runlog [aria-pressed=true]')].map(b => b.dataset.visit),
+          bars: [...art.querySelectorAll('ol.journey [aria-pressed=true]')].map(b => b.dataset.visit),
+          buttons: [...sec.querySelectorAll('.jd-ctl button')].filter(b => b.offsetParent !== null).map(b => b.textContent),
+          canvas: [canvas.width, canvas.height], box: canvas.closest('.jd-box').clientWidth, scrollY: window.scrollY};
+})()"""
+
+TAPS = {"running": ["1", "2"], "shipped": ["1"], "stopped": ["0"]}
+
+
+def _tap(chrome: _Chrome, visit: str) -> float:
+    at = chrome.run(f"{TAP_AT}({json.dumps(visit)})")
+    chrome.send("Input.dispatchTouchEvent", chrome.session, type="touchStart", touchPoints=[{"x": at["x"], "y": at["y"]}])
+    chrome.send("Input.dispatchTouchEvent", chrome.session, type="touchEnd", touchPoints=[])
+    return at["scrollY"]
+
+
+def _picked(visit: dict) -> dict:
+    took = visit["duration_seconds"]
+    return {"st": visit["state"], "who": visit["who"], "dur": "—" if took is None else f"took {duration(took)}"}
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+@pytest.mark.parametrize("kind", TAPS)
+def test_on_a_phone_a_tap_picks_a_step_in_place_before_and_after_a_rebuild(tmp_path: Path, kind: str) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    visits = (_review(snapshot)["flow"] if kind in LIVE else snapshot[RECORDS][ADDRESS[kind]])["visits"]
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    taps = []
+    try:
+        chrome.send("Emulation.setTouchEmulationEnabled", chrome.session, enabled=True, maxTouchPoints=1)
+        if kind not in LIVE:
+            records.set()
+        _ticket_at(chrome, base, ADDRESS[kind], 375)
+        _wait(chrome, _journey_drawn("article.ticketpage"))
+        for n, visit in enumerate(TAPS[kind]):
+            if n:
+                records.set()
+                chrome.wait_for("!window.oldTicket.isConnected", "the records rebuild")
+                _wait(chrome, _journey_drawn("article.ticketpage"))
+            before = _tap(chrome, visit)
+            taps.append((visit, before, chrome.run(TAPPED)))
+    finally:
+        records.set()
+        chrome.close()
+        server.shutdown()
+    assert len(taps) == len(TAPS[kind])
+    replay = [] if kind == "stopped" else ["replay"]
+    for when, (visit, before, tapped) in zip(("first render", "rebuilt"), taps):
+        at = (kind, when, visit, tapped)
+        assert tapped["caption"] == _picked(visits[int(visit)]), at
+        assert tapped["log"] == tapped["bars"] == [visit], at
+        assert tapped["scrollY"] == before, ("the tap leaves the page where it was", at)
+        assert tapped["buttons"] == replay, at
+        assert tapped["canvas"] == [_fit(tapped["box"]), 240], at
+
+
+REFIT = r"""
+(async phone => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const read = () => {
+    const c = document.querySelector('article.ticketpage canvas.jd-journey');
+    const box = c.closest('.jd-box').clientWidth;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let drawn = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] && (d[i] !== 14 || d[i + 1] !== 14 || d[i + 2] !== 20)) drawn++;
+    return {canvas: [c.width, c.height], box, drawn};
+  };
+  const fits = g => g.drawn > 0 && g.canvas[0] === (phone ? Math.min(Math.max(Math.floor(g.box / 4), 56), 250) * 4 : 1000);
+  await sleep(100);
+  let got = read();
+  for (let t = 0; t < 60 && !fits(got); t++) { await sleep(50); got = read(); }
+  return got;
+})"""
+
+RESIZES = [(320, 800, True), (667, 375, True), (1280, 800, False)]
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_under_reduced_motion_a_resize_refits_and_repaints_the_journey(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    found = {}
+    try:
+        chrome.send("Emulation.setEmulatedMedia", chrome.session,
+                    features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
+        for kind in ("running", "shipped", "stopped"):
+            _ticket_at(chrome, base, ADDRESS[kind], 375)
+            _wait(chrome, _journey_drawn("article.ticketpage"))
+            found[kind, 375, 800] = chrome.run(f"{REFIT}(true)")
+            for width, height, mobile in RESIZES:
+                chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=width, height=height,
+                            deviceScaleFactor=1, mobile=mobile)
+                found[kind, width, height] = chrome.run(f"{REFIT}({json.dumps(width < 700)})")
+    finally:
+        chrome.close()
+        server.shutdown()
+    for (kind, width, height), got in found.items():
+        want = [_fit(got["box"]), 240] if width < 700 else [1000, 336]
+        assert got["canvas"] == want, (kind, width, height, got)
+        assert got["drawn"] > 0, ("the refit canvas is painted", kind, width, height, got)
