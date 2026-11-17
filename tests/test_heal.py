@@ -524,6 +524,22 @@ def test_a_version_update_that_never_lands_backs_off_and_escalates(tmp_path: Pat
     assert len(escalations) == 1 and f"escalate {POLLER} (backoff: 3 restarts in 30m)" in escalations[0]
 
 
+def test_updates_toward_a_moving_checkout_that_never_land_back_off_and_escalate(
+    tmp_path: Path,
+) -> None:
+    runs = Runs()
+    posts = Posts()
+    for step in range(6):
+        run_heal(tmp_path, moved(COMMITS[0], COMMITS[step + 1]), now=NOW + step * 120,
+                 runs=runs, posts=posts)
+    assert len(runs.calls) == 4
+    assert f"2027-01-15T08:08:00Z self-heal: skip {POLLER} (backoff: 3 restarts in 30m " \
+        f"(stale code: running {COMMITS[0]}, checkout {COMMITS[5]}))" in log_lines(tmp_path)
+    (_, _, body), = posts.calls
+    assert body["components"][0]["reason"] == "backoff: 3 restarts in 30m"
+    assert len(saved(tmp_path)[POLLER]["attempts"]) == 3
+
+
 def test_failed_stale_restarts_count_even_toward_new_commits(tmp_path: Path) -> None:
     runs = Runs(code=1)
     posts = Posts()

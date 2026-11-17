@@ -34,11 +34,11 @@ Per component (its health label), in order:
    checkout): restart once idle. The Linear listener is busy while a
    delivery is under REQUEST_DEADLINE_SECONDS old; the poller (at its cycle
    boundary) and a waiter (outside a claim) stop at a safe point themselves.
-5. Backoff: a restart that moves a component onto a new checkout commit is
-   a version update and does not use the budget. Down restarts, failed
-   restart commands, and repeat restarts toward a commit the component did
-   not reach get at most MAX_ATTEMPTS per WINDOW_SECONDS, then are skipped
-   until the oldest leaves the window.
+5. Backoff: a successful stale-code restart is a version update. It does
+   not use the budget when the component was seen running the commit of
+   its previous update; otherwise it counts. Down restarts, failed restart
+   commands, and counted updates get at most MAX_ATTEMPTS per
+   WINDOW_SECONDS, then are skipped until the oldest leaves the window.
 6. Escalation, once per component per window: the backoff tripped, the
    restart command failed MAX_ATTEMPTS times, or the component flaps
    (FLAP_CHANGES process changes in the window that self-heal did not
@@ -204,8 +204,12 @@ def _restarts(key: KeyState) -> list[float]:
 
 def observe(report: Mapping, states: dict[str, KeyState], now: float) -> None:
     """Record each component's process (pid, started_at); a change that no
-    self-heal restart since the last look explains counts toward flapping."""
+    self-heal restart since the last look explains counts toward flapping.
+    A component seen running its pending update target clears it."""
     for item in report.get("components") or ():
+        landed = states.get(item.get("label"))
+        if landed is not None and item.get("version") == landed.target:
+            landed.target = None
         if item.get("pid") is None:
             continue
         key = states.setdefault(item["label"], KeyState())
@@ -309,9 +313,10 @@ def _record_restart(key: KeyState, action: Action, version: str, code: int, now:
     key.restarted_at = now
     if code != 0:
         key.failures = _recent(key.failures, now) + [now]
-    elif action.state != health.DOWN and version != key.target:
-        key.target = version
-        return
+    elif action.state != health.DOWN:
+        pending, key.target = key.target, version
+        if pending is None:
+            return
     key.attempts = _recent(key.attempts, now) + [now]
 
 
