@@ -65,16 +65,17 @@ with `r"""` and a newline) and with nothing in `CSS` (`"""\`).
 The golden tests in `tests/golden/` pin every served byte for three snapshots,
 one file per page (#633). Each page splits into its `<style>`, its `<script>`,
 its `<main>` and the chrome around them (`tests/golden/pages.py`). A page's
-file pins its `<main>` and the CSS, script and placeholder values its module
-owns: `test_lanes_golden.py` (`index.html`), `test_tickets_golden.py`
+file pins its `<main>`, its chrome and the CSS, script and placeholder values
+its module owns: `test_lanes_golden.py` (`index.html`), `test_tickets_golden.py`
 (`job.html`, with `ticket_detail.py`), `test_activity_golden.py`,
 `test_efficiency_golden.py` (with the telemetry CSS and script) and
 `test_system_golden.py` (`health.html`). `test_shell_golden.py` pins the
-chrome of every page, the `common.py` and `shell.py` parts, the served order
-of the parts and how `page_script` fills its placeholders. A change that
-alters a page's bytes on purpose records that page's file again, for example
-`python -m tests.golden.test_lanes_golden`. A change to the chrome, a shared
-part or the served order records `python -m tests.golden.test_shell_golden`.
+`common.py` and `shell.py` parts, the served order of the parts and how
+`page_script` fills its placeholders, and no page's rendered bytes. A change
+that alters a page's bytes on purpose records that page's file again, for
+example `python -m tests.golden.test_lanes_golden`. A change to the chrome of
+every page records each page's file. A change to a shared part or the served
+order records `python -m tests.golden.test_shell_golden`.
 
 ## Shared files
 

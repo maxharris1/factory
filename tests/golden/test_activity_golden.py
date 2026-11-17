@@ -11,8 +11,11 @@ GOLDEN = {
     "activity.CSS": "51ad4744666673c5e668ad042e11e65f48ace480ff85991b4436a256ba57e6f9",
     "activity.SCRIPT": "06664951616bf8def28a5630e7ddab5dd2f1194115069e5ca72155f82121b9aa",
     "seeded/main": "d0fcff172911a1d87399ad0b6b83791c1c71fdb8fafb31e8f198ddc35ae3f280",
+    "seeded/chrome": "ca00a1fa1253bba2f40a75827c4b893c8906d4e236e54920a1d611ce6d35b5f3",
     "hostile/main": "81ed6c31be92f082a69a69f25504cb2823b89d987324b7fbcee14a6f1817b59b",
+    "hostile/chrome": "8ee30fef2e5d928b38a300fa9f58d374aa5f08c7032faea0ef02bca188698231",
     "empty/main": "5ae29a1d33e19d8e1327d638b05372532e97d29662bbc2d5db039d1fa5882e12",
+    "empty/chrome": "94fd064fe383db5bd30b7ffae462111f385939940ab21804f6fb59170cd9c6bd",
 }
 
 

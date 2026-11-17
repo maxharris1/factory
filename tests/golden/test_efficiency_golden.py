@@ -14,8 +14,11 @@ GOLDEN = {
     "TELEMETRY_CSS": "d411c22b93b0b403263b7f5c47b79cb083a294188188359631aea4758055e523",
     "__TELEMETRY__": "46282b20d23c15d3b06e6aaee9f34d3305a8f3285c53f1913fb0933df19d7f9f",
     "seeded/main": "30ef102e2a8a354abe4812ad8b6ffb1c0711dd6ffa2942796f5bd3be275600e6",
+    "seeded/chrome": "c26f7b3a41c71644f96b33d8384494a9fe81dd78db216aed69a278b8655f71bc",
     "hostile/main": "30ef102e2a8a354abe4812ad8b6ffb1c0711dd6ffa2942796f5bd3be275600e6",
+    "hostile/chrome": "e76657c6e62954fdaa26519a0dfe79b203e040cf187fbe23ae5bfb6b2921ae0e",
     "empty/main": "5b7a908edc00d44b70fd121a7bb925b4cac66a443d3d2ef75fb8ff8c141a0202",
+    "empty/chrome": "0e87ae7051e3c1a551a9309768b9f3b189c3becfdd4d821a5b6fa4f4b6feb9d5",
 }
 
 

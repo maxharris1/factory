@@ -112,7 +112,9 @@ def substitutions(chart: dict | None) -> dict[str, str]:
 def page_digests(name: str, assets: dict[str, str], root: Path) -> dict[str, str]:
     found = {key: sha(text) for key, text in assets.items()}
     for case, pages in served(root).items():
-        found[f"{case}/main"] = sha(split(pages[name])["main"])
+        parts = split(pages[name])
+        found[f"{case}/main"] = sha(parts["main"])
+        found[f"{case}/chrome"] = sha(parts["chrome"])
     return found
 
 

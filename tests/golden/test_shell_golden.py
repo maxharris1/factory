@@ -12,7 +12,7 @@ from lib.dashboard_pages import (
     activity, common, efficiency, lanes, shell, system, ticket_detail, tickets,
 )
 from tests.golden.pages import (
-    PAGE_FILES, record, render, served, sha, snapshots, split, substitutions,
+    PAGE_FILES, record, render, sha, snapshots, split, substitutions,
 )
 
 FACADE = Path(__file__).resolve().parents[2] / "lib" / "dashboard_page.py"
@@ -49,21 +49,6 @@ GOLDEN = {
     "__SHELL__": "64254ccf3c3532c0494fcc6af489cca2abd6b66d4cc38c6ce50513258a795a3d",
     "__POLL_MS__": "9f69998560dcfd8016442e0a32e959191df095817a164ce844c64ec5a8b0cc1b",
     "__FONTS__": "c0fa48bc2983db78f449c669c8b225684b4b09de6cfcab610d8eb98a9463cfd6",
-    "seeded/index.html/chrome": "0a8ffabd85bf57b1c7dea9a499df231e862f995d29134036edbcbdc286125e3b",
-    "seeded/job.html/chrome": "0eb603610142b4c6d93f15c6076bb69b60dec58b6429c64fb6d7c7074d7ad83f",
-    "seeded/activity.html/chrome": "ca00a1fa1253bba2f40a75827c4b893c8906d4e236e54920a1d611ce6d35b5f3",
-    "seeded/efficiency.html/chrome": "c26f7b3a41c71644f96b33d8384494a9fe81dd78db216aed69a278b8655f71bc",
-    "seeded/health.html/chrome": "87aa45406cfb21e3a8b55b80a8449a67fdc8cb50931240d8c583eac2d4338dd6",
-    "hostile/index.html/chrome": "5a734816fa9563c8f243b29fb5c071cd4bbebf4e90d47e8c1adeaf268ec65799",
-    "hostile/job.html/chrome": "85226d27bc97bf6944c88f6af626bf3495c9ad6a79c1b5ee9a2434a7559b435b",
-    "hostile/activity.html/chrome": "8ee30fef2e5d928b38a300fa9f58d374aa5f08c7032faea0ef02bca188698231",
-    "hostile/efficiency.html/chrome": "e76657c6e62954fdaa26519a0dfe79b203e040cf187fbe23ae5bfb6b2921ae0e",
-    "hostile/health.html/chrome": "f998539f4f098ea9855764ebdfb8d8d1b54a4cc426ca421f260ba7455b96f41b",
-    "empty/index.html/chrome": "5874f90e87b3ee61e41b0649b02623df2b1d87590d31b29bb1efe68f889b2f9f",
-    "empty/job.html/chrome": "78c6b2bfe6a8a3a39cdbe5dcbce2670b5eb730f502d2a3a8cc409d937d955ef7",
-    "empty/activity.html/chrome": "94fd064fe383db5bd30b7ffae462111f385939940ab21804f6fb59170cd9c6bd",
-    "empty/efficiency.html/chrome": "0e87ae7051e3c1a551a9309768b9f3b189c3becfdd4d821a5b6fa4f4b6feb9d5",
-    "empty/health.html/chrome": "154d0c1de17b6110f3401c6a987db977e8f152fb96902d5c94308e9ecfd4c03a",
 }
 
 NAMES = (
@@ -97,9 +82,6 @@ def digests(root: Path) -> dict[str, str]:
     found["PX_SCRIPT"] = sha(page.PX_SCRIPT)
     values = substitutions(None)
     found.update({name: sha(values[name]) for name in SHELL_SUBSTITUTIONS})
-    for case, pages in served(root).items():
-        for name, html in pages.items():
-            found[f"{case}/{name}/chrome"] = sha(split(html)["chrome"])
     return found
 
 
@@ -125,6 +107,14 @@ def test_every_part_and_substitution_is_pinned_by_a_golden_file() -> None:
     owned = {key(module, attr) for module, attr in CSS_ORDER + SCRIPT_ORDER}
     owned |= set(substitutions(None)) | {"TELEMETRY_CSS", "PX_SCRIPT"}
     assert owned <= pinned
+
+
+def test_each_page_pins_its_rendered_digests_in_its_own_file(site) -> None:
+    assert not [key for key in GOLDEN for case in site if key.startswith(f"{case}/")]
+    for stem in PAGE_FILES.values():
+        golden = importlib.import_module(f"tests.golden.{stem}").GOLDEN
+        for case in site:
+            assert {f"{case}/main", f"{case}/chrome"} <= set(golden), (stem, case)
 
 
 def test_each_placeholder_occurs_in_the_script_once() -> None:
