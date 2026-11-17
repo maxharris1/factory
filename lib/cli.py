@@ -51,7 +51,7 @@ from lib.eval_report import (
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.grok_delivery import GrokDeliveryError, NoGrokWebhook, WebhookGrokDelivery
 from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hold import MergeUpdate
@@ -1005,7 +1005,7 @@ def _runtime(
         and not config.trusted_linear_users
     ):
         raise ValueError("trusted_linear_users is required for Linear polling")
-    if config.grok is None:
+    if config.grok is None and any(project.grok_webhook for project in config.projects):
         raise ValueError("grok webhook env names are required for polling")
     path = _db_path(db_path)
     queue = (
@@ -1019,14 +1019,17 @@ def _runtime(
     }
     if create and not any(trusted.values()):
         trusted["github"]["init-db"] = frozenset({"init-db"})
-    cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
+    cleared: list[str] = []
+    delivery: WebhookGrokDelivery | NoGrokWebhook = NoGrokWebhook()
+    if config.grok is not None:
+        cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
+        delivery = WebhookGrokDelivery(
+            url_env=config.grok.webhook_url_env,
+            key_env=config.grok.webhook_key_env,
+            auth_env=config.grok.webhook_auth_env,
+        )
     if config.linear is not None:
         cleared.append(config.linear.api_key_env)
-    delivery = WebhookGrokDelivery(
-        url_env=config.grok.webhook_url_env,
-        key_env=config.grok.webhook_key_env,
-        auth_env=config.grok.webhook_auth_env,
-    )
     t8 = T8Hook()
     source = LivePollSource(
         config,
@@ -1052,6 +1055,7 @@ def _runtime(
         trusted_logins=trusted,
         review_actions=source.review_actions_by_repo(),
         grok_delivery=delivery,
+        projects=config.projects,
         hooks=(T7Hook(), t8),
         devices=devices,
         job_states=config.job_states,

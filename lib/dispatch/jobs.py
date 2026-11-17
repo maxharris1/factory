@@ -269,6 +269,7 @@ class JobsMixin:
             self._t6(job)
         self._ensure_all_stuck_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
+        self._drain_driver_inbox()
 
     def _close_abandoned_jobs(self) -> None:
         """#109: a queued job on an abandoned ticket never starts.
