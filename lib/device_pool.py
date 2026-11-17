@@ -856,7 +856,8 @@ def link_drop_detail(device: str, minutes: str, tag: str) -> str:
 
 
 def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
-    """#218: the device job_id's latest run lost its link to, or None."""
+    """#218: the device job_id's latest run lost its link to, or None.
+    #662: a run lost with its unreachable device (device-lost) counts too."""
     table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
     ).fetchone()
@@ -865,14 +866,14 @@ def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
     row = connection.execute(
         """
         SELECT event, detail FROM job_events
-        WHERE job_id = ? AND event IN ('run-died', 'run-exited', 'link-drop')
+        WHERE job_id = ? AND event IN ('run-died', 'run-exited', 'link-drop', 'device-lost')
         ORDER BY id DESC LIMIT 1
         """,
         (job_id,),
     ).fetchone()
-    if row is None or row[0] != "link-drop":
+    if row is None or row[0] not in ("link-drop", "device-lost"):
         return None
-    return str(row[1]).split(": no certain answer for ", 1)[0]
+    return str(row[1]).split(": ", 1)[0]
 
 
 def _used(

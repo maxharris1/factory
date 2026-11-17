@@ -408,6 +408,44 @@ def test_a_lost_job_is_requeued_as_the_same_row_after_its_backoff_on_another_dev
     assert (again.job_id, again.device) == (job_id, "box"), "the lost device is backed off"
 
 
+def test_a_lost_jobs_requeue_avoids_its_device_after_the_device_backoff_ends(
+    tmp_path: Path,
+) -> None:
+    poller = Poller(tmp_path, box=True, box_slots=1, pc=True, check=UNREACHABLE)
+    job_id, lost_at = lost_review(poller)
+    poll(poller, lost_at + BACKOFF[0])
+    assert poller.row(job_id)["state"] == "queued"
+    poller.now[0] = lost_at + 300
+    assert poller.pool.used().get("box", 0) == 0
+    again = poller.claim()
+    assert (again.job_id, again.device) == (job_id, "box"), "the lost device is avoided"
+
+
+@pytest.mark.parametrize(
+    ("states", "polls"),
+    [
+        (JobStateConfig(release_claimed_seconds=900), (0, 600, 660, 960)),
+        (JobStateConfig(unreachable_lost_seconds=60), (0, 60, 120, 360)),
+    ],
+)
+def test_a_claim_that_never_started_is_released_free_not_lost(
+    tmp_path: Path, states: JobStateConfig, polls: tuple[int, ...]
+) -> None:
+    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=states)
+    job_id = poller.review()
+    for _cycle in range(3):
+        assert poller.claim().job_id == job_id
+        for seconds in polls:
+            poller.at(seconds)
+        assert poller.row(job_id)["state"] == "queued", "the claim is released"
+        polls = tuple(seconds + polls[-1] + 1 for seconds in polls)
+    assert "device-lost" not in names(poller, job_id)
+    assert "requeued-link-drop" not in names(poller, job_id)
+    row = poller.row(job_id)
+    assert (row["attempt"], row["generation"]) == (1, 1)
+    assert retries(poller) == [] and not_stuck(poller)
+
+
 def test_a_late_end_from_the_lost_run_never_touches_the_next_claim(tmp_path: Path) -> None:
     poller = Poller(tmp_path, box=True, box_slots=1, pc=True, check=UNREACHABLE)
     job_id = poller.review(timeout=TIMEOUT)

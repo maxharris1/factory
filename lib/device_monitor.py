@@ -26,9 +26,11 @@ first failed probe after a good one starts the device's offline clock; a
 good probe stops it, and a device that holds no slot is forgotten. Once a
 device has failed every probe for `lost_after` seconds (orch.yml
 job_states.unreachable_lost_minutes, 10 by default; `stranded`), each job
-still running on it is handed to `on_lost`: the dispatcher fails it as
+still running on it whose worker started is handed to `on_lost`: the dispatcher fails it as
 lost, moves its slot to device_orphans and backs the device off, and T6
-requeues it under the link-drop budget.
+requeues it under the link-drop budget. A claim that never started its
+worker is left to the claimed and unstarted releases (lib/job_state.py),
+which requeue it without spending a run attempt.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lib.device_pool import DevicePool, HeldSlot, Placement
-from lib.job_state import Liveness, liveness
+from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     GONE,
@@ -210,7 +212,7 @@ class DeviceMonitor:
         if reason is None:
             return
         for slot in slots:
-            if slot.job_state == "running":
+            if slot.job_state == "running" and not never_started(slot.placement):
                 on_lost(slot.placement.job_id, device.name, reason)
                 lost.append(slot.placement.job_id)
 
