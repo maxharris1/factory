@@ -417,16 +417,25 @@ SCRIPT_TICKETS = r"""
     add(page, el('span', 'tk-note', left + ' older not shown · newest first'));
   }
 
+  function tkTier(names, q) {
+    if (!q) return -1;
+    names = names.map(function (n) { return String(n).toLowerCase(); });
+    return names.indexOf(q) >= 0 ? 0
+      : names.some(function (n) { return n.indexOf(q) === 0; }) ? 1
+      : names.some(function (n) { return n.indexOf(q) > 0; }) ? 2 : -1;
+  }
+
   function tkMatches(rows, query) {
-    var q = query.trim().toLowerCase();
+    var q = query.trim().toLowerCase(), qid = q.replace(/^#/, '');
     if (!q) return [];
     var found = [];
     rows.forEach(function (r, i) {
-      var names = [String(r.ticket_id), tileLabel(r), short(r.repo) + '#' + r.ticket_id, ticketOf(r), ticketKey(r)]
-        .map(function (n) { return n.toLowerCase(); });
-      var rank = names.indexOf(q) >= 0 ? 0
-        : names.some(function (n) { return n.indexOf(q) === 0; }) ? 1
-        : names.some(function (n) { return n.indexOf(q) > 0; }) ? 2 : -1;
+      var ids = [r.ticket_id];
+      if (r.source) ids.push(String(r.source).replace(/^#/, ''));
+      if (r.pr) ids.push(r.pr);
+      var id = tkTier(ids, qid);
+      var label = tkTier([tileLabel(r), short(r.repo) + '#' + r.ticket_id, ticketOf(r), ticketKey(r)], q);
+      var rank = id >= 0 ? id : label >= 0 ? 3 + label : -1;
       if (rank >= 0) found.push({rank: rank, at: i, key: ticketKey(r), label: ticketOf(r), href: ticketPageHref(r)});
     });
     found.sort(function (a, b) { return a.rank - b.rank || a.at - b.at; });
@@ -494,7 +503,8 @@ SCRIPT_TICKETS = r"""
     var box = el('div', 'tk-find');
     box.setAttribute('role', 'search');
     add(box, el('label', null, 'Find a ticket')).setAttribute('for', 'find-ticket');
-    var input = add(box, el('input'));
+    var focused = before === document.activeElement;
+    var input = add(box, before || el('input'));
     [['id', 'find-ticket'], ['type', 'text'], ['name', 'ticket'], ['placeholder', 'factory#470'],
      ['autocomplete', 'off'], ['spellcheck', 'false'], ['role', 'combobox'], ['aria-autocomplete', 'list'],
      ['aria-controls', 'find-ticket-list'], ['aria-expanded', 'false']].forEach(function (a) {
@@ -521,9 +531,9 @@ SCRIPT_TICKETS = r"""
       tkFind.active = null;
       tkFindDraw();
     });
-    if (before && before.value) {
-      input.value = tkFind.query = before.value;
-      tkFind.open = before === document.activeElement;
+    if (input.value) {
+      tkFind.query = input.value;
+      tkFind.open = focused;
     }
     tkFind.box = box;
     tkFind.input = input;

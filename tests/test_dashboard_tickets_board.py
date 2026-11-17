@@ -1527,3 +1527,99 @@ def test_moving_focus_out_of_the_box_closes_the_list(tmp_path: Path, snapshot: d
     assert _expanded(inside) == ("true", False)
     assert _expanded(outside) == ("false", True)
     assert [step for step in steps if "where" in step] == [{"where": None, "value": "1"}]
+
+
+def _collected(tmp_path: Path, ids: list[str], *, owner: str = "maxharris1", source: str | None = None) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    repo = f"{owner}/factory"
+    with sqlite3.connect(db) as connection:
+        for ident in ids:
+            add_ticket(connection, repo, ident, state="intake")
+        if source:
+            connection.execute("INSERT INTO ticket_sources (repo, ticket_id, source, pr_number) VALUES (?, ?, ?, ?)",
+                               (repo, ids[-1], source, ids[-1]))
+    return collect_snapshot(db, tmp_path / "poller.log", now=NOW)
+
+
+@layout.needs_node
+def test_an_id_fragment_is_not_crowded_out_by_a_digit_in_the_owner(tmp_path: Path) -> None:
+    ids = ["200", "202", "203", "204", "205", "206", "207", "208", "209", "291"]
+    snap = _collected(tmp_path, ids)
+    found = _searched(tmp_path / "run", snap, "1", ["Enter"])
+    labels = [label for label, _, _ in _options(found["snaps"][0])]
+    assert labels[0] == "factory#291" and len(labels) == 8
+    assert found["where"] == _page(snap, "factory#291")
+
+
+@layout.needs_node
+@pytest.mark.parametrize("query", ["12", "#12"])
+def test_an_exact_source_issue_id_ranks_before_id_prefixes(tmp_path: Path, query: str) -> None:
+    snap = _collected(tmp_path, [str(i) for i in range(120, 128)] + ["999"], source="#12")
+    found = _searched(tmp_path / "run", snap, query, ["Enter"])
+    labels = [label for label, _, _ in _options(found["snaps"][0])]
+    assert labels[0] == "factory#12 (PR #999)"
+    (row,) = [row for row in snap["tickets"] if row["ticket_id"] == "999"]
+    assert found["where"] == ticket_page_href(row)
+
+
+SHIFT = 8
+
+
+def _press_key(chrome, key: str, code: int, modifiers: int = 0) -> None:
+    for kind in ("rawKeyDown", "keyUp"):
+        chrome.send("Input.dispatchKeyEvent", chrome.session, type=kind, key=key, code=key,
+                    windowsVirtualKeyCode=code, modifiers=modifiers)
+
+
+FIELD_STATE = """(() => {
+  const f = document.getElementById('find-ticket');
+  return {value: f.value, selection: [f.selectionStart, f.selectionEnd], focused: document.activeElement === f,
+          options: [...document.querySelectorAll('#find-ticket-list [role=option]')].map(li => li.textContent)};
+})()"""
+
+
+def test_the_first_render_keeps_a_keyboard_selection_in_the_find_box(tmp_path: Path, snapshot: dict) -> None:
+    import functools
+    import http.server
+    import threading
+
+    from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
+
+    if CHROME is None:
+        pytest.skip("Chrome is not installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "job.html").write_text(render_pages(snapshot)["job.html"], encoding="utf-8")
+    (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    gate = threading.Event()
+
+    class Held(QuietHandler):
+        def do_GET(self) -> None:
+            if self.path.endswith("/status.json"):
+                gate.wait(30)
+            super().do_GET()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Held, directory=str(site)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        chrome.send("Page.navigate", chrome.session, url=f"http://127.0.0.1:{server.server_address[1]}/job.html")
+        chrome.wait_for("document.readyState !== 'loading' && !!document.getElementById('find-ticket')", "find box")
+        chrome.run("window.serverList = document.getElementById('find-ticket-list');"
+                   "document.getElementById('find-ticket').focus()")
+        chrome.send("Input.insertText", chrome.session, text="107")
+        _press_key(chrome, "ArrowLeft", 37, SHIFT)
+        held = chrome.run(FIELD_STATE)
+        gate.set()
+        chrome.wait_for("document.getElementById('find-ticket-list') !== window.serverList", "first render")
+        drawn = chrome.run(FIELD_STATE)
+        chrome.send("Input.insertText", chrome.session, text="4")
+        typed = chrome.run(FIELD_STATE)
+    finally:
+        gate.set()
+        chrome.close()
+        server.shutdown()
+    assert held == {"value": "107", "selection": [2, 3], "focused": True, "options": []}
+    assert (drawn["value"], drawn["selection"], drawn["focused"]) == ("107", [2, 3], True)
+    assert typed["value"] == "104" and typed["options"][0] == "cleffy#104"
