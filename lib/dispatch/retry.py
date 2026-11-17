@@ -8,13 +8,16 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal
 
+from lib.device_monitor import retry_stranded
+from lib.device_pool import HEALTH_TABLE
 from lib.dispatch.constants import UPDATE_FAILURES_TO_STOP
 from lib.dispatch.helpers import _comment_link, _queue_state, _scope
 from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import parse_comment
-from lib.queue import Job, JobRequest, _job
+from lib.job_state import requeue_link_drop
+from lib.queue import SLOTS_TABLE, Job, JobRequest, _job
 
 RetryStep = Literal["replay", "ci-fix", "plan", "build", "update"]
 
@@ -149,6 +152,16 @@ class RetryMixin:
                 return outcome, None
             return outcome, row["workflow_state"]
         reason = None if row is None else row["stuck_reason"]
+        now = self.queue.now()
+        lost = self._lose_stranded_job(connection, key, now)
+        if lost is not None:
+            job, detail = lost
+            requeue_link_drop(
+                connection, job.id, now=now, reason=f"retry {comment.id}: {detail}"
+            )
+            return self._record_retry(
+                connection, ticket, comment, reason, job, "queued-retry-stranded"
+            ), None
         if row is None or not row["stuck"]:
             if self._unlanded_plan(connection, ticket) is not None:
                 job = self._replan_in_transaction(connection, ticket, comment)
@@ -248,6 +261,34 @@ class RetryMixin:
             job,
             f"queued-retry-{request.action}",
         ), state
+
+    def _lose_stranded_job(
+        self, connection: sqlite3.Connection, key: tuple[str, str], now: float
+    ) -> tuple[Job, str] | None:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return None
+        row = connection.execute(
+            f"""
+            SELECT jobs.id, slots.device, health.failing_since
+            FROM jobs
+            JOIN {SLOTS_TABLE} AS slots ON slots.job_id = jobs.id
+            LEFT JOIN {HEALTH_TABLE} AS health ON health.device = slots.device
+            WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? AND jobs.recipient != 'grok'
+              AND jobs.action IN ({", ".join("?" for _ in _HARNESS_ACTIONS)})
+              AND jobs.state = 'running'
+            ORDER BY jobs.created_at, jobs.rowid
+            LIMIT 1
+            """,
+            (*key, *_HARNESS_ACTIONS),
+        ).fetchone()
+        device = None if row is None else config.device(str(row["device"]))
+        if device is None or device.local:
+            return None
+        reason = retry_stranded(device, row["failing_since"], now)
+        if reason is None:
+            return None
+        return self._lose_running_job(connection, str(row["id"]), device.name, reason, now)
 
     def _unlanded_plan(
         self, connection: sqlite3.Connection, ticket: TrackedTicket
