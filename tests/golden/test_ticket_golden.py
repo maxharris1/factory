@@ -8,11 +8,11 @@ NAME = page_name(__file__)
 
 GOLDEN = {
     "seeded/main": "4b2657cf26146c0c01158006ab6a5d27092ad026b038f056acf306c4b480069a",
-    "seeded/chrome": "f685630f17a2144f5c12fd36eb2bb484acfcfc6d13d2a47d371cb516608dccb2",
+    "seeded/chrome": "ef3462dca429a13165eb1c3f98fed18bc3638b100fa06913a2e99384db278195",
     "hostile/main": "4b2657cf26146c0c01158006ab6a5d27092ad026b038f056acf306c4b480069a",
-    "hostile/chrome": "f13fabe9af52615cf680199c2802ba15eddb2c71a72034fdd7499f8b23208ea1",
+    "hostile/chrome": "072d99efb8ef289fe7ae15bd3cec6958f6b0d1413b8f18f27bf3089b937a0314",
     "empty/main": "4b2657cf26146c0c01158006ab6a5d27092ad026b038f056acf306c4b480069a",
-    "empty/chrome": "0e08a67d9235d1bb0d5ef3804523ce32bbb2142b50bdb516bfcd9818853ee6c6",
+    "empty/chrome": "c7397800d93e6353e549a56d2ed4b3b7bb3df468993f524f4bfaede5c0ba420c",
 }
 
 

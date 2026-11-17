@@ -12,18 +12,18 @@ GOLDEN = {
     "tickets.CSS": "381084a5f2be20182876d9794216aaa9cbc407e662e2db03d5ce202d9cb8d821",
     "tickets.SCRIPT_TICKETS": "6b6280667c5dab42cbce08fd4c8c1b21e3a94a63e87e34e8afd9cea96e1ead15",
     "ticket_detail.CSS": "98304f26e3acafe1d308c528c2f0b460f08c9c942477255b191b388e5b0db282",
-    "ticket_detail.SCRIPT": "efd3cdd454944e24fe13ee4f8a1130151861f38beb32a2bccb3b7f90a660a487",
+    "ticket_detail.SCRIPT": "713a4c301012a83792e565914da82a16b6ce7bace755129ca84aefc3cf8a5e77",
     "__BOARD__": "cf46429059149151ee84a5d841667bf567b6bc6e51532f4f8815a23addde9fdb",
     "__FLOWMAP__": "cf92e47672a73474f1d5c5fc67a2ac14fc381f2d5f4499c203fc8fa54a575f2c",
     "seeded/__FLOWMAP__": "cf92e47672a73474f1d5c5fc67a2ac14fc381f2d5f4499c203fc8fa54a575f2c",
     "hostile/__FLOWMAP__": "cf92e47672a73474f1d5c5fc67a2ac14fc381f2d5f4499c203fc8fa54a575f2c",
     "empty/__FLOWMAP__": "cf92e47672a73474f1d5c5fc67a2ac14fc381f2d5f4499c203fc8fa54a575f2c",
     "seeded/main": "7f2c6b4708768fb3208c39c0dd3cf8389f8e36c38e92fb6f3abfcbab8a158efc",
-    "seeded/chrome": "f7fbdb4b81985537d0b9b806d2a07da4b102fe1755f187c40e31a8066858318f",
+    "seeded/chrome": "972f0acb0cca6b6cdeb1b32db67b983e0a9b5749d3a6eab0125396afe7e5978e",
     "hostile/main": "7f2c6b4708768fb3208c39c0dd3cf8389f8e36c38e92fb6f3abfcbab8a158efc",
-    "hostile/chrome": "9d4afdf83cd1a61d6c1dfe9d932176bc1f16b189b825af695a60942964822a81",
+    "hostile/chrome": "d95cea09428464cbb3bf64a264f5f75987df8ef82796e04ed0ed1ab1fb0c8040",
     "empty/main": "e36d217e80efb19b357b57a0949ab9f065931c323ae9ab40c99774ec7aa34f38",
-    "empty/chrome": "2e576ea7d76b1582b5aed1b9bc4e6792f74a8379f9d21f33ec84ddca545478a4",
+    "empty/chrome": "21a18a3977ce3719d4e7f1d74f4d7182415256067fd28788c6b88b775cd65da3",
 }
 
 

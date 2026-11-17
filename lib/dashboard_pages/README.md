@@ -17,10 +17,11 @@ Name the module in a ticket's `Touches:` line.
 | Page (nav label) | Module | Holds | Next ticket |
 |---|---|---|---|
 | every page: TopBar, header band, attention strip, status line, nav, PixelStrip | `shell.py` | `_topbar`, `_band`, `_attention_strip`, `status_segments`, `_statusline`, `NAV_PAGES` (the nav), `PAGES` (every written page), `_PAGE_NAMES`, `_PANELS`, `_page`, the `px_*` table and `PX_SCRIPT`; the shell CSS and the "every page" script | none (shared) |
-| every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop) | none (shared) |
+| every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop); `SCRIPT_GITHUB`, the one #563 sign-in (`GH`, `ghPost`, `ghStart`, `ghAuth` for the sign-in row) the board, the ticket page and the settings page share | none (shared) |
 | `index.html` (Lanes) | `lanes.py` | `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
 | `index.html` (CI, after the lanes) | `ci.py` | `_ci_section` (in-flight runs per ticket head and the recent failures, from `ci_runs`; `renderCiRuns` in the script); every github.com link is built from the repo, PR, short head, run and job ids, never a stored URL | none |
 | `health.html` (System) | `system.py` | `_broken` (Broken now, from `broken_items`; hidden when nothing is broken), `_components` (matrix, the per-device list a phone shows instead, and process details, down rows first), `_versions` (the always-present mount holding `_drift` only when a component is behind; otherwise the Components count carries the `drift` anchor), `_log_row` (`_health` beside `_log` in a `sys-row`), `_rules`, `_no_waiter` (inside the always-present `waiters` mount, drawn only when it has rows) | none |
+| `settings.html` (Settings) | `settings.py` | `_settings`: one card per `slots.devices[]` row (local or remote, enabled, slot_max, harnesses, held slots, `drain_state`) with that device's newest `settings.results` (`device_results`); signed in, each card's kept controls (`ST.cards`) POST `/api/settings` `{device, field, expect, value}` and show 202 or the error on that card | none |
 | `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns with Stopped last, Shipped shelf, from `board` and `phase_table`), `_tickets` (the table view); `redirectMoved` in `ticket_detail.py` sends an old `job.html#job-<id>` address for a running or queued job to that job's ticket page | #142, #656 |
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_headroom`, `_rounds`, `_savings`, `_jobs_lifetime` (cost: `rollup_panel` in `lib/dashboard_telemetry.py`); `top_row` and `middle_row` wrap two panels each in an `ef-row` | #144 |
@@ -75,7 +76,7 @@ file pins its `<main>`, its chrome and the CSS, script and placeholder values
 its module owns: `test_lanes_golden.py` (`index.html`), `test_tickets_golden.py`
 (`job.html`, with `ticket_detail.py`), `test_activity_golden.py`,
 `test_efficiency_golden.py` (with the telemetry CSS and script),
-`test_system_golden.py` (`health.html`) and `test_ticket_golden.py`
+`test_system_golden.py` (`health.html`), `test_settings_golden.py` (`settings.html`) and `test_ticket_golden.py`
 (`ticket.html`, its `<main>` and chrome only). `test_shell_golden.py` pins the
 `common.py` and `shell.py` parts, the served order of the parts and how
 `page_script` fills its placeholders, and no page's rendered bytes. A change

@@ -35,11 +35,12 @@ from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _sectio
 from tests.test_dashboard_pixelstrip import _node
 from tests.test_dashboard_lanes import FOLD, Browser, _page_with_status_stub, needs_chrome
 
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "ticket.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "settings.html", "ticket.html")
 SCRIPT_PAGE = {"index.html": "main", "job.html": "job", "activity.html": "activity",
-               "efficiency.html": "efficiency", "health.html": "health", "ticket.html": "ticket"}
+               "efficiency.html": "efficiency", "health.html": "health", "settings.html": "settings",
+               "ticket.html": "ticket"}
 NAV = [("index.html", "Lanes"), ("job.html", "Tickets"), ("activity.html", "Activity"),
-       ("efficiency.html", "Efficiency"), ("health.html", "System")]
+       ("efficiency.html", "Efficiency"), ("health.html", "System"), ("settings.html", "Settings")]
 SHELL = ["caret", "band", "attention-strip", "statusline"]
 # The harness clock starts 3 s after the snapshot; this puts it back, so
 # every ticking age reads as the server wrote it.
@@ -926,7 +927,7 @@ def test_current_item_style_is_the_artboards() -> None:
     assert ".nav a{padding:6px 12px;color:var(--hdr-text-2);text-decoration:none;font:500 14px/1.2 var(--sans)}" in css
 
 
-def test_slots_open_the_ticket_page_and_shell_links_only_name_the_six_pages(base: dict) -> None:
+def test_slots_open_the_ticket_page_and_shell_links_only_name_the_pages(base: dict) -> None:
     pages = render_pages(base)
     codex = next(row for row in base["running"] if row["job"] == "r-codex-")
     assert f'href="{ticket_page_href(codex)}"' in pages["index.html"]
