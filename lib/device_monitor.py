@@ -250,7 +250,6 @@ class DeviceMonitor:
                 forgotten.append(orphan.job_id)
 
     def _stop_local(self, placement: Placement) -> None:
-        """SIGTERM the job's `orch job run`, which stops its whole tree; else its worker."""
         for pid, start in (
             (placement.runner_pid, placement.runner_start),
             (placement.worker_pid, placement.worker_start),

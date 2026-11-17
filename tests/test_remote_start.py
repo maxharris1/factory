@@ -1070,8 +1070,6 @@ def test_disabling_an_answering_device_stops_the_lost_worker_in_the_same_poll(
 
 
 class LocalShell:
-    """The pc's scripts run in a local shell: the real check, stop and launch."""
-
     def run(self, argv, *, timeout: float) -> int:
         return subprocess.run(["sh", "-c", argv[-1]], timeout=timeout).returncode
 
@@ -1110,6 +1108,20 @@ def test_a_launch_still_in_transit_when_its_device_is_disabled_never_starts(
         assert remote.check_worker(monitor.transport, target) == remote.GONE
     finally:
         remote.stop_worker(monitor.transport, target, kill=True)
+
+
+def test_a_check_that_cannot_fence_the_launch_never_says_gone(tmp_path: Path) -> None:
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", TAG)
+    assert target is not None
+    jobs = Path(target.job_dir).parent
+    jobs.mkdir(parents=True)
+    jobs.chmod(0o500)
+    try:
+        assert remote.check_worker(LocalShell(), target) == remote.UNKNOWN
+    finally:
+        jobs.chmod(0o700)
+    assert remote.check_worker(LocalShell(), target) == remote.GONE
 
 
 def test_a_launch_that_got_there_first_keeps_its_orphan_until_it_is_stopped(
