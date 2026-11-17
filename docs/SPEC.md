@@ -176,10 +176,11 @@ stateDiagram-v2
   Review --> Stuck: job dies twice (T6)
   Review --> WaitingOnMax: REVISE with unsat=, or a repeat stop (T3)
   Ship --> Review: head changed and the patch differs (D33-D)
-  Ship --> Merged: ship = merge
-  Ship --> HandedOff: ship = handoff (Max merges, or the Aut0 RfR handoff)
-  Ship --> WaitingExternal: ship = after an approver (Tracy Site)
-  Ship --> AwaitingOk: ship = merge or handoff and the PR is held (hold label or hold.paths)
+  Ship --> Merged: ship = merge, QA covers the head
+  Ship --> HandedOff: ship = handoff (Max merges, or the Aut0 RfR handoff), QA covers the head
+  Ship --> WaitingExternal: ship = after an approver (Tracy Site), QA covers the head
+  Ship --> AwaitingOk: ship = merge or handoff and the PR is held (hold label or hold.paths), QA covers the head
+  Ship --> WaitingOnMax: QA environment fails twice at one head (qa.gate block)
   AwaitingOk --> Merged: approver's OK at the head, or approver removes a label-only hold
   AwaitingOk --> MergeQueue: approver's OK at the head, finish_line merge
   AwaitingOk --> HandedOff: approver's OK at the head, ship = handoff, finish_line ready-for-review
@@ -199,6 +200,7 @@ stateDiagram-v2
   Fixing --> WaitingOnMax: question mid-work
   WaitingOnMax --> Building: answer, same step resumes
   WaitingOnMax --> Fixing: answer, same step resumes
+  WaitingOnMax --> Ship: answer, QA runs again at the same head
   WaitingOnMax --> Review: Max's /go, a planning go or Grok's answers, the paused review resumes
   WaitingOnMax --> Fixing: approver's building go on an unsat= REVISE, fix round (issue #611)
   WaitingOnMax --> Abandoned: Max drops it
@@ -206,7 +208,7 @@ stateDiagram-v2
   HandedOff --> Review: trusted ready at a new head, within the effective cap
   HandedOff --> Fixing: approver's go at the cap, one more round
   HandedOff --> Merged: PR merged (by Factory or by hand)
-  Ship --> MergeQueue: APPROVE, finish_line merge (ship = handoff marks the PR ready and waits here, not HandedOff)
+  Ship --> MergeQueue: APPROVE, finish_line merge (ship = handoff marks the PR ready and waits here, not HandedOff), QA covers the head
   MergeQueue --> Merged: poller squash-merges the queue head (clean, CI green, approval covers the head), or the merge is observed
   MergeQueue --> Updating: PR conflicts with base, update-from-main job queued
   Updating --> MergeQueue: trivial update (each conflict hunk took one side, or both sides in a shared_paths file, nothing else changed), approval carried
@@ -304,6 +306,8 @@ deduplication key.
 | `finish_line: ready-for-review` never auto-merges and never updates from base | T4 hands off as before; TQ acts only while `factory.md` says `finish_line: merge`; `check-config` refuses `ship: merge` with `finish_line: ready-for-review` |
 
 The model (`model/Orchestrator.tla`) checks these as safety invariants only. No liveness property is checked, and none holds by design: the capped to fixing to review loop (each extra round needs Max's own words) and the ship to review loop (a head whose patch differs goes back to review, D33-D) have no bound. `ShipPinnedToCoveredHead` holds because a new head, a REVISE and a decline clear the covered head; `model/fixtures/omit-ship-guard.cfg` drops the guard on ship = merge and must break it.
+
+`ShipNeedsCoveredQa` holds the QA gate (issue #764): a gated ticket reaches a shipped state only at a head whose QA result covers it. QA covers the head when the gate is off or set to `report`, and under `qa.gate: block` only on a QA PASS, a result carried by a trivial update, or a recorded "qa not required". A new head resets the result to none, and a second QA environment failure at one head parks the ticket in WaitingOnMax with ship paused; the answer runs QA again at that head. A merge the factory did not gate counts as a hand merge. `model/fixtures/omit-qa-guard.cfg` drops the QA condition from ship = merge and must break it.
 
 ## 5. Handoff comment format
 
