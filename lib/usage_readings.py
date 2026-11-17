@@ -21,15 +21,17 @@ RESET_HORIZON_SECONDS of now) gives that window an explicit no-reading
 (`used` and `resets_at` None), which replaces any older numbers. A Codex
 reading is observed at its event's own time, so rereading the same event
 never makes it fresher. A window the account's readings, on any of its
-devices, leave out of NOT_ON_PLAN_READINGS distinct source observations in
-a row (fresh readings that report other limits: a null or missing window in
-a reply with limits) is `not on plan`: the plan has no such limit. A Codex
-event read again is the same observation, and any reading that reports the
-window ends the streak. `Session._write` (lib/telemetry.py) stores them in
+devices, leave out of its newest NOT_ON_PLAN_READINGS distinct source
+observations, ordered by source time (fresh readings that report other
+limits: a null or missing window in a reply with limits), is `not on plan`:
+the plan has no such limit. `usage_observations` keeps those observations
+per account and window, whatever order they arrive in. A Codex event read
+again is the same observation, and any reading that reports the window ends
+the streak. `Session._write` (lib/telemetry.py) stores them in
 `usage_readings` in the same transaction as the job's telemetry row, on the
-existing heartbeat flush. A reading is
-keyed by harness, bot (the account's OS user) and device, and an older
-reading never replaces a newer one. Cursor is not tracked.
+existing heartbeat flush. A reading is keyed by harness, bot (the account's
+OS user) and device, and replaces one only when its source time is newer.
+Cursor is not tracked.
 
 `TelemetryUsage` is a `lib.usage.UsageSource` over the table. Its report is
 verified only when both windows are fresh, so routing keeps the existing
@@ -83,6 +85,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 
 ADDED_COLUMNS = {"absent": "INTEGER NOT NULL DEFAULT 0", "source_at": "REAL"}
 
+OBSERVATIONS = "usage_observations"
+OBSERVATIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {OBSERVATIONS} (
+    harness TEXT NOT NULL,
+    bot TEXT NOT NULL,
+    window TEXT NOT NULL,
+    source_at REAL NOT NULL,
+    absent INTEGER NOT NULL,
+    PRIMARY KEY (harness, bot, window, source_at)
+)
+"""
+
 _UPSERT = f"""
 INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id, absent, source_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -93,18 +107,26 @@ ON CONFLICT (harness, bot, device, window) DO UPDATE SET
     job_id = excluded.job_id,
     absent = excluded.absent,
     source_at = excluded.source_at
-WHERE excluded.observed_at > {TABLE}.observed_at
+WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.source_at, {TABLE}.observed_at)
 """
 
-_LATEST = f"""
-SELECT COALESCE(source_at, observed_at) AS source, absent FROM {TABLE}
+_OBSERVE = f"""
+INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
+"""
+
+_NEWEST = f"""
+SELECT source_at, absent FROM {OBSERVATIONS}
 WHERE harness = ? AND bot = ? AND window = ?
-ORDER BY source DESC LIMIT 1
+ORDER BY source_at DESC LIMIT {NOT_ON_PLAN_READINGS}
 """
 
-_INTERRUPT = f"""
-UPDATE {TABLE} SET absent = 1
-WHERE harness = ? AND bot = ? AND window = ? AND COALESCE(source_at, observed_at) > ? AND absent > 1
+_PRUNE = f"""
+DELETE FROM {OBSERVATIONS} WHERE harness = ? AND bot = ? AND window = ? AND source_at < ?
+"""
+
+_MARK = f"""
+UPDATE {TABLE} SET absent = MAX(?, 1) WHERE harness = ? AND bot = ? AND window = ? AND absent > 0
 """
 
 
@@ -124,6 +146,7 @@ def missing(window: str, observed_at: float, absent: int = 0, source_at: float |
 
 def ensure_table(connection: sqlite3.Connection) -> None:
     connection.execute(DDL)
+    connection.execute(OBSERVATIONS_DDL)
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
     for name, kind in ADDED_COLUMNS.items():
         if name in columns:
@@ -261,25 +284,26 @@ def store(
     ensure_table(connection)
     for r in readings:
         source = r.observed_at if r.source_at is None else r.source_at
-        if r.absent:
-            streak = _streak(source, connection.execute(_LATEST, (harness, bot, r.window)).fetchone())
-        else:
-            streak = 0
-            connection.execute(_INTERRUPT, (harness, bot, r.window, source))
+        absent = 1 if r.absent else 0
+        account = (harness, bot, r.window)
+        connection.execute(_OBSERVE, (*account, source, absent))
+        newest = connection.execute(_NEWEST, account).fetchall()
+        connection.execute(_PRUNE, (*account, newest[-1][0]))
         connection.execute(
             _UPSERT,
-            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, streak, source),
+            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, absent, source),
         )
+        connection.execute(_MARK, (_omissions(newest), *account))
     lane_limit.reevaluate(connection, harness, bot, readings)
 
 
-def _streak(source_at: float, latest: tuple | None) -> int:
-    if latest is None:
-        return 1
-    latest_at, streak = latest
-    if not streak or latest_at > source_at or source_at - latest_at > STALE_SECONDS:
-        return 1
-    return streak if latest_at == source_at else streak + 1
+def _omissions(newest: list[tuple[float, int]]) -> int:
+    run, newer = 0, None
+    for source_at, absent in newest:
+        if not absent or (newer is not None and newer - source_at > STALE_SECONDS):
+            break
+        run, newer = run + 1, source_at
+    return run
 
 
 def from_row(
