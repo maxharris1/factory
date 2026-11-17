@@ -102,10 +102,10 @@ color:var(--text-2)}
 .tk-phc.tk-stopped{color:var(--bad)}
 @media (min-width:700px){.tk-narrow{display:none}}
 @media (max-width:699.98px){
-.tk-phases{display:grid;gap:4px;margin-bottom:12px;
+.tk-live .tk-phases{display:grid;gap:4px;margin-bottom:12px;
 grid-template-columns:minmax(0,4fr) minmax(0,4fr) minmax(0,5fr) minmax(0,6fr) minmax(0,4fr) minmax(0,7fr)}
 .tk-board{grid-template-columns:minmax(0,1fr)}
-.tk-col:not(.tk-picked){display:none}
+.tk-live .tk-col:not(.tk-picked){display:none}
 .tk-wide{display:none}
 .tk-tiles{flex-direction:column;gap:6px}
 .tk-tile{display:flex;box-sizing:border-box;min-height:44px;padding:0 10px;gap:8px}
@@ -116,7 +116,6 @@ grid-template-columns:minmax(0,4fr) minmax(0,4fr) minmax(0,5fr) minmax(0,6fr) mi
 .tk-earlier>summary{box-sizing:border-box;min-height:44px;padding:10px;border:1px dashed var(--line-hi)}
 }
 @media (scripting:none){#tickets[hidden]{display:block !important}#ticket-filter{display:none}}
-@media (scripting:none){.tk-phases{display:none}.tk-col:not(.tk-picked){display:flex}}
 @media (scripting:none){.tk-earlier .tk-btn{display:none}}
 """
 
@@ -442,6 +441,7 @@ SCRIPT_TICKETS = r"""
                          b.tracked + ' tracked' + (b.available ? ' · ' + b.open + ' open · ' + b.shipped + ' shipped' : ''));
     if (pipeline) {
       pipeline.hidden = tkView !== 'board';
+      pipeline.classList.toggle('tk-live', b.available);
       if (!b.available) add(pipeline, el('p', 'empty', 'statechart unavailable'));
       else {
         tkPhases(pipeline, b.columns);

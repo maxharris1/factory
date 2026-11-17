@@ -1677,6 +1677,27 @@ def test_a_phone_without_scripts_lists_every_phase(snapshot: dict) -> None:
     assert seen["scroll"] <= seen["inner"] == 375
 
 
+@needs_chrome
+def test_a_phone_whose_status_fetch_fails_lists_every_phase(snapshot: dict) -> None:
+    shim = "<script>window.fetch = function () { return Promise.reject(new Error('offline')); };</script>"
+    browser = Browser()
+    try:
+        page = Path(browser.tmp.name) / "page.html"
+        page.write_text(render_pages(snapshot)["job.html"].replace("<script>", shim + "<script>", 1), encoding="utf-8")
+        browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)
+        browser.call("Page.navigate", url=page.as_uri())
+        deadline = time.monotonic() + 30
+        while "static view" not in browser.eval("document.body.textContent") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        link = browser.eval("document.body.textContent.includes('NO LINK · static view')")
+        seen = browser.eval(PHONE_BOARD)
+    finally:
+        browser.close()
+    assert link
+    assert seen["heights"] == [] and seen["columns"] == COLUMNS
+    assert seen["scroll"] <= seen["inner"] == 375
+
+
 def _find(markup: str) -> dict:
     return _one(_dom(markup), _cls("tk-find"))
 
