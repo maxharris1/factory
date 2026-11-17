@@ -19,7 +19,7 @@ from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote_to_bytes, urlsplit
 from urllib.request import urlopen
 
 RESULT_NAME = "result.json"
@@ -114,7 +114,7 @@ def _check_expires(expires_s: object) -> int:
     return expires_s
 
 
-def _uri_encode(text: str, *, keep_slash: bool) -> str:
+def _uri_encode(text: str | bytes, *, keep_slash: bool) -> str:
     return quote(text, safe="-_.~/" if keep_slash else "-_.~")
 
 
@@ -173,10 +173,9 @@ class S3Storage:
             raise ValueError("endpoint must be an http or https URL")
         self.bucket = bucket
         self.region = region
-        self._endpoint = endpoint
         self._origin = f"{parts.scheme}://{parts.netloc}"
         self._host = _host(endpoint)
-        self._base_path = parts.path
+        self._encoded_bucket_path = f"{parts.path}/{_uri_encode(bucket, keep_slash=False)}"
         self._access_key_id = access_key_id
         self._secret_key = secret_key
         self._opener = opener
@@ -225,14 +224,16 @@ class S3Storage:
             "x-amz-date": amz_date,
             "x-amz-signature": signature,
         }
-        url = f"{self._endpoint}/{_uri_encode(self.bucket, keep_slash=False)}"
+        url = f"{self._origin}{self._encoded_bucket_path}"
         return UploadLink(key=key, max_bytes=max_bytes, expires_s=expires_s, url=url, fields=fields)
 
     def sign_download(self, key: str, expires_s: int) -> DownloadLink:
         _check_key(key)
         _check_expires(expires_s)
-        path = _uri_encode(f"{self._base_path}/{self.bucket}/{key}", keep_slash=True)
-        query = _presign_query(host=self._host, encoded_path=path, region=self.region,
+        path = f"{self._encoded_bucket_path}/{_uri_encode(key, keep_slash=True)}"
+        query = _presign_query(host=self._host,
+                               encoded_path=_uri_encode(unquote_to_bytes(path), keep_slash=True),
+                               region=self.region,
                                access_key=self._access_key_id, secret_key=self._secret_key,
                                when=self._now().astimezone(timezone.utc), expires_s=expires_s)
         url = f"{self._origin}{path}?{query}"
