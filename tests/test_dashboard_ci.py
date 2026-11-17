@@ -15,8 +15,11 @@ import pytest
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot
 from tests import test_dashboard_activity as activity
 from tests.test_dashboard import NOW, seeded
+from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import BAR, _no_script, _section, needs_node, run_harness
 
+ROOT = Path(__file__).resolve().parents[1]
+SHOTS = ("issue-717-ci-1440.png", "issue-717-ci-375.png")
 REPO = "maxharris1/cleffy"
 HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f901234567890"
@@ -290,4 +293,33 @@ def test_the_script_redraws_the_section_live_as_the_server_draws_it(tmp_path: Pa
     assert "2 running · 0 queued" in _text(seen[2]) and "1 running · 0 queued" in _text(seen[3])
     assert "self-hosted · pc-wsl-bots-1 · queued 50s" in _text(seen[2]) and "13s" in _text(seen[2])
     assert seen[3].count('class="ci-run"') == 1
+
+
+# --- the phone ------------------------------------------------------------------------------
+
+CI_LAYOUT = """(function () {
+  var runs = document.querySelectorAll('#ci-runs .ci-run');
+  var jobs = [].map.call(document.querySelectorAll('#ci-runs .ci-job'), function (j) {
+    var b = j.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.right)]; });
+  return {runs: runs.length, jobs: jobs, fails: document.querySelectorAll('#ci-runs .ci-fails > li').length,
+          scrollWidth: document.documentElement.scrollWidth};
+})()"""
+
+
+@needs_chrome
+def test_the_phone_page_has_no_sideways_scroll(tmp_path: Path) -> None:
+    browser = Browser()
+    try:
+        browser.open(_page_with_status_stub(ci_snapshot(tmp_path), "index.html"), 375)
+        found = browser.eval(CI_LAYOUT)
+    finally:
+        browser.close()
+    assert (found["runs"], len(found["jobs"]), found["fails"]) == (2, 6, 2), found
+    assert all(0 <= left and right <= 375 for left, right in found["jobs"]), found
+    assert found["scrollWidth"] <= 375, found
+
+
+def test_review_screenshots_are_committed() -> None:
+    for name in SHOTS:
+        assert (ROOT / "docs" / "screenshots" / name).stat().st_size > 0, name
 
