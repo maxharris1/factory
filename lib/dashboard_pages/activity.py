@@ -82,11 +82,11 @@ SCRIPT = r"""
 
   function liveRows(d) {
     var running = {}, queued = {};
-    (d.running || []).forEach(function (r) {
+    d.running.forEach(function (r) {
       var key = threadKey(r);
       if (!running[key] || (r.elapsed_seconds || 0) < (running[key].elapsed_seconds || 0)) running[key] = r;
     });
-    (d.queued || []).forEach(function (r) { if (!queued[threadKey(r)]) queued[threadKey(r)] = r; });
+    d.queued.forEach(function (r) { if (!queued[threadKey(r)]) queued[threadKey(r)] = r; });
     return {running: running, queued: queued};
   }
 
@@ -475,12 +475,12 @@ _ENDINGS = (
 
 def _live_rows(snapshot: dict) -> tuple[dict[str, dict], dict[str, dict]]:
     running: dict[str, dict] = {}
-    for row in snapshot.get("running", []):
+    for row in snapshot["running"]:
         key = _thread_key(row)
         if key not in running or (row.get("elapsed_seconds") or 0) < (running[key].get("elapsed_seconds") or 0):
             running[key] = row
     queued: dict[str, dict] = {}
-    for row in snapshot.get("queued", []):
+    for row in snapshot["queued"]:
         queued.setdefault(_thread_key(row), row)
     return running, queued
 
@@ -541,8 +541,6 @@ def _items(thread: dict) -> list[str]:
 
 
 def _windowed(key: str, items: list[str]) -> str:
-    """The RELAY_WINDOW newest items; each older one sits, with the arrow
-    after it, in an rl-early box that only script hides."""
     hidden = len(items) - RELAY_WINDOW
     if hidden <= 0:
         return _SEP.join(items)

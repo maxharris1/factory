@@ -358,7 +358,7 @@ def test_a_thread_carries_every_step_up_to_the_cap(tmp_path: Path) -> None:
     threads = {t["ticket_id"]: t for t in collect_snapshot(db, log, now=NOW)["relay"]["threads"]}
     assert [row["job"] for row in threads["12"]["handoffs"]] == [f"h-12-{n:02}" for n in range(RELAY_STEPS + 1, 1, -1)]
     assert len(threads["13"]["handoffs"]) == 15 and len(threads["13"]["verdicts"]) == 15
-    (thread,) = page.relay_threads({"relay": {"threads": [threads["13"]]}})
+    (thread,) = page.relay_threads({"relay": {"threads": [threads["13"]]}, "running": [], "queued": []})
     assert len(thread["steps"]) == 30
 
 
