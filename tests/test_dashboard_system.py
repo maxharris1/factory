@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import functools
 import html as htmllib
 import http.server
@@ -529,6 +530,151 @@ def test_script_no_waiter_panel_only_with_rows(tmp_path: Path) -> None:
         assert _no_waiter_home(out["html"]) == [(home, "h2")], build.__name__
 
 
+def _unknown_version(tmp_path: Path) -> dict:
+    snapshot = _healthy(tmp_path)
+    snapshot["health"]["code_version"] = "unknown"
+    return snapshot
+
+
+def _unknown_health(tmp_path: Path) -> dict:
+    snapshot = _healthy(tmp_path)
+    snapshot["health"] = {"known": False, "error": "cannot read orch.health.db", "components": [],
+                          "no_waiter": []}
+    return snapshot
+
+
+RULE_KEYS = ["stuck", "plan-check", "rounds", "ship", "approver"]
+TUNNEL, CURSOR, SPARE, PROBE = ("health-tunnel-cloudflared-box", "health-waiter-cursor-bot-box",
+                                "health-waiter-cursor-bot-mac", "health-device-probe--pc")
+UP_ANCHORS = ["health-poller--box", "health-waiter-claude-bot-box", "health-waiter-claude-bot-pc"]
+
+STATES = {
+    "healthy": (_healthy, "count", "3 configured · 3 up · all on aaaaaaa", False, UP_ANCHORS),
+    "down": (_down, "count", "6 configured · 3 up · all on aaaaaaa", False,
+             [TUNNEL, CURSOR, SPARE, PROBE, *UP_ANCHORS]),
+    "no-waiter": (_no_waiter, "count", "3 configured · 3 up · all on aaaaaaa", False, UP_ANCHORS),
+    "drift": (_snapshot, "count warn", "6 configured · 5 up · 1 behind", True,
+              ["health-linear-listener--box", "health-poller--box", "health-waiter-claude-bot-box",
+               "health-waiter-claude-bot-pc", "health-waiter-codex-bot-box", "health-device-probe--pc"]),
+    "unknown-version": (_unknown_version, "count", "3 configured · 3 up · version unknown", False,
+                        UP_ANCHORS),
+    "unknown-health": (_unknown_health, "count", "unknown", False, []),
+}
+
+
+def _components_count(components: str) -> tuple[str, str | None, str]:
+    found = re.search(r'<h2(?: id="no-waiter")?><span>Components</span>'
+                      r'<span class="(count[^"]*)"(?: id="(drift)")?>([^<]+)</span></h2>', components)
+    assert found, components[:300]
+    return found.groups()
+
+
+def _assert_state(state: str, components: str, versions: str, rules: str, everything: str) -> None:
+    _, cls, text, drawn, process = STATES[state]
+    assert _components_count(components) == (cls, None if drawn else "drift", text)
+    assert everything.count('id="drift"') == 1
+    if drawn:
+        assert re.match(r'<section class="panel" id="drift" aria-label="Version drift"><h2>'
+                        r'<span>Version drift</span><span class="count warn">1 behind</span></h2>', versions)
+    else:
+        assert versions == ""
+    assert re.findall(r'<tr id="([^"]+)"', components) == process
+    assert re.findall(r'<span class="key">([^<]+)</span>', rules) == RULE_KEYS
+    assert "req/h" not in rules and "intervals" not in rules
+
+
+def _main_order(html: str) -> list[str]:
+    main = _section(html, "hud")
+    return re.findall(r'<(?:section class="panel"|div) id="([^"]+)"', main)
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_components_count_and_version_drift_follow_the_snapshot(tmp_path: Path, state: str) -> None:
+    build, _, _, drawn, _ = STATES[state]
+    snapshot = build(tmp_path)
+    html = _no_script(render_pages(snapshot)["health.html"])
+    versions = _section(html, "versions")
+    inner = re.fullmatch(r'<div id="versions"(?: hidden)?>(.*)</div>', versions, re.S).group(1)
+    assert versions.startswith('<div id="versions" hidden>') == (inner == "")
+    _assert_state(state, _section(html, "components"), inner, _section(html, "rules"), html)
+    drift = ["drift"] if drawn else []
+    waiters = ["no-waiter"] if snapshot["health"]["no_waiter"] else []
+    assert _main_order(html) == ["broken", "components", "versions", *drift, "health", "log", "rules",
+                                 "waiters", *waiters]
+    assert re.search(r'<div class="sys-row"><section class="panel" id="health"', html)
+    assert _section(html, "health") + _section(html, "log") in html
+
+
+@needs_node
+@pytest.mark.parametrize("state", STATES)
+def test_script_components_count_and_version_drift_follow_the_snapshot(tmp_path: Path, state: str) -> None:
+    build, _, _, drawn, _ = STATES[state]
+    out = _run_page(tmp_path, build(tmp_path), "health", BAR + ["hud", *PANELS])
+    assert out["hidden"]["versions"] == (not drawn)
+    markup = out["html"]
+    _assert_state(state, markup["components"], markup["versions"], markup["rules"],
+                  "".join(markup[panel] for panel in PANELS))
+
+
+def _device_list(components: str) -> list[tuple[str, str, list[tuple[bool, str, str, str, str]]]]:
+    start = components.index('<div class="sys-devices">')
+    listing = components[start:components.index('<p class="sys-note sys-legend">', start)]
+    assert " id=" not in listing
+    blocks = []
+    for chunk in listing.split('<div class="sys-dev">')[1:]:
+        name, count = re.match(r'<div class="sys-dev-head"><span class="sys-name">([^<]+)</span>'
+                               r'<span class="muted">([^<]+)</span></div>', chunk).groups()
+        rows = [(two == " two", kind, tone, word, seen) for two, kind, tone, word, seen in re.findall(
+            r'<div class="sys-dev-row( two)?"><span class="sys-kind">([^<]+)</span><span class="sys-cell">'
+            r'<span class="sys-blk (\w+)" aria-hidden="true"></span><span>([^<]+)</span></span>'
+            r'<span class="sys-seen">([^<]+)</span></div>', chunk)]
+        blocks.append((name, count, rows))
+    return blocks
+
+
+def _expected_devices(late: int) -> list:
+    return [
+        ("pc", "1 of 2 up", [(True, "device-probe", "warn", "stale", f"{50 + late}s ago"),
+                             (False, "waiter · claude-bot", "ok", "up", f"{4 + late}s ago")]),
+        ("box", "2 of 4 up", [(True, "tunnel · cloudflared", "bad", "down", "8h 02m ago"),
+                              (True, "waiter · cursor-bot", "bad", "down", "never"),
+                              (False, "poller", "ok", "up", f"{4 + late}s ago"),
+                              (False, "waiter · claude-bot", "ok", "up", f"{4 + late}s ago")]),
+        ("mac", "0 of 1 up", [(True, "waiter · cursor-bot", "muted", "down · not configured", "never")]),
+    ]
+
+
+def test_phone_device_list_puts_abnormal_rows_first(tmp_path: Path) -> None:
+    components = _section(_no_script(render_pages(_down(tmp_path))["health.html"]), "components")
+    assert [name for name, _, _ in _device_list(components)] == re.findall(
+        r"<th>([^<]+)</th>", _matrix_of(components))[1:]
+    assert _device_list(components) == _expected_devices(0)
+
+
+@needs_node
+def test_script_phone_device_list_puts_abnormal_rows_first(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _down(tmp_path), "health", BAR + ["hud", *PANELS])
+    assert _device_list(out["html"]["components"]) == _expected_devices(3)
+
+
+@needs_node
+def test_script_live_beat_ages_advance_with_the_clock(tmp_path: Path) -> None:
+    pages = {}
+    for advance in (0, 30):
+        (tmp_path / str(advance)).mkdir()
+        out = _run_page(tmp_path / str(advance), _healthy(tmp_path / str(advance)), "health",
+                        BAR + ["hud", *PANELS], actions=[["advance", advance]])
+        pages[advance] = out["html"]["components"]
+    titles = {advance: [cell["title"] for cell in _quiet_cells(_matrix_of(html))]
+              for advance, html in pages.items()}
+    beats = [int(re.fullmatch(r"up · beat (\d+)s ago", title).group(1)) for title in titles[0]]
+    assert len(beats) == 3
+    assert titles[30] == [f"up · beat {beat + 30}s ago" for beat in beats]
+    seen = {advance: [row[4] for _, _, rows in _device_list(html) for row in rows]
+            for advance, html in pages.items()}
+    assert seen[30] == [f"{int(text[:-5]) + 30}s ago" for text in seen[0]]
+
+
 CLASSIFIED_TAIL = [
     ("2026-11-13 13:08:59 EST poller exit rc=1", "bad"),
     ("2026-11-13 13:09:19 EST poller start", "start"),
@@ -772,11 +918,10 @@ LAND_ON_EVERY_LINK = r"""
 """
 
 
-@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
-def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path) -> None:
+@contextlib.contextmanager
+def _browse(tmp_path: Path, snapshot: dict, *, phone: bool = False, script: bool = True):
     site = tmp_path / "site"
     site.mkdir()
-    snapshot = _snapshot(tmp_path)
     for name, html in render_pages(snapshot).items():
         (site / name).write_text(html, encoding="utf-8")
     (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
@@ -785,21 +930,73 @@ def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path
     threading.Thread(target=server.serve_forever, daemon=True).start()
     chrome = _Chrome(tmp_path / "profile")
     try:
+        if phone:
+            chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=375, height=800,
+                        deviceScaleFactor=1, mobile=True)
+        if not script:
+            chrome.send("Emulation.setScriptExecutionDisabled", chrome.session, value=True)
         chrome.send("Page.navigate", chrome.session,
                     url=f"http://127.0.0.1:{server.server_address[1]}/health.html")
         chrome.wait_for("location.pathname === '/health.html' && document.readyState === 'complete'",
                         "health.html")
-        landed = chrome.run(LAND_ON_EVERY_LINK)
+        yield chrome
     finally:
         chrome.close()
         server.shutdown()
+
+
+LINKS = {
+    "drift": (_snapshot, {"health.html#health-linear-listener--box", "#broken-health-linear-listener--box",
+                          "health.html#health-no-waiter-codex", "health.html#components",
+                          "health.html#drift"}),
+    "healthy": (_healthy, {"health.html#components", "health.html#drift", "health.html#health"}),
+}
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+@pytest.mark.parametrize("state", LINKS)
+def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path, state: str) -> None:
+    build, expected = LINKS[state]
+    with _browse(tmp_path, build(tmp_path)) as chrome:
+        landed = chrome.run(LAND_ON_EVERY_LINK)
     assert isinstance(landed, list)
     hrefs = {row["href"] for row in landed}
-    assert {"health.html#health-linear-listener--box", "#broken-health-linear-listener--box",
-            "health.html#health-no-waiter-codex", "health.html#components"} <= hrefs, hrefs
+    assert expected <= hrefs, hrefs
     for row in landed:
         if row["href"] == "#hud":
             assert (row["hash"], row["focus"]) == ("", "hud"), row
             continue
         assert row["hash"] == "#" + row["href"].split("#")[1], row
         assert row["visible"] and row["inView"], row
+
+
+PHONE_LAYOUT = r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  for (let i = 0; i < 100 && /ACQUIRING/.test(document.getElementById('link-text').textContent); i++) await sleep(50);
+  const shown = node => !!node && node.checkVisibility();
+  const log = document.querySelector('#log .sys-log');
+  return {
+    live: document.getElementById('link-text').textContent,
+    matrix: shown(document.querySelector('#components table.sys-table:not(.wide)')),
+    devices: shown(document.querySelector('#components .sys-devices')),
+    blocks: [...document.querySelectorAll('#components .sys-dev')].filter(shown).length,
+    head: shown(document.querySelector('#broken thead')),
+    rows: [...document.querySelectorAll('#broken tbody tr')].map(tr => getComputedStyle(tr).display),
+    overflow: document.documentElement.scrollWidth - innerWidth,
+    log: log.scrollWidth - log.clientWidth,
+  };
+})()
+"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+@pytest.mark.parametrize("script", [True, False], ids=["script", "no-script"])
+def test_a_phone_shows_device_blocks_and_stacked_broken_rows(tmp_path: Path, script: bool) -> None:
+    snapshot = _down(tmp_path)
+    snapshot["poller"]["log"]["tail"].append("x" * 400)
+    with _browse(tmp_path, snapshot, phone=True, script=script) as chrome:
+        layout = chrome.run(PHONE_LAYOUT)
+    assert (layout.pop("live") == "LIVE") == script, layout
+    assert layout == {"matrix": False, "devices": True, "blocks": 3, "head": False,
+                      "rows": ["block"] * 3, "overflow": 0, "log": 0}
