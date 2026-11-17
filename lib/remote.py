@@ -41,8 +41,9 @@ worker. The remote POSIX shell scripts sent as the SSH command:
 * check: exit 1 while any process of the run lives (wherever its group or
   session now is): one of this user's that carries the job's tag, one the
   tree record `.orch-worker-<tag>.tree.pid` from this boot names with the
-  start time it has now, one still in the start's session (its record from
-  this boot names it), or a child of any of them (#722). The check rewrites
+  start time it has now, one in the start's session while that session
+  still holds one of those (its record from this boot names it), or a child
+  of any of them (#722). The check rewrites
   the tree record with them (the boot id, then `<pid> <start time>` each,
   zombies left out), so a descendant that dropped the tag and left the
   session stays the run's after its parent exits; a number alone never
@@ -246,8 +247,8 @@ _BAD_GROUP = '""|0*|1|*[!0-9]*'
 # process), prints the tree record anew when the run has a member: a tagged
 # process, a record entry from this boot whose pid has that start time now,
 # a process in the start's session, or a process whose parent is a member.
-# A session number is not reused while a process is in it, so the session
-# counts unless its number now names a leader that is not the start.
+# A session number is not reused while a process is in it, but a record
+# outlives the session, so its number alone never names the run's session.
 # The deadline is never a member, so neither are the checks and stops it runs.
 _TREE_AWK = (
     '$1 == "B" { b = $2 } $1 == "K" && NF == 2 { r = $2 } '
@@ -256,24 +257,30 @@ _TREE_AWK = (
     '$1 == "K" && NF == 3 { k[$2] = $3 } '
     '$1 == "P" && NF == 5 { u[$2] = $3; s[$2] = $4; g[$2] = $5 } '
     'END { if (r == "" || r != b) split("", k); '
-    'if (qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 '
-    '|| ((q in u) && !(q in t) && !((q in k) && k[q] == s[q]))) q = ""; '
-    "for (p in u) if (!(p in x) && ((p in t) || ((p in k) && k[p] == s[p]) || (q != \"\" && g[p] == q))) "
-    "m[p] = 1; "
+    "for (p in u) if (!(p in x) && ((p in t) || ((p in k) && k[p] == s[p]))) m[p] = 1; "
+    'if (qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 || ((q in u) && !(q in m))) q = ""; '
+    'if (q != "" && seal == "") { v = 0; for (p in m) if (g[p] == q) v = 1; if (!v) q = "" } '
+    'if (q != "") for (p in u) if (!(p in x) && g[p] == q) m[p] = 1; '
     "do { n = 0; for (p in u) if (!(p in m) && !(p in x) && (u[p] in m)) { m[p] = 1; n = 1 } } "
     "while (n); for (p in m) n++; if (n) { print b; for (p in m) print p, s[p] } }"
 )
 
 
-def _members(directory: str) -> str:
-    """Define `members`: rewrite the tree record of tag $t, then print its members' pids."""
+def _members(directory: str, *, seal: bool = False) -> str:
+    """Define `members`: rewrite the tree record of tag $t, then print its members' pids.
+
+    With seal, the start's session counts with no proven member in it: only
+    the wrapper that has just reaped the start passes it.
+
+    The listing is its own function, so no `)` of its case pattern sits
+    inside a command substitution: macOS's sh (bash 3.2) closes the
+    substitution there and cannot parse the script (#722 f-4).
+    """
     record = f"{directory}/{tree_record('$t')}"
     start = f"{directory}/{start_record('$t')}"
     return (
-        f"k={record}; members() {{ "
-        f"g=$({_TAGGED}); "
-        f'x=$(grep -lzxsF -e "{DEADLINE_ENV}=$t" /proc/[0-9]*/environ); '
-        'o=$({ b=; { read -r b < /proc/sys/kernel/random/boot_id; } 2>/dev/null; echo "B $b"; '
+        f"k={record}; listed() {{ "
+        'b=; { read -r b < /proc/sys/kernel/random/boot_id; } 2>/dev/null; echo "B $b"; '
         'for e in $g; do e=${e#/proc/}; echo "T ${e%/environ}"; done; '
         'for e in $x; do e=${e#/proc/}; echo "X ${e%/environ}"; done; '
         "sed 's/^/K /' \"$k\" 2>/dev/null; "
@@ -283,7 +290,10 @@ def _members(directory: str) -> str:
         "set -- ${s##*) }; "
         'case "$1" in Z|X) continue;; esac; '
         'echo "P ${e#/proc/} $2 ${20} $4"; '
-        f"done; }} | awk {shlex.quote(_TREE_AWK)}); "
+        "done; }; members() { "
+        f"g=$({_TAGGED}); "
+        f'x=$(grep -lzxsF -e "{DEADLINE_ENV}=$t" /proc/[0-9]*/environ); '
+        f"o=$(listed | awk -v seal={'1' if seal else ''} {shlex.quote(_TREE_AWK)}); "
         'if [ -n "$o" ] || [ -e "$k" ]; then '
         '{ { [ -z "$o" ] || printf \'%s\\n\' "$o"; } > "$k.$$" '
         '&& mv -f -- "$k.$$" "$k"; } 2>/dev/null || rm -f -- "$k.$$"; fi; '
@@ -676,6 +686,15 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
     )
 
 
+def _record_session_script(target: RemoteTarget) -> str:
+    """Linux: record every process left in the start's session as the run's."""
+    return _sh(
+        f"t={target.require_tag()}; if {_IS_DARWIN}; then exit 0; fi; "
+        f"{_CAN_SCAN} || exit 0; [ -r /proc/self/stat ] || exit 0; "
+        f"{_members(shlex.quote(target.job_dir), seal=True)}members > /dev/null"
+    )
+
+
 def fenced_check_script(target: RemoteTarget) -> str:
     """check_script, after taking the tag's run directory (as launch_script's mkdir
     would) and, on Linux, the start's record.
@@ -852,21 +871,23 @@ _WRITE_RESULT_PAST_STOPS = (
 )
 
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
-# directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
-# budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop
-# and kill scripts, $8 the check script. It starts the start (lib/remote.py start_script, which
+# directory, $2 the detacher, $3 the start script, $4 the session record
+# script (_record_session_script), then (#199 r1) $5 the budget in whole
+# seconds (empty: none), $6 the grace, $7 and $8 the stop and kill scripts,
+# $9 the check script. It starts the start (lib/remote.py start_script, which
 # records the worker and execs the harness) in a session of its own with
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again
 # after a SIGTERM, which it catches so the start keeps default handling),
-# then writes `handoff` and `exit`, each through a temporary file.
+# then runs the session record script without the tag and writes `handoff`
+# and `exit`, each through a temporary file.
 _WRAPPER = (
-    'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
+    'T=$1; S=$2; x=$3; z=$4; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
     + _DETACH
     + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
-    'if [ -n "$4" ]; then '
-    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7" "$8"; '
+    'if [ -n "$5" ]; then '
+    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$5" "$6" "$7" "$8" "$9"; '
     f'if [ "$S" = setsid ]; then env -u {TAG_ENV} "{DEADLINE_ENV}=$t" setsid "$@" '
     '< /dev/null > /dev/null 2>&1 & '
     f'else env -u {TAG_ENV} "{DEADLINE_ENV}=$t" '
@@ -874,6 +895,7 @@ _WRAPPER = (
     '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
+    f'env -u {TAG_ENV} sh -c "$z" < /dev/null > /dev/null 2>&1; '
     + _WRITE_RESULT_PAST_STOPS
 )
 
@@ -955,6 +977,7 @@ def launch_script(
         f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
         + _DETACH
         + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
+        f"{shlex.quote(_record_session_script(target))} "
         f"{limits} < /dev/null > /dev/null 2>&1 & "
         "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
         "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "

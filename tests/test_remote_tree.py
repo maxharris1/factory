@@ -10,6 +10,7 @@ after the worker that started it is gone. The scripts run locally through
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -269,3 +270,109 @@ while True:
         kill_leftover(tmp_path)
         unrelated.kill()
         unrelated.wait()
+
+
+def stat_line(pid: int, session: int, start: int) -> str:
+    return f"{pid} (sleep) S 1 {session} {session} " + "0 " * 15 + f"{start}\n"
+
+
+@pytest.mark.parametrize("member_in_session", [False, True])
+def test_a_recorded_session_counts_only_while_a_proven_member_is_in_it(
+    tmp_path: Path, member_in_session: bool
+) -> None:
+    """#722 f-5: the start's session number, from a record that outlived the
+    session, is reused by an unrelated session whose leader then exits.
+    """
+    proc = tmp_path / "proc"
+    (proc / "sys/kernel/random").mkdir(parents=True)
+    (proc / "sys/kernel/random/boot_id").write_text("boot-current\n")
+    (proc / "self").mkdir()
+    (proc / "self/stat").write_text("readable\n")
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    for name, body in {
+        "uname": "echo Linux",
+        "grep": 'case "$*" in *"-qzxF x") exit 0;; *) exit 1;; esac',
+    }.items():
+        (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
+        (stubs / name).chmod(0o755)
+    env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"}
+    target = remote.RemoteTarget("pc", "pc", "claude-bot", str(tmp_path / "work"), "job", "a" * 32)
+    job = Path(target.job_dir)
+    job.mkdir(parents=True)
+    session = 456789
+    (job / remote.start_record(target.require_tag())).write_text(
+        f"{session} boot-current {target.tag}\n"
+    )
+    (job / remote.PID_FILE).write_text(f"{session} boot-current\n")
+    stray = subprocess.Popen(["sleep", "60"])
+    member = subprocess.Popen(["sleep", "60"])
+    shown = [stray] + ([member] if member_in_session else [])
+    for process in shown:
+        (proc / str(process.pid)).mkdir()
+        (proc / str(process.pid) / "environ").write_bytes(b"PATH=/usr/bin\0")
+        (proc / str(process.pid) / "stat").write_text(stat_line(process.pid, session, 9000))
+    if member_in_session:
+        (job / remote.tree_record(target.tag)).write_text(f"boot-current\n{member.pid} 9000\n")
+
+    def run(script: str) -> int:
+        return subprocess.run(
+            ["sh", "-c", script.replace("/proc", str(proc))], capture_output=True, env=env
+        ).returncode
+
+    try:
+        check = run(remote.check_script(target))
+        run(remote.stop_script(target, kill=True))
+        if member_in_session:
+            assert check == 1, "a recorded member keeps the run alive"
+            assert stray.wait(timeout=5) == -signal.SIGKILL, (
+                "a process in the session of a proven member is the run's"
+            )
+            return
+        assert check != 1, "a session number alone never names the run"
+        assert not (job / remote.tree_record(target.tag)).exists()
+        time.sleep(0.2)
+        assert stray.poll() is None, "a process outside the run is never signalled"
+    finally:
+        for process in (stray, member):
+            process.kill()
+            process.wait()
+
+
+def command_substitutions(script: str) -> list[str]:
+    """Each `$(...)` body, ended where bash 3.2 ends it: at the `)` that
+    balances its unquoted parentheses, so a case pattern's `)` ends it."""
+    bodies, at = [], script.find("$(")
+    while at >= 0:
+        end, depth, quote = at + 2, 1, None
+        while end < len(script) and depth:
+            c = script[end]
+            if quote:
+                quote = None if c == quote else quote
+            elif c in "'\"":
+                quote = c
+            else:
+                depth += {"(": 1, ")": -1}.get(c, 0)
+            end += 1
+        if not script.startswith("$((", at):
+            bodies.append(script[at + 2 : end - 1])
+        at = script.find("$(", at + 2)
+    return bodies
+
+
+def test_every_generated_remote_script_parses_under_the_native_sh() -> None:
+    """#722 f-4: macOS's /bin/sh (bash 3.2) ends a `$(...)` at an unquoted
+    `)` such as a case pattern's, so each body must parse cut there too."""
+    target = remote.RemoteTarget("pc", "pc", "claude-bot", "/tmp/w", "job", "a" * 32)
+    scripts = {
+        "check": remote.check_script(target),
+        "stop": remote.stop_script(target),
+        "kill": remote.stop_script(target, kill=True),
+        "fenced check": remote.fenced_check_script(target),
+        "session record": remote._record_session_script(target),
+    }
+    for name, script in scripts.items():
+        inner = shlex.split(script)[3]
+        for code in [inner, *command_substitutions(inner)]:
+            result = subprocess.run(["/bin/sh", "-n", "-c", code], capture_output=True, text=True)
+            assert result.returncode == 0, f"{name}: {result.stderr} in {code[:80]!r}"
