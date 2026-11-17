@@ -188,7 +188,7 @@ def test_a_late_ready_from_a_counted_update_leaves_the_retry_queued(
     assert [r["state"] for r in b.jobs("update-from-main")] == ["failed", "failed", "queued"]
 
 
-def _retried_review(b: Board, p: PR, *, revises: int, stuck: str) -> None:
+def _retried_review(b: Board, p: PR, *, revises: int) -> None:
     b.go(p, "go")
     b.poll()
     b.finish("claude")
@@ -208,16 +208,13 @@ def _retried_review(b: Board, p: PR, *, revises: int, stuck: str) -> None:
     b.poll()
     assert b.outcome(ready) == "rejected-edited"
     assert b.state("42")["workflow_state"] == ("fixing" if revises else "building")
-    if stuck == "job-failed-2":
-        b.fail("codex")
-        b.poll()
-        b.now[0] += STOPPED_POLL_SECONDS
-        b.poll()
-        b.fail("codex")
-        b.poll()
-    else:
-        b.dispatcher._device_offline(b.claim("codex").id, "pc", 3600.0)
-    assert b.state("42")["stuck_reason"] == stuck
+    b.fail("codex")
+    b.poll()
+    b.now[0] += STOPPED_POLL_SECONDS
+    b.poll()
+    b.fail("codex")
+    b.poll()
+    assert b.state("42")["stuck_reason"] == "job-failed-2"
 
     b.post(p, "retry-review", REASON, "grok-login")
     b.now[0] += 600
@@ -230,14 +227,11 @@ def _queued_fix_heads(b: Board) -> list[str]:
     return [row["head"] for row in b.jobs("fix") if row["state"] == "queued"]
 
 
-@pytest.mark.parametrize("stuck", ["job-failed-2", "device-offline"])
 @pytest.mark.parametrize("revises", [0, 1], ids=["building", "fixing"])
-def test_a_retried_review_s_revise_queues_the_fix(
-    tmp_path: Path, stuck: str, revises: int
-) -> None:
+def test_a_retried_review_s_revise_queues_the_fix(tmp_path: Path, revises: int) -> None:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
-    _retried_review(b, p, revises=revises, stuck=stuck)
+    _retried_review(b, p, revises=revises)
     assert b.state("42")["workflow_state"] == "review"
 
     b.revise(p, f"{revises + 1}/3")
@@ -252,7 +246,7 @@ def test_a_retried_review_s_revise_queues_the_fix(
 def test_a_retried_review_s_revise_at_the_cap_caps(tmp_path: Path) -> None:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
-    _retried_review(b, p, revises=2, stuck="job-failed-2")
+    _retried_review(b, p, revises=2)
 
     b.revise(p, "3/3")
     b.poll()
@@ -262,11 +256,10 @@ def test_a_retried_review_s_revise_at_the_cap_caps(tmp_path: Path) -> None:
     assert _queued_fix_heads(b) == []
 
 
-@pytest.mark.parametrize("stuck", ["job-failed-2", "device-offline"])
-def test_a_retried_review_s_approve_ships(tmp_path: Path, stuck: str) -> None:
+def test_a_retried_review_s_approve_ships(tmp_path: Path) -> None:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
-    _retried_review(b, p, revises=1, stuck=stuck)
+    _retried_review(b, p, revises=1)
 
     approve = b.approve(p, "2/3")
     b.poll()
@@ -278,7 +271,7 @@ def test_a_retried_review_s_approve_ships(tmp_path: Path, stuck: str) -> None:
 def test_a_stale_verdict_after_a_retried_review_is_still_refused(tmp_path: Path) -> None:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
-    _retried_review(b, p, revises=1, stuck="job-failed-2")
+    _retried_review(b, p, revises=1)
 
     for comment_id, round_text, head in (
         ("old-head", "2/3", sha(1)),

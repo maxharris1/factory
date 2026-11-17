@@ -528,7 +528,7 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         "path": ["intake", "building", "review", "fixing", "review"],
         "state_age_seconds": 2000,
         # #78: the chart's direct successors of review, and review is not finished.
-        "next": ["blocked", "ship", "stuck", "fixing", "waiting-max", "capped"],
+        "next": ["blocked", "ship", "fixing", "waiting-max", "stuck", "capped"],
         "terminal": False,
         "visits": [dict(zip(keys, row)) for row in (
             ("intake", "script", None, None, False, False, None, False),

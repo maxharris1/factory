@@ -389,7 +389,7 @@ class Hook(Protocol):
 
 
 class DeviceChecks(Protocol):
-    """F2-02's DeviceMonitor: release gone workers' slots, find offline devices.
+    """F2-02's DeviceMonitor: release gone workers' slots, find lost jobs.
 
     A DeviceMonitor also has `liveness(placement)` (#75), which the
     dispatcher uses, when present, to find dead jobs.
@@ -398,7 +398,8 @@ class DeviceChecks(Protocol):
     def reconcile(
         self,
         now: float,
-        on_offline: Callable[[str, str, float], None],
+        lost_after: float,
+        on_lost: Callable[[str, str, str], None],
     ) -> object: ...
 
 

@@ -5,8 +5,9 @@ fail any running job whose heartbeat had stopped for its timeout, and T6 then
 queued attempt 2 while attempt 1's remote worker still ran. Now a running job
 whose slot records a remote start is never timed out: it leaves running only
 through the dead path, once its runner is gone and the device confirms its
-worker gone (then T6 retries as before), or as stuck when the device stays
-offline for an hour. All on a fake clock and a scripted SSH transport.
+worker gone (then T6 retries as before), or as lost once the device stays
+unreachable for 10 minutes (#662; T6 then requeues the same row). All on a
+fake clock and a scripted SSH transport.
 """
 
 from __future__ import annotations
@@ -129,20 +130,21 @@ def test_once_the_worker_is_confirmed_gone_the_t6_retry_still_comes(
     assert int(poller.row(retry.id)["attempt"]) == 2
 
 
-def test_an_unreachable_device_past_the_timeout_goes_stuck_without_a_retry(
+def test_an_unreachable_device_loses_the_job_and_requeues_it_without_a_retry(
     tmp_path: Path,
 ) -> None:
     poller = Poller(tmp_path, box_slots=2, check=UNREACHABLE)
     job_id = remote_job(poller)
     poller.at(60)  # first failed probe starts the device's offline clock
-    poller.at(30 + TIMEOUT)  # past the job timeout, offline < 60 minutes
+    poller.at(60 + 599)
     assert_no_attempt_2(poller, job_id)
 
-    poller.at(60 + 3600)  # offline for the full hour: stuck, no T6 retry
+    poller.at(60 + 600)
     assert poller.row(job_id)["state"] == "failed"
-    assert int(poller.row(job_id)["failure_handled"]) == 1
-    assert [(state, attempt) for _id, state, attempt in review_jobs(poller)] == [("failed", 1)]
-    assert poller.pool.placement(job_id) is not None  # the slot stays held
+    assert int(poller.row(job_id)["failure_handled"]) == 0
+    assert poller.pool.placement(job_id) is None
+    poller.at(60 + 600 + 60)
+    assert review_jobs(poller) == [(job_id, "queued", 1)]
 
 
 def test_a_box_job_keeps_the_plain_timeout(tmp_path: Path) -> None:

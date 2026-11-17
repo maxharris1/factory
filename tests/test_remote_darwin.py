@@ -685,11 +685,11 @@ def test_darwin_remote_takeover_is_refused_while_the_dead_runners_worker_lives(
         monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
         queue.finish(job_id, owner="codex", handoff_comment_id="c1")
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        result = monitor.reconcile(time.time(), lambda *_: None)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
         assert result.stopped == (job_id,)
         assert pool.placement(job_id) is not None
         assert wait_group_gone(group)
-        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
     finally:
         kill_quietly(group, group=True)
         if first.poll() is None:
@@ -1025,7 +1025,7 @@ def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(
     monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
     queue.finish(job_id, owner="codex", handoff_comment_id="c1")
     monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-    assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+    assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
 
 
 # --- Codex review round 2 ----------------------------------------------------
@@ -1132,15 +1132,15 @@ def test_r2_f21_darwin_awk_failure_keeps_a_live_workers_slot_and_refuses_takeove
         monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
         queue.finish(job_id, owner="codex", handoff_comment_id="c1")
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        result = monitor.reconcile(time.time(), lambda *_: None)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
         assert result.released == () and result.stopped == ()
         assert pool.placement(job_id) is not None
         assert group_alive(group)
 
         mac.real_awk()
-        assert monitor.reconcile(time.time(), lambda *_: None).stopped == (job_id,)
+        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).stopped == (job_id,)
         assert wait_group_gone(group)
-        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
     finally:
         kill_quietly(group, group=True)
         if first.poll() is None:

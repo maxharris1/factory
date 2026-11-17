@@ -54,7 +54,6 @@ export const step = (action, from, to) => {
   if (action === "T2ReadyCovered") return "ready at the approved patch, CI green";
   if (action === "T6JobRetry") return "job dies, retry once";
   if (action === "T6JobStuck") return "job dies twice (T6)";
-  if (action === "T6DeviceOffline") return "device offline 60 minutes";
   if (action === "T3Revise" && to.state === "fixing") return "REVISE, under the round cap";
   if (action === "T3Revise") return "REVISE at the cap";
   if (action === "T3Unsat") return "REVISE with unsat=, the criterion goes to Max";

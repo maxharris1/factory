@@ -36,9 +36,11 @@ lib/remote.py, so a check never trusts a stored process number). #80 adds
 the job, if one did. #96 adds `run_token_hash`: the hash of the secret
 token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
-contact and when it began failing, for the 60-minute offline check. #460
+contact and when it began failing, for the lost check (#662). #460
 adds `device_backoff`: a device whose start preflight could not reach it
-takes no new placement, for any harness, until its `until` time.
+takes no new placement, for any harness, until its `until` time. #662
+adds `device_orphans`: the slot of a job lost with its unreachable device,
+moved there so the slot is free while its worker may still run.
 
 This module starts nothing and contacts no device.
 """
@@ -71,6 +73,7 @@ from lib.schema import HARNESSES
 
 HEALTH_TABLE = "device_health"
 BACKOFF_TABLE = "device_backoff"
+ORPHANS_TABLE = "device_orphans"
 UNREACHABLE_BACKOFF_SECONDS = 5 * 60
 # Columns F2-02 added to the F2-01 slot table, added in place on an old database.
 _SLOT_COLUMNS = (
@@ -270,7 +273,7 @@ class DevicePool:
             if row is None:
                 connection.commit()
                 return None
-            dropped = _link_dropped_on(connection, str(row["id"]))
+            dropped = _lost_on(connection, str(row["id"]))
             if dropped == device.name:
                 device = choose_device(
                     self.config,
@@ -768,6 +771,31 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
     )
 
 
+def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None:
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ORPHANS_TABLE} (
+            job_id TEXT PRIMARY KEY,
+            device TEXT NOT NULL,
+            harness TEXT NOT NULL,
+            os_user TEXT NOT NULL,
+            worker_tag TEXT,
+            lost_at REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT OR REPLACE INTO {ORPHANS_TABLE}
+            (job_id, device, harness, os_user, worker_tag, lost_at)
+        SELECT job_id, device, harness, os_user, worker_tag, ? FROM {SLOTS_TABLE}
+        WHERE job_id = ?
+        """,
+        (now, job_id),
+    )
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+
+
 def placement_blocked(connection: sqlite3.Connection, now: float) -> Blocked:
     """Where a claim must not go now: device_sync's blocks plus every backed-off device."""
     blocked = sync_blocked(connection)
@@ -827,7 +855,11 @@ def link_drop_detail(device: str, minutes: str, tag: str) -> str:
     return f"{device}: no certain answer for {minutes}{LINK_DROP_TAG}{tag}"
 
 
-def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
+def device_lost_detail(device: str, reason: str, tag: str | None) -> str:
+    return f"{device}: {reason}" + ("" if tag is None else f"{LINK_DROP_TAG}{tag}")
+
+
+def _lost_on(connection: sqlite3.Connection, job_id: str) -> str | None:
     """#218: the device job_id's latest run lost its link to, or None."""
     table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
@@ -837,14 +869,14 @@ def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
     row = connection.execute(
         """
         SELECT event, detail FROM job_events
-        WHERE job_id = ? AND event IN ('run-died', 'run-exited', 'link-drop')
+        WHERE job_id = ? AND event IN ('run-died', 'run-exited', 'link-drop', 'device-lost')
         ORDER BY id DESC LIMIT 1
         """,
         (job_id,),
     ).fetchone()
-    if row is None or row[0] != "link-drop":
+    if row is None or row[0] not in ("link-drop", "device-lost"):
         return None
-    return str(row[1]).split(": no certain answer for ", 1)[0]
+    return str(row[1]).split(": ", 1)[0]
 
 
 def _used(

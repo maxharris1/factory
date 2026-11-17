@@ -64,7 +64,7 @@ def test_fixture_visit_fields() -> None:
         OFF_CHART,
         OFF_CHART,
         "APPROVE on red CI, CI fix or REVISE, under the round cap",
-        "device offline 60 minutes or CI red three times or job dies twice (T6)",
+        "CI red three times or job dies twice (T6)",
         OFF_CHART,
     ]
     assert [visit["current"] for visit in visits] == [False] * 8 + [True]

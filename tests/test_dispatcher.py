@@ -5680,7 +5680,7 @@ class FailedDevices:
     def __init__(self, body: str):
         self.body = body
 
-    def reconcile(self, now: float, on_offline: object) -> None:
+    def reconcile(self, now: float, lost_after: float, on_lost: object) -> None:
         raise RuntimeError(f"device check failed: {self.body}")
 
 
@@ -6473,7 +6473,7 @@ def _busy_dispatcher(
             )
         )
 
-        def reconcile(self, now, on_offline):
+        def reconcile(self, now, lost_after, on_lost):
             return None
 
     path = tmp_path / "d.db"
