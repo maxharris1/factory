@@ -154,6 +154,7 @@ SCRIPT_HEAD = r"""
   var generated = Number(body.getAttribute('data-generated')) || 0;
   function byId(id) { return document.getElementById(id); }
   var lastOk = 0;
+  var accepted = 0;
   var shownAt = Date.now();
   var everOk = false;
   var resuming = false;
@@ -527,6 +528,7 @@ SCRIPT_TAIL = r"""
   function accept(d) {
     if (!d || typeof d !== 'object' || d.schema !== 'factory-dashboard/v1') { failed(); return; }
     lastOk = Date.now();
+    accepted += 1;
     everOk = true;
     resuming = false;
     failures = 0;
