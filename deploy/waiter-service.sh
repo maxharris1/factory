@@ -274,7 +274,8 @@ supervise() {
     local child="" status started delay="$RESTART_SEC" stopping=""
     trap 'stopping=1; [[ -n "$child" ]] && kill -TERM "$child" 2>/dev/null || true' TERM INT HUP
     mkdir -p "$STATE"
-    printf '%s\n' "$$" >"$PIDFILE"
+    printf '%s\n' "$$" >"${PIDFILE}.$$"
+    mv -f "${PIDFILE}.$$" "$PIDFILE"
     if [[ -r "$ENV_FILE" ]]; then
         set -a
         # shellcheck disable=SC1090

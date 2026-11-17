@@ -367,6 +367,17 @@ def test_a_supervisor_the_pidfile_does_not_name_exits(home: Path) -> None:
     assert f"no longer names this supervisor (pid {stray})" in log
 
 
+def test_a_supervisor_replaces_the_pidfile_never_rewrites_it_in_place(home: Path) -> None:
+    assert _service(home, "claude-bot", "start").returncode == 0
+    _wait_for(lambda: _starts(home))
+    pidfile = home / ".local/state/factory/waiter-claude-bot.pid"
+    inode = os.stat(pidfile).st_ino
+
+    stray = _stray(home)
+    _wait_for(lambda: pidfile.read_text().strip() == str(stray))
+    assert os.stat(pidfile).st_ino != inode
+
+
 @pytest.mark.parametrize("home", ["home", "home with spaces"], indirect=True)
 @pytest.mark.parametrize("proc", ["/proc", "no-proc"])
 def test_restart_after_a_pidfile_mismatch_leaves_one_supervisor_and_one_waiter(

@@ -20,16 +20,20 @@ States:
   progress, local commits) or failed. Escalated once.
 * unreachable: ssh failed. Not a placement block: the device probe and the
   start's own preflight already cover an offline device.
+* held: the box runs at `sha` on purpose because self-deploy could not
+  reach `target` (origin/main); `detail` names why. Not a placement block:
+  the start's preflight accepts a box HEAD behind origin/main while it
+  matches the row. The next up-to-date or deployed pass drops it.
 
 A device with no row is placeable, so a new device is not dead before its
 first pass; the start's preflight still checks its HEAD.
 
 The box has rows too, written by lib/self_deploy.py (device bot "",
-deploying while its checkout moves) and by each bot's waiter: lagging when
-a box start was refused, and synced or refused for the skills installed in
-its own home (#345). Self-deploy drops its own row and the lagging rows
-once the box HEAD is origin/main, and `orch heal devices` never forgets
-box rows.
+deploying while its checkout moves, held after a conflict) and by each
+bot's waiter: lagging when a box start was refused, and synced or refused
+for the skills installed in its own home (#345). Self-deploy drops its own
+row and the lagging rows once the box HEAD is origin/main, and
+`orch heal devices` never forgets box rows.
 """
 
 from __future__ import annotations
@@ -46,7 +50,8 @@ DEPLOYING = "deploying"
 MISSING = "missing"
 REFUSED = "refused"
 UNREACHABLE = "unreachable"
-STATES = (SYNCED, LAGGING, DEPLOYING, MISSING, REFUSED, UNREACHABLE)
+HELD = "held"
+STATES = (SYNCED, LAGGING, DEPLOYING, MISSING, REFUSED, UNREACHABLE, HELD)
 
 BLOCKS_HARNESS = frozenset({LAGGING, DEPLOYING, MISSING, REFUSED})
 ALARM_AT_ONCE = frozenset({MISSING, REFUSED})
@@ -137,6 +142,11 @@ def read(connection: sqlite3.Connection) -> list[Row]:
             f"FROM {TABLE} ORDER BY device, bot"
         )
     ]
+
+
+def held(connection: sqlite3.Connection, device: str) -> Row | None:
+    return next((row for row in read(connection)
+                 if (row.device, row.bot, row.state) == (device, "", HELD)), None)
 
 
 def blocked_by(rows: Iterable[Row]) -> Blocked:
