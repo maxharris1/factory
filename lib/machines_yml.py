@@ -35,6 +35,12 @@ it always names a disabled device. Unknown fields are refused so v1
 stays closed. Nothing here checks that a device is reachable. A gitignored
 machines.local.yml beside the file is merged in before validation
 (lib/config_overlay.py).
+
+The top-level orch_host names the device that runs orch. It must be a
+listed device, and a `local: true` device must be it. Without it, the one
+local device is the orch host; with no local device it is required. A
+remote device may name an ssh_user: the login (`ssh -l`) the box uses for
+it in place of the job's bot user, which stays the job's identity.
 """
 
 from __future__ import annotations
@@ -57,10 +63,11 @@ PLACEHOLDER_PREFIX = "REPLACE_WITH_"
 BOT_USERS = MappingProxyType({harness: f"{harness}-bot" for harness in HARNESSES})
 FORBIDDEN_WORKDIR_ROOT = "/mnt"
 BOT_TOKEN = "{bot}"
+DEFAULT_ORCH_HOST = "box"
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-_TOP_KEYS = {"devices"}
+_TOP_KEYS = {"devices", "orch_host"}
 _DEVICE_KEYS = {
     "name",
     "tailscale_name",
@@ -71,10 +78,12 @@ _DEVICE_KEYS = {
     "workdir_root",
     "ssh_alias",
     "factory_root",
+    "ssh_user",
 }
 # An ssh_alias once {bot} is resolved: a bare Host alias. No user@, no
 # leading '-' (it would be read as an option), no spaces or shell syntax.
 _SSH_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+_SSH_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,7 @@ class Device:
     placeholders: tuple[str, ...] = ()
     ssh_alias: str | None = None
     factory_root: str | None = None
+    ssh_user: str | None = None
 
     @property
     def placeholder(self) -> bool:
@@ -121,6 +131,10 @@ class Device:
             return None
         return self.ssh_alias.replace(BOT_TOKEN, self.harnesses[harness])
 
+    def login_for(self, harness: str) -> str | None:
+        """The SSH login for harness: ssh_user, else the harness's bot user."""
+        return self.ssh_user or self.harnesses.get(harness)
+
     def factory_root_for(self, harness: str) -> str | None:
         """factory_root with {bot} resolved to the harness's bot user.
 
@@ -151,6 +165,7 @@ def shared_tailscale_names(devices: Sequence[Device]) -> list[tuple[str, ...]]:
 @dataclass(frozen=True)
 class MachinesConfig:
     devices: tuple[Device, ...] = field(default_factory=tuple)
+    orch_host: str = DEFAULT_ORCH_HOST
 
     def device(self, name: str) -> Device | None:
         return next((item for item in self.devices if item.name == name), None)
@@ -159,6 +174,11 @@ class MachinesConfig:
         """The deployed factory checkout for harness on the named device."""
         device = self.device(device_name)
         return None if device is None else device.factory_root_for(harness)
+
+
+def orch_host(config: MachinesConfig | None) -> str:
+    """The device that runs orch; DEFAULT_ORCH_HOST only when machines.yml is missing or invalid."""
+    return DEFAULT_ORCH_HOST if config is None else config.orch_host
 
 
 def is_placeholder(value: object) -> bool:
@@ -241,7 +261,36 @@ def _validate(
         )
     if any(item.severity == "error" for item in findings):
         return None, findings
-    return MachinesConfig(devices=tuple(devices)), findings
+    host = _orch_host(data, seen, local_names, findings)
+    if host is None or any(item.severity == "error" for item in findings):
+        return None, findings
+    return MachinesConfig(devices=tuple(devices), orch_host=host), findings
+
+
+def _orch_host(
+    data: dict, names: set[str], local_names: list[str], findings: list[Finding]
+) -> str | None:
+    if "orch_host" not in data:
+        if len(local_names) == 1:
+            return local_names[0]
+        if not local_names:
+            findings.append(
+                Finding("error", "orch_host is required when no device is local")
+            )
+        return None
+    host = data["orch_host"]
+    if not isinstance(host, str) or _NAME.fullmatch(host) is None:
+        findings.append(Finding("error", "orch_host must be a device name"))
+        return None
+    if host not in names:
+        findings.append(Finding("error", f"orch_host {host!r} is not a listed device"))
+        return None
+    for name in local_names:
+        if name != host:
+            findings.append(
+                Finding("error", f"local device {name!r} must be orch_host {host!r}")
+            )
+    return host
 
 
 def _device(
@@ -401,6 +450,23 @@ def _device(
         else:
             findings.append(Finding("error", f"{prefix}.ssh_alias {problem}"))
 
+    ssh_user: str | None = None
+    raw_user = item.get("ssh_user")
+    if "ssh_user" in item and local:
+        findings.append(
+            Finding("error", f"{prefix}.ssh_user must be omitted on the local device")
+        )
+    elif isinstance(raw_user, str) and _SSH_USER.fullmatch(raw_user):
+        ssh_user = raw_user
+    elif "ssh_user" in item:
+        findings.append(
+            Finding(
+                "error",
+                f"{prefix}.ssh_user must be a login name "
+                "(lowercase letters, digits, '_' and '-', at most 32)",
+            )
+        )
+
     slot_max: int | None = None
     raw_slots = item.get("slot_max")
     if "slot_max" not in item:
@@ -487,6 +553,7 @@ def _device(
         placeholders=tuple(placeholders),
         ssh_alias=ssh_alias,
         factory_root=factory_root,
+        ssh_user=ssh_user,
     )
 
 

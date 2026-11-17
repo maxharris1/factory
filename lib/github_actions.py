@@ -254,6 +254,8 @@ class GitHubReviewActions:
         )
         self.cache_ttl = cache_ttl
         self.login: str | None = None
+        self.warning_sink: Callable[[str], None] | None = None
+        self._contradictions_logged: set[tuple[str, str, int | str]] = set()
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         if state not in STATES:
@@ -636,6 +638,9 @@ class GitHubReviewActions:
         A short read is pending even when a run in view failed: a rerun on
         an unread page may supersede that failure, so pending is the safe
         answer, at the cost of one poll.
+
+        A run is pending only with no conclusion; a conclusion decides it
+        even when status is not completed (#720).
         """
         head = _sha(head, "head")
         commit = f"{_repo_path(repo)}/commits/{head}"
@@ -661,9 +666,12 @@ class GitHubReviewActions:
             name = str(run.get("name"))
             status = run.get("status")
             conclusion = run.get("conclusion")
-            if status != "completed":
+            if conclusion is None and status != "completed":
                 pending.append(name)
-            elif conclusion in _CHECK_FAILED:
+                continue
+            if status != "completed":
+                self._warn_contradiction(repo, head, run, name, status, conclusion)
+            if conclusion in _CHECK_FAILED:
                 failed.append(_failed_check(name, run.get("details_url")))
             elif conclusion == "success":
                 passed = True
@@ -686,6 +694,18 @@ class GitHubReviewActions:
                 failed=tuple(failed),
             )
         return CIResult("success" if passed and not pending else "pending", pending=tuple(pending))
+
+    def _warn_contradiction(
+        self, repo: str, head: str, run: dict[str, Any], name: str, status: Any, conclusion: Any
+    ) -> None:
+        run_id = run.get("id")
+        key = (repo, head, run_id if isinstance(run_id, int) else name)
+        if self.warning_sink is None or key in self._contradictions_logged:
+            return
+        self._contradictions_logged.add(key)
+        self.warning_sink(
+            f"check run {name} reports status={status} with conclusion={conclusion}; using the conclusion"
+        )
 
     def failed_run_logs(self, repo: str, run_id: str) -> dict[str, str]:
         if not run_id.isdigit():

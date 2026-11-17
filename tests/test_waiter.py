@@ -1111,7 +1111,7 @@ def test_autostart_runs_with_only_remote_devices(tmp_path: Path) -> None:
     config = write_config(tmp_path / "waiter.yml", "bot: claude-bot\ncommand: [x]\n")
     machines = tmp_path / "machines.yml"
     machines.write_text(
-        "devices:\n"
+        "orch_host: pc\ndevices:\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot}\n"
         "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n"

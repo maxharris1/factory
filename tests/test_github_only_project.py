@@ -694,7 +694,7 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
     world.poll()
     idle = snapshot()
     assert idle["running"] == []
-    assert idle["slots"]["box"] == {"running": 0, "slot_max": 3}
+    assert idle["slots"]["box"] == {"name": "box", "running": 0, "slot_max": 3}
     assert [(item["repo"], item["ticket_id"], item["action"]) for item in idle["queued"]] == [
         (FACTORY_REPO, "51", "review")
     ]
@@ -702,7 +702,7 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
     review = world.queue.claim("codex")
     assert review is not None
     reviewing = snapshot()
-    assert reviewing["slots"]["box"] == {"running": 1, "slot_max": 3}
+    assert reviewing["slots"]["box"] == {"name": "box", "running": 1, "slot_max": 3}
     assert [
         (item["repo"], item["ticket_id"], item["action"], item["recipient"], item["device"])
         for item in reviewing["running"]
@@ -728,7 +728,7 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
     assert fix is not None
     assert (fix.request.action, fix.request.head) == ("fix", PR_HEAD)
     building = snapshot()
-    assert building["slots"]["box"] == {"running": 1, "slot_max": 3}
+    assert building["slots"]["box"] == {"name": "box", "running": 1, "slot_max": 3}
     assert [
         (item["repo"], item["ticket_id"], item["action"], item["recipient"])
         for item in building["running"]

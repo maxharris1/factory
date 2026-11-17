@@ -32,6 +32,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
+from tests.pool_helpers import write_target_machines
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
@@ -435,6 +436,17 @@ def test_poller_beats_write_the_poller_and_probe_rows(tmp_path: Path) -> None:
     assert rows == {("poller", "box"), ("device-probe", "pc")}
     poller = next(r for r in health.read_heartbeats(db) or () if r.component == "poller")
     assert poller.stopped_at is not None
+
+
+def test_the_poller_beats_on_the_orch_host(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    with health.poller_beats(db, write_target_machines(tmp_path), transport=FakeTransport({}),
+                             interval=3600.0, log=lambda line: None):
+        deadline = time.monotonic() + 5
+        while not health.read_heartbeats(db) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        rows = health.read_heartbeats(db) or ()
+    assert [r.device for r in rows if r.component == "poller"] == ["pc"]
 
 
 def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path) -> None:
@@ -1162,7 +1174,7 @@ def test_every_writer_refuses_a_device_outside_machines_yml(tmp_path: Path, devi
     assert device.encode() not in raw
 
 
-def test_the_inventory_is_machines_yml_plus_the_local_device(tmp_path: Path) -> None:
+def test_the_inventory_is_machines_yml_plus_the_orch_host(tmp_path: Path) -> None:
     assert health.known_devices(machines_config(tmp_path)) == {"box", "pc", "mac"}
     assert health.known_devices(None) == {"box"}
 

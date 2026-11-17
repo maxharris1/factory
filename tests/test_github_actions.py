@@ -759,6 +759,79 @@ def test_ci_status_names_the_checks_still_running() -> None:
     assert (result.status, result.pending) == ("pending", ("build", "Vercel"))
 
 
+def concluded_run(status: str, conclusion: str | None) -> GhResult:
+    page = json.loads((FIXTURES / "check-runs-in-progress-concluded.json").read_text())
+    page["check_runs"][0].update(status=status, conclusion=conclusion)
+    return GhResult(0, json.dumps(page), "")
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "expected", "pending"),
+    [
+        ("in_progress", "success", "success", ()),
+        ("queued", "success", "success", ()),
+        ("in_progress", "failure", "failure", ()),
+        ("in_progress", "cancelled", "failure", ()),
+        ("in_progress", "timed_out", "failure", ()),
+        ("in_progress", "neutral", "pending", ()),
+        ("in_progress", "skipped", "pending", ()),
+        ("in_progress", None, "pending", ("Service Account Key Scan",)),
+        ("queued", None, "pending", ("Service Account Key Scan",)),
+    ],
+)
+def test_ci_status_judges_a_check_run_by_its_conclusion_whatever_its_status(
+    status: str, conclusion: str | None, expected: str, pending: tuple[str, ...]
+) -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, concluded_run(status, conclusion))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+    assert (result.status, result.pending) == (expected, pending)
+
+
+def test_ci_status_passes_the_in_progress_run_that_concluded_success() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-in-progress-concluded.json"))
+    gh.route(STATUS, served("status-empty.json"))
+
+    assert actions.ci_status("owner/repo", HEAD).status == "success"
+
+
+def test_ci_status_logs_a_contradictory_check_run_once_per_head() -> None:
+    actions, gh = adapter()
+    lines: list[str] = []
+    actions.warning_sink = lines.append
+    gh.route(CHECKS, served("check-runs-in-progress-concluded.json"))
+    gh.route(STATUS, served("status-empty.json"))
+
+    actions.ci_status("owner/repo", HEAD)
+    actions.ci_status("owner/repo", HEAD)
+
+    assert lines == [
+        "check run Service Account Key Scan reports status=in_progress"
+        " with conclusion=success; using the conclusion"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion"),
+    [("completed", "success"), ("in_progress", None)],
+)
+def test_ci_status_logs_nothing_for_a_consistent_check_run(
+    status: str, conclusion: str | None
+) -> None:
+    actions, gh = adapter()
+    lines: list[str] = []
+    actions.warning_sink = lines.append
+    gh.route(CHECKS, concluded_run(status, conclusion))
+    gh.route(STATUS, served("status-empty.json"))
+
+    actions.ci_status("owner/repo", HEAD)
+
+    assert lines == []
+
+
 @pytest.mark.parametrize(
     "pages",
     [

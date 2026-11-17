@@ -149,3 +149,13 @@ def test_a_round_two_fix_brief_shows_each_open_finding_once() -> None:
 def test_the_build_brief_is_at_least_15_percent_smaller() -> None:
     box = _halves("build")[0]
     assert len(box.encode()) <= 0.85 * BUILD_BRIEF_BYTES_BEFORE
+
+
+def test_a_fix_brief_with_no_router_keeps_its_findings_in_job_data() -> None:
+    evidence = evidence_bundle(2)
+    job = _job("fix", "claude", 1, HEAD, {"round": "2/3", "instruction": ROUND_ONE_VERDICT.url, "evidence": evidence})
+    text = render_brief(job, bot="claude-bot", context=None, factory_root=None)
+    data = _section(text, "## Job data")
+    assert "(quoted in the What to do section)" not in text
+    for finding in evidence["findings"]["findings"]:
+        assert json.dumps(finding["text"])[1:-1] in data

@@ -127,7 +127,7 @@ from typing import TYPE_CHECKING, NamedTuple, TextIO
 from lib import device_sync
 from lib.dashboard_config import EVERY_MINUTES_MAX
 from lib.device_monitor import remote_target
-from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.machines_yml import DEFAULT_ORCH_HOST, MachinesConfig, load_machines_yml, orch_host
 from lib.remote import ByteTransport, RemoteTarget, Transport, probe_device, ssh_argv
 from lib.wait import OWNING_BOTS
 
@@ -152,7 +152,6 @@ TUNNEL_DOWN = "tunnel-down"
 _HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]*)")
 MIN_INTERVAL = 5.0
 MAX_INTERVAL = EVERY_MINUTES_MAX * 60.0
-DEFAULT_DEVICE = "box"
 PROBE_JOB_ID = "health-probe"
 
 POLLER = "poller"
@@ -623,7 +622,7 @@ class Beater:
     ):
         if on_exit not in ("stop", "delete"):
             raise ValueError("on_exit must be stop or delete")
-        self.devices = tuple(dict.fromkeys(devices)) or (DEFAULT_DEVICE,)
+        self.devices = tuple(dict.fromkeys(devices)) or (DEFAULT_ORCH_HOST,)
         self.store = store if store is not None else HealthStore(db, devices=self.devices)
         self.component = component
         self.bot = bot
@@ -693,7 +692,7 @@ def beat_once(
     ok: bool = True,
 ) -> bool:
     """One heartbeat from a short-lived writer (the dashboard push), on the
-    local device; with ok=False, a failed check instead. Never raises: a
+    orch host; with ok=False, a failed check instead. Never raises: a
     failure is logged and returns False."""
     try:
         config = load_machines(machines)
@@ -701,7 +700,7 @@ def beat_once(
         record = store.beat if ok else store.checked
         record(
             component,
-            local_device(config),
+            orch_host(config),
             pid=os.getpid(),
             version=LOADED_VERSION,
             interval=min(max(float(interval), MIN_INTERVAL), MAX_INTERVAL),
@@ -899,17 +898,10 @@ def load_machines(path: Path | None) -> MachinesConfig | None:
 
 
 def known_devices(machines: MachinesConfig | None) -> frozenset[str]:
-    """The device names a heartbeat may carry: machines.yml's, plus the local one."""
+    """The device names a heartbeat may carry: machines.yml's, plus the orch host."""
     names = {d.name for d in (machines.devices if machines is not None else ())
              if TOKEN.fullmatch(d.name)}
-    return frozenset(names | {local_device(machines)})
-
-
-def local_device(machines: MachinesConfig | None) -> str:
-    for device in machines.devices if machines is not None else ():
-        if device.local and TOKEN.fullmatch(device.name):
-            return device.name
-    return DEFAULT_DEVICE
+    return frozenset(names | {orch_host(machines)})
 
 
 def eligible_devices(machines: MachinesConfig | None) -> dict[str, frozenset[str]] | None:
@@ -930,7 +922,7 @@ def waiter_devices(machines: MachinesConfig | None, bot: str) -> list[str]:
         for d in (machines.devices if machines is not None else ())
         if harness is not None and d.eligible(harness) and TOKEN.fullmatch(d.name)
     ]
-    return names or [local_device(machines)]
+    return names or [orch_host(machines)]
 
 
 class PollerBeats:
@@ -973,7 +965,7 @@ def poller_beats(
         from lib.remote import SshTransport
 
         transport = SshTransport()
-    beater = Beater(db, POLLER, devices=[local_device(machines)], store=store,
+    beater = Beater(db, POLLER, devices=[orch_host(machines)], store=store,
                     interval=interval, log=log, cycle=cycle)
     return PollerBeats(beater, DeviceProber(store, probe_targets(machines), transport, log=log))
 
@@ -1008,7 +1000,7 @@ def listener_beats(
     log: Log = _stderr,
 ) -> ListenerBeats:
     machines = load_machines(machines_path)
-    device = local_device(machines)
+    device = orch_host(machines)
     store = HealthStore(db, devices=known_devices(machines))
     beater = Beater(db, LISTENER, devices=[device], store=store, interval=interval, log=log)
     tunnel = (
@@ -1266,8 +1258,8 @@ def expected_components(machines: MachinesConfig | None, orch: OrchConfig | None
     device when machines.yml is known; the Linear listener when orch.yml has
     `linear_webhook`, and its tunnel when that sets `public_url`; the
     dashboard writer when orch.yml pushes the dashboard."""
-    local = local_device(machines)
-    slots = [Slot(POLLER, (local,))]
+    host = orch_host(machines)
+    slots = [Slot(POLLER, (host,))]
     covers = {POLLER}
     refused = frozenset(orch.refused_harnesses) if orch is not None else frozenset()
     if machines is not None:
@@ -1283,11 +1275,11 @@ def expected_components(machines: MachinesConfig | None, orch: OrchConfig | None
     if orch is not None:
         covers |= {LISTENER, TUNNEL, DASHBOARD}
         if orch.linear_webhook is not None:
-            slots.append(Slot(LISTENER, (local,)))
+            slots.append(Slot(LISTENER, (host,)))
             if orch.linear_webhook.public_url:
-                slots.append(Slot(TUNNEL, (local,)))
+                slots.append(Slot(TUNNEL, (host,)))
         if orch.dashboard.push.transport != "none":
-            slots.append(Slot(DASHBOARD, (local,)))
+            slots.append(Slot(DASHBOARD, (host,)))
     return Expected(tuple(slots), frozenset(covers))
 
 
@@ -1370,7 +1362,7 @@ def build_report(
     if rows is None and not tunnel_held:
         return HealthReport(known=False, code_version=checkout, devices=checkouts)
     registry = expected if expected is not None else Expected(
-        (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
+        (Slot(POLLER, (DEFAULT_ORCH_HOST,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
     for row in _latest_checks(rows or (), uptime):
         state, reason = classify(row, now, uptime)
@@ -1454,7 +1446,7 @@ def load_report(
     """`build_report` from the health file and orch.db's `device_sync` rows;
     an unreadable health file is reported (`error`, which needs attention),
     not raised."""
-    box = box_sync(local_device(machines), ROOT if root is None else root)
+    box = box_sync(orch_host(machines), ROOT if root is None else root)
     devices = ((box,) if box is not None else ()) + tuple(
         DeviceSync.of(row, now) for row in read_device_sync(db))
     try:
@@ -1605,7 +1597,7 @@ def remote_storage(transport: ByteTransport, item: ProbeTarget,
 
 def measure_storage(machines: MachinesConfig | None, db: Path,
                     transport: ByteTransport) -> tuple[Storage, ...]:
-    box = box_storage(local_device(machines), (ROOT, db.parent, Path("/tmp")))
+    box = box_storage(orch_host(machines), (ROOT, db.parent, Path("/tmp")))
     targets = probe_targets(machines)
     if not targets:
         return tuple(box)

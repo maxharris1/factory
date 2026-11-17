@@ -77,7 +77,7 @@ from lib import device_sync
 from lib.device_monitor import remote_target
 from lib.health import checkout_sha
 from lib.device_pool import Placement
-from lib.machines_yml import Device
+from lib.machines_yml import DEFAULT_ORCH_HOST, Device
 from lib.pstack_models import rules_text
 from lib.pstack_pin import (
     DIR_HARNESS, FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, install_skills, load_pin,
@@ -368,6 +368,7 @@ def check(
     checkout: str | None,
     root: Path = ROOT,
     held: device_sync.Row | None = None,
+    host: str = DEFAULT_ORCH_HOST,
 ) -> Report:
     skills = skills_dir(bot)
     try:
@@ -375,13 +376,13 @@ def check(
     except (OSError, ValueError, UnicodeError) as exc:
         raise PreflightError(f"preflight: cannot read skills.lock: {exc}") from exc
     if checkout is None:
-        name = device.name if device is not None else "box"
+        name = device.name if device is not None else host
         raise PreflightError(f"preflight: {name} has no factory_root for {OWNING_BOTS[bot]}")
     expected = wanted(skills, checkout, pinned)
     paths = sorted(expected)
     install_errors: list[str] = []
     if device is None or device.local or placement is None:
-        name = device.name if device is not None else "box"
+        name = device.name if device is not None else host
         refuse_box_checkout_behind(name, bot, checkout, root, held)
         found = local_hashes(home, paths)
         if home_install_stale(expected, found):
@@ -389,7 +390,7 @@ def check(
             found = local_hashes(home, paths)
     else:
         name = device.name
-        lagging = box_behind_origin("box", bot, str(root.resolve()), held)
+        lagging = box_behind_origin(host, bot, str(root.resolve()), held)
         if lagging is not None:
             raise CheckoutLagging(lagging, box_behind_origin=True)
         seen = remote_hashes(transport, device, placement, paths, checkout)
@@ -448,6 +449,7 @@ def preflight(
     home: Path | None = None,
     root: Path | None = None,
     held: device_sync.Row | None = None,
+    host: str = DEFAULT_ORCH_HOST,
 ) -> Report:
     """Check the pinned skills on the job's device, under the checkout the brief names,
     and record the result. Raises PreflightError."""
@@ -461,9 +463,10 @@ def preflight(
             checkout=checkout,
             root=root if root is not None else ROOT,
             held=held,
+            host=host,
         )
     except PreflightError as exc:
-        record(queue, job, {"device": device.name if device is not None else "box", "error": str(exc)})
+        record(queue, job, {"device": device.name if device is not None else host, "error": str(exc)})
         raise
     record(queue, job, report.entry())
     if report.error is not None:
