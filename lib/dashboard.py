@@ -1,12 +1,12 @@
-"""Read-only, redacted dashboard snapshot (status.json plus four pages).
+"""Read-only, redacted dashboard snapshot (status.json, the pages and tickets.json).
 
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
-It writes status.json and the self-contained pages (PAGES: index.html,
+It writes status.json, the self-contained pages (PAGES: index.html,
 job.html, activity.html, efficiency.html, health.html; see
-lib/dashboard_page.py) to an
-output directory, each atomically (temp file in the same directory, fsync,
-then rename). Each page's inline script fetches status.json every 1 to 2
+lib/dashboard_page.py) and tickets.json to an output directory, each
+atomically (temp file in the same directory, fsync, then rename), as one
+set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
 seconds and updates in place. Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
@@ -38,6 +38,38 @@ orch.health.db nothing is flagged.
 Projects (#152): `projects` is each orch.yml project's tracker, ship mode
 and round caps as the poller last read its factory.md (lib/project_rules.py).
 An unreadable or not-yet-read factory.md is `unknown` with the reason.
+
+Ticket records (#530): tickets.json holds one record per tracked ticket
+(the tickets in status.json's `tickets`), built from the database whether
+or not the ticket has a job. The snapshot carries them under RECORDS, so
+the final scrub covers every string; the writer keeps that key out of
+status.json and the pages. The file is compact JSON with sorted keys, and
+every <, > and & is written as a JSON escape:
+
+    {schema: 1, generated_at_epoch, tickets: {"<repo>#<ticket_id>": record}}
+    record:   {repo, ticket_id, state, state_age_seconds, round, hops,
+               off_chart_count, terminal, hops_to_shipped, all_durations_known,
+               visits, shipped, stopped, jobs}
+    visits:   job_flow's visits, unchanged: [{state, who, started_at,
+               duration_seconds, time_known, off_chart, reason, current}]
+    shipped:  null | {at, how: "merged" | "handed-off", intake_to_ship_seconds,
+               revise_rounds, jobs, tokens_in, tokens_out, cost_usd}
+    stopped:  null | {state, at, stopped_in, reason, ways_out: [{to, label}]}
+    jobs:     the ticket's status.json running rows, newest first, then its
+               queued rows, each without `flow`
+
+A key is the stored repo and ticket id, redacted but not cut short, so it
+can be longer than the record's shown `repo` and `ticket_id`. Tickets that
+redaction alone makes equal take a `~<n>` suffix.
+
+`shipped` is set when the ticket's state is on the Shipped shelf: `at` is
+when it first reached a Shipped state, and `how` is "handed-off" when that
+state was handed-off. Its totals cover every job the ticket ever had; tokens
+and cost are null when no job reported them. `stopped` is set when the board
+puts the ticket in its Stopped group; a stuck flag on a state that is not a
+stop reads as stopped in "stuck". A record is shaped so the ticket page's
+`_detail_model({"flow": record}, chart)` reads it as it reads a job row. A
+job whose ticket is not tracked has no record.
 """
 
 from __future__ import annotations
@@ -59,10 +91,17 @@ import yaml
 from lib import health as component_health
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_flow import JobStep, Transition, job_flow, load_chart
+from lib.dashboard_flow import (
+    JobStep,
+    Transition,
+    job_flow,
+    load_chart,
+    shipped_facts,
+    stop_facts,
+)
 from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
-from lib.dashboard_telemetry import read_telemetry
+from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import CI_WAIT_REASONS
 from lib.dashboard_page import PAGES, render_pages
@@ -92,6 +131,8 @@ from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
+RECORDS = "ticket_records"
+TICKETS_SCHEMA = 1
 LOG_TAIL_LINES = 50
 LOG_TAIL_BYTES = 256 * 1024
 RAW_LINE_LIMIT = 4096
@@ -730,6 +771,16 @@ def collect_snapshot(
         if flag is not None:
             item["no_waiter"] = flag.harness
             item["no_waiter_link"] = f"health.html#{flag.anchor}"
+    records = {
+        db["record_keys"][key]: {
+            **record,
+            "jobs": [
+                {name: value for name, value in item.items() if name != "flow"}
+                for item in db["ticket_jobs"].get(key, [])
+            ],
+        }
+        for key, record in db["ticket_records"].items()
+    }
 
     snapshot = {
         "schema": SCHEMA,
@@ -790,6 +841,7 @@ def collect_snapshot(
         "projects": _projects(orch, rules, now),
         "rules": rules_and_limits(chart),
         "usage": usage,
+        RECORDS: records,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 
@@ -814,8 +866,6 @@ _CHART_RULES = (
 
 
 def rules_and_limits(chart: dict | None) -> list[dict]:
-    """Each value is read from the chart's edge labels, never copied. The
-    heartbeat legend and the Linear budget have their own System panels."""
     rows = []
     edges = (
         {} if chart is None
@@ -1232,8 +1282,13 @@ def _read_db(
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             ci_wait = ci_waits.get(key)
             no_ci = no_ci_bases.get(key)
+            reason = (
+                _clean(row["stuck_reason"], 200) if row["stuck_reason"] is not None else None
+            )
             ticket_info[key] = TicketInfo(
-                _enum(row["tracker"], TRACKERS), stuck, state
+                _enum(row["tracker"], TRACKERS), stuck, state,
+                ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
+                f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
             )
             tickets.append(
                 {
@@ -1254,11 +1309,7 @@ def _read_db(
                     {
                         **ref,
                         "state": state,
-                        "reason": (
-                            _clean(row["stuck_reason"], 200)
-                            if row["stuck_reason"] is not None
-                            else None
-                        ),
+                        "reason": reason,
                     }
                 )
             if stuck or str(row["workflow_state"]) in PAUSED_STATES:
@@ -1270,7 +1321,32 @@ def _read_db(
                         **waiting,
                     }
                 )
-    _add_job_tickets(connection, active, ticket_info, chart, now, tables)
+    flows, retries, tracked_at = _ticket_flows(
+        connection,
+        {*ticket_info, *((repo.casefold(), ticket_id) for _, repo, ticket_id in active)},
+        {key: info.state for key, info in ticket_info.items()},
+        chart,
+        now,
+        tables,
+    )
+    for item, repo, ticket_id in active:
+        key = (repo.casefold(), ticket_id)
+        info = ticket_info.get(key, TicketInfo(None, False, None))
+        item["tracker"] = info.tracker
+        item["stuck"] = info.stuck
+        item["flow"] = flows[key]
+        if key in retries:
+            item["retries"] = retries[key]
+    spent = ticket_totals(connection)
+    ticket_records = {
+        key: _ticket_record(info, flows[key], tracked_at.get(key), spent.get(key), chart)
+        for key, info in ticket_info.items()
+    }
+    record_keys = _record_keys(ticket_info)
+    ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
+    ticket_jobs: dict[tuple[str, str], list[dict]] = {}
+    for item in [*sorted(running, key=lambda item: item["elapsed_seconds"]), *queued]:
+        ticket_jobs.setdefault(ticket_of[id(item)], []).append(item)
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
@@ -1502,6 +1578,9 @@ def _read_db(
         },
         "running": running,
         "queued": queued,
+        "ticket_records": ticket_records,
+        "record_keys": record_keys,
+        "ticket_jobs": ticket_jobs,
         "box_running": box_running,
         "running_on": running_on,
         "overdue_jobs": overdue,
@@ -1543,58 +1622,120 @@ class TicketInfo(NamedTuple):
     tracker: str | None
     stuck: bool
     state: str | None
+    repo: str = ""
+    ticket_id: str = ""
+    round: int = 0
+    reason: str | None = None
+    key: str = ""
 
 
-def _add_job_tickets(
+def _record_keys(ticket_info: dict[tuple[str, str], TicketInfo]) -> dict[tuple[str, str], str]:
+    """Each tracked ticket's tickets.json key, from its stored repo and ticket
+    id redacted but never cut short, so tickets whose shown identifiers cut to
+    the same text keep separate records. Tickets that redaction alone makes
+    equal take a `~<n>` suffix, in stored-identifier order."""
+    keys: dict[tuple[str, str], str] = {}
+    taken: set[str] = set()
+    for ticket in sorted(ticket_info):
+        key = base = ticket_info[ticket].key
+        count = 1
+        while key in taken:
+            count += 1
+            key = f"{base}~{count}"
+        taken.add(key)
+        keys[ticket] = key
+    return keys
+
+
+def _ticket_record(
+    info: TicketInfo,
+    flow: dict,
+    tracked_at: float | None,
+    totals: dict | None,
+    chart: dict | None,
+) -> dict:
+    """A tracked ticket's tickets.json record, less its live jobs. Shaped so
+    the ticket page's `_detail_model({"flow": record}, chart)` reads it as it
+    reads a job row."""
+    visits = flow["visits"]
+    shipped = shipped_facts(chart, flow)
+    if shipped is not None:
+        began = tracked_at if tracked_at is not None else (
+            visits[0]["started_at"] if visits else None
+        )
+        shipped.update(
+            intake_to_ship_seconds=(
+                None if shipped["at"] is None or began is None
+                else int(max(0.0, shipped["at"] - began))
+            ),
+            revise_rounds=info.round,
+            **(totals or {"jobs": 0, "tokens_in": None, "tokens_out": None, "cost_usd": None}),
+        )
+    stopped = stop_facts(chart, flow, str(info.state), info.stuck)
+    if stopped is not None:
+        stopped["reason"] = info.reason
+    return {
+        "repo": info.repo,
+        "ticket_id": info.ticket_id,
+        "state": flow["state"],
+        "state_age_seconds": flow["state_age_seconds"],
+        "round": info.round,
+        "hops": max(0, len(visits) - 1),
+        "off_chart_count": sum(1 for visit in visits if visit["off_chart"]),
+        "terminal": flow["terminal"],
+        "hops_to_shipped": flow["hops_to_shipped"],
+        "all_durations_known": flow["all_durations_known"],
+        "visits": visits,
+        "shipped": shipped,
+        "stopped": stopped,
+    }
+
+
+def _ticket_flows(
     connection: sqlite3.Connection,
-    active: list[tuple[dict, str, str]],
-    ticket_info: dict[tuple[str, str], TicketInfo],
+    keys: set[tuple[str, str]],
+    states: dict[tuple[str, str], str | None],
     chart: dict | None,
     now: float,
     tables: set[str],
-) -> None:
-    if not active:
-        return
-    # One read for every ticket with a running or queued job, oldest first.
-    wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
-    ids = sorted({ticket_id for _, ticket_id in wanted})
-    marks = ",".join("?" for _ in ids)
-    histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
-    columns = (
-        {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
-        if "job_telemetry" in tables
-        else set()
-    )
-    joined = "job_id" in columns
-    times = ", ".join(
-        f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
-        for name in ("started_at", "finished_at")
-    )
-    for row in connection.execute(
-        "SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
-        f"jobs.attempt, {times} "
-        "FROM jobs "
-        + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
-        + f"WHERE jobs.ticket_id IN ({marks}) "
-        "ORDER BY jobs.created_at, jobs.rowid",
-        ids,
-    ):
-        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-        if key in histories:
-            histories[key].append(JobStep(
-                str(row["action"]),
-                _enum(row["recipient"], RECIPIENTS),
-                float(row["created_at"]),
-                _telemetry_time(row["started_at"]),
-                _telemetry_time(row["finished_at"]),
-                int(row["attempt"]),
-            ))
-    recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in wanted}
+) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], int], dict[tuple[str, str], float]]:
+    """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
+    ticket id). Each table is read once, whole, and kept for `keys` only: no
+    `IN (...)` list, so the number of tickets never meets SQLite's variable cap."""
+    histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in keys}
+    if "jobs" in tables:
+        columns = (
+            {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
+            if "job_telemetry" in tables
+            else set()
+        )
+        joined = "job_id" in columns
+        times = ", ".join(
+            f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
+            for name in ("started_at", "finished_at")
+        )
+        for row in connection.execute(
+            "SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
+            f"jobs.attempt, {times} "
+            "FROM jobs "
+            + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
+            + "ORDER BY jobs.created_at, jobs.rowid"
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            if key in histories:
+                histories[key].append(JobStep(
+                    str(row["action"]),
+                    _enum(row["recipient"], RECIPIENTS),
+                    float(row["created_at"]),
+                    _telemetry_time(row["started_at"]),
+                    _telemetry_time(row["finished_at"]),
+                    int(row["attempt"]),
+                ))
+    recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in keys}
     if "ticket_transitions" in tables:
         for row in connection.execute(
             "SELECT repo, ticket_id, from_state, to_state, at, source FROM ticket_transitions "
-            f"WHERE ticket_id IN ({marks}) ORDER BY at, id",
-            ids,
+            "ORDER BY at, id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             at = _telemetry_time(row["at"])
@@ -1608,33 +1749,25 @@ def _add_job_tickets(
                 ))
     tracked_at: dict[tuple[str, str], float] = {}
     if "tracked_tickets" in tables:
-        for row in connection.execute(
-            f"SELECT repo, ticket_id, tracked_at FROM tracked_tickets WHERE ticket_id IN ({marks})",
-            ids,
-        ):
+        for row in connection.execute("SELECT repo, ticket_id, tracked_at FROM tracked_tickets"):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             at = _telemetry_time(row["tracked_at"])
-            if at is not None:
-                tracked_at[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = float(at)
+            if key in keys and at is not None:
+                tracked_at[key] = float(at)
     retries: dict[tuple[str, str], int] = {}
     if "ticket_retries" in tables:
         for row in connection.execute(
             "SELECT repo, ticket_id, count(*) AS n FROM ticket_retries "
-            f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
-            "AND outcome NOT LIKE 'rejected-%' GROUP BY repo, ticket_id",
-            ids,
+            "WHERE outcome NOT LIKE 'rejected-%' GROUP BY repo, ticket_id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            retries[key] = retries.get(key, 0) + int(row["n"])
-    for item, repo, ticket_id in active:
-        key = (repo.casefold(), ticket_id)
-        info = ticket_info.get(key, TicketInfo(None, False, None))
-        item["tracker"] = info.tracker
-        item["stuck"] = info.stuck
-        item["flow"] = job_flow(
-            chart, histories[key], info.state, now, recorded[key], tracked_at.get(key)
-        )
-        if key in retries:
-            item["retries"] = retries[key]
+            if key in keys:
+                retries[key] = retries.get(key, 0) + int(row["n"])
+    flows = {
+        key: job_flow(chart, histories[key], states.get(key), now, recorded[key], tracked_at.get(key))
+        for key in keys
+    }
+    return flows, retries, tracked_at
 
 
 def _has_placeholder(value: object) -> bool:
@@ -1724,18 +1857,22 @@ def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
 
 
 def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
-    """Write status.json and every page (PAGES) from one snapshot, as a set.
+    """Write status.json, every page (PAGES) and tickets.json from one
+    snapshot, as a set.
 
-    Each is written to a temp file in the same directory and fsynced, then
-    renamed into place, status.json first. If a later rename fails, every
-    file already renamed is put back as it was (or removed if there was
-    none), so the directory never mixes files from this snapshot with files
-    from an earlier one. Returns every path, status.json first, then the
-    pages in PAGES order.
+    The ticket records (RECORDS) go to tickets.json only; status.json and the
+    pages are written from the rest of the snapshot. Each file is written to
+    a temp file in the same directory and fsynced, then renamed into place,
+    status.json first. If a later rename fails, every file already renamed is
+    put back as it was (or removed if there was none), so the directory never
+    mixes files from this snapshot with files from an earlier one. Returns
+    every path: status.json, then the pages in PAGES order, then tickets.json.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"}
-    texts.update(render_pages(snapshot))
+    status = {key: value for key, value in snapshot.items() if key != RECORDS}
+    texts = {"status.json": json.dumps(status, indent=2, sort_keys=True, allow_nan=False) + "\n"}
+    texts.update(render_pages(status))
+    texts["tickets.json"] = tickets_json(snapshot)
     targets = [out_dir / name for name in texts]
     temps: list[str] = []
     try:
@@ -1763,6 +1900,22 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
             except FileNotFoundError:
                 pass
     return tuple(targets)
+
+
+def tickets_json(snapshot: dict) -> str:
+    """The ticket records as compact JSON, with <, > and & written as JSON
+    escapes so no markup survives in the file even outside a JSON parser."""
+    text = json.dumps(
+        {
+            "schema": TICKETS_SCHEMA,
+            "generated_at_epoch": snapshot.get("generated_at_epoch"),
+            "tickets": snapshot.get(RECORDS, {}),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026") + "\n"
 
 
 def _temp_name(path: Path, temps: list[str], *, suffix: str = ".tmp") -> str:

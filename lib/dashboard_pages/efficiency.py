@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import math
 
-from lib.dashboard_pages.common import _b, _e, _num, _panel, _short, _span, duration
-from lib.dashboard_pages.lanes import lane_devices
+from lib.dashboard_pages.common import _b, _e, _num, _panel, _span, duration
+from lib.dashboard_telemetry import rollup_panel
 
 CSS = """\
 .ef-row{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px}
 .ef-row>.panel{flex:2 1 380px}.ef-row>.panel.ef-wide{flex:3 1 560px}
-#headroom,#tokens{grid-column:1/-1}
 .ef-savings{display:flex;flex-wrap:wrap;align-items:center;gap:24px}
 .waffle{display:grid;grid-template-columns:repeat(10,12px);grid-auto-rows:12px;gap:2px;flex:none}
 .waffle span{background:var(--grok)}.waffle .s{background:var(--text)}.waffle.none span{background:var(--line-hi)}
@@ -22,35 +21,22 @@ CSS = """\
 .ef-counts span{font-size:12px;color:var(--muted)}
 #savings .definition{margin:14px 0 6px;font-size:13px;color:var(--text-2)}
 #savings details p{margin:6px 0 0;font-size:12px}
-.ef-tiles{display:flex;flex-wrap:wrap;gap:12px}
-.ef-tile{flex:1 1 140px;padding:10px 14px 12px;background:var(--bg);box-shadow:var(--elev)}
-.ef-tile b{display:block;font:600 30px/1.15 var(--mono);letter-spacing:-.03em;font-variant-numeric:tabular-nums}
-.ef-tile span{display:block;font:500 12px/1.3 var(--mono);color:var(--muted)}
-.ef-bar{display:flex;height:12px;margin:14px 0 8px;background:var(--line-hi)}
-.ef-bar .ok{background:var(--ok)}.ef-bar .bad{background:var(--bad)}
-.ef-foot{margin:0;font-size:12px;color:var(--muted)}
-.ef-groups{display:flex;flex-direction:column;gap:10px}
-.ef-group{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
-.ef-k{flex:0 0 72px;font:12px/1.5 var(--mono);color:var(--text)}
-.ef-sq{display:flex;flex-wrap:wrap;gap:3px;flex:0 0 133px}
-.ef-sq span{width:14px;height:14px;background:var(--text-2)}.ef-sq.zero span{background:var(--ok)}
-.ef-n{flex:0 0 20px;text-align:right;font:600 13px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
-.ef-n.ok{color:var(--ok)}
-.ef-refs{flex:1 1 260px;min-width:0;font:11px/1.5 var(--mono);color:var(--muted)}
-.ef-note{margin:14px 0 0;font-size:13px;color:var(--text-2)}
-.ef-cells{display:flex;flex-wrap:wrap;gap:3px}
-.ef-cells span{width:20px;height:20px;background:var(--muted)}
-.ef-cells .claude{background:var(--claude)}.ef-cells .codex{background:var(--codex)}
-.ef-cells .cursor{background:var(--cursor)}
-.ef-cells .held{border:1px dashed var(--warn);background:none}.ef-cells .idle{border:1px dashed var(--line-hi);background:none}
-.ef-legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin:10px 0 14px;font:12px/1.5 var(--mono);font-variant-numeric:tabular-nums}
-.ef-legend .claude{color:var(--claude)}.ef-legend .codex{color:var(--codex)}.ef-legend .cursor{color:var(--cursor)}
-.ef-legend .grok{color:var(--grok)}.ef-legend .held{color:var(--warn)}.ef-legend .idle{color:var(--muted)}
-.ef-devs{display:flex;flex-direction:column;gap:8px}
-.ef-dev{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px}
-.ef-dev b{flex:0 0 48px;font:600 13px/1.5 var(--mono);color:var(--text)}
-.ef-meter{display:block;max-width:100%}.ef-meter .px{height:8px}
-.ef-u{font:12px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--muted)}
+.ef-rounds{display:flex;flex-direction:column;gap:10px}
+.ef-rb{display:grid;grid-template-columns:84px minmax(0,1fr) 84px;align-items:center;gap:12px}
+.ef-k{font:12px/1.5 var(--mono);color:var(--text)}
+.ef-track{display:block;height:14px}
+.ef-fill{display:block;height:14px;background:var(--text-2)}.ef-fill.zero{background:var(--ok)}
+.ef-n{text-align:right;white-space:nowrap;font:12px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--muted)}
+.ef-n b{font-size:13px;font-weight:600;color:var(--text)}.ef-n b.ok{color:var(--ok)}
+.ef-foot{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:6px 16px;margin:14px 0 0}
+.ef-note{margin:0;font-size:13px;color:var(--text-2)}
+.ef-foot a{font:12px/1.5 var(--mono);text-decoration:underline;text-underline-offset:3px}
+#jobs-lifetime{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;padding:10px 16px}
+#jobs-lifetime h2{margin:0;font:500 11px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+#jobs-lifetime h2>span:first-child::before{display:none}
+.ef-life{font:13px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--text-2)}.ef-life b{font-weight:600}
+.ef-dot{font:13px/1.5 var(--mono);color:var(--muted)}
+.ef-pct{margin-left:auto;font-size:12px;color:var(--muted)}
 .ef-lede{margin:0 0 12px;max-width:880px;font-size:13px;color:var(--text-2)}
 .ef-scroll{overflow-x:auto}
 .ef-usage{min-width:640px;margin:0}
@@ -58,6 +44,14 @@ CSS = """\
 .ef-usage .ef-v.ok{color:var(--ok)}.ef-usage .ef-v.warn{color:var(--warn)}.ef-usage .ef-v.bad{color:var(--bad)}
 .ef-usage .ef-v.muted{color:var(--muted)}
 .ef-usage td .muted{margin-left:6px;font:12px/1.5 var(--mono)}
+@media (max-width:699.98px){
+body[data-page="efficiency"] main{padding:12px 12px 24px;gap:12px}
+.ef-row{gap:12px}.ef-row>.panel,.ef-row>.panel.ef-wide{flex:1 1 100%;padding:12px}
+.ef-row>.panel h2{flex-wrap:wrap;gap:4px 8px;margin:0 0 10px}
+.ef-rb{grid-template-columns:68px minmax(0,1fr) 66px;gap:8px}.ef-n b{font-size:12px}
+.ef-foot{display:block;margin:12px 0 0}.ef-note{margin:0 0 4px}
+#jobs-lifetime{gap:2px 10px;padding:10px 12px}#jobs-lifetime h2{flex:1 0 100%}.ef-pct{flex:1 0 100%;margin-left:0}
+}
 """
 
 
@@ -92,96 +86,43 @@ SCRIPT = r"""
   function renderJobsLifetime(d) {
     var t = d.queue.totals;
     var finished = t.done + t.failed;
-    var root = panel('jobs-lifetime', 'Jobs, lifetime', num(finished) + ' finished');
+    var root = panel('jobs-lifetime', 'Lifetime');
     if (!root) return;
-    var tiles = add(root, el('div', 'ef-tiles'));
-    [[t.done, 'done', 'ok'], [t.failed, 'failed', 'bad']].forEach(function (x) {
-      var tile = add(tiles, el('div', 'ef-tile'));
-      add(tile, el('b', x[2], num(x[0])));
-      add(tile, el('span', null, x[1]));
+    [[t.done, 'ok', ' jobs done'], [t.failed, 'bad', ' failed']].forEach(function (x, i) {
+      if (i) add(root, el('span', 'ef-dot', '·')).setAttribute('aria-hidden', 'true');
+      var life = add(root, el('span', 'ef-life'));
+      add(life, el('b', x[1], num(x[0])));
+      add(life, document.createTextNode(x[2]));
     });
-    var bar = add(root, el('div', 'ef-bar'));
-    bar.setAttribute('role', 'img');
-    bar.setAttribute('aria-label', num(t.done) + ' jobs done, ' + num(t.failed) + ' jobs failed');
-    if (!finished) { add(root, el('p', 'ef-foot', 'no finished jobs yet')); return; }
-    var done = halfUp(1000 * t.done / finished);
-    add(bar, el('span', 'ok')).setAttribute('style', 'flex:0 0 ' + tenths(done) + '%');
-    add(bar, el('span', 'bad')).setAttribute('style', 'flex:0 0 ' + tenths(1000 - done) + '%');
-    add(root, el('p', 'ef-foot', halfUp(100 * t.done / finished) + '% of ' + num(finished) + ' finished jobs succeeded'));
+    add(root, el('span', 'ef-pct', finished
+      ? halfUp(100 * t.done / finished) + '% of ' + num(finished) + ' finished jobs succeeded' : 'no finished jobs yet'));
   }
 
   var SHIPPED = {merged: true, done: true, 'handed-off': true};
-  function shortRef(r) { return short(r.repo) + '#' + (r.source ? String(r.source).replace(/^#/, '') : r.ticket_id); }
+  var ROUND_BUCKETS = ['0 rounds', '1 round', '2 rounds', '3 rounds', '4 or more'];
   function renderRounds(d) {
     var shipped = (d.tickets || []).filter(function (r) { return SHIPPED[r.state]; });
     var root = panel('rounds', 'Revise rounds before ship', shipped.length + ' shipped tickets');
     if (!root) return;
     if (!shipped.length) { add(root, el('p', 'empty', 'no shipped tickets yet')); return; }
-    var groups = {};
-    shipped.forEach(function (r) { (groups[r.round] = groups[r.round] || []).push(r); });
-    var box = add(root, el('div', 'ef-groups'));
-    Object.keys(groups).map(Number).sort(function (a, b) { return a - b; }).forEach(function (n) {
-      var rows = groups[n];
-      var line = add(box, el('div', 'ef-group'));
-      add(line, el('span', 'ef-k', n + (n === 1 ? ' round' : ' rounds')));
-      var squares = add(line, el('span', n ? 'ef-sq' : 'ef-sq zero'));
-      squares.setAttribute('aria-hidden', 'true');
-      rows.forEach(function () { add(squares, el('span')); });
-      add(line, el('span', n ? 'ef-n' : 'ef-n ok', rows.length));
-      add(line, el('span', 'ef-refs', rows.map(shortRef).join(' · ')));
+    var counts = ROUND_BUCKETS.map(function () { return 0; });
+    shipped.forEach(function (r) { counts[Math.min(r.round, ROUND_BUCKETS.length - 1)] += 1; });
+    var top = Math.max.apply(null, counts), total = shipped.length;
+    var box = add(root, el('div', 'ef-rounds'));
+    counts.forEach(function (n, i) {
+      var line = add(box, el('div', 'ef-rb'));
+      add(line, el('span', 'ef-k', ROUND_BUCKETS[i]));
+      var track = add(line, el('span', 'ef-track'));
+      track.setAttribute('aria-hidden', 'true');
+      add(track, el('span', i ? 'ef-fill' : 'ef-fill zero'))
+        .setAttribute('style', 'width:' + tenths(Math.floor((2000 * n + top) / (2 * top))) + '%');
+      var count = add(line, el('span', 'ef-n'));
+      add(count, el('b', i ? null : 'ok', num(n)));
+      add(count, document.createTextNode(' · ' + Math.floor((200 * n + total) / (2 * total)) + '%'));
     });
-    add(root, el('p', 'ef-note', ((groups[0] || []).length) + ' of ' + shipped.length + ' shipped with no revise round'));
-  }
-
-  var WORKING_BOTS = ['claude', 'codex', 'cursor'];
-  function renderWorking(d) {
-    var lanes = laneDevices(d);
-    var devices = [];
-    lanes.devices.forEach(function (x) {
-      if (x.enabled && !x.placeholder) devices.push(x);
-      else if (x.used) devices.push(Object.assign({}, x, {slot_max: x.used}));
-    });
-    var running = {claude: 0, codex: 0, cursor: 0, other: 0};
-    var held = 0, idle = 0, used = 0, slots = 0, known = true;
-    devices.forEach(function (x) {
-      x.jobs.forEach(function (j) { running[WORKING_BOTS.indexOf(j.recipient) >= 0 ? j.recipient : 'other'] += 1; });
-      held += Math.max(0, x.held - x.jobs.length);
-      used += x.used;
-      if (x.slot_max === null || x.slot_max === undefined) { known = false; return; }
-      idle += Math.max(0, x.slot_max - x.used);
-      slots += x.slot_max;
-    });
-    var root = panel('working', 'Who is working now', known ? used + ' of ' + slots + ' slots used' : used + ' slots used');
-    if (!root) return;
-    var kinds = WORKING_BOTS.concat(['other']);
-    var cellCount = held + idle;
-    kinds.forEach(function (k) { cellCount += running[k]; });
-    var label = kinds.filter(function (k) { return running[k]; }).map(function (k) { return running[k] + ' running ' + k; });
-    var cells = add(root, el('div', 'ef-cells'));
-    cells.setAttribute('role', 'img');
-    cells.setAttribute('aria-label', cellCount + ' slots: ' + label.concat([held + ' held', idle + ' idle']).join(', '));
-    kinds.concat(['held', 'idle']).forEach(function (k) {
-      var n = k === 'held' ? held : k === 'idle' ? idle : running[k];
-      for (var i = 0; i < n; i++) add(cells, el('span', k));
-    });
-    var legend = add(root, el('div', 'ef-legend'));
-    WORKING_BOTS.forEach(function (k) { add(legend, el('span', k, k + ' ' + running[k])); });
-    add(legend, el('span', 'grok', 'grok ' + lanes.wakes.length));
-    add(legend, el('span', 'held', 'held ' + held));
-    add(legend, el('span', 'idle', 'idle ' + idle));
-    var list = add(root, el('div', 'ef-devs'));
-    devices.forEach(function (x) {
-      var line = add(list, el('div', 'ef-dev'));
-      add(line, el('b', null, x.name));
-      if (x.slot_max === null || x.slot_max === undefined) { add(line, el('span', 'ef-u', x.used + ' slots')); return; }
-      var wrap = add(line, el('span', 'ef-meter'));
-      wrap.setAttribute('aria-hidden', 'true');
-      wrap.setAttribute('style', 'flex:0 0 ' + 16 * x.slot_max + 'px;width:' + 16 * x.slot_max + 'px');
-      var meter = add(wrap, PX.strip('meter-' + x.name, {effect: 'meter', tint: '#9ece6a', height: 8}));
-      meter.setAttribute('data-used', String(x.used));
-      meter.setAttribute('data-slots', String(x.slot_max));
-      add(line, el('span', 'ef-u', x.used + ' / ' + x.slot_max + ' slots'));
-    });
+    var foot = add(root, el('div', 'ef-foot'));
+    add(foot, el('p', 'ef-note', counts[0] + ' of ' + total + ' shipped with no revise round'));
+    add(foot, link(null, 'job.html')).textContent = 'see shipped tickets';
   }
 
   var USAGE_HARNESSES = ['claude', 'codex', 'cursor', 'grok'];
@@ -244,7 +185,7 @@ HEADROOM_LEDE = (
     "so it is clear which bot has room before the queue backs up."
 )
 SHIPPED = ("merged", "done", "handed-off")
-WORKING_BOTS = ("claude", "codex", "cursor")
+ROUND_BUCKETS = ("0 rounds", "1 round", "2 rounds", "3 rounds", "4 or more")
 USAGE_HARNESSES = ("claude", "codex", "cursor", "grok")
 USAGE_UNTRACKED = ("cursor", "grok")
 WINDOWS = ("five_hour", "seven_day")
@@ -290,125 +231,54 @@ def _savings(snapshot: dict) -> str:
         "<details><summary>how each count is made</summary>"
         f'<p class="muted">{_e(savings["definition"])}</p></details>'
     )
-    return _panel("savings", "Handoff savings", inner, count="scripted / (scripted + grok wakes)",
-                  extra="ef-wide")
+    return _panel("savings", "Handoff savings", inner, count="scripted / (scripted + grok wakes)")
 
 
 def _jobs_lifetime(snapshot: dict) -> str:
     totals = snapshot["queue"]["totals"]
     done, failed = totals["done"], totals["failed"]
     finished = done + failed
-    tiles = "".join(
-        f'<div class="ef-tile">{_b(value, cls)}{_span(None, text)}</div>'
-        for value, text, cls in ((done, "done", "ok"), (failed, "failed", "bad"))
+    rate = (
+        f"{_half_up(100 * done / finished)}% of {_num(finished)} finished jobs succeeded" if finished
+        else "no finished jobs yet"
     )
-    label = f"{_num(done)} jobs done, {_num(failed)} jobs failed"
-    if finished:
-        part = _half_up(1000 * done / finished)
-        bar = (
-            f'<span class="ok" style="flex:0 0 {_tenths(part)}%"></span>'
-            f'<span class="bad" style="flex:0 0 {_tenths(1000 - part)}%"></span>'
-        )
-        foot = f"{_half_up(100 * done / finished)}% of {_num(finished)} finished jobs succeeded"
-    else:
-        bar, foot = "", "no finished jobs yet"
     inner = (
-        f'<div class="ef-tiles">{tiles}</div>'
-        f'<div class="ef-bar" role="img" aria-label="{label}">{bar}</div>'
-        f'<p class="ef-foot">{_e(foot)}</p>'
+        f'<span class="ef-life">{_b(done, "ok")} jobs done</span>'
+        '<span class="ef-dot" aria-hidden="true">·</span>'
+        f'<span class="ef-life">{_b(failed, "bad")} failed</span>'
+        + _span("ef-pct", rate)
     )
-    return _panel("jobs-lifetime", "Jobs, lifetime", inner, count=f"{_num(finished)} finished")
-
-
-def _short_ref(row: dict) -> str:
-    source = row.get("source")
-    return f"{_short(row['repo'])}#{str(source).removeprefix('#') if source else row['ticket_id']}"
+    return _panel("jobs-lifetime", "Lifetime", inner)
 
 
 def _rounds(snapshot: dict) -> str:
     shipped = [row for row in snapshot["tickets"] if row["state"] in SHIPPED]
-    count = f"{len(shipped)} shipped tickets"
+    total = len(shipped)
+    count = f"{total} shipped tickets"
     if not shipped:
         return _panel("rounds", "Revise rounds before ship",
                       '<p class="empty">no shipped tickets yet</p>', count=count, extra="ef-wide")
-    groups: dict[int, list[dict]] = {}
+    counts = [0] * len(ROUND_BUCKETS)
     for row in shipped:
-        groups.setdefault(row["round"], []).append(row)
-    lines = "".join(
-        '<div class="ef-group">'
-        + _span("ef-k", f"{n} round" if n == 1 else f"{n} rounds")
-        + f'<span class="{"ef-sq" if n else "ef-sq zero"}" aria-hidden="true">{"<span></span>" * len(rows)}</span>'
-        + _span("ef-n" if n else "ef-n ok", len(rows))
-        + _span("ef-refs", " · ".join(_short_ref(row) for row in rows))
+        counts[min(row["round"], len(ROUND_BUCKETS) - 1)] += 1
+    top = max(counts)
+    bars = "".join(
+        '<div class="ef-rb">'
+        + _span("ef-k", label)
+        + '<span class="ef-track" aria-hidden="true">'
+        + f'<span class="{"ef-fill" if i else "ef-fill zero"}" style="width:{_tenths((2000 * n + top) // (2 * top))}%">'
+        + "</span></span>"
+        + f'<span class="ef-n">{_b(n, "" if i else "ok")} · {(200 * n + total) // (2 * total)}%</span>'
         + "</div>"
-        for n, rows in sorted(groups.items())
+        for i, (label, n) in enumerate(zip(ROUND_BUCKETS, counts))
     )
-    note = f"{len(groups.get(0, []))} of {len(shipped)} shipped with no revise round"
+    note = f"{counts[0]} of {total} shipped with no revise round"
     return _panel(
         "rounds", "Revise rounds before ship",
-        f'<div class="ef-groups">{lines}</div><p class="ef-note">{note}</p>',
+        f'<div class="ef-rounds">{bars}</div>'
+        f'<div class="ef-foot"><p class="ef-note">{note}</p><a href="job.html">see shipped tickets</a></div>',
         count=count, extra="ef-wide",
     )
-
-
-def _meter(name: str, used: int, slots: int) -> str:
-    return (
-        f'<canvas class="px" data-px="meter" data-tint="#9ece6a" data-px-key="meter-{_e(name)}" '
-        f'aria-hidden="true" style="--px:#9ece6a;height:8px" data-used="{used}" data-slots="{slots}"></canvas>'
-    )
-
-
-def _working(snapshot: dict) -> str:
-    lanes, wakes = lane_devices(snapshot)
-    devices = []
-    for device in lanes:
-        if device["enabled"] and not device["placeholder"]:
-            devices.append(device)
-        elif device["used"]:
-            devices.append({**device, "slot_max": device["used"]})
-    running = {kind: 0 for kind in (*WORKING_BOTS, "other")}
-    held = idle = used = slots = 0
-    known = True
-    for device in devices:
-        for job in device["jobs"]:
-            running[job["recipient"] if job["recipient"] in WORKING_BOTS else "other"] += 1
-        held += max(0, device["held"] - len(device["jobs"]))
-        used += device["used"]
-        if device["slot_max"] is None:
-            known = False
-            continue
-        idle += max(0, device["slot_max"] - device["used"])
-        slots += device["slot_max"]
-    counts = {**running, "held": held, "idle": idle}
-    total = sum(counts.values())
-    label = ", ".join(
-        [f"{n} running {kind}" for kind, n in running.items() if n] + [f"{held} held", f"{idle} idle"]
-    )
-    cells = "".join(f'<span class="{kind}"></span>' * n for kind, n in counts.items())
-    legend = (
-        "".join(_span(kind, f"{kind} {running[kind]}") for kind in WORKING_BOTS)
-        + _span("grok", f"grok {len(wakes)}") + _span("held", f"held {held}") + _span("idle", f"idle {idle}")
-    )
-    rows = []
-    for device in devices:
-        name, cap = device["name"], device["slot_max"]
-        if cap is None:
-            slots_text = f"{device['used']} slots"
-            rows.append(f'<div class="ef-dev">{_b(name)}{_span("ef-u", slots_text)}</div>')
-            continue
-        rows.append(
-            f'<div class="ef-dev"><b>{_e(name)}</b>'
-            f'<span class="ef-meter" aria-hidden="true" style="flex:0 0 {16 * cap}px;width:{16 * cap}px">'
-            f"{_meter(name, device['used'], cap)}</span>"
-            + _span("ef-u", f"{device['used']} / {cap} slots")
-            + "</div>"
-        )
-    inner = (
-        f'<div class="ef-cells" role="img" aria-label="{total} slots: {_e(label)}">{cells}</div>'
-        f'<div class="ef-legend">{legend}</div><div class="ef-devs">{"".join(rows)}</div>'
-    )
-    count = f"{used} of {slots} slots used" if known else f"{used} slots used"
-    return _panel("working", "Who is working now", inner, count=count)
 
 
 def _usage_cells(entry: dict, now: float) -> list[tuple[str, str | None]]:
@@ -474,7 +344,7 @@ def _headroom(snapshot: dict) -> str:
                    ("bot", "5-hour window", "7-day window", "resets", "headroom"))
     title = "Subscription headroom"
     return (
-        f'<section class="panel" id="headroom" aria-label="{title}">'
+        f'<section class="panel ef-wide" id="headroom" aria-label="{title}">'
         f"<h2>{_span(None, title)}</h2>"
         f'<p class="ef-lede">{_e(HEADROOM_LEDE)}</p>'
         f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
@@ -482,9 +352,9 @@ def _headroom(snapshot: dict) -> str:
     )
 
 
-def savings_row(snapshot: dict) -> str:
-    return _row(_savings(snapshot), _jobs_lifetime(snapshot))
+def top_row(snapshot: dict) -> str:
+    return _row(_headroom(snapshot), rollup_panel(snapshot))
 
 
-def rounds_row(snapshot: dict) -> str:
-    return _row(_rounds(snapshot), _working(snapshot))
+def middle_row(snapshot: dict) -> str:
+    return _row(_rounds(snapshot), _savings(snapshot))

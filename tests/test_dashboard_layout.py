@@ -139,8 +139,10 @@ def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
     out = tmp_path / "out"
     paths = write_snapshot_pages(out, _snapshot(tmp_path))
     assert dashboard.PAGES == PAGES
-    assert paths == (out / "status.json", *(out / name for name in PAGES))
-    assert sorted(path.name for path in out.iterdir()) == sorted(("status.json", *PAGES))
+    assert paths == (out / "status.json", *(out / name for name in PAGES), out / "tickets.json")
+    assert sorted(path.name for path in out.iterdir()) == sorted(
+        ("status.json", *PAGES, "tickets.json")
+    )
 
 
 def test_every_page_links_every_other_page(tmp_path: Path) -> None:
@@ -651,7 +653,7 @@ def test_no_device_checkout_path_reaches_any_page(tmp_path: Path, monkeypatch: p
 HARNESS = r"""
 const fs = require('fs');
 const [script, statusText, page, hash, idsText, actionsText] = [2, 3, 4, 5, 6, 7].map(i => {
-  const v = process.argv[i]; return i <= 3 ? fs.readFileSync(v, 'utf8') : v; });
+  const v = process.argv[i]; return i <= 3 || i === 7 ? fs.readFileSync(v, 'utf8') : v; });
 const status = JSON.parse(statusText);
 const ids = {};
 class Node {
@@ -783,7 +785,7 @@ const intervals = [];
 global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 eval(script);
 setTimeout(() => {
-  act(JSON.parse(actionsText || '[]'));
+  act(JSON.parse(actionsText));
   process.stdout.write(JSON.stringify({fetches, steps,
     text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
     html: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.children.map(c => c.html()).join('')])),
@@ -804,18 +806,36 @@ def _run_page(
     html = render_pages(snapshot)[name]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     assert f'data-page="{page}"' in html
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(HARNESS, encoding="utf-8")
+    out = run_harness(tmp_path, HARNESS, script, snapshot, page, ids, actions or [], hash_)
+    assert out["fetches"] >= 1
+    return out
+
+
+def run_harness(
+    tmp_path: Path, harness: str, script: str, snapshot: dict, page: str, ids: list[str], actions: list,
+    hash_: str = "",
+) -> dict:
+    """Linux caps one argument at 128 KiB, so actions go by file like the script and snapshot."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    files = {"harness.js": harness, "page.js": script, "status.json": json.dumps(snapshot),
+             "actions.json": json.dumps(actions)}
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"),
-         str(tmp_path / "status.json"), page, hash_, json.dumps(ids), json.dumps(actions or [])],
+        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         page, hash_, json.dumps(ids), str(tmp_path / "actions.json")],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout)
-    assert out["fetches"] >= 1
-    return out
+    return json.loads(result.stdout)
+
+
+@needs_node
+def test_the_harness_takes_an_action_list_past_the_linux_argument_cap(tmp_path: Path) -> None:
+    padding = "x" * 200_000
+    out = _run_page(tmp_path, _snapshot(tmp_path), "main", ["link"], actions=[["pad", padding]])
+    assert len(json.dumps([["pad", padding]]).encode()) > 131072
+    assert out["steps"] == []
 
 
 # The shell on every page (#139): the TopBar's link state and caret, the band,
@@ -928,7 +948,7 @@ def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     calls = [eval(line) for line in remote_log.read_text().splitlines()]  # noqa: S307
-    names = ("status.json", *PAGES)
+    names = ("status.json", *PAGES, "tickets.json")
     assert [call[0] for call in calls] == ["scp"] * len(names) + ["ssh"]
     assert calls[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
         f"mv -f -- .{name}.push-tmp {name}" for name in names

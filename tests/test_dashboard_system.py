@@ -22,7 +22,7 @@ from lib.dashboard_page import CSS, render_pages, version_drift
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
 from tests import test_dashboard_tickets_board as board
-from tests.test_dashboard_layout import BAR, NODE, _no_script, _run_page, _section, _text, needs_node
+from tests.test_dashboard_layout import BAR, NODE, _no_script, _run_page, _section, _text, needs_node, run_harness
 from tests.test_project_rules import FIXTURES, fixture_world
 
 NEWEST = "aaaaaaaaaaaa"
@@ -272,16 +272,8 @@ DETAILS_HARNESS = board.HARNESS.replace(
 def _details_steps(tmp_path: Path, actions: list) -> list[dict]:
     snapshot = _snapshot(tmp_path)
     (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["health.html"], flags=re.S)
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(DETAILS_HARNESS, encoding="utf-8")
-    result = subprocess.run(
-        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "health", "", json.dumps(BAR + ["hud", "components"]), json.dumps(actions)],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return [step for step in json.loads(result.stdout)["steps"] if "open" in step]
+    out = run_harness(tmp_path, DETAILS_HARNESS, script, snapshot, "health", BAR + ["hud", "components"], actions)
+    return [step for step in out["steps"] if "open" in step]
 
 
 def test_process_details_start_closed(tmp_path: Path) -> None:
@@ -749,7 +741,7 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
     assert "renderHealth, renderLog" in pages["health.html"]
-    assert re.search(r"efficiency: \[renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens\]",
+    assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime\]",
                      pages["health.html"])
 
 

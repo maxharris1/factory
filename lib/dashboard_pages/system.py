@@ -326,7 +326,7 @@ SCRIPT_COMPONENTS = r"""
     else ticking(add(row, el('span', 'sys-seen')), age, '', ' ago');
     return row;
   }
-  function renderDevices(root, m) {
+  function renderPhoneDevices(root, m) {
     var box = add(root, el('div', 'sys-devices'));
     m.devices.forEach(function (device) {
       var rows = m.keys.map(function (key) { return m.cells[key + '\n' + device]; }).filter(Boolean);
@@ -362,7 +362,7 @@ SCRIPT_COMPONENTS = r"""
         add(add(tr, el('td')), matrixCell(c));
       });
     });
-    renderDevices(root, m);
+    renderPhoneDevices(root, m);
     var t = h.thresholds || {};
     add(root, el('p', 'sys-note sys-legend', 'up: a beat within ' + (t.stale_beats || 3) + ' intervals (' + (t.beat_seconds || 15) +
       ' s each; device probes every ' + (t.probe_seconds || 60) + ' s) · stale: within ' + (t.down_beats || 8) +
@@ -798,9 +798,7 @@ def _device_row(row: dict) -> str:
     )
 
 
-def _devices(keys: list[str], devices: list[str], cells: dict) -> str:
-    """The matrix as one block per device, abnormal rows first (renderDevices
-    in the script); CSS shows it instead of the matrix on a phone."""
+def _phone_devices(keys: list[str], devices: list[str], cells: dict) -> str:
     blocks = []
     for device in devices:
         rows = [cells[(key, device)] for key in keys if (key, device) in cells]
@@ -849,7 +847,7 @@ def _components(snapshot: dict) -> str:
             for key in keys
         )
         + "</tbody></table></div>"
-        + _devices(keys, devices, cells)
+        + _phone_devices(keys, devices, cells)
     )
     heads = ("component", "bot", "device", "state", "last seen (ET)", "ago", "pid", "version",
              "started (ET)")

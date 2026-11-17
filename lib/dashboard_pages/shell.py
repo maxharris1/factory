@@ -9,12 +9,12 @@ import json
 import re
 from decimal import Decimal, ROUND_HALF_UP
 
-from lib.dashboard_telemetry import rollup_panel, TELEMETRY_CSS
+from lib.dashboard_telemetry import TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key, _health_link, _relay
 from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _ticket, ticket_href
-from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
+from lib.dashboard_pages.efficiency import _jobs_lifetime, middle_row, top_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _broken, _components, _log_row, _no_waiter, _POLL_STATE, _rules, _versions,
@@ -32,7 +32,14 @@ CSS = """\
 .caret{display:block;width:8px}
 .link{display:flex;align-items:center;gap:8px;font:500 12px/1 var(--mono);letter-spacing:.04em;color:var(--muted)}
 .link .dot{width:8px;height:8px;background:currentColor}
-.link.live{color:var(--ok)}.link.stale{color:var(--warn)}.link.lost{color:var(--bad)}.link.boot{color:var(--muted)}
+.link.live{color:var(--ok)}.link.stale{color:var(--warn)}.link.lost{color:var(--bad)}.link.boot,.link.paused{color:var(--muted)}
+[data-fresh=stale] .topbar .meta #age{color:var(--warn)}[data-fresh=lost] .topbar .meta #age{color:var(--bad)}
+.fresh-bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;min-height:36px;padding:6px 24px;font:12px/1.5 var(--mono);
+--fresh:var(--warn);background:color-mix(in srgb,var(--fresh) 9%,transparent);border-bottom:1px solid color-mix(in srgb,var(--fresh) 45%,transparent)}
+.fresh-bar[hidden]{display:none}.fresh-bar.lost{--fresh:var(--bad)}
+.fresh-blk{flex:none;width:12px;height:16px;background:var(--fresh)}
+.fresh-bar b{font-weight:700;color:var(--fresh)}
+#fresh-text{color:var(--text-2)}
 .topbar .meta{margin-left:auto;color:var(--muted);font:12px/1.3 var(--mono)}
 .topbar .meta span{color:var(--text-2)}
 .attn{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;min-height:36px;padding:6px 24px;
@@ -45,17 +52,31 @@ font:12px/1.5 var(--mono)}
 .attn-who{font-weight:600;color:var(--text);text-decoration:none}
 .attn-what{color:var(--text-2)}
 .attn a:hover{text-decoration:underline}
-.statusline{position:sticky;bottom:0;z-index:2;display:flex;flex-wrap:wrap;align-items:stretch;width:100%;min-height:32px;
+.statusline{position:sticky;bottom:0;z-index:2;display:flex;flex-wrap:nowrap;align-items:stretch;width:100%;overflow:auto hidden;scrollbar-width:none;min-height:32px;
 background:var(--dim);border-top:1px solid var(--line);font:12px/1.3 var(--mono);color:var(--text-2)}
+.statusline>*{white-space:nowrap}
 .sl-brand{display:flex;align-items:center;padding:6px 9px;background:var(--ok);color:var(--ink);font-weight:700;letter-spacing:.04em}
 .sl-seg{display:flex;align-items:center;gap:6px;padding:6px 9px;border-right:1px solid var(--line)}
 .sl-seg.sl-queue{border-right:0}
 .sl-k{color:var(--muted)}.sl-v{color:var(--text)}
-.sl-fill{flex:1 1 24px}
+.sl-fill{flex:1 1 8px}
 .sl-vital{display:flex;align-items:center;gap:7px;padding:6px 9px;border-left:1px solid var(--line);text-decoration:none}
 .sl-vital:hover{background:var(--panel-hi)}
 .sl-vital .blk{width:8px;height:8px;background:currentColor}
 .sl-vital.ok{color:var(--text-2)}.sl-vital.ok .blk{background:var(--ok)}
+.statusline [data-seg=slots],.sl-vital[data-seg=ok-count]{display:none}
+@media (width<1100px){.statusline [data-seg^="device:"],.sl-vital.ok{display:none}
+.statusline [data-seg=slots],.sl-vital[data-seg=ok-count]{display:flex}}
+.sl-age{display:flex;align-items:center;gap:7px;padding:6px 9px;border-left:1px solid var(--line);color:var(--warn)}
+.sl-age[hidden]{display:none}.sl-age.lost{color:var(--bad)}.sl-age .blk{width:8px;height:8px;background:currentColor}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline .sl-brand{background:var(--muted)}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline :is(.sl-v,.sl-vital){color:var(--muted)}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline .sl-vital .blk{background:var(--muted)}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline [data-seg^="device:"]{display:none}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline [data-seg=slots]{display:flex}
+@media (width<700px){.sl-brand,.sl-seg,.sl-vital,.sl-age{padding:6px 7px}.fresh-bar{padding:6px 12px}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline :is(.sl-k[data-short],.sl-t){font-size:0}
+:is([data-fresh=stale],[data-fresh=lost]) .statusline :is(.sl-k[data-short],.sl-t)::after{content:attr(data-short);font-size:12px}}
 main{position:relative;z-index:1;flex:1 0 auto;width:100%;display:grid;align-content:start;grid-template-columns:repeat(12,minmax(0,1fr));
 gap:16px;max-width:1600px;margin:0 auto;padding:20px 24px 32px}
 """
@@ -135,7 +156,9 @@ SCRIPT = r"""
 
   function renderBand(d) {
     var root = byId('band');
-    if (root) root.replaceChildren(PX.strip('band', {state: 'band', load: headerLoad(d), height: 24}));
+    var opts = {state: 'band', load: headerLoad(d), height: 24};
+    if (!(FRESH[freshState] || FRESH.boot).band) { opts.tint = '#8b93b8'; opts.still = true; }
+    if (root) root.replaceChildren(PX.strip('band', opts));
   }
 
   function attentionItems(d) {
@@ -195,11 +218,16 @@ SCRIPT = r"""
   // The status line's segments, each from the snapshot. Mirrors status_segments.
   function statusSegments(d) {
     var out = [];
-    laneDevices(d).devices.forEach(function (dev) {
+    var devices = laneDevices(d).devices;
+    devices.forEach(function (dev) {
       var value = !dev.enabled || dev.placeholder ? 'off'
         : dev.used + '/' + (present(dev.slot_max) ? dev.slot_max : '—');
       out.push(segment('device:' + dev.name, value, null, dev.name));
     });
+    var live = devices.filter(function (dev) { return dev.enabled && !dev.placeholder; });
+    var total = live.length && live.every(function (dev) { return present(dev.slot_max); })
+      ? live.reduce(function (n, dev) { return n + dev.slot_max; }, 0) : '—';
+    out.push(segment('slots', live.reduce(function (n, dev) { return n + dev.used; }, 0) + '/' + total, null, 'slots'));
     out.push(segment('queue', num(((d.queue || {}).totals || {}).queued || 0), null, 'queue'));
     var p = d.poller || {};
     var h = p.health || {state: 'unknown'};
@@ -243,6 +271,8 @@ SCRIPT = r"""
       out.push(segment('version', drift.newest.slice(0, 7) + ' · ' + drift.behind.length + ' behind',
                        drift.behind.length ? 'warn' : 'ok'));
     }
+    var ok = out.filter(function (s) { return s.state === 'ok'; }).length;
+    if (ok) out.push(segment('ok-count', ok + ' ok', 'ok'));
     return out;
   }
 
@@ -256,11 +286,20 @@ SCRIPT = r"""
       if (s.state === null) {
         var plain = add(root, el('span', 'sl-seg' + (s.key === 'queue' ? ' sl-queue' : '')));
         plain.setAttribute('data-seg', s.key);
-        add(plain, el('span', 'sl-k', s.label));
+        var k = add(plain, el('span', 'sl-k', s.label));
+        if (s.key === 'queue') k.setAttribute('data-short', 'q');
         add(plain, el('span', 'sl-v', s.text));
         return;
       }
-      if (!filled) { add(root, el('span', 'sl-fill')); filled = true; }
+      if (!filled) {
+        add(root, el('span', 'sl-fill'));
+        var age = add(root, el('span', 'sl-age'));
+        age.setAttribute('data-seg', 'age');
+        age.hidden = true;
+        add(age, el('span', 'blk')).setAttribute('aria-hidden', 'true');
+        add(age, el('span', 'sl-t')).setAttribute('data-short', '');
+        filled = true;
+      }
       var a = add(root, link('sl-vital ' + s.state, s.href));
       a.setAttribute('data-seg', s.key);
       add(a, el('span', 'blk')).setAttribute('aria-hidden', 'true');
@@ -889,7 +928,8 @@ _PX_BAD = "#f7768e"
 PX_BROKEN = ("dead", "overdue", "stuck", "blocked", "capped", "refused", "no_waiter", "down")
 
 
-_PX_LINK = {"live": ("#9ece6a", 1), "stale": ("#ff9e64", 0.4), "lost": (_PX_BAD, 0), "boot": ("#8b93b8", 0)}
+_PX_LINK = {"live": ("#9ece6a", 1), "stale": ("#ff9e64", 0.4), "lost": (_PX_BAD, 0), "boot": ("#8b93b8", 0),
+            "paused": ("#8b93b8", 0)}
 
 
 PX_STATE: dict[str, dict[str, str | float]] = {
@@ -1073,6 +1113,9 @@ def _topbar(snapshot: dict, page: str) -> str:
         ' · <span id="clock"></span> · read-only, redacted</div>'
         "</div>"
         f'<div class="band" id="band">{_band(snapshot)}</div>'
+        '<div class="fresh-bar" id="fresh-bar" hidden><span class="fresh-blk" aria-hidden="true"></span>'
+        '<b id="fresh-head" aria-hidden="true"></b><span id="fresh-text" aria-hidden="true"></span>'
+        '<span class="vh" id="fresh-say" role="alert"></span></div>'
         f"{_attention_strip(snapshot)}"
         "</header>"
     )
@@ -1137,6 +1180,7 @@ STATUS_LINKS = {
     "feeder": "index.html#feeder",
     "components": "health.html#components",
     "version": "health.html#drift",
+    "ok-count": "health.html#health",
 }
 
 
@@ -1161,8 +1205,9 @@ def _count(value: object) -> str:
 
 def status_segments(snapshot: dict) -> list[dict]:
     """The status line, one segment per figure, each computed from the
-    snapshot: devices and queue (plain), then the vitals with a state
-    (ok, warn, bad, muted) and a link. Mirrors statusSegments in SCRIPT."""
+    snapshot: devices, their slots summed and queue (plain), then the vitals
+    with a state (ok, warn, bad, muted) and a link, then the count of ok
+    vitals. Mirrors statusSegments in SCRIPT."""
     out = []
     devices, _ = lane_devices(snapshot)
     for device in devices:
@@ -1171,6 +1216,10 @@ def status_segments(snapshot: dict) -> list[dict]:
         else:
             value = f'{device["used"]}/{"—" if device["slot_max"] is None else device["slot_max"]}'
         out.append(_segment(f'device:{device["name"]}', value, label=str(device["name"])))
+    live = [device for device in devices if device["enabled"] and not device["placeholder"]]
+    caps = [device["slot_max"] for device in live]
+    total = sum(caps) if caps and None not in caps else "—"
+    out.append(_segment("slots", f'{sum(device["used"] for device in live)}/{total}', label="slots"))
     out.append(_segment("queue", _count(snapshot["queue"]["totals"]["queued"]), label="queue"))
     poller = snapshot["poller"]
     health = poller.get("health") or {"state": "unknown"}
@@ -1221,6 +1270,9 @@ def status_segments(snapshot: dict) -> list[dict]:
         behind = len(drift["behind"])
         out.append(_segment("version", f'{drift["newest"][:7]} · {behind} behind',
                             "warn" if behind else "ok"))
+    ok = sum(1 for seg in out if seg["state"] == "ok")
+    if ok:
+        out.append(_segment("ok-count", f"{ok} ok", "ok"))
     return out
 
 
@@ -1229,14 +1281,18 @@ def _statusline(snapshot: dict) -> str:
     filled = False
     for seg in status_segments(snapshot):
         if seg["state"] is None:
-            cls = "sl-seg sl-queue" if seg["key"] == "queue" else "sl-seg"
+            queue = seg["key"] == "queue"
+            label = f'<span class="sl-k" data-short="q">{_e(seg["label"])}</span>' if queue else _span("sl-k", seg["label"])
             parts.append(
-                f'<span class="{cls}" data-seg="{_e(seg["key"])}">'
-                f'{_span("sl-k", seg["label"])}{_span("sl-v", seg["text"])}</span>'
+                f'<span class="{"sl-seg sl-queue" if queue else "sl-seg"}" data-seg="{_e(seg["key"])}">'
+                f'{label}{_span("sl-v", seg["text"])}</span>'
             )
             continue
         if not filled:
-            parts.append('<span class="sl-fill"></span>')
+            parts.append(
+                '<span class="sl-fill"></span><span class="sl-age" data-seg="age" hidden>'
+                '<span class="blk" aria-hidden="true"></span><span class="sl-t" data-short=""></span></span>'
+            )
             filled = True
         parts.append(
             f'<a class="sl-vital {seg["state"]}" href="{_e(seg["href"])}" data-seg="{_e(seg["key"])}">'
@@ -1249,7 +1305,7 @@ def _statusline(snapshot: dict) -> str:
 _PANELS = {
     "index.html": (_lanes, _just_happened_and_intake),
     "activity.html": (_attention, _relay),
-    "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel),
+    "efficiency.html": (top_row, middle_row, _jobs_lifetime),
     "health.html": (_broken, _components, _versions, _log_row, _rules, _no_waiter),
     "job.html": (_board, _tickets, _jobview),
 }

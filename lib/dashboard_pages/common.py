@@ -155,6 +155,7 @@ SCRIPT_HEAD = r"""
   var lastOk = 0;
   var shownAt = Date.now();
   var everOk = false;
+  var resuming = false;
   var failures = 0;
   var inflight = false;
   var timer = null;
@@ -310,7 +311,7 @@ SCRIPT_TAIL = r"""
     main: [renderLanes, renderJustHappened, renderIntake],
     job: [renderBoard, renderTickets, renderJobView],
     activity: [renderAttention, renderRelay],
-    efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens],
+    efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
@@ -421,18 +422,72 @@ SCRIPT_TAIL = r"""
     target.scrollIntoView();
   }
 
+  var FRESH = {
+    boot: {label: null, bar: false, band: true},
+    live: {label: 'LIVE', bar: false, band: true},
+    stale: {label: 'STALE', bar: true, band: false},
+    lost: {label: 'LINK LOST', bar: true, band: false},
+    paused: {label: 'PAUSED · resuming', bar: false, band: false}
+  };
+  var freshState = '';
+  var ET = new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit'});
+  function staleSeconds() {
+    var h = (latest && latest.health) || {};
+    var publish = Number(h.publish_seconds) || 0;
+    return publish > 0 ? ((h.thresholds || {}).stale_beats || 3) * publish : STALE_SECONDS;
+  }
+  function freshness() {
+    if (!everOk) return 'boot';
+    if (resuming) return 'paused';
+    if (Date.now() - Math.max(lastOk, shownAt) > LINK_LOST_MS) return 'lost';
+    return since() > staleSeconds() ? 'stale' : 'live';
+  }
+  function publishedAt() { return ET.format(new Date(generated * 1000)) + ' ET'; }
+  function freshBar(state, age) {
+    var bar = byId('fresh-bar');
+    if (!bar) return;
+    var head = byId('fresh-head');
+    var text = byId('fresh-text');
+    var say = byId('fresh-say');
+    if (!FRESH[state].bar) {
+      bar.hidden = true;
+      if (say) say.textContent = '';
+      return;
+    }
+    var words = state === 'stale'
+      ? ['Snapshot is ' + dur(age) + ' old.',
+         'The dashboard writer last published at ' + publishedAt() + '. Everything below is as of then.']
+      : ['Cannot reach the dashboard.', 'Showing the last snapshot, from ' + publishedAt() + '.'];
+    if (head) head.textContent = words[0];
+    if (text) text.textContent = words[1];
+    if (say && (bar.hidden || bar.className !== 'fresh-bar ' + state)) say.textContent = words[0] + ' ' + words[1];
+    bar.className = 'fresh-bar ' + state;
+    bar.hidden = false;
+  }
+  function statusAge(state, age) {
+    var line = byId('statusline');
+    var seg = line && Array.prototype.filter.call(line.children, function (n) {
+      return n.getAttribute('data-seg') === 'age';
+    })[0];
+    if (!seg) return;
+    var text = seg.children[1];
+    var on = FRESH[state].bar;
+    seg.hidden = !on;
+    seg.className = on ? 'sl-age ' + state : 'sl-age';
+    if (!text) return;
+    text.textContent = on ? 'as of ' + dur(age) + ' ago' : '';
+    text.setAttribute('data-short', on ? dur(age).split(' ')[0] + ' old' : '');
+  }
+
   function updateLink() {
     var link = byId('link');
     var text = byId('link-text');
     var age = since();
-    var state;
-    var label;
-    if (!everOk) { state = 'boot'; label = failures ? 'NO LINK · static view' : 'ACQUIRING LINK'; }
-    else if (Date.now() - Math.max(lastOk, shownAt) > LINK_LOST_MS) { state = 'lost'; label = 'LINK LOST'; }
-    else if (age > STALE_SECONDS) { state = 'stale'; label = 'STALE'; }
-    else { state = 'live'; label = 'LIVE'; }
+    var state = freshness();
+    var label = FRESH[state].label || (failures ? 'NO LINK · static view' : 'ACQUIRING LINK');
     var caret = byId('caret');
     if (!document.hidden) {
+      body.setAttribute('data-fresh', state);
       if (link) link.className = 'link ' + state;
       if (text) text.textContent = label;
       if (caret && state !== caretState) {
@@ -440,6 +495,11 @@ SCRIPT_TAIL = r"""
         caret.replaceChildren(PX.strip('caret', {state: 'link-' + state, height: 12}));
         PX.bind();
       }
+      var moved = FRESH[state].band !== (FRESH[freshState] || FRESH.boot).band;
+      freshState = state;
+      if (latest && moved) { renderBand(latest); PX.bind(); }
+      freshBar(state, age);
+      statusAge(state, age);
     }
     var ageNode = byId('age');
     if (ageNode) ageNode.textContent = dur(age) + ' ago';
@@ -458,6 +518,7 @@ SCRIPT_TAIL = r"""
     if (!d || typeof d !== 'object' || d.schema !== 'factory-dashboard/v1') { failed(); return; }
     lastOk = Date.now();
     everOk = true;
+    resuming = false;
     failures = 0;
     if (firstRender || d.generated_at_epoch !== generated) {
       var first = firstRender;
@@ -470,6 +531,7 @@ SCRIPT_TAIL = r"""
 
   function failed() {
     failures += 1;
+    resuming = false;
     if (!everOk && failures >= 3 && !reloadArmed) {
       // status.json cannot be fetched (blocked or missing): behave like a
       // page without script and reload the server-rendered view every
@@ -507,6 +569,8 @@ SCRIPT_TAIL = r"""
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
     shownAt = Date.now();
+    resuming = everOk;
+    updateLink();
     if (timer === null && !inflight) poll();
   });
   var skip = byId('skip');
