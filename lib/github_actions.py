@@ -182,9 +182,6 @@ def run_gh(argv: Sequence[str], timeout: float) -> GhResult:
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_group(process)
-        raise subprocess.TimeoutExpired(process.args, timeout) from None
     except BaseException:
         _kill_group(process)
         raise

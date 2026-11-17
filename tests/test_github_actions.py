@@ -254,7 +254,7 @@ def test_the_subprocess_seam_is_one_function_with_no_shell() -> None:
             ):
                 callers.append(function.name)
                 assert all(keyword.arg != "shell" for keyword in node.keywords)
-    assert set(callers) == {"run_gh", "git_patch_id"}
+    assert callers == ["run_gh", "git_patch_id"]
     assert not any(
         isinstance(node, ast.ImportFrom) and node.module == "os" for node in ast.walk(tree)
     )
