@@ -1269,6 +1269,26 @@ def test_a_record_opens_by_its_own_key_and_a_shared_address_by_the_first_key(tmp
 
 
 @needs_node
+def test_a_running_ticket_opened_by_its_record_key_stays_live_when_its_repo_is_cut_short(tmp_path: Path) -> None:
+    import sqlite3
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import add_job, add_ticket, seeded
+    db, log = seeded(tmp_path / "db")
+    repo = "owner/" + "a" * 95
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, repo, "7")
+        add_job(connection, "r-long", state="running", repo=repo, ticket_id="7")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    key = f"{repo}#7"
+    assert key in snapshot[RECORDS] and _row(snapshot, "r-long")["repo"] != repo
+    views = _both(tmp_path, snapshot, key)
+    assert views["script"] == views["server"]
+    assert ticket_detail.resolve_ticket(snapshot, key, snapshot[RECORDS])["kind"] == "running"
+    assert views["server"].startswith(f'<article class="jobpage ticketpage" data-ticket="{key}">')
+    assert _sections(views["server"]) == SECTIONS
+
+
+@needs_node
 def test_a_no_job_ticket_shows_a_loading_panel_until_its_record_arrives(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     address = RECORD["idle"]

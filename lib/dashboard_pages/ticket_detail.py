@@ -1084,6 +1084,8 @@ def record_row(record: dict, ticket: dict | None) -> dict:
 
 def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) -> dict | None:
     repo, _, ticket_id = address.partition("#")
+    record = records.get(address) if records else None
+    own = {(job["job"], ticket_address(job)) for job in record["jobs"]} if record else set()
 
     def exact(row: dict) -> bool:
         return ticket_address(row) == address
@@ -1091,12 +1093,16 @@ def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) ->
     def any_case(row: dict) -> bool:
         return str(row["repo"]).lower() == repo.lower() and str(row["ticket_id"]) == ticket_id
 
-    for rule in (exact, any_case):
+    def own_job(row: dict) -> bool:
+        return (row["job"], ticket_address(row)) in own
+
+    for rule in (exact, any_case, own_job):
         for kind in LIVE_KINDS:
             rows = [row for row in snapshot[kind] if rule(row)]
             if rows:
                 row = _PICK[kind](rows)
-                return {"kind": kind, "address": ticket_address(row), "row": row, "ticket": _ticket_of(snapshot, row)}
+                shown = ticket_address(row) if rule is any_case else address
+                return {"kind": kind, "address": shown, "row": row, "ticket": _ticket_of(snapshot, row)}
     if not records:
         return None
     key = address if address in records else next((k for k in sorted(records) if any_case(records[k])), None)
@@ -2176,18 +2182,22 @@ _SCRIPT = r"""
     return function (r) { return String(r.repo).toLowerCase() === repo && String(r.ticket_id) === id; };
   }
   function resolveTicket(d, address, records) {
-    var rules = [function (r) { return ticketAddress(r) === address; }, sameTicket(address)];
+    var keyed = records && Object.prototype.hasOwnProperty.call(records, address);
+    var own = keyed ? records[address].jobs : [];
+    var rules = [function (r) { return ticketAddress(r) === address; }, sameTicket(address), function (r) {
+      return own.some(function (j) { return j.job === r.job && ticketAddress(j) === ticketAddress(r); });
+    }];
     for (var i = 0; i < rules.length; i++) {
       for (var k = 0; k < DETAIL.liveKinds.length; k++) {
         var kind = DETAIL.liveKinds[k];
         var rows = (d[kind] || []).filter(rules[i]);
         if (!rows.length) continue;
         var row = PICK[kind](rows);
-        return {kind: kind, address: ticketAddress(row), row: row, ticket: ticketRow(d, row)};
+        return {kind: kind, address: i === 1 ? ticketAddress(row) : address, row: row, ticket: ticketRow(d, row)};
       }
     }
     if (!records) return null;
-    var key = Object.prototype.hasOwnProperty.call(records, address) ? address
+    var key = keyed ? address
       : Object.keys(records).sort().filter(function (k) { return rules[1](records[k]); })[0];
     if (key === undefined) return null;
     var rec = records[key], t = ticketRow(d, rec);

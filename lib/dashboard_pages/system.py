@@ -66,7 +66,8 @@ font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
 .sys-devices{display:none}
 .sys-dev{padding:8px 0;border-bottom:1px solid var(--line)}.sys-dev:last-child{border-bottom:0}
 .sys-dev-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:2px}
-.sys-dev-head .muted{font:12px var(--mono)}
+.sys-dev-head .sys-name{min-width:0;white-space:normal;overflow-wrap:anywhere}
+.sys-dev-head .muted{flex:none;font:12px var(--mono)}
 .sys-dev-row{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;padding:3px 0;font:12px/1.5 var(--mono);color:var(--text)}
 .sys-dev-row .sys-kind{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
 .sys-dev-row.two .sys-kind{flex-basis:100%;font-weight:600}
