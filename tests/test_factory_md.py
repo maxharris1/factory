@@ -620,8 +620,8 @@ def test_f2_03_runner_checklist_holds_no_token_and_names_the_wiring() -> None:
     assert re.search(r"\b(gh[pousr]_|github_pat_)", text) is None
     assert re.search(r"--token\b", text) is None
     for needle in (
-        "ci_runner: factory-pc-wsl",
-        "runs-on: [self-hosted, factory-pc-wsl]",
+        "ci_runner: factory-linux",
+        "runs-on: [self-hosted, Linux, X64, factory-linux]",
         "factory-mac",
         "Credential-holding deploy workflows stay on hosted runners",
         "Max only",
