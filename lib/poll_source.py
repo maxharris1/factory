@@ -209,6 +209,7 @@ class _NoRedirect(HTTPRedirectHandler):
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
 _TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
+_REVIEW_ACTIONS = tuple(name for name in vars(ReviewActions) if not name.startswith("_"))
 
 
 class _Cutoff:
@@ -456,6 +457,7 @@ class LivePollSource:
         self._factory_warned: dict[str, str] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self.cycle_clock: CycleClock | None = None
+        self._write_ticket: str | None = None
         self._head_reads: dict[tuple[str, str, str], tuple[tuple[str, str, str], Any]] = {}
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
@@ -524,8 +526,24 @@ class LivePollSource:
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
                 )
-            actions[project.repo.lower()] = action
+            actions[project.repo.lower()] = self._ticket_scoped(action)
         return actions
+
+    def _ticket_scoped(self, actions: ReviewActions) -> ReviewActions:
+        for name in _REVIEW_ACTIONS:
+            setattr(actions, name, self._in_ticket(getattr(actions, name)))
+        return actions
+
+    def _in_ticket(self, method: Callable[..., Any]) -> Callable[..., Any]:
+        def call(ticket: TrackedTicket, *args: Any, **kwargs: Any) -> Any:
+            outer = self._write_ticket
+            self._write_ticket = f"{ticket.repo.lower()}#{ticket.ticket_id}"
+            try:
+                return method(ticket, *args, **kwargs)
+            finally:
+                self._write_ticket = outer
+
+        return call
 
     def begin_cycle(self) -> None:
         self._factory_cache.clear()
@@ -2028,7 +2046,7 @@ class LivePollSource:
         try:
             return self.gh_runner(call, timeout)
         except subprocess.TimeoutExpired:
-            name = _gh_ticket(call)
+            name = self._write_ticket or _gh_ticket(call)
             raise
         finally:
             if self.cycle_clock is not None:

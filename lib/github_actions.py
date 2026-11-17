@@ -177,7 +177,6 @@ def run_gh(argv: Sequence[str], timeout: float) -> GhResult:
         list(argv),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         start_new_session=True,
     )
     try:
@@ -185,10 +184,14 @@ def run_gh(argv: Sequence[str], timeout: float) -> GhResult:
     except BaseException:
         _kill_group(process)
         raise
-    return GhResult(process.returncode, stdout, stderr)
+    return GhResult(process.returncode, _text(stdout), _text(stderr))
 
 
-def _kill_group(process: subprocess.Popen[str]) -> None:
+def _text(output: bytes) -> str:
+    return output.decode("utf-8", errors="replace")
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:

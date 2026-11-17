@@ -14,7 +14,7 @@ import pytest
 from lib.dispatch.cycle_clock import CycleClock
 from lib.github_actions import GhResult, GitHubAdapterError, run_gh
 from lib.poll_source import LivePollSource
-from tests.test_github_actions import pr
+from tests.test_github_actions import HEAD, pr
 from tests.test_live_poll import config
 
 TIMEOUT = 1.0
@@ -39,6 +39,9 @@ with open(gh_pid_file, "w") as handle:
     handle.write(str(os.getpid()))
 if mode == "exit":
     sys.exit(0)
+if mode == "partial":
+    os.write(1, b"\\xe2")
+    os.write(2, b"\\xe2")
 time.sleep(120)
 """
 
@@ -123,6 +126,12 @@ def test_a_grandchild_that_left_the_group_cannot_hold_run_gh_either(
     assert gone(os.kill, fake_gh.gh_pid()), "gh outlived the timeout"
 
 
+def test_a_timeout_mid_character_still_raises_the_timeout(fake_gh: FakeGh) -> None:
+    timed_out_within_bound(fake_gh.argv("partial"))
+
+    assert gone(os.killpg, fake_gh.gh_pid()), "gh's process group outlived the timeout"
+
+
 def test_a_fast_gh_returns_its_exit_code_and_output(fake_gh: FakeGh) -> None:
     assert run_gh(fake_gh.argv("fast"), 30.0) == GhResult(3, "out", "err")
 
@@ -159,3 +168,28 @@ def test_a_timed_out_write_is_charged_to_its_source_and_ticket() -> None:
 
     line = source.cycle_clock.end()
     assert "[acme/widgets 2.0s, acme/widgets#664 60.0s]" in line, line
+
+
+def test_a_timed_out_graphql_write_is_charged_to_its_source_and_ticket() -> None:
+    clock = Clock()
+
+    def gh(argv, timeout):
+        call = list(argv)
+        if "graphql" in call:
+            clock.now += 60.0
+            raise subprocess.TimeoutExpired(call, 60.0)
+        clock.now += 1.0
+        pull = {"head": {"sha": HEAD}, "state": "open", "draft": True, "merged": False}
+        return GhResult(0, json.dumps({**pull, "node_id": "PR_kwDOKfac0s6CiTKq"}), "")
+
+    source = LivePollSource(config(), gh_runner=gh, clock=clock)
+    source.cycle_clock = CycleClock(wall=clock, monotonic=clock)
+    source.cycle_clock.start()
+    with pytest.raises(GitHubAdapterError, match="timed out after 60s"):
+        with source.cycle_clock.phase("process"):
+            source.review_actions_by_repo()["acme/widgets"].handoff(
+                pr(repo="acme/widgets", ticket_id="664"), HEAD
+            )
+
+    line = source.cycle_clock.end()
+    assert "[acme/widgets 1.0s, acme/widgets#664 60.0s]" in line, line
