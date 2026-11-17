@@ -19,7 +19,7 @@ import pytest
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_page import CSS, TILE_STATE, intake_split, queue_speed
 from tests.test_dashboard import NOW, seeded
-from tests.test_dashboard_layout import BAR, HARNESS, NODE, _no_script, _run_page, _section, needs_node
+from tests.test_dashboard_layout import BAR, HARNESS, NODE, _no_script, _run_page, _section, needs_node, run_harness
 from tests.merge_queue_support import sha
 from tests.test_ready_ci_gate import approved_then_pushed_pending
 
@@ -503,19 +503,9 @@ def _run_series(tmp_path: Path, snapshots: list[dict]) -> list[dict]:
         "process.stdout.write(JSON.stringify({fetches, steps,",
         "process.stdout.write(JSON.stringify({fetches, steps, seen,",
     )
-    (tmp_path / "page.js").write_text(
-        script.replace("    PX.bind();\n", "    PX.bind();\n    if (global.__snap) global.__snap();\n"),
-        encoding="utf-8",
-    )
-    (tmp_path / "status.json").write_text(json.dumps(snapshots), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
-    result = subprocess.run(
-        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "main", "", json.dumps(BAR + ["hud", "kpis", "lanes", "just-happened", "intake"]), "[]"],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)["seen"]
+    script = script.replace("    PX.bind();\n", "    PX.bind();\n    if (global.__snap) global.__snap();\n")
+    ids = BAR + ["hud", "kpis", "lanes", "just-happened", "intake"]
+    return run_harness(tmp_path, harness, script, snapshots, "main", ids, [])["seen"]
 
 
 @needs_node

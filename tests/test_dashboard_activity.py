@@ -4,7 +4,6 @@ import copy
 import json
 import re
 import sqlite3
-import subprocess
 import time
 from collections import Counter
 from pathlib import Path
@@ -38,8 +37,8 @@ HARNESS = (
         "      await new Promise(resolve => realSetTimeout(resolve, 50));\n"
         "    } else if (kind === 'press') {",
     )
-    .replace("setTimeout(() => {\n  act(JSON.parse(actionsText || '[]'));",
-             "realSetTimeout(async () => {\n  await act(JSON.parse(actionsText || '[]'));")
+    .replace("setTimeout(() => {\n  act(JSON.parse(actionsText));",
+             "realSetTimeout(async () => {\n  await act(JSON.parse(actionsText));")
 )
 STILL = HARNESS.replace("global.window = global;",
                         "global.window = global;\nglobal.matchMedia = q => ({matches: /reduce/.test(q)});")
@@ -303,16 +302,7 @@ def _server(snapshot: dict) -> dict[str, str]:
 def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, harness: str = HARNESS) -> dict:
     html = render_pages(snapshot)["activity.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
-    result = subprocess.run(
-        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "activity", "", json.dumps(IDS), json.dumps(actions or [])],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    return layout.run_harness(tmp_path, harness, script, snapshot, "activity", IDS, actions or [])
 
 
 def _rich(snapshot: dict) -> dict:

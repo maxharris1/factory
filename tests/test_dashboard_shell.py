@@ -12,7 +12,6 @@ from __future__ import annotations
 import copy
 import json
 import re
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -760,19 +759,9 @@ def _place_harness() -> str:
 
 
 def _place(tmp_path: Path, snapshot: dict, page_name: str, ids: list[str], actions: list, hash_: str = "") -> list[dict]:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    html = render_pages(snapshot)[page_name]
-    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(_place_harness(), encoding="utf-8")
-    result = subprocess.run(
-        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         SCRIPT_PAGE[page_name], hash_, json.dumps(ids), json.dumps(actions)],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return [step for step in json.loads(result.stdout)["steps"] if "where" in step]
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)[page_name], flags=re.S)
+    out = layout.run_harness(tmp_path, _place_harness(), script, snapshot, SCRIPT_PAGE[page_name], ids, actions, hash_)
+    return [step for step in out["steps"] if "where" in step]
 
 
 def _next(snapshot: dict, change=None) -> dict:
@@ -980,20 +969,10 @@ def _link_harness() -> str:
 
 def _link_run(tmp_path: Path, snapshot: dict, actions: list, name: str = "index.html",
               ids: list[str] | None = None, harness: str | None = None) -> dict:
-    tmp_path.mkdir(parents=True, exist_ok=True)
     harness = harness or _link_harness()
     assert "kind === 'hide'" in harness and "if (failing)" in harness
     (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)[name], flags=re.S)
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
-    result = subprocess.run(
-        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         SCRIPT_PAGE[name], "", json.dumps(ids or BAR), json.dumps(actions)],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    return layout.run_harness(tmp_path, harness, script, snapshot, SCRIPT_PAGE[name], ids or BAR, actions)
 
 
 def _links(out: dict) -> list[list[str]]:

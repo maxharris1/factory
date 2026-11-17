@@ -4,7 +4,6 @@ import copy
 import json
 import re
 import sqlite3
-import subprocess
 from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
@@ -170,16 +169,7 @@ def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, page_fr
     assert "windowListeners[type].push" in HARNESS
     html = render_pages(page_from or snapshot)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(HARNESS, encoding="utf-8")
-    result = subprocess.run(
-        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "job", "", json.dumps(IDS), json.dumps(actions or [])],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    return layout.run_harness(tmp_path, HARNESS, script, snapshot, "job", IDS, actions or [])
 
 
 def _key(row: dict) -> str:
@@ -601,15 +591,8 @@ def test_a_held_card_with_no_job_keeps_the_comment_and_ok_controls(tmp_path: Pat
     held.update(state="awaiting-ok", waiting_on="maxharris1", source="#563", pr="601")
     html = render_pages(snap)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    for name, text in (("page.js", script), ("status.json", json.dumps(snap)), ("harness.js", SIGNED_IN)):
-        (tmp_path / name).write_text(text, encoding="utf-8")
-    result = subprocess.run(
-        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "job", "", json.dumps(IDS), "[]"],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    card = _card(json.loads(result.stdout)["html"]["pipeline"], _key(held))
+    out = layout.run_harness(tmp_path, SIGNED_IN, script, snap, "job", IDS, [])
+    card = _card(out["html"]["pipeline"], _key(held))
     (panel,) = _all(card, lambda n: "jd-gh" in n["attrs"].get("class", "").split())
     assert "signed in as maxharris1" in json.dumps(panel)
     (form,) = _all(panel, lambda n: n["attrs"].get("class") == "gh-form")
@@ -756,16 +739,7 @@ def _stored(tmp_path: Path, snapshot: dict, store: dict | None, actions: list) -
     assert "global.sessionStorage = " in harness and "kind === 'store'" in harness
     html = render_pages(snapshot)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    (tmp_path / "page.js").write_text(script, encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
-    result = subprocess.run(
-        [layout.NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "job", "", json.dumps(IDS), json.dumps(actions)],
-        capture_output=True, text=True, timeout=60, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    return layout.run_harness(tmp_path, harness, script, snapshot, "job", IDS, actions)
 
 
 def _rows(markup: str) -> int:
