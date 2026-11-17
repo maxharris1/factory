@@ -590,7 +590,7 @@ def test_strip_escapes_and_clamps_its_input() -> None:
     assert "height:96px" in page.px_strip("k", height=500)
 
 
-def test_held_strip_frame_is_the_marching_dashed_border() -> None:
+def test_held_strip_frame_is_a_still_dashed_border() -> None:
     assert page.px_frame("held") == "px-held"
     assert page.px_frame("build") == ""
     css = page.CSS
@@ -598,8 +598,9 @@ def test_held_strip_frame_is_the_marching_dashed_border() -> None:
     rule = rule[: rule.index("}") + 1]
     assert rule.count("repeating-linear-gradient(90deg,var(--warn) 0 8px,transparent 8px 16px)") == 2
     assert rule.count("repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px)") == 2
-    assert "animation:px-march 2s steps(4) infinite" in rule
-    assert "@keyframes px-march{to{background-position:16px 0,-16px 100%,100% 16px,0 -16px}}" in css
+    assert "animation" not in rule
+    assert "px-march" not in css
+    assert not re.search(r"px-held[^{}]*\{[^}]*animation", css)
 
 
 @needs_node
@@ -638,7 +639,7 @@ def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
         assert keys[:3] == ["caret", "band", "attention"], name
         if name == "index.html":
             # #140: the Lanes page adds its own strips after the shell's three.
-            assert {"kpi-0", "queue", "meter-box"} <= set(keys[3:]), keys
+            assert {"queue", "meter-box"} <= set(keys[3:]), keys
             continue
         board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
         rows = [key for key in keys[3:] if key.startswith("attention-")]
@@ -655,9 +656,7 @@ def test_strip_css_is_gradients_only() -> None:
     assert "linear-gradient" in "".join(rules)
 
 
-def test_reduced_motion_stills_the_held_border_and_the_script_reads_it() -> None:
-    block = page.CSS[page.CSS.index("@media (prefers-reduced-motion: reduce)") :]
-    assert ".px-held::after{animation:none}" in block
+def test_the_strip_script_reads_reduced_motion() -> None:
     assert "matchMedia('(prefers-reduced-motion: reduce)')" in page.px_script()
 
 
