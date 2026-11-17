@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from lib.dashboard import collect_snapshot, render_pages
-from lib.dashboard_page import CSS, TILE_STATE, intake_split, queue_speed
+from lib.dashboard_page import CSS, TILE_STATE, intake_groups, queue_speed
 from tests.test_dashboard import NOW, seeded
 from tests.test_dashboard_layout import BAR, HARNESS, NODE, _no_script, _run_page, _section, needs_node, run_harness
 from tests.merge_queue_support import sha
@@ -56,6 +56,27 @@ def _row(template: dict, name: str, **extra) -> dict:
     return row
 
 
+def _intake_item(issue: int, state: str, **extra) -> dict:
+    return {"repo": "o/factory", "issue": str(issue), "state": state, "pr": None, "reason": None,
+            "fed_age_seconds": None, "tier": None, **extra}
+
+
+DAY = 86400
+INTAKE_ITEMS = [
+    _intake_item(1, "done", pr="101", fed_age_seconds=600, tier=1),
+    _intake_item(2, "waiting-blocked", reason="waiting on #1"),
+    _intake_item(3, "error"),
+    _intake_item(4, "waiting-capacity"),
+    _intake_item(5, "waiting-blocked", reason="waiting on #2"),
+    _intake_item(6, "refused-intake", reason="no acceptance criteria"),
+    _intake_item(7, "done", pr="107", fed_age_seconds=2 * DAY),
+    _intake_item(8, "waiting-blocked", reason="waiting on #5"),
+    _intake_item(9, "waiting-capacity"),
+    _intake_item(10, "fed", fed_age_seconds=3600),
+    _intake_item(11, "eligible"),
+]
+
+
 def _tiles(tmp_path: Path) -> dict:
     snapshot = _base(tmp_path)
     template = snapshot["running"][0]
@@ -64,6 +85,12 @@ def _tiles(tmp_path: Path) -> dict:
         {"name": "box", "slot_max": 9, "held": 0, "enabled": True, "placeholder": False,
          "harnesses": ["claude", "codex"]},
     ]
+    snapshot["poller"]["linear_webhook"] = {
+        "last_received_age_seconds": 30, "last_event": "Issue", "listener_age_seconds": 600, "dirty": 0,
+        "warning": None, "note": None,
+    }
+    snapshot["feeder"] = {"eligible": 11, "fed": 3, "waiting_capacity": 2, "waiting_blocked": 3,
+                          "items": copy.deepcopy(INTAKE_ITEMS)}
     return snapshot
 
 
@@ -427,22 +454,57 @@ def test_just_happened_shows_six_newest_and_marks_grok_wakes(tmp_path: Path) -> 
     assert "6 newest handoffs" in panel and 'href="activity.html"' in panel
 
 
-def test_intake_lists_three_newest_fed_and_folds_the_rest(tmp_path: Path) -> None:
-    items = [
-        {"repo": "o/factory", "issue": str(n), "state": "done", "pr": str(100 + n), "reason": None,
-         "fed_age_seconds": age}
-        for n, age in ((1, 50), (2, 10), (3, 40), (4, 20), (5, 30))
-    ] + [{"repo": "o/factory", "issue": "9", "state": "waiting-blocked", "pr": None,
-          "reason": "blocked by #1", "fed_age_seconds": None}]
-    top, rest = intake_split(items)
-    assert [x["issue"] for x in top] == ["2", "4", "5"]
-    assert [x["issue"] for x in rest] == ["1", "3", "9"]
-    snapshot = _base(tmp_path)
-    snapshot["feeder"] = {"eligible": 6, "fed": 5, "waiting_capacity": 0, "waiting_blocked": 1, "items": items}
-    panel = _section(_no_script(render_pages(snapshot)["index.html"]), "intake")
-    assert "5 fed · 1 waiting" in panel
-    assert panel.index("factory#2") < panel.index("factory#4") < panel.index("<details>")
-    assert "<summary>3 more</summary>" in panel and "blocked by #1" in panel
+def _ticket_span(issue: int) -> str:
+    return f'<span class="ticket">factory#{issue}</span>'
+
+
+def _assert_intake_order(intake: str) -> None:
+    head, body = intake.split("</h2>", 1)
+    assert '<span class="count">5 waiting · 2 fed today</span>' in head
+    t = _ticket_span
+    marks = ['id="linear-webhook"', 'id="feeder"', t(3), t(6), "5 waiting", t(2), t(4), t(5),
+             "<details><summary>2 more</summary>", t(8), t(9), "<details><summary>2 fed today</summary>", t(1), t(10)]
+    at = [body.index(mark) for mark in marks]
+    assert at == sorted(at), [marks[i] for i, _ in sorted(enumerate(at), key=lambda x: x[1])]
+    assert t(7) not in intake and t(11) not in intake
+    assert intake.count("<details>") == 2 and "<details open" not in intake
+    assert '<span class="what bad">feed error, retrying</span>' in intake
+    assert '<span class="what bad">no acceptance criteria</span>' in intake
+    fed = intake[intake.index("2 fed today") :]
+    assert "<span>→ PR #101</span>" in fed and "PR #107" not in intake
+    assert fed.count('<span class="when">fed ') == 2
+
+
+def test_intake_order_server(tmp_path: Path) -> None:
+    _assert_intake_order(_section(_no_script(render_pages(_tiles(tmp_path))["index.html"]), "intake"))
+    assert [[x["issue"] for x in group] for group in intake_groups(INTAKE_ITEMS)] == [
+        ["3", "6"], ["2", "4", "5", "8", "9"], ["1", "10"]]
+
+
+@needs_node
+def test_intake_order_script(tmp_path: Path) -> None:
+    _assert_intake_order(_run_page(tmp_path, _tiles(tmp_path), "main", BAR + ["hud", "intake"])["html"]["intake"])
+
+
+def _ids(markup: str) -> list[str]:
+    return re.findall(r'\bid="([^"]*)"', markup)
+
+
+def test_intake_anchors_server(tmp_path: Path) -> None:
+    page = _no_script(render_pages(_tiles(tmp_path))["index.html"])
+    for anchor in ("intake", "feeder", "linear-webhook"):
+        assert _ids(page).count(anchor) == 1, anchor
+    assert _ids(_section(page, "intake")) == ["intake", "linear-webhook", "feeder"]
+
+
+@needs_node
+def test_intake_anchors_script(tmp_path: Path) -> None:
+    snapshot = _tiles(tmp_path)
+    assert _ids(_no_script(render_pages(snapshot)["index.html"])).count("intake") == 1
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "intake"])
+    inside_intake = out["html"]["intake"]
+    assert _ids(inside_intake) == ["linear-webhook", "feeder"]
+    assert "feeder" in out["html"] and "linear-webhook" in out["html"]
 
 
 def test_index_has_no_modal_markup(tmp_path: Path) -> None:
@@ -711,6 +773,43 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     assert len(rounds) == 13
     broken = [r for r in rounds if not (r["shown"] and r["oneRow"] and r["label"] == "2/3")]
     assert not broken, f"round pips and their n/m label must both show on one row: {broken}"
+
+
+def _long_intake_reasons(tmp_path: Path) -> dict:
+    from lib.feeder_gates import Holds, github_ref, parse_gate_lines
+
+    lines = parse_gate_lines("Touches: tests/test_factory_dashboard_preserves_existing_intake_navigation_anchors.py",
+                             "o/factory")
+    holds = Holds()
+    holds.take(github_ref("o/factory", 4), (), lines)
+    reason = holds.collision(github_ref("o/factory", 2), lines).reason
+    snapshot = _tiles(tmp_path)
+    for item in snapshot["feeder"]["items"]:
+        if item["issue"] in ("1", "2", "6", "9", "10"):
+            item["reason"] = reason
+    return snapshot
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", ["script", "server"])
+def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, render: str) -> None:
+    snapshot = _long_intake_reasons(tmp_path)
+    if render == "script":
+        browser.open(_page_with_status_stub(snapshot, "index.html"), 375)
+    else:
+        page = Path(browser.tmp.name) / "page.html"
+        page.write_text(_no_script(render_pages(snapshot)["index.html"]), encoding="utf-8")
+        browser.call("Emulation.setDeviceMetricsOverride", width=375, height=FOLD, deviceScaleFactor=1, mobile=False)
+        browser.call("Page.navigate", url=page.as_uri())
+        browser.eval("""new Promise(function (done) { (function wait() {
+          if (document.readyState === 'complete' && document.getElementById('intake')) done(true);
+          else setTimeout(wait, 50); })(); })""")
+    browser.eval("[].forEach.call(document.querySelectorAll('#intake details'), function (d) { d.open = true; })")
+    shown = browser.eval("""[].filter.call(document.querySelectorAll('#intake .what'),
+      function (e) { return e.textContent.indexOf('test_factory_dashboard') >= 0 && e.getClientRects().length; }).length""")
+    assert shown == 5, f"expected the long reason on five visible Intake rows, saw {shown}"
+    width = browser.eval("document.documentElement.scrollWidth")
+    assert width <= 375, f"phone page scrolls sideways: scrollWidth={width}"
 
 
 def write_screenshots(out: Path) -> list[Path]:
