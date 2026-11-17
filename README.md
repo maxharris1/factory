@@ -1238,8 +1238,8 @@ that host has no `orch-retired`. It refuses when this host already has an
 exists, so `import` places `orch.db` at the `ORCH_DB` that
 `~/.config/factory/orch-poll.env` gives the poller it then starts. When
 `--print-db` fails, for example on a missing env file, they refuse. A refusal
-places nothing and starts nothing. Otherwise it adds `machines.<dest>.yml`, this host's `machines.yml`,
-so both hosts' `machines.yml` sit beside the snapshot. It places `orch.db`
+places nothing and starts nothing. Otherwise it adds `machines.<dest>.yml`,
+this host's `machines.yml`, so both hosts' `machines.yml` sit beside the snapshot. It places `orch.db`
 with `cp` and `mv`. It never uses `orch restore-db`, which would cancel the
 queued jobs. It removes this host's `orch-retired`, then starts
 `poller-service.sh` first, then the waiter of each bot with
@@ -1496,7 +1496,8 @@ pass exit at once. Each pass and the device deploy it starts detached hold
 seconds (default 900) until none does, and exits 1 if one still does. On a
 host retired as the orch host (`~/.config/factory/orch-retired`, see *Move
 the orch host*), `once`, `kick`, `start`, `restart` and `ensure` exit 79 and
-run nothing.
+run nothing. `factory-self-heal.service` counts that exit 79 as success
+(`SuccessExitStatus=79`), so the timer's unit is not marked failed there.
 
 ### Self-deploy
 

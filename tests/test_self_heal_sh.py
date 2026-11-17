@@ -304,6 +304,7 @@ def test_the_repo_units_run_once_every_two_minutes() -> None:
     timer = (ROOT / "deploy" / "factory-self-heal.timer").read_text(encoding="utf-8")
     assert "Type=oneshot" in service and "KillMode=process" in service
     assert "ExecStart=%h/factory/deploy/self-heal.sh once" in service
+    assert "SuccessExitStatus=79" in service
     assert "Unit=factory-self-heal.service" in timer
     assert "WantedBy=timers.target" in timer
 
