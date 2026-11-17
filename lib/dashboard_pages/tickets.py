@@ -36,6 +36,7 @@ font-family:var(--mono)}
 .tk-empty{padding:16px;border:1px dashed var(--line-hi);font-size:12px;color:var(--muted)}
 .tk-card{display:flex;flex-direction:column;min-width:0;background:var(--panel-hi);box-shadow:var(--elev)}
 .tk-card.tk-stop{border:1px solid color-mix(in srgb,var(--bad) 45%,transparent);box-shadow:none}
+.tk-card.tk-stale{border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);box-shadow:none}
 .tk-strip{display:block}
 .tk-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px}
 .tk-id{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
@@ -47,9 +48,12 @@ font-family:var(--mono)}
 .tk-pips span{width:6px;height:6px;background:var(--line-hi)}
 .tk-pips .done{background:var(--text)}
 .tk-pips .now{background:var(--accent)}
-.tk-round{font-size:11px;color:var(--muted)}
+.tk-round,.tk-q{font-size:11px;color:var(--muted)}
+.tk-in{font-variant-numeric:tabular-nums}
 .tk-reason{font-size:12px;color:var(--text-2);overflow-wrap:anywhere}
-.tk-wait{font-size:12px;color:var(--warn);overflow-wrap:anywhere}
+.tk-wait{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.tk-wait span{color:var(--text-2)}
+.tk-hb{font-size:12px;color:var(--warn);font-variant-numeric:tabular-nums}
 .tk-run,.tk-ci{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:12px}
 .tk-dev{color:var(--muted)}
 .tk-t{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -145,13 +149,23 @@ SCRIPT_TICKETS = r"""
     var cards = rows.filter(function (r) { return !project || r.repo === project; }).map(function (t) {
       var key = joinKey(t);
       var known = Object.prototype.hasOwnProperty.call(table.states, t.state);
+      var lv = live.get(key) || null, q = queued.get(key) || null;
       return {ticket: t, phase: t.stuck || !known ? 'Stop' : table.states[t.state],
-              live: live.get(key) || null, queued: queued.get(key) || null,
+              live: lv, queued: q, kind: lv ? (lv.job_state === 'stale' ? 'stale' : 'live') : q ? 'queued' : 'idle',
               verdict: verdicts.get(key) || null, reason: reasons.get(key) || null};
     });
+    function rank(c) {
+      var k = BOARD.kinds[c.kind], age = c[k[1]][k[2]];
+      var unknown = age === null || age === undefined;
+      return [k[0], unknown ? 1 : 0, unknown ? 0 : -age];
+    }
+    function byRank(a, b) {
+      var x = rank(a), y = rank(b);
+      return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+    }
     var columns = table.columns.map(function (col) {
-      return {phase: col.phase, name: col.name, glyph: col.glyph, states: col.states,
-              cards: cards.filter(function (c) { return c.phase === col.phase; })};
+      var ranked = cards.filter(function (c) { return c.phase === col.phase; }).sort(byRank);
+      return {phase: col.phase, name: col.name, glyph: col.glyph, states: col.states, cards: ranked};
     });
     return {
       projects: projects, total: rows.length, tracked: cards.length, available: table.columns.length > 0,
@@ -222,16 +236,23 @@ SCRIPT_TICKETS = r"""
     add(line, el('span', 'tk-out', noCi.base));
   }
 
+  function tkInState(parent, t) {
+    var span = add(parent, el('span', 'tk-in'));
+    if (t.state_age_seconds === null || t.state_age_seconds === undefined) span.textContent = 'in ' + t.state;
+    else ticking(span, t.state_age_seconds, 'in ' + t.state + ' ');
+  }
+
   function tkCard(c) {
     var t = c.ticket, job = c.live || c.queued;
     var stop = c.phase === 'Stop', waiting = WAITING.hasOwnProperty(t.state);
     var ci = stop || job ? null : t.ci_wait;
-    var card = el('div', stop ? 'tk-card tk-stop' : 'tk-card');
+    var card = el('div', stop ? 'tk-card tk-stop' : c.kind === 'stale' ? 'tk-card tk-stale' : 'tk-card');
     card.setAttribute('data-ticket', ticketKey(t));
     if (ci) card.setAttribute('data-wait', 'ci');
     var key = 'ticket-' + ticketKey(t);
     var strip = stop ? PX.strip(key, {state: 'stuck', height: 8})
       : waiting || ci ? PX.strip(key, {effect: 'static', tint: WAIT_TINT, height: 8})
+      : c.kind === 'queued' ? PX.strip(key, {effect: 'conveyor', tint: 'bot', bot: job.recipient, still: true, height: 8})
       : c.live ? PX.jobStrip(c.live, 8) : null;
     if (strip) {
       var box = add(card, el('div', 'tk-strip'));
@@ -244,26 +265,35 @@ SCRIPT_TICKETS = r"""
     add(id, el('span', 'tk-tag', t.tracker));
     addGh(id, t);
     var state = add(main, el('div', 'tk-state'));
-    add(state, el('span', null, t.state));
-    tkChips(state, c.live);
     if (stop) {
       if (t.stuck) add(state, chip('stuck', 'bad'));
+      tkInState(state, t);
+      tkChips(state, c.live);
       if (c.reason) add(main, el('div', 'tk-reason', c.reason));
       return card;
     }
+    if (c.kind === 'idle') tkInState(state, t);
+    else add(state, el('span', null, t.state));
+    if (c.kind === 'queued') add(state, el('span', 'tk-q', 'queued'));
+    else tkChips(state, c.live);
     tkRound(state, t, job);
     var waitLine = waiting && t.waiting_on;
-    if (waitLine) add(main, el('div', 'tk-wait', 'waiting on ' + t.waiting_on));
+    if (waitLine) add(add(main, el('div', 'tk-wait', 'waits on ')), el('span', null, t.waiting_on));
     if (job) {
       var run = add(main, el('div', 'tk-run'));
+      if (c.kind === 'queued') {
+        add(run, el('span', 'tk-dev', 'for'));
+        add(run, bot(job.recipient));
+        ticking(add(run, el('span', 'tk-t')), job.age_seconds, 'waiting ');
+        return card;
+      }
       add(run, bot(job.recipient));
-      if (!c.live) add(run, el('span', 'tk-dev', 'queued'));
-      else if (job.device) add(run, el('span', 'tk-dev', '@ ' + job.device));
-      ticking(add(run, el('span', 'tk-t')), c.live ? job.elapsed_seconds : job.age_seconds, 'T+ ');
+      if (job.device) add(run, el('span', 'tk-dev', '@ ' + job.device));
+      ticking(add(run, el('span', 'tk-t')), job.elapsed_seconds, 'T+ ');
+      if (c.kind === 'stale') ticking(add(main, el('div', 'tk-hb')), job.heartbeat_age_seconds, 'no heartbeat for ');
       return card;
     }
     if (ci) tkCi(main, t, ci);
-    else if (BOARD.idle.indexOf(c.phase) >= 0) add(main, el('div', 'tk-none', 'no job running'));
     if (t.no_ci) tkNoCi(main, t.no_ci);
     if (waiting && GH.on && ghRefs(t)) add(main, ghPanel(t, t));
     if (c.verdict && !(waitLine && c.verdict.kind === 'waiting')) {
@@ -379,7 +409,14 @@ PHASE_GLYPH = {
     "Stop": {"effect": "static", "tint": "#f7768e", "seed": 76},
 }
 WAITING = ("awaiting-ok", "waiting-max")
-IDLE = ("Plan", "Build", "Review")
+# kind: (sort group, card field, age field). A column lists the lowest group
+# first, each group longest in state first, unknown ages last.
+CARD_KINDS = {
+    "live": (0, "live", "elapsed_seconds"),
+    "stale": (0, "live", "elapsed_seconds"),
+    "queued": (1, "queued", "age_seconds"),
+    "idle": (2, "ticket", "state_age_seconds"),
+}
 JOB_CHIPS = {
     **{name: TILE_STATE[name]["chip"] for name in ("claimed", "stale", "dead")},
     "overdue": ["overdue", "bad"],
@@ -398,7 +435,7 @@ def _phase_glyph(phase: str) -> dict:
 def board_constants() -> dict:
     return {
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
-        "shipped": SHIPPED, "gloss": GLOSS, "idle": IDLE, "chips": JOB_CHIPS,
+        "shipped": SHIPPED, "gloss": GLOSS, "chips": JOB_CHIPS, "kinds": CARD_KINDS,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -440,6 +477,18 @@ def _first(rows: list | None) -> dict[str, dict]:
     return found
 
 
+def _kind(live: dict | None, queued: dict | None) -> str:
+    if live:
+        return "stale" if live.get("job_state") == "stale" else "live"
+    return "queued" if queued else "idle"
+
+
+def _rank(card: dict) -> tuple:
+    group, source, field = CARD_KINDS[card["kind"]]
+    age = card[source].get(field)
+    return group, age is None, -(age or 0)
+
+
 def board(snapshot: dict, project: str | None = None) -> dict:
     table = phase_table(snapshot.get("statechart"))
     rows = snapshot["tickets"]
@@ -458,13 +507,17 @@ def board(snapshot: dict, project: str | None = None) -> dict:
             "phase": ticket_phase(table["states"], row["state"], row["stuck"]),
             "live": live.get(_join(row)),
             "queued": queued.get(_join(row)),
+            "kind": _kind(live.get(_join(row)), queued.get(_join(row))),
             "verdict": verdicts.get(_join(row)),
             "reason": reasons.get(_join(row)),
         }
         for row in rows
         if project in (None, row["repo"])
     ]
-    columns = [{**col, "cards": [c for c in cards if c["phase"] == col["phase"]]} for col in table["columns"]]
+    columns = []
+    for col in table["columns"]:
+        ranked = sorted((c for c in cards if c["phase"] == col["phase"]), key=_rank)
+        columns.append({**col, "cards": ranked})
     return {
         "projects": sorted(counts.items(), key=lambda item: (-item[1], _short(item[0]), item[0])),
         "total": len(rows),
@@ -513,8 +566,13 @@ def _chips(live: dict | None) -> str:
     return "".join(_chip(text, tone) for text, tone in filter(None, chips))
 
 
+def _in_state(ticket: dict) -> str:
+    age = ticket.get("state_age_seconds")
+    return _span("tk-in", f"in {ticket['state']}" + ("" if age is None else f" {duration(age)}"))
+
+
 def _card(card: dict) -> str:
-    ticket, live = card["ticket"], card["live"]
+    ticket, live, kind = card["ticket"], card["live"], card["kind"]
     job = live or card["queued"]
     stop = card["phase"] == "Stop"
     waiting = ticket["state"] in WAITING
@@ -525,33 +583,41 @@ def _card(card: dict) -> str:
         strip = px.px_strip(key, state="stuck", height=8)
     elif waiting or ci:
         strip = px.px_strip(key, effect="static", tint=_WAIT_TINT, height=8)
+    elif kind == "queued":
+        strip = px.px_strip(key, effect="conveyor", tint="bot", bot=job["recipient"], still=True, height=8)
     else:
         strip = px.px_job_strip(live, height=8) if live else ""
     ident = f'<a href="{_e(ticket_page_href(ticket))}">{_e(_ticket(ticket))}</a>'
-    state = _span(None, ticket["state"]) + _chips(live)
     lines = ""
     if stop:
-        state += _chip("stuck", "bad") if ticket["stuck"] else ""
+        state = (_chip("stuck", "bad") if ticket["stuck"] else "") + _in_state(ticket) + _chips(live)
         lines = f'<div class="tk-reason">{_e(card["reason"])}</div>' if card["reason"] else ""
     else:
-        state += _round(ticket, job)
+        state = (
+            _in_state(ticket) if kind == "idle"
+            else _span(None, ticket["state"]) + (_span("tk-q", "queued") if kind == "queued" else _chips(live))
+        ) + _round(ticket, job)
         wait_line = waiting and ticket.get("waiting_on")
         if wait_line:
-            lines += f'<div class="tk-wait">{_e("waiting on " + str(ticket["waiting_on"]))}</div>'
-        if job:
-            where = _span("tk-dev", "queued") if not live else (
-                _span("tk-dev", f"@ {job['device']}") if job.get("device") else ""
+            lines += f'<div class="tk-wait">waits on {_span(None, ticket["waiting_on"])}</div>'
+        if kind == "queued":
+            lines += (
+                f'<div class="tk-run">{_span("tk-dev", "for")}{_bot(job["recipient"])}'
+                f'{_span("tk-t", "waiting " + duration(job.get("age_seconds")))}</div>'
             )
-            since = _span("tk-t", "T+ " + duration(job["elapsed_seconds"] if live else job.get("age_seconds")))
-            lines += f'<div class="tk-run">{_bot(job["recipient"])}{where}{since}</div>'
+        elif live:
+            where = _span("tk-dev", f"@ {live['device']}") if live.get("device") else ""
+            since = _span("tk-t", "T+ " + duration(live["elapsed_seconds"]))
+            lines += f'<div class="tk-run">{_bot(live["recipient"])}{where}{since}</div>'
+            if kind == "stale":
+                hb = duration(live.get("heartbeat_age_seconds"))
+                lines += f'<div class="tk-hb">{_e("no heartbeat for " + hb)}</div>'
         else:
             if ci:
                 lines += (
                     f'<div class="tk-ci">{_chip("waiting on CI", "warn")}{_span("tk-out", checks_named(ci))}'
                     f'{checks_link(ticket)}{_span("tk-t", "waiting " + duration(ci["waiting_seconds"]))}</div>'
                 )
-            elif card["phase"] in IDLE:
-                lines += '<div class="tk-none">no job running</div>'
             if ticket.get("no_ci"):
                 lines += (
                     f'<div class="tk-ci">{_chip("no CI on this base", "muted")}'
@@ -563,8 +629,9 @@ def _card(card: dict) -> str:
                     f'<div class="tk-run">{_chip(verdict["kind"], _VERDICT.get(verdict["kind"], "muted"))}'
                     f'{_span("tk-out", verdict["outcome"])}</div>'
                 )
+    cls = "tk-card tk-stop" if stop else "tk-card tk-stale" if kind == "stale" else "tk-card"
     return (
-        f'<div class="{"tk-card tk-stop" if stop else "tk-card"}" data-ticket="{_e(_key(ticket))}"'
+        f'<div class="{cls}" data-ticket="{_e(_key(ticket))}"'
         + (' data-wait="ci">' if ci else ">")
         + (f'<div class="tk-strip" aria-hidden="true">{strip}</div>' if strip else "")
         + f'<div class="tk-body"><div class="tk-id">{ident}{_span("tk-tag", ticket["tracker"])}{github_links(ticket)}</div>'
