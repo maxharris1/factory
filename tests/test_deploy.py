@@ -527,6 +527,7 @@ def _shell_commands(
         return after
 
     def arithmetic(j: int) -> int:
+        begin = j
         level = 2
         while j < len(text) and level:
             if text.startswith("$(", j) and not text.startswith("$((", j):
@@ -536,6 +537,7 @@ def _shell_commands(
             else:
                 level += {"(": 1, ")": -1}.get(text[j], 0)
                 j += 1
+        bodies.append((begin, j))
         return j
 
     while i < len(text):
@@ -648,8 +650,9 @@ def _orch_poll_launch_starts(text: str) -> list[int]:
     bodies: list[tuple[int, int]] = []
     commands, _ = _shell_commands(text, [], bodies)
     starts = [start for start, words in commands if _runs_orch_poll(words)]
-    # A heredoc body may be a script (bash <<EOF) or a unit file (cat > x.service <<EOF), and a
-    # stray quote in it must not hide the rest, so it counts whole and line by line.
+    # A heredoc body may be a script (bash <<EOF) or a unit file (cat > x.service <<EOF), and bash
+    # reruns arithmetic it cannot parse as commands ($((orch poll) )). A stray quote in either must
+    # not hide the rest, so each counts on its own, whole and line by line.
     for begin, end in bodies:
         body = text[begin:end]
         starts += [begin + start for start in _orch_poll_launch_starts(body)]
@@ -760,6 +763,8 @@ HIDDEN_LAUNCHERS = [
     "x=1; ((x <<= 1))\necho 'a\nb'; orch poll --once\n",
     "echo $'Factory\\'s poller'; orch poll --once\n",
     "read -r x <<<'it'; orch poll --once\n",
+    "((orch poll --once) )\n",
+    "echo $((orch poll --once) )\n",
 ]
 
 
