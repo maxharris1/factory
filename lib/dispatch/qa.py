@@ -12,11 +12,12 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 
+from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.helpers import _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.factory_md import QaConfig
 from lib.handoff import HandoffError, parse_comment
-from lib.queue import QA_RECIPIENT, Job, JobRequest
+from lib.queue import QA_RECIPIENT, Job, JobRequest, cancel_queued
 
 OPEN_STATES = ("queued", "running")
 
@@ -185,6 +186,95 @@ class QaMixin:
             ticket, comment, fields, f"{ticket.factory.builder_harness}-bot", role="builder"
         )
 
+    def _qa_record(
+        self, ticket: TrackedTicket, comment: Comment, fields: dict[str, str]
+    ) -> str | None:
+        """Record a kind=qa comment on its run; None leaves it unhandled (QA off).
+
+        At the current head it reports the open row for its runner and arm.
+        At any other head it marks that head's row stale and changes nothing
+        else, since a new head already cancelled it.
+        """
+        if ticket.factory.qa is None:
+            return None
+        if not (
+            fields.get("from") == ORCHESTRATOR
+            and fields.get("role", "qa") == "qa"
+            and ORCHESTRATOR in self._trusted_bots(comment)
+            and self._app_may_post(comment, fields)
+        ):
+            return "qa-untrusted"
+        head = fields["head"]
+        current = head == ticket.current_head
+        states = OPEN_STATES if current else (*OPEN_STATES, "cancelled")
+        marks = ", ".join("?" for _ in states)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"""
+                SELECT run_id FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND runner = ? AND arm = ?
+                  AND state IN ({marks})
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head, fields["runner"], fields["arm"], *states),
+            ).fetchone()
+            if row is not None:
+                connection.execute(
+                    """
+                    UPDATE qa_runs
+                    SET state = ?, result = ?, comment_id = ?, finished_at = ?
+                    WHERE run_id = ?
+                    """,
+                    (
+                        "reported" if current else "stale",
+                        fields["result"],
+                        comment.id,
+                        self.queue.now(),
+                        row["run_id"],
+                    ),
+                )
+            connection.commit()
+        if not current:
+            return "qa-stale"
+        return "qa-reported" if row is not None else "qa-unmatched"
+
+    def _qa_follow(self, ticket: TrackedTicket) -> None:
+        """Once per poll: a new head cancels the open runs at older heads and
+        their queued jobs; each open run follows its job's state. The queue
+        cannot cancel a running job, so its run is cancelled and its late
+        report is recorded stale."""
+        if ticket.factory.qa is None:
+            return
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT qa_runs.run_id, qa_runs.head, qa_runs.state, jobs.id AS job_id,
+                       jobs.state AS job_state
+                FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
+                WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ?
+                  AND qa_runs.state IN ('queued', 'running')
+                """,
+                key,
+            ).fetchall()
+            for row in rows:
+                state, reason = _followed(row, ticket.current_head)
+                if (state, reason) == (row["state"], None):
+                    continue
+                if reason == "new-head" and row["job_state"] == "queued":
+                    cancel_queued(connection, row["job_id"], "qa-new-head", now)
+                connection.execute(
+                    """
+                    UPDATE qa_runs SET state = ?, reason = ?, finished_at = ?
+                    WHERE run_id = ?
+                    """,
+                    (state, reason, now if state == "cancelled" else None, row["run_id"]),
+                )
+            connection.commit()
+
     def _qa_job_failed(self, job: Job) -> None:
         """T6 for a qa job: cancel its run, never retry, never mark stuck."""
         now = self.queue.now()
@@ -200,3 +290,13 @@ class QaMixin:
             connection.commit()
         self._record_job_event_once(job, "qa-no-retry", "a qa job is never retried")
         self.queue.mark_failure_handled(job.id)
+
+
+def _followed(row: sqlite3.Row, current_head: str | None) -> tuple[str, str | None]:
+    if current_head is not None and row["head"] != current_head:
+        return "cancelled", "new-head"
+    if row["job_state"] == "cancelled":
+        return "cancelled", "job-cancelled"
+    if row["job_state"] == "running":
+        return "running", None
+    return row["state"], None

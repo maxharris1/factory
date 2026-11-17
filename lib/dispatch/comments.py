@@ -101,6 +101,10 @@ class CommentsMixin:
             self._drain_auto_extra(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
+            self._qa_follow(self._polled.get(key, ticket))
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
 
     def _remember_no_ci_base(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -178,6 +182,11 @@ class CommentsMixin:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)
+                continue
+            if kind == "qa":
+                outcome = self._qa_record(ticket, comment, fields)
+                if outcome is not None:
+                    self._mark_handled(ticket, comment.id, outcome)
                 continue
             if kind not in (
                 "go",
