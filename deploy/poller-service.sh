@@ -117,11 +117,40 @@ is_poller_argv() {
 # process, or a live process that is not `orch poll`, does not count. With
 # no /proc (macOS), ps(1) names the command; if it cannot, the pid does not
 # count either (orch poll's own lock still refuses a second poller).
+# Without a live pid in ${PIDFILE}, the poller is the `orch poll` holding
+# the poll lock open, whatever pidfile it writes: orch-poll.service runs
+# run-poller.sh without --pidfile, so that poller writes poller.pid beside
+# its ORCH_DB instead.
 running_pid() {
-    local pid command
-    local -a argv=()
+    pidfile_pid || lock_holder_pid
+}
+
+pidfile_pid() {
+    local pid
     [[ -r "$PIDFILE" ]] || return 1
     pid="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
+    is_poller_pid "$pid"
+}
+
+lock_holder_pid() {
+    local lock dir fd
+    [[ -d "$PROC" ]] || return 1
+    lock="$(readlink -f "$(poll_lock_path)" 2>/dev/null)" || return 1
+    [[ -e "$lock" ]] || return 1
+    for dir in "$PROC"/[1-9]*; do
+        is_poller_pid "${dir##*/}" >/dev/null || continue
+        for fd in "${dir}"/fd/*; do
+            [[ "$(readlink "$fd" 2>/dev/null)" == "$lock" ]] || continue
+            printf '%s\n' "${dir##*/}"
+            return 0
+        done
+    done
+    return 1
+}
+
+is_poller_pid() {
+    local pid="$1" command
+    local -a argv=()
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
     if [[ -d "$PROC" ]]; then
@@ -137,12 +166,17 @@ running_pid() {
     printf '%s\n' "$pid"
 }
 
+poll_lock_path() {
+    local db
+    db="$("$RUNNER" --print-db 2>/dev/null 9>&-)" || db=""
+    printf '%s.lock\n' "${db:-${ORCH_DB:-${STATE}/orch.db}}"
+}
+
 # Is orch poll's own lock held? Without flock(1) or the lock file, no.
 poll_lock_held() {
-    local db lock status=0
+    local lock status=0
     command -v flock >/dev/null 2>&1 || return 1
-    db="$("$RUNNER" --print-db 2>/dev/null 9>&-)" || db=""
-    lock="${db:-${ORCH_DB:-${STATE}/orch.db}}.lock"
+    lock="$(poll_lock_path)"
     [[ -e "$lock" ]] || return 1
     flock -n -E 75 "$lock" true 9>&- || status=$?
     ((status == 75))

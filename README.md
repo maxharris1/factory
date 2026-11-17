@@ -1147,7 +1147,11 @@ On a host with no systemd user session (the box), use
 running or held stopped). It runs `deploy/run-poller.sh --pidfile
 ~/.local/state/factory/poller.pid` under `nohup`, appending to `poller.log`
 beside it, and treats a pidfile whose process is gone or is not `orch poll`
-(argv `orch poll ...`, read from `/proc`, else `ps`) as not running. `start`,
+(argv `orch poll ...`, read from `/proc`, else `ps`) as not running. With no
+live poller in that pidfile, it looks in `/proc` for the `orch poll` that has
+this host's `orch.db.lock` open, so `stop` and `status` also find a poller
+started by `orch-poll.service`, which writes `poller.pid` beside its own
+`ORCH_DB`. `start`,
 `stop`, `restart` and `ensure` serialize on `poller-service.lock` (where
 `flock` exists), and `ensure` never clears a stop.
 `deploy/install.sh --autostart` (or `poller-service.sh install-autostart`)
@@ -1223,7 +1227,12 @@ the systemd timer runs. After stopping self-heal, `export` runs `self-heal.sh
 wait-idle`, which waits up to `ORCH_HEAL_IDLE_WAIT` seconds (default 900) for
 a self-heal pass already under way, and the device deploy it started
 detached, to finish before `export` takes its copy. A wait that runs out
-fails the export like a failed stop. The export
+fails the export like a failed stop. `poller-service.sh stop` finds the
+poller by the `orch.db.lock` it holds open when its pidfile is not
+`~/.local/state/factory/poller.pid`, as with `orch-poll.service`. Before the
+copy, `orch move-db unlocked` checks that no process still holds
+`orch.db.lock`, the lock every `orch poll` on that database holds, and fails
+the export if one does. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.

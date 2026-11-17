@@ -245,6 +245,7 @@ move-db drained --db PATH
 move-db manifest --db PATH --out PATH --source-host HOST --to HOST
                  --retired LINE
 move-db check --db PATH --manifest PATH
+move-db unlocked --db PATH
   deploy/orch-move.sh runs these on copies taken with backup-db, each
   opened read-only. drained exits 0 when the copy has no running job and
   no held device slot, 1 (printing both counts) when it has, and 2 when
@@ -254,6 +255,9 @@ move-db check --db PATH --manifest PATH
   integrity_check. check prints each table's row count and exits 0 when
   the copy has the manifest's sha256, passes integrity_check, and the
   manifest has a retired line; otherwise it exits 1 saying which failed.
+  unlocked reads the live database's poll lock, never the database: it
+  exits 0 when no poller holds PATH.lock (or there is none), 1 when one
+  does.
 
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -1199,6 +1203,24 @@ def _pidfile_path(explicit: Path | None, database: Path) -> Path:
     return database.with_name("poller.pid")
 
 
+def _lock_path(database: Path) -> Path:
+    return database.with_name(database.name + ".lock")
+
+
+def _poll_lock_free(database: Path) -> bool:
+    try:
+        handle = _lock_path(database).open("rb")
+    except FileNotFoundError:
+        return True
+    with handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return True
+
+
 @contextmanager
 def _poll_lock(path: Path, pidfile: Path | None = None):
     """Hold the single-poller lock; while held, own the pidfile.
@@ -1211,7 +1233,7 @@ def _poll_lock(path: Path, pidfile: Path | None = None):
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
-    lock_path = path.with_name(path.name + ".lock")
+    lock_path = _lock_path(path)
     handle = lock_path.open("a+", encoding="utf-8")
     written = False
     try:
@@ -2352,7 +2374,14 @@ def _move_db(argv: list[str]) -> int:
     check = commands.add_parser("check")
     check.add_argument("--db", type=Path, required=True)
     check.add_argument("--manifest", type=Path, required=True)
+    unlocked = commands.add_parser("unlocked")
+    unlocked.add_argument("--db", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "unlocked":
+        if _poll_lock_free(args.db):
+            return 0
+        print(f"orch move-db unlocked: a poller still holds {_lock_path(args.db)}", file=sys.stderr)
+        return 1
     try:
         if args.command == "drained":
             facts = db_facts(args.db)

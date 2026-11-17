@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import fcntl
+import signal
 import time
 from pathlib import Path
 
@@ -15,8 +18,10 @@ from lib import cli
 from lib.queue import JobRequest
 from lib.state_backup import backup
 from tests.pool_helpers import pool_claim
-from tests.test_deploy import _orch_poll_launches
+from tests.procs import alive
+from tests.test_deploy import _orch_poll_tokens
 from tests.test_dispatcher import setup
+from tests.test_poller_service import DRIVER
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "orch-move.sh"
@@ -301,15 +306,100 @@ def test_usage_errors_exit_2(tmp_path: Path, args: tuple[str, ...]) -> None:
 
 
 def test_orch_move_starts_the_poller_only_through_poller_service() -> None:
+    assert _orch_poll_tokens("orch-move.sh", SCRIPT.read_text(encoding="utf-8")) == []
     code = [line.strip() for line in SCRIPT.read_text(encoding="utf-8").splitlines()
             if not line.lstrip().startswith("#")]
-    assert _orch_poll_launches("\n".join(code)) == []
     assert [line for line in code if "run-poller.sh" in line and "--print-db" not in line] == []
     assert [line for line in code if "restore-db" in line] == []
     assert [line for line in code if "poller-service.sh" in line] == [
         'service "${HERE}/poller-service.sh" stop',
         'service "${HERE}/poller-service.sh" start',
     ]
+
+
+def _service_poller(host: Host, tmp_path: Path, db: Path) -> int:
+    driver = tmp_path / "driver" / "orch"
+    driver.parent.mkdir()
+    driver.write_text(DRIVER.format(root=str(ROOT)), encoding="utf-8")
+    _executable(
+        host.home / ".local/bin/orch",
+        f'''#!/bin/sh
+[ "$1" = poll ] && exec "{sys.executable}" "{driver}" "$@"
+exec "{sys.executable}" "{ROOT / "bin/orch"}" "$@"
+''',
+    )
+    (host.config / "orch-poll.env").write_text(f"ORCH_DB={db}\n", encoding="utf-8")
+    pidfile = db.parent / "poller.pid"
+    subprocess.run(
+        ["bash", "-c", '"$0" >/dev/null 2>&1 </dev/null &', str(host.checkout / "deploy/run-poller.sh")],
+        env={"HOME": str(host.home), "PATH": "/usr/bin:/bin"},
+        timeout=30,
+        check=True,
+    )
+    _until(pidfile.exists, "the service poller never wrote its pidfile")
+    return int(pidfile.read_text(encoding="utf-8"))
+
+
+def _real_poller_service(host: Host) -> None:
+    for name in ("poller-service.sh", "host-pidns.sh"):
+        shutil.copy(ROOT / "deploy" / name, host.checkout / "deploy" / name)
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_export_stops_a_service_poller_whose_pidfile_is_beside_a_custom_orch_db(
+    tmp_path: Path,
+) -> None:
+    box = Host(tmp_path, "box")
+    _real_poller_service(box)
+    db = tmp_path / "custom" / "orch.db"
+    db.parent.mkdir()
+    _seed(tmp_path, db)
+    poller = _service_poller(box, tmp_path, db)
+    export = tmp_path / "export"
+    try:
+        assert not (box.state / "poller.pid").exists()
+
+        result = box.move("export", "--to", "pc", "--dir", str(export))
+
+        assert result.returncode == 0, result.stderr
+        assert not alive(poller), "export left the source poller running"
+    finally:
+        if alive(poller):
+            os.kill(poller, signal.SIGKILL)
+    assert not (db.parent / "poller.pid").exists()
+    assert (export / "manifest.json").exists()
+    assert box.retired.exists()
+    assert box.calls() == STOPS[1:]
+
+
+def test_export_fails_while_any_process_still_holds_the_poll_lock(tmp_path: Path) -> None:
+    box = Host(tmp_path, "box")
+    _seed(tmp_path, box.db)
+    export = tmp_path / "export"
+    with (box.db.parent / "orch.db.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = box.move("export", "--to", "pc", "--dir", str(export))
+
+    assert result.returncode == 1
+    assert "a poller still holds" in result.stderr
+    assert box.retired.exists()
+    assert box.calls() == STOPS
+    assert not (export / "orch.db").exists()
+    assert not (export / "manifest.json").exists()
+
+
+def test_move_db_unlocked_reads_the_poll_lock(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
+    with (tmp_path / "orch.db.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held = subprocess.run(
+            [sys.executable, str(ROOT / "bin/orch"), "move-db", "unlocked", "--db", str(db)],
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+    assert held.returncode == 1
+    assert f"a poller still holds {db}.lock" in held.stderr
+    assert cli.main(["move-db", "unlocked", "--db", str(db)]) == 0
 
 
 def test_move_db_drained_counts_running_jobs_and_held_slots(
