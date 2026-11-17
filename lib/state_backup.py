@@ -13,6 +13,12 @@ takes a dated snapshot, weekly/orch-<Monday>.db, the baseline that
 over Monday takes it on its first later cycle that week. Snapshots dated
 more than KEEP_WEEKS weeks before the current Monday are deleted; the
 newest is always kept.
+
+`orch db-backup <label>` takes a labelled copy before a manual write to the
+database, manual/orch-<UTC stamp>-<label>.db beside the rolling copy (#654).
+Each one, and the poller once a day, keeps the newest KEEP_LABELLED and any
+younger than LABELLED_MIN_AGE and deletes the rest with their -wal and -shm
+files. The stamp in the name, not the mtime, is a copy's age.
 """
 
 from __future__ import annotations
@@ -37,6 +43,12 @@ STEPS = ("plan", "build", "fix", "review")
 KEEP_WEEKS = 4
 WEEK_ZONE = ZoneInfo("America/New_York")
 _WEEKLY_NAME = re.compile(r"orch-(\d{4}-\d{2}-\d{2})\.db")
+KEEP_LABELLED = 5
+LABELLED_MIN_AGE = timedelta(hours=48)
+LABELLED_PRUNE_EVERY = timedelta(days=1)
+_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_STAMP = "%Y%m%dT%H%M%SZ"
+_LABELLED_NAME = re.compile(rf"orch-(\d{{8}}T\d{{6}}Z)-({_LABEL.pattern})\.db")
 
 
 class BackupError(RuntimeError):
@@ -129,6 +141,54 @@ def _prune(directory: Path, oldest: date) -> None:
             path.unlink()
 
 
+def labelled_backup(
+    db: Path, directory: Path, label: str, now: datetime
+) -> tuple[Path, list[Path]]:
+    """Copy db to directory/orch-<now>-<label>.db, then prune_labelled;
+    return the copy and the backups pruned."""
+    if _LABEL.fullmatch(label) is None:
+        raise BackupError(
+            f"label {label!r} must be 1-64 letters, digits, '.', '_' or '-', "
+            "starting with a letter or digit"
+        )
+    target = directory / f"orch-{now.astimezone(UTC):{_STAMP}}-{label}.db"
+    _check_apart(db, target)
+    if not db.exists():
+        raise BackupError(f"database {db} does not exist")
+    _copy(db, target)
+    return target, prune_labelled(directory, now)
+
+
+def prune_labelled(directory: Path, now: datetime) -> list[Path]:
+    """Delete the labelled backups past the newest KEEP_LABELLED that are at
+    least LABELLED_MIN_AGE old, with their -wal and -shm files; return them."""
+    if not directory.exists():
+        return []
+    labelled = sorted(
+        (stamp, path)
+        for path in directory.iterdir()
+        if (stamp := _labelled_stamp(path.name)) is not None
+    )
+    deleted = []
+    for stamp, path in labelled[:-KEEP_LABELLED]:
+        if now - stamp >= LABELLED_MIN_AGE:
+            # Siblings first: a crash after the main file would orphan them.
+            for suffix in ("-wal", "-shm", ""):
+                path.with_name(path.name + suffix).unlink(missing_ok=True)
+            deleted.append(path)
+    return deleted
+
+
+def _labelled_stamp(name: str) -> datetime | None:
+    match = _LABELLED_NAME.fullmatch(name)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), _STAMP).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
 def restore(backup_path: Path, db: Path) -> datetime:
     """Restore a missing db from backup_path; returns when the backup was taken.
 
@@ -216,7 +276,7 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
 
 class CycleBackup:
     """The poll loop's after-cycle hook: back up, take the weekly snapshot,
-    record a failure, go on."""
+    prune the labelled backups once a day, record a failure, go on."""
 
     def __init__(
         self,
@@ -228,6 +288,8 @@ class CycleBackup:
         self.db = db
         self.dest = dest
         self.weekly = dest.parent / "weekly"
+        self.labelled = dest.parent / "manual"
+        self.pruned_at: datetime | None = None
         self.record_error = record_error
         self.clock = clock
 
@@ -240,3 +302,10 @@ class CycleBackup:
             weekly_snapshot(self.db, self.weekly, self.clock())
         except Exception as exc:
             self.record_error("backup", "-", f"weekly-snapshot:{type(exc).__name__}")
+        now = self.clock()
+        if self.pruned_at is None or now - self.pruned_at >= LABELLED_PRUNE_EVERY:
+            self.pruned_at = now
+            try:
+                prune_labelled(self.labelled, now)
+            except Exception as exc:
+                self.record_error("backup", "-", f"labelled-prune:{type(exc).__name__}")
