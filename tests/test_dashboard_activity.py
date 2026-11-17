@@ -5,16 +5,18 @@ import json
 import re
 import sqlite3
 import time
+import urllib.parse
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
 import lib.dashboard_page as page
-from lib.dashboard import _VERDICT_TIMES, collect_snapshot, render_pages
+from lib.dashboard import RELAY_STEPS, _VERDICT_TIMES, collect_snapshot, render_pages
+from lib.dashboard_pages.ticket_detail import resolve_ticket
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
-from tests.test_dashboard import NOW, add_job, seeded
+from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dispatcher import retry, seed_state, setup, ticket
 
@@ -100,11 +102,12 @@ def test_verdicts_on_a_database_without_jobs_have_no_time(tmp_path: Path) -> Non
     snapshot = collect_snapshot(db, log, now=NOW)
     assert [(row["outcome"], row["age_seconds"]) for row in snapshot["poller"]["verdicts"]] == [
         ("merged", None), ("queued-review", None)]
-    (thread,) = page.relay_threads(snapshot)
+    (thread,) = [t for t in page.relay_threads(snapshot) if t["key"] == "maxharris1/cleffy#12"]
     assert [step["row"]["outcome"] for step in thread["steps"]] == ["queued-review", "merged"]
+    assert [t["handoffs"] for t in snapshot["relay"]["threads"]] == [[]] * 4
     relay = layout._section(render_pages(snapshot)["activity.html"], "relay")
-    assert relay.index("queued-review") < relay.index("merged")
-    assert '<span class="count">1 ticket</span>' in relay
+    assert relay.index('title="queued-review"') < relay.index('title="merged"')
+    assert '<span class="count">4 of 4 tickets · newest activity first</span>' in relay
 
 
 def test_a_verdict_carries_the_approval_time_recorded_for_its_comment(tmp_path: Path) -> None:
@@ -196,6 +199,196 @@ def test_every_table_that_times_a_comment_feeds_the_verdict_time(tmp_path: Path)
     assert timed == {table for table, *_ in _VERDICT_TIMES}
 
 
+def _moved(tmp_path: Path, count: int, stopped_seconds_ago: dict[int, int] | None = None) -> dict:
+    stopped = stopped_seconds_ago or {}
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        for n in range(1, count + 1):
+            add_ticket(connection, "owner/repo", str(n), state="stuck" if n in stopped else "building",
+                       stuck=int(n in stopped))
+            add_job(connection, f"j-{n}", repo="owner/repo", ticket_id=str(n), state="done",
+                    created_at=NOW - 60 * n - 30)
+            _finish(connection, f"j-{n}", NOW - 60 * n)
+            if n in stopped:
+                connection.execute(
+                    "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+                    "VALUES ('owner/repo', ?, 'building', 'stuck', ?, 'test')", (str(n), NOW - stopped[n]))
+    log = tmp_path / "poller.log"
+    log.write_text("")
+    return collect_snapshot(db, log, now=NOW)
+
+
+def _relay_ids(snapshot: dict) -> list[int]:
+    return [int(thread["ticket_id"]) for thread in snapshot["relay"]["threads"]]
+
+
+def test_the_relay_holds_the_twelve_tickets_that_moved_last_newest_first(tmp_path: Path) -> None:
+    snapshot = _moved(tmp_path, 15)
+    assert _relay_ids(snapshot) == list(range(1, 13))
+    assert snapshot["relay"]["tracked"] == 15
+    relay = _server(snapshot)["relay"]
+    assert '<span class="count">12 of 15 tickets · newest activity first</span>' in relay
+    assert relay.endswith('<p class="rl-note">The relay shows the 12 tickets that moved most recently. '
+                          "A stopped ticket stays listed until it moves again.</p>")
+    assert _relay_links(relay)["owner/repo#1"] == "job.html"
+
+
+def test_stopped_tickets_keep_their_places_and_the_oldest_movers_drop_out(tmp_path: Path) -> None:
+    snapshot = _moved(tmp_path, 15, {13: 5, 14: 5, 15: 5})
+    assert _relay_ids(snapshot) == [13, 14, 15, *range(1, 10)]
+
+
+def test_past_twelve_stopped_tickets_the_most_recently_stopped_stay(tmp_path: Path) -> None:
+    snapshot = _moved(tmp_path, 15, {n: 15 - n for n in range(1, 15)})
+    assert _relay_ids(snapshot) == list(range(14, 2, -1))
+
+
+def test_past_twelve_stuck_wakes_the_most_recently_stuck_stay(tmp_path: Path) -> None:
+    clock = [NOW - 100]
+    dispatcher, queue = setup(tmp_path, now=clock)
+    with queue.connect() as connection:
+        for n in range(1, 16):
+            add_ticket(connection, "owner/repo", str(n))
+    for n in range(1, 16):
+        clock[0] = NOW - 100 + n
+        dispatcher._mark_stuck_and_wake(repo="owner/repo", ticket_id=str(n), source_comment_id=f"s-{n}",
+                                         timeout_seconds=600, reason="job-timeout", detail="job-timeout")
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poller.log", now=NOW)
+    assert _relay_ids(snapshot) == list(range(15, 3, -1))
+
+
+def test_a_retried_stuck_wake_keeps_its_ticket_stop_time(tmp_path: Path) -> None:
+    clock = [NOW - 100]
+    dispatcher, queue = setup(tmp_path, now=clock)
+    with queue.connect() as connection:
+        for n in range(1, 16):
+            add_ticket(connection, "owner/repo", str(n))
+    for n in range(1, 16):
+        clock[0] = NOW - 100 + n
+        dispatcher._mark_stuck_and_wake(repo="owner/repo", ticket_id=str(n), source_comment_id=f"s-{n}",
+                                         timeout_seconds=600, reason="job-timeout", detail="job-timeout")
+    with queue.connect() as connection:
+        wake = connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state WHERE ticket_id = '1'").fetchone()[0]
+        connection.execute("UPDATE jobs SET state = 'failed' WHERE id = ?", (wake,))
+    clock[0] = NOW - 1
+    dispatcher._ensure_all_stuck_wakes()
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state WHERE ticket_id = '1'").fetchone()[0] != wake
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poller.log", now=NOW)
+    assert _relay_ids(snapshot) == list(range(15, 3, -1))
+
+
+def test_a_merge_with_no_job_moves_its_ticket_to_the_top(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path, now=[NOW - 1])
+    with queue.connect() as connection:
+        for n in range(1, 16):
+            add_ticket(connection, "owner/repo", str(n))
+            add_job(connection, f"j-{n}", repo="owner/repo", ticket_id=str(n), state="done",
+                    created_at=NOW - 60 * n - 30)
+            _finish(connection, f"j-{n}", NOW - 60 * n)
+    dispatcher.record_terminal("owner/repo", "15", "merged")
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poller.log", now=NOW)
+    assert _relay_ids(snapshot) == [15, *range(1, 12)]
+
+
+def _relay_links(relay: str) -> dict[str, str]:
+    return dict(re.findall(r'data-thread="([^"]*)"><a class="rl-tk" href="([^"]*)"', relay))
+
+
+def _assert_relay_links_open(snapshot: dict, relay: str) -> None:
+    links = _relay_links(relay)
+    assert len(links) == len(snapshot["relay"]["threads"])
+    assert links["aut0-code/aut0#AUT-7"] == "job.html"
+    assert links["maxharris1/cleffy#20"] == "job.html"
+    assert links["maxharris1/cleffy#13"] == "ticket.html#t=maxharris1%2Fcleffy%2313"
+    for key, href in links.items():
+        if href != "job.html":
+            address = urllib.parse.unquote(href.removeprefix("ticket.html#t="))
+            assert href.startswith("ticket.html#t=") and resolve_ticket(snapshot, address) is not None, key
+
+
+def test_a_relay_ticket_opens_its_ticket_page_only_while_a_job_is_live(snapshot: dict) -> None:
+    _assert_relay_links_open(snapshot, _server(snapshot)["relay"])
+
+
+@layout.needs_node
+def test_the_script_links_relay_tickets_like_the_server(tmp_path: Path, snapshot: dict) -> None:
+    _assert_relay_links_open(snapshot, _script(tmp_path, snapshot)["html"]["relay"])
+
+
+def test_a_thread_carries_every_step_up_to_the_cap(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        for ticket_id, count in (("12", RELAY_STEPS + 2), ("13", 15)):
+            for n in range(count):
+                add_job(connection, f"h-{ticket_id}-{n:02}", ticket_id=ticket_id, state="done", created_at=NOW - 5000 + n)
+                _finish(connection, f"h-{ticket_id}-{n:02}", NOW - 5000 + n)
+        _handled(connection, *[("maxharris1/cleffy", "13", f"v-{n}", "queued-review") for n in range(15)])
+    threads = {t["ticket_id"]: t for t in collect_snapshot(db, log, now=NOW)["relay"]["threads"]}
+    assert [row["job"] for row in threads["12"]["handoffs"]] == [f"h-12-{n:02}" for n in range(RELAY_STEPS + 1, 1, -1)]
+    assert len(threads["13"]["handoffs"]) == 15 and len(threads["13"]["verdicts"]) == 15
+    (thread,) = page.relay_threads({"relay": {"threads": [threads["13"]]}})
+    assert len(thread["steps"]) == 30
+
+
+WORDS = {
+    "queued-review": ("routed", "accent", "sent to review"),
+    "queued-plan": ("routed", "accent", "sent to plan"),
+    "queued-plan-build": ("routed", "accent", "plan accepted, sent to build"),
+    "merge-queue": ("routed", "accent", "approved, queued to merge"),
+    "resumed-fix": ("routed", "accent", "resumed the fix"),
+    "handed-off": ("shipped", "ok", "handed off"),
+    "merged": ("shipped", "ok", "merged"),
+    "authorized-unstick-build": ("unstuck", "accent", "Max unstuck it"),
+    "authorized-unstick-fix": ("unstuck", "accent", "Max unstuck it"),
+    "waiting-max-repeat": ("waiting", "warn", "still waiting on Max"),
+    "approve-ci-red": ("blocked", "bad", "approved, CI red"),
+}
+UNMAPPED = "ship-weird-thing"
+
+
+@pytest.fixture(scope="module")
+def worded(tmp_path_factory) -> dict:
+    tmp_path = tmp_path_factory.mktemp("worded")
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "owner/repo", "7")
+        _handled(connection, *[("owner/repo", "7", f"c-{outcome}", outcome) for outcome in [*WORDS, UNMAPPED]])
+    log = tmp_path / "poller.log"
+    log.write_text("")
+    return collect_snapshot(db, log, now=NOW)
+
+
+def _said(relay: str, outcome: str) -> str:
+    return re.search(rf'<span class="rl-verdict" title="{outcome}">((?:<span[^>]*>[^<]*</span>)*)</span>', relay).group(1)
+
+
+@pytest.mark.parametrize("outcome", list(WORDS))
+def test_a_verdict_reads_as_one_chip_and_plain_words(worded: dict, outcome: str) -> None:
+    chip, tone, words = WORDS[outcome]
+    assert _said(_server(worded)["relay"], outcome) == f'<span class="chip {tone}">{chip}</span><span class="rl-out">{words}</span>'
+
+
+def test_an_unmapped_verdict_shows_its_raw_text_once_with_a_muted_chip(worded: dict) -> None:
+    relay = _server(worded)["relay"]
+    assert _said(relay, UNMAPPED) == f'<span class="chip muted">blocked</span><span class="rl-out">{UNMAPPED}</span>'
+    assert re.sub(r' title="[^"]*"', "", relay).count(UNMAPPED) == 1
+
+
+@layout.needs_node
+def test_the_script_draws_the_window_and_the_words_like_the_server(tmp_path: Path, worded: dict) -> None:
+    window = _moved(tmp_path / "db", 15, {13: 5})
+    for case, snap in (("window", window), ("worded", worded)):
+        assert _script(tmp_path / case, snap)["html"]["relay"] == _server(snap)["relay"], case
+    relay = _server(window)["relay"]
+    assert '<span class="count">12 of 15 tickets · newest activity first</span>' in relay
+    assert 'class="rl-note"' in relay
+
+
 def test_a_new_approval_leads_the_relay_ahead_of_an_older_handoff(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
@@ -224,7 +417,7 @@ def test_every_handoff_and_verdict_is_in_exactly_one_thread(snapshot: dict) -> N
     assert _keys(threads) == rows and len(rows) == 8
     assert len({thread["key"] for thread in threads}) == len(threads)
     for thread in threads:
-        assert {f"{str(s['row']['repo']).lower()}#{s['row']['ticket_id']}" for s in thread["steps"]} == {thread["key"]}
+        assert {f"{str(s['row']['repo']).lower()}#{s['row']['ticket_id']}" for s in thread["steps"]} <= {thread["key"]}
 
 
 def test_mixed_case_repos_share_one_thread(snapshot: dict) -> None:
@@ -240,12 +433,24 @@ def _handoff(job: str, ticket: str, age: int, kind: str = "scripted", recipient:
 
 
 def _verdict(seq: int, ticket: str, outcome: str, age: int | None, kind: str = "routed") -> dict:
+    chip, _, words = WORDS.get(outcome, (None, None, None))
     return {"repo": "maxharris1/factory", "ticket_id": ticket, "outcome": outcome, "kind": kind, "seq": seq,
-            "age_seconds": age}
+            "age_seconds": age, "chip": chip, "words": words}
 
 
-def _snap(handoffs: list[dict], verdicts: list[dict] | None) -> dict:
-    return {"handoff_savings": {"recent": handoffs}, "poller": {"verdicts": verdicts}, "running": [], "queued": []}
+def _threaded(handoffs: list[dict], verdicts: list[dict]) -> list[dict]:
+    threads: dict[str, dict] = {}
+    for name, rows in (("handoffs", handoffs), ("verdicts", verdicts)):
+        for row in rows:
+            threads.setdefault(row["ticket_id"], {"repo": row["repo"], "ticket_id": row["ticket_id"],
+                                                  "handoffs": [], "verdicts": []})[name].append(row)
+    return list(threads.values())
+
+
+def _snap(handoffs: list[dict], verdicts: list[dict], tracked: int | None = None) -> dict:
+    threads = _threaded(handoffs, verdicts)
+    return {"relay": {"tracked": len(threads) if tracked is None else tracked, "threads": threads},
+            "running": [], "queued": []}
 
 
 def _order(thread: dict) -> list[str]:
@@ -275,18 +480,15 @@ def test_an_untimed_verdict_follows_the_verdict_handled_before_it() -> None:
         "authorized-unstick-build", "build", "queued-review", "approve-untimed", "also-untimed", "fix"]
 
 
-def test_threads_go_newest_first_and_untimed_threads_last() -> None:
+def test_threads_keep_the_snapshot_order_and_the_count_reads_shown_of_tracked() -> None:
     snap = _snap(
-        [_handoff("old", "1", 900), _handoff("new", "2", 5), _handoff("mid", "3", 60)],
-        [_verdict(1, "4", "first-untimed", None, "other"), _verdict(2, "5", "later-untimed", None, "other"),
-         _verdict(3, "1", "queued-review", 30)],
+        [_handoff("old", "1", 900), _handoff("new", "2", 5)],
+        [_verdict(1, "4", "first-untimed", None, "other"), _verdict(3, "1", "queued-review", 30)],
+        tracked=222,
     )
-    threads = page.relay_threads(snap)
-    assert [t["key"] for t in threads] == [
-        "maxharris1/factory#2", "maxharris1/factory#1", "maxharris1/factory#3",
-        "maxharris1/factory#5", "maxharris1/factory#4"]
-    assert '<span class="count">5 tickets · last 15m 00s</span>' in page._relay(snap)
-    assert '<span class="count">2 tickets</span>' in page._relay(_snap([], snap["poller"]["verdicts"][:2]))
+    assert [t["key"] for t in page.relay_threads(snap)] == [
+        "maxharris1/factory#1", "maxharris1/factory#2", "maxharris1/factory#4"]
+    assert '<span class="count">3 of 222 tickets · newest activity first</span>' in page._relay(snap)
 
 
 def _inner(html: str, ident: str) -> str:
@@ -305,23 +507,25 @@ def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, harness
     return layout.run_harness(tmp_path, harness, script, snapshot, "activity", IDS, actions or [])
 
 
-def _rich(snapshot: dict) -> dict:
+def _rich(snapshot: dict, handoffs: tuple | list = (), verdicts: tuple | list = ()) -> dict:
     rich = copy.deepcopy(snapshot)
-    rich["handoff_savings"]["recent"] = [
+    rich["relay"] = {"tracked": 9, "threads": _threaded([
         _handoff("j-rev114", "114", 4, recipient="codex", action="review"),
         _handoff("j-wake24", "124", 167, "bot_to_bot", "grok", "done"),
         _handoff("j-rev124", "124", 202, recipient="codex", action="review"),
         _handoff("j-bld124", "124", 382),
         _handoff("j-fix100", "100", 482, "failed", action="fix"),
         _handoff("j-bld114", "114", 904),
-    ]
-    rich["poller"]["verdicts"] = [
+        *handoffs,
+    ], [
+        *verdicts,
+        _verdict(10, "100", "ship-weird-thing", 300, "blocked"),
         _verdict(9, "124", "handed-off", 160, "shipped"),
         _verdict(8, "100", "queued-review", None),
         _verdict(7, "124", "queued-review", 382),
         _verdict(6, "107", "authorized-unstick-fix", None, "other"),
         _verdict(5, "124", "authorized-unstick-build", 600, "other"),
-    ]
+    ])}
     return rich
 
 
@@ -341,15 +545,16 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
     rows = re.findall(r'<div class="rl-row" data-thread="([^"]+)">(.*?)</div>', relay)
     assert [key for key, _ in rows] == [
         "maxharris1/factory#114", "maxharris1/factory#124", "maxharris1/factory#100", "maxharris1/factory#107"]
-    for _, row in rows:
-        assert re.fullmatch(r'<a class="rl-tk" href="[^"]*">[^<]*</a><span class="rl-steps">.*</span>', row)
+    for key, row in rows:
+        assert re.fullmatch(r'<a class="rl-tk" href="job\.html">[^<]*</a><span class="rl-steps">.*</span>', row), key
     row124 = dict(rows)["maxharris1/factory#124"]
     assert re.findall(r'class="(rl-step [^"]*|rl-verdict)"', row124) == [
         "rl-verdict", "rl-step rl-claude", "rl-verdict", "rl-step rl-codex", "rl-step rl-grok b2b", "rl-verdict"]
     assert row124.count('<span class="rl-sep" aria-hidden="true">→</span>') == 5
-    assert '<span class="chip ok">shipped</span><span class="rl-out">handed-off</span>' in row124
+    assert ('<span class="rl-verdict" title="handed-off"><span class="chip ok">shipped</span>'
+            '<span class="rl-out">handed off</span>') in row124
     assert '<span class="chip bad">failed</span>' in dict(rows)["maxharris1/factory#100"]
-    assert '<span class="count">4 tickets · last 15m 04s</span>' in relay
+    assert '<span class="count">4 of 9 tickets · newest activity first</span>' in relay
     assert ".rl-step.b2b{border-style:dashed}" in page.CSS
     assert re.search(r"\.rl-step\{[^}]*border:1px solid", page.CSS)
     buttons = re.findall(r'<button class="rl-btn" type="button" aria-pressed="(true|false)" data-relay="(\w+)">'
@@ -363,18 +568,19 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
                     ("chip accent", "routed", "verdict"), ("chip bad", "failed", "failed handoff")]
     assert legend.count('class="rl-key"') == 4
     for drawn in ('class="rl-step rl-claude"', 'class="rl-step rl-grok b2b"',
-                  'class="rl-verdict"><span class="chip accent">routed</span>', '<span class="chip bad">failed</span>'):
+                  'class="rl-verdict" title="queued-review"><span class="chip accent">routed</span>',
+                  '<span class="chip bad">failed</span>'):
         assert drawn in relay
 
 
 def test_a_verdict_shows_its_age_like_a_handoff_and_no_time_when_it_has_none() -> None:
     relay = page._relay(_snap([_handoff("build", "1", 400)],
                               [_verdict(2, "1", "queued-review", 380), _verdict(1, "1", "authorized-unstick-build", None)]))
-    assert ('<span class="rl-verdict"><span class="chip accent">routed</span><span class="rl-out">queued-review</span>'
-            '<span class="rl-when">6m 20s ago</span></span>') in relay
+    assert ('<span class="rl-verdict" title="queued-review"><span class="chip accent">routed</span>'
+            '<span class="rl-out">sent to review</span><span class="rl-when">6m 20s ago</span></span>') in relay
     assert '<span class="rl-what">build</span><span class="rl-when">6m 40s ago</span>' in relay
-    assert ('<span class="rl-verdict"><span class="chip accent">routed</span>'
-            '<span class="rl-out">authorized-unstick-build</span></span>') in relay
+    assert ('<span class="rl-verdict" title="authorized-unstick-build"><span class="chip accent">unstuck</span>'
+            '<span class="rl-out">Max unstuck it</span></span>') in relay
     assert relay.count('class="rl-when"') == 2
 
 
@@ -395,13 +601,14 @@ def test_filter_buttons_show_only_the_matching_threads(tmp_path: Path, snapshot:
     assert _threads(snaps[2]) == ["maxharris1/factory#124"]
     assert _threads(snaps[3]) == every
     assert 'aria-pressed="true" data-relay="shipped"' in snaps[2]
-    assert '<span class="count">1 ticket · last 10m 00s</span>' in snaps[2]
+    assert '<span class="count">1 of 9 tickets · newest activity first</span>' in snaps[2]
 
 
 def _shipped(snapshot: dict, seq: int) -> dict:
     later = copy.deepcopy(snapshot)
     later["generated_at_epoch"] = snapshot["generated_at_epoch"] + 2
-    later["poller"]["verdicts"].insert(0, _verdict(seq, "114", "merged", None, "shipped"))
+    thread = next(t for t in later["relay"]["threads"] if t["ticket_id"] == "114")
+    thread["verdicts"].insert(0, _verdict(seq, "114", "merged", None, "shipped"))
     return later
 
 
@@ -479,16 +686,13 @@ def test_attention_ticket_rows_link_github_in_both_renderers(tmp_path: Path, sna
 
 
 def _long(snapshot: dict) -> dict:
-    long = _rich(snapshot)
-    long["handoff_savings"]["recent"] += [
+    return _rich(snapshot, [
         _handoff("j-l1", "131", 3000), _handoff("j-l2", "131", 2800, recipient="codex", action="review"),
         _handoff("j-l3", "131", 2600, "failed", action="fix"), _handoff("j-l4", "131", 2400, "bot_to_bot", "grok", "done"),
         _handoff("j-l5", "131", 2200, action="fix"), _handoff("j-l6", "131", 2000, recipient="codex", action="review"),
-    ]
-    long["poller"]["verdicts"][:0] = [
+    ], [
         _verdict(19, "131", "handed-off", 1900, "shipped"), _verdict(18, "131", "authorized-unstick-build", None, "other"),
-        _verdict(17, "131", "queued-review", 2500), _verdict(16, "131", "queued-fix", 2700)]
-    return long
+        _verdict(17, "131", "queued-review", 2500), _verdict(16, "131", "queued-fix", 2700)])
 
 
 def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:

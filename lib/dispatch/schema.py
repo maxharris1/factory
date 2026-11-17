@@ -77,6 +77,7 @@ class SchemaMixin:
                     stuck_reason TEXT,
                     stuck_source_comment_id TEXT,
                     stuck_wake_job_id TEXT,
+                    stuck_since REAL,
                     timeout_seconds INTEGER,
                     generation INTEGER NOT NULL DEFAULT 1,
                     cap_extra INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +160,7 @@ class SchemaMixin:
                 "ticket_state",
                 {
                     "stuck_wake_job_id": "TEXT",
+                    "stuck_since": "REAL",
                     "workflow_state": "TEXT",
                     "review_round": "INTEGER NOT NULL DEFAULT 0",
                     "plan_gap_count": "INTEGER NOT NULL DEFAULT 0",
