@@ -107,7 +107,7 @@ CSS_TAIL = """\
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue{grid-column:1/-1}}
-@media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
+@media (max-width:640px){.top-row{padding:8px 14px}main{padding:14px 12px 24px;gap:12px}
 .topbar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}

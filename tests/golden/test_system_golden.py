@@ -13,9 +13,9 @@ GOLDEN = {
     "system.SCRIPT_HEALTH": "3d0bbddf094e7caaba8887cb17183942d34282cf925c7dfc34df2a83af847f8d",
     "system.SCRIPT_COMPONENTS": "bc8d14f54bb5d024ae9c09abb84630b467bc1382f63be67f63badadea71fb9fb",
     "seeded/main": "215428423f716fcf2a606dd05cd456fb7a59dac2d44d3f9049e0c8959d76f21e",
-    "seeded/chrome": "fd5c5866e624ce5c1aa81103e6bb94375716552d1cb1d29ad36b49223da2a81d",
+    "seeded/chrome": "cded770f1db69ba4119e1550122465e1e029a1d7d82805ae942b6f20531218ea",
     "hostile/main": "215428423f716fcf2a606dd05cd456fb7a59dac2d44d3f9049e0c8959d76f21e",
-    "hostile/chrome": "5440924e9cb09309da7253b001bbfa52f2e9dd1be602b0a3ed5db4068e14542c",
+    "hostile/chrome": "4cc8c46b4f933b280fb2db70b109554c944d090c677a204294947a44edb1845a",
     "empty/main": "eae8c7bcb9f625a2e311e345966929282c1df13607290e0aef351213380f6472",
     "empty/chrome": "f5f301d6ad94422f9354337b1e98231833b5d946aabbb8ba736c86900075a224",
 }

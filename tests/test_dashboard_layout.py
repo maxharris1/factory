@@ -236,7 +236,8 @@ def test_attention_strip_counts_and_links_to_activity(tmp_path: Path) -> None:
     pages = _pages(tmp_path)
     for name, html in pages.items():
         strip = _section(_no_script(html), "attention-strip")
-        assert 'href="activity.html#attention"' in strip, name
+        href = "#attention" if name == "activity.html" else "activity.html#attention"
+        assert f'<a class="attn-count" href="{href}">' in strip, name
         assert re.search(r'<b id="attention-count">3</b>', strip), (name, strip)
         assert "3 need attention" in _text(strip)
         assert "attention-badge" not in html
