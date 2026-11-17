@@ -1494,7 +1494,8 @@ renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
 
 `tickets.json` holds one detail record per tracked ticket, keyed
-`<repo>#<ticket_id>` (issue #530). A record exists for a shipped or stuck
+`<repo>#<ticket_id>` from the stored identifiers, redacted but never cut
+short (issue #530). A record exists for a shipped or stuck
 ticket with no job too. It has the ticket's state, time in state, round,
 hops, off-chart count and its visits in order. A shipped ticket's record
 says when and how it shipped, the time from intake to ship, its revise

@@ -207,6 +207,43 @@ def _shipped(tmp_path: Path) -> tuple[Path, Path]:
     return db, log
 
 
+def test_tickets_whose_shown_identifiers_cut_to_the_same_text_keep_separate_records(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    repos = ["owner/" + "a" * 94 + suffix for suffix in ("x", "y")]
+    tickets = ["T-" + "ab-" * 25 + suffix for suffix in ("x", "y")]
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, repos[0], "1", state="building")
+        add_ticket(connection, repos[1], "1", state="merged")
+        add_ticket(connection, CLEFFY, tickets[0], state="review")
+        add_ticket(connection, CLEFFY, tickets[1], state="stuck", stuck=1)
+    published = records(db, tmp_path / "poller.log", tmp_path)
+    assert {key: record["state"] for key, record in published.items()} == {
+        f"{repos[0]}#1": "building",
+        f"{repos[1]}#1": "merged",
+        f"{CLEFFY}#{tickets[0]}": "review",
+        f"{CLEFFY}#{tickets[1]}": "stuck",
+    }
+
+
+def test_tickets_that_redact_to_the_same_key_keep_separate_records(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    other_token = GH_TOKEN[:-1] + "Z"
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, f"evil/{GH_TOKEN}", "1", state="building")
+        add_ticket(connection, f"evil/{other_token}", "1", state="merged")
+    _, published, raw = publish(db, tmp_path / "poller.log", tmp_path / "out")
+    assert GH_TOKEN not in raw and other_token not in raw
+    assert sorted(record["state"] for record in published["tickets"].values()) == [
+        "building", "merged",
+    ]
+    for key in published["tickets"]:
+        assert key == redact(key)
+
+
 def test_a_merged_tickets_record_says_when_and_how_it_shipped(tmp_path: Path) -> None:
     db, log = _shipped(tmp_path)
     record = records(db, log, tmp_path)["maxharris1/cleffy#80"]

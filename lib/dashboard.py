@@ -58,6 +58,10 @@ every <, > and & is written as a JSON escape:
     jobs:     the ticket's status.json running rows, newest first, then its
                queued rows, each without `flow`
 
+A key is the stored repo and ticket id, redacted but not cut short, so it
+can be longer than the record's shown `repo` and `ticket_id`. Tickets that
+redaction alone makes equal take a `~<n>` suffix.
+
 `shipped` is set when the ticket's state is on the Shipped shelf: `at` is
 when it first reached a Shipped state, and `how` is "handed-off" when that
 state was handed-off. Its totals cover every job the ticket ever had; tokens
@@ -768,7 +772,7 @@ def collect_snapshot(
             item["no_waiter"] = flag.harness
             item["no_waiter_link"] = f"health.html#{flag.anchor}"
     records = {
-        f"{record['repo']}#{record['ticket_id']}": {
+        db["record_keys"][key]: {
             **record,
             "jobs": [
                 {name: value for name, value in item.items() if name != "flow"}
@@ -1294,6 +1298,7 @@ def _read_db(
             ticket_info[key] = TicketInfo(
                 _enum(row["tracker"], TRACKERS), stuck, state,
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
+                f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
             )
             tickets.append(
                 {
@@ -1347,6 +1352,7 @@ def _read_db(
         key: _ticket_record(info, flows[key], tracked_at.get(key), spent.get(key), chart)
         for key, info in ticket_info.items()
     }
+    record_keys = _record_keys(ticket_info)
     ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
     ticket_jobs: dict[tuple[str, str], list[dict]] = {}
     for item in [*sorted(running, key=lambda item: item["elapsed_seconds"]), *queued]:
@@ -1583,6 +1589,7 @@ def _read_db(
         "running": running,
         "queued": queued,
         "ticket_records": ticket_records,
+        "record_keys": record_keys,
         "ticket_jobs": ticket_jobs,
         "box_running": box_running,
         "running_on": running_on,
@@ -1629,6 +1636,25 @@ class TicketInfo(NamedTuple):
     ticket_id: str = ""
     round: int = 0
     reason: str | None = None
+    key: str = ""
+
+
+def _record_keys(ticket_info: dict[tuple[str, str], TicketInfo]) -> dict[tuple[str, str], str]:
+    """Each tracked ticket's tickets.json key, from its stored repo and ticket
+    id redacted but never cut short, so tickets whose shown identifiers cut to
+    the same text keep separate records. Tickets that redaction alone makes
+    equal take a `~<n>` suffix, in stored-identifier order."""
+    keys: dict[tuple[str, str], str] = {}
+    taken: set[str] = set()
+    for ticket in sorted(ticket_info):
+        key = base = ticket_info[ticket].key
+        count = 1
+        while key in taken:
+            count += 1
+            key = f"{base}~{count}"
+        taken.add(key)
+        keys[ticket] = key
+    return keys
 
 
 def _ticket_record(
