@@ -455,7 +455,49 @@ def test_cost_tiles_are_two_by_two_at_375_in_a_browser(tmp_path: Path) -> None:
         browser.close()
 
 
-TOPS = """(function () {
+TILE_VALUES = """(function () {
+  return [].map.call(document.querySelectorAll('#tokens .stat'), function (tile) {
+    tile.scrollIntoView({block: 'center'});
+    var value = tile.querySelector('b'), range = document.createRange();
+    range.selectNodeContents(value);
+    var box = tile.getBoundingClientRect(), style = getComputedStyle(tile);
+    var left = box.left + parseFloat(style.paddingLeft), right = box.right - parseFloat(style.paddingRight);
+    var rects = [].slice.call(range.getClientRects());
+    var lines = rects.map(function (r) { return Math.round(r.top); })
+      .filter(function (top, i, all) { return all.indexOf(top) === i; }).length;
+    var spill = rects.filter(function (r) { return r.left < left - 0.5 || r.right > right + 0.5; }).length;
+    var end = rects[rects.length - 1], probe = document.elementFromPoint(end.right - 1, (end.top + end.bottom) / 2);
+    return [tile.querySelector('span').textContent, value.textContent, spill, lines, value.contains(probe),
+            parseFloat(getComputedStyle(value).fontSize)];
+  });
+})()"""
+BIG_COST = tuple({**row, "cost_usd": 617_283.9 if row["cost_usd"] else None} for row in WIDE)
+
+
+@needs_chrome
+@pytest.mark.parametrize("width", [320, 375, 699, 700, 1440])
+def test_cost_tile_values_stay_whole_inside_their_tiles_in_a_browser(tmp_path: Path, width: int) -> None:
+    (tmp_path / "big").mkdir()
+    cases = {"$24,691.35": _snapshot(tmp_path, telemetry=WIDE),
+             "$1,234,567.80": _snapshot(tmp_path / "big", telemetry=BIG_COST)}
+    browser = Browser()
+    try:
+        for cost, snapshot in cases.items():
+            for script in (False, True):
+                _load(browser, snapshot, width, script)
+                tiles = browser.eval(TILE_VALUES)
+                where = (cost, script, tiles)
+                assert [(label, value) for label, value, *_ in tiles][:2] == [("cost", cost), ("jobs", "5")], where
+                for label, value, spill, lines, visible, size in tiles:
+                    assert spill == 0 and visible, (label, where)
+                    assert size >= 14, (label, where)
+                    if cost == "$24,691.35":
+                        assert lines == 1, (label, where)
+    finally:
+        browser.close()
+
+
+TOPS ="""(function () {
   var out = {};
   [].forEach.call(document.querySelectorAll('main .panel'), function (n) { out[n.id] = n.getBoundingClientRect().top; });
   return out;
