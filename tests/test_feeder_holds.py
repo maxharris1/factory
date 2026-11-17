@@ -719,3 +719,94 @@ def test_pull_base_refuses_an_unreadable_base(pull: dict) -> None:
     gh.route((f"{REPO_PATH}/pulls/1461",), ok(pull))
     with pytest.raises(GitHubAdapterError, match="base branch"):
         GitHubIntakeClient(gh).pull_base(HOME, 1461)
+
+
+def test_intake_uses_the_tracked_pr_when_its_branch_has_two_open_prs(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github, beyond_base=(DEV,), dev_merge=True)
+    github.pulls[(LINEAR_REPO, 1460)] = {"head": AUT.branch, "base": "dev"}
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, queue, _, logs = linear_feeder(tmp_path, github)
+    dispatcher_for(tmp_path, queue, feeder)
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(
+            "INSERT INTO ticket_sources(repo, ticket_id, source, pr_number) VALUES (?, ?, ?, ?)",
+            (LINEAR_REPO, "AUT-2231", "AUT-2231", "1461"),
+        )
+
+    feeder.feed_once()
+    feeder.feed_once()
+
+    row = rows(tmp_path / "orch.db")["AUT-2231"]
+    assert row["base_branch"] == FEATURE
+    assert row["waiting_reason"] == f"waiting on #1460 (branch {AUT.branch} carries its commits)"
+    assert logs.count(BASE_NOTE) == 1
+
+
+def test_intake_finds_the_branch_pr_when_the_tracked_pr_closed(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github)
+    github.pulls[(LINEAR_REPO, 1450)] = {"head": AUT.branch, "base": "dev", "state": "closed"}
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, queue, _, logs = linear_feeder(tmp_path, github)
+    dispatcher_for(tmp_path, queue, feeder)
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(
+            "INSERT INTO ticket_sources(repo, ticket_id, source, pr_number) VALUES (?, ?, ?, ?)",
+            (LINEAR_REPO, "AUT-2231", "AUT-2231", "1450"),
+        )
+
+    report = feeder.feed_once()
+
+    assert [ref.ticket_id for ref in report.fed] == ["AUT-2231"]
+    row = rows(tmp_path / "orch.db")["AUT-2231"]
+    assert (row["pr_number"], row["base_branch"]) == ("1461", FEATURE)
+    assert logs.count(BASE_NOTE) == 1
+
+
+RELEASE = "release+stable"
+
+
+def test_a_pr_on_a_git_valid_base_outside_the_factory_names_still_holds(tmp_path: Path) -> None:
+    gh = RecordedGh()
+    for sha in (A, B, C):
+        pulls = [{"number": 113, "state": "open", "base": {"ref": RELEASE}}] if sha in (A, B) else []
+        gh.route(("--cache", "60s", f"{REPO_PATH}/commits/{sha}/pulls?per_page=100"), ok(pulls))
+    github = stacked_github()
+    github.pulls[(HOME, 113)]["base"] = RELEASE
+    github.branch_commits[(HOME, RELEASE)] = (A,)
+    github.commit_pulls = GitHubIntakeClient(gh).commit_pulls
+    feeder, _, _, _ = make_feeder(tmp_path, github=github)
+
+    report = feeder.feed_once()
+
+    assert (report.blocked, report.errors) == (1, 0)
+    assert rows(tmp_path / "orch.db")["205"]["state"] == "waiting-blocked"
+    assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
+
+
+def test_branch_reads_accept_a_git_valid_name_and_encode_it() -> None:
+    gh = RecordedGh()
+    encoded = "release%2Bstable"
+    gh.route(("--cache", "60s", f"{REPO_PATH}/commits/{A}/pulls?per_page=100"),
+             ok([{"number": 113, "state": "open", "base": {"ref": RELEASE}}]))
+    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{encoded}...{A}"), ok({"status": "behind"}))
+    gh.route((f"{REPO_PATH}/pulls/1461",), ok({"state": "open", "base": {"ref": RELEASE}}))
+    gh.route((f"{REPO_PATH}/git/ref/heads/{encoded}",), ok({"object": {"sha": A}}))
+    gh.route((f"{REPO_PATH}/compare/{encoded}...{BRANCH}",), ok({"total_commits": 1, "commits": [{"sha": B}]}))
+    client = GitHubIntakeClient(gh)
+
+    assert client.commit_pulls(HOME, A) == {113: RELEASE}
+    assert client.branch_has(HOME, RELEASE, A) is True
+    assert client.pull_base(HOME, 1461) == RELEASE
+    assert client.branch_sha(HOME, RELEASE) == A
+    assert client.ahead_commits(HOME, RELEASE, BRANCH) == (B,)
+
+
+@pytest.mark.parametrize("name", ["-x", "a..b", "a b", "a:b", "a.lock", "x/", "a@{1}", "@", ""])
+def test_branch_reads_refuse_a_name_git_refuses(name: str) -> None:
+    client = GitHubIntakeClient(RecordedGh())
+    with pytest.raises(GitHubAdapterError, match="not safe"):
+        client.branch_sha(HOME, name)
+    with pytest.raises(GitHubAdapterError, match="not safe"):
+        client.branch_has(HOME, name, A)

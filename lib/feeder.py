@@ -140,7 +140,7 @@ from lib.feeder_gates import (
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
-from lib.pr_title import prefixed
+from lib.pr_title import prefixed, read_sources
 from lib.queue import (
     JobRequest,
     SQLiteJobQueue,
@@ -1307,7 +1307,9 @@ class Feeder:
                 return None
             branch_found = True
         else:
-            number = self.github.find_pull(repo, branch)
+            number = self._ticket_pull(repo, row["ticket_id"] or (issue.key if issue.tracker == "linear" else None))
+            if number is None:
+                number = self.github.find_pull(repo, branch)
             if number is not None:
                 wait = holds.collision(candidate.ref, candidate.lines, (github_ref(repo, number),))
                 if wait is not None:
@@ -1383,6 +1385,18 @@ class Feeder:
             go_id = post(_go(issue, state=state, risk=risk, number=number, visible=linear))
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
+
+    def _ticket_pull(self, repo: str, ticket_id: str | None) -> int | None:
+        """The open PR the dispatcher tracks for this ticket, when the feeder row has none."""
+        if ticket_id is None:
+            return None
+        with self.queue.connect() as connection:
+            source = read_sources(connection).get((repo.casefold(), ticket_id))
+        recorded = source[1] if source is not None else None
+        if recorded is None or not recorded.isdigit():
+            return None
+        number = int(recorded)
+        return number if self.github.pull_state(repo, number) == "open" else None
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None:
         number = int(ticket.pr_number) if ticket.pr_number else None
