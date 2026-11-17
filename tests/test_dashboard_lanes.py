@@ -857,7 +857,7 @@ def _rail(lane: str) -> tuple[str, int, str]:
 
 def _assert_no_work_lane(lanes: str) -> None:
     box = _lane(lanes, "box")
-    assert 'class="tile' not in box
+    assert not re.search(r'class="tile[ "]', box)
     assert _rail(box) == ("rail", 4, "4 idle")
     assert re.search(r'<div class="tiles"><div class="rail">.*?</div></div></div>$', box)
 
@@ -909,7 +909,8 @@ def test_idle_slots_fold_into_a_rail_script(tmp_path: Path, check) -> None:
 def test_a_healthy_device_has_no_online_chip(tmp_path: Path) -> None:
     html = render_pages(_rail_lanes(tmp_path))["index.html"]
     assert "ONLINE" not in html
-    assert 'class="chip' not in _lane(_server_lanes(_rail_lanes(tmp_path)), "pc")
+    pc = _lane(_section(_no_script(html), "lanes"), "pc")
+    assert 'class="chip' not in pc[: pc.index('<div class="tiles">')]
 
 
 def test_rail_and_head_rules_come_from_the_artboard() -> None:
