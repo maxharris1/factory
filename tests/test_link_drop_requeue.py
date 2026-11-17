@@ -52,8 +52,7 @@ TIMEOUT = 3600
 SETTLE = 10 * 60 + TIMEOUT + 5 * 60
 UNREACHABLE, RUNNING, GONE = 255, 1, 0
 RUNNERS = count(900_001)
-# The settle-time tests keep the lost tier (#662) past their whole run.
-SETTLE_ONLY = JobStateConfig(unreachable_lost_seconds=24 * 3600.0)
+LOST_AFTER_A_DAY = JobStateConfig(unreachable_lost_seconds=24 * 3600.0)
 
 
 def dropped_run(poller: Poller, job_id: str, *, bot: str = "codex-bot", owner: str = "codex") -> float:
@@ -342,7 +341,7 @@ def _spend_budget(poller: Poller, job_id: str) -> None:
 def test_a_device_that_stays_dead_spends_the_budget_with_backoff_then_sticks_with_link_drop(
     tmp_path: Path,
 ) -> None:
-    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=SETTLE_ONLY)
+    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=LOST_AFTER_A_DAY)
     first = poller.review(timeout=TIMEOUT)
     _spend_budget(poller, first)
 
@@ -433,7 +432,7 @@ def test_a_late_end_from_the_lost_run_never_touches_the_next_claim(tmp_path: Pat
     lost.ended(255)
     poller.transport.check = GONE
     with pytest.raises(ClaimProofError):
-        lost.finish(255)  # orch job run logs this and exits
+        lost.finish(255)
 
     assert events(poller.path, job_id) == before, "the old run records nothing"
     assert poller.row(job_id)["state"] == "running"
@@ -441,7 +440,7 @@ def test_a_late_end_from_the_lost_run_never_touches_the_next_claim(tmp_path: Pat
 
 
 def test_a_takeover_after_a_drop_is_never_failed_on_the_old_runs_deadline(tmp_path: Path) -> None:
-    poller, job_id = remote_review(tmp_path, job_states=SETTLE_ONLY)
+    poller, job_id = remote_review(tmp_path, job_states=LOST_AFTER_A_DAY)
     dropped = dropped_run(poller, job_id)
     poller.transport.check = GONE
     takeover = placed_run.prepare(
@@ -467,7 +466,7 @@ def test_a_takeover_after_a_drop_is_never_failed_on_the_old_runs_deadline(tmp_pa
 def test_a_spent_budget_frees_the_settled_slot_so_attempt_2_runs_on_a_one_slot_device(
     tmp_path: Path,
 ) -> None:
-    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=SETTLE_ONLY)
+    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=LOST_AFTER_A_DAY)
     poller.config = replace(poller.config, devices=tuple(
         replace(device, slot_max=1) if device.name == "pc" else device
         for device in poller.config.devices
@@ -509,7 +508,7 @@ def test_a_dropped_review_waits_for_an_open_fix_for_its_head(tmp_path: Path) -> 
 def test_a_review_held_behind_an_open_fix_frees_its_settled_slot_for_the_fix(
     tmp_path: Path, spent: bool
 ) -> None:
-    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=SETTLE_ONLY)
+    poller = Poller(tmp_path, box=False, check=UNREACHABLE, job_states=LOST_AFTER_A_DAY)
     poller.config = replace(poller.config, devices=tuple(
         replace(device, slot_max=1) if device.name == "pc" else device
         for device in poller.config.devices

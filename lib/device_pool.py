@@ -772,7 +772,6 @@ def back_off(connection: sqlite3.Connection, device: str, *, until: float, reaso
 
 
 def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None:
-    """Move job_id's slot into device_orphans, in the caller's transaction (#662)."""
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {ORPHANS_TABLE} (

@@ -733,7 +733,7 @@ def test_a_device_unreachable_10_minutes_loses_the_job_and_frees_its_slot(
     tmp_path: Path,
 ) -> None:
     now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
-    poll_at(now, dispatcher, 0.0)  # the first failed probe starts the clock
+    poll_at(now, dispatcher, 0.0)
     poll_at(now, dispatcher, 540.0)
     assert state(queue, job.id) == "running"
     assert pool.used() == {"pc": 1}
@@ -761,7 +761,7 @@ def test_a_good_probe_restarts_the_lost_clock(tmp_path: Path) -> None:
     transport.check = 1  # the device answers: the worker runs
     poll_at(now, dispatcher, 300.0)
     transport.check = 255
-    poll_at(now, dispatcher, 400.0)  # failing again from 400
+    poll_at(now, dispatcher, 400.0)
     poll_at(now, dispatcher, 900.0)
     assert state(queue, job.id) == "running"
     poll_at(now, dispatcher, 1000.0)
@@ -777,7 +777,7 @@ def test_the_offline_clock_is_forgotten_once_the_device_holds_no_slot(tmp_path: 
     assert pool.health("pc") == (None, 0.0)
     queue.finish(job_id, owner="codex", handoff_comment_id="c")
     monitor.alive = lambda *_: False
-    monitor.reconcile(60.0, 600.0, lambda *_: None)  # no worker started: released, no probe
+    monitor.reconcile(60.0, 600.0, lambda *_: None)
     assert pool.used() == {}
     assert pool.health("pc") == (None, None)
 
