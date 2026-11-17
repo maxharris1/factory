@@ -156,12 +156,34 @@ class RetryMixin:
         lost = self._lose_stranded_job(connection, key, now)
         if lost is not None:
             job, detail = lost
+            state = None
+            if row is not None and row["stuck"]:
+                state = row["workflow_state"]
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    state,
+                    source="retry",
+                    at=now,
+                    also={
+                        "stuck": 0,
+                        "stuck_reason": None,
+                        "stuck_source_comment_id": None,
+                        "stuck_wake_job_id": None,
+                    },
+                )
+                self._supersede_stuck(connection, key, keep=job.id)
+            if self._posted_handoff(job, ticket) is not None:
+                return self._record_retry(
+                    connection, ticket, comment, reason, job, "retried-stranded-posted"
+                ), state
             requeue_link_drop(
                 connection, job.id, now=now, reason=f"retry {comment.id}: {detail}"
             )
             return self._record_retry(
                 connection, ticket, comment, reason, job, "queued-retry-stranded"
-            ), None
+            ), state
         if row is None or not row["stuck"]:
             if self._unlanded_plan(connection, ticket) is not None:
                 job = self._replan_in_transaction(connection, ticket, comment)
@@ -214,23 +236,7 @@ class RetryMixin:
                 "update_failures": update_failures,
             },
         )
-        connection.execute(
-            """
-            UPDATE jobs SET failure_handled = 1
-            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
-              AND state = 'failed' AND failure_handled = 0
-            """,
-            key,
-        )
-        for wake in connection.execute(
-            """
-            SELECT id FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'stuck'
-              AND state = 'queued'
-            """,
-            key,
-        ).fetchall():
-            self.queue.cancel(str(wake["id"]), "retried", connection=connection)
+        self._supersede_stuck(connection, key)
         if step == "update" and state != "updating":
             return self._record_retry(
                 connection, ticket, comment, reason, None, f"retried-{state}"
@@ -261,6 +267,27 @@ class RetryMixin:
             job,
             f"queued-retry-{request.action}",
         ), state
+
+    def _supersede_stuck(
+        self, connection: sqlite3.Connection, key: tuple[str, str], keep: str | None = None
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE jobs SET failure_handled = 1
+            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+              AND state = 'failed' AND failure_handled = 0 AND id IS NOT ?
+            """,
+            (*key, keep),
+        )
+        for wake in connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'stuck'
+              AND state = 'queued'
+            """,
+            key,
+        ).fetchall():
+            self.queue.cancel(str(wake["id"]), "retried", connection=connection)
 
     def _lose_stranded_job(
         self, connection: sqlite3.Connection, key: tuple[str, str], now: float

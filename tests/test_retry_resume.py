@@ -9,12 +9,14 @@ from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.types import Comment
+from lib.hook_t7 import T7Hook
 from lib.queue import Job
 from tests.merge_queue_support import PR, REPO, Board, sha
 from tests.test_dispatcher import PLAN, RETRY, VERDICT
 from tests.test_remote_start import FakeTransport, config_of, machines_file
 
 REASON = RETRY.format(reason="Max: retry.")
+STUCK_FIXTURE = Path(__file__).parent / "fixtures" / "comments" / "stuck.txt"
 
 
 def _stuck_fix_with_unsettled_failure(b: Board, p: PR) -> None:
@@ -377,3 +379,77 @@ def test_retry_still_refuses_a_job_on_a_reachable_enabled_device(tmp_path: Path)
     assert [r["state"] for r in b.jobs("fix")] == ["running"]
     placement = pool.placement(job.id)
     assert placement is not None and placement.device == "pc"
+
+
+@pytest.mark.parametrize(
+    ("answers", "pc_enabled"), [(False, True), (True, False)], ids=["unreachable", "disabled"]
+)
+def test_retry_of_a_stranded_job_on_a_stuck_ticket_lets_the_replacement_resume_it(
+    tmp_path: Path, answers: bool, pc_enabled: bool
+) -> None:
+    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers, pc_enabled=pc_enabled)
+    b.dispatcher.hooks = (T7Hook(),)
+    b.post(p, "stuck-report", STUCK_FIXTURE.read_text(), "grok-login")
+    b.poll()
+    assert b.state("42")["stuck"] == 1
+
+    b.post(p, "retry-1", REASON, "grok-login")
+    b.now[0] += 600
+    b.poll()
+
+    assert b.outcome("retry-1") == "queued-retry-stranded"
+    state = b.state("42")
+    assert (state["workflow_state"], state["stuck"], state["stuck_reason"]) == (
+        "fixing", 0, None,
+    )
+    [row] = b.jobs("fix")
+    assert (row["state"], row["attempt"], row["generation"]) == (
+        "queued", job.request.attempt, job.request.generation,
+    )
+    box = DevicePool(b.queue, config_of(machines_file(tmp_path / "now", box_enabled=True)))
+    claimed = box.claim("claude")
+    assert claimed is not None
+    replacement, placed = claimed
+    assert (replacement.id, placed.device) == (job.id, "box")
+    p.push(sha(2))
+    b.ready(p, p.head, "replacement-ready")
+    b.queue.finish(replacement.id, owner="claude", handoff_comment_id="replacement-ready")
+    b.now[0] += 600
+    b.poll()
+
+    assert b.outcome("replacement-ready") == "queued-review"
+    assert b.state("42")["stuck"] == 0
+
+
+@pytest.mark.job_bound
+def test_retry_of_a_stranded_job_that_posted_its_ready_settles_it_instead_of_rerunning(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    config = config_of(machines_file(tmp_path))
+    pool = DevicePool(b.queue, config)
+    b.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(check=255), alive=lambda *_: True
+    )
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    job, placed = claimed
+    assert placed.device == "pc"
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True, tag="e" * 32)
+    b.poll()
+    b.ready(p, p.head)
+    b.post(p, "retry-1", REASON, "grok-login")
+    b.poll()
+
+    assert b.outcome("retry-1") == "retried-stranded-posted"
+    assert pool.claim("claude") is None
+    b.poll()
+
+    [build] = b.jobs("build")
+    assert build["state"] == "done"
+    assert [r["state"] for r in b.jobs("review")] == ["queued"]
+    assert pool.claim("claude") is None
