@@ -10,7 +10,9 @@ missing or within REFRESH_MARGIN of expiry. The file is readable by the
 bot's harness user on the box (group of that user, mode 0640) and by no one
 else; the bot's directory is 0750 the same way. A remote device that runs
 the bot's harness gets each new token over the bot's own SSH alias, on
-stdin, into ~/.config/factory/app-tokens/<owner>.json (mode 0600).
+stdin, into ~/.config/factory/app-tokens/<owner>.json (mode 0600). Where the
+device's ssh_user makes several bots share one login, each bot's tokens go
+to ~/.config/factory/app-tokens/<bot>/<owner>.json instead.
 
 The harness user reads it through two helpers, run with the system python
 (stdlib only, so the top of this module imports nothing from lib):
@@ -19,6 +21,9 @@ The harness user reads it through two helpers, run with the system python
 * `gh --dir D --gh /path/to/gh -- ARGS`: runs gh with GH_TOKEN set for that
   one child, so `env -u GH_TOKEN gh` keeps working with no token variable in
   the job's environment.
+
+Both read D/<bot> instead of D when the job's ORCH_JOB_BOT names a bot and
+that directory exists.
 
 Nothing here prints, logs or puts a token on a command line.
 """
@@ -52,6 +57,7 @@ MINT_TIMEOUT_SECONDS = 30.0
 PUSHED_FILE = ".pushed"
 TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_BOT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
 _GITHUB_REMOTE = re.compile(
     r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
     r"([A-Za-z0-9-]+)/"
@@ -88,6 +94,7 @@ class Remote:
     device: str
     user: str
     alias: str
+    bot: str | None = None
 
 
 Mint = Callable[["GitHubApp", int, datetime], Stored]
@@ -112,6 +119,12 @@ def plain_owner(owner: str) -> str:
     if not _OWNER.fullmatch(owner):
         raise BrokerError(f"account {owner!r} is not a GitHub login")
     return owner.casefold()
+
+
+def plain_bot(bot: str) -> str:
+    if not _BOT.fullmatch(bot):
+        raise BrokerError(f"bot {bot!r} is not a plain bot name")
+    return bot
 
 
 def token_path(directory: Path, owner: str) -> Path:
@@ -293,11 +306,12 @@ def github_mint(
 # --- remote devices ----------------------------------------------------------
 
 
-def push_script(owner: str) -> str:
+def push_script(owner: str, bot: str | None = None) -> str:
     """The device side of a push: the token arrives on stdin, never in argv."""
     name = f"{plain_owner(owner)}.json"
+    directory = REMOTE_DIR if bot is None else f"{REMOTE_DIR}/{plain_bot(bot)}"
     return (
-        "exec sh -c 'umask 077 && d=\"$HOME/" + REMOTE_DIR + "\" && mkdir -p \"$d\" && "
+        "exec sh -c 'umask 077 && d=\"$HOME/" + directory + "\" && mkdir -p \"$d\" && "
         "chmod 700 \"$d\" && t=\"$d/." + name + ".$$\" && cat >\"$t\" && "
         "mv -f \"$t\" \"$d/" + name + "\"'"
     )
@@ -306,7 +320,8 @@ def push_script(owner: str) -> str:
 def ssh_push(remote: Remote, owner: str, payload: bytes) -> bool:
     from lib.remote import SSH_BINARY, SSH_OPTIONS, SshTransport
 
-    argv = [SSH_BINARY, *SSH_OPTIONS, "-l", remote.user, "--", remote.alias, push_script(owner)]
+    script = push_script(owner, remote.bot)
+    argv = [SSH_BINARY, *SSH_OPTIONS, "-l", remote.user, "--", remote.alias, script]
     result = SshTransport().exchange(argv, timeout=PUSH_TIMEOUT_SECONDS, input=payload)
     return result.code == 0
 
@@ -373,7 +388,7 @@ def refresh(
                 file=out,
             )
             for remote in remotes.get(app.bot, ()):
-                key = f"{remote.device}/{plain_owner(owner)}"
+                key = f"{remote.device}/{remote.user}/{plain_owner(owner)}"
                 stamp = _iso(stored.issued_at)
                 if pushed.get(key) == stamp:
                     continue
@@ -482,9 +497,9 @@ def _command_refresh(args: argparse.Namespace) -> int:
                 continue
             alias = device.ssh_alias_for(harness)
             if device.eligible(harness) and alias is not None:
-                remotes.setdefault(bot, []).append(
-                    Remote(device.name, device.login_for(harness), alias)
-                )
+                login = device.login_for(harness)
+                shared = bot if login != device.harnesses[harness] else None
+                remotes.setdefault(bot, []).append(Remote(device.name, login, alias, shared))
     apps = list(config.github_app.apps.values())
     holders = box_holders((app.bot for app in apps), users)
     token_root = Path(args.token_root).expanduser()
@@ -504,6 +519,14 @@ def _command_refresh(args: argparse.Namespace) -> int:
 
 
 # --- harness-side helpers (stdlib only) --------------------------------------
+
+
+def bot_directory(directory: Path, environ: Mapping[str, str]) -> Path:
+    """directory/<ORCH_JOB_BOT> when that is a bot's own token directory."""
+    bot = environ.get("ORCH_JOB_BOT", "")
+    if _BOT.fullmatch(bot) and (directory / bot).is_dir():
+        return directory / bot
+    return directory
 
 
 def select_token(directory: Path, owner: str | None, now: datetime) -> str | None:
@@ -680,7 +703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     now = datetime.now(timezone.utc)
     if args.command == "refresh":
         return _command_refresh(args)
-    directory = Path(args.dir).expanduser()
+    directory = bot_directory(Path(args.dir).expanduser(), os.environ)
     if args.command == "credential":
         return credential(directory, args.operation, sys.stdin, sys.stdout, now)
     rest = list(args.args)
