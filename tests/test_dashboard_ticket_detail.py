@@ -1233,8 +1233,6 @@ def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path, kind:
     assert width == 375
 
 
-# --- #655: every tracked ticket opens, from its tickets.json record ------------------------------
-
 SHIPPED = "maxharris1/cleffy#88"
 RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/aut0#AUT-7", "shipped": SHIPPED}
 NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
