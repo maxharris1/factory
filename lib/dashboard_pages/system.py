@@ -57,8 +57,8 @@ SCRIPT_LOG = r"""
   // --- system page (#141) ------------------------------------------------------
 
   var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/Traceback/, 'bad'], [/\b\w*(?:Error|Exception):/, 'bad'],
-                   [/\b(?:ERROR|CRITICAL)\b/, 'bad'], [/another orch poll owns/, 'warn'], [/poller start/, 'start'],
-                   [/\b(?:WARNING|WARN)\b/, 'warn']];
+                   [/\b(?:ERROR|CRITICAL)\b/, 'bad'], [/\b(?:WARNING|WARN)\b/, 'warn'], [/another orch poll owns/, 'warn'],
+                   [/poller start/, 'start']];
   function logKinds(lines) {
     var traceback = false;
     return lines.map(function (line) {
@@ -321,9 +321,9 @@ _LOG_KINDS = (
     (re.compile(r"Traceback"), "bad"),
     (re.compile(r"\b\w*(?:Error|Exception):"), "bad"),
     (re.compile(r"\b(?:ERROR|CRITICAL)\b"), "bad"),
+    (re.compile(r"\b(?:WARNING|WARN)\b"), "warn"),
     (re.compile(r"another orch poll owns"), "warn"),
     (re.compile(r"poller start"), "start"),
-    (re.compile(r"\b(?:WARNING|WARN)\b"), "warn"),
 )
 
 

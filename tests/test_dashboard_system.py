@@ -348,6 +348,8 @@ CLASSIFIED_TAIL = [
     ("ERROR another orch poll owns lock", "bad"),
     ("2026-11-13 13:10:05 EST CRITICAL poller start aborted", "bad"),
     ("WARNING another orch poll owns lock", "warn"),
+    ("WARNING poller start delayed", "warn"),
+    ("WARN poller start retrying", "warn"),
 ]
 
 
