@@ -2,8 +2,10 @@ import ast
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
@@ -7820,7 +7822,7 @@ def assert_fresh_plan_on_factory_pr(queue: SQLiteJobQueue, source: str) -> None:
     brief = render_brief(plan, bot="claude-bot", context=None)
     for text in (plan.request.detail or "", brief):
         assert "wrong-pr-plan" not in text
-        assert WRONG_PR not in text
+        assert re.search(rf"(?<![0-9A-Za-z]){WRONG_PR}(?![0-9A-Za-z])", text) is None
         assert "previous plan" not in text
     row = ticket_row(queue)
     assert (row["workflow_state"], row["stuck"], row["generation"]) == ("planning", 0, 2)
@@ -7842,6 +7844,25 @@ def test_retry_replans_a_plan_whose_handoff_never_landed(tmp_path: Path) -> None
             "SELECT stuck_reason, resumed_action FROM ticket_retries"
         ).fetchone()
     assert tuple(recorded) == (None, "plan")
+
+
+def test_replan_accepts_a_job_id_that_contains_the_wrong_pr_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_finished_plan(queue)
+    flag_unlanded(dispatcher)
+    monkeypatch.setattr(
+        "lib.queue.uuid.uuid4",
+        lambda: uuid.UUID("13380000-0000-4000-8000-000000000001"),
+    )
+
+    dispatcher.process(factory_pr_ticket(retry()))
+
+    (plan,) = queued_harness_jobs(queue)
+    brief = render_brief(plan, bot="claude-bot", context=None)
+    assert "13380000000040008000000000000001" in brief
+    assert_fresh_plan_on_factory_pr(queue, "retry-1")
 
 
 def test_go_planning_replans_a_plan_whose_handoff_never_landed(tmp_path: Path) -> None:

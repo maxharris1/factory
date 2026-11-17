@@ -116,7 +116,11 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "no_ci_base": no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None,
         "local_checks": _check_labels(detail.get("local_checks")),
         "verify": verify,
-        "verify_unavailable": context.config.verify_unavailable if context is not None else False,
+        "verify_unavailable": (
+            context is not None
+            and context.config.verify_unavailable
+            and context.config.verify == verify
+        ),
         "reviewer": reviewer if isinstance(reviewer, str) and _HARNESS.fullmatch(reviewer) else None,
         "url": url if isinstance(url, str) and _URL.fullmatch(url) else None,
         "plan": plan if isinstance(plan, str) and _URL.fullmatch(plan) else None,
