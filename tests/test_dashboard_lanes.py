@@ -62,7 +62,6 @@ def _intake_item(issue: int, state: str, **extra) -> dict:
 
 
 DAY = 86400
-# Feeder order mixes the groups, so Intake's order comes from the render, not the input.
 INTAKE_ITEMS = [
     _intake_item(1, "done", pr="101", fed_age_seconds=600, tier=1),
     _intake_item(2, "waiting-blocked", reason="waiting on #1"),
@@ -460,7 +459,6 @@ def _ticket_span(issue: int) -> str:
 
 
 def _assert_intake_order(intake: str) -> None:
-    """Trouble, then waits (three shown, the rest folded), then fed today folded."""
     head, body = intake.split("</h2>", 1)
     assert '<span class="count">5 waiting · 2 fed today</span>' in head
     t = _ticket_span
@@ -501,11 +499,11 @@ def test_intake_anchors_server(tmp_path: Path) -> None:
 
 @needs_node
 def test_intake_anchors_script(tmp_path: Path) -> None:
-    """The script fills the server's <section id="intake"> and draws the other two anchors itself."""
     snapshot = _tiles(tmp_path)
     assert _ids(_no_script(render_pages(snapshot)["index.html"])).count("intake") == 1
     out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "intake"])
-    assert _ids(out["html"]["intake"]) == ["linear-webhook", "feeder"]
+    inside_intake = out["html"]["intake"]
+    assert _ids(inside_intake) == ["linear-webhook", "feeder"]
     assert "feeder" in out["html"] and "linear-webhook" in out["html"]
 
 

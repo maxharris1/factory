@@ -132,10 +132,19 @@ BELT_TINT = "#9ece6a"
 CI_TINT = "#ff9e64"
 _BAD = "#f7768e"
 
+INTAKE_GROUP = {
+    "error": "trouble",
+    "refused-intake": "trouble",
+    "waiting-blocked": "waiting",
+    "waiting-capacity": "waiting",
+}
+FED_TODAY_SECONDS = 86400
+
 
 def lanes_table() -> dict:
     return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
-            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "step_after_ci": STEP_AFTER_CI, "ci_tint": CI_TINT}
+            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "step_after_ci": STEP_AFTER_CI, "ci_tint": CI_TINT,
+            "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS}
 
 
 def queue_speed(age: object) -> float:
@@ -442,8 +451,6 @@ SCRIPT = r"""
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
     'waiting-blocked': 'waiting on a blocker', 'refused-intake': 'refused at intake', 'feeding': 'feeding',
     'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
-  var INTAKE_GROUP = {'error': 'trouble', 'refused-intake': 'trouble',
-    'waiting-blocked': 'waiting', 'waiting-capacity': 'waiting'};
 
   function tierChip(parent, tier) {
     if (tier !== null && tier !== undefined) add(parent, chip('tier ' + tier, 'accent'));
@@ -453,7 +460,7 @@ SCRIPT = r"""
     var groups = {trouble: [], waiting: [], fed: []};
     items.forEach(function (x) {
       var age = x.fed_age_seconds;
-      var group = INTAKE_GROUP[x.state] || (age !== null && age !== undefined && age < 86400 ? 'fed' : null);
+      var group = LANES.intake_group[x.state] || (age !== null && age !== undefined && age < LANES.fed_today ? 'fed' : null);
       if (group) groups[group].push(x);
     });
     return groups;
@@ -837,13 +844,6 @@ _FEEDER_STATE = {
     "closed": "PR closed, not fed",
 }
 
-_INTAKE_GROUP = {
-    "error": "trouble",
-    "refused-intake": "trouble",
-    "waiting-blocked": "waiting",
-    "waiting-capacity": "waiting",
-}
-
 
 def _linear_webhook(snapshot: dict) -> str:
     """Linear webhook health (#56), Intake's first line; only when a listener or
@@ -870,12 +870,10 @@ def _linear_webhook(snapshot: dict) -> str:
 
 
 def intake_groups(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    """Intake's rows as (trouble, waiting, fed in the last day), feeder order kept
-    in each; other items are not listed. Mirrors intakeGroups in the page script."""
     groups: dict[str, list[dict]] = {"trouble": [], "waiting": [], "fed": []}
     for item in items:
         age = item.get("fed_age_seconds")
-        group = _INTAKE_GROUP.get(item["state"]) or ("fed" if age is not None and age < 86400 else None)
+        group = INTAKE_GROUP.get(item["state"]) or ("fed" if age is not None and age < FED_TODAY_SECONDS else None)
         if group:
             groups[group].append(item)
     return groups["trouble"], groups["waiting"], groups["fed"]
