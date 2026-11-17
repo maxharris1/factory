@@ -216,7 +216,14 @@ def test_example_passes_strict_check() -> None:
 
     assert findings == []
     assert config is not None
-    assert [device.name for device in config.devices] == ["box"]
+    assert orch_host(config) == "pc"
+    assert [device.name for device in config.devices] == ["pc", "box"]
+    assert not any(device.local for device in config.devices)
+    box = config.device("box")
+    assert box.ssh_user == "box"
+    assert box.login_for("codex") == "box"
+    assert box.ssh_alias_for("codex") == "box-codex-bot"
+    assert box.harnesses["codex"] == "codex-bot"
 
 
 def test_enabled_defaults_true_and_remote_device_schedules(tmp_path: Path) -> None:

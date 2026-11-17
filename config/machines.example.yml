@@ -1,22 +1,32 @@
-# Minimal machines.yml: the one local device that runs orch.
+# Example machines.yml: orch runs on the pc, and the box is a remote device.
 # See docs/SPEC.md section 13 and the shipped machines.yml.
+# orch_host names the device that runs orch. With no local: true device it is
+# required; a local device would have to be the orch host.
+orch_host: pc
 devices:
-  - name: box
-    local: true
-    slot_max: 1
+  - name: pc
+    tailscale_name: pc-wsl-bots.example.ts.net
+    slot_max: 10
     harnesses:
       claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+    # workdir_root is where job worktrees are made (empty at job start).
     # factory_root is the deployed factory checkout (skills/, bin/orch), not
-    # workdir_root. Optional on the local device, required on remote ones.
+    # workdir_root, and may not sit inside it.
+    workdir_root: /home/{bot}/factory-work
+    ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
+  - name: box
+    tailscale_name: factory-box.example.ts.net
+    slot_max: 6
+    # ssh_user is the login (ssh -l) for this device in place of the bot user.
+    # The bot user stays the job's identity: its slot and the {bot} paths.
+    ssh_user: box
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+    workdir_root: /home/box/factory-work
+    ssh_alias: box-{bot}
     factory_root: /home/box/factory
-  # A remote device names both, side by side. workdir_root is where job
-  # worktrees are made (empty at job start); factory_root is not workdir_root
-  # and may not sit inside it.
-  # - name: pc
-  #   tailscale_name: pc-wsl-bots.example.ts.net
-  #   slot_max: 3
-  #   harnesses:
-  #     claude: claude-bot
-  #   workdir_root: /home/{bot}/factory-work
-  #   factory_root: /home/{bot}/factory
-  #   ssh_alias: pc-wsl-{bot}

@@ -165,23 +165,28 @@ binary.
 
 [`machines.yml`](machines.yml) is the F2-01 device inventory
 ([docs/SPEC.md](docs/SPEC.md) section 13);
-[`config/machines.example.yml`](config/machines.example.yml) is the minimal
-file. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
+[`config/machines.example.yml`](config/machines.example.yml) is an example
+with orch on the PC and the box as a remote device. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
 `workdir_root`, `ssh_alias` and `enabled` (default `true`). `harnesses` maps each eligible
 harness to the bot OS user whose login Max provisioned there, and that user
 must be the harness's own bot (`claude: claude-bot`, `codex: codex-bot`,
-`cursor: cursor-bot`). The one `local: true` device is the box that runs
-`orch`; it omits `tailscale_name`, `workdir_root` and `ssh_alias`. Every other device names
+`cursor: cursor-bot`). The top-level `orch_host` names the device that runs
+`orch`; it must be a listed device, and a `local: true` device must be it.
+Without `orch_host`, the one local device is the orch host; with no local
+device, `orch_host` is required. The local device omits `tailscale_name`,
+`workdir_root` and `ssh_alias`. Every other device names
 a `workdir_root`, an absolute normalized path that may not be under `/mnt/`,
 so jobs on a WSL node stay off the Windows drives. A whole path component may
 be `{bot}`, which resolves to the harness's bot user
 (`Device.workdir_for(harness)`). Every remote device also names an
-`ssh_alias` (F2-02): the Host alias in the box user's own SSH client config,
+`ssh_alias` (F2-02): the Host alias in the orch host user's own SSH client config,
 which must contain `{bot}` so each bot logs in through its own alias
 (`Device.ssh_alias_for(harness)`; the PC's `pc-wsl-{bot}` gives
 `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`). It is a bare
 alias: no `user@`, no leading `-`, no space or shell character, never a key
-path; the host name and key stay in that SSH config. A Tailscale name is a device name, never an
+path; the host name and key stay in that SSH config. A remote device may
+name an `ssh_user`, the login (`ssh -l`) used in place of the bot user; the
+bot user stays the job's identity. A Tailscale name is a device name, never an
 IP address. Two devices may not share a `tailscale_name` (compared
 case-insensitively): slots are counted per device name, so a second entry
 would give one host a second `slot_max`. Release a device's held slots
