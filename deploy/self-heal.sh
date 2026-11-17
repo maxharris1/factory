@@ -14,8 +14,15 @@
 #   self-heal.sh status            exit 0 if the loop runs, 3 if not
 #   self-heal.sh ensure            start unless running or held stopped; prints
 #                                  nothing when running (what autostart runs)
+#   self-heal.sh wait-idle         wait until no pass and none of its
+#                                  detached work runs (orch-move.sh export)
 #   self-heal.sh install-autostart run `once` on a timer (see below)
 #   self-heal.sh remove-autostart  turn that off
+#
+# On a host retired as the orch host (~/.config/factory/orch-retired), once,
+# kick, start, restart and ensure do nothing and exit 79, the timer's `once`
+# included, and the loop exits before its next pass; stop, status and
+# wait-idle still work.
 #
 # `once` holds self-heal.lock, so passes never overlap; a pass that finds the
 # lock held exits 0 at once. It reads ~/.config/factory/webhook.env into the
@@ -42,6 +49,15 @@
 # dashboard files (the PC's factory-dashboard) are rendered by the new code
 # at once rather than at the poller's next push.
 #
+# Each pass also holds a shared flock on self-heal-work.lock from just after
+# it takes self-heal.lock, and the detached `orch heal devices` and `orch
+# dashboard push` inherit it, so it is held until the last of them exits.
+# `wait-idle` takes that lock exclusively, waiting up to ORCH_HEAL_IDLE_WAIT
+# seconds (default 900): exit 0 once nothing holds it, 1 on timeout, and 1
+# without flock(1), which cannot tell. A pass checks orch-retired again once
+# it holds the shared lock, so after orch-move.sh export writes orch-retired
+# and `wait-idle` returns, no pass writes to orch.db.
+#
 # `kick` starts factory-self-heal.service with --no-block where the systemd
 # user timer is installed, and otherwise a detached `once` in its own
 # session; the lock keeps it from overlapping a timer pass.
@@ -51,8 +67,9 @@
 # app-token-autostart exists.
 #
 # Files, in ~/.local/state/factory (ORCH_STATE_DIR): self-heal.lock (one
-# pass at a time), self-heal.pid (the loop), self-heal.stopped (the stop
-# hold), self-heal-service.lock, and self-heal-service.log (this script's
+# pass at a time), self-heal-work.lock (a pass and its detached work),
+# self-heal.pid (the loop), self-heal.stopped (the stop hold),
+# self-heal-service.lock, and self-heal-service.log (this script's
 # lines and health's stderr). The loop runs `once` every ORCH_HEAL_SECONDS
 # (default 120).
 #
@@ -89,6 +106,7 @@ STATE="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
 CONFIG="${HOME}/.config/factory"
 PIDFILE="${STATE}/self-heal.pid"
 RUN_LOCK="${STATE}/self-heal.lock"
+WORK_LOCK="${STATE}/self-heal-work.lock"
 LOG="${STATE}/self-heal-service.log"
 SERVICE_LOCK="${STATE}/self-heal-service.lock"
 STOPPED="${STATE}/self-heal.stopped"
@@ -99,6 +117,7 @@ MARKER="# factory-self-heal"
 INTERVAL="${ORCH_HEAL_SECONDS:-120}"
 START_WAIT="${ORCH_HEAL_START_WAIT:-15}"
 STOP_WAIT="${ORCH_HEAL_STOP_WAIT:-60}"
+IDLE_WAIT="${ORCH_HEAL_IDLE_WAIT:-900}"
 CRONTAB="${ORCH_CRONTAB:-crontab}"
 SYSTEMCTL="${ORCH_SYSTEMCTL:-systemctl}"
 UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
@@ -111,7 +130,7 @@ export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 say() { printf '%s self-heal: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 usage() {
-    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
+    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|wait-idle|install-autostart|remove-autostart}" >&2
     exit 2
 }
 
@@ -192,6 +211,17 @@ running_pid() {
     printf '%s\n' "$pid"
 }
 
+retired() {
+    [[ -e "${CONFIG}/orch-retired" ]]
+}
+
+refuse_if_retired() {
+    local retired="${CONFIG}/orch-retired"
+    retired || return 0
+    echo "self-heal: refusing to $1 on a host retired as the orch host (${retired}: $(head -n 1 "$retired" 2>/dev/null || true))" >&2
+    exit 79
+}
+
 service_lock() {
     command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$STATE"
@@ -214,11 +244,15 @@ head_sha() {
 # One pass. Without flock(1) passes are not serialized.
 once() {
     local statuses before after
+    refuse_if_retired once
     mkdir -p "$STATE"
     if command -v flock >/dev/null 2>&1; then
         exec 8>>"$RUN_LOCK"
         flock -n 8 || return 0
+        exec 7>>"$WORK_LOCK"
+        flock -s 7
     fi
+    refuse_if_retired once
     if [[ -r "$WEBHOOK_ENV" ]]; then
         set -a
         # shellcheck disable=SC1090
@@ -228,7 +262,7 @@ once() {
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
     export PYTHONUNBUFFERED=1
     if [[ -f "${CONFIG}/app-token-autostart" && -x "${HERE}/app-token-service.sh" ]]; then
-        "${HERE}/app-token-service.sh" once 8>&- || say "token broker pass exited $?" >>"$LOG"
+        "${HERE}/app-token-service.sh" once 7>&- 8>&- || say "token broker pass exited $?" >>"$LOG"
     fi
     set +e
     before="$(head_sha)"
@@ -254,6 +288,7 @@ once() {
 
 # Start one pass now without waiting for it.
 kick() {
+    refuse_if_retired kick
     mkdir -p "$STATE"
     if have_systemd_user && [[ -f "${UNIT_DIR}/factory-self-heal.service" ]]; then
         if "$SYSTEMCTL" --user start --no-block factory-self-heal.service >>"$LOG" 2>&1; then
@@ -280,6 +315,10 @@ run_loop() {
         if [[ "$owner" != "$$" ]]; then
             say "loop $$ no longer owns ${PIDFILE} (${owner:-missing}); exiting"
             return 0
+        fi
+        if retired; then
+            say "this host is retired as the orch host (${CONFIG}/orch-retired); exiting"
+            break
         fi
         bash "$SELF" once 9>&- || say "pass exited $?"
         [[ -z "$stopping" && ! -e "$STOPPED" ]] || break
@@ -375,6 +414,19 @@ status() {
         echo "not running"
     fi
     return 3
+}
+
+wait_idle() {
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "self-heal: flock(1) not found; cannot tell whether a pass or its detached work still runs" >&2
+        return 1
+    fi
+    mkdir -p "$STATE"
+    exec 7>>"$WORK_LOCK"
+    if ! flock -w "$IDLE_WAIT" 7; then
+        echo "self-heal: a pass or its detached work still holds ${WORK_LOCK} after ${IDLE_WAIT}s" >&2
+        return 1
+    fi
 }
 
 ensure() {
@@ -490,12 +542,13 @@ not_from_a_job() {
 case "$COMMAND" in
     once) once ;;
     kick) kick ;;
-    _loop) factory_host_pidns_or_refuse _loop && run_loop ;;
-    start) factory_host_pidns_or_refuse start && not_from_a_job start && service_lock && start ;;
+    _loop) factory_host_pidns_or_refuse _loop && refuse_if_retired _loop && run_loop ;;
+    start) factory_host_pidns_or_refuse start && not_from_a_job start && refuse_if_retired start && service_lock && refuse_if_retired start && start ;;
     stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && not_from_a_job restart && service_lock && stop && start ;;
+    restart) factory_host_pidns_or_refuse restart && not_from_a_job restart && refuse_if_retired restart && service_lock && refuse_if_retired restart && stop && start ;;
     status) status ;;
-    ensure) factory_host_pidns_or_refuse ensure && not_from_a_job ensure && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && not_from_a_job ensure && refuse_if_retired ensure && service_lock && refuse_if_retired ensure && ensure ;;
+    wait-idle) wait_idle ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

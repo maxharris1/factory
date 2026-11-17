@@ -24,17 +24,23 @@ files. The stamp in the name, not the mtime, is a copy's age.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import sqlite3
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from lib import job_detail
+
 BACKUP_ENV = "ORCH_DB_BACKUP"
+BACKUP_EVERY_ENV = "ORCH_DB_BACKUP_EVERY"
 # The job_events detail of a step restore() holds; the dispatcher's first
 # pass over the ticket queues it again unless the thread answered it (#108).
 RESTORED = "restored"
@@ -64,6 +70,16 @@ def default_backup_path(environ: dict[str, str] | None = None) -> Path:
     if explicit:
         return Path(explicit)
     return Path(env.get("HOME", str(Path.home()))) / ".local/share/factory/backup/orch.db"
+
+
+def backup_every(environ: dict[str, str] | None = None) -> int:
+    """Seconds between rolling backups from ORCH_DB_BACKUP_EVERY; 0, the
+    default, backs up every cycle."""
+    env = os.environ if environ is None else environ
+    text = env.get(BACKUP_EVERY_ENV, "").strip() or "0"
+    if not text.isdigit():
+        raise ValueError(f"{BACKUP_EVERY_ENV} must be a whole number of seconds, not {text!r}")
+    return int(text)
 
 
 def _check_apart(db: Path, backup: Path) -> None:
@@ -122,6 +138,147 @@ def backup(db: Path, dest: Path) -> None:
     if not db.exists():
         raise BackupError(f"database {db} does not exist")
     _copy(db, dest)
+
+
+@dataclass(frozen=True)
+class DbFacts:
+    sha256: str
+    integrity: str
+    tables: dict[str, int]
+    running_jobs: int
+    held_slots: int
+
+
+def db_facts(db: Path) -> DbFacts:
+    """Read db's DbFacts through a read-only connection; BackupError when it
+    is missing or SQLite cannot read it."""
+    if not db.is_file():
+        raise BackupError(f"database {db} does not exist")
+    with open(db, "rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    try:
+        connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            integrity = "; ".join(
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+            )
+            names = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            ]
+            tables = {name: _count(connection, name) for name in names}
+            running = 0
+            if "jobs" in tables:
+                running = connection.execute(
+                    "SELECT count(*) FROM jobs WHERE state = 'running'"
+                ).fetchone()[0]
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as exc:
+        raise BackupError(f"{db} is not a readable database: {exc}") from exc
+    return DbFacts(digest, integrity, tables, running, tables.get("device_slots", 0))
+
+
+def _count(connection: sqlite3.Connection, table: str) -> int:
+    quoted = table.replace('"', '""')
+    return int(connection.execute(f'SELECT count(*) FROM "{quoted}"').fetchone()[0])
+
+
+def write_manifest(db: Path, out: Path, *, source_host: str, to: str, retired: str) -> None:
+    """Write the move manifest for db to out; refuse, writing nothing, unless
+    db passes integrity_check."""
+    facts = db_facts(db)
+    if facts.integrity != "ok":
+        raise BackupError(f"{db} failed integrity_check: {facts.integrity}")
+    _refuse_spilled_without_file(db)
+    manifest = {
+        "sha256": facts.sha256,
+        "job_detail": _job_detail_files(db),
+        "tables": facts.tables,
+        "integrity": facts.integrity,
+        "source_host": source_host,
+        "to": to,
+        "retired": retired,
+        "taken_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def check_manifest(db: Path, manifest: Path) -> DbFacts:
+    """db's DbFacts when db is the copy manifest describes, passes
+    integrity_check, and its source host was retired; BackupError otherwise."""
+    try:
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BackupError(f"cannot read manifest {manifest}: {exc}") from exc
+    if not isinstance(recorded, dict):
+        raise BackupError(f"manifest {manifest} is not a JSON object")
+    facts = db_facts(db)
+    if facts.sha256 != recorded.get("sha256"):
+        raise BackupError(
+            f"{db} is not the copy {manifest} describes "
+            f"(sha256 {facts.sha256}, manifest {recorded.get('sha256')})"
+        )
+    if facts.integrity != "ok":
+        raise BackupError(f"{db} failed integrity_check: {facts.integrity}")
+    if not str(recorded.get("retired") or "").strip():
+        raise BackupError(
+            f"manifest {manifest} names no retired line; the source host never retired"
+        )
+    present = _job_detail_files(db)
+    changed = sorted(
+        name
+        for name, digest in (recorded.get("job_detail") or {}).items()
+        if present.get(name) != digest
+    )
+    if changed:
+        raise BackupError(
+            f"{len(changed)} job-detail files beside {db} are missing or differ from "
+            f"{manifest} (first: {', '.join(changed[:3])})"
+        )
+    _refuse_spilled_without_file(db)
+    return facts
+
+
+def _job_detail_files(db: Path) -> dict[str, str]:
+    directory = db.parent / job_detail.DIRECTORY
+    if not directory.is_dir():
+        return {}
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(directory.glob("*.json"))
+    }
+
+
+def _refuse_spilled_without_file(db: Path) -> None:
+    connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone() is None:
+            return
+        rows = connection.execute("SELECT id, detail FROM jobs ORDER BY rowid").fetchall()
+    finally:
+        connection.close()
+    lacking = []
+    for job_id, detail in rows:
+        data = job_detail.as_object(detail)
+        if data is None or job_detail.MARKER not in data:
+            continue
+        try:
+            merged = json.loads(job_detail.load(db.parent, str(job_id), detail))
+        except ValueError:
+            merged = {}
+        if not set(data[job_detail.MARKER]) <= merged.keys():
+            lacking.append(str(job_id))
+    if lacking:
+        raise BackupError(
+            f"{len(lacking)} spilled job rows in {db} have no complete job-detail file "
+            f"beside it (first: {', '.join(lacking[:3])})"
+        )
 
 
 def week_monday(now: datetime) -> date:
@@ -309,8 +466,9 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
 
 
 class CycleBackup:
-    """The poll loop's after-cycle hook: back up, take the weekly snapshot,
-    prune the labelled backups once a day, record a failure, go on."""
+    """The poll loop's after-cycle hook: back up (at most once per `every`
+    seconds once one has succeeded), take the weekly snapshot, prune the
+    labelled backups once a day, record a failure, go on."""
 
     def __init__(
         self,
@@ -318,6 +476,8 @@ class CycleBackup:
         dest: Path,
         record_error,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        every: float = 0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.db = db
         self.dest = dest
@@ -326,12 +486,21 @@ class CycleBackup:
         self.pruned_at: datetime | None = None
         self.record_error = record_error
         self.clock = clock
+        self.every = every
+        self.monotonic = monotonic
+        self.last_success: float | None = None
+
+    def _due(self, now: float) -> bool:
+        return self.last_success is None or now - self.last_success >= self.every
 
     def __call__(self) -> None:
-        try:
-            backup(self.db, self.dest)
-        except Exception as exc:
-            self.record_error("backup", "-", f"backup:{type(exc).__name__}")
+        now = self.monotonic()
+        if self._due(now):
+            try:
+                backup(self.db, self.dest)
+                self.last_success = now
+            except Exception as exc:
+                self.record_error("backup", "-", f"backup:{type(exc).__name__}")
         try:
             weekly_snapshot(self.db, self.weekly, self.clock())
         except Exception as exc:

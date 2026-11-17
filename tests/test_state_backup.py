@@ -271,6 +271,91 @@ def test_retention_never_deletes_the_newest_snapshot(tmp_path: Path) -> None:
     ]
 
 
+class Ticks:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _backups_at(tmp_path: Path, every: float, times: list[float], fail_at: set[float] = frozenset()):
+    _dispatcher, queue = _seeded(tmp_path)
+    dest = tmp_path / "share" / "backup" / "orch.db"
+    ticks = Ticks()
+    errors: list[str] = []
+    taken: list[float] = []
+    cycle = CycleBackup(
+        queue.path,
+        dest,
+        lambda *error: errors.append(error[2]),
+        clock=lambda: datetime(2026, 11, 18, 14, 0, tzinfo=ET),
+        every=every,
+        monotonic=ticks,
+    )
+    for at in times:
+        ticks.now = at
+        dest.unlink(missing_ok=True)
+        cycle.db = tmp_path / "missing.db" if at in fail_at else queue.path
+        cycle()
+        if dest.exists():
+            taken.append(at)
+    return taken, errors, dest
+
+
+def test_backup_every_spaces_the_rolling_backup_out(tmp_path: Path) -> None:
+    taken, errors, dest = _backups_at(tmp_path, 900, [0, 10, 899, 900, 1000, 1799, 1800])
+
+    assert taken == [0, 900, 1800]
+    assert errors == []
+    assert _weekly(dest) == ["orch-2026-11-16.db"]
+
+
+def test_backup_every_retries_a_failed_backup_on_the_next_cycle(tmp_path: Path) -> None:
+    taken, errors, _dest = _backups_at(tmp_path, 900, [0, 900, 910, 920], fail_at={900})
+
+    assert taken == [0, 910]
+    assert errors == ["backup:BackupError", "weekly-snapshot:BackupError"]
+
+
+def test_backup_every_zero_backs_up_every_cycle(tmp_path: Path) -> None:
+    taken, errors, _dest = _backups_at(tmp_path, 0, [0, 0, 1, 2])
+
+    assert taken == [0, 0, 1, 2]
+    assert errors == []
+
+
+def test_poll_reads_orch_db_backup_every(tmp_path: Path, monkeypatch) -> None:
+    dispatcher, queue = _seeded(tmp_path)
+    built: list[float] = []
+    real = cli.CycleBackup
+
+    def spy(*args, **kwargs):
+        built.append(kwargs["every"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "CycleBackup", spy)
+    monkeypatch.setenv("ORCH_DB_BACKUP_EVERY", "900")
+
+    assert _poll_once(monkeypatch, dispatcher, queue.path, tmp_path / "share" / "orch.db") == 0
+    monkeypatch.delenv("ORCH_DB_BACKUP_EVERY")
+    assert _poll_once(monkeypatch, dispatcher, queue.path, tmp_path / "share" / "orch.db") == 0
+
+    assert built == [900, 0]
+
+
+@pytest.mark.parametrize("value", ["abc", "-1", "1.5"])
+def test_poll_refuses_a_bad_orch_db_backup_every(
+    tmp_path: Path, monkeypatch, capsys, value: str
+) -> None:
+    dispatcher, queue = _seeded(tmp_path)
+    monkeypatch.setenv("ORCH_DB_BACKUP_EVERY", value)
+
+    assert _poll_once(monkeypatch, dispatcher, queue.path, tmp_path / "share" / "orch.db") == 1
+
+    assert "ORCH_DB_BACKUP_EVERY" in capsys.readouterr().err
+
+
 NOW = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
 
 
