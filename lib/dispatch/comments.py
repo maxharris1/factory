@@ -314,9 +314,6 @@ class CommentsMixin:
     def _after_finish(
         self, ticket: TrackedTicket, comment: Comment, fields: Mapping[str, str] | None
     ) -> bool:
-        """merged and done are absorbing (#108): on a finished ticket only a
-        ship intent's replay and a QA report act; any other comment, a hook's
-        included, is handled with no job, ship, state write or wake."""
         if (
             self._review_context(ticket)[0] not in FINISHED_STATES
             or self._ship_intent(ticket, comment.id) is not None
