@@ -155,10 +155,12 @@ commands:
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
-             [--allow-placeholders]
+             [--allow-placeholders] [--digest]
   With no paths, checks orch.yml, machines.yml and the example factory.md
   files. When --orch is given, machines.yml is checked only with --machines.
   --allow-placeholders permits and reports REPLACE_WITH_ install values only.
+  Warns about uncommitted edits to a tracked orch.yml or machines.yml.
+  --digest prints the sha256 of each effective config (base plus overlay).
   A disabled or placeholder device is named on stderr and never scheduled.
   An unknown model name warns on stderr and still exits 0.
 
@@ -531,12 +533,20 @@ def _check_config(argv: list[str]) -> int:
         if orch_config is not None and factory is not None:
             findings = findings + hold_approver_findings(orch_config, factory.hold)
         failed = _report(path, findings) or failed
-    from lib.config_overlay import describe
+    from lib.config_overlay import describe, digest, uncommitted_edits
 
     for path in (orch_path, machines_path):
-        line = describe(path) if path is not None else None
+        if path is None:
+            continue
+        warning = uncommitted_edits(path)
+        if warning is not None:
+            _report(path, [warning])
+        line = describe(path)
         if line is not None:
             print(line)
+        effective = digest(path) if args.digest else None
+        if effective is not None:
+            print(f"effective {path.name} sha256={effective}")
     if failed:
         return 1
     print("ok")
@@ -2269,6 +2279,7 @@ def _parser() -> _Parser:
     parser.add_argument("--machines", type=Path)
     parser.add_argument("--factory", type=Path, action="append")
     parser.add_argument("--allow-placeholders", action="store_true")
+    parser.add_argument("--digest", action="store_true")
     return parser
 
 

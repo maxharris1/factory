@@ -13,9 +13,10 @@ runs as the owning bot's own user and login, starts the job itself:
   device against skills/skills.lock (lib/skill_preflight.py), and a missing
   or changed file fails the job. A remote factory checkout that is not on
   the box's commit, or missing, or a box checkout behind its fetched
-  origin/main (#297), instead marks the checkout that lags (the box's own,
-  for a box behind origin/main) lagging in device_sync and fails the job
-  unhandled with a preflight-lagging event (#357). T6 requeues that same row
+  origin/main (#297) that self-deploy does not hold there, instead marks
+  the checkout that lags (the box's own, for a box behind origin/main)
+  lagging in device_sync and fails the job unhandled with a
+  preflight-lagging event (#357). T6 requeues that same row
   after a backoff, charging no round, attempt or free requeue, and marks the
   ticket stuck device-lagging if it still lags past the bound. A device
   the preflight's ssh cannot reach (`preflight-unreachable`, #460) requeues
@@ -662,7 +663,7 @@ class Waiter:
         state = device_sync.REFUSED if detail else device_sync.SYNCED
         clears_lagging = (head == checkout_sha(FACTORY_CHECKOUT)
                           and skill_preflight.box_behind_origin(
-                              name, self.bot, str(FACTORY_CHECKOUT)) is None)
+                              name, self.bot, str(FACTORY_CHECKOUT), self._box_held()) is None)
 
         def write() -> None:
             with self.queue.connect() as connection:
@@ -782,6 +783,13 @@ class Waiter:
             )
         return 0
 
+    def _box_held(self) -> device_sync.Row | None:
+        try:
+            with self.queue.connect() as connection:
+                return device_sync.held(connection, box_device(self.pool.config))
+        except (QueueError, sqlite3.Error, OSError):
+            return None
+
     def _start(self, job: Job, placement: Placement | None, proof: str) -> str | None:
         request = job.request
         label = f"job {job.id} ({request.repo}#{request.ticket_id} {request.action})"
@@ -796,7 +804,7 @@ class Waiter:
         try:
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
-                checkout=factory_root,
+                checkout=factory_root, held=self._box_held(),
             )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
