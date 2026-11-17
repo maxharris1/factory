@@ -258,6 +258,37 @@ def test_disabled_device_is_reported_and_never_eligible(tmp_path: Path) -> None:
     assert not config.devices[0].eligible("codex")
 
 
+def test_drain_defaults_false_and_the_device_takes_new_jobs(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(write(tmp_path, "orch_host: pc\ndevices:\n" + remote()))
+
+    assert findings == []
+    assert config is not None
+    (pc,) = config.devices
+    assert pc.drain is False
+    assert pc.takes_new("codex")
+    assert not pc.takes_new("claude")
+
+
+def test_draining_device_stays_enabled_and_eligible_but_takes_no_new_jobs(
+    tmp_path: Path,
+) -> None:
+    config, findings = load_machines_yml(
+        write(tmp_path, "orch_host: pc\ndevices:\n" + remote(drain="true"))
+    )
+
+    assert config is not None
+    assert errors(findings) == []
+    assert warnings(findings) == [
+        "device 'pc' is draining (drain: true); "
+        "it takes no new jobs and its running jobs finish"
+    ]
+    (pc,) = config.devices
+    assert pc.drain is True
+    assert pc.enabled is True, "drain is not disable"
+    assert pc.schedulable and pc.eligible("codex"), "tokens, probes and deploys still reach it"
+    assert not pc.takes_new("codex")
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -300,6 +331,7 @@ def test_placeholder_device_loads_with_a_warning_and_is_never_eligible(
         ("devices:\n" + remote(slot_max="true"), "devices[0].slot_max must be a positive"),
         ("devices:\n" + remote(slot_max="-"), "missing required field 'devices[0].slot_max'"),
         ("devices:\n" + remote(enabled="yes please"), "devices[0].enabled must be true or false"),
+        ("devices:\n" + remote(drain='"yes"'), "devices[0].drain must be true or false"),
         (
             "devices:\n" + remote(tailscale_name="-"),
             "missing required field 'devices[0].tailscale_name'",

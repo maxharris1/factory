@@ -5,8 +5,8 @@ A slot is one row in `device_slots`, in the dispatcher database next to
 claim order (lib/queue.py claim_order), to running
 and holds a slot for it on the least-loaded device (lowest utilization,
 slots held over slot_max; a tie goes to a remote before the local box,
-remotes in machines.yml order; issue #223) that is schedulable and lists
-that harness (issue #85). Both writes happen
+remotes in machines.yml order; issue #223) that is schedulable, not
+draining, and lists that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
@@ -149,7 +149,7 @@ def choose_device(
     blocked: Blocked = NOTHING_BLOCKED,
     avoid: Collection[str] = frozenset(),
 ) -> Device | None:
-    """The schedulable device listing harness with the lowest utilization, or None.
+    """The schedulable, non-draining device listing harness with the lowest utilization, or None.
 
     Utilization is slots held over slot_max, compared exactly. A tie goes to
     a remote device before the local box, remotes in machines.yml order
@@ -159,7 +159,7 @@ def choose_device(
     """
     candidates = []
     for index, device in enumerate(config.devices):
-        if not device.eligible(harness) or blocked.blocks(device.name, harness):
+        if not device.takes_new(harness) or blocked.blocks(device.name, harness):
             continue
         assert device.slot_max is not None
         held = used.get(device.name, 0)
@@ -177,10 +177,10 @@ def free_slots(
     used: Mapping[str, int],
     blocked: Blocked = NOTHING_BLOCKED,
 ) -> int:
-    """Free slots, summed over every schedulable device listing harness that choose_device may pick."""
+    """Free slots, summed over every device listing harness that choose_device may pick."""
     total = 0
     for device in config.devices:
-        if device.eligible(harness) and not blocked.blocks(device.name, harness):
+        if device.takes_new(harness) and not blocked.blocks(device.name, harness):
             assert device.slot_max is not None
             total += max(0, device.slot_max - used.get(device.name, 0))
     return total

@@ -96,6 +96,7 @@ class DeviceRow:
     used: int
     slot_max: int | None
     enabled: bool = True
+    drain: bool = False
     placeholder: bool = False
     listed: bool = True
 
@@ -476,6 +477,7 @@ def device_rows(
             used=used.get(device.name, 0),
             slot_max=device.slot_max,
             enabled=device.enabled,
+            drain=device.drain,
             placeholder=device.placeholder,
         )
         for device in config.devices
@@ -869,6 +871,8 @@ def _device_line(row: DeviceRow) -> str:
         flags.append("not-in-machines.yml")
     if not row.enabled:
         flags.append("disabled")
+    if row.drain:
+        flags.append("draining")
     if row.placeholder:
         flags.append("placeholder")
     suffix = "".join(f" {flag}" for flag in flags)

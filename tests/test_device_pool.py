@@ -21,6 +21,7 @@ def device(
     slot_max: int | None,
     *harnesses: str,
     enabled: bool = True,
+    drain: bool = False,
     placeholders: tuple[str, ...] = (),
 ) -> Device:
     return Device(
@@ -29,6 +30,7 @@ def device(
         harnesses=MappingProxyType({harness: f"{harness}-bot" for harness in harnesses}),
         tailscale_name=f"{name}.example.ts.net",
         enabled=enabled,
+        drain=drain,
         workdir_root="/home/work",
         placeholders=placeholders,
     )
@@ -153,6 +155,33 @@ def test_choose_device_skips_full_ineligible_placeholder_and_disabled() -> None:
     chosen = choose_device(config, "claude", {"full": 1, "free": 1})
     assert chosen is not None and chosen.name == "free"
     assert choose_device(config, "claude", {"full": 1, "free": 2}) is None
+
+
+def test_choose_device_and_free_slots_skip_a_draining_device() -> None:
+    config = MachinesConfig(
+        devices=(
+            device("pc", 4, "claude"),
+            device("box", 6, "claude", drain=True),
+        )
+    )
+
+    chosen = choose_device(config, "claude", {"pc": 3})
+    assert chosen is not None and chosen.name == "pc", "the emptier draining box is skipped"
+    assert choose_device(config, "claude", {"pc": 4}) is None
+    assert device_pool.free_slots(config, "claude", {"pc": 3, "box": 2}) == 1
+
+
+def test_a_claim_with_every_device_draining_leaves_the_job_queued(tmp_path: Path) -> None:
+    pool, queue = make_pool(
+        tmp_path,
+        device("box", 6, "claude", drain=True),
+        device("pc", 4, "claude", "codex", drain=True),
+    )
+    enqueue(queue, "claude", "1")
+
+    assert pool.claim("claude") is None
+    assert pool.used() == {}
+    assert [job.state for job in queue.outstanding()] == ["queued"]
 
 
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:

@@ -168,7 +168,8 @@ binary.
 ([docs/SPEC.md](docs/SPEC.md) section 13);
 [`config/machines.example.yml`](config/machines.example.yml) is an example
 with orch on the PC and the box as a remote device. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
-`workdir_root`, `ssh_alias` and `enabled` (default `true`). `harnesses` maps each eligible
+`workdir_root`, `ssh_alias`, `enabled` (default `true`) and `drain` (default
+`false`). `harnesses` maps each eligible
 harness to the bot OS user whose login Max provisioned there, and that user
 must be the harness's own bot (`claude: claude-bot`, `codex: codex-bot`,
 `cursor: cursor-bot`). The top-level `orch_host` names the device that runs
@@ -208,13 +209,25 @@ disabled until Max turns it on; it has no bot users and no SSH yet, and its
 `workdir_root` and `ssh_alias` are still `REPLACE_WITH_` placeholders. Nothing
 assumes a device is reachable: the poller checks it (below).
 
+To stop new jobs on a device and let its running jobs finish, set
+`drain: true` on it (issue #777). A draining device keeps every slot it holds
+and the poller leaves its jobs alone, so they finish and hand off as usual;
+only new placement skips it, and `orch status` marks it `draining`. Do not
+use `enabled: false` for this: a disabled device's running jobs are lost and
+stopped (issue #679). Lowering `slot_max` below the running count also stops
+new placement without touching running jobs, but a slot frees as each job
+ends. Waiters read `machines.yml` only at start, so after the edit run
+`deploy/waiter-service.sh <bot> restart` for each bot and
+`deploy/poller-service.sh restart`; neither stops a running job. Set
+`drain: false` (or remove the line) and restart them the same way to undo it.
+
 [`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
 moves the first queued job for that harness, in claim order (a priority tier
 first, then a ticket marked urgent, then a job resuming a paused step, then a
 ticket marked bug, then the ticket that unblocks more, then the oldest; issues
 #85, #258), to running and holds a slot on the least-loaded device
 (the lowest utilization, slots held over `slot_max`; a tie goes to a remote
-device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, has no placeholder and lists the harness. Slots are generic: any
+device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, is not draining, has no placeholder and lists the harness. Slots are generic: any
 free slot on an eligible device takes any harness. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
