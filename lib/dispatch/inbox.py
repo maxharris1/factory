@@ -6,10 +6,11 @@ import sqlite3
 from collections.abc import Mapping
 
 from lib.dispatch.errors_text import poll_error_text
-from lib.dispatch.types import ReviewActions
+from lib.dispatch.types import IssueComments
 from lib.orch_yml import DriverInbox, Project
 from lib.pr_title import SOURCES_TABLE
 from lib.queue import Job
+from lib.schema import AUT0_REPO
 
 DRAIN_LIMIT = 10
 DETAIL_LIMIT = 1500
@@ -47,11 +48,14 @@ class InboxMixin:
             parsed = request.detail
         link = parsed.get("link") if isinstance(parsed, dict) else None
         cause = link if isinstance(link, str) and _URL.fullmatch(link) else "unknown"
-        if request.repo.lower() == inbox.repo.lower():
-            detail = _detail_text(parsed)
-        else:
+        if request.repo.lower() == AUT0_REPO:
+            cause = _LINEAR_SLUG.sub(r"\1\2", cause)
+            detail = "(left out: Aut0 wakes carry IDs and links only)"
+        elif request.repo.lower() != inbox.repo.lower():
             cause = _LINEAR_SLUG.sub(r"\1\2", cause)
             detail = "(left out: wake from another repo)"
+        else:
+            detail = _detail_text(parsed)
         return "\n".join(
             (
                 f"**Wake: {request.action}** on {request.repo} {request.ticket_id}",
@@ -125,13 +129,13 @@ class InboxMixin:
                     (self.queue.now(), job_id),
                 )
 
-    def _inbox_poster(self, repo: str) -> ReviewActions:
+    def _inbox_poster(self, repo: str) -> IssueComments:
         if isinstance(self.review_actions, Mapping):
             return self.review_actions[repo.lower()]
         return self.review_actions
 
 
-def _posted_before_a_crash(poster: ReviewActions, row: sqlite3.Row) -> bool:
+def _posted_before_a_crash(poster: IssueComments, row: sqlite3.Row) -> bool:
     return row["status"] == "sending" and poster.issue_has_marker(
         row["inbox_repo"], int(row["inbox_number"]), inbox_marker(row["job_id"])
     )

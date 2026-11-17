@@ -6,9 +6,10 @@ import pytest
 
 from lib import cli
 from lib.dispatcher import Dispatcher
-from lib.github_actions import GitHubAdapterError
+from lib.github_actions import GhResult, GitHubAdapterError
 from lib.grok_delivery import GrokDeliveryError
-from lib.orch_yml import DriverInbox, Project
+from lib.orch_yml import DriverInbox, OrchConfig, Project
+from lib.poll_source import LivePollSource
 from lib.queue import Job, SQLiteJobQueue
 from tests.test_hooks import (
     TRUSTED_LOGINS,
@@ -152,8 +153,65 @@ def test_a_wake_from_another_repo_carries_ids_and_links_only(tmp_path: Path) -> 
         f"**Wake: go-not-from-approver** on {AUT0} AUT-2233",
         f"PR: https://github.com/{AUT0}/pull/123",
         f"Cause: {LINEAR}#comment-ab12",
-        "Detail: (left out: wake from another repo)",
+        "Detail: (left out: Aut0 wakes carry IDs and links only)",
     ]
+
+
+def test_an_aut0_wake_on_an_aut0_inbox_still_carries_ids_and_links_only(
+    tmp_path: Path,
+) -> None:
+    issue = InboxIssue()
+    dispatcher, _, _ = make(
+        tmp_path, issue=issue, projects=(Project(AUT0, driver_inbox=DriverInbox(AUT0, 7)),)
+    )
+    dispatcher.review_actions = {AUT0: issue}
+    with sqlite3.connect(tmp_path / "d.db") as connection:
+        connection.execute(
+            "INSERT INTO comment_links (repo, ticket_id, comment_id, link) VALUES (?, ?, ?, ?)",
+            (AUT0, "AUT-2233", "901", f"{LINEAR}/jane-roe-intake#comment-ab12"),
+        )
+
+    wake(dispatcher, detail=SECRET, repo=AUT0, ticket_id="AUT-2233", pr_number="123")
+    dispatcher.reconcile_jobs()
+
+    [(repo, number, body)] = issue.posts
+    assert (repo, number) == (AUT0, 7)
+    assert "jane" not in body.lower() and "1970" not in body
+    assert body.splitlines()[2:4] == [
+        f"Cause: {LINEAR}#comment-ab12",
+        "Detail: (left out: Aut0 wakes carry IDs and links only)",
+    ]
+
+
+def test_live_adapters_post_the_inbox_and_keep_ticket_comment_writes_working(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def gh(argv: list[str], timeout: float) -> GhResult:
+        calls.append(argv)
+        return GhResult(0, "[]", "")
+
+    project = Project("owner/repo", driver_inbox=INBOX)
+    source = LivePollSource(OrchConfig(60, (project,)), environ={}, gh_runner=gh)
+    actions = source.review_actions_by_repo()
+    dispatcher, _, _ = make(tmp_path, projects=(project,))
+    dispatcher.review_actions = actions
+
+    actions["owner/repo"].comment_once(ticket(), "notice", "<!-- notice -->")
+    actions["owner/repo"].comment_on_issue_once(ticket(), 9, "parked", "<!-- parked -->")
+    wake(dispatcher)
+    dispatcher.reconcile_jobs()
+
+    posts = [(argv[argv.index("POST") + 1], argv[-1]) for argv in calls if "POST" in argv]
+    assert [path for path, _ in posts] == [
+        "repos/owner/repo/issues/42/comments",
+        "repos/owner/repo/issues/9/comments",
+        "repos/owner/repo/issues/7/comments",
+    ]
+    assert posts[2][1].startswith("body=**Wake: go-not-from-approver** on owner/repo 42")
+    assert inbox_rows(tmp_path) == [("posted", 1)]
+    assert poll_errors(tmp_path) == []
 
 
 def test_same_repo_detail_is_redacted(tmp_path: Path) -> None:

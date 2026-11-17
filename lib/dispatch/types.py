@@ -304,6 +304,11 @@ class ReviewActions(Protocol):
         """Post body on issue `number` unless a comment carrying marker exists."""
         ...
 
+
+class IssueComments(Protocol):
+    """Repo-first issue comment writes. Kept out of ReviewActions, whose
+    methods all take a ticket first and are wrapped per ticket."""
+
     def issue_has_marker(self, repo: str, number: int, marker: str) -> bool:
         """Whether this login has a comment carrying marker on issue `number` in repo."""
         ...
