@@ -25,7 +25,7 @@ from lib.dashboard_push import SshTransport
 from tests.test_dashboard import NOW, TRACKED_AT, _fail_replacing, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_telemetry import add_telemetry
 
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "ticket.html")
 CLEFFY = "maxharris1/cleffy"
 
 RECORD_KEYS = {

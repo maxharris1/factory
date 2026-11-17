@@ -19,7 +19,7 @@ from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE, version_drift,
 )
-from lib.dashboard_pages.ticket_detail import _jobview
+from lib.dashboard_pages.ticket_detail import _jobview, _ticketview
 from lib.dashboard_pages.tickets import _board, _tickets
 
 
@@ -882,7 +882,13 @@ def px_script() -> str:
 # refresh_seconds) and the script only has to replace their contents.
 
 # In nav order (#78).
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
+NAV_PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
+
+
+PAGES = (*NAV_PAGES, "ticket.html")
+
+
+_NAV_PARENT = {"ticket.html": "job.html"}
 
 
 _PAGE_NAMES = {
@@ -891,6 +897,7 @@ _PAGE_NAMES = {
     "activity.html": ("activity", "Activity"),
     "efficiency.html": ("efficiency", "Efficiency"),
     "health.html": ("health", "System"),
+    "ticket.html": ("ticket", "Ticket"),
 }
 
 
@@ -1098,9 +1105,9 @@ def px_job_strip(row: dict, height: int = 16) -> str:
 
 def _topbar(snapshot: dict, page: str) -> str:
     current = ' aria-current="page"'
+    home = _NAV_PARENT.get(page, page)
     links = "".join(
-        f'<a href="{name}"{current if name == page else ""}>{label}</a>'
-        for name, (_, label) in _PAGE_NAMES.items()
+        f'<a href="{name}"{current if name == home else ""}>{_PAGE_NAMES[name][1]}</a>' for name in NAV_PAGES
     )
     return (
         '<header class="topbar" id="topbar"><div class="top-row">'
@@ -1310,14 +1317,18 @@ _PANELS = {
     "efficiency.html": (top_row, middle_row, _jobs_lifetime),
     "health.html": (_components, _drift_row, _log_row, _no_waiter),
     "job.html": (_board, _tickets, _jobview),
+    "ticket.html": (_ticketview,),
 }
+
+
+_OWN_H1 = ("job.html", "ticket.html")
 
 
 def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
-    heading = "" if name == "job.html" else f'<h1 class="vh">{_e(label)}</h1>'
+    heading = "" if name in _OWN_H1 else f'<h1 class="vh">{_e(label)}</h1>'
     return "\n".join(
         [
             "<!doctype html>",

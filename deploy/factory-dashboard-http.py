@@ -66,7 +66,7 @@ from urllib.parse import urlsplit
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 DEFAULT_PORT = 8787
 MAX_BYTES = 8 * 1024 * 1024
-PAGES = ("index.html", "activity.html", "efficiency.html", "job.html", "health.html")
+PAGES = ("index.html", "activity.html", "efficiency.html", "job.html", "health.html", "ticket.html")
 ROUTES = {
     "/": "index.html",
     "/status.json": "status.json",

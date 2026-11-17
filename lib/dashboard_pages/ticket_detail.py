@@ -1,16 +1,21 @@
-"""job.html#job-<id>: the ticket detail page (Job.dc.html). Breadcrumb, hero, Run
-log, Live run slot, Journey, Can come next and the collapsed Full state chart.
-The Run log and the Journey render from one visit list and share one selection."""
+"""job.html#job-<id> and ticket.html#t=<repo>#<ticket>: the ticket detail page (Job.dc.html,
+TicketR2.dc.html). Breadcrumb, hero, Run log, Live run slot, Journey, Can come next and the
+collapsed Full state chart. The Run log and the Journey render from one visit list and share
+one selection."""
 
 from __future__ import annotations
 
 import json
 import math
+import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from lib.dashboard_flow import FLOWMAP_SCRIPT, flowmap_layout, ticket_phases
 from lib.dashboard_telemetry import NO_DATA
 from lib.dashboard_pages.common import (
     anchor, _bot, _chip, duration, _e, github_links, _job_kind, _job_label, _span, _state_chip,
+    _thread_key, ticket_address, _tile_label,
 )
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
@@ -26,10 +31,20 @@ FIRST_REASON = "ticket arrives"
 STOP_TINT = journey_canvas.STOP
 HOP_TINT = "#c0caf5"
 CHART_SUB = "· {n} states, with this ticket's path drawn on the whole machine"
+ET = ZoneInfo("America/New_York")
+TRACKER_NAMES = {"github": "GitHub", "linear": "Linear"}
+SECTION_ORDER = ("liverun", "journey", "next", "chart")
+JOB_TILES = {"running": ("elapsed_here", "heartbeat", "round", "hops"), "queued": ("waiting", "not_started", "round", "hops")}
+KIND_ORDER = ("running", "queued")
+TICKET_KINDS = {
+    "running": {"started": True, "tiles": ("elapsed", "heartbeat", "round", "hops"), "sections": SECTION_ORDER},
+    "queued": {"started": False, "tiles": ("waiting", "not_started", "round", "hops"), "sections": SECTION_ORDER},
+}
 
 
 CSS = """\
 #jobview{display:grid;gap:16px}
+#ticketview{grid-column:1/-1;min-width:0}
 .jobpage{display:flex;flex-direction:column;gap:16px;min-width:0}
 .jobpage:target{outline:1px solid var(--brand)}
 #jobview:has(.jobpage:target) .jobpage:not(:target){display:none}
@@ -41,7 +56,7 @@ CSS = """\
 .jd-hero .title{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px}
 .jd-hero h1{margin:0;font:600 22px/1.3 var(--mono);letter-spacing:-.02em;color:var(--text)}
 .jd-hero .kind{padding:0 4px;border:1px solid var(--line-hi);color:var(--muted);font:10px/1.6 var(--mono)}
-.jd-hero .device{font:12px var(--mono);color:var(--muted)}
+.jd-hero .device,.jd-hero .tracker{font:12px var(--mono);color:var(--muted)}
 .jd-hero .line{margin:0;font-size:15px;line-height:1.5;color:var(--text-2)}
 .jd-hero .line b{font-family:var(--mono);font-weight:600;color:var(--accent)}
 .jd-gh{display:flex;flex-direction:column;gap:8px;font:12px/1.5 var(--mono);color:var(--text-2)}
@@ -216,12 +231,22 @@ def _round(row: dict) -> tuple[int, int] | None:
     return int(parts[0]), int(parts[1])
 
 
-def _crumb(row: dict) -> str:
+def _crumb(label: str, right: str | None) -> str:
     return (
         '<nav class="jd-crumb" aria-label="Breadcrumb"><a href="job.html">Tickets</a>'
         '<span aria-hidden="true">/</span>'
-        f'{_span("here", _job_label(row))}{_span("job", "job " + str(row["job"]))}</nav>'
+        f'{_span("here", label)}{"" if right is None else _span("job", right)}</nav>'
     )
+
+
+def _first_start(model: dict) -> float | None:
+    starts = [v["started_at"] for v in model["visits"] if v["started_at"] is not None]
+    return min(starts) if starts else None
+
+
+def _et_clock(epoch: float) -> str:
+    at = datetime.fromtimestamp(epoch, ET)
+    return f"{at.hour % 12 or 12}:{at.minute:02d} {'AM' if at.hour < 12 else 'PM'} ET"
 
 
 def _hero_line(row: dict, model: dict) -> str:
@@ -232,7 +257,7 @@ def _hero_line(row: dict, model: dict) -> str:
     if rnd:
         parts.append(f"round {rnd[0]} of {rnd[1]}")
     if model["state"] and model["state_age_seconds"] is not None:
-        parts.append(f"{duration(model['state_age_seconds'])} in {_e(model['state'])}")
+        parts.append(f"<span>{duration(model['state_age_seconds'])} in {_e(model['state'])}</span>")
     return f'<p class="line">{" · ".join(parts) or "state not recorded"}</p>'
 
 
@@ -252,47 +277,103 @@ def _tile(value: str, label: str, cls: str = "") -> str:
     return f'<div class="jd-tile"><b{attr}>{value}</b>{_span(None, label)}</div>'
 
 
-def _tiles(row: dict, model: dict, running: bool) -> str:
-    if running:
-        first = _tile(duration(row.get("elapsed_seconds")), "T+ on this device")
-        hb = row.get("heartbeat_age_seconds")
-        beat = _tile("not started" if hb is None else f"{duration(hb)} ago", "last heartbeat", HEARTBEAT_TONE[_px().px_state(row)])
-    else:
-        first = _tile(duration(row.get("age_seconds")), "waiting")
-        beat = _tile("not started", "last heartbeat")
+def _heartbeat_tile(row: dict, model: dict) -> str:
+    hb = row.get("heartbeat_age_seconds")
+    return _tile("not started" if hb is None else f"{duration(hb)} ago", "last heartbeat", HEARTBEAT_TONE[_px().px_state(row)])
+
+
+def _round_tile(row: dict, model: dict) -> str:
     rnd = _round(row)
-    if rnd:
-        pips = "".join(
-            f'<span class="{"done" if i < rnd[0] - 1 else "now" if i == rnd[0] - 1 else ""}"></span>'
-            for i in range(rnd[1])
-        ).replace(' class=""', "")
-        third = _tile(f'{rnd[0]} / {rnd[1]}<span class="jd-pips" aria-hidden="true">{pips}</span>', "revise round")
-    else:
-        third = _tile("no round", "revise round")
-    hops = _tile(f"{model['hops']} hops", f"{model['off_chart_count']} off-chart")
-    return f'<div class="jd-tiles">{first}{beat}{third}{hops}</div>'
+    if not rnd:
+        return _tile("no round", "revise round")
+    pips = "".join(
+        f'<span class="{"done" if i < rnd[0] - 1 else "now" if i == rnd[0] - 1 else ""}"></span>'
+        for i in range(rnd[1])
+    ).replace(' class=""', "")
+    return _tile(f'{rnd[0]} / {rnd[1]}<span class="jd-pips" aria-hidden="true">{pips}</span>', "revise round")
 
 
-def _hero(row: dict, model: dict, running: bool) -> str:
-    motion = _motion(row, model)
-    key = f"job-hero-{row['job']}"
-    strip = _px().px_strip(key, state=motion, bot=row.get("recipient"), cell=4, height=40, seed=2)
-    kind = _job_kind(row)
-    device = f"on {row['device']}" if running and row.get("device") else "queued" if not running else ""
-    title = (
-        f'<div class="title"><h1>{_e(_job_label(row))}</h1>{_bot(row.get("recipient"))}'
-        + (_span("kind", kind) if kind else "")
-        + (_span("device", device) if device else "")
-        + _state_chip(row)
+def _elapsed_label(row: dict) -> str:
+    return f"T+ on {row['device']}" if row.get("device") else "T+ on this device"
+
+
+TILES = {
+    "elapsed_here": lambda row, model: _tile(duration(row.get("elapsed_seconds")), "T+ on this device"),
+    "elapsed": lambda row, model: _tile(duration(row.get("elapsed_seconds")), _elapsed_label(row)),
+    "heartbeat": _heartbeat_tile,
+    "waiting": lambda row, model: _tile(duration(row.get("age_seconds")), "waiting"),
+    "not_started": lambda row, model: _tile("not started", "last heartbeat"),
+    "round": _round_tile,
+    "hops": lambda row, model: _tile(f"{model['hops']} hops", f"{model['off_chart_count']} off-chart"),
+}
+
+
+def _trouble(row: dict) -> str:
+    return (
+        _state_chip(row)
         + (_chip("OVERDUE", "bad") if row.get("overdue") else "")
         + (_chip(f"retried {row['retries']}x") if row.get("retries") else "")
-        + github_links(row)
-        + "</div>"
     )
+
+
+def _hero(row: dict, model: dict, motion: str, strip: str, title: str, tiles: tuple[str, ...]) -> str:
+    cells = "".join(TILES[name](row, model) for name in tiles)
     return (
-        f'<section class="jd-hero">{strip}<div class="body"><div class="who">{title}'
-        f"{_hero_line(row, model)}{_verb(row, motion)}</div>{_tiles(row, model, running)}</div></section>"
+        f'<section class="jd-hero">{strip}<div class="body"><div class="who"><div class="title">{title}</div>'
+        f'{_hero_line(row, model)}{_verb(row, motion)}</div><div class="jd-tiles">{cells}</div></div></section>'
     )
+
+
+def _job_hero(row: dict, model: dict, state: str) -> str:
+    motion = _motion(row, model)
+    strip = _px().px_strip(f"job-hero-{row['job']}", state=motion, bot=row.get("recipient"), cell=4, height=40, seed=2)
+    kind = _job_kind(row)
+    running = state == "running"
+    device = f"on {row['device']}" if running and row.get("device") else "queued" if not running else ""
+    title = (
+        f'<h1>{_e(_job_label(row))}</h1>{_bot(row.get("recipient"))}'
+        + (_span("kind", kind) if kind else "")
+        + (_span("device", device) if device else "")
+        + _trouble(row)
+        + github_links(row)
+    )
+    return _hero(row, model, motion, strip, title, JOB_TILES[state])
+
+
+_NUMBER = re.compile(r"[0-9]+")
+
+
+def _tracker_text(row: dict) -> str:
+    source, pr = str(row.get("source")), str(row.get("pr"))
+    tracker = row.get("tracker")
+    if tracker == "linear":
+        first = str(row["ticket_id"])
+    else:
+        first = f"issue {source}" if source.startswith("#") and _NUMBER.fullmatch(source[1:]) else ""
+    refs = " · ".join(p for p in (first, f"PR #{pr}" if _NUMBER.fullmatch(pr) else "") if p)
+    return " ".join(p for p in (TRACKER_NAMES.get(tracker), refs) if p)
+
+
+def _ticket_tracker(row: dict, started: bool) -> str:
+    if started:
+        tail = f"on {row['device']}" if row.get("device") else ""
+    else:
+        tail = f"queued for {row.get('recipient')} · {duration(row.get('age_seconds'))}"
+    text = " · ".join(p for p in (_tracker_text(row), tail) if p)
+    return _span("tracker", text) if text else ""
+
+
+def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
+    row = found["row"]
+    motion = _motion(row, model)
+    strip = _px().px_strip(f"ticket-hero-{found['address']}", state=motion, bot=row.get("recipient"),
+                           still=not spec["started"], cell=4, height=40, seed=2)
+    title = (
+        f'<h1>{_e(_tile_label(row))}</h1>{_bot(row.get("recipient"))}'
+        + _ticket_tracker(row, spec["started"])
+        + _trouble(row)
+    )
+    return _hero(row, model, motion, strip, title, spec["tiles"])
 
 
 def _now_dur(model: dict) -> str:
@@ -320,27 +401,31 @@ def _reason(visit: dict) -> str:
     return FIRST_REASON if visit["index"] == 0 else ""
 
 
-def _runlog_row(visit: dict, model: dict) -> str:
+def _runlog_row(visit: dict, model: dict, pressable: bool) -> str:
     tint = _who_tint(visit["who"])
     cls = " ".join(c for c in ("visit", "now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
     mark_tint = STOP_TINT if visit["stop"] else tint
     name = visit["state"] + (" · now" if visit["current"] else "")
     num = f"{visit['index'] + 1:02d}"
+    on = visit["index"] == model["selected"]
+    if pressable:
+        tag, kind, picked = "button", ' type="button"', f' aria-pressed="{"true" if on else "false"}"'
+    else:
+        tag, kind, picked = "div", "", ' aria-current="true"' if on else ""
     return (
-        f'<li><div class="{cls}" data-visit="{visit["index"]}" data-state="{_e(visit["state"])}"'
-        + (' aria-current="true"' if visit["index"] == model["selected"] else "")
-        + f' style="--m:{tint}">'
+        f'<li><{tag} class="{cls}"{kind} data-visit="{visit["index"]}" data-state="{_e(visit["state"])}"{picked}'
+        f' style="--m:{tint}">'
         f'{_span("num", num)}'
         f'<span class="mark{" off" if visit["off_chart"] else ""}" aria-hidden="true" style="--m:{mark_tint}"></span>'
         f'<span class="main"><span class="top">{_span("name", name)}{_span("who", visit["who"])}'
         f'{_span("dur", _visit_dur(visit, model))}'
         + (_span("offchip", "off-chart") if visit["off_chart"] else "")
-        + f'</span>{_span("note", _reason(visit))}</span></div></li>'
+        + f'</span>{_span("note", _reason(visit))}</span></{tag}></li>'
     )
 
 
-def _runlog(model: dict) -> str:
-    rows = "".join(_runlog_row(v, model) for v in model["visits"])
+def _runlog(model: dict, pressable: bool) -> str:
+    rows = "".join(_runlog_row(v, model, pressable) for v in model["visits"])
     count = f"{len(model['visits'])} visits · oldest first"
     body = f'<ol class="runlog">{rows}</ol>' if rows else '<p class="empty">no visits recorded</p>'
     return (
@@ -477,11 +562,11 @@ def live_run(row: dict, queued: bool = False) -> str:
     )
 
 
-def _liverun(row: dict, running: bool) -> str:
+def _liverun(row: dict, started: bool) -> str:
     sub = f"{row.get('recipient')} · job {row['job']}"
     return (
         f'<section class="jd-panel" id="liverun-{_e(anchor(row["job"]))}">'
-        f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{live_run(row, not running)}</section>'
+        f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{live_run(row, not started)}</section>'
     )
 
 
@@ -572,7 +657,7 @@ def _next(model: dict) -> str:
     return f'<section class="jd-panel"><h2>{_span("t", "Can come next")}{_span("count", sub)}</h2>{body}</section>'
 
 
-def _chart(row: dict, model: dict, chart: dict | None) -> str:
+def _chart(key: str, model: dict, chart: dict | None) -> str:
     if chart is None:
         return '<details class="jd-chart"><summary>Full state chart</summary><p class="empty">statechart unavailable</p></details>'
     n = len(chart["states"])
@@ -582,7 +667,7 @@ def _chart(row: dict, model: dict, chart: dict | None) -> str:
     legend += f'<span><i class="off" style="--m:{TINT["script"]}"></i>off-chart jump</span>'
     legend += '<span><i class="now"></i>now</span><span><i class="next"></i>can come next</span>'
     return (
-        f'<details class="jd-chart" data-key="full-chart:{_e(row["job"])}"><summary>Full state chart '
+        f'<details class="jd-chart" data-key="full-chart:{_e(key)}"><summary>Full state chart '
         f'{_span("count", CHART_SUB.format(n=n))}</summary>'
         f'<div class="jd-box"><canvas class="jd-flowmap" width="1000" height="{grid["h"] * grid["cell"]}" role="img" '
         f'aria-label="{_e("Full state chart; path: " + " → ".join(v["state"] for v in model["visits"]))}"></canvas></div>'
@@ -590,21 +675,28 @@ def _chart(row: dict, model: dict, chart: dict | None) -> str:
     )
 
 
+SECTIONS = {
+    "liverun": lambda part: _liverun(part["row"], part["started"]),
+    "journey": lambda part: _journey(part["row"], part["model"]),
+    "next": lambda part: _next(part["model"]),
+    "chart": lambda part: _chart(part["key"], part["model"], part["chart"]),
+}
+
+
+def _cols(part: dict, sections: tuple[str, ...], pressable: bool) -> str:
+    right = "".join(SECTIONS[name](part) for name in sections)
+    return f'<div class="jd-cols">{_runlog(part["model"], pressable)}<div class="jd-right">{right}</div></div>'
+
+
 def _job_article(row: dict, state: str, chart: dict | None) -> str:
     model = _detail_model(row, chart)
-    running = state == "running"
+    part = {"row": row, "model": model, "chart": chart, "key": row["job"], "started": state == "running"}
     return (
         f'<article class="jobpage" id="{anchor(row["job"])}">'
-        + _crumb(row)
-        + _hero(row, model, running)
-        + '<div class="jd-cols">'
-        + _runlog(model)
-        + '<div class="jd-right">'
-        + _liverun(row, running)
-        + _journey(row, model)
-        + _next(model)
-        + _chart(row, model, chart)
-        + "</div></div></article>"
+        + _crumb(_job_label(row), "job " + str(row["job"]))
+        + _job_hero(row, model, state)
+        + _cols(part, SECTION_ORDER, pressable=False)
+        + "</article>"
     )
 
 
@@ -619,10 +711,71 @@ def _jobview(snapshot: dict) -> str:
     return f'<div id="jobview">{inner}</div>'
 
 
+_PICK = {
+    "running": lambda rows: min(rows, key=lambda row: row.get("elapsed_seconds") or 0),
+    "queued": lambda rows: rows[0],
+}
+
+
+def resolve_ticket(snapshot: dict, address: str) -> dict | None:
+    repo, _, ticket_id = address.partition("#")
+
+    def exact(row: dict) -> bool:
+        return ticket_address(row) == address
+
+    def any_case(row: dict) -> bool:
+        return str(row["repo"]).lower() == repo.lower() and str(row["ticket_id"]) == ticket_id
+
+    for rule in (exact, any_case):
+        for kind in KIND_ORDER:
+            rows = [row for row in snapshot[kind] if rule(row)]
+            if rows:
+                row = _PICK[kind](rows)
+                key = _thread_key(row)
+                ticket = next((t for t in snapshot["tickets"] if _thread_key(t) == key), None)
+                return {"kind": kind, "address": ticket_address(row), "row": row, "ticket": ticket}
+    return None
+
+
+def _ticket_article(found: dict, chart: dict | None) -> str:
+    row, address = found["row"], found["address"]
+    spec = TICKET_KINDS[found["kind"]]
+    model = _detail_model(row, chart)
+    start = _first_start(model)
+    part = {"row": row, "model": model, "chart": chart, "key": address, "started": spec["started"]}
+    return (
+        f'<article class="jobpage ticketpage" data-ticket="{_e(address)}">'
+        + _crumb(_tile_label(row), None if start is None else "started " + _et_clock(start))
+        + _ticket_hero(found, model, spec)
+        + _cols(part, spec["sections"], pressable=True)
+        + "</article>"
+    )
+
+
+def _no_ticket(address: str | None) -> str:
+    title = "No ticket chosen" if address is None else "Ticket not found"
+    lead = "" if address is None else f"{_e(address)} has no running or queued job. "
+    return (
+        f'<section class="panel"><h1><span>{title}</span></h1>'
+        f'<p class="empty">{lead}Pick a ticket on the <a href="job.html">Tickets board</a>.</p></section>'
+    )
+
+
+def ticket_view(snapshot: dict, address: str | None) -> str:
+    found = None if address is None else resolve_ticket(snapshot, address)
+    inner = _ticket_article(found, snapshot.get("statechart")) if found else _no_ticket(address)
+    return f'<div id="ticketview">{inner}</div>'
+
+
+def _ticketview(snapshot: dict) -> str:
+    return ticket_view(snapshot, None)
+
+
 _SCRIPT = r"""
   var DETAIL = {verbs: __VERBS__, hb: __HB__, order: {normal: 0, human: 1, stop: 2},
                 first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
-                chartSub: __CHARTSUB__};
+                chartSub: __CHARTSUB__, trackers: __TRACKERS__, sections: __SECTIONS__, jobTiles: __JOBTILES__,
+                kinds: __KINDS__, kindOrder: __KINDORDER__};
   var SEL = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -660,15 +813,26 @@ _SCRIPT = r"""
     return m ? [Number(m[1]), Number(m[2])] : null;
   }
   function span(parent, cls, text) { return add(parent, el('span', cls, text)); }
-  function crumb(r) {
+  function crumb(label, right) {
     var nav = el('nav', 'jd-crumb');
     nav.setAttribute('aria-label', 'Breadcrumb');
     var a = add(nav, link(null, 'job.html'));
     a.textContent = 'Tickets';
     span(nav, null, '/').setAttribute('aria-hidden', 'true');
-    span(nav, 'here', jobLabel(r));
-    span(nav, 'job', 'job ' + r.job);
+    span(nav, 'here', label);
+    if (right !== null) span(nav, 'job', right);
     return nav;
+  }
+  function firstStart(m) {
+    var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
+    return starts.length ? Math.min.apply(null, starts) : null;
+  }
+  var ET = null;
+  function etClock(epoch) {
+    ET = ET || new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true});
+    var p = {};
+    ET.formatToParts(new Date(epoch * 1000)).forEach(function (part) { p[part.type] = part.value; });
+    return p.hour + ':' + p.minute + ' ' + p.dayPeriod + ' ET';
   }
   function tile(parent, value, label, cls) {
     var t = add(parent, el('div', 'jd-tile'));
@@ -681,24 +845,57 @@ _SCRIPT = r"""
   function holdsStill(motion) {
     return !PX.table.effects[(PX.table.states[motion] || PX.table.states.unknown).effect];
   }
-  function hero(r, m, running, motion, ticket) {
-    var sec = el('section', 'jd-hero');
-    var action = String(r.action || '');
-    add(sec, PX.strip('job-hero-' + r.job, {state: motion, bot: r.recipient, cell: 4, height: 40, seed: 2}));
-    var body = add(sec, el('div', 'body'));
-    var who = add(body, el('div', 'who'));
-    var title = add(who, el('div', 'title'));
-    add(title, el('h1', null, jobLabel(r)));
-    add(title, bot(r.recipient));
-    var kind = jobKind(r);
-    if (kind) span(title, 'kind', kind);
-    var device = running ? (r.device ? 'on ' + r.device : '') : 'queued';
-    if (device) span(title, 'device', device);
+  var TILES = {
+    elapsed_here: function (box, r) { ticking(tile(box, '', 'T+ on this device'), r.elapsed_seconds); },
+    elapsed: function (box, r) { ticking(tile(box, '', r.device ? 'T+ on ' + r.device : 'T+ on this device'), r.elapsed_seconds); },
+    heartbeat: function (box, r) {
+      var hb = r.heartbeat_age_seconds;
+      var tone = DETAIL.hb[PX.state(r)];
+      if (hb === null || hb === undefined) tile(box, 'not started', 'last heartbeat', tone);
+      else ticking(tile(box, '', 'last heartbeat', tone), hb, '', ' ago');
+    },
+    waiting: function (box, r) { ticking(tile(box, '', 'waiting'), r.age_seconds); },
+    not_started: function (box) { tile(box, 'not started', 'last heartbeat'); },
+    round: function (box, r) {
+      var rnd = roundOf(r);
+      if (!rnd) { tile(box, 'no round', 'revise round'); return; }
+      var b = tile(box, rnd[0] + ' / ' + rnd[1], 'revise round');
+      var pips = add(b, el('span', 'jd-pips'));
+      pips.setAttribute('aria-hidden', 'true');
+      for (var i = 0; i < rnd[1]; i++) span(pips, i < rnd[0] - 1 ? 'done' : i === rnd[0] - 1 ? 'now' : null);
+    },
+    hops: function (box, r, m) { tile(box, m.hops + ' hops', m.off_chart_count + ' off-chart'); }
+  };
+  function troubleChips(title, r) {
     var jobState = stateChip(r);
     if (jobState) add(title, jobState);
     if (r.overdue) add(title, chip('OVERDUE', 'bad'));
     if (r.retries) add(title, chip('retried ' + r.retries + 'x'));
-    addGh(title, r);
+  }
+  function trackerText(r) {
+    var source = String(r.source), pr = String(r.pr);
+    var first = r.tracker === 'linear' ? String(r.ticket_id) : /^#[0-9]+$/.test(source) ? 'issue ' + source : '';
+    var refs = [first, /^[0-9]+$/.test(pr) ? 'PR #' + pr : ''].filter(Boolean).join(' · ');
+    return [DETAIL.trackers[r.tracker], refs].filter(Boolean).join(' ');
+  }
+  function trackerSpan(title, r, started) {
+    var text = trackerText(r);
+    if (started) {
+      text = [text, r.device ? 'on ' + r.device : ''].filter(Boolean).join(' · ');
+      if (text) span(title, 'tracker', text);
+    } else ticking(span(title, 'tracker'), r.age_seconds, [text, 'queued for ' + r.recipient].filter(Boolean).join(' · ') + ' · ');
+  }
+  function hero(c, strip, label, tags, ticket, tiles) {
+    var r = c.r, m = c.m, motion = c.motion;
+    var sec = el('section', 'jd-hero');
+    var action = String(r.action || '');
+    add(sec, strip);
+    var body = add(sec, el('div', 'body'));
+    var who = add(body, el('div', 'who'));
+    var title = add(who, el('div', 'title'));
+    add(title, el('h1', null, label));
+    add(title, bot(r.recipient));
+    tags(title);
     if (GH.on && ghRefs(r)) add(who, ghPanel(r, ticket));
     var line = add(who, el('p', 'line'));
     var parts = 0;
@@ -715,24 +912,8 @@ _SCRIPT = r"""
     var verbs = PX.table.actions.hasOwnProperty(motion) ? DETAIL.verbs[motion] : null;
     if (verbs) span(verb, 'verb', verbs[Math.floor(Date.now() / 4000) % verbs.length] + '…');
     span(verb, 'phase', action.toUpperCase());
-    var tiles = add(body, el('div', 'jd-tiles'));
-    if (running) {
-      ticking(tile(tiles, '', 'T+ on this device'), r.elapsed_seconds);
-      var hb = r.heartbeat_age_seconds;
-      var tone = DETAIL.hb[PX.state(r)];
-      if (hb === null || hb === undefined) tile(tiles, 'not started', 'last heartbeat', tone);
-      else ticking(tile(tiles, '', 'last heartbeat', tone), hb, '', ' ago');
-    } else {
-      ticking(tile(tiles, '', 'waiting'), r.age_seconds);
-      tile(tiles, 'not started', 'last heartbeat');
-    }
-    if (rnd) {
-      var b = tile(tiles, rnd[0] + ' / ' + rnd[1], 'revise round');
-      var pips = add(b, el('span', 'jd-pips'));
-      pips.setAttribute('aria-hidden', 'true');
-      for (var i = 0; i < rnd[1]; i++) span(pips, i < rnd[0] - 1 ? 'done' : i === rnd[0] - 1 ? 'now' : null);
-    } else tile(tiles, 'no round', 'revise round');
-    tile(tiles, m.hops + ' hops', m.off_chart_count + ' off-chart');
+    var box = add(body, el('div', 'jd-tiles'));
+    tiles.forEach(function (name) { TILES[name](box, r, m); });
     return sec;
   }
   // GitHub actions: present only when the server answers /api/session. The
@@ -943,11 +1124,11 @@ _SCRIPT = r"""
         btn.setAttribute('data-visit', String(v.index));
         btn.setAttribute('data-state', v.state);
         btn.setAttribute('aria-pressed', v.index === m.selected ? 'true' : 'false');
-        btn.style.setProperty('--m', tint);
+        btn.setAttribute('style', '--m:' + tint);
         span(btn, 'num', pad(v.index + 1));
         var mk = span(btn, 'mark' + (v.off_chart ? ' off' : ''));
         mk.setAttribute('aria-hidden', 'true');
-        mk.style.setProperty('--m', v.stop ? DETAIL.stop : tint);
+        mk.setAttribute('style', '--m:' + (v.stop ? DETAIL.stop : tint));
         var main = span(btn, 'main');
         var top = span(main, 'top');
         span(top, 'name', v.state + (v.current ? ' · now' : ''));
@@ -1070,17 +1251,17 @@ _SCRIPT = r"""
     add(box, lrTiles(t));
     return box;
   }
-  function liverun(r, running) {
+  function liverun(r, started) {
     var sec = jdPanel(null, 'Live run', r.recipient + ' · job ' + r.job);
     sec.setAttribute('id', 'liverun-' + anchor(r.job));
-    add(sec, liveRun(r, !running));
+    add(sec, liveRun(r, !started));
     return sec;
   }
   function legendItem(parent, cls, tint, text, bg) {
     var s = span(parent, null);
     var i = add(s, el('i', cls || null));
-    if (tint) i.style.setProperty('--m', tint);
-    if (bg) i.style.background = bg;
+    if (tint) i.setAttribute('style', '--m:' + tint);
+    if (bg) i.setAttribute('style', 'background:' + bg);
     s.appendChild(document.createTextNode(text));
     return s;
   }
@@ -1110,7 +1291,7 @@ _SCRIPT = r"""
     if (!v) return;
     span(cap, 'idx', pad(v.index + 1) + ' of ' + m.visits.length);
     span(cap, 'st', v.state + (v.current ? ' · now' : ''));
-    span(cap, 'who', v.who).style.setProperty('--m', JOURNEY.tint[v.who] || JOURNEY.tint.script);
+    span(cap, 'who', v.who).setAttribute('style', '--m:' + (JOURNEY.tint[v.who] || JOURNEY.tint.script));
     var d = span(cap, 'dur');
     if (v.current) nowDur(m, d);
     else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : 'took ' + dur(v.duration_seconds);
@@ -1179,9 +1360,9 @@ _SCRIPT = r"""
     });
     return sec;
   }
-  function chartPanel(r, m, chart) {
+  function chartPanel(id, m, chart) {
     var box = el('details', 'jd-chart');
-    var key = 'full-chart:' + r.job;
+    var key = 'full-chart:' + id;
     if (!chart) { add(box, el('summary', null, 'Full state chart')); add(box, el('p', 'empty', 'statechart unavailable')); return {sec: box}; }
     box.setAttribute('data-key', key);
     box.open = !!openDetails[key];
@@ -1203,11 +1384,11 @@ _SCRIPT = r"""
     return {sec: box, canvas: canvas};
   }
 
-  function selection(r, m) {
-    var s = SEL[r.job];
+  function selection(key, r, m) {
+    var s = SEL[key];
     var beatAt = typeof r.heartbeat_at === 'number' ? r.heartbeat_at : null;
     if (!s) {
-      s = SEL[r.job] = {selected: m.selected, picked: false, tPlay: Date.now(), beatAt: beatAt, beatStart: null,
+      s = SEL[key] = {selected: m.selected, picked: false, tPlay: Date.now(), beatAt: beatAt, beatStart: null,
                         flashAt: null, scale: 'even'};
       return s;
     }
@@ -1218,7 +1399,7 @@ _SCRIPT = r"""
     return s;
   }
   function pick(j, i, fromChart) {
-    var s = SEL[j.r.job];
+    var s = SEL[j.key];
     s.selected = i;
     s.picked = true;
     s.flashAt = Date.now();
@@ -1233,7 +1414,7 @@ _SCRIPT = r"""
     drawOne(j, Date.now());
   }
   function placeHits(j) {
-    var bars = journeyBars(j.m, SEL[j.r.job].scale);
+    var bars = journeyBars(j.m, SEL[j.key].scale);
     var buttons = j.hitButtons;
     for (var k = 0; k < buttons.length && k < bars.length; k++) {
       var b = bars[k], st = buttons[k].style;
@@ -1241,7 +1422,7 @@ _SCRIPT = r"""
     }
   }
   function drawOne(j, now) {
-    var s = SEL[j.r.job];
+    var s = SEL[j.key];
     if (j.canvas.getContext) {
       var ctx = j.canvas.getContext('2d');
       if (ctx) {
@@ -1266,32 +1447,30 @@ _SCRIPT = r"""
     return !reducedMotion;
   }
 
-  function jobArticle(r, state, d) {
+  var SECTIONS = {
+    liverun: function (c) { return liverun(c.r, c.started); },
+    journey: function (c) { c.jp = journeyPanel(c.r, c.m, c.hitButtons, c.scales, c.s.scale); return c.jp.sec; },
+    next: function (c) { return nextPanel(c.m); },
+    chart: function (c) { c.cp = chartPanel(c.key, c.m, c.chart); return c.cp.sec; }
+  };
+  function detailContext(key, r, d, started) {
     var chart = d.statechart || null;
     var m = detailModel(r, chart);
-    var running = state === 'running';
-    var motion = motionOf(r, m);
-    var generated = Number(d.generated_at_epoch) || Date.now() / 1000;
-    var s = selection(r, m);
+    var s = selection(key, r, m);
     m.selected = s.selected;
-    var art = el('article', 'jobpage');
-    art.setAttribute('id', anchor(r.job));
-    add(art, crumb(r));
-    var ticket = (d.tickets || []).filter(function (t) { return threadKey(t) === threadKey(r); })[0] || null;
-    add(art, hero(r, m, running, motion, ticket));
+    return {key: key, r: r, m: m, s: s, chart: chart, started: started, motion: motionOf(r, m),
+            generated: Number(d.generated_at_epoch) || Date.now() / 1000, logButtons: [], hitButtons: [], scales: []};
+  }
+  function detailCols(art, c, sections) {
+    var s = c.s, scales = c.scales, hitButtons = c.hitButtons;
     var cols = add(art, el('div', 'jd-cols'));
-    var logButtons = [], hitButtons = [], scales = [];
-    add(cols, runlog(r, m, logButtons));
+    add(cols, runlog(c.r, c.m, c.logButtons));
     var right = add(cols, el('div', 'jd-right'));
-    add(right, liverun(r, running));
-    var jp = journeyPanel(r, m, hitButtons, scales, s.scale);
-    add(right, jp.sec);
-    add(right, nextPanel(m));
-    var cp = chartPanel(r, m, chart);
-    add(right, cp.sec);
-    var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
-    var j = {r: r, m: m, still: holdsStill(motion), logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
-             startClock: starts.length ? journeyClock(Math.min.apply(null, starts)) : '', nowClock: journeyClock(generated)};
+    sections.forEach(function (name) { add(right, SECTIONS[name](c)); });
+    var jp = c.jp, cp = c.cp, start = firstStart(c.m);
+    var j = {key: c.key, r: c.r, m: c.m, still: holdsStill(c.motion), logButtons: c.logButtons, hitButtons: hitButtons,
+             canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
+             startClock: start === null ? '' : journeyClock(start), nowClock: journeyClock(c.generated)};
     art.addEventListener('click', function (ev) {
       var t = ev.target.closest('button');
       if (!t) return;
@@ -1309,7 +1488,77 @@ _SCRIPT = r"""
     placeHits(j);
     journeys.push(j);
     PX.onFrame(journeyFrame);
+  }
+
+  function jobArticle(r, state, d) {
+    var running = state === 'running';
+    var c = detailContext(r.job, r, d, running);
+    var art = el('article', 'jobpage');
+    art.setAttribute('id', anchor(r.job));
+    add(art, crumb(jobLabel(r), 'job ' + r.job));
+    var strip = PX.strip('job-hero-' + r.job, {state: c.motion, bot: r.recipient, cell: 4, height: 40, seed: 2});
+    add(art, hero(c, strip, jobLabel(r), function (title) {
+      var kind = jobKind(r);
+      if (kind) span(title, 'kind', kind);
+      var device = running ? (r.device ? 'on ' + r.device : '') : 'queued';
+      if (device) span(title, 'device', device);
+      troubleChips(title, r);
+      addGh(title, r);
+    }, ticketRow(d, r), DETAIL.jobTiles[state]));
+    detailCols(art, c, DETAIL.sections);
     return art;
+  }
+
+  function ticketRow(d, r) {
+    return (d.tickets || []).filter(function (t) { return threadKey(t) === threadKey(r); })[0] || null;
+  }
+  var PICK = {
+    running: function (rows) { return rows.reduce(function (a, b) { return (b.elapsed_seconds || 0) < (a.elapsed_seconds || 0) ? b : a; }); },
+    queued: function (rows) { return rows[0]; }
+  };
+  function resolveTicket(d, address) {
+    var cut = address.indexOf('#');
+    var repo = (cut < 0 ? address : address.slice(0, cut)).toLowerCase(), id = cut < 0 ? '' : address.slice(cut + 1);
+    var rules = [function (r) { return ticketAddress(r) === address; },
+                 function (r) { return String(r.repo).toLowerCase() === repo && String(r.ticket_id) === id; }];
+    for (var i = 0; i < rules.length; i++) {
+      for (var k = 0; k < DETAIL.kindOrder.length; k++) {
+        var kind = DETAIL.kindOrder[k];
+        var rows = (d[kind] || []).filter(rules[i]);
+        if (!rows.length) continue;
+        var row = PICK[kind](rows);
+        return {kind: kind, address: ticketAddress(row), row: row, ticket: ticketRow(d, row)};
+      }
+    }
+    return null;
+  }
+  function ticketArticle(found, d) {
+    var spec = DETAIL.kinds[found.kind];
+    var r = found.row;
+    var c = detailContext(found.address, r, d, spec.started);
+    var art = el('article', 'jobpage ticketpage');
+    art.setAttribute('data-ticket', found.address);
+    var start = firstStart(c.m);
+    add(art, crumb(tileLabel(r), start === null ? null : 'started ' + etClock(start)));
+    var strip = PX.strip('ticket-hero-' + found.address, {state: c.motion, bot: r.recipient, still: !spec.started, cell: 4, height: 40, seed: 2});
+    add(art, hero(c, strip, tileLabel(r), function (title) {
+      trackerSpan(title, r, spec.started);
+      troubleChips(title, r);
+    }, found.ticket, spec.tiles));
+    detailCols(art, c, spec.sections);
+    return art;
+  }
+  function ticketView(d, address) {
+    var found = address === null ? null : resolveTicket(d, address);
+    if (found) return ticketArticle(found, d);
+    var sec = el('section', 'panel');
+    add(add(sec, el('h1')), el('span', null, address === null ? 'No ticket chosen' : 'Ticket not found'));
+    var p = add(sec, el('p', 'empty'));
+    if (address !== null) p.appendChild(document.createTextNode(address + ' has no running or queued job. '));
+    p.appendChild(document.createTextNode('Pick a ticket on the '));
+    add(p, link(null, 'job.html')).textContent = 'Tickets board';
+    p.appendChild(document.createTextNode('.'));
+    return sec;
   }
 
   function renderJobView(d) {
@@ -1331,7 +1580,13 @@ _SCRIPT = r"""
     if (!jobs.length) { add(root, el('p', 'empty', 'no running or queued jobs')); return; }
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
-""".replace("__VERBS__", json.dumps(VERBS)).replace("__HB__", json.dumps(HEARTBEAT_TONE)).replace(
-    "__CHARTSUB__", json.dumps(CHART_SUB)
-)
+
+  function renderTicketView(d) {
+    if (!GH.started) { GH.started = true; ghStart(); }
+    byId('ticketview').replaceChildren(ticketView(d, hashAddress()));
+  }
+"""
+_DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,
+           "SECTIONS": SECTION_ORDER, "JOBTILES": JOB_TILES, "KINDS": TICKET_KINDS, "KINDORDER": KIND_ORDER}
+_SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

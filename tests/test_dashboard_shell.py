@@ -30,9 +30,9 @@ from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _sectio
 from tests.test_dashboard_pixelstrip import _node
 from tests.test_dashboard_lanes import FOLD, Browser, _page_with_status_stub, needs_chrome
 
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "ticket.html")
 SCRIPT_PAGE = {"index.html": "main", "job.html": "job", "activity.html": "activity",
-               "efficiency.html": "efficiency", "health.html": "health"}
+               "efficiency.html": "efficiency", "health.html": "health", "ticket.html": "ticket"}
 NAV = [("index.html", "Lanes"), ("job.html", "Tickets"), ("activity.html", "Activity"),
        ("efficiency.html", "Efficiency"), ("health.html", "System")]
 SHELL = ["caret", "band", "attention-strip", "statusline"]
@@ -634,12 +634,13 @@ def test_script_strips_with_rate_load_and_seed_are_the_server_strips(tmp_path: P
 def test_nav_labels_current_item_and_file_names_on_every_page(base: dict) -> None:
     pages = render_pages(base)
     assert tuple(pages) == PAGES == page.PAGES
+    assert page.NAV_PAGES == tuple(name for name, _ in NAV)
     for name, html in pages.items():
         nav = _section(html, "nav")
         links = re.findall(r'<a href="([^"]+)"( aria-current="page")?>([^<]+)</a>', nav)
         assert [(href, label) for href, _, label in links] == NAV, name
-        assert [href for href, current, _ in links if current] == [name], name
-        label = dict(NAV)[name].lower()
+        assert [href for href, current, _ in links if current] == [{"ticket.html": "job.html"}.get(name, name)], name
+        label = {**dict(NAV), "ticket.html": "Ticket"}[name].lower()
         assert f"<title>factory mission control · {label}</title>" in html
 
 
@@ -659,7 +660,7 @@ def test_anchors_stay_and_shell_links_only_name_the_five_files(base: dict) -> No
     for name, html in pages.items():
         shell = html[html.index('<header class="topbar"') : html.index("</header>")] + _footer(html)
         for href in re.findall(r'href="([^"#]+)', shell):
-            assert href in PAGES, (name, href)
+            assert href in dict(NAV), (name, href)
 
 
 def test_main_keeps_the_ticket_box_model() -> None:

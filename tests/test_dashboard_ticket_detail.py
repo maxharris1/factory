@@ -8,11 +8,13 @@ Can come next lists normal ways on, then human waits, then stops.
 
 import copy
 import functools
+import html
 import http.server
 import json
 import re
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -20,9 +22,10 @@ import pytest
 from lib.dashboard import render_pages
 from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED
 from lib.dashboard_pages import ticket_detail
+from lib.dashboard_pages.common import duration
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
-from tests.test_dashboard_layout import JOB, _no_script, _run_page, _section, _snapshot, needs_node
+from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, needs_node
 from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
@@ -346,7 +349,7 @@ Date.now = () => nowMs;
 const page = new Function('window', require('fs').readFileSync(script, 'utf8') + '\nreturn {selection: selection};');
 const {selection} = page({matchMedia: () => ({matches: false})});
 const m = {selected: 0, visits: [{}], all_durations_known: false};
-console.log(JSON.stringify(JSON.parse(rowsText).map(r => { nowMs += 20000; return selection(r, m).beatStart; })));
+console.log(JSON.stringify(JSON.parse(rowsText).map(r => { nowMs += 20000; return selection(r.job, r, m).beatStart; })));
 """
 
 
@@ -884,3 +887,308 @@ def test_the_page_carries_the_actions_api_and_no_credential(tmp_path: Path) -> N
         assert hook in html, hook
     for secret in ("gho_", "ghp_", "github_pat_", "client_secret"):
         assert secret not in html, secret
+
+
+# --- #531a: ticket.html#t=<repo>#<ticket>, one live ticket keyed by ticket ------------------------
+
+TICKET_IDS = BAR + ["hud", "ticketview"]
+AT_SNAPSHOT = [["advance", -3]]
+LIVE = {"running": ("maxharris1/cleffy#40", "h-review"), "queued": ("maxharris1/cleffy#12", "g-grok-c")}
+SECTIONS = ["Run log", "Live run", "Journey", "Can come next", "Full state chart"]
+AWKWARD = ["a/b", "a#b", "50%", "a b", "!*'()", "Ünï-çødé", "~2"]
+
+
+def _quote(address: str) -> str:
+    return urllib.parse.quote(address, safe="-_.!~*'()")
+
+
+def _ticket_server(snapshot: dict, address: str | None) -> str:
+    view = ticket_detail.ticket_view(snapshot, address)
+    assert view.startswith('<div id="ticketview">') and view.endswith("</div>")
+    return view[len('<div id="ticketview">'):-len("</div>")]
+
+
+def _ticket_script(tmp_path: Path, snapshot: dict, hash_: str, actions: list | None = None) -> str:
+    out = _run_page(tmp_path, snapshot, "ticket", TICKET_IDS, hash_=hash_, actions=AT_SNAPSHOT + (actions or []))
+    return out["html"]["ticketview"]
+
+
+def _both(tmp_path: Path, snapshot: dict, address: str | None) -> dict[str, str]:
+    hash_ = "" if address is None else "#t=" + _quote(address)
+    return {"server": _ticket_server(snapshot, address), "script": _ticket_script(tmp_path, snapshot, hash_)}
+
+
+def _row(snapshot: dict, job: str) -> dict:
+    return next(row for row in snapshot["running"] + snapshot["queued"] if row["job"] == job)
+
+
+def _h1s(markup: str) -> list[str]:
+    return [re.sub(r"<[^>]+>", "", h) for h in re.findall(r"<h1\b[^>]*>(.*?)</h1>", markup, re.S)]
+
+
+def _sections(markup: str) -> list[str]:
+    return [t or s for t, s in re.findall(r'<span class="t">([^<]+)</span>|<summary>(Full state chart)', markup)]
+
+
+def _ticket_tiles(markup: str) -> list[tuple[str, str]]:
+    return [(re.sub(r"<span[^>]*>.*$", "", value), label) for value, label in
+            re.findall(r'<div class="jd-tile"><b[^>]*>(.*?)</b><span>([^<]*)</span></div>', markup)]
+
+
+def _tracker(markup: str) -> str:
+    return re.search(r'<span class="tracker">([^<]*)</span>', markup).group(1)
+
+
+@needs_node
+def test_the_ticket_page_href_is_the_script_s_and_names_any_ticket(tmp_path: Path) -> None:
+    import subprocess
+    from lib.dashboard_pages.common import ticket_address, ticket_page_href
+    from tests.test_dashboard_layout import NODE
+    rows = [{"repo": "maxharris1/cleffy", "ticket_id": tid} for tid in AWKWARD]
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(_snapshot(tmp_path))["ticket.html"], re.S)
+    defs = re.findall(r"^  (function (?:ticketAddress|ticketPageHref)\(.*\}$)", script, re.M)
+    assert len(defs) == 2
+    (tmp_path / "href.js").write_text("\n".join(defs) + "\nconsole.log(JSON.stringify(JSON.parse(process.argv[2])"
+                                      ".map(r => [ticketPageHref(r), ticketAddress(r)])));", encoding="utf-8")
+    out = subprocess.run([NODE, str(tmp_path / "href.js"), json.dumps(rows)], capture_output=True, text=True,
+                         timeout=30, check=True)
+    hrefs = [ticket_page_href(row) for row in rows]
+    assert json.loads(out.stdout) == [[href, ticket_address(row)] for href, row in zip(hrefs, rows)]
+    assert [urllib.parse.unquote(h.removeprefix("ticket.html#t=")) for h in hrefs] == [
+        f"maxharris1/cleffy#{tid}" for tid in AWKWARD]
+    assert all(re.fullmatch(r"ticket\.html#t=[A-Za-z0-9%_.!~*'()-]+", h) for h in hrefs)
+
+
+@needs_node
+@pytest.mark.parametrize("tid", AWKWARD)
+def test_the_script_opens_the_ticket_its_href_names(tmp_path: Path, tid: str) -> None:
+    from lib.dashboard_pages.common import ticket_page_href
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot)["ticket_id"] = tid
+    href = ticket_page_href(_review(snapshot))
+    view = _ticket_script(tmp_path, snapshot, href.removeprefix("ticket.html"))
+    assert f'data-ticket="{html.escape("maxharris1/cleffy#" + tid)}"' in view
+    assert 'id="liverun-job-h-review"' in view
+
+
+@needs_node
+@pytest.mark.parametrize("kind", LIVE)
+def test_the_script_draws_the_server_s_ticket(tmp_path: Path, kind: str) -> None:
+    views = _both(tmp_path, _snapshot(tmp_path), LIVE[kind][0])
+    assert views["script"] == views["server"]
+
+
+@needs_node
+@pytest.mark.parametrize("kind", LIVE)
+def test_a_live_ticket_has_the_job_page_s_sections_and_one_h1(tmp_path: Path, kind: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    address, job = LIVE[kind]
+    for render, markup in _both(tmp_path, snapshot, address).items():
+        assert re.search(r'^<article class="jobpage ticketpage" data-ticket="maxharris1/cleffy#\d+">', markup), render
+        assert _sections(markup) == SECTIONS, render
+        assert _h1s(markup) == [f"cleffy#{address.rsplit('#')[1]}"], render
+        assert f'id="liverun-job-{job}"' in markup, render
+        assert '<nav class="jd-crumb" aria-label="Breadcrumb"><a href="job.html">Tickets</a>' in markup, render
+
+
+@needs_node
+def test_a_running_ticket_says_where_it_runs_and_how_it_beats(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    row = _review(snapshot)
+    for render, markup in _both(tmp_path, snapshot, LIVE["running"][0]).items():
+        assert _ticket_tiles(markup) == [
+            (duration(row["elapsed_seconds"]), "T+ on box"),
+            (f"{duration(row['heartbeat_age_seconds'])} ago", "last heartbeat"),
+            ("2 / 3", "revise round"),
+            ("4 hops", "1 off-chart"),
+        ], render
+        assert _tracker(markup) == "GitHub PR #40 · on box", render
+        assert '<span class="job">started 1:36 AM ET</span></nav>' in markup, render
+        assert "data-still" not in _hero_px(markup), render
+        assert '<p class="empty">no telemetry</p>' in markup, render
+        assert not re.search(r'<span class="(?:kind|device)">', markup), render
+        assert "github.com" not in markup, render
+
+
+@needs_node
+def test_a_queued_ticket_says_who_it_waits_for_and_holds_still(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    row = _row(snapshot, "g-grok-c")
+    for render, markup in _both(tmp_path, snapshot, LIVE["queued"][0]).items():
+        assert _tracker(markup) == f"GitHub PR #12 · queued for grok · {duration(row['age_seconds'])}", render
+        assert _hero_px(markup)["data-still"] == "true", render
+        assert '<p class="empty">not started yet</p>' in markup, render
+        labels = [label for _, label in _ticket_tiles(markup)]
+        assert labels[:3] == ["waiting", "last heartbeat", "revise round"] and labels[3].endswith(" off-chart"), render
+        assert _ticket_tiles(markup)[:2] == [(duration(row["age_seconds"]), "waiting"),
+                                             ("not started", "last heartbeat")], render
+
+
+@needs_node
+def test_the_queued_tracker_counts_up(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    age = _row(snapshot, "g-grok-c")["age_seconds"]
+    later = _ticket_script(tmp_path, snapshot, "#t=" + _quote(LIVE["queued"][0]), [["advance", 7]])
+    assert _tracker(later).endswith(f"queued for grok · {duration(age + 7)}")
+
+
+def test_a_linear_ticket_names_its_tracker_and_pr(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot).update(tracker="linear", ticket_id="AUT-9", source="AUT-9", pr="77")
+    assert _tracker(_ticket_server(snapshot, "maxharris1/cleffy#AUT-9")) == "Linear AUT-9 · PR #77 · on box"
+    _review(snapshot).update(tracker="github", ticket_id="531", source="#531", pr=None, device=None)
+    markup = _ticket_server(snapshot, "maxharris1/cleffy#531")
+    assert _tracker(markup) == "GitHub issue #531"
+    assert _ticket_tiles(markup)[0][1] == "T+ on this device"
+
+
+NOT_FOUND = [
+    ("unknown", "maxharris1/cleffy#999", "Ticket not found"),
+    ("hostile", '<img src=x onerror=y>#"1"', "Ticket not found"),
+    ("none", None, "No ticket chosen"),
+]
+
+
+@needs_node
+@pytest.mark.parametrize(("case", "address", "title"), NOT_FOUND, ids=[c[0] for c in NOT_FOUND])
+def test_without_a_live_ticket_the_page_says_so_and_links_the_board(tmp_path: Path, case, address, title) -> None:
+    views = _both(tmp_path, _snapshot(tmp_path), address)
+    assert views["script"] == views["server"], case
+    markup = views["server"]
+    assert markup.startswith('<section class="panel">'), case
+    assert _h1s(markup) == [title], case
+    assert '<a href="job.html">Tickets board</a>' in markup, case
+    assert "jobpage" not in markup and "<img" not in markup, case
+    if address:
+        assert html.escape(address) in markup, case
+
+
+@needs_node
+@pytest.mark.parametrize("hash_", ["#t=", "#t=%E0%A4%A", "#job-h-review", "#t=maxharris1%2Fcleffy%23999"])
+def test_a_hash_that_names_no_live_ticket_draws_a_panel(tmp_path: Path, hash_: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    view = _ticket_script(tmp_path, snapshot, hash_)
+    expected = "Ticket not found" if hash_.endswith("999") else "No ticket chosen"
+    assert _h1s(view) == [expected]
+
+
+def test_the_resolver_prefers_running_then_the_freshest_run_and_an_exact_repo(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    older = {**_review(snapshot), "job": "h-old", "elapsed_seconds": 9000}
+    snapshot["running"].insert(0, older)
+    snapshot["queued"].append({**_row(snapshot, "q-claude"), "job": "q-40", "ticket_id": "40"})
+    found = ticket_detail.resolve_ticket(snapshot, "maxharris1/cleffy#40")
+    assert (found["kind"], found["row"]["job"], found["address"]) == ("running", "h-review", "maxharris1/cleffy#40")
+    assert found["ticket"]["state"] == "review"
+    queued = ticket_detail.resolve_ticket(snapshot, "maxharris1/cleffy#12")
+    assert (queued["kind"], queued["row"]["job"]) == ("queued", "g-grok-c")
+    loose = ticket_detail.resolve_ticket(snapshot, "MaxHarris1/Cleffy#40")
+    assert (loose["kind"], loose["row"]["job"], loose["address"]) == ("running", "h-review", "maxharris1/cleffy#40")
+    snapshot["queued"].append({**_row(snapshot, "q-claude"), "job": "q-caps", "repo": "MaxHarris1/Cleffy", "ticket_id": "40"})
+    exact = ticket_detail.resolve_ticket(snapshot, "MaxHarris1/Cleffy#40")
+    assert (exact["kind"], exact["row"]["job"]) == ("queued", "q-caps")
+    assert ticket_detail.resolve_ticket(snapshot, "maxharris1/cleffy#40x") is None
+    assert ticket_detail.resolve_ticket(snapshot, "maxharris1/cleffy#4") is None
+
+
+@needs_node
+def test_the_script_resolves_like_the_server(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    snapshot["running"].insert(0, {**_review(snapshot), "job": "h-old", "elapsed_seconds": 9000})
+    loose = _ticket_script(tmp_path, snapshot, "#t=" + _quote("MaxHarris1/Cleffy#40"))
+    assert loose == _ticket_server(snapshot, "MaxHarris1/Cleffy#40")
+    assert 'data-ticket="maxharris1/cleffy#40"' in loose and 'id="liverun-job-h-review"' in loose
+    snapshot["queued"].append({**_row(snapshot, "q-claude"), "job": "q-caps", "repo": "MaxHarris1/Cleffy", "ticket_id": "40"})
+    exact = _ticket_script(tmp_path, snapshot, "#t=" + _quote("MaxHarris1/Cleffy#40"))
+    assert 'id="liverun-job-q-caps"' in exact
+
+
+def _emptied(snapshot: dict) -> dict:
+    return {**copy.deepcopy(snapshot), "running": [], "queued": [], "tickets": []}
+
+
+def test_the_served_ticket_page_is_the_no_ticket_panel_for_any_snapshot(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    pages = {name: render_pages(s)["ticket.html"] for name, s in (("fixture", snapshot), ("empty", _emptied(snapshot)))}
+    views = {name: _section(_no_script(page), "ticketview") for name, page in pages.items()}
+    assert views["fixture"] == views["empty"]
+    assert "No ticket chosen" in views["fixture"] and 'class="jobpage' not in views["fixture"]
+    page = pages["fixture"]
+    assert 'data-page="ticket"' in page
+    assert _h1s(_no_script(page)) == ["No ticket chosen"]
+    nav = _section(page, "nav")
+    assert "ticket.html" not in nav
+    assert re.findall(r'<a href="([^"]+)" aria-current="page">', nav) == ["job.html"]
+
+
+@needs_node
+def test_picking_a_log_row_on_the_ticket_page_selects_its_bar_and_the_reverse(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    hash_ = "#t=" + _quote(LIVE["running"][0])
+    row = _ticket_script(tmp_path, snapshot, hash_, [["click", {"attr": {"data-visit": "1"}}]])
+    for cls in ("runlog", "journey"):
+        assert [i for i, _, p in _rows(row, cls) if p == "true"] == ["1"], cls
+    bar = _ticket_script(tmp_path, snapshot, hash_,
+                         [["click", {"attr": {"data-visit": "2", "aria-label": "Step 3 of 5: review, codex, 16m 40s"}}]])
+    for cls in ("runlog", "journey"):
+        assert [i for i, _, p in _rows(bar, cls) if p == "true"] == ["2"], cls
+
+
+KEEP_PLACE = r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const art = document.querySelector('article.ticketpage');
+  const row = art.querySelector('.runlog button[data-visit="2"]');
+  row.focus();
+  window.scrollTo(0, 240);
+  await sleep(50);
+  return {focused: document.activeElement === row, y: window.scrollY};
+})()"""
+
+AFTER_REDRAW = r"""
+(() => {
+  const now = document.activeElement;
+  return {redrawn: !window.oldTicket.isConnected, visit: now && now.getAttribute('data-visit'),
+          inLog: !!(now && now.closest('.runlog')), y: window.scrollY};
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_a_redraw_keeps_focus_and_scroll_on_the_ticket_page(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    server = _serve(tmp_path, {"fixture": snapshot})
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/ticket.html#t={_quote(LIVE['running'][0])}",
+              "document.querySelector('article.ticketpage .runlog button')")
+        before = chrome.run(KEEP_PLACE)
+        chrome.run("window.oldTicket = document.querySelector('article.ticketpage')")
+        later = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
+        (tmp_path / "site" / "fixture" / "status.json").write_text(json.dumps(later), encoding="utf-8")
+        chrome.wait_for("!window.oldTicket.isConnected", "a redraw")
+        after = chrome.run(AFTER_REDRAW)
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert before == {"focused": True, "y": 240}
+    assert after == {"redrawn": True, "visit": "2", "inLog": True, "y": 240}
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _row(snapshot, "g-grok-c").update(source="#5310", pr="5770", round="2/3")
+    server = _serve(tmp_path, {"fixture": snapshot})
+    chrome = _Chrome(tmp_path / "profile")
+    widths = {}
+    try:
+        chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=375, height=800, deviceScaleFactor=1,
+                    mobile=True)
+        for kind, (address, _) in LIVE.items():
+            _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/ticket.html#t={_quote(address)}",
+                  f"document.querySelector('article.ticketpage[data-ticket=\"{address}\"] canvas.jd-journey')")
+            widths[kind] = chrome.run("document.documentElement.scrollWidth")
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert widths == {"running": 375, "queued": 375}
