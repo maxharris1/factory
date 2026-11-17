@@ -20,7 +20,7 @@ CSS = """\
 .at-go:hover,.rl-tk:hover{color:var(--ok)}
 .at-go{margin-left:auto;font-family:var(--mono);font-size:12px;white-space:nowrap}
 .rl-filter{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
-@media (scripting:none){#relay .rl-filter{display:none}}
+@media (scripting:none){#relay .rl-filter,#relay .rl-more{display:none}#relay .rl-early{display:contents}}
 .rl-btn{height:44px;padding:0 16px;font-family:var(--mono);font-size:12px;cursor:pointer;
 border:1px solid var(--line-hi);background:var(--panel);color:var(--text)}
 .rl-btn[aria-pressed=true]{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent);color:var(--ok)}
@@ -36,6 +36,10 @@ border:1px solid color-mix(in srgb,var(--h) 40%,transparent);background:color-mi
 .rl-claude{--h:var(--claude)}.rl-codex{--h:var(--codex)}.rl-cursor{--h:var(--cursor)}.rl-grok{--h:var(--grok)}
 .rl-bot{color:var(--h)}.rl-what{color:var(--text)}.rl-when{color:var(--muted)}
 .rl-sep{color:var(--muted)}
+.rl-early{display:none}
+.rl-more{height:22px;padding:0 8px;font-family:inherit;font-size:11px;line-height:1;cursor:pointer;
+border:1px solid var(--line-hi);background:var(--bg);color:var(--text-2);white-space:nowrap}
+.rl-more:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 .rl-verdict{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;white-space:nowrap}
 .rl-out{color:var(--text-2)}
 .rl-done{display:block;flex:1 0 100%}
@@ -60,7 +64,9 @@ SCRIPT = r"""
   var DONE_TINT = '#9ece6a';
   var RELAY_FILTERS = [['all', 'all'], ['scripted', 'scripted'], ['wakes', 'grok wakes'], ['shipped', 'shipped']];
   var RELAY_NOTE = 'The relay shows the 12 tickets that moved most recently. A stopped ticket stays listed until it moves again.';
+  var RELAY_WINDOW = 6;
   var rlFilter = 'all';
+  var rlOpen = {};
 
   function cmpStep(a, b) {
     return b.at - a.at || (a.type === 'verdict') - (b.type === 'verdict') || a.tie - b.tie;
@@ -112,6 +118,17 @@ SCRIPT = r"""
     if (r.kind === 'failed') add(row, chip('failed', 'bad'));
   }
 
+  function relayMore(steps, t, hidden) {
+    var b = add(steps, el('button', 'rl-more', '+' + hidden + ' earlier'));
+    b.setAttribute('type', 'button');
+    b.setAttribute('aria-expanded', rlOpen[t.key] ? 'true' : 'false');
+    b.setAttribute('data-more', t.key);
+    b.setAttribute('title', 'show ' + hidden + ' earlier step' + (hidden === 1 ? '' : 's'));
+    b.addEventListener('click', function () { rlOpen[t.key] = !rlOpen[t.key]; if (latest) render(latest); });
+  }
+
+  function relaySep(parent) { add(parent, el('span', 'rl-sep', '→')).setAttribute('aria-hidden', 'true'); }
+
   function legendKey(legend, swatch, text) {
     var key = add(legend, el('span', 'rl-key'));
     add(key, swatch).setAttribute('aria-hidden', 'true');
@@ -155,8 +172,17 @@ SCRIPT = r"""
         row.setAttribute('data-thread', t.key);
         add(row, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
         var steps = add(row, el('span', 'rl-steps'));
+        var hidden = t.steps.length - RELAY_WINDOW;
+        if (hidden > 0) relayMore(steps, t, hidden);
+        var shut = hidden > 0 && !rlOpen[t.key] ? hidden : 0;
         t.steps.forEach(function (s, i) {
-          if (i) add(steps, el('span', 'rl-sep', '→')).setAttribute('aria-hidden', 'true');
+          if (i < shut) {
+            var early = add(steps, el('span', 'rl-early'));
+            relayStep(early, s);
+            relaySep(early);
+            return;
+          }
+          if (i > shut) relaySep(steps);
           relayStep(steps, s);
         });
         if (played[t.key] && !still) {
@@ -216,6 +242,7 @@ _VERDICT = {"routed": "accent", "shipped": "ok", "stale": "muted", "rejected": "
 
 _TONE_TINT = {"warn": "#ff9e64", "bad": "#f7768e", "muted": "#8b93b8"}
 _RELAY_FILTERS = (("all", "all"), ("scripted", "scripted"), ("wakes", "grok wakes"), ("shipped", "shipped"))
+RELAY_WINDOW = 6
 _RELAY_NOTE = "The relay shows the 12 tickets that moved most recently. A stopped ticket stays listed until it moves again."
 
 
@@ -278,6 +305,23 @@ def _relay_step(step: dict) -> str:
     )
 
 
+_SEP = '<span class="rl-sep" aria-hidden="true">→</span>'
+
+
+def _windowed(key: str, items: list[str]) -> str:
+    """The RELAY_WINDOW newest items; each older one sits, with the arrow
+    after it, in an rl-early box that only script hides."""
+    hidden = len(items) - RELAY_WINDOW
+    if hidden <= 0:
+        return _SEP.join(items)
+    more = (
+        f'<button class="rl-more" type="button" aria-expanded="false" data-more="{_e(key)}" '
+        f'title="show {hidden} earlier step{"" if hidden == 1 else "s"}">+{hidden} earlier</button>'
+    )
+    early = "".join(f'<span class="rl-early">{item}{_SEP}</span>' for item in items[:hidden])
+    return more + early + _SEP.join(items[hidden:])
+
+
 def _relay(snapshot: dict) -> str:
     threads = relay_threads(snapshot)
     hrefs = _job_hrefs(snapshot)
@@ -286,11 +330,10 @@ def _relay(snapshot: dict) -> str:
         f'data-relay="{key}">{text}</button>'
         for key, text in _RELAY_FILTERS
     )
-    sep = '<span class="rl-sep" aria-hidden="true">→</span>'
     rows = "".join(
         f'<div class="rl-row" data-thread="{_e(t["key"])}">'
         f'<a class="rl-tk" href="{_e(ticket_page_href(t["ref"]) if t["key"] in hrefs else "job.html")}">{_e(_ticket(t["ref"]))}</a>'
-        f'<span class="rl-steps">{sep.join(_relay_step(step) for step in t["steps"])}</span></div>'
+        f'<span class="rl-steps">{_windowed(t["key"], [_relay_step(step) for step in t["steps"]])}</span></div>'
         for t in threads
     )
     body = f'<div class="rl-rows">{rows}</div>' if rows else '<p class="empty">no handoffs or verdicts yet</p>'

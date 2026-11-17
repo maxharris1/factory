@@ -13,6 +13,7 @@ import pytest
 
 import lib.dashboard_page as page
 from lib.dashboard import RELAY_STEPS, _VERDICT_TIMES, collect_snapshot, render_pages
+from lib.dashboard_pages.common import duration
 from lib.dashboard_pages.ticket_detail import resolve_ticket
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
@@ -711,6 +712,114 @@ def test_attention_ticket_rows_link_github_in_both_renderers(tmp_path: Path, sna
     assert _script(tmp_path, snap)["html"]["attention"] == server
 
 
+def _only(snapshot: dict, handoffs: list[dict], verdicts: list[dict] | None = None) -> dict:
+    snap = copy.deepcopy(snapshot)
+    snap["relay"] = _snap(handoffs, verdicts or [])["relay"]
+    return snap
+
+
+def _steps(count: int, ticket: str = "1") -> list[dict]:
+    return [_handoff(f"j-{ticket}-{n:02}", ticket, 1000 - 10 * n) for n in range(count)]
+
+
+def _ages(count: int) -> list[str]:
+    return [duration(1000 - 10 * n) + " ago" for n in range(count)]
+
+
+def _row(relay: str, ticket: str = "1") -> str:
+    return re.search(rf'data-thread="maxharris1/factory#{ticket}">(.*?)</div>', relay).group(1)
+
+
+def _early(row: str) -> list[str]:
+    return re.findall(r'<span class="rl-early">(.*?<span class="rl-sep" aria-hidden="true">→</span>)</span>', row)
+
+
+def _shown(row: str) -> list[str]:
+    return re.findall(r'class="rl-when">([^<]*)<', re.sub(r'<span class="rl-early">.*?→</span></span>', "", row))
+
+
+@layout.needs_node
+@pytest.mark.parametrize(("count", "hidden"), [(6, 0), (7, 1), (9, 3)])
+def test_a_thread_shows_its_six_newest_steps_and_folds_the_rest_behind_a_button(
+    tmp_path: Path, snapshot: dict, count: int, hidden: int,
+) -> None:
+    snap = _only(snapshot, _steps(count))
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path, snap)["html"]["relay"] == relay
+    row = _row(relay)
+    assert len(_early(row)) == hidden == row.count("rl-early")
+    assert _shown(row) == _ages(count)[hidden:] and len(_shown(row)) == 6
+    if not hidden:
+        assert "rl-more" not in row
+        return
+    noun = "step" if hidden == 1 else "steps"
+    assert row.split('<span class="rl-steps">')[1].startswith(
+        '<button class="rl-more" type="button" aria-expanded="false" data-more="maxharris1/factory#1" '
+        f'title="show {hidden} earlier {noun}">+{hidden} earlier</button><span class="rl-early">')
+
+
+def _open(relay: str, ticket: str) -> bool | None:
+    row = _row(relay, ticket)
+    found = re.findall(r'class="rl-more" type="button" aria-expanded="(true|false)"', row)
+    assert len(found) == 1
+    assert (found[0] == "true") == ("rl-early" not in row)
+    return found[0] == "true"
+
+
+@layout.needs_node
+def test_the_earlier_button_opens_one_thread_in_place_and_it_stays_open_across_polls(
+    tmp_path: Path, snapshot: dict,
+) -> None:
+    snap = _only(snapshot, [*_steps(9, "1"), *_steps(8, "2")])
+    later = copy.deepcopy(snap)
+    later["generated_at_epoch"] += 2
+    later["relay"]["threads"][0]["handoffs"].insert(0, _handoff("j-1-99", "1", 5))
+    press = ["press", ["data-more", "maxharris1/factory#1"]]
+    actions = [press, ["snap", ["relay"]], ["poll", later], ["snap", ["relay"]], press, ["snap", ["relay"]]]
+    snaps = [step["snap"]["relay"] for step in _script(tmp_path, snap, actions)["steps"] if "snap" in step]
+    assert [(_open(relay, "1"), _open(relay, "2")) for relay in snaps] == [
+        (True, False), (True, False), (False, False)]
+    assert "+4 earlier" in snaps[1] and "+4 earlier" in snaps[2]
+    assert snaps[2] == _server(later)["relay"]
+
+
+@layout.needs_node
+def test_the_earlier_button_keeps_focus_when_pressed(tmp_path: Path, snapshot: dict) -> None:
+    key = "maxharris1/factory#1"
+    actions = [["focus", ["data-more", key]], ["press", ["data-more", key]], ["focused", "data-more"],
+               ["press", ["data-more", key]], ["focused", "data-more"]]
+    steps = _script(tmp_path, _only(snapshot, _steps(9)), actions)["steps"]
+    assert [step["focused"] for step in steps if "focused" in step] == [["button", key]] * 2
+
+
+RELAY_WINDOWED = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
+  function seen(n) { var b = n.getBoundingClientRect(); return b.width > 0 && b.height > 0; }
+  return {
+    shown: [].filter.call(row.querySelectorAll('.rl-step'), seen).map(function (n) {
+      return n.querySelector('.rl-when').textContent; }),
+    early: [].map.call(row.querySelectorAll('.rl-early, .rl-early *'), seen),
+    more: [].filter.call(row.querySelectorAll('.rl-more'), seen).map(function (n) { return n.textContent; })
+  };
+})"""
+
+
+@needs_chrome
+def test_the_earlier_steps_fold_only_with_script_in_a_browser(snapshot: dict) -> None:
+    snap = _only(snapshot, _steps(9))
+    ages = _ages(9)
+    browser = Browser()
+    try:
+        _load(browser, snap, 1440, True)
+        (row,) = browser.eval(RELAY_WINDOWED)
+        assert row["shown"] == ages[3:] and row["more"] == ["+3 earlier"]
+        assert row["early"] and not any(row["early"])
+        _load(browser, snap, 1440, False)
+        (row,) = browser.eval(RELAY_WINDOWED)
+        assert row["shown"] == ages and row["more"] == []
+    finally:
+        browser.close()
+
+
 def _long(snapshot: dict) -> dict:
     return _rich(snapshot, [
         _handoff("j-l1", "131", 3000), _handoff("j-l2", "131", 2800, recipient="codex", action="review"),
@@ -739,14 +848,16 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
 
 RELAY_ROWS = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
   var box = row.getBoundingClientRect(), tk = row.querySelector('.rl-tk').getBoundingClientRect();
-  var parts = [].filter.call(row.querySelectorAll('*'), function (n) { return !n.closest('.rl-tk'); });
+  var parts = [].filter.call(row.querySelectorAll('*'), function (n) {
+    return !n.closest('.rl-tk') && n.getClientRects().length > 0;
+  });
   return {
     thread: row.getAttribute('data-thread'),
     outside: parts.filter(function (n) {
       var b = n.getBoundingClientRect();
       return b.left < tk.right || b.right > box.right + 0.5;
     }).map(function (n) { return n.className + ': ' + n.textContent; }),
-    lines: new Set([].map.call(row.querySelectorAll('.rl-step, .rl-verdict'), function (n) {
+    lines: new Set(parts.filter(function (n) { return n.matches('.rl-step, .rl-verdict'); }).map(function (n) {
       return Math.round(n.getBoundingClientRect().top);
     })).size
   };

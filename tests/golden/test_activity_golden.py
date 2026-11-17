@@ -8,8 +8,8 @@ from tests.golden.pages import page_digests, page_name, record
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "activity.CSS": "3a69efa664921ac94bc562b6dce0674409ed8285aed1cedfa01dd7d6ee774462",
-    "activity.SCRIPT": "a18ab029da96695d78c6c442bfff69654c574466957e31c131ee3e9110da9bac",
+    "activity.CSS": "02908bec801c66a7bcd2bf7614388d9486f971e2443fd0f69de77f2a7fae413d",
+    "activity.SCRIPT": "653cd947ecabca42240b139bc1a40004683bb866c86b4b71980617a3fdc8f498",
     "seeded/main": "950505367194d2d02e934bc853d7d5268197e84e02eec4c09035818011fa2516",
     "seeded/chrome": "df5260d3c44e18b2faeabc80086acab78beb4fb5bf199d1dd0c44f5e3b2fa8b5",
     "hostile/main": "bd1316b434262ad33c1014f1e436abba29b25a928d783cbf7a5e556b77c0eb78",
