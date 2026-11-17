@@ -1121,7 +1121,7 @@ def test_the_page_ages_component_states_with_an_unchanged_snapshot(tmp_path: Pat
         later = later_out["text"]
         assert _states(later["components"]) == ["UNKNOWN", "UNKNOWN"]
         assert "no snapshot for " in later["components"]
-        assert "2 components · 0 down" in later["components"]
+        assert "2 configured · 0 up · " in later["components"]
         assert attention_count(later_out) == "1"
 
 
@@ -1519,7 +1519,7 @@ def test_an_overdue_snapshot_shows_unknown_and_only_its_writer_alerts(tmp_path: 
     (tmp_path / "stale").mkdir()
     stale_out = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 901]])
     stale = stale_out["text"]
-    assert _states(stale["components"]) == ["UNKNOWN", "UNKNOWN", "STALE"]
+    assert _states(stale["components"]) == ["STALE", "UNKNOWN", "UNKNOWN"]
     assert "DOWN" not in stale["components"]
     assert attention_count(stale_out) == "0"
     assert stale_out["hidden"]["waiters"]
@@ -1552,9 +1552,9 @@ def _overdue_page(tmp_path: Path, *, waiter_seen: float, writer_interval: int,
 
 
 @pytest.mark.parametrize("waiter_seen, expected", [
-    (0, ["UNKNOWN", "UNKNOWN", "STALE"]),
-    (-60, ["UNKNOWN", "UNKNOWN", "STALE"]),
-    (-100, ["UNKNOWN", "UNKNOWN", "STALE"]),
+    (0, ["STALE", "UNKNOWN", "UNKNOWN"]),
+    (-60, ["STALE", "UNKNOWN", "UNKNOWN"]),
+    (-100, ["STALE", "UNKNOWN", "UNKNOWN"]),
 ])
 def test_an_overdue_snapshot_vouches_for_no_state_past_its_up_window(
     tmp_path: Path, waiter_seen, expected,
@@ -1585,7 +1585,7 @@ def test_a_retired_writer_row_does_not_hide_an_old_one_off_snapshot(tmp_path: Pa
         pytest.skip("node is not installed")
     out = _overdue_page(tmp_path, waiter_seen=0, writer_interval=300,
                         publish_seconds=None, push=False, advance=3000)
-    assert _states(out["text"]["components"]) == ["UNKNOWN", "UNKNOWN", "DOWN"]
+    assert _states(out["text"]["components"]) == ["DOWN", "UNKNOWN", "UNKNOWN"]
     assert attention_count(out) == "1"
 
 

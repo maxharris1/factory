@@ -1,5 +1,6 @@
-"""health.html (System, #92, #141): the components matrix and process details, version drift,
-the poll and Linear budget, poller.log, rules and limits, and harnesses with no live waiter."""
+"""health.html (System, #92, #141, #537): Broken now, the components matrix (a device list on a
+phone) and process details, version drift when a component is behind, the poll and Linear budget
+beside poller.log, rules and limits, and harnesses with no live waiter."""
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from lib.dashboard_pages.common import (
 CSS = """\
 .sys-row{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;min-width:0}
 .panel h2 .count.warn{color:var(--warn)}
-#drift{flex:1 1 340px}#health{flex:2 1 520px}#log{flex:3 1 560px}#rules{flex:2 1 380px}
+#health{flex:2 1 520px}#log{flex:3 1 560px}#versions,#rules{grid-column:1/-1}
 .sys-scroll{overflow-x:auto}
 .sys-table{min-width:560px;margin:0;font:12px/1.5 var(--mono);color:var(--text)}
 .sys-table.wide{min-width:860px}
@@ -62,6 +63,19 @@ font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
 .sys-rules .text{min-width:0;font-size:13px;color:var(--text-2)}
 .sys-sub{margin:16px 0 4px;font:11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .feed .sys-proj{flex-basis:100%;font:12px var(--mono);color:var(--muted)}
+.sys-devices{display:none}
+.sys-dev{padding:8px 0;border-bottom:1px solid var(--line)}.sys-dev:last-child{border-bottom:0}
+.sys-dev-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:2px}
+.sys-dev-head .muted{font:12px var(--mono)}
+.sys-dev-row{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;padding:3px 0;font:12px/1.5 var(--mono);color:var(--text)}
+.sys-dev-row .sys-kind{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.sys-dev-row.two .sys-kind{flex-basis:100%;font-weight:600}
+.sys-dev-row .sys-seen{color:var(--text-2)}
+@media (max-width:699.98px){.sys-matrix{display:none}.sys-devices{display:block}
+.sys-table.sys-broken{min-width:0}.sys-broken thead{display:none}
+.sys-broken,.sys-broken tbody,.sys-broken tr,.sys-broken td{display:block}
+.sys-broken tr{padding:8px 0;border-bottom:1px solid var(--line)}.sys-broken tbody tr:last-child{border-bottom:0}
+.sys-broken td{padding:1px 0;border-bottom:0}}
 """
 
 
@@ -273,8 +287,7 @@ SCRIPT_COMPONENTS = r"""
       var sq = el('span', 'sys-sq ok');
       sq.setAttribute('role', 'img');
       sq.setAttribute('aria-label', 'up');
-      sq.setAttribute('title', 'up · beat ' + (never ? '—' : dur(age + since())) + ' ago');
-      return sq;
+      return ticking(sq, age, 'up · beat ', ' ago', 'title');
     }
     var tone = configured ? st[1] : 'muted';
     var anchor = validAnchor(c.anchor);
@@ -286,16 +299,57 @@ SCRIPT_COMPONENTS = r"""
     else ticking(text, age, word + ' ', '');
     return box;
   }
+  function isUp(c) { return c.configured !== false && c.state === 'up'; }
+  function driftShown(h) { return !!h.known && versionDrift(h).behind.length > 0; }
+  function componentsCount(h, rows) {
+    if (!h.known) return ['unknown', 'count'];
+    var configured = rows.filter(function (c) { return c.configured !== false; });
+    var drift = versionDrift(h);
+    var last = drift.behind.length ? drift.behind.length + ' behind'
+      : drift.newest === 'unknown' ? 'version unknown' : 'all on ' + drift.newest.slice(0, 7);
+    return [configured.length + ' configured · ' + configured.filter(isUp).length + ' up · ' + last,
+            drift.behind.length ? 'count warn' : 'count'];
+  }
+  function upFirst(rows) {
+    return rows.filter(function (c) { return !isUp(c); }).concat(rows.filter(isUp));
+  }
+  function deviceRow(c) {
+    var st = HEALTH_STATE[c.state] || ['OTHER', 'muted'];
+    var configured = c.configured !== false;
+    var row = el('div', 'sys-dev-row' + (isUp(c) ? '' : ' two'));
+    add(row, el('span', 'sys-kind', matrixKey(c)));
+    var cell = add(row, el('span', 'sys-cell'));
+    add(cell, el('span', 'sys-blk ' + (configured ? st[1] : 'muted'))).setAttribute('aria-hidden', 'true');
+    add(cell, el('span', null, st[0].toLowerCase() + (configured ? '' : ' · not configured')));
+    var age = c.last_seen_age_seconds;
+    if (age === null || age === undefined) add(row, el('span', 'sys-seen', 'never'));
+    else ticking(add(row, el('span', 'sys-seen')), age, '', ' ago');
+    return row;
+  }
+  function renderDevices(root, m) {
+    var box = add(root, el('div', 'sys-devices'));
+    m.devices.forEach(function (device) {
+      var rows = m.keys.map(function (key) { return m.cells[key + '\n' + device]; }).filter(Boolean);
+      var block = add(box, el('div', 'sys-dev'));
+      var head = add(block, el('div', 'sys-dev-head'));
+      add(head, el('span', 'sys-name', device));
+      add(head, el('span', 'muted', rows.filter(isUp).length + ' of ' + rows.length + ' up'));
+      upFirst(rows).forEach(function (c) { add(block, deviceRow(c)); });
+    });
+  }
+  var PROCESS_RANK = {down: 0, stale: 1};
+  function processRank(c) { return PROCESS_RANK.hasOwnProperty(c.state) ? PROCESS_RANK[c.state] : 2; }
   function renderComponents(d) {
     var h = d.health || {known: false, components: []};
     var rows = agedHealth(d).rows;
-    var down = rows.filter(function (c) { return c.state === 'down' && c.configured !== false; }).length;
-    var root = panel('components', 'Components', rows.length + ' components · ' + down + ' down',
-                     brokenItems(d).length ? null : 'no-waiter');
+    var root = panel('components', 'Components', null, brokenItems(d).length ? null : 'no-waiter');
     if (!root) return;
+    var count = componentsCount(h, rows);
+    var countNode = add(root.children[0], el('span', count[1], count[0]));
+    if (!driftShown(h)) countNode.setAttribute('id', 'drift');
     if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
     var m = matrixOf(d, rows);
-    var table = add(add(root, el('div', 'sys-scroll')), el('table', 'sys-table'));
+    var table = add(add(root, el('div', 'sys-scroll sys-matrix')), el('table', 'sys-table'));
     var head = add(add(table, el('thead')), el('tr'));
     ['component'].concat(m.devices).forEach(function (t) { add(head, el('th', null, t)); });
     var mbody = add(table, el('tbody'));
@@ -308,6 +362,7 @@ SCRIPT_COMPONENTS = r"""
         add(add(tr, el('td')), matrixCell(c));
       });
     });
+    renderDevices(root, m);
     var t = h.thresholds || {};
     add(root, el('p', 'sys-note sys-legend', 'up: a beat within ' + (t.stale_beats || 3) + ' intervals (' + (t.beat_seconds || 15) +
       ' s each; device probes every ' + (t.probe_seconds || 60) + ' s) · stale: within ' + (t.down_beats || 8) +
@@ -317,7 +372,7 @@ SCRIPT_COMPONENTS = r"""
     var phead = add(add(ptable, el('thead')), el('tr'));
     ['component', 'bot', 'device', 'state', 'last seen (ET)', 'ago', 'pid', 'version', 'started (ET)'].forEach(function (t) { add(phead, el('th', null, t)); });
     var tbody = add(ptable, el('tbody'));
-    rows.forEach(function (c) {
+    rows.slice().sort(function (a, b) { return processRank(a) - processRank(b); }).forEach(function (c) {
       var tr = add(tbody, el('tr'));
       tr.setAttribute('id', c.anchor);
       add(tr, el('td', null, c.component));
@@ -364,15 +419,20 @@ SCRIPT_COMPONENTS = r"""
     return out;
   }
   function renderDrift(d) {
-    var h = d.health || {known: false, components: []};
-    var groups = driftOf(h);
-    var behind = versionDrift(h).behind.length;
-    var root = panel('drift', 'Version drift');
+    var root = byId('versions');
     if (!root) return;
-    if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
-    add(root.children[0], el('span', 'count' + (behind ? ' warn' : ''), behind + ' behind'));
-    var box = add(root, el('div', 'sys-drift'));
-    groups.forEach(function (g) {
+    var h = d.health || {known: false, components: []};
+    root.replaceChildren();
+    root.hidden = !driftShown(h);
+    if (root.hidden) return;
+    var section = add(root, el('section', 'panel'));
+    section.setAttribute('id', 'drift');
+    section.setAttribute('aria-label', 'Version drift');
+    var head = add(section, el('h2'));
+    add(head, el('span', null, 'Version drift'));
+    add(head, el('span', 'count warn', versionDrift(h).behind.length + ' behind'));
+    var box = add(section, el('div', 'sys-drift'));
+    driftOf(h).forEach(function (g) {
       var row = add(box, el('div', 'sys-ver'));
       add(row, el('span', 'name ' + g.tone, g.version));
       var blocks = add(row, el('span', 'blocks'));
@@ -687,7 +747,7 @@ def _matrix_cell(row: dict) -> str:
     word = label.lower()
     configured = row.get("configured") is not False
     age = row.get("last_seen_age_seconds")
-    if configured and row["state"] == "up":
+    if _is_up(row):
         return (f'<td><span class="sys-sq ok" role="img" aria-label="up" '
                 f'title="up · beat {duration(age)} ago"></span></td>')
     if not configured:
@@ -700,6 +760,65 @@ def _matrix_cell(row: dict) -> str:
     return f'<td><span class="sys-cell">{inner}</span></td>'
 
 
+def _is_up(row: dict) -> bool:
+    return row.get("configured") is not False and row["state"] == "up"
+
+
+def _drift_shown(health: dict) -> bool:
+    return bool(health.get("known")) and bool(version_drift(health)["behind"])
+
+
+def _components_count(health: dict) -> tuple[str, str]:
+    if not health.get("known"):
+        return "unknown", "count"
+    rows = [row for row in health.get("components") or [] if row.get("configured") is not False]
+    drift = version_drift(health)
+    behind = len(drift["behind"])
+    last = (
+        f"{behind} behind" if behind
+        else "version unknown" if drift["newest"] == "unknown"
+        else f"all on {drift['newest'][:7]}"
+    )
+    up = sum(_is_up(row) for row in rows)
+    return f"{len(rows)} configured · {up} up · {last}", "count warn" if behind else "count"
+
+
+def _device_row(row: dict) -> str:
+    label, tone = _HEALTH_STATE.get(row["state"], ("OTHER", "muted"))
+    configured = row.get("configured") is not False
+    age = row.get("last_seen_age_seconds")
+    word = label.lower() + ("" if configured else " · not configured")
+    return (
+        f'<div class="sys-dev-row{"" if _is_up(row) else " two"}">'
+        + _span("sys-kind", _matrix_key(row))
+        + f'<span class="sys-cell"><span class="sys-blk {tone if configured else "muted"}" '
+        f'aria-hidden="true"></span>{_span(None, word)}</span>'
+        + _span("sys-seen", "never" if age is None else f"{duration(age)} ago")
+        + "</div>"
+    )
+
+
+def _devices(keys: list[str], devices: list[str], cells: dict) -> str:
+    """The matrix as one block per device, abnormal rows first (renderDevices
+    in the script); CSS shows it instead of the matrix on a phone."""
+    blocks = []
+    for device in devices:
+        rows = [cells[(key, device)] for key in keys if (key, device) in cells]
+        ordered = [row for row in rows if not _is_up(row)] + [row for row in rows if _is_up(row)]
+        blocks.append(
+            '<div class="sys-dev"><div class="sys-dev-head">'
+            + _span("sys-name", device)
+            + _span("muted", f"{sum(map(_is_up, rows))} of {len(rows)} up")
+            + "</div>"
+            + "".join(_device_row(row) for row in ordered)
+            + "</div>"
+        )
+    return f'<div class="sys-devices">{"".join(blocks)}</div>'
+
+
+_PROCESS_RANK = {"down": 0, "stale": 1}
+
+
 def _et_cell(value: str | None) -> str | None:
     return value.removesuffix(" ET") if value else value
 
@@ -707,15 +826,16 @@ def _et_cell(value: str | None) -> str | None:
 def _components(snapshot: dict) -> str:
     health = snapshot.get("health") or {"known": False, "components": []}
     rows = health.get("components") or []
-    count = f"{len(rows)} components · {health.get('down') or 0} down"
-    heading_id = None if broken_items(health) else "no-waiter"
+    count, count_cls = _components_count(health)
+    head = {"count": count, "count_cls": count_cls,
+            "count_id": None if _drift_shown(health) else "drift",
+            "heading_id": None if broken_items(health) else "no-waiter"}
     if not health.get("known"):
         text = f"unknown: {health['error']}" if health.get("error") else "no heartbeats recorded yet"
-        return _panel("components", "Components", f'<p class="empty">{_e(text)}</p>', count=count,
-                      heading_id=heading_id)
+        return _panel("components", "Components", f'<p class="empty">{_e(text)}</p>', **head)
     keys, devices, cells = _matrix(snapshot, rows)
     matrix = (
-        '<div class="sys-scroll"><table class="sys-table"><thead><tr>'
+        '<div class="sys-scroll sys-matrix"><table class="sys-table"><thead><tr>'
         + "".join(f"<th>{_e(text)}</th>" for text in ["component", *devices])
         + "</tr></thead><tbody>"
         + "".join(
@@ -729,11 +849,12 @@ def _components(snapshot: dict) -> str:
             for key in keys
         )
         + "</tbody></table></div>"
+        + _devices(keys, devices, cells)
     )
     heads = ("component", "bot", "device", "state", "last seen (ET)", "ago", "pid", "version",
              "started (ET)")
     body = []
-    for row in rows:
+    for row in sorted(rows, key=lambda row: _PROCESS_RANK.get(row["state"], 2)):
         label, cls = _HEALTH_STATE.get(row["state"], ("OTHER", "muted"))
         reason = _span("muted", " " + row["reason"]) if row.get("reason") else ""
         if row.get("last_cycle_seconds") is not None:
@@ -771,7 +892,7 @@ def _components(snapshot: dict) -> str:
         + "</tbody></table></div></details>"
     )
     inner = matrix + f'<p class="sys-note sys-legend">{_e(note)}</p>' + details
-    return _panel("components", "Components", inner, count=count, heading_id=heading_id)
+    return _panel("components", "Components", inner, **head)
 
 
 def version_groups(health: dict) -> list[dict]:
@@ -821,15 +942,9 @@ def version_drift(health: dict | None) -> dict:
     }
 
 
-def _drift(snapshot: dict) -> str:
-    health = snapshot.get("health") or {"known": False, "components": []}
-    if not health.get("known"):
-        text = f"unknown: {health['error']}" if health.get("error") else "no heartbeats recorded yet"
-        return _panel("drift", "Version drift", f'<p class="empty">{_e(text)}</p>')
-    groups = version_groups(health)
-    behind = len(version_drift(health)["behind"])
+def _drift(health: dict) -> str:
     items = []
-    for group in groups:
+    for group in version_groups(health):
         rows = group["rows"]
         tone = group["tone"]
         if tone == "ok":
@@ -846,7 +961,7 @@ def _drift(snapshot: dict) -> str:
             + _span("meta", meta)
             + "</div>"
         )
-    count = _span("count warn" if behind else "count", f"{behind} behind")
+    count = _span("count warn", f"{len(version_drift(health)['behind'])} behind")
     return (
         '<section class="panel" id="drift" aria-label="Version drift">'
         f'<h2>{_span(None, "Version drift")}{count}</h2>'
@@ -854,12 +969,15 @@ def _drift(snapshot: dict) -> str:
     )
 
 
-def _drift_row(snapshot: dict) -> str:
-    return f'<div class="sys-row">{_drift(snapshot)}{_health(snapshot)}</div>'
+def _versions(snapshot: dict) -> str:
+    health = snapshot.get("health") or {}
+    if not _drift_shown(health):
+        return '<div id="versions" hidden></div>'
+    return f'<div id="versions">{_drift(health)}</div>'
 
 
 def _log_row(snapshot: dict) -> str:
-    return f'<div class="sys-row">{_log(snapshot)}{_rules(snapshot)}</div>'
+    return f'<div class="sys-row">{_health(snapshot)}{_log(snapshot)}</div>'
 
 
 def _no_waiter_text(row: dict) -> str:

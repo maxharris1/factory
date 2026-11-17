@@ -258,11 +258,12 @@ SCRIPT_HEAD = r"""
     var s = JOB_STATE[r.job_state];
     return s ? chip(s[0], s[1]) : null;
   }
-  function ticking(node, base, prefix, suffix) {
+  function ticking(node, base, prefix, suffix, attr) {
     prefix = prefix || '';
     suffix = suffix || '';
-    if (base === null || base === undefined) { node.textContent = prefix + '—'; return node; }
-    var item = {run: function (d) { node.textContent = prefix + dur(base + d) + suffix; }};
+    var put = attr ? function (text) { node.setAttribute(attr, text); } : function (text) { node.textContent = text; };
+    if (base === null || base === undefined) { put(prefix + '—'); return node; }
+    var item = {run: function (d) { put(prefix + dur(base + d) + suffix); }};
     tickers.push(item);
     item.run(since());
     return node;
@@ -672,9 +673,11 @@ def checks_link(ticket: dict) -> str:
 
 def _panel(
     ident: str, title: str, inner: str, *, count: object = None, count_html: str | None = None,
-    extra: str = "", hidden: bool = False, heading_id: str | None = None,
+    extra: str = "", hidden: bool = False, heading_id: str | None = None, count_cls: str = "count",
+    count_id: str | None = None,
 ) -> str:
-    head = _span(None, title) + ("" if count is None else _span("count", count))
+    count_attr = f' id="{count_id}"' if count_id else ""
+    head = _span(None, title) + ("" if count is None else f'<span class="{count_cls}"{count_attr}>{_e(count)}</span>')
     if count_html is not None:
         head += f'<span class="count">{count_html}</span>'
     classes = f"panel {extra}".strip()

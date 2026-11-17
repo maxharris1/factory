@@ -17,7 +17,8 @@ from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
 from lib.dashboard_pages.system import (
-    _BUDGET_STATE, _broken, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE, version_drift,
+    _BUDGET_STATE, _broken, _components, _log_row, _no_waiter, _POLL_STATE, _rules, _versions,
+    version_drift,
 )
 from lib.dashboard_pages.ticket_detail import _jobview
 from lib.dashboard_pages.tickets import _board, _tickets
@@ -1249,7 +1250,7 @@ _PANELS = {
     "index.html": (_lanes, _just_happened_and_intake),
     "activity.html": (_attention, _relay),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel),
-    "health.html": (_broken, _components, _drift_row, _log_row, _no_waiter),
+    "health.html": (_broken, _components, _versions, _log_row, _rules, _no_waiter),
     "job.html": (_board, _tickets, _jobview),
 }
 

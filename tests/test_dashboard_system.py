@@ -15,12 +15,7 @@ from pathlib import Path
 import pytest
 
 from lib import health as component_health
-from lib.dashboard import (
-    LINEAR_BUDGET_COMPLEXITY_PER_HOUR,
-    LINEAR_BUDGET_REQUESTS_PER_HOUR,
-    collect_snapshot,
-    rules_and_limits,
-)
+from lib.dashboard import collect_snapshot, rules_and_limits
 from lib.dashboard_flow import load_chart
 from lib.dashboard_page import CSS, render_pages, version_drift
 from lib.factory_md import load_factory_md
@@ -31,7 +26,7 @@ from tests.test_project_rules import FIXTURES, fixture_world
 
 NEWEST = "aaaaaaaaaaaa"
 OLDER = "bbbbbbbbbbbb"
-PANELS = ["broken", "components", "drift", "health", "log", "rules", "waiters"]
+PANELS = ["broken", "components", "versions", "health", "log", "rules", "waiters"]
 
 
 def _component(component: str, device: str, *, bot: str = "", state: str = "up",
@@ -171,7 +166,7 @@ def test_drift_and_status_line_count_the_same_stale_code_components(tmp_path: Pa
 
 @needs_node
 def test_script_drift_and_status_line_count_the_same_stale_code_components(tmp_path: Path) -> None:
-    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", "drift"])
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", "versions"])
     assert '<span class="count warn">1 behind</span>' in out["html"]["drift"]
     assert "<span>aaaaaaa · 1 behind</span>" in out["html"]["statusline"]
     assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
@@ -613,31 +608,23 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
 
 
 
-def test_rules_read_their_values_from_health_budget_and_chart() -> None:
+def test_rules_read_their_values_from_the_chart() -> None:
     chart = load_chart()
     assert chart is not None
     rules = {row["key"]: row["text"] for row in rules_and_limits(chart)}
-    assert list(rules) == ["heartbeat", "liveness", "stuck", "plan-check", "rounds", "ship",
-                           "approver", "linear"]
-    assert rules["heartbeat"] == (f"every {component_health.BEAT_SECONDS:g} s (device probes "
-                                  f"every {component_health.PROBE_SECONDS:g} s)")
-    assert str(component_health.STALE_BEATS) in rules["liveness"]
-    assert str(component_health.DOWN_BEATS) in rules["liveness"]
+    assert list(rules) == ["stuck", "plan-check", "rounds", "ship", "approver"]
     labels = {(e["from"], e["to"]): e["label"] for e in chart["edges"]}
     assert rules["stuck"] == labels[("building", "stuck")]
     assert labels[("plan-check", "planning")] in rules["plan-check"]
     assert labels[("review", "capped")] in rules["rounds"]
     assert rules["ship"] == "merge, handoff, or after an approver"
     assert rules["approver"].startswith(labels[("waiting-external", "stuck")])
-    assert f"{LINEAR_BUDGET_REQUESTS_PER_HOUR:,} req/h" in rules["linear"]
-    assert f"{LINEAR_BUDGET_COMPLEXITY_PER_HOUR:,} complexity/h" in rules["linear"]
 
 
 def test_rules_without_a_chart_say_so() -> None:
     rules = {row["key"]: row["text"] for row in rules_and_limits(None)}
-    for key in ("stuck", "plan-check", "rounds", "ship", "approver"):
-        assert rules[key] == "chart unavailable"
-    assert rules["heartbeat"].startswith("every ")
+    assert rules == dict.fromkeys(("stuck", "plan-check", "rounds", "ship", "approver"),
+                                  "chart unavailable")
 
 
 def _fixture_projects(tmp_path: Path) -> tuple[dict, list[tuple[str, str]]]:
