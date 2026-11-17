@@ -103,7 +103,7 @@ class ReadyMixin:
                 approved is not None and _matching_head(reported_head, approved)
             ):
                 return True, "ready-already-shipped"
-            reentry = _approved_round(shipped, review_round)
+            reentry = self._completed_round(ticket)
             if reentry + 1 > self._effective_cap(ticket):
                 self._flag_ready_after_cap(ticket, comment, reported_head)
                 return True, "ready-after-cap"
@@ -257,8 +257,6 @@ class ReadyMixin:
             )
 
     def _completed_round(self, ticket: TrackedTicket) -> int:
-        """The last completed review round. A handed-off or merge-queue
-        ticket counts its shipped APPROVE's round, as re-entry does (#108)."""
         state, completed = self._review_context(ticket)
         if state in ("handed-off", "merge-queue"):
             return _approved_round(self._shipped_approval(ticket), completed)
