@@ -19,9 +19,9 @@ GOLDEN = {
     "hostile/__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",
     "empty/__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",
     "seeded/main": "6d2419dab23185790ba5b6406db656dee96c5af9afad356529d9708f926ecf37",
-    "seeded/chrome": "e277beb39363974a797b0b43e520c3f0a57b74f9cf5e56dc5b0de1961ae46c87",
+    "seeded/chrome": "25243b2b23181bb500bb0ae75b458563a3776cbf60b71dd8a22b43fc11aa09d6",
     "hostile/main": "6d2419dab23185790ba5b6406db656dee96c5af9afad356529d9708f926ecf37",
-    "hostile/chrome": "82488a14f9b7d18963fc9592e79613709f7c71fd64c21b3be241f0cb62c0bcdb",
+    "hostile/chrome": "6dd91374a98a4768353983eae7bf8a94e47b1cbd49b4c407ae20f48df672f03f",
     "empty/main": "0ec9c75f06e03378d33b54ae12ebc1a1541f84161dcebbe8ade6a35a0c0dd140",
     "empty/chrome": "2e576ea7d76b1582b5aed1b9bc4e6792f74a8379f9d21f33ec84ddca545478a4",
 }

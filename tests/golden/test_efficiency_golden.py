@@ -14,9 +14,9 @@ GOLDEN = {
     "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
     "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
     "seeded/main": "25f0a842b84a4bdcc2bb96b8d6690129d8f83be794752722792e6968cea4af1d",
-    "seeded/chrome": "7a3bcff265d9a1ca720fa41f0f7637468ae825f0ae4ff3c39a745b59fd8d93fc",
+    "seeded/chrome": "349998bffaa7abdb233c885199065e9a592a30a3b24bfe7d232d26c840d3c6de",
     "hostile/main": "25f0a842b84a4bdcc2bb96b8d6690129d8f83be794752722792e6968cea4af1d",
-    "hostile/chrome": "90a3ea12157efa86e5fa07f39110c45c7bbeedf96a8853e62ff685491ae999f3",
+    "hostile/chrome": "449e14eb0e6a9e826ede090355017baf30903203810f67a492185347957c5531",
     "empty/main": "1d7925930a63c3dfee60f517b44c37ab998e9e0bb7b005972c6e2f19ad4cfc33",
     "empty/chrome": "e29f9c314b03a8c630f24395b16e4af5d15a509e3d390dca018466426827f73b",
 }

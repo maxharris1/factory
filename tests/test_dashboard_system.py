@@ -95,8 +95,11 @@ def _strip_fragments(html: str) -> list[str]:
 
 def test_every_health_attention_link_lands_on_its_row(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    html = render_pages(snapshot)["health.html"]
-    fragments = set(_strip_fragments(html))
+    pages = render_pages(snapshot)
+    html = pages["health.html"]
+    assert set(_strip_fragments(_section(_no_script(html), "attention-strip"))) == {
+        "health-linear-listener--box", "components"}
+    fragments = set(_strip_fragments(html)) | set(_strip_fragments(_section(pages["activity.html"], "attention")))
     assert {"health-linear-listener--box", "components", "health-no-waiter-codex"} <= fragments
     ids = _ids(html)
     for fragment in fragments:
@@ -112,7 +115,7 @@ def test_script_keeps_the_rows_the_attention_links_name(tmp_path: Path) -> None:
     drawn = "".join(out["html"][panel] for panel in PANELS)
     ids = _ids(drawn) | set(PANELS)
     fragments = set(_strip_fragments(out["html"]["attention-strip"]))
-    assert {"health-linear-listener--box", "components", "health-no-waiter-codex"} <= fragments
+    assert fragments == {"health-linear-listener--box", "components"}
     for fragment in fragments:
         assert fragment in ids, fragment
 
@@ -939,7 +942,7 @@ def _browse(tmp_path: Path, snapshot: dict, *, phone: bool = False, script: bool
 
 LINKS = {
     "drift": (_snapshot, {"health.html#health-linear-listener--box", "#broken-health-linear-listener--box",
-                          "health.html#health-no-waiter-codex", "health.html#components",
+                          "health.html#components",
                           "health.html#drift"}),
     "healthy": (_healthy, {"health.html#components", "health.html#drift", "health.html#health"}),
 }
