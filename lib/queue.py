@@ -19,6 +19,10 @@ A handoff that `orch job done` finds does not fit its job (lib/handoff_check.py,
 #191) is recorded by record_invalid_handoff: a `submitted-invalid` job event
 each time, one `submitted-invalid` needs_attention flag per ticket, and the
 MAX_INVALID_HANDOFFS-th one fails the job for T6.
+
+The bulky keys of a job's detail live in a file beside the database
+(lib/job_detail.py, #653): enqueue writes it, and every Job read merges it
+back, so callers pass the connection the row came from.
 """
 
 from __future__ import annotations
@@ -228,6 +232,7 @@ class SQLiteJobQueue:
             raise QueueError("dedupe_key must not be empty")
         job_id = uuid.uuid4().hex
         now = self.now()
+        detail, spill = job_detail.split(request.detail)
         connection.execute(
             """
             INSERT OR IGNORE INTO jobs (
@@ -248,7 +253,7 @@ class SQLiteJobQueue:
                 request.generation,
                 request.attempt,
                 request.head,
-                request.detail,
+                detail,
                 now,
                 now,
             ),
@@ -258,6 +263,8 @@ class SQLiteJobQueue:
             (dedupe_key,),
         ).fetchone()
         assert row is not None
+        if spill is not None and row["id"] == job_id:
+            job_detail.write(job_detail.root(connection), job_id, spill)
         return _job(row, connection)
 
     def claim(

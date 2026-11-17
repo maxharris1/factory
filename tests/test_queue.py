@@ -1,13 +1,16 @@
 import inspect
+import json
 import sqlite3
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
+from lib import job_detail
 from lib.dispatcher import Dispatcher
 from lib import queue as queue_module
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -525,3 +528,94 @@ def test_queued_timeout_fails_closed_after_a_same_tick_claim(tmp_path: Path) -> 
 
     assert queue.mark_timed_out(stale) is False
     assert [job.state for job in queue.outstanding()] == ["running"]
+
+
+def _bulky_detail(size: int = 100_000) -> str:
+    return json.dumps(
+        {
+            "evidence": {"criteria": {"text": "c" * size}},
+            "instruction": "failed: pytest",
+            "plan_text": "Plan.",
+            "resume": True,
+            "round": "2/3",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _raw_detail(path: Path, job_id: str) -> str:
+    with sqlite3.connect(path) as connection:
+        return connection.execute("SELECT detail FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+
+
+def test_bulky_detail_keys_live_in_a_file_and_claim_returns_the_full_detail(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    queue = make_queue(path, [10.0])
+    detail = _bulky_detail()
+    job = queue.enqueue(replace(request(), detail=detail), dedupe_key="build")
+
+    raw = _raw_detail(path, job.id)
+    assert len(raw) < 4096
+    assert json.loads(raw) == {
+        "resume": True,
+        "round": "2/3",
+        "spilled": ["evidence", "instruction", "plan_text"],
+    }
+    assert (tmp_path / "job-detail" / f"{job.id}.json").is_file()
+    assert job.request.detail == detail
+    claimed = queue.claim("claude")
+    assert claimed is not None and claimed.request.detail == detail
+
+
+def test_a_retry_copy_of_a_merged_detail_spills_again_and_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    queue = make_queue(path, [10.0])
+    first = queue.enqueue(replace(request(), detail=_bulky_detail()), dedupe_key="build")
+    copy = queue.enqueue(replace(request(), detail=first.request.detail), dedupe_key="retry")
+
+    assert json.loads(_raw_detail(path, copy.id)) == json.loads(_raw_detail(path, first.id))
+    assert copy.request.detail == first.request.detail
+
+
+def test_a_deduped_enqueue_writes_no_second_file(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    queue = make_queue(path, [10.0])
+    first = queue.enqueue(replace(request(), detail=_bulky_detail()), dedupe_key="build")
+    again = queue.enqueue(replace(request(), detail=_bulky_detail(10)), dedupe_key="build")
+
+    assert again.id == first.id
+    assert again.request.detail == _bulky_detail()
+    assert [item.name for item in (tmp_path / "job-detail").iterdir()] == [f"{first.id}.json"]
+
+
+def test_small_and_plain_text_detail_stays_in_the_row(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    queue = make_queue(path, [10.0])
+    small = queue.enqueue(replace(request(), detail='{"round": "1/3"}'), dedupe_key="small")
+    plain = queue.enqueue(replace(request(), detail="stuck: no handoff"), dedupe_key="plain")
+
+    assert _raw_detail(path, small.id) == '{"round": "1/3"}'
+    assert _raw_detail(path, plain.id) == "stuck: no handoff"
+    assert (small.request.detail, plain.request.detail) == ('{"round": "1/3"}', "stuck: no handoff")
+    assert not (tmp_path / "job-detail").exists()
+
+
+def test_a_missing_detail_file_degrades_to_the_slim_row(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    queue = make_queue(path, [10.0])
+    job = queue.enqueue(replace(request(), detail=_bulky_detail()), dedupe_key="build")
+    (tmp_path / "job-detail" / f"{job.id}.json").unlink()
+
+    claimed = queue.claim("claude")
+    assert claimed is not None
+    assert json.loads(claimed.request.detail or "") == {"resume": True, "round": "2/3"}
+
+
+def test_a_spilled_detail_without_a_database_directory_fails_closed() -> None:
+    slim, spill = job_detail.split(_bulky_detail())
+    assert spill is not None
+    with pytest.raises(job_detail.JobDetailError, match="no database directory"):
+        job_detail.load(None, "job-1", slim)
+    assert job_detail.load(None, "job-1", '{"round": "1/3"}') == '{"round": "1/3"}'
+
