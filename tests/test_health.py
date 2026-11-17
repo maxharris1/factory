@@ -32,7 +32,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
-from tests.pool_helpers import write_target_machines
+from tests.pool_helpers import LOCAL_BOX_MACHINES, write_target_machines
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
@@ -2129,7 +2129,7 @@ def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
         "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
         f"  public_url: {TUNNEL_URL}\n  tunnel_alert_minutes: 30\n"
     )
-    args = ["--db", str(db), "--orch", str(config)]
+    args = ["--db", str(db), "--orch", str(config), "--machines", str(LOCAL_BOX_MACHINES)]
 
     out = io.StringIO()
     assert health.main([*args, "--json"], stdout=out, clock=lambda: NOW,
