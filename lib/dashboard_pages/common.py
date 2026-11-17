@@ -107,7 +107,7 @@ CSS_TAIL = """\
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue{grid-column:1/-1}}
-@media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
+@media (max-width:640px){.top-row{padding:8px 14px}main{padding:14px 12px 24px;gap:12px}
 .topbar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
@@ -154,6 +154,7 @@ SCRIPT_HEAD = r"""
   var generated = Number(body.getAttribute('data-generated')) || 0;
   function byId(id) { return document.getElementById(id); }
   var lastOk = 0;
+  var accepted = 0;
   var shownAt = Date.now();
   var everOk = false;
   var resuming = false;
@@ -446,9 +447,10 @@ SCRIPT_TAIL = r"""
     return publish > 0 ? ((h.thresholds || {}).stale_beats || 3) * publish : STALE_SECONDS;
   }
   function freshness() {
-    if (!everOk) return 'boot';
+    if (!everOk && !failures) return 'boot';
     if (resuming) return 'paused';
     if (Date.now() - Math.max(lastOk, shownAt) > LINK_LOST_MS) return 'lost';
+    if (!everOk) return 'boot';
     return since() > staleSeconds() ? 'stale' : 'live';
   }
   function publishedAt() { return ET.format(new Date(generated * 1000)) + ' ET'; }
@@ -506,7 +508,7 @@ SCRIPT_TAIL = r"""
       }
       var moved = FRESH[state].band !== (FRESH[freshState] || FRESH.boot).band;
       freshState = state;
-      if (latest && moved) { renderBand(latest); PX.bind(); }
+      if (moved) { renderBand(latest); PX.bind(); }
       freshBar(state, age);
       statusAge(state, age);
     }
@@ -526,6 +528,7 @@ SCRIPT_TAIL = r"""
   function accept(d) {
     if (!d || typeof d !== 'object' || d.schema !== 'factory-dashboard/v1') { failed(); return; }
     lastOk = Date.now();
+    accepted += 1;
     everOk = true;
     resuming = false;
     failures = 0;

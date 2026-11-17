@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,9 +21,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import lib.dashboard_page as page
+from lib.attention import ensure_table
 from lib.dashboard import collect_snapshot, render_pages
 from lib.health import CODE_COMPONENTS
-from tests.test_dashboard import NOW, seeded
+from tests.test_dashboard import NOW, add_ticket, make_db, seeded
 from tests import test_dashboard_activity as activity
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_system as system
@@ -71,33 +73,299 @@ def _segments(snapshot: dict) -> dict[str, dict]:
 # --- 1. the attention strip ------------------------------------------------------------
 
 
-def test_the_strip_lists_exactly_the_badge_items_on_every_page(base: dict) -> None:
-    items = base["attention"]["items"]
-    assert base["attention"]["count"] == len(items) == 3
-    for name, html in render_pages(base).items():
-        strip = _section(_no_script(html), "attention-strip")
-        assert " hidden" not in strip[: strip.index(">")], name
-        assert re.search(r'<b id="attention-count">3</b><span> need attention</span>', strip), name
-        assert 'href="activity.html#attention"' in strip
-        rows = re.findall(
-            r'<div class="attn-item" data-attn="[^"]+"><span class="chip ([a-z]+)">([^<]+)</span>'
-            r'<a class="attn-who" href="([^"]+)">([^<]+)</a><span class="attn-what">([^<]*)</span></div>',
-            strip,
-        )
-        assert [(kind, who, what) for _, kind, _, who, what in rows] == [
-            ("stuck", "aut0#AUT-7", "stuck: job-timeout"),
-            ("overdue", "cleffy#14", "cursor fix running, no heartbeat for 2h 00m"),
-            ("paused", "tracy-harris-coaching#5", "waiting-max (clarify)"),
-        ]
-        assert [href for _, _, href, _, _ in rows] == ["job.html", "job.html#job-r-cursor", "job.html"]
-        assert [cls for cls, *_ in rows] == ["bad", "bad", "warn"]
+SYNTHETIC = ["stale", "down", "stale", "no-waiter", "down", "paused", "dead", "stale", "down", "stale", "health",
+             "needs-attention", "stale"]
+COMPONENT_KINDS = {"down", "no-waiter", "health"}
 
 
-def test_one_item_reads_needs(base: dict) -> None:
-    one = copy.deepcopy(base)
-    one["attention"] = {"count": 1, "items": base["attention"]["items"][:1]}
-    strip = _section(render_pages(one)["index.html"], "attention-strip")
-    assert "<b id=\"attention-count\">1</b><span> needs attention</span>" in strip
+def _synthetic(kind: str, i: int) -> dict:
+    if kind in COMPONENT_KINDS:
+        return {"kind": kind, "repo": "", "ticket_id": "", "component": f"poller @ dev{i}",
+                "link": "health.html#health-poller-box", "detail": f"{kind} for {i}m"}
+    return {"kind": kind, "repo": "maxharris1/cleffy", "ticket_id": str(100 + i), "detail": f"{kind} {i}"}
+
+
+def _items(base: dict, count: int) -> list[dict]:
+    seeded_items = copy.deepcopy(base["attention"]["items"])
+    extra = [_synthetic(SYNTHETIC[i % len(SYNTHETIC)], i) for i in range(max(0, count - len(seeded_items)))]
+    return (seeded_items + extra)[:count]
+
+
+def _with(base: dict, items: list[dict]) -> dict:
+    out = copy.deepcopy(base)
+    out["attention"] = {"count": len(items), "items": items}
+    return out
+
+
+WORST = [("stuck", "aut0#AUT-7", "job.html"), ("overdue", "cleffy#14", "job.html#job-r-cursor")]
+STRIPS = {
+    1: ([("1 stuck", "bad")], None, "1 stuck"),
+    2: ([("1 stuck", "bad"), ("1 overdue", "bad")], None, "1 stuck · 1 overdue"),
+    3: ([("1 stuck", "bad"), ("1 overdue", "bad"), ("1 paused", "warn")], "+1 more →", "1 stuck · 1 overdue · +1"),
+    16: ([("3 down", "bad"), ("1 stuck", "bad"), ("1 overdue", "bad"), ("1 no-waiter", "bad"), ("1 dead", "bad"),
+          ("1 health", "bad"), ("1 needs-attention", "bad"), ("5 stale", "warn"), ("2 paused", "warn")],
+         "+14 more →", "5 stale · 3 down · +8"),
+}
+ITEM = re.compile(
+    r'<div class="attn-item" data-attn="[^"]+"><span class="chip ([a-z-]+)">([^<]+)</span>'
+    r'<a class="attn-who" href="([^"]+)">([^<]+)</a><span class="attn-what">[^<]*</span></div>')
+
+
+@pytest.mark.parametrize("name", PAGES)
+@pytest.mark.parametrize("count", sorted(STRIPS))
+def test_the_strip_is_one_row_with_a_tally_and_the_worst_two(base: dict, count: int, name: str) -> None:
+    snapshot = _with(base, _items(base, count))
+    html = render_pages(snapshot)[name]
+    strip = _section(_no_script(html), "attention-strip")
+    head, inner = strip[: strip.index(">") + 1], _inner(html, "attention-strip")
+    assert head == '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention">'
+    need = "needs" if count == 1 else "need"
+    tally, more, short = STRIPS[count]
+    if name == "activity.html":
+        assert inner == (
+            f'<div class="attn-here"><span class="attn-blk" aria-hidden="true">'
+            f'{page.px_strip("attention", state="attention", height=16)}</span>'
+            f'<a class="attn-count" href="#attention"><b id="attention-count">{count}</b><span> {need} attention</span></a>'
+            '<span class="attn-below">listed below</span></div>')
+    else:
+        row, phone = re.fullmatch(r'(<div class="attn-row">.*</div>)(<a class="attn-phone".*</a>)', inner).groups()
+        assert row.startswith(
+            '<div class="attn-row"><div class="attn-head"><span class="attn-blk" aria-hidden="true">'
+            f'{page.px_strip("attention", state="attention", height=16)}</span>'
+            f'<a class="attn-count" href="activity.html#attention"><b id="attention-count">{count}</b>'
+            f'<span> {need} attention</span></a></div><div class="attn-tally">')
+        spans = '<span aria-hidden="true">·</span>'.join(
+            f'<span class="attn-n {tone}">{text}</span>' for text, tone in tally)
+        assert f'<div class="attn-tally">{spans}</div><span class="attn-rule" aria-hidden="true"></span>' in row
+        assert [(kind, who, href) for _, kind, href, who in ITEM.findall(row)] == WORST[:count]
+        assert [tone for tone, *_ in ITEM.findall(row)] == ["bad"] * min(2, count)
+        if more is None:
+            assert "attn-more" not in row
+            assert row.endswith("</div></div>")
+        else:
+            assert row.endswith(f'<a class="attn-more" href="activity.html#attention">{more}</a></div>')
+        assert f'<b>{count} {need} attention</b><span class="attn-short">{short}</span>' in phone
+
+
+@needs_node
+@pytest.mark.parametrize("name", PAGES)
+@pytest.mark.parametrize("count", sorted(STRIPS))
+def test_the_script_strip_is_the_server_strip_at_every_count(tmp_path: Path, base: dict, count: int, name: str) -> None:
+    snapshot = _with(base, _items(base, count))
+    out = _script(tmp_path, snapshot, name)
+    assert out["html"]["attention-strip"] == _inner(render_pages(snapshot)[name], "attention-strip")
+    assert out["hidden"]["attention-strip"] is False
+
+
+def test_the_seeded_lanes_strip_shows_the_two_bad_items_before_the_warn(base: dict) -> None:
+    strip = _inner(render_pages(base)["index.html"], "attention-strip")
+    assert [(kind, who, href) for _, kind, href, who in ITEM.findall(strip)] == WORST
+    assert "tracy-harris-coaching#5" not in strip
+    assert '<a class="attn-more" href="activity.html#attention">+1 more →</a>' in strip
+
+
+def _kinds(*kinds: str, ages: list | None = None) -> list[dict]:
+    rows = [{"kind": kind, "repo": "o/r", "ticket_id": str(i), "detail": ""} for i, kind in enumerate(kinds)]
+    for row, age in zip(rows, ages or []):
+        if age is not None:
+            row["age_seconds"] = age
+    return rows
+
+
+def _ids_of(rows: list[dict]) -> list[str]:
+    return [row["ticket_id"] for row in rows]
+
+
+def test_the_tally_puts_bad_before_warn_then_the_larger_count_first() -> None:
+    model = page.strip_model(_kinds("stale", "stale", "stale", "stuck", "down", "down"))
+    assert model["tally"] == [("down", 2, "bad"), ("stuck", 1, "bad"), ("stale", 3, "warn")]
+    assert (model["count"], model["need"], model["more"]) == (6, " need attention", 4)
+
+
+def test_a_warn_item_listed_first_loses_to_a_later_bad_item() -> None:
+    assert _ids_of(page.strip_model(_kinds("paused", "stale", "stuck"))["worst"]) == ["2", "0"]
+
+
+def test_aged_items_order_oldest_first_within_a_tone() -> None:
+    rows = _kinds("stuck", "stuck", "stuck", "paused", ages=[60, None, 600, 9000])
+    assert _ids_of(page.strip_model(rows)["worst"]) == ["2", "0"]
+    rows = _kinds("stuck", "stuck", "stuck", ages=[True, float("nan"), 5])
+    assert _ids_of(page.strip_model(rows)["worst"]) == ["2", "0"]
+
+
+def test_without_ages_the_worst_keep_snapshot_order() -> None:
+    assert _ids_of(page.strip_model(_kinds("stale", "down", "dead", "stuck"))["worst"]) == ["1", "2"]
+    assert page.strip_model(_kinds("stale"))["need"] == " needs attention"
+
+
+def test_short_and_label_read_the_artboard_mix() -> None:
+    model = page.strip_model(_kinds("down", "stuck", "no-waiter", "stale", "down"))
+    assert model["short"] == "2 down · 1 stuck · +2"
+    assert model["label"] == "5 need attention: 2 down, 1 stuck, 1 no-waiter, 1 stale. Open Activity."
+    one = page.strip_model(_kinds("stale", "stale"))
+    assert (one["short"], one["label"]) == ("2 stale", "2 need attention: 2 stale. Open Activity.")
+
+
+@needs_node
+def test_the_phone_tally_names_the_two_largest_kinds_in_both_renders(tmp_path: Path, base: dict) -> None:
+    snapshot = _with(base, _kinds("stuck", "overdue", "paused", "paused", "paused"))
+    strip = _inner(render_pages(snapshot)["index.html"], "attention-strip")
+    assert '<span class="attn-short">3 paused · 1 stuck · +1</span>' in strip
+    assert 'aria-label="5 need attention: 1 stuck, 1 overdue, 3 paused. Open Activity."' in strip
+    assert _script(tmp_path, snapshot)["html"]["attention-strip"] == strip
+
+
+def test_activity_shows_the_count_only_and_holds_the_anchor(base: dict) -> None:
+    html = _no_script(render_pages(_with(base, _items(base, 16)))["activity.html"])
+    strip = _section(html, "attention-strip")
+    assert '<a class="attn-count" href="#attention">' in strip
+    assert "listed below" in strip
+    assert 'data-px-key="attention"' in strip
+    for gone in ("attn-n", "attn-item", "attn-more", "attn-phone", "attn-row"):
+        assert gone not in strip, gone
+    assert 'id="attention"' in html
+
+
+def test_the_phone_line_is_one_link_to_activity(base: dict) -> None:
+    html = render_pages(_with(base, _items(base, 3)))["index.html"]
+    phone = re.search(r'<a class="attn-phone".*?</a>', _inner(html, "attention-strip")).group(0)
+    assert phone == (
+        '<a class="attn-phone" href="activity.html#attention" '
+        'aria-label="3 need attention: 1 stuck, 1 overdue, 1 paused. Open Activity.">'
+        f'<span class="attn-blk" aria-hidden="true">{page.px_strip("attention-phone", state="attention", height=16)}'
+        '</span><b>3 need attention</b><span class="attn-short">1 stuck · 1 overdue · +1</span>'
+        '<span class="attn-go" aria-hidden="true">→</span></a>')
+
+
+STRIP = """(function () {
+  var strip = document.getElementById('attention-strip');
+  function shown(sel) { var n = strip.querySelector(sel); return n && getComputedStyle(n).display !== 'none' ? n : null; }
+  function box(n) { return n ? n.getBoundingClientRect() : null; }
+  var row = shown('.attn-row'), what = row && row.querySelector('.attn-what'), more = row && row.querySelector('.attn-more');
+  return {strip: box(strip).height,
+          row: row && {fits: row.scrollHeight === row.clientHeight,
+                       centers: new Set([].concat.apply([], [].map.call(row.children, function (n) {
+                         return getComputedStyle(n).display === 'contents' ? [].slice.call(n.children) : [n];
+                       })).map(function (n) {
+                         var b = n.getBoundingClientRect(); return Math.round(b.top + b.bottom); })).size},
+          more: more && box(more).right,
+          tally: row && [].map.call(row.querySelectorAll('.attn-tally'), function (n) { return n.scrollWidth <= n.clientWidth; })[0],
+          ellipsis: what && [what.scrollWidth > what.clientWidth, getComputedStyle(what).textOverflow],
+          details: row && [].map.call(row.querySelectorAll('.attn-what'), function (n) { return box(n).width; }),
+          items: row && [].map.call(row.querySelectorAll('.attn-item'), function (item) {
+            var r = box(row), chip = box(item.querySelector('.chip')), who = item.querySelector('.attn-who'),
+                at = box(who), detail = box(item.querySelector('.attn-what'));
+            var hit = document.elementFromPoint((at.left + at.right) / 2, (at.top + at.bottom) / 2);
+            var text = who.firstChild, last = document.createRange();
+            last.setStart(text, text.length - 1);
+            last.setEnd(text, text.length);
+            var end = last.getBoundingClientRect();
+            function inside(b) { return b.width > 0 && b.left >= r.left && b.right <= r.right; }
+            return {chip: inside(chip), who: inside(at) && end.left >= at.left && end.right <= at.right + 0.5,
+                    clickable: !!hit && who.contains(hit), detail: inside(detail) && detail.width >= 20,
+                    whole: who.scrollWidth <= who.clientWidth};
+          }),
+          phone: shown('.attn-phone') && box(shown('.attn-phone')).height,
+          here: shown('.attn-here') && box(shown('.attn-here')).height,
+          sideways: document.documentElement.scrollWidth > innerWidth,
+          moving: document.getAnimations().filter(function (a) {
+            return a.effect && a.effect.target && strip.contains(a.effect.target); }).length};
+})()"""
+
+
+@needs_chrome
+def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: dict) -> None:
+    browser = Browser()
+    try:
+        for count in (1, 2, 3, 16, 50):
+            snapshot = _with(base, _items(base, count))
+            snapshot["attention"]["items"][0]["detail"] = "a detail far too long for one row " * 12
+            html = _page_with_status_stub(_now(snapshot), "index.html")
+            for width in (700, 1100, 1440):
+                browser.open(html, width)
+                got = browser.eval(STRIP)
+                where = (count, width)
+                assert got["strip"] == 36, where
+                assert got["row"] == {"fits": True, "centers": 1}, where
+                assert got["phone"] is None and got["here"] is None, where
+                assert got["ellipsis"] == [True, "ellipsis"], where
+                drawn = {"chip": True, "who": True, "clickable": True, "detail": True, "whole": True}
+                assert got["items"] == [drawn] * min(2, count), f"each worst item shows its chip, subject and detail: {where}"
+                if count > 2:
+                    assert got["more"] <= width, where
+                if not got["tally"]:
+                    assert max(got["details"]) <= 40, f"the tally is cut only once each detail is at its floor: {where}"
+                if width >= 1440 and count <= 16:
+                    assert got["tally"] is True, f"a long detail must not squeeze the tally: {where}"
+                assert (got["sideways"], got["moving"]) == (False, 0), where
+            for width in (375, 699):
+                browser.open(html, width)
+                got = browser.eval(STRIP)
+                assert (got["row"], got["phone"], got["strip"]) == (None, 36, 36), (count, width)
+                assert (got["sideways"], got["moving"]) == (False, 0), (count, width)
+        html = _page_with_status_stub(_now(_with(base, _items(base, 16))), "activity.html")
+        for width in (375, 1440):
+            browser.open(html, width)
+            got = browser.eval(STRIP)
+            assert (got["here"], got["strip"], got["row"], got["phone"]) == (36, 36, None, None), width
+            assert got["moving"] == 0, width
+    finally:
+        browser.close()
+
+
+COLLECTED = {
+    "two waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, "paused") for t in ("5", "6")],
+    "three waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, "paused") for t in ("5", "6", "7")],
+    "fifty with two stuck": [("maxharris1/a-repository-name-longer-than-most", t, "stuck") for t in ("1201", "1202")]
+                            + [("maxharris1/tracy-harris-coaching", str(t), "paused") for t in range(100, 148)],
+    "three ship-failed tickets": [("maxharris1/tracy-harris-coaching", t, "ship-failed") for t in ("5", "6", "7")],
+    "fifty ship-failed tickets": [("maxharris1/a-repository-name-longer-than-most", str(t), "ship-failed")
+                                  for t in range(1200, 1250)],
+}
+
+
+def _collected(tmp_path: Path, tickets: list[tuple[str, str, str]]) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        ensure_table(connection)
+        for repo, ticket, how in tickets:
+            if how == "ship-failed":
+                add_ticket(connection, repo, ticket)
+                connection.execute("INSERT INTO needs_attention VALUES (?, ?, ?, ?, ?)",
+                                   (repo, ticket, "ship-failed", "merge failed", NOW))
+            else:
+                add_ticket(connection, repo, ticket, state="waiting-max", paused_action="clarify",
+                           stuck=int(how == "stuck"), stuck_reason="review loop" if how == "stuck" else None)
+    return _now(collect_snapshot(db, tmp_path / "poller.log", now=NOW))
+
+
+@needs_chrome
+@pytest.mark.parametrize("case", sorted(COLLECTED))
+def test_both_worst_items_stay_inside_the_row_with_long_collected_subjects(tmp_path: Path, case: str) -> None:
+    snapshot = _collected(tmp_path, COLLECTED[case])
+    assert len(snapshot["attention"]["items"]) == len(COLLECTED[case])
+    html = _page_with_status_stub(snapshot, "index.html")
+    browser = Browser()
+    try:
+        for width in (700, 1100, 1440):
+            browser.open(html, width)
+            got = browser.eval(STRIP)
+            where = (case, width)
+            assert got["strip"] == 36, where
+            assert got["row"] == {"fits": True, "centers": 1}, where
+            shown = [{k: v for k, v in item.items() if k != "whole"} for item in got["items"]]
+            drawn = {"chip": True, "who": True, "clickable": True, "detail": True}
+            assert shown == [drawn, drawn], f"both items keep chip, subject end and detail inside the row: {where}"
+            if len(COLLECTED[case]) > 2:
+                assert got["more"] is not None and got["more"] <= width, f"the +N more link stays inside the row: {where}"
+            if not all(item["whole"] for item in got["items"]):
+                assert (got["tally"], max(got["details"]) <= 40) == (False, True), f"subjects are cut last: {where}"
+            if width >= 1440:
+                assert [item["whole"] for item in got["items"]] == [True, True], where
+            assert (got["sideways"], got["moving"]) == (False, 0), where
+    finally:
+        browser.close()
 
 
 def _clear(snapshot: dict) -> dict:
@@ -144,26 +412,25 @@ def _row() -> dict:
 
 @needs_node
 def test_the_script_strip_adds_what_an_overdue_snapshot_ages(tmp_path: Path, base: dict) -> None:
-    """The strip lists the badge's items plus agedHealth's: the writer that
-    went down, or the one overdue-snapshot item when no writer can alert."""
     writer = copy.deepcopy(base)
     writer["health"] = _health_rows(
         {}, {"component": "dashboard", "label": "dashboard @ box", "anchor": "health-dashboard-box"})
     out = _script(tmp_path / "writer", writer, "activity.html", actions=[["advance", 8 * 15 + 1]],
                   ids=BAR + ["attention"])
     assert out["text"]["attention-count"] == "4"
-    strip = out["html"]["attention-strip"]
-    assert strip.count('class="attn-item"') == 4
-    assert ('<span class="chip bad">down</span><a class="attn-who" href="health.html#health-dashboard-box">'
-            "dashboard @ box</a>") in strip
     assert "dashboard @ box" in out["text"]["attention"]
+    out = _script(tmp_path / "writer-lanes", writer, "index.html", actions=[["advance", 8 * 15 + 1]])
+    strip = out["html"]["attention-strip"]
+    assert out["text"]["attention-count"] == "4"
+    assert '<span class="attn-n bad">1 down</span>' in strip
+    assert strip.count('class="attn-item"') == 2
+    assert '<a class="attn-more" href="activity.html#attention">+2 more →</a>' in strip
 
     lone = copy.deepcopy(base)
     lone["health"] = _health_rows({}, publish=None)
     out = _script(tmp_path / "lone", lone, "index.html", actions=[["advance", 3 * 15 + 1]])
     assert out["text"]["attention-count"] == "4"
-    assert ('<span class="chip bad">health</span><a class="attn-who" href="health.html#components">'
-            "health snapshot</a>") in out["html"]["attention-strip"]
+    assert '<span class="attn-n bad">1 health</span>' in out["html"]["attention-strip"]
 
 
 @needs_node
@@ -1020,6 +1287,7 @@ def _ticket_items(snapshot: dict) -> dict:
 
 
 TICKET_HREFS = ["job.html#job-r-codex-", "job.html#job-g-grok-c", "job.html"]
+STRIP_HREFS = TICKET_HREFS[:2]
 
 
 def _strip_hrefs(markup: str) -> list[str]:
@@ -1035,14 +1303,17 @@ def test_strip_ticket_links_follow_the_activity_panel_rule(base: dict) -> None:
     pages = render_pages(snapshot)
     assert _panel_hrefs(_section(pages["activity.html"], "attention")) == TICKET_HREFS
     for name, html in pages.items():
-        assert _strip_hrefs(_section(_no_script(html), "attention-strip")) == TICKET_HREFS, name
+        want = [] if name == "activity.html" else STRIP_HREFS
+        assert _strip_hrefs(_section(_no_script(html), "attention-strip")) == want, name
 
 
 @needs_node
 def test_script_strip_ticket_links_follow_the_activity_panel_rule(tmp_path: Path, base: dict) -> None:
-    out = _script(tmp_path, _ticket_items(base), "activity.html", ids=BAR + ["attention"])
-    assert _strip_hrefs(out["html"]["attention-strip"]) == TICKET_HREFS
+    out = _script(tmp_path / "activity", _ticket_items(base), "activity.html", ids=BAR + ["attention"])
+    assert _strip_hrefs(out["html"]["attention-strip"]) == []
     assert _panel_hrefs(out["html"]["attention"]) == TICKET_HREFS
+    out = _script(tmp_path / "lanes", _ticket_items(base), "index.html")
+    assert _strip_hrefs(out["html"]["attention-strip"]) == STRIP_HREFS
 
 
 FOCUSABLE = re.compile(r'<(a\s[^>]*href=|button\b|input\b|select\b|textarea\b|summary\b|[a-z]+\s[^>]*tabindex="(?!-1)")')
@@ -1101,7 +1372,7 @@ def test_a_redraw_keeps_the_strip_and_status_line_labels(tmp_path: Path, base: d
     later["generated_at_epoch"] += 5
     out = _link_run(tmp_path, base, [["label"], ["poll", later], ["labels"]])
     assert out["steps"][-1]["labels"] == ["Needs attention", "Status line"]
-    assert _strip_hrefs(out["html"]["attention-strip"]) == TICKET_HREFS
+    assert _strip_hrefs(out["html"]["attention-strip"]) == STRIP_HREFS
 
 
 def _visible(markup: str) -> str:
@@ -1322,6 +1593,65 @@ def test_lost_outranks_stale_and_is_announced_on_entry(tmp_path: Path, base: dic
     assert (lost["state"], lost["text"], lost["bar"]["cls"], lost["age"]["cls"]) == (
         "lost", "LINK LOST", "fresh-bar lost", "sl-age lost")
     assert lost["bar"]["say"] == "Cannot reach the dashboard. " + _showing(NOW - STALE_AGE)
+
+
+@needs_node
+def test_polls_that_fail_from_the_first_fetch_show_the_red_bar(tmp_path: Path, base: dict) -> None:
+    snapshot = _aged(base, STALE_AGE)
+    harness = (
+        _fresh_harness()
+        .replace("let failing = false;", "let failing = true;", 1)
+        .replace("body.attrs['data-generated'] = '1800000000.000';",
+                 f"body.attrs['data-generated'] = '{snapshot['generated_at_epoch']:.3f}';", 1)
+    )
+    assert "let failing = true;" in harness and f"'{NOW - STALE_AGE:.3f}'" in harness
+    out = _link_run(tmp_path, snapshot, [["fresh"], ["advance", 7], ["fresh"], ["advance", 1], ["fresh"]],
+                    ids=FRESH_IDS, harness=harness)
+    early, lost, later = [_plain(step["fresh"]) for step in out["steps"] if "fresh" in step]
+    assert (early["state"], early["text"], early["bar"]["hidden"]) == ("boot", "NO LINK · static view", True)
+    assert (lost["state"], lost["link"], lost["text"]) == ("lost", "link lost", "LINK LOST")
+    text = _showing(NOW - STALE_AGE)
+    assert lost["bar"] == {"hidden": False, "cls": "fresh-bar lost", "head": "Cannot reach the dashboard.",
+                           "text": text, "say": "Cannot reach the dashboard. " + text}
+    assert (_tint(lost["band"]), _still(lost["band"])) == (GREY, "true")
+    assert lost["caret"] == page.px_strip("caret", state="link-lost", height=12)
+    assert later["bar"] == lost["bar"], "announced once, not per tick"
+
+
+LOST = """(function () {
+  function shown(n) { return !!n && !n.hidden && n.getClientRects().length > 0; }
+  var bar = document.getElementById('fresh-bar'), band = document.querySelector('#band canvas');
+  var age = document.querySelector('#statusline [data-seg=age]');
+  return {state: document.body.getAttribute('data-fresh'), hidden: document.hidden,
+    link: document.getElementById('link-text').textContent,
+    bar: {shown: shown(bar), cls: bar.className, head: document.getElementById('fresh-head').textContent,
+          text: document.getElementById('fresh-text').textContent},
+    age: {shown: shown(age), cls: age.className, text: age.querySelector('.sl-t').textContent},
+    band: {tint: band.getAttribute('data-tint'), still: band.getAttribute('data-still')}};
+})()"""
+
+
+@needs_chrome
+def test_a_page_whose_polls_never_answer_reads_link_lost_in_a_browser(base: dict) -> None:
+    snapshot = _now(base, STALE_AGE)
+    html = _fresh_page(snapshot).replace("window.__fail = false;", "window.__fail = true;", 1)
+    browser = Browser()
+    try:
+        _open(browser, html, 1440, None)
+        browser.eval("window.__skew = 7000;")
+        deadline = time.monotonic() + 20
+        while browser.eval("document.body.getAttribute('data-fresh')") != "lost":
+            assert time.monotonic() < deadline, browser.eval(LOST)
+            time.sleep(0.05)
+        seen = _plain(browser.eval(LOST))
+    finally:
+        browser.close()
+    assert (seen["state"], seen["hidden"], seen["link"]) == ("lost", False, "LINK LOST")
+    assert seen["bar"] == {"shown": True, "cls": "fresh-bar lost", "head": "Cannot reach the dashboard.",
+                           "text": _showing(snapshot["generated_at_epoch"])}
+    assert (seen["age"]["shown"], seen["age"]["cls"]) == (True, "sl-age lost")
+    assert re.fullmatch(r"as of \d+m \d\ds ago", seen["age"]["text"]), seen["age"]
+    assert seen["band"] == {"tint": GREY, "still": "true"}
 
 
 def _assert_paused(seen: dict) -> None:

@@ -19,13 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from lib.dashboard import render_pages
+from lib.dashboard import RECORDS, render_pages, tickets_json
 from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED
 from lib.dashboard_pages import ticket_detail
 from lib.dashboard_pages.common import duration
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
-from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, needs_node
+from tests.test_dashboard import NOW
+from tests.test_dashboard_activity import HARNESS as POLLING
+from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
 from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
@@ -231,6 +233,7 @@ def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0) ->
         for page, html in render_pages(snapshot).items():
             (site / page).write_text(html, encoding="utf-8")
         (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+        (site / "tickets.json").write_text(tickets_json(snapshot), encoding="utf-8")
 
     class Handler(QuietHandler):
         def do_GET(self) -> None:
@@ -1096,7 +1099,7 @@ def test_without_a_live_ticket_the_page_says_so_and_links_the_board(tmp_path: Pa
     assert '<a href="job.html">Tickets board</a>' in markup, case
     assert "jobpage" not in markup and "<img" not in markup, case
     if address:
-        assert html.escape(address) in markup, case
+        assert f"{html.escape(address)} is not a tracked ticket. " in markup, case
 
 
 @needs_node
@@ -1178,7 +1181,8 @@ KEEP_PLACE = r"""
   row.focus();
   window.scrollTo(0, 240);
   await sleep(50);
-  return {focused: document.activeElement === row, y: window.scrollY};
+  const now = document.activeElement;
+  return {focused: !!(now && now.closest('.runlog') && now.getAttribute('data-visit') === '2'), y: window.scrollY};
 })()"""
 
 AFTER_REDRAW = r"""
@@ -1211,20 +1215,263 @@ def test_a_redraw_keeps_focus_and_scroll_on_the_ticket_page(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
-def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path) -> None:
-    snapshot = _snapshot(tmp_path)
+@pytest.mark.parametrize("kind", ["running", "queued", "idle", "shipped", "stopped"])
+def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path, kind: str) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
     _row(snapshot, "g-grok-c").update(source="#5310", pr="5770", round="2/3")
+    address = {**{k: a for k, (a, _) in LIVE.items()}, **RECORD}[kind]
     server = _serve(tmp_path, {"fixture": snapshot})
     chrome = _Chrome(tmp_path / "profile")
-    widths = {}
     try:
         chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=375, height=800, deviceScaleFactor=1,
                     mobile=True)
-        for kind, (address, _) in LIVE.items():
-            _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/ticket.html#t={_quote(address)}",
-                  f"document.querySelector('article.ticketpage[data-ticket=\"{address}\"] canvas.jd-journey')")
-            widths[kind] = chrome.run("document.documentElement.scrollWidth")
+        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/ticket.html#t={_quote(address)}",
+              f"document.querySelector('article.ticketpage[data-ticket=\"{address}\"] canvas.jd-journey')")
+        width = chrome.run("document.documentElement.scrollWidth")
     finally:
         chrome.close()
         server.shutdown()
-    assert widths == {"running": 375, "queued": 375}
+    assert width == 375
+
+
+SHIPPED = "maxharris1/cleffy#88"
+RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/aut0#AUT-7", "shipped": SHIPPED}
+NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
+                   "shipped": ["Run log", "Journey", "Full state chart"],
+                   "stopped": ["Run log", "Journey", "Full state chart"]}
+OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": SECTIONS, "maxharris1/cleffy#40": SECTIONS,
+         **{address: NO_JOB_SECTIONS[kind] for kind, address in RECORD.items()}}
+POLLED = POLLING.replace(
+    "    } else if (kind === 'poll') {",
+    "    } else if (kind === 'release') {\n"
+    "      heldTickets.splice(0).forEach(release => release());\n"
+    "      await new Promise(resolve => realSetTimeout(resolve, 50));\n"
+    "    } else if (kind === 'count') {\n"
+    "      steps.push({tickets: ticketFetches});\n"
+    "    } else if (kind === 'poll') {",
+)
+
+
+def _visit(state: str, who: str, at: float, took: float | None, reason: str | None, current: bool = False) -> dict:
+    return {"state": state, "who": who, "started_at": at, "duration_seconds": took, "time_known": True,
+            "off_chart": False, "reason": reason, "current": current}
+
+
+def _with_shipped(snapshot: dict) -> dict:
+    visits = [_visit("intake", "script", NOW - 9000, 600, None),
+              _visit("building", "codex", NOW - 8400, 4800, "plan approved"),
+              _visit("merged", "script", NOW - 3600, None, "PR merged", current=True)]
+    snapshot[RECORDS][SHIPPED] = {
+        "repo": "maxharris1/cleffy", "ticket_id": "88", "state": "merged", "state_age_seconds": 3600, "round": 2,
+        "hops": 2, "off_chart_count": 0, "terminal": True, "hops_to_shipped": 0, "all_durations_known": False,
+        "visits": visits, "stopped": None, "jobs": [],
+        "shipped": {"at": NOW - 3600, "how": "merged", "intake_to_ship_seconds": 5400, "revise_rounds": 2, "jobs": 3,
+                    "tokens_in": None, "tokens_out": None, "cost_usd": None},
+    }
+    snapshot["tickets"].append({**snapshot["tickets"][-1], "repo": "maxharris1/cleffy", "ticket_id": "88", "source": "#88",
+                                "pr": "91", "state": "merged", "round": 2})
+    return snapshot
+
+
+def _unloaded(snapshot: dict) -> dict:
+    return {key: value for key, value in snapshot.items() if key != RECORDS}
+
+
+def _polled(tmp_path: Path, snapshot: dict, address: str, actions: list) -> dict:
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    return run_harness(tmp_path, POLLED, script, snapshot, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
+                       tickets_json(snapshot))
+
+
+def test_the_fixture_tracks_the_tickets_these_tests_open(tmp_path: Path) -> None:
+    assert set(_with_shipped(_snapshot(tmp_path))[RECORDS]) == set(OPENS)
+
+
+@needs_node
+@pytest.mark.parametrize("address", OPENS)
+def test_every_tracked_ticket_opens_in_both_renders(tmp_path: Path, address: str) -> None:
+    views = _both(tmp_path, _with_shipped(_snapshot(tmp_path)), address)
+    assert views["script"] == views["server"]
+    assert views["server"].startswith(f'<article class="jobpage ticketpage" data-ticket="{html.escape(address)}">')
+    assert _sections(views["server"]) == OPENS[address]
+
+
+@needs_node
+def test_a_record_opens_by_its_own_key_and_a_shared_address_by_the_first_key(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    idle = RECORD["idle"]
+    twin = idle + "~2"
+    snapshot[RECORDS][twin] = {**copy.deepcopy(snapshot[RECORDS][RECORD["stopped"]]),
+                               "repo": "maxharris1/tracy-harris-coaching", "ticket_id": "5"}
+    for address, key, kind in ((twin, twin, "stopped"), (idle, idle, "idle"),
+                               ("MaxHarris1/Tracy-Harris-Coaching#5", idle, "idle")):
+        views = _both(tmp_path, snapshot, address)
+        assert views["script"] == views["server"], address
+        assert f'data-ticket="{key}"' in views["server"], address
+        assert _sections(views["server"]) == NO_JOB_SECTIONS[kind], address
+
+
+@needs_node
+def test_a_no_job_ticket_shows_a_loading_panel_until_its_record_arrives(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = RECORD["idle"]
+    out = _polled(tmp_path, snapshot, address, [["hold"], ["snap", ["ticketview"]], ["release"]])
+    loading = out["steps"][0]["snap"]["ticketview"]
+    assert loading == _ticket_server(_unloaded(snapshot), address)
+    assert loading.startswith('<section class="panel">')
+    assert _h1s(loading) == ["Loading ticket"]
+    assert f"Loading ticket {address}… " in loading
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, address)
+    assert out["html"]["ticketview"].startswith(f'<article class="jobpage ticketpage" data-ticket="{address}">')
+
+
+@needs_node
+def test_a_live_ticket_draws_at_once_while_the_records_load(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = LIVE["running"][0]
+    out = _polled(tmp_path, snapshot, address, [["hold"], ["count"]])
+    assert out["steps"] == [{"tickets": 1}]
+    assert out["html"]["ticketview"] == _ticket_server(_unloaded(snapshot), address) == _ticket_server(snapshot, address)
+
+
+@needs_node
+def test_the_ticket_page_fetches_tickets_json_once_per_snapshot(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    later = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
+    polls = [["count"], ["poll", snapshot], ["count"], ["poll", later], ["count"]]
+    held = [["hold"], ["poll", later], ["count"], ["release"], ["count"]]
+    counts = {name: [step["tickets"] for step in _polled(tmp_path, snapshot, RECORD["idle"], actions)["steps"]]
+              for name, actions in (("polls", polls), ("held", held))}
+    assert counts == {"polls": [1, 1, 2], "held": [1, 2]}
+
+
+SKEWED = (POLLED.replace("JSON.parse(ticketsText)", "JSON.parse(publishedTickets)")
+          .replace("let ticketFetches = 0;", "let ticketFetches = 0;\nlet publishedTickets = ticketsText;")
+          .replace("    } else if (kind === 'poll') {",
+                   "    } else if (kind === 'publish') {\n      publishedTickets = arg;\n    } else if (kind === 'poll') {"))
+
+
+@needs_node
+def test_records_older_than_the_status_load_again_on_each_poll_until_the_ticket_arrives(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = RECORD["idle"]
+    status = _unloaded(snapshot)
+    older = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] - 5,
+             RECORDS: {key: record for key, record in snapshot[RECORDS].items() if key != address}}
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+
+    def run(target: str, actions: list) -> dict:
+        return run_harness(tmp_path / str(len(actions)), SKEWED, script, status, "ticket", TICKET_IDS, actions,
+                           "#t=" + _quote(target), tickets_json(older))
+
+    out = run(address, [["snap", ["ticketview"]], ["count"], ["poll", status], ["snap", ["ticketview"]], ["count"],
+                        ["publish", tickets_json(snapshot)], ["poll", status], ["count"], ["poll", status], ["count"]])
+    loading = _ticket_server(status, address)
+    assert _h1s(loading) == ["Loading ticket"]
+    assert [step["snap"]["ticketview"] for step in out["steps"] if "snap" in step] == [loading, loading]
+    assert [step["tickets"] for step in out["steps"] if "tickets" in step] == [1, 2, 3, 3]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, address)
+
+    untracked = "owner/nowhere#1"
+    out = run(untracked, [["poll", status], ["poll", status], ["count"]])
+    assert out["steps"] == [{"tickets": 1}]
+    assert _h1s(out["html"]["ticketview"]) == ["Ticket not found"]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, untracked)
+
+
+NO_JOB = {
+    "idle": (lambda record: None, ("static", "#ff9e64"),
+             [("no reading", "in waiting-max"), ("0", "revise round"), ("1 hops", "1 off-chart")]),
+    "idle elsewhere": (lambda record: (record.update(state="building", state_age_seconds=4000),
+                                       record["visits"][-1].update(state="building")),
+                       (PX_STATE["held"]["effect"], PX_STATE["held"]["tint"]),
+                       [("1h 06m", "in building"), ("0", "revise round"), ("1 hops", "1 off-chart")]),
+}
+
+
+@needs_node
+@pytest.mark.parametrize("case", NO_JOB)
+def test_a_ticket_with_no_job_holds_still_and_leads_with_its_time_in_state(tmp_path: Path, case: str) -> None:
+    change, strip, tiles = NO_JOB[case]
+    snapshot = _snapshot(tmp_path)
+    change(snapshot[RECORDS][RECORD["idle"]])
+    for render, markup in _both(tmp_path, snapshot, RECORD["idle"]).items():
+        assert _sections(markup) == NO_JOB_SECTIONS["idle"], render
+        assert 'id="liverun-' not in markup, render
+        px = _hero_px(markup)
+        assert (px["data-px"], px["data-tint"], px["data-still"]) == (*strip, "true"), render
+        assert _ticket_tiles(markup) == tiles, render
+        assert _h1s(markup) == ["tracy-harris-coaching#5"], render
+        assert _tracker(markup) == "GitHub PR #5", render
+        assert 'class="bot ' not in markup, render
+
+
+def _notes(markup: str) -> list[str]:
+    log = re.search(r'<ol class="runlog">(.*?)</ol>', markup, re.S).group(1)
+    return re.findall(r'<span class="note">([^<]*)</span>', log)
+
+
+ENDED = {
+    "shipped": (lambda record: None, {"data-px": "off", "data-done": "true"},
+                [("1h 00m", "in merged"), ("2", "revise round"), ("2 hops", "0 off-chart")],
+                ["ticket arrives", "plan approved", "PR merged"]),
+    "stopped": (lambda record: None, {"data-px": PX_STATE["stuck"]["effect"], "data-tint": PX_STATE["stuck"]["tint"]},
+                [("no reading", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
+                ["ticket arrives", "no direct transition on the chart"]),
+    "stopped at a known time": (lambda record: record["stopped"].update(at=NOW - 5400), {},
+                                [("1h 30m", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
+                                ["ticket arrives", "no direct transition on the chart"]),
+    "stopped with no round": (lambda record: record.update(round=None), {},
+                              [("no reading", "stopped"), ("no round", "revise round"), ("1 hops", "1 off-chart")],
+                              ["ticket arrives", "no direct transition on the chart"]),
+}
+
+
+@needs_node
+@pytest.mark.parametrize("case", ENDED)
+def test_a_shipped_or_stopped_ticket_draws_its_record_without_live_run_or_next(tmp_path: Path, case: str) -> None:
+    change, strip, tiles, notes = ENDED[case]
+    address = RECORD[case.split()[0]]
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    record = snapshot[RECORDS][address]
+    change(record)
+    for render, markup in _both(tmp_path, snapshot, address).items():
+        assert _sections(markup) == ["Run log", "Journey", "Full state chart"], render
+        assert [state for _, state, _ in _rows(markup, "runlog")] == [v["state"] for v in record["visits"]], render
+        assert _notes(markup) == notes, render
+        assert _ticket_tiles(markup) == tiles, render
+        px = _hero_px(markup)
+        assert {k: px.get(k) for k in strip} == strip and px["data-still"] == "true", render
+
+
+STILL_TICKET = r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  document.querySelector('details.jd-chart').open = true;
+  await sleep(3300);
+  const shot = () => [...document.querySelectorAll('.jd-hero canvas.px, canvas.jd-journey, canvas.jd-flowmap')]
+    .map(c => c.toDataURL());
+  const a = shot();
+  await sleep(500);
+  const b = shot();
+  return a.length === 3 && a.every((x, i) => x === b[i]);
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_a_ticket_without_a_job_holds_its_hero_strip_and_journey_still(tmp_path: Path) -> None:
+    cases = {"running": LIVE["running"][0], **RECORD}
+    for name in cases:
+        (tmp_path / name).mkdir()
+    server = _serve(tmp_path, {name: _with_shipped(_snapshot(tmp_path / name)) for name in cases})
+    chrome = _Chrome(tmp_path / "profile")
+    still = {}
+    try:
+        for name, address in cases.items():
+            _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/{name}/ticket.html#t={_quote(address)}",
+                  _journey_drawn("article.ticketpage"))
+            still[name] = chrome.run(STILL_TICKET)
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert still == {"running": False, "idle": True, "stopped": True, "shipped": True}
