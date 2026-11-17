@@ -498,8 +498,9 @@ def test_ci_byte_compiles_lib_and_bin_on_python_311() -> None:
     assert "python -m py_compile bin/orch bin/skill-probe" in runs
     assert any("sys.version_info[:2] == (3, 11)" in run for run in runs)
 
-    versions = _ci_jobs()["test"]["steps"][1]["with"]["python-version"].split()
-    assert versions[-1] == "3.12" and "3.11" in versions
+    steps = _ci_jobs()["test"]["steps"]
+    assert steps[1]["with"]["python-version"] == "3.12"
+    assert any("uv python install 3.11" in step.get("run", "") for step in steps)
 
 
 @pytest.mark.parametrize("bad", [None, "lib/dashboard_pages/new.py", "bin/orch"])

@@ -208,7 +208,7 @@ the box. Do not move WSL or its VHDX.
    running the same way the bot users' sessions are kept up; a stopped node
    leaves jobs queued, not failed.
 6. **Optional, after the first week:** a 2 GB `tmpfs` for each instance's
-   `_work` (not `_work/_tool`, which holds Python, the JDK and Node) to keep
+   `_work` (not `_work/_tool`, which holds uv, the JDK and Node) to keep
    CI writes off the spinning disk. tmpfs pages count against `MemoryMax`,
    so raise it to `8G` if you do this.
 
@@ -264,8 +264,10 @@ Same rules, with these differences:
   Max runs `sudo bash ~/factory-runner-mac-setup.sh` from his own home on
   the Mac. It moves the runner to `gharunner` as a boot-time LaunchDaemon.
   Until then, the Mac's isolation check below fails.
-- Install Python build prerequisites only if `actions/setup-python` fails
-  there; it downloads its own Python into the runner's tool cache.
+- No system Python is needed. CI installs Python with `astral-sh/setup-uv`
+  into the runner user's home. `actions/setup-python` fails on self-hosted
+  runners other than Ubuntu (on macOS it writes to `/Users/runner`, and it
+  has no Debian builds for the box).
 - On GitHub's page pick macOS and the Mac's architecture (ARM64 on Apple
   silicon). Logged in as `gharunner`, run the download lines and paste the
   `./config.sh` line yourself with

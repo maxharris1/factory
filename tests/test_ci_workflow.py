@@ -463,6 +463,18 @@ def test_no_ci_job_uses_a_github_hosted_runner() -> None:
         assert not any(hosted.match(label) for label in _labels(job)), name
 
 
+def test_every_python_job_provisions_python_with_setup_uv_not_setup_python() -> None:
+    for name, job in _workflow()["jobs"].items():
+        uses = [step.get("uses", "") for step in job["steps"]]
+        runs = " ".join(step.get("run", "") for step in job["steps"])
+        assert not any(use.startswith("actions/setup-python@") for use in uses), name
+        if re.search(r"\b(python|pytest|pip)\b", runs):
+            setup = [step for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@")]
+            assert len(setup) == 1, name
+            assert setup[0]["with"]["activate-environment"] is True, name
+            assert not re.search(r"(?<!uv )\bpip install\b", runs), name
+
+
 def test_every_ci_job_skips_pull_requests_from_forks() -> None:
     for name, job in _workflow()["jobs"].items():
         assert FORK_GUARD in job.get("if", ""), name
