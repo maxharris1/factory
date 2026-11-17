@@ -47,17 +47,20 @@ CSS = """\
 .attn{font:12px/1.5 var(--mono)}
 .attn-row,.attn-here,.attn-phone{display:flex;align-items:center;height:36px;box-sizing:border-box;padding:0 24px;overflow:hidden;white-space:nowrap;
 background:color-mix(in srgb,var(--bad) 9%,transparent);border-bottom:1px solid color-mix(in srgb,var(--bad) 45%,transparent)}
-.attn-row{gap:16px}.attn-here{gap:12px}
+.attn-row{gap:8px}.attn-here{gap:12px}
 .attn-phone{display:none;gap:10px;padding:0 12px;text-decoration:none}
 .attn-head{flex:none;display:flex;align-items:center;gap:8px}
 .attn-blk{display:block;flex:none;width:12px}
 .attn-count{font-weight:700;color:var(--bad);text-decoration:none}
-.attn-tally{flex:0 1 auto;min-width:0;overflow:hidden;display:flex;align-items:baseline;gap:6px;color:var(--muted)}
+.attn-tally{flex:0 1000000 auto;min-width:0;overflow:hidden;display:flex;align-items:baseline;gap:6px;color:var(--muted)}
 .attn-rule{flex:none;width:1px;height:16px;background:color-mix(in srgb,var(--bad) 45%,transparent)}
-.attn-item{flex:0 100000 auto;display:grid;grid-template-columns:auto auto minmax(5ch,max-content);align-items:baseline;gap:8px}
-.attn-who{font-weight:600;color:var(--text);text-decoration:none}
-.attn-what{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
-.attn-more{flex:none;margin-left:auto;font-weight:600;color:var(--bad);text-decoration:none}
+.attn-row>.attn-tally,.attn-row>.attn-rule,.attn-item>.chip{margin-left:8px}
+.attn-item{display:contents}
+.attn-item>.chip{flex:none}
+.attn-who{flex:0 1 auto;min-width:7ch;overflow:hidden;text-overflow:ellipsis;direction:rtl;font-weight:600;color:var(--text);text-decoration:none}
+.attn-who::before,.attn-who::after{content:"\\200e"}
+.attn-what{flex:0 1000000000000 auto;min-width:5ch;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
+.attn-more{flex:none;margin-left:auto;padding-left:8px;font-weight:600;color:var(--bad);text-decoration:none}
 .attn-below{color:var(--muted)}
 .attn-phone b{font-weight:700;color:var(--bad)}
 .attn-short{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--bad)}

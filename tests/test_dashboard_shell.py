@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +23,7 @@ import pytest
 import lib.dashboard_page as page
 from lib.dashboard import collect_snapshot, render_pages
 from lib.health import CODE_COMPONENTS
-from tests.test_dashboard import NOW, seeded
+from tests.test_dashboard import NOW, add_ticket, make_db, seeded
 from tests import test_dashboard_activity as activity
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_system as system
@@ -242,7 +243,9 @@ STRIP = """(function () {
   var row = shown('.attn-row'), what = row && row.querySelector('.attn-what'), more = row && row.querySelector('.attn-more');
   return {strip: box(strip).height,
           row: row && {fits: row.scrollHeight === row.clientHeight,
-                       centers: new Set([].map.call(row.children, function (n) {
+                       centers: new Set([].concat.apply([], [].map.call(row.children, function (n) {
+                         return getComputedStyle(n).display === 'contents' ? [].slice.call(n.children) : [n];
+                       })).map(function (n) {
                          var b = n.getBoundingClientRect(); return Math.round(b.top + b.bottom); })).size},
           more: more && box(more).right,
           tally: row && [].map.call(row.querySelectorAll('.attn-tally'), function (n) { return n.scrollWidth <= n.clientWidth; })[0],
@@ -252,9 +255,14 @@ STRIP = """(function () {
             var r = box(row), chip = box(item.querySelector('.chip')), who = item.querySelector('.attn-who'),
                 at = box(who), detail = box(item.querySelector('.attn-what'));
             var hit = document.elementFromPoint((at.left + at.right) / 2, (at.top + at.bottom) / 2);
+            var text = who.firstChild, last = document.createRange();
+            last.setStart(text, text.length - 1);
+            last.setEnd(text, text.length);
+            var end = last.getBoundingClientRect();
             function inside(b) { return b.width > 0 && b.left >= r.left && b.right <= r.right; }
-            return {chip: inside(chip), who: inside(at) && who.scrollWidth <= who.clientWidth,
-                    clickable: !!hit && who.contains(hit), detail: inside(detail) && detail.width >= 20};
+            return {chip: inside(chip), who: inside(at) && end.left >= at.left && end.right <= at.right + 0.5,
+                    clickable: !!hit && who.contains(hit), detail: inside(detail) && detail.width >= 20,
+                    whole: who.scrollWidth <= who.clientWidth};
           }),
           phone: shown('.attn-phone') && box(shown('.attn-phone')).height,
           here: shown('.attn-here') && box(shown('.attn-here')).height,
@@ -280,7 +288,7 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
                 assert got["row"] == {"fits": True, "centers": 1}, where
                 assert got["phone"] is None and got["here"] is None, where
                 assert got["ellipsis"] == [True, "ellipsis"], where
-                drawn = {"chip": True, "who": True, "clickable": True, "detail": True}
+                drawn = {"chip": True, "who": True, "clickable": True, "detail": True, "whole": True}
                 assert got["items"] == [drawn] * min(2, count), f"each worst item shows its chip, subject and detail: {where}"
                 if count > 2:
                     assert got["more"] <= width, where
@@ -300,6 +308,52 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
             got = browser.eval(STRIP)
             assert (got["here"], got["strip"], got["row"], got["phone"]) == (36, 36, None, None), width
             assert got["moving"] == 0, width
+    finally:
+        browser.close()
+
+
+COLLECTED = {
+    "two waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, 0) for t in ("5", "6")],
+    "three waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, 0) for t in ("5", "6", "7")],
+    "fifty with two stuck": [("maxharris1/a-repository-name-longer-than-most", t, 1) for t in ("1201", "1202")]
+                            + [("maxharris1/tracy-harris-coaching", str(t), 0) for t in range(100, 148)],
+}
+
+
+def _collected(tmp_path: Path, tickets: list[tuple[str, str, int]]) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        for repo, ticket, stuck in tickets:
+            add_ticket(connection, repo, ticket, state="waiting-max", paused_action="clarify",
+                       stuck=stuck, stuck_reason="review loop" if stuck else None)
+    return _now(collect_snapshot(db, tmp_path / "poller.log", now=NOW))
+
+
+@needs_chrome
+@pytest.mark.parametrize("case", sorted(COLLECTED))
+def test_both_worst_items_stay_inside_the_row_with_long_collected_subjects(tmp_path: Path, case: str) -> None:
+    snapshot = _collected(tmp_path, COLLECTED[case])
+    assert len(snapshot["attention"]["items"]) == len(COLLECTED[case])
+    html = _page_with_status_stub(snapshot, "index.html")
+    browser = Browser()
+    try:
+        for width in (700, 1100, 1440):
+            browser.open(html, width)
+            got = browser.eval(STRIP)
+            where = (case, width)
+            assert got["strip"] == 36, where
+            assert got["row"] == {"fits": True, "centers": 1}, where
+            shown = [{k: v for k, v in item.items() if k != "whole"} for item in got["items"]]
+            drawn = {"chip": True, "who": True, "clickable": True, "detail": True}
+            assert shown == [drawn, drawn], f"both items keep chip, subject end and detail inside the row: {where}"
+            if got["more"] is not None:
+                assert got["more"] <= width, where
+            if not all(item["whole"] for item in got["items"]):
+                assert (got["tally"], max(got["details"]) <= 40) == (False, True), f"subjects are cut last: {where}"
+            if width >= 1440:
+                assert [item["whole"] for item in got["items"]] == [True, True], where
+            assert (got["sideways"], got["moving"]) == (False, 0), where
     finally:
         browser.close()
 
