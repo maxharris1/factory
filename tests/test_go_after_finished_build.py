@@ -1,5 +1,3 @@
-"""A driver go after the generation's job finished queues a fresh one (#808)."""
-
 from pathlib import Path
 
 import pytest

@@ -132,7 +132,6 @@ class T1Mixin:
         generation: int,
         current: str | None,
     ) -> str | None:
-        """The go's dedupe key suffix, or None when the go already queued a job."""
         prefix = f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
         with self._connect() as connection:
             held = {
@@ -146,8 +145,6 @@ class T1Mixin:
             if prefix + comment.id in held:
                 return None
             spent = held.get(f"{prefix}g{generation}")
-            # #808: a go after the generation's job finished, with nothing
-            # running, would otherwise be dropped and the ticket stall.
             if (
                 current in ("building", "fixing")
                 and spent is not None

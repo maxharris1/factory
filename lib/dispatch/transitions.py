@@ -60,12 +60,12 @@ def write_workflow_state(
             "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
             (*key, CI_SILENT_REASON),
         )
-    if prior is not None and prior != state:
-        connection.execute(
-            "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
-            (*key, DEDUPE_DROPPED),
-        )
     if prior != state:
+        if prior is not None:
+            connection.execute(
+                "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                (*key, DEDUPE_DROPPED),
+            )
         connection.execute(
             """
             INSERT INTO ticket_transitions (
