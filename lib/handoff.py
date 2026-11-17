@@ -76,6 +76,7 @@ STATES = (
     "blocked",
     "capped",
     "abandoned",
+    "handed-off-externally",
 )
 
 VERDICTS = ("REVISE", "APPROVE", "BLOCKED")
