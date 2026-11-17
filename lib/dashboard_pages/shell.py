@@ -15,14 +15,14 @@ from lib.dashboard_telemetry import TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key, _health_link, _relay
-from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _ticket, ticket_href
+from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket, ticket_page_href
 from lib.dashboard_pages.efficiency import _jobs_lifetime, middle_row, top_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _broken, _components, _log_row, _no_waiter, _POLL_STATE, _rules, _versions,
     version_drift,
 )
-from lib.dashboard_pages.ticket_detail import _jobview, _ticketview
+from lib.dashboard_pages.ticket_detail import _ticketview
 from lib.dashboard_pages.tickets import _board, _tickets
 
 
@@ -243,7 +243,6 @@ SCRIPT = r"""
       add(here, el('span', 'attn-below', 'listed below'));
       return;
     }
-    var hrefs = jobHrefs(d);
     var row = add(root, el('div', 'attn-row'));
     var head = add(row, el('div', 'attn-head'));
     blk(head, 'attention');
@@ -258,7 +257,7 @@ SCRIPT = r"""
       var item = add(row, el('div', 'attn-item'));
       item.setAttribute('data-attn', attentionKey(x));
       add(item, chip(x.kind, ATTENTION[x.kind] || 'muted'));
-      add(item, link('attn-who', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
+      add(item, link('attn-who', x.component ? healthLink(x.link) : ticketPageHref(x))).textContent =
         x.component ? x.component : ticketOf(x);
       add(item, el('span', 'attn-what', x.detail));
     });
@@ -1284,13 +1283,11 @@ def _attention_strip(snapshot: dict, page: str) -> str:
     if page == "activity.html":
         return (f'{root}><div class="attn-here">{blk("attention")}{count("#attention")}'
                 f'{_span("attn-below", "listed below")}</div></div>')
-    hrefs = _job_hrefs(snapshot)
-
     def item(row: dict) -> str:
         if row.get("component"):
             href, who = _health_link(row.get("link")), row["component"]
         else:
-            href, who = ticket_href(hrefs, row), _ticket(row)
+            href, who = ticket_page_href(row), _ticket(row)
         return (
             f'<div class="attn-item" data-attn="{_e(_attention_key(row))}">'
             + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
@@ -1451,19 +1448,16 @@ _PANELS = {
     "activity.html": (_attention, _relay),
     "efficiency.html": (top_row, middle_row, _jobs_lifetime),
     "health.html": (_broken, _components, _versions, _log_row, _rules, _no_waiter),
-    "job.html": (_board, _tickets, _jobview),
+    "job.html": (_board, _tickets),
     "ticket.html": (_ticketview,),
 }
-
-
-_OWN_H1 = ("job.html", "ticket.html")
 
 
 def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
-    heading = "" if name in _OWN_H1 else f'<h1 class="vh">{_e(label)}</h1>'
+    heading = "" if name == "ticket.html" else f'<h1 class="vh">{_e(label)}</h1>'
     return "\n".join(
         [
             "<!doctype html>",

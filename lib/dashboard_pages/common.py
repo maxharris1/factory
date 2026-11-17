@@ -35,7 +35,7 @@ CSS_PANEL = """\
 .panel{grid-column:span 4;position:relative;min-width:0;padding:14px 16px 16px;
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
-#ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#broken,#waiters{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
+#ticket-filter,#pipeline,#shipped,#tickets,#attention,#components,#broken,#waiters{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
 .panel h1,.panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .panel h1>span:first-child::before,.panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
@@ -231,20 +231,8 @@ SCRIPT_HEAD = r"""
     if (r.tracker === 'linear') return String(r.ticket_id);
     return short(r.repo) + '#' + (r.source ? String(r.source).replace(/^#/, '') : r.ticket_id);
   }
-  function jobKind(r) { return r.tracker === 'github' ? 'PR' : r.tracker === 'linear' ? 'ticket' : null; }
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function threadKey(r) { return String(r.repo).toLowerCase() + '#' + r.ticket_id; }
-  function jobHrefs(d) {
-    var hrefs = {}, best = {};
-    (d.running || []).forEach(function (r) {
-      var key = threadKey(r);
-      if (!best[key] || (r.elapsed_seconds || 0) < (best[key].elapsed_seconds || 0)) best[key] = r;
-    });
-    (d.queued || []).forEach(function (r) { if (!best[threadKey(r)]) best[threadKey(r)] = r; });
-    Object.keys(best).forEach(function (key) { hrefs[key] = 'job.html#' + anchor(best[key].job); });
-    return hrefs;
-  }
-  function ticketHref(hrefs, r) { return hrefs[threadKey(r)] || 'job.html'; }
   function ticketAddress(r) { return String(r.repo) + '#' + r.ticket_id; }
   function ticketPageHref(r) { return 'ticket.html#t=' + encodeURIComponent(ticketAddress(r)); }
   function hashAddress() {
@@ -318,7 +306,7 @@ __TELEMETRY__
 SCRIPT_TAIL = r"""
   var PAGES = {
     main: [renderLanes, renderJustHappened, renderIntake],
-    job: [renderBoard, renderTickets, renderJobView],
+    job: [redirectMoved, renderBoard, renderTickets],
     activity: [renderAttention, renderRelay],
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter],
@@ -691,31 +679,12 @@ def _tile_label(row: dict) -> str:
     return label(_short(row["repo"]), str(row["ticket_id"]), row.get("source"), None)
 
 
-def _job_kind(row: dict) -> str | None:
-    return {"github": "PR", "linear": "ticket"}.get(str(row.get("tracker")))
-
-
 def anchor(job: object) -> str:
     return "job-" + re.sub(r"[^A-Za-z0-9_-]", "-", str(job))
 
 
 def _thread_key(row: dict) -> str:
     return f"{str(row['repo']).lower()}#{row['ticket_id']}"
-
-
-def _job_hrefs(snapshot: dict) -> dict[str, str]:
-    best: dict[str, dict] = {}
-    for row in snapshot["running"]:
-        key = _thread_key(row)
-        if key not in best or (row.get("elapsed_seconds") or 0) < (best[key].get("elapsed_seconds") or 0):
-            best[key] = row
-    for row in snapshot["queued"]:
-        best.setdefault(_thread_key(row), row)
-    return {key: f"job.html#{anchor(row['job'])}" for key, row in best.items()}
-
-
-def ticket_href(hrefs: dict[str, str], row: dict) -> str:
-    return hrefs.get(_thread_key(row), "job.html")
 
 
 def ticket_address(row: dict) -> str:

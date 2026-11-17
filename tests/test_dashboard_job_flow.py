@@ -6,7 +6,7 @@ covers its panels.
 - On the lanes page (index.html), clicking a job in a lane slot or the queue
   rail opens a modal with that job's ticket page; Esc, the close button and a
   backdrop click close it. Without script the link goes to
-  job.html#job-<id>.
+  ticket.html#t=<repo#ticket>.
 - The Run log lists the path the ticket took, oldest first (a revisited
   state appears again, in sequence), and Can come next lists the chart's
   direct successors of the current state. Everything comes from
@@ -23,7 +23,6 @@ from lib.dashboard import collect_snapshot, render_pages
 from tests.test_dashboard import NOW, add_job, add_ticket
 from tests.test_dashboard_layout import (
     BAR,
-    JOB,
     CHART,
     MINI,
     _chart_source,
@@ -36,6 +35,7 @@ from tests.test_dashboard_layout import (
     needs_node,
     seeded,
 )
+from tests.test_dashboard_ticket_detail import TICKET_IDS, _quote, _ticket_server
 
 NAV = [
     ("index.html", "Lanes"),
@@ -47,6 +47,7 @@ NAV = [
 # Ticket 40 (tests/test_dashboard_layout.py _history): built, reviewed,
 # revised once, now in its second review.
 TICKET_40_PATH = ["intake", "building", "review", "fixing", "review"]
+TICKET_40 = "maxharris1/cleffy#40"
 
 
 def _successors(path: Path, state: str) -> set[str]:
@@ -101,9 +102,9 @@ def test_run_log_is_the_chronological_path_with_the_revisit_repeated(tmp_path: P
     snapshot = _snapshot(tmp_path)
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
     assert job["flow"]["path"] == TICKET_40_PATH
-    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
+    article = _ticket_server(snapshot, TICKET_40)
     assert _visits(article, "runlog") == TICKET_40_PATH
-    assert re.findall(r'<div class="visit now"[^>]*data-visit="(\d+)"', article) == ["4"]
+    assert re.findall(r'<button class="visit now"[^>]*data-visit="(\d+)"', article) == ["4"]
 
 
 def test_next_steps_are_the_charts_direct_successors_of_the_current_state(tmp_path: Path) -> None:
@@ -112,7 +113,7 @@ def test_next_steps_are_the_charts_direct_successors_of_the_current_state(tmp_pa
     expected = _successors(CHART, "review")
     assert expected == {"blocked", "ship", "stuck", "fixing", "capped", "waiting-max"}
     assert set(job["flow"]["next"]) == expected
-    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
+    article = _ticket_server(snapshot, TICKET_40)
     assert set(_next_cards(article)) == expected
 
 
@@ -147,7 +148,7 @@ def test_a_chart_change_changes_the_next_steps(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, chart_path=changed)
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
     assert set(job["flow"]["next"]) == _successors(changed, "review") == {"fixing", "waiting-max"}
-    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
+    article = _ticket_server(snapshot, TICKET_40)
     assert set(_next_cards(article)) == {"fixing", "waiting-max"}
 
 
@@ -156,26 +157,25 @@ def test_a_finished_ticket_has_no_way_out(tmp_path: Path) -> None:
     jobs = {row["ticket_id"]: row for row in snapshot["running"] + snapshot["queued"]}
     assert (jobs["50"]["flow"]["state"], jobs["50"]["flow"]["terminal"]) == ("done", True)
     assert (jobs["40"]["flow"]["state"], jobs["40"]["flow"]["terminal"]) == ("review", False)
-    html = _no_script(render_pages(snapshot)["job.html"])
-    done = _section(html, "job-t-done-1")
+    done = _ticket_server(snapshot, "maxharris1/cleffy#50")
     assert _next_cards(done) == [] and "no way out: this ticket is finished" in done
-    assert _next_cards(_section(html, "job-h-review"))
+    assert _next_cards(_ticket_server(snapshot, TICKET_40))
 
 
-def test_the_job_page_draws_no_ring_or_breathing(tmp_path: Path) -> None:
-    html = render_pages(_snapshot(tmp_path))["job.html"]
-    assert "breathe" not in html
-    assert not re.search(r"\bring\b", _section(_no_script(html), "jobview"))
+def test_the_ticket_page_draws_no_ring_or_breathing(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    assert "breathe" not in render_pages(snapshot)["ticket.html"]
+    assert not re.search(r"\bring\b", _ticket_server(snapshot, TICKET_40))
 
 
 def test_hero_keeps_the_round_and_time_in_state(tmp_path: Path) -> None:
-    article = _section(_no_script(render_pages(_snapshot(tmp_path))["job.html"]), "job-h-review")
+    article = _ticket_server(_snapshot(tmp_path), TICKET_40)
     line = re.search(r'<p class="line">(.*?)</p>', article).group(1)
     assert _text(line) == "now review · round 2 of 3 · 33m 20s in review"
 
 
 def test_full_chart_is_behind_a_collapsed_toggle(tmp_path: Path) -> None:
-    article = _section(_no_script(render_pages(_snapshot(tmp_path))["job.html"]), "job-h-review")
+    article = _ticket_server(_snapshot(tmp_path), TICKET_40)
     toggle = re.search(r'<details class="jd-chart"[^>]*>(.*?)</details>', article, re.S)
     assert toggle, "no full chart toggle"
     assert not re.search(r'<details class="jd-chart"[^>]*\bopen\b', article)
@@ -183,10 +183,10 @@ def test_full_chart_is_behind_a_collapsed_toggle(tmp_path: Path) -> None:
     assert '<canvas class="jd-flowmap" width="1000" height="416"' in toggle.group(1)
 
 
-def test_lanes_page_links_jobs_to_the_job_page_without_script(tmp_path: Path) -> None:
+def test_lanes_page_links_jobs_to_the_ticket_page_without_script(tmp_path: Path) -> None:
     html = _no_script(render_pages(_snapshot(tmp_path))["index.html"])
-    assert 'href="job.html#job-h-review"' in _section(html, "lanes")
-    assert 'href="job.html#job-q-claude"' in _section(html, "queue")
+    assert f'href="ticket.html#t={_quote(TICKET_40)}"' in _section(html, "lanes")
+    assert f'href="ticket.html#t={_quote("maxharris1/cleffy#12")}"' in _section(html, "queue")
     # #140: the Lanes job modal is dropped (STATUS.md decision 1), and with it the chart template.
     for needle in ('id="job-modal"', "modal-box", 'role="dialog"', 'id="flow-template"'):
         assert needle not in html, needle
@@ -197,16 +197,17 @@ def test_lanes_page_links_jobs_to_the_job_page_without_script(tmp_path: Path) ->
 
 @needs_node
 def test_script_draws_the_same_path_and_next_steps(tmp_path: Path) -> None:
-    out = _run_page(tmp_path, _snapshot(tmp_path), "job", JOB, hash_="#job-h-review")
-    view = out["html"]["jobview"]
+    out = _run_page(tmp_path, _snapshot(tmp_path), "ticket", TICKET_IDS, hash_="#t=" + _quote(TICKET_40))
+    view = out["html"]["ticketview"]
     assert _visits(view, "runlog") == TICKET_40_PATH
     assert set(_next_cards(view)) == _successors(CHART, "review")
-    assert "round 2 of 3" in out["text"]["jobview"]
+    assert "round 2 of 3" in out["text"]["ticketview"]
 
 
 @needs_node
 def test_script_shows_no_way_out_for_a_finished_ticket(tmp_path: Path) -> None:
-    out = _run_page(tmp_path, _with_finished_tickets(tmp_path), "job", JOB, hash_="#job-t-done-1")
-    view = out["html"]["jobview"]
+    out = _run_page(tmp_path, _with_finished_tickets(tmp_path), "ticket", TICKET_IDS,
+                    hash_="#t=" + _quote("maxharris1/cleffy#50"))
+    view = out["html"]["ticketview"]
     assert _next_cards(view) == [] and "no way out: this ticket is finished" in view
     assert "breathe" not in view
