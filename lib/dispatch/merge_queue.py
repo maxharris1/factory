@@ -41,7 +41,7 @@ from lib.job_state import (
     never_started,
     read_placements,
 )
-from lib.queue import JobRequest
+from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, JobRequest
 from lib.update_check import UpdateClass, UpdateScope
 
 
@@ -370,6 +370,10 @@ class MergeQueueMixin:
         return True, "merge-queue"
 
     def _advance_merge_queues(self) -> None:
+        for row in self._merge_queue_members():
+            polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
+            if polled is not None and _failed_update_may_settle(row, polled):
+                self._settle_failed_update_head(polled)
         queues: dict[str, list[sqlite3.Row]] = {}
         for row in self._merge_queue_members():
             if str(row["repo"]) not in self._merged_repos:
@@ -429,8 +433,6 @@ class MergeQueueMixin:
             self._queue_update(ticket, row)
             return True
         head = ticket.current_head
-        if head is not None and self._update_orphaned(ticket, row, head):
-            return self._settle_orphaned_update(ticket, row, head)
         wait = self._queue_head_wait_reason(ticket, row, head)
         if wait is not None:
             self._log_queue_wait(ticket, head, wait)
@@ -455,8 +457,6 @@ class MergeQueueMixin:
         return not self._approval_covers(ticket, str(row["approved_head"]), head)
 
     def _settle_failed_update_head(self, polled: TrackedTicket) -> None:
-        """Settle a head the failed update pushed in the poll that counts the
-        failure (#660): T6 runs after this poll's queue pass."""
         row = next(
             (
                 row
@@ -479,6 +479,28 @@ class MergeQueueMixin:
         except Exception as exc:
             self._record_queue_error(row, exc)
 
+    def _unmet_gate_instruction(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> str | None:
+        job_id = row["update_failed_job"]
+        events: list[sqlite3.Row] = []
+        with self._connect() as connection:
+            if job_id is not None and has_job_events(connection):
+                events = connection.execute(
+                    f"""
+                    SELECT event, detail FROM {JOB_EVENTS_TABLE}
+                    WHERE job_id = ? AND event IN (?, ?) ORDER BY id
+                    """,
+                    (job_id, PRE_READY_FAILED, PRE_READY_PASSED),
+                ).fetchall()
+        failed = [str(detail) for event, detail in events if event == PRE_READY_FAILED]
+        if failed:
+            return f"The update job pushed {head} but its pre_ready check failed: {failed[-1]}"
+        if ticket.factory.pre_ready is None or any(
+            event == PRE_READY_PASSED and str(detail).endswith(f": at {head}")
+            for event, detail in events
+        ):
+            return None
+        return f"The update job pushed {head} but its pre_ready check never passed at that head"
+
     def _settle_orphaned_update(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> bool:
         """True once the ticket left the queue, so another may merge ahead of it (#660)."""
         approved = str(row["approved_head"])
@@ -486,6 +508,39 @@ class MergeQueueMixin:
         generation = int(row["generation"])
         ci = ticket.ci[head]
         if ci.clears:
+            unmet = self._unmet_gate_instruction(ticket, row, head)
+            if unmet is not None:
+                scope = _scope(ticket.repo, ticket.ticket_id)
+                self._enqueue_or_flag(
+                    ticket,
+                    source,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="fix",
+                        recipient=ticket.factory.builder_harness,
+                        source_comment_id=source.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        head=head,
+                        detail=self._job_detail(
+                            ticket,
+                            action="fix",
+                            head=head,
+                            round_number=int(row["review_round"]) + 1,
+                            instruction=unmet,
+                        ),
+                    ),
+                    dedupe_key=f"t-update-gate:{scope}:{head}:g{generation}",
+                )
+                self._leave_merge_queue(ticket, "update-gate-unmet")
+                self._set_workflow_state(ticket, "fixing")
+                if self.log is not None:
+                    self.log(
+                        f"update pre_ready unmet: {ticket.repo}#{ticket.ticket_id} at "
+                        f"{head[:12]}, its update job gone: fix queued"
+                    )
+                return True
             verdict = self._classify_update(ticket, approved, head)
             if verdict.trivial:
                 self._carry_approval(
@@ -988,7 +1043,7 @@ class MergeQueueMixin:
         query = f"""
             SELECT repo, ticket_id, workflow_state, approved_head, approved_at,
                    approve_comment_id, update_failures, update_from_head,
-                   generation, review_round
+                   update_failed_job, generation, review_round
             FROM ticket_state
             WHERE {_MEMBER}
         """
@@ -1034,6 +1089,17 @@ def _may_share_files(head: TrackedTicket | None, entry: TrackedTicket) -> bool:
     if head is None or head.changed_files is None or entry.changed_files is None:
         return True
     return not set(head.changed_files).isdisjoint(entry.changed_files)
+
+
+def _failed_update_may_settle(row: sqlite3.Row, polled: TrackedTicket) -> bool:
+    from_head = row["update_from_head"]
+    if from_head is None or not int(row["update_failures"]) or row["workflow_state"] == "updating":
+        return False
+    head = polled.current_head
+    if head is None or _matching_head(head, str(from_head)) is not None:
+        return False
+    ci = polled.ci.get(head)
+    return ci is not None and ci.status != "pending"
 
 
 def _waits_on_update_or_ci(ticket: TrackedTicket) -> bool:

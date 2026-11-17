@@ -6,20 +6,27 @@ ask Max."""
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from lib.brief import brief_kind
+from lib.dispatch.core import DispatcherBase
+from lib.factory_md import PreReady
 from lib.github_actions import _comment
-from lib.queue import _job
-from lib.update_check import UpdateClass, UpdateScope
+from lib.pre_ready import run as run_pre_ready
+from lib.queue import PRE_READY_FAILED, _job
+from lib.update_check import UpdateClass, UpdateScope, classify
 from tests.merge_queue_support import Board, sha
+from tests.test_update_check import Repo
 from tests.test_dispatcher import READY
 
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
+REGISTRATION = DispatcherBase._registration
 
 
 def conflicted(tmp_path: Path, **options) -> tuple[Board, object, str]:
@@ -506,3 +513,98 @@ def test_a_done_update_with_no_ready_after_pushing_queues_one_review(tmp_path: P
     for _ in range(3):
         board.poll()
     assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
+
+
+def test_a_refused_pre_ready_gate_cannot_carry_the_approval(tmp_path: Path) -> None:
+    repo = Repo(tmp_path / "git")
+    approved, _ = repo.branches(
+        [("app.py", "line 5\n", "ours\n")],
+        [("app.py", "line 5\n", "theirs\n")],
+    )
+    pushed = repo.merge_main(lambda r: r.git("checkout", "--ours", "app.py"))
+    verdict = classify(repo.gitdir, approved, pushed, "refs/heads/main")
+    assert verdict.trivial
+    board = Board(tmp_path, classifier=lambda *args: verdict)
+    pr = board.open("42", approved)
+    board.build_and_approve(pr, mergeable=False)
+    spec = PreReady("exit 1", 60)
+    board.factory = replace(board.factory, pre_ready=spec)
+    board.dispatcher._registration = REGISTRATION.__get__(board.dispatcher)
+    update = board.claim("claude")
+    pr.push(pushed)
+    ready = board.ready(pr, pushed, "refused-ready")
+    result = run_pre_ready(spec, repo.root, pushed, dict(os.environ))
+    assert (result.passed, result.reason) == (False, "exit 1")
+    board.queue.record_invalid_handoff(
+        update.id, owner="claude", comment_id=ready,
+        detail=f"pre_ready failed: {result.reason}", event=PRE_READY_FAILED,
+    )
+    board.queue.finish(update.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+    assert board.outcome(ready) == "rejected-unregistered-ready"
+    board.poll()
+    board.poll()
+
+    assert board.actions.merges == []
+    [fix] = [job for job in board.jobs("fix") if job["head"] == pushed]
+    assert fix["recipient"] == "claude"
+    assert "exit 1" in json.loads(fix["detail"])["instruction"]
+    assert [job["head"] for job in board.jobs("review")] == [approved]
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == ("fixing", None)
+
+
+def test_an_unpassed_pre_ready_gate_routes_a_dead_update_to_a_fix(tmp_path: Path) -> None:
+    board, pr = died_after_push(tmp_path)
+    board.factory = replace(board.factory, pre_ready=PreReady("make check", 60))
+    for _ in range(3):
+        board.poll()
+
+    assert board.actions.merges == []
+    assert board.classified == []
+    [fix] = [job for job in board.jobs("fix") if job["head"] == sha(2)]
+    assert "never passed" in json.loads(fix["detail"])["instruction"]
+    assert [job["head"] for job in board.jobs("review")] == [sha(1)]
+    assert board.state("42")["workflow_state"] == "fixing"
+
+
+@pytest.mark.parametrize("ci,action", [("success", "review"), ("failure", "fix")])
+def test_a_dead_update_behind_a_new_queue_head_settles_once_ci_finishes(
+    tmp_path: Path, ci: str, action: str
+) -> None:
+    board = Board(tmp_path)
+    older = board.open("43", sha(3))
+    board.go(older, "go43")
+    board.poll()
+    board.finish("claude")
+    board.ready(older, older.head)
+    board.poll()
+    board.finish("codex")
+    board.approve(older)
+    older.ci[older.head] = "pending"
+    older.mergeable, older.mergeable_state = None, None
+    board.poll()
+    current = board.open("42", sha(1))
+    board.build_and_approve(current, mergeable=False)
+    update = board.claim("claude")
+    current.push(sha(2), ci="pending")
+    board.queue.finish(update.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+
+    def members() -> list[str]:
+        return [str(row["ticket_id"]) for row in board.dispatcher._merge_queue_members()]
+
+    assert members() == ["42"]
+    assert board.state("42")["update_failures"] == 1
+    older.ci[older.head] = "success"
+    board.poll()
+    assert members() == ["43", "42"]
+    board.verdict = UpdateClass(False, "nontrivial")
+    older.conflict()
+    current.ci[sha(2)] = ci
+    for _ in range(4):
+        board.poll()
+
+    assert len([job for job in board.jobs(action) if job["head"] == sha(2)]) == 1
+    assert board.state("42")["workflow_state"] == ("review" if ci == "success" else "fixing")
+    assert members() == ["43"]
