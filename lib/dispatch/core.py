@@ -15,6 +15,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.helpers import (
     _REGISTERING_ACTIONS,
+    _base_mismatch,
     _detail_round,
     _detail_routing,
     _family_errors,
@@ -25,6 +26,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
+    BaseMismatch,
     Comment,
     DeviceChecks,
     Feeder,
@@ -275,11 +277,31 @@ class DispatcherBase:
 
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         """Every read outside the poll's snapshot passes here: one showing
-        a watched PR closed unmerged abandons it (#130) before anything
-        acts on the read."""
-        if fresh is not None and fresh.closed and not fresh.merged and self._watched(fresh):
-            self._abandon_closed(fresh)
+        a watched PR closed unmerged abandons it (#130), and one showing an
+        open PR on another base becomes the poll's ticket and raises
+        BaseMismatch, before anything acts on the read."""
+        if fresh is None or fresh.merged:
+            return fresh
+        if fresh.closed:
+            if self._watched(fresh):
+                self._abandon_closed(fresh)
+            return fresh
+        mismatch = self._sync_base_mismatch(fresh)
+        if mismatch is not None:
+            self._polled[(fresh.repo.lower(), fresh.ticket_id)] = fresh
+            raise BaseMismatch(mismatch, fresh)
         return fresh
+
+    def _sync_base_mismatch(self, ticket: TrackedTicket) -> str | None:
+        mismatch = _base_mismatch(ticket)
+        if mismatch is not None:
+            with self._connect() as connection:
+                self._flag_attention_once(
+                    connection, ticket.repo, ticket.ticket_id, "base-mismatch", mismatch
+                )
+        elif ticket.pr_base is not None:
+            self.clear_attention(ticket.repo, ticket.ticket_id, "base-mismatch")
+        return mismatch
 
     def _tracker(self, repo: str, ticket_id: str) -> str | None:
         with self._connect() as connection:

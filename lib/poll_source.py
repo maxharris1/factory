@@ -393,12 +393,17 @@ class FedPulls:
         )
 
     def get(self, repo: str, identifier: str) -> str | None:
-        if self._connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (FEEDER_TABLE,)
-        ).fetchone() is None:
+        return self._read("pr_number", repo, identifier)
+
+    def base(self, repo: str, identifier: str) -> str | None:
+        return self._read("base_branch", repo, identifier)
+
+    def _read(self, column: str, repo: str, identifier: str) -> str | None:
+        columns = {row[1] for row in self._connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
+        if column not in columns:
             return None
         row = self._connection.execute(
-            f"SELECT pr_number FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
+            f"SELECT {column} FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
             (repo.lower(), identifier),
         ).fetchone()
         return None if row is None or row[0] is None else str(row[0])
@@ -1687,6 +1692,12 @@ class LivePollSource:
         brief = canonical_brief(linear_comments, self._trusted)
         head = _latest_head(linear_comments)
         factory = self._factory(project)
+        linear_project = issue.get("project")
+        factory = replace(
+            factory,
+            base_branch=self.fed_pulls.base(project.repo, identifier)
+            or project.base_for(linear_project.get("id") if isinstance(linear_project, dict) else None),
+        )
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
         pr_number = self._factory_pr_number(

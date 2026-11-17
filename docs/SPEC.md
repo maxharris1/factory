@@ -502,6 +502,8 @@ projects:
     #   priority_labels: [priority:p0, priority:p1]  # build order tiers (#258); default none
     #   priority_from_linear: false   # Linear projects: priority Urgent..Low as tiers 0-3
     #   critical_path_order: true     # inside a tier, the ticket that unblocks most first
+    #   base_branches:                # Linear projects: a project's base in place of factory_ref
+    #     PROJECT_ID_B: feature/name
 # Optional Linear webhook listener (issue #55). Absent means none, and the
 # poller behaves as it did before the listener existed.
 # linear_webhook:
@@ -565,6 +567,24 @@ project fails with "Linear issue is not in its configured project", as
 before. An `orch.local.yml` overlay replaces a nested list whole, so an
 overlay that sets `linear_project_ids` over a base `linear_project_id` is
 refused as setting both.
+
+`intake.base_branches` (issue #614) gives one Linear project of a repo its
+own base branch. It maps a Linear project ID that the entry watches to a
+plain branch name. A ticket in that project opens its draft PR on that
+branch, is built, reviewed and updated against it, and ships to it. Every
+other project of the repo keeps `factory_ref`. `factory.md` is still read
+from `factory_ref`, and its `base_branch` must still equal `factory_ref`.
+An unwatched ID, a branch that is not a plain name, an empty mapping, and
+the key on a project with no Linear ID are errors. `check-config` names the
+key an `orch.local.yml` overlay sets, never its IDs or branches. A PR whose
+live base differs from its ticket's base is flagged `base-mismatch` in
+needs-attention and starts no job, and a ship refuses it, until someone
+retargets the PR. The factory never retargets a PR itself. The feeder
+records a ticket's base until its feed begins and keeps it from then on,
+through holds, retries and a lost label, so a later config edit never moves
+a branch or PR it opened. A base branch missing on GitHub, or a
+Linear issue with no project on a repo that sets `base_branches`, holds the
+ticket in `waiting-blocked` with that reason, and opens nothing.
 
 The Grok webhook fields also contain environment-variable names, not values.
 Delivery sends one JSON object containing the job fields and `logical_key`,

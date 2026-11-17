@@ -22,6 +22,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     AlreadyMergedShip,
+    BaseMismatch,
     Comment,
     PollSource,
     RetryableStateError,
@@ -937,8 +938,8 @@ class ReviewShipper:
         ]
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
-        self.dispatcher._observed(found[0])
         try:
+            self.dispatcher._observed(found[0])
             return self.dispatcher._routed(found[0])
-        except RouteError as error:
+        except (BaseMismatch, RouteError) as error:
             raise ShipError(str(error)) from error

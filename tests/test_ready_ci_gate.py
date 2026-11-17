@@ -370,7 +370,7 @@ NO_CI_BASE = "feature/upload-only-intake"
 
 
 def on_base(board, base: str, *, ci_branches: tuple[str, ...] | None = ("dev", "main")) -> set[str]:
-    board.factory = replace(board.factory, ci_branches=ci_branches)
+    board.factory = replace(board.factory, base_branch=base, ci_branches=ci_branches)
     reported: set[str] = set()
     snapshot = board.snapshot
 

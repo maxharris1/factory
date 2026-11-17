@@ -71,6 +71,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
+from lib.dispatch.helpers import _base_mismatch
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -808,6 +809,9 @@ class LinearReviewActions(GitHubReviewActions):
                 error = GitHubAdapterError("linked pull request changed before handoff")
                 error.write_confirmed = False
                 raise error
+            mismatch = _base_mismatch(fresh)
+            if mismatch is not None:
+                raise RetryableShipError(mismatch)
             ticket = fresh
         if (
             self.move_ready_for_review

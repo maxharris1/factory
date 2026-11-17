@@ -38,13 +38,14 @@ def context_section(
             f"From {where}. {FRAMING}\n\n"
             f"{_nested(_filtered(context, reviewer))}"
         )
-    base = facts["base"] or "its base branch"
+    branch = ref or facts["base"]
+    where = f"branch {branch}" if branch else "its base branch"
     reason = f" ({note})" if note else ""
     sections = "Review and Context sections" if reviewer else "Context section"
     return (
         f"{heading}\n"
-        f"factory.md was not loaded{reason}. Before you start, read `factory.md` from the base branch "
-        f"{base} of {repo} yourself (not from the PR head) and follow its {sections}. "
+        f"factory.md was not loaded{reason}. Before you start, read `factory.md` from {where} "
+        f"of {repo} yourself (not from the PR head) and follow its {sections}. "
         f"{FRAMING}"
     )
 
