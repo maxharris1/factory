@@ -529,13 +529,21 @@ def _shell_commands(
     def arithmetic(j: int) -> int:
         begin = j
         level = 2
+        quoted = False
         while j < len(text) and level:
-            if text.startswith("$(", j) and not text.startswith("$((", j):
+            if text[j] == "\\":
+                j += 2
+            elif text[j] == "'" and not quoted:
+                j = text.find("'", j + 1) + 1 or len(text)
+            elif text[j] == '"':
+                quoted = not quoted
+                j += 1
+            elif text.startswith("$(", j) and not text.startswith("$((", j):
                 j = substitution(j + 2, ")")
             elif text[j] == "`":
                 j = substitution(j + 1, "`")
             else:
-                level += {"(": 1, ")": -1}.get(text[j], 0)
+                level += 0 if quoted else {"(": 1, ")": -1}.get(text[j], 0)
                 j += 1
         opaque.append((begin, j))
         return j
@@ -670,14 +678,11 @@ def _orch_poll_launches(text: str) -> list[str]:
 
 def _unit_orch_poll_launches(text: str) -> list[str]:
     hits = []
-    lines = text.split("\n")
-    i = 0
-    while i < len(lines):
-        first = logical = lines[i]
-        while logical.endswith("\\") and i + 1 < len(lines):
-            i += 1
-            logical = logical[:-1] + " " + lines[i]
-        i += 1
+    lines = (line for line in text.split("\n") if not line.lstrip().startswith(("#", ";")))
+    for first in lines:
+        logical = first
+        while logical.endswith("\\"):
+            logical = logical[:-1] + " " + next(lines, "")
         key = re.match(r"[ \t]*Exec\w*[ \t]*=", logical)
         if not key:
             continue
@@ -766,6 +771,12 @@ HIDDEN_LAUNCHERS = [
     "read -r x <<<'it'; orch poll --once\n",
     "((orch poll --once) )\n",
     "echo $((orch poll --once) )\n",
+    "declare -A a; a[\"))\"]=1; echo $((a[\"))\"])); orch poll --once\n",
+    "declare -A a; a['))']=1; echo $((a['))'])); orch poll --once\n",
+    "declare -A a; a[\"))\"]=1; ((a[\"))\"])); orch poll --once\n",
+    "declare -A a; a['))']=1; ((a['))'])); orch poll --once\n",
+    "declare -A a; a[\"))\"]=1; echo \"$((a[\"))\"]))\"; orch poll --once\n",
+    "declare -A a; a[x]=1; echo $((a[\\)])); orch poll --once\n",
 ]
 
 
@@ -796,6 +807,14 @@ def test_the_detector_reads_heredoc_bodies_as_data(text: str, runs: bool) -> Non
     assert bool(_orch_poll_launches(text)) is runs
 
 
+COMMENTED_UNIT_LAUNCHERS = [
+    "[Service]\nType=oneshot\nExecStart=/usr/bin/env \\\n# Keep the command readable.\n    orch poll\n",
+    "[Service]\nType=oneshot\nExecStart=/usr/bin/env \\\n    ; a comment\n    orch poll\n",
+    "[Service]\nType=oneshot\n# note \\\nExecStart=/usr/bin/env orch poll\n",
+    "[Service]\nType=oneshot\n  ; note \\\nExecStart=/usr/bin/env orch poll\n",
+]
+
+
 @pytest.mark.parametrize(
     ("unit", "runs"),
     [
@@ -810,10 +829,34 @@ def test_the_detector_reads_heredoc_bodies_as_data(text: str, runs: bool) -> Non
         ("Description=runs orch poll through run-poller.sh\n", False),
         ("# ExecStart=orch poll\n; ExecStart=orch poll\n", False),
         ("ExecStart=/bin/echo 'orch poll'\n", False),
+        *((unit, True) for unit in COMMENTED_UNIT_LAUNCHERS),
     ],
 )
 def test_the_unit_file_launch_detector(unit: str, runs: bool) -> None:
     assert bool(_unit_orch_poll_launches(unit)) is runs
+
+
+@pytest.mark.parametrize("unit", COMMENTED_UNIT_LAUNCHERS)
+def test_the_unit_file_detector_catches_a_launcher_systemd_runs(tmp_path: Path, unit: str) -> None:
+    analyze = shutil.which("systemd-analyze")
+    if analyze is None:
+        pytest.skip("systemd-analyze is not installed")
+    stub = tmp_path / "orch"
+    stub.write_text("#!/bin/sh\n", encoding="utf-8")
+    stub.chmod(0o755)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    (tmp_path / "probe.service").write_text(unit.replace("orch", str(stub)), encoding="utf-8")
+    result = subprocess.run(
+        [analyze, "--user", "--man=no", "--generators=no", "verify", str(tmp_path / "probe.service")],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "SYSTEMD_LOG_LEVEL": "debug", "XDG_RUNTIME_DIR": str(runtime)},
+    )
+    command_lines = re.findall(r"Command Line: (.*)", result.stdout + result.stderr)
+    if not command_lines:
+        pytest.skip(f"systemd-analyze printed no command line: {result.stderr[-500:]}")
+    assert any(line.endswith(f"{stub} poll") for line in command_lines)
+    assert _unit_orch_poll_launches(unit)
 
 
 def test_run_poller_is_the_only_deploy_file_that_runs_orch_poll() -> None:
