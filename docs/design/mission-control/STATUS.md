@@ -47,3 +47,10 @@ questions before the tickets were filed):
    scroll is a bug.
 6. Re-key timing: Max chose "After the mock-up round". Keying the detail page by ticket waits until the shipped-ticket and
    stopped-ticket variants are mocked.
+
+## Round 2 approved (2026-11-16)
+
+Max approved the round-2 mock-ups on 2026-11-16 at 10:45 AM ET: "Designs are approved". The packet is `round2/` (`SPEC.md`,
+`artboards/`, `screenshots/`). Precedence for intent is now `STATUS.md` > `round2/SPEC.md` > `SPEC.md` > artboards; a round-2
+artboard wins for look and motion wherever one exists, and the first-round artboards apply elsewhere. All data in the round-2
+artboards is sample data. The design tickets that build this round each name their artboards and depend on the packet being merged.
