@@ -12,10 +12,12 @@ device that holds a slot or an orphan. A remote device gets all three
 steps below. On the box (a local device) a finished job's slot is
 released as below; when machines.yml sets it `enabled: false`, each
 running job whose worker started is handed to `on_lost` as below. A box
-orphan keeps the pids of its `orch job run` and its worker: while either
-lives it is sent SIGTERM, through the runner or through the worker once
-that runner is gone, and SIGKILL on each later poll; its row is forgotten
-once both are gone.
+orphan names its whole process tree (lib/job_run.py Tree): its `orch job
+run`, its worker, every descendant of either, and on Linux every process
+carrying the run's tag. On the poll that loses it, it is sent SIGTERM,
+through the runner or through the worker once that runner is gone; each
+later poll stops, then kills (SIGKILL), the whole tree. Its row is
+forgotten only once no process of the run is left.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -60,6 +62,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +70,7 @@ from typing import NamedTuple
 
 from lib.config_overlay import overlay_path
 from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
+from lib.job_run import Process, ProcessesUnknown, Tree, _responsible_pid, processes, run_tag
 from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.remote import (
@@ -160,6 +164,7 @@ class DeviceMonitor:
         *,
         alive: Alive = pid_alive,
         kill: Callable[[int, int], None] = os.kill,
+        scan: Callable[[str | None], dict[int, Process]] = processes,
         machines_path: Path | None = None,
     ):
         self.pool = pool
@@ -167,8 +172,10 @@ class DeviceMonitor:
         self.transport = transport
         self.alive = alive
         self.kill = kill
+        self.scan = scan
         self.machines_path = machines_path
         self._stamp: Stamp | None = None
+        self._trees: dict[str, Tree] = {}
 
     def reload(self) -> None:
         """Load machines.yml again if it or its overlay changed since the last good load."""
@@ -197,8 +204,11 @@ class DeviceMonitor:
         groups: dict[str, list[HeldSlot]] = {}
         for slot in self.pool.held():
             groups.setdefault(slot.placement.device, []).append(slot)
-        for orphan in self.pool.orphans():
+        orphans = self.pool.orphans()
+        for orphan in orphans:
             groups.setdefault(orphan.device, [])
+        named = {orphan.job_id for orphan in orphans}
+        self._trees = {job_id: tree for job_id, tree in self._trees.items() if job_id in named}
         for name, slots in groups.items():
             device = self.config.device(name)
             if device is None:
@@ -259,25 +269,55 @@ class DeviceMonitor:
     def _stop_local(
         self, orphan: Orphan, now: float, stopped: list[str], forgotten: list[str]
     ) -> None:
-        live = [
-            pid
+        try:
+            tree = self._trees.get(orphan.job_id) or self._tree(orphan)
+            members = tree.track() if tree is not None else {}
+        except ProcessesUnknown:
+            return
+        if tree is None or not members:
+            self.pool.forget_orphan(orphan.job_id)
+            self._trees.pop(orphan.job_id, None)
+            forgotten.append(orphan.job_id)
+            return
+        self._trees[orphan.job_id] = tree
+        if orphan.lost_at < now:
+            try:
+                tree.kill_round()
+            except ProcessesUnknown:
+                return
+        else:
+            gentle = [pid for pid in (orphan.runner_pid, orphan.worker_pid) if pid in members]
+            for pid in gentle[:1] or members:
+                try:
+                    self.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+        stopped.append(orphan.job_id)
+
+    def _tree(self, orphan: Orphan) -> Tree | None:
+        listing = self.scan(None)
+        seed = {
+            pid: listing[pid].start
             for pid, start in (
                 (orphan.runner_pid, orphan.runner_start),
                 (orphan.worker_pid, orphan.worker_start),
             )
-            if pid is not None and self.alive(pid, start)
-        ]
-        if not live:
-            self.pool.forget_orphan(orphan.job_id)
-            forgotten.append(orphan.job_id)
-            return
-        kill = orphan.lost_at < now
-        for pid in live if kill else live[:1]:
-            try:
-                self.kill(pid, signal.SIGKILL if kill else signal.SIGTERM)
-            except OSError:
-                continue
-        stopped.append(orphan.job_id)
+            if pid in listing and start in (None, listing[pid].start)
+        }
+        root = orphan.worker_pid if orphan.worker_pid in seed else orphan.runner_pid
+        if root is None or root not in seed:
+            return None
+        tag = run_tag(root) if root == orphan.worker_pid else None
+        if tag is not None and not self.alive(root, orphan.worker_start):
+            tag = None
+        return Tree(
+            root,
+            tag,
+            scan=self.scan,
+            signal_pid=self.kill,
+            responsible=_responsible_pid if sys.platform == "darwin" else None,
+            known=seed,
+        )
 
     def _local_gone(self, slot: HeldSlot) -> bool:
         if slot.job_state == "running":

@@ -487,19 +487,19 @@ class Process:
     tagged: bool
 
 
-def processes(tag: str) -> dict[int, Process]:
+def processes(tag: str | None) -> dict[int, Process]:
     """This machine's live processes (zombies left out), and which carry `tag`.
 
     From /proc where there is one, else from `ps` (macOS: no tag is read,
-    so only the process tree counts there).
+    so only the process tree counts there). With no tag, none is tagged.
     """
     if os.path.isdir("/proc/self"):
         return _proc_processes(tag)
     return _ps_processes()
 
 
-def _proc_processes(tag: str) -> dict[int, Process]:
-    mark = f"{RUN_TAG_ENV}={tag}".encode()
+def _proc_processes(tag: str | None) -> dict[int, Process]:
+    mark = None if tag is None else f"{RUN_TAG_ENV}={tag}".encode()
     try:
         names = os.listdir("/proc")
     except OSError as exc:
@@ -516,13 +516,29 @@ def _proc_processes(tag: str) -> dict[int, Process]:
         fields = stat[stat.rfind(")") + 2:].split()
         if len(fields) < 20 or fields[0] in ("Z", "X"):
             continue
-        try:
-            with open(f"/proc/{name}/environ", "rb") as handle:
-                tagged = mark in handle.read().split(b"\0")
-        except OSError:
-            tagged = False
+        tagged = False
+        if mark is not None:
+            try:
+                with open(f"/proc/{name}/environ", "rb") as handle:
+                    tagged = mark in handle.read().split(b"\0")
+            except OSError:
+                pass
         found[int(name)] = Process(int(name), int(fields[1]), fields[19], tagged)
     return found
+
+
+def run_tag(pid: int) -> str | None:
+    """The RUN_TAG_ENV value pid carries, None when it has none or it cannot be read."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as handle:
+            environ = handle.read().split(b"\0")
+    except OSError:
+        return None
+    prefix = f"{RUN_TAG_ENV}=".encode()
+    for entry in environ:
+        if entry.startswith(prefix):
+            return entry[len(prefix):].decode(errors="replace")
+    return None
 
 
 def _ps_processes() -> dict[int, Process]:
@@ -565,18 +581,23 @@ class Tree:
     `responsible` (macOS), an orphan whose responsible process is the root
     belongs to it. `responsible` returns None for a process that is
     gone or not this user's, and raises ProcessesUnknown when it cannot say.
+    The root is taken by pid only on the first look; `known` (pid and start
+    time) seeds the members instead, for a run this process did not start.
+    After that a pid counts only by its start time, so a reused pid never
+    joins the run.
     """
 
     def __init__(
         self,
         root: int,
-        tag: str,
+        tag: str | None,
         *,
-        scan: Callable[[str], dict[int, Process]] = processes,
+        scan: Callable[[str | None], dict[int, Process]] = processes,
         signal_pid: Callable[[int, int], None] = os.kill,
         adopts: bool = False,
         others: frozenset[tuple[int, str]] = frozenset(),
         responsible: Callable[[int], int | None] | None = None,
+        known: Mapping[int, str] | None = None,
     ):
         self.root = root
         self.responsible = responsible
@@ -585,7 +606,8 @@ class Tree:
         self.others = others
         self.scan = scan
         self.signal_pid = signal_pid
-        self.known: dict[int, str] = {}
+        self.known: dict[int, str] = dict(known or {})
+        self.looked = known is not None
         self.foreign: set[int] = set()
 
     def track(self) -> dict[int, Process]:
@@ -597,8 +619,7 @@ class Tree:
             for pid, start in self.known.items()
             if pid in listing and listing[pid].start == start and pid not in self.foreign
         }
-        root = self.root not in self.foreign
-        if root and self.root in listing and (self.root not in self.known or self.root in members):
+        if not self.looked and self.root in listing:
             members[self.root] = listing[self.root]
         grown = True
         while grown:
@@ -615,6 +636,7 @@ class Tree:
                     members[process.pid] = process
                     grown = True
         self.known = {pid: process.start for pid, process in members.items()}
+        self.looked = True
         return members
 
     def track_if_listable(self) -> None:
@@ -646,7 +668,7 @@ class Tree:
         said: float | None = None
         while True:
             try:
-                members = self._kill_round()
+                members = self.kill_round()
             except ProcessesUnknown as exc:
                 if said is None or time.monotonic() - said >= KILL_GRACE_SECONDS:
                     log(f"{exc}; holding the job until the run's processes are confirmed gone")
@@ -662,7 +684,8 @@ class Tree:
                 said = time.monotonic()
             time.sleep(0.05)
 
-    def _kill_round(self) -> dict[int, Process]:
+    def kill_round(self) -> dict[int, Process]:
+        """Stop every member, look again until none is new, kill them all; the members."""
         members = self.track()
         stopped: set[int] = set()
         while set(members) - stopped:
