@@ -1278,7 +1278,22 @@ def _read_db(
                         **waiting,
                     }
                 )
-    _add_job_tickets(connection, active, ticket_info, chart, now, tables)
+    flows, retries, tracked_at = _ticket_flows(
+        connection,
+        {*ticket_info, *((repo.casefold(), ticket_id) for _, repo, ticket_id in active)},
+        {key: info.state for key, info in ticket_info.items()},
+        chart,
+        now,
+        tables,
+    )
+    for item, repo, ticket_id in active:
+        key = (repo.casefold(), ticket_id)
+        info = ticket_info.get(key, TicketInfo(None, False, None))
+        item["tracker"] = info.tracker
+        item["stuck"] = info.stuck
+        item["flow"] = flows[key]
+        if key in retries:
+            item["retries"] = retries[key]
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
@@ -1553,56 +1568,51 @@ class TicketInfo(NamedTuple):
     state: str | None
 
 
-def _add_job_tickets(
+def _ticket_flows(
     connection: sqlite3.Connection,
-    active: list[tuple[dict, str, str]],
-    ticket_info: dict[tuple[str, str], TicketInfo],
+    keys: set[tuple[str, str]],
+    states: dict[tuple[str, str], str | None],
     chart: dict | None,
     now: float,
     tables: set[str],
-) -> None:
-    if not active:
-        return
-    # One read for every ticket with a running or queued job, oldest first.
-    wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
-    ids = sorted({ticket_id for _, ticket_id in wanted})
-    marks = ",".join("?" for _ in ids)
-    histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
-    columns = (
-        {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
-        if "job_telemetry" in tables
-        else set()
-    )
-    joined = "job_id" in columns
-    times = ", ".join(
-        f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
-        for name in ("started_at", "finished_at")
-    )
-    for row in connection.execute(
-        "SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
-        f"jobs.attempt, {times} "
-        "FROM jobs "
-        + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
-        + f"WHERE jobs.ticket_id IN ({marks}) "
-        "ORDER BY jobs.created_at, jobs.rowid",
-        ids,
-    ):
-        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-        if key in histories:
-            histories[key].append(JobStep(
-                str(row["action"]),
-                _enum(row["recipient"], RECIPIENTS),
-                float(row["created_at"]),
-                _telemetry_time(row["started_at"]),
-                _telemetry_time(row["finished_at"]),
-                int(row["attempt"]),
-            ))
-    recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in wanted}
+) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], int], dict[tuple[str, str], float]]:
+    """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
+    ticket id). Each table is read once, whole, and kept for `keys` only: no
+    `IN (...)` list, so the number of tickets never meets SQLite's variable cap."""
+    histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in keys}
+    if "jobs" in tables:
+        columns = (
+            {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
+            if "job_telemetry" in tables
+            else set()
+        )
+        joined = "job_id" in columns
+        times = ", ".join(
+            f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
+            for name in ("started_at", "finished_at")
+        )
+        for row in connection.execute(
+            "SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
+            f"jobs.attempt, {times} "
+            "FROM jobs "
+            + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
+            + "ORDER BY jobs.created_at, jobs.rowid"
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            if key in histories:
+                histories[key].append(JobStep(
+                    str(row["action"]),
+                    _enum(row["recipient"], RECIPIENTS),
+                    float(row["created_at"]),
+                    _telemetry_time(row["started_at"]),
+                    _telemetry_time(row["finished_at"]),
+                    int(row["attempt"]),
+                ))
+    recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in keys}
     if "ticket_transitions" in tables:
         for row in connection.execute(
             "SELECT repo, ticket_id, from_state, to_state, at, source FROM ticket_transitions "
-            f"WHERE ticket_id IN ({marks}) ORDER BY at, id",
-            ids,
+            "ORDER BY at, id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             at = _telemetry_time(row["at"])
@@ -1616,33 +1626,25 @@ def _add_job_tickets(
                 ))
     tracked_at: dict[tuple[str, str], float] = {}
     if "tracked_tickets" in tables:
-        for row in connection.execute(
-            f"SELECT repo, ticket_id, tracked_at FROM tracked_tickets WHERE ticket_id IN ({marks})",
-            ids,
-        ):
+        for row in connection.execute("SELECT repo, ticket_id, tracked_at FROM tracked_tickets"):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             at = _telemetry_time(row["tracked_at"])
-            if at is not None:
-                tracked_at[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = float(at)
+            if key in keys and at is not None:
+                tracked_at[key] = float(at)
     retries: dict[tuple[str, str], int] = {}
     if "ticket_retries" in tables:
         for row in connection.execute(
             "SELECT repo, ticket_id, count(*) AS n FROM ticket_retries "
-            f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
-            "AND outcome NOT LIKE 'rejected-%' GROUP BY repo, ticket_id",
-            ids,
+            "WHERE outcome NOT LIKE 'rejected-%' GROUP BY repo, ticket_id"
         ):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            retries[key] = retries.get(key, 0) + int(row["n"])
-    for item, repo, ticket_id in active:
-        key = (repo.casefold(), ticket_id)
-        info = ticket_info.get(key, TicketInfo(None, False, None))
-        item["tracker"] = info.tracker
-        item["stuck"] = info.stuck
-        item["flow"] = job_flow(
-            chart, histories[key], info.state, now, recorded[key], tracked_at.get(key)
-        )
-        if key in retries:
-            item["retries"] = retries[key]
+            if key in keys:
+                retries[key] = retries.get(key, 0) + int(row["n"])
+    flows = {
+        key: job_flow(chart, histories[key], states.get(key), now, recorded[key], tracked_at.get(key))
+        for key in keys
+    }
+    return flows, retries, tracked_at
 
 
 def _has_placeholder(value: object) -> bool:
