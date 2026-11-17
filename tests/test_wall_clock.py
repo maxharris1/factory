@@ -125,6 +125,24 @@ def test_a_remote_run_past_its_budget_has_its_control_stopped() -> None:
     assert budget.expired
 
 
+def test_a_remote_run_its_device_stopped_past_its_budget_still_expires_it() -> None:
+    """#776: the device's own deadline can end the run before the local timer runs."""
+    now = [0.0]
+    budget = Budget(60, clock=lambda: now[0])
+    lines: list[str] = []
+
+    def stopped_by_its_device(_control: job_run.Control) -> int:
+        now[0] = 60.5
+        return 128 + signal.SIGTERM
+
+    code = job_run.follow(
+        stopped_by_its_device, beat=lambda: None, interval=0.1, log=lines.append, budget=budget
+    )
+    assert code == 128 + signal.SIGTERM
+    assert budget.expired and budget.signum == signal.SIGTERM
+    assert any("passed its 1-minute wall-clock budget" in line for line in lines), lines
+
+
 def test_a_remote_run_that_ends_in_time_cancels_its_budget_timer() -> None:
     budget = Budget(0.3)
     code = job_run.follow(
