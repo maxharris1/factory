@@ -254,14 +254,18 @@ def test_the_subprocess_seam_is_one_function_with_no_shell() -> None:
             ):
                 callers.append(function.name)
                 assert all(keyword.arg != "shell" for keyword in node.keywords)
-    assert callers == ["run_gh", "git_patch_id"]
-    imported = {
-        alias.name
+    assert set(callers) == {"run_gh", "git_patch_id"}
+    assert not any(
+        isinstance(node, ast.ImportFrom) and node.module == "os" for node in ast.walk(tree)
+    )
+    used = {
+        node.attr
         for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "os"
     }
-    assert "os" not in imported
+    assert used == {"killpg"}
 
 
 def test_gh_token_in_the_environment_is_not_used(

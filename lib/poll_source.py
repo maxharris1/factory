@@ -207,6 +207,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
+_TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
 
 
@@ -510,7 +511,7 @@ class LivePollSource:
         for project in self.config.projects:
             if not project.linear_project_ids:
                 action: ReviewActions = GitHubReviewActions(
-                    runner=self.gh_runner,
+                    runner=self._write_runner,
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
                 )
@@ -519,7 +520,7 @@ class LivePollSource:
                     move_ready_for_review=project.linear_ready_for_review,
                     linear_ready=self._move_linear_ready,
                     fresh_ticket=self.fresh_ticket,
-                    runner=self.gh_runner,
+                    runner=self._write_runner,
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
                 )
@@ -2018,8 +2019,20 @@ class LivePollSource:
         call = list(argv)
         if _is_gh_read(call[call.index("gh") + 1 :] if "gh" in call else []):
             return self._run_gh_read(call)
-        with self._timed(_gh_source(call)):
-            return self.gh_runner(call, self.timeout_seconds)
+        return self._write_runner(call, self.timeout_seconds)
+
+    def _write_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
+        call = list(argv)
+        name = _gh_source(call)
+        began = self.clock()
+        try:
+            return self.gh_runner(call, timeout)
+        except subprocess.TimeoutExpired:
+            name = _gh_ticket(call)
+            raise
+        finally:
+            if self.cycle_clock is not None:
+                self.cycle_clock.add_source(name, self.clock() - began)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         self._check_hangs("github")
@@ -2141,6 +2154,15 @@ def _gh_source(argv: Sequence[str]) -> str:
         if part == "--repo" and index + 1 < len(argv):
             return argv[index + 1].lower()
     return "github"
+
+
+def _gh_ticket(argv: Sequence[str]) -> str:
+    source = _gh_source(argv)
+    for part in argv:
+        match = _TICKET_ROUTE.match(part)
+        if match:
+            return f"{source}#{match.group(1)}"
+    return source
 
 
 def _json(text: str, source: str) -> object:

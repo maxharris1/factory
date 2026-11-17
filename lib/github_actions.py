@@ -63,7 +63,9 @@ so no response body, URL or token reaches ship_intents.error.
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -101,6 +103,7 @@ GH = ("env", *(part for name in TOKEN_VARIABLES for part in ("-u", name)), "gh")
 TIMEOUT_SECONDS = 60.0
 STATE_LABEL_PREFIX = "orch:state/"
 PULL_FILES_LIMIT = 3000
+GH_DRAIN_SECONDS = 2.0
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
@@ -170,15 +173,37 @@ Runner = Callable[[Sequence[str], float], GhResult]
 
 
 def run_gh(argv: Sequence[str], timeout: float) -> GhResult:
-    """The adapter's only process call. argv is a list; no shell."""
-    completed = subprocess.run(
+    process = subprocess.Popen(
         list(argv),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
-        check=False,
+        start_new_session=True,
     )
-    return GhResult(completed.returncode, completed.stdout, completed.stderr)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(process)
+        raise subprocess.TimeoutExpired(process.args, timeout) from None
+    except BaseException:
+        _kill_group(process)
+        raise
+    return GhResult(process.returncode, stdout, stderr)
+
+
+def _kill_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=GH_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        # A process that left the group with setsid still holds the pipes.
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait()
 
 
 def git_patch_id(diff: str, timeout: float) -> str:
