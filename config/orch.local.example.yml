@@ -10,6 +10,13 @@ projects:
     linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
   - repo: maxharris1/Cleffy
     ready_starts_review: true
+    # QA evidence bucket (issue #787), needed when factory.md enables qa:
+    # qa_storage:
+    #   bucket: factory-qa-maxharris1
+    #   region: us-east-1
+    #   access_key_env: QA_S3_KEY_ID
+    #   secret_key_env: QA_S3_SECRET
+    #   evidence_root: /srv/factory/qa-evidence
 trusted_linear_users:
   REPLACE_WITH_LINEAR_USER_ID:
     - grok-bot

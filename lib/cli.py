@@ -71,6 +71,7 @@ from lib.orch_yml import (
     approvals,
     bot_approver_findings,
     hold_approver_findings,
+    qa_storage_findings,
     linear_approver_findings,
     load_approvals,
     load_orch_yml,
@@ -171,7 +172,7 @@ commands:
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
 
-check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
+check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
   With no paths, checks orch.yml, machines.yml and the example factory.md
   files. When --orch is given, machines.yml is checked only with --machines.
@@ -179,6 +180,8 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
   orch.yml only; a machines.yml device with one is always skipped with a warning.
   Warns about uncommitted edits to a tracked orch.yml or machines.yml.
   --digest prints the sha256 of each effective config (base plus overlay).
+  owner/name=PATH names the project a factory.md belongs to; a file with
+  qa enabled needs it, and that project needs a qa_storage entry.
   A disabled or placeholder device is named on stderr and never scheduled.
   An unknown model name warns on stderr and still exits 0.
 
@@ -571,7 +574,7 @@ def _check_config(argv: list[str]) -> int:
     if args.factory:
         factory_paths = args.factory
     else:
-        factory_paths = [ROOT / relative for relative in EXAMPLE_PATHS]
+        factory_paths = [(None, ROOT / relative) for relative in EXAMPLE_PATHS]
 
     orch_config, orch_findings = load_orch_yml(
         orch_path,
@@ -592,10 +595,14 @@ def _check_config(argv: list[str]) -> int:
             machines_path,
             load_machines_yml(machines_path)[1],
         ) or failed
-    for path in factory_paths:
+    for repo, path in factory_paths:
         factory, findings = load_factory_md(path)
         if orch_config is not None and factory is not None:
-            findings = findings + hold_approver_findings(orch_config, factory.hold)
+            findings = (
+                findings
+                + hold_approver_findings(orch_config, factory.hold)
+                + qa_storage_findings(orch_config, repo, factory.qa)
+            )
         failed = _report(path, findings) or failed
     from lib.config_overlay import describe, digest, uncommitted_edits
 
@@ -2511,10 +2518,20 @@ def _parser() -> _Parser:
     parser = _Parser(prog="orch check-config", add_help=True)
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--machines", type=Path)
-    parser.add_argument("--factory", type=Path, action="append")
+    parser.add_argument("--factory", type=_factory_arg, action="append")
     parser.add_argument("--allow-placeholders", action="store_true")
     parser.add_argument("--digest", action="store_true")
     return parser
+
+
+_FACTORY_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def _factory_arg(value: str) -> tuple[str | None, Path]:
+    repo, sep, rest = value.partition("=")
+    if sep and _FACTORY_REPO.fullmatch(repo):
+        return repo, Path(rest)
+    return None, Path(value)
 
 
 def _install_skills(argv: list[str]) -> int:

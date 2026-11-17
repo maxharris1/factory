@@ -99,6 +99,16 @@ projects:
 # Host-specific values (the Linear project id, trusted_linear_users,
 # linear_webhook, a device's slots) go in the gitignored orch.local.yml
 # beside this file, merged in at load (config/orch.local.example.yml).
+# A project's QA evidence bucket is a host value too (issue #787): set
+# projects[].qa_storage there, never here. A factory.md with qa enabled
+# needs one (docs/SPEC.md section 7):
+#   qa_storage:
+#     bucket: factory-qa-owner          # one bucket per owner
+#     region: us-east-1
+#     # endpoint: https://...           # default https://s3.<region>.amazonaws.com
+#     access_key_env: QA_S3_KEY_ID      # variable names only, never values
+#     secret_key_env: QA_S3_SECRET
+#     evidence_root: /srv/factory/qa-evidence
 # Optional Linear webhook listener (README "Linear webhook"). Off unless
 # this section is present; the poller then behaves exactly as without it.
 # Max saves the Linear signing secret to secret_file (chmod 600).

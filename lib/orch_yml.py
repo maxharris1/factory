@@ -25,7 +25,7 @@ import yaml
 
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import DashboardConfig, parse_dashboard
-from lib.factory_md import HoldConfig
+from lib.factory_md import HoldConfig, QaConfig
 from lib.job_state import (
     DEFAULT_RELEASE_CLAIMED_MINUTES,
     DEFAULT_STALE_MINUTES,
@@ -107,7 +107,14 @@ _PROJECT_KEYS = {
     "intake",
     "driver_inbox",
     "grok_webhook",
+    "qa_storage",
 }
+_QA_STORAGE_KEYS = {
+    "bucket", "region", "endpoint", "access_key_env", "secret_key_env", "evidence_root",
+}
+_QA_STORAGE_REQUIRED = ("bucket", "region", "access_key_env", "secret_key_env", "evidence_root")
+_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_REGION = re.compile(r"^[a-z0-9-]{1,32}$")
 _INTAKE_KEYS = {
     "label",
     "linear_state",
@@ -157,6 +164,16 @@ class DriverInbox:
 
 
 @dataclass(frozen=True)
+class QaStorage:
+    bucket: str
+    region: str
+    endpoint: str | None
+    access_key_env: str
+    secret_key_env: str
+    evidence_root: Path
+
+
+@dataclass(frozen=True)
 class Project:
     repo: str
     job_timeout: int | None = None
@@ -171,6 +188,7 @@ class Project:
     intake: Intake | None = None
     driver_inbox: DriverInbox | None = None
     grok_webhook: bool = True
+    qa_storage: QaStorage | None = None
 
     def base_for(self, linear_project_id: str | None) -> str | None:
         if self.intake is not None and linear_project_id in self.intake.base_branches:
@@ -410,6 +428,33 @@ def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[
             Finding("error", f"hold.approver {hold.approver} is not a trusted_logins key")
         )
     return findings
+
+
+def qa_storage_findings(
+    config: OrchConfig, repo: str | None, qa: QaConfig | None
+) -> list[Finding]:
+    if qa is None:
+        return []
+    if repo is None:
+        return [
+            Finding(
+                "error",
+                "qa.enabled is true: pass --factory owner/name=PATH so check-config "
+                "can find the project's qa_storage entry",
+            )
+        ]
+    project = next(
+        (item for item in config.projects if item.repo.lower() == repo.lower()), None
+    )
+    if project is None or project.qa_storage is None:
+        return [
+            Finding(
+                "error",
+                f"qa.enabled is true but {repo} has no qa_storage entry "
+                "(set it under its project in orch.local.yml)",
+            )
+        ]
+    return []
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -742,6 +787,12 @@ def _projects(
             )
             ok = False
             continue
+        qa_storage = None
+        if "qa_storage" in item:
+            qa_storage = _qa_storage(item["qa_storage"], f"projects[{index}].qa_storage", findings)
+            if qa_storage is None:
+                ok = False
+                continue
         projects.append(
             Project(
                 repo=repo,
@@ -754,6 +805,7 @@ def _projects(
                 intake=intake,
                 driver_inbox=driver_inbox,
                 grok_webhook=grok_webhook,
+                qa_storage=qa_storage,
             )
         )
     if not ok:
@@ -1470,6 +1522,48 @@ def _trusted_linear_users(
             continue
         result[f"linear:{user_id}"] = frozenset(identities)
     return result
+
+
+def _qa_storage(value: object, where: str, findings: list[Finding]) -> QaStorage | None:
+    if not isinstance(value, dict):
+        findings.append(Finding("error", f"{where} must be a mapping"))
+        return None
+    before = len(findings)
+    _unknown_keys(value, _QA_STORAGE_KEYS, where, findings)
+    for key in _QA_STORAGE_REQUIRED:
+        if key not in value:
+            findings.append(Finding("error", f"missing required field '{where}.{key}'"))
+    if len(findings) > before:
+        return None
+    bucket = value["bucket"]
+    if not isinstance(bucket, str) or _BUCKET.fullmatch(bucket) is None:
+        findings.append(Finding("error", "qa_storage.bucket must be an S3 bucket name"))
+    region = value["region"]
+    if not isinstance(region, str) or _REGION.fullmatch(region) is None:
+        findings.append(Finding("error", "qa_storage.region must be a region name"))
+    endpoint = value.get("endpoint")
+    if endpoint is not None and not _https_url(endpoint):
+        findings.append(Finding("error", "qa_storage.endpoint must be an https URL"))
+    access = _env_name(value["access_key_env"], "qa_storage.access_key_env", findings)
+    secret = _env_name(value["secret_key_env"], "qa_storage.secret_key_env", findings)
+    root = _absolute_path(value, "evidence_root", "qa_storage.evidence_root", findings)
+    if len(findings) > before or access is None or secret is None or root is None:
+        return None
+    return QaStorage(bucket, region, endpoint, access, secret, root)
+
+
+def _https_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = urlsplit(value)
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and not parts.username
+        and not parts.password
+        and not parts.query
+        and not parts.fragment
+    )
 
 
 def _env_name(
