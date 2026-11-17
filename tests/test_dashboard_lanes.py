@@ -20,6 +20,8 @@ from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_page import CSS, TILE_STATE, intake_split, queue_speed
 from tests.test_dashboard import NOW, seeded
 from tests.test_dashboard_layout import BAR, HARNESS, NODE, _no_script, _run_page, _section, needs_node
+from tests.merge_queue_support import sha
+from tests.test_ready_ci_gate import approved_then_pushed_pending
 
 STATES = {
     "plan": {"job_state": "running", "action": "plan"},
@@ -262,7 +264,7 @@ def test_queue_lane_is_still_when_empty_and_red_without_a_waiter(tmp_path: Path)
 def _held_for_ci(snapshot: dict) -> dict:
     snapshot = copy.deepcopy(snapshot)
     snapshot["tickets"][0].update(pr="13", ci_wait={
-        "reason": "ci-pending", "checks": ["build", "lint"], "waiting_seconds": 125,
+        "reason": "ci-pending", "checks": ["build", "lint"], "waiting_seconds": 125, "round": 3,
     })
     snapshot["tickets"][2].update(ci_wait={
         "reason": "approved-ci-pending", "checks": [], "waiting_seconds": 3700,
@@ -281,7 +283,7 @@ def _ci_cards(lanes: str) -> list[str]:
 def _assert_ci_lane(lanes: str, snapshot: dict) -> None:
     pending, approved = _ci_cards(lanes)
     for needle in ("AUT-7", 'href="https://github.com/aut0-code/aut0/pull/13"', "waiting on CI", "then review",
-                   "round 1", "build, lint", 'href="https://github.com/aut0-code/aut0/pull/13/checks"',
+                   "round 3", "build, lint", 'href="https://github.com/aut0-code/aut0/pull/13/checks"',
                    "waiting 2m 0"):
         assert needle in pending, needle
     for needle in ("cleffy#13", 'href="https://github.com/maxharris1/cleffy/pull/13"', "then merge",
@@ -315,6 +317,24 @@ def test_the_page_script_draws_the_ci_lane_like_the_server(tmp_path: Path) -> No
     assert _shape(script) == _shape(server[server.index(">") + 1 : server.rindex("<")])
     bare = _run_page(tmp_path, base, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
     assert 'data-device="ci-wait"' not in bare
+
+
+def _card_round(lanes: str) -> str:
+    return re.search(r'<span class="round">round (\d+)</span>', lanes.split('data-device="ci-wait"')[1]).group(1)
+
+
+@needs_node
+def test_a_ci_card_after_an_approved_round_names_the_round_the_dispatcher_queues(tmp_path: Path) -> None:
+    board, pr = approved_then_pushed_pending(tmp_path)
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "unused.log", now=board.now[0])
+    server = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+    script = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
+
+    pr.ci[sha(2)] = "success"
+    board.poll()
+    queued = json.loads(board.jobs("review")[-1]["detail"])["round"]
+    assert queued == "2/3"
+    assert _card_round(server) == _card_round(script) == "2"
 
 
 def test_probe_down_gives_a_still_red_meter(tmp_path: Path) -> None:

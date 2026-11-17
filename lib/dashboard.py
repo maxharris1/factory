@@ -839,8 +839,10 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
 
 def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str], dict]:
     found = {}
+    columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(ci_waits)")}
+    next_round = "next_round" if "next_round" in columns else "NULL"
     for row in connection.execute(
-        "SELECT repo, ticket_id, reason, checks, since FROM ci_waits"
+        f"SELECT repo, ticket_id, reason, checks, since, {next_round} AS next_round FROM ci_waits"
     ):
         try:
             names = json.loads(row["checks"])
@@ -850,6 +852,7 @@ def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str
             "reason": _enum(row["reason"], CI_WAIT_REASONS),
             "checks": [_clean(name, 80) for name in names] if isinstance(names, list) else [],
             "waiting_seconds": _age(now, row["since"]),
+            **({"round": int(row["next_round"])} if row["next_round"] is not None else {}),
         }
     return found
 

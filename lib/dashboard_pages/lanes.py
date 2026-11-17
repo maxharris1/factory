@@ -392,7 +392,7 @@ SCRIPT = r"""
     add(add(bodyEl, el('div', 'tile-l2')), el('span', 'verb warn', 'waiting on CI'));
     var l3 = add(bodyEl, el('div', 'tile-l3'));
     if (step) add(l3, el('span', 'action', 'then ' + step));
-    if (step === 'review') add(l3, el('span', 'round', 'round ' + (Number(r.round) + 1)));
+    if (step === 'review' && ci.round != null) add(l3, el('span', 'round', 'round ' + ci.round));
     ticking(add(l3, el('span', 't')), ci.waiting_seconds, 'waiting ');
     var l4 = add(bodyEl, el('div', 'tile-l4'));
     add(l4, el('span', 'what', checksNamed(ci)));
@@ -784,7 +784,7 @@ def _ci_card(row: dict) -> str:
     strip = px_strip(f"ci-{row['repo']}#{row['ticket_id']}", effect="static", tint=CI_TINT, height=8)
     line3 = (
         (_span("action", f"then {step}") if step else "")
-        + (_span("round", f"round {int(row['round']) + 1}") if step == "review" else "")
+        + (_span("round", f"round {ci['round']}") if step == "review" and ci.get("round") is not None else "")
         + _span("t", "waiting " + duration(ci["waiting_seconds"]))
     )
     return (

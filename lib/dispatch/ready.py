@@ -233,13 +233,15 @@ class ReadyMixin:
             result = ticket.ci.get(head) or ticket.ci.get(reported_head)
             connection.execute(
                 """
-                INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ci_waits
+                    (repo, ticket_id, comment_id, head, reason, checks, since, next_round)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id) DO UPDATE SET
                     comment_id = excluded.comment_id,
                     head = excluded.head,
                     reason = excluded.reason,
                     checks = excluded.checks,
+                    next_round = excluded.next_round,
                     since = CASE WHEN ci_waits.head = excluded.head
                                  THEN ci_waits.since ELSE excluded.since END
                 """,
@@ -250,8 +252,17 @@ class ReadyMixin:
                     outcome,
                     json.dumps(list(result.pending) if result is not None else []),
                     self.queue.now(),
+                    self._completed_round(ticket) + 1,
                 ),
             )
+
+    def _completed_round(self, ticket: TrackedTicket) -> int:
+        """The last completed review round. A handed-off or merge-queue
+        ticket counts its shipped APPROVE's round, as re-entry does (#108)."""
+        state, completed = self._review_context(ticket)
+        if state in ("handed-off", "merge-queue"):
+            return _approved_round(self._shipped_approval(ticket), completed)
+        return completed
 
     def _watch_ci_silence(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)

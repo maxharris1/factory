@@ -470,6 +470,7 @@ class SchemaMixin:
                 )
                 """
             )
+            _add_missing_columns(connection, "ci_waits", {"next_round": "INTEGER"})
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
