@@ -104,7 +104,7 @@ SCRIPT_TICKETS = r"""
   var tkProject = tkLoad('tk-project') || '';
   var tkView = tkLoad('tk-view') === 'table' ? 'table' : 'board';
   var tkShelfShown = BOARD.shelf_page;
-  var tkFind = {query: '', active: null, open: false, rows: [], found: []};
+  var tkFind = {query: '', active: null, open: false, moving: false, rows: [], found: []};
 
   function tkLoad(key) {
     try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
@@ -367,7 +367,9 @@ SCRIPT_TICKETS = r"""
     var filter = byId('ticket-filter');
     if (filter) {
       var tools = el('div', 'tk-tools');
+      tkFind.moving = true;
       filter.replaceChildren(tools, tkFind.box || tkFindBox());
+      tkFind.moving = false;
       var group = tkGroup(tools, 'tk-group', 'Project');
       tkButton(group, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; tkSave('tk-project', ''); });
       b.projects.forEach(function (p) {
@@ -420,7 +422,8 @@ SCRIPT_TICKETS = r"""
     if (!q) return [];
     var found = [];
     rows.forEach(function (r, i) {
-      var names = [String(r.ticket_id), ticketOf(r), ticketKey(r)].map(function (n) { return n.toLowerCase(); });
+      var names = [String(r.ticket_id), tileLabel(r), short(r.repo) + '#' + r.ticket_id, ticketOf(r), ticketKey(r)]
+        .map(function (n) { return n.toLowerCase(); });
       var rank = names.indexOf(q) >= 0 ? 0
         : names.some(function (n) { return n.indexOf(q) === 0; }) ? 1
         : names.some(function (n) { return n.indexOf(q) > 0; }) ? 2 : -1;
@@ -473,7 +476,7 @@ SCRIPT_TICKETS = r"""
       f.open = true;
       f.active = f.found[ev.key === 'ArrowDown' ? (at + 1) % n : at <= 0 ? n - 1 : at - 1].key;
       tkFindDraw();
-    } else if (ev.key === 'Enter') {
+    } else if (ev.key === 'Enter' && !ev.isComposing) {
       var target = f.found[Math.max(at, 0)];
       if (!target) return;
       ev.preventDefault();
@@ -511,6 +514,13 @@ SCRIPT_TICKETS = r"""
       tkFindDraw();
     });
     input.addEventListener('keydown', tkFindKey);
+    box.addEventListener('focusout', function (ev) {
+      if (tkFind.moving || !tkFind.open) return;
+      for (var n = ev.relatedTarget; n; n = n.parentNode) if (n === box) return;
+      tkFind.open = false;
+      tkFind.active = null;
+      tkFindDraw();
+    });
     if (before && before.value) {
       input.value = tkFind.query = before.value;
       tkFind.open = before === document.activeElement;

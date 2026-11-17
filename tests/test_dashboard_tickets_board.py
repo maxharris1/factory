@@ -13,7 +13,7 @@ import pytest
 import lib.dashboard_flow as flow
 import lib.dashboard_page as page
 from lib.dashboard_pages import tickets as tickets_page
-from lib.dashboard_pages.common import ticket_page_href
+from lib.dashboard_pages.common import _ticket, ticket_page_href
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
@@ -160,6 +160,10 @@ HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", f"let nowMs = {in
     "      fire(document.activeElement, 'input');\n"
     "    } else if (kind === 'keyon') {\n"
     "      steps.push({keyon: arg, prevented: fire(document.activeElement, 'keydown', {key: arg}).defaultPrevented});\n"
+    "    } else if (kind === 'leave') {\n"
+    "      const to = find(body, n => (arg[0] === 'class' ? n.className : n.attrs[arg[0]]) === arg[1]);\n"
+    "      fire(document.activeElement, 'focusout', {relatedTarget: to});\n"
+    "      to.focus();\n"
     "    } else if (kind === 'where') {\n"
     "      steps.push({where: location.href || null, value: ids['find-ticket'].value || ''});\n"
     "    } else if (kind === 'focused') {\n"
@@ -1386,14 +1390,8 @@ def _expanded(markup: str) -> tuple[str, bool]:
 
 
 def _page(snapshot: dict, label: str) -> str:
-    (row,) = [row for row in snapshot["tickets"] if _ticket_label(row) == label]
+    (row,) = [row for row in snapshot["tickets"] if _ticket(row) == label]
     return ticket_page_href(row)
-
-
-def _ticket_label(row: dict) -> str:
-    from lib.dashboard_pages.common import _ticket
-
-    return _ticket(row)
 
 
 def _searched(tmp_path: Path, snapshot: dict, query: str, keys: list[str], *, project: str | None = None) -> dict:
@@ -1445,8 +1443,8 @@ def test_find_ranks_an_exact_id_first_then_prefixes_then_the_rest(tmp_path: Path
     assert labels and all(label.startswith("aut0#AUT-1") for label in labels)
     labels = [label for label, _, _ in _options(_searched(tmp_path / "sub", snapshot, "11", [])["snaps"][0])]
     ids = [str(row["ticket_id"]) for row in snapshot["tickets"]]
-    starts = [_ticket_label(row) for row, i in zip(snapshot["tickets"], ids) if i.startswith("11")]
-    inside = [_ticket_label(row) for row, i in zip(snapshot["tickets"], ids) if "11" in i and not i.startswith("11")]
+    starts = [_ticket(row) for row, i in zip(snapshot["tickets"], ids) if i.startswith("11")]
+    inside = [_ticket(row) for row, i in zip(snapshot["tickets"], ids) if "11" in i and not i.startswith("11")]
     assert len(starts) < 8 < len(starts) + len(inside) and inside[0].startswith("aut0#")
     assert labels == (starts + inside)[:8]
     exact = "cleffy#200"
@@ -1507,3 +1505,25 @@ def test_a_redraw_while_typing_keeps_the_text_focus_and_picked_match(tmp_path: P
     assert wheres[0] == {"where": None, "value": "1"}
     assert wheres[1]["where"] == _options(before)[1][1]
     assert _all(_dom(after), _attr("data-view", "table"))[0]["attrs"]["aria-pressed"] == "true"
+
+
+@layout.needs_node
+def test_typing_a_repo_and_id_opens_that_ticket_even_when_its_pr_differs(tmp_path: Path, snapshot: dict) -> None:
+    changed = copy.deepcopy(snapshot)
+    row = next(row for row in changed["tickets"] if row["repo"] == "maxharris1/cleffy" and row["ticket_id"] == "119")
+    row.update(ticket_id="10", pr=55)
+    found = _searched(tmp_path, changed, "cleffy#10", ["Enter"])
+    assert _options(found["snaps"][0])[0][0] == "cleffy#10 (PR #55)"
+    assert found["where"] == ticket_page_href(row)
+
+
+@layout.needs_node
+def test_moving_focus_out_of_the_box_closes_the_list(tmp_path: Path, snapshot: dict) -> None:
+    actions = [["focus", ["id", "find-ticket"]], ["type", "1"], ["keyon", "ArrowDown"],
+               ["leave", ["class", "tk-open"]], ["snap", ["ticket-filter"]],
+               ["leave", ["data-view", "table"]], ["hashchange", None], ["snap", ["ticket-filter"]], ["where", None]]
+    steps = _script(tmp_path, snapshot, actions)["steps"]
+    inside, outside = (step["snap"]["ticket-filter"] for step in steps if "snap" in step)
+    assert _expanded(inside) == ("true", False)
+    assert _expanded(outside) == ("false", True)
+    assert [step for step in steps if "where" in step] == [{"where": None, "value": "1"}]
