@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from lib import project_rules
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
+    HANDED_OFF_EXTERNALLY,
     LINEAR_HANDOFF_QUERY,
     OFF_LOOP_VERIFY_READS,
     POLL_ERROR_RETENTION_SECONDS,
@@ -52,6 +53,8 @@ class PollMixin:
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._cycle_failures: list[str] = []
         read_from = self.queue.now()
+        with self._phase("linear-states"):
+            self._read_linear_states(source)
         with self._phase("feed"):
             self._feed(source)
         with self._phase("github-candidates"):
@@ -114,6 +117,8 @@ class PollMixin:
                     self.process(self._polled.get(key, ticket))
                 except Exception as exc:
                     self._record_poll_error(ticket, exc)
+        with self._phase("linear-moves"):
+            self._apply_linear_moves()
         with self._phase("merge-queue"):
             self._advance_merge_queues()
         with self._phase("verify-handoffs"):
@@ -194,7 +199,10 @@ class PollMixin:
                 JOIN tracked_tickets AS tracked
                   ON tracked.repo = lower(jobs.repo)
                  AND tracked.ticket_id = jobs.ticket_id
+                LEFT JOIN ticket_state AS state
+                  ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
                 WHERE {_UNVERIFIED_HANDOFF}
+                  AND COALESCE(state.workflow_state, '') != '{HANDED_OFF_EXTERNALLY}'
                 GROUP BY tracked.repo, tracked.ticket_id, tracked.tracker
                 ORDER BY max(jobs.finished_at) DESC, tracked.repo, tracked.ticket_id
                 """,

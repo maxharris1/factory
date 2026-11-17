@@ -100,6 +100,7 @@ _PROJECT_KEYS = {
     "linear_project_ids",
     "grok_bot",
     "linear_ready_for_review",
+    "linear_handoff_states",
     "ready_starts_review",
     "intake",
     "driver_inbox",
@@ -153,6 +154,9 @@ class DriverInbox:
     number: int
 
 
+DEFAULT_LINEAR_HANDOFF_STATES = ("Ready for Review", "In Review")
+
+
 @dataclass(frozen=True)
 class Project:
     repo: str
@@ -161,6 +165,7 @@ class Project:
     linear_project_ids: frozenset[str] = frozenset()
     grok_bot: str = "grok-bot"
     linear_ready_for_review: bool = False
+    linear_handoff_states: tuple[str, ...] = DEFAULT_LINEAR_HANDOFF_STATES
     # A trusted ready from factory.md's builder starts review even with no
     # factory-queued build job (PRs built outside the queue). Default off.
     ready_starts_review: bool = False
@@ -661,6 +666,29 @@ def _projects(
             )
             ok = False
             continue
+        handoff_states = item.get("linear_handoff_states", list(DEFAULT_LINEAR_HANDOFF_STATES))
+        if not (
+            isinstance(handoff_states, list)
+            and handoff_states
+            and all(isinstance(name, str) and name.strip() for name in handoff_states)
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_handoff_states must be a list of Linear state names",
+                )
+            )
+            ok = False
+            continue
+        if "linear_handoff_states" in item and not linear_project_ids:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_handoff_states requires linear_project_id",
+                )
+            )
+            ok = False
+            continue
         ready_starts_review = item.get("ready_starts_review", False)
         if not isinstance(ready_starts_review, bool):
             findings.append(
@@ -716,6 +744,7 @@ def _projects(
                 linear_project_ids=linear_project_ids,
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
+                linear_handoff_states=tuple(handoff_states),
                 ready_starts_review=ready_starts_review,
                 intake=intake,
                 driver_inbox=driver_inbox,

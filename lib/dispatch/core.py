@@ -430,13 +430,16 @@ class DispatcherBase:
                 ) from exc
         return self.review_actions
 
-    def _is_abandoned(self, repo: str, ticket_id: str) -> bool:
+    def _workflow_state(self, repo: str, ticket_id: str) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
                 (repo.lower(), ticket_id),
             ).fetchone()
-        return row is not None and row["workflow_state"] == "abandoned"
+        return None if row is None else row["workflow_state"]
+
+    def _is_abandoned(self, repo: str, ticket_id: str) -> bool:
+        return self._workflow_state(repo, ticket_id) == "abandoned"
 
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)

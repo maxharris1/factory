@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
 
-from lib.dispatch.constants import FINISHED_STATES
+from lib.dispatch.constants import FINISHED_STATES, HANDED_OFF_EXTERNALLY
 from lib.dispatch.helpers import (
     _ANSWERS,
     _REGISTERING_ACTIONS,
@@ -486,6 +486,8 @@ class QuestionsMixin:
             source = sources.get(row["source_comment_id"])
             if reason == RESTORED:
                 requeue_reason = "restored-unanswered"
+            elif reason == HANDED_OFF_EXTERNALLY:
+                requeue_reason = "resumed-from-linear"
             elif reason.startswith("answered-by:") and source is not None:
                 answer_id = reason.removeprefix("answered-by:")
                 outcome = self._handled_outcome(ticket, answer_id)

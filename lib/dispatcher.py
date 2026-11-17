@@ -164,6 +164,7 @@ from lib.dispatch.ship import (
     ReviewShipper,
     ShipMixin,
 )
+from lib.dispatch.linear_states import LinearStatesMixin
 from lib.dispatch.tracking import (
     TrackingMixin,
 )
@@ -245,6 +246,7 @@ class Dispatcher(
     InboxMixin,
     FollowupsMixin,
     TrackingMixin,
+    LinearStatesMixin,
     PollMixin,
     EvalLogMixin,
     SchemaMixin,

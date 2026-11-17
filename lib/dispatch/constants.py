@@ -25,6 +25,18 @@ STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 # handed-off-externally waits for Linear to move the ticket again.
 PARKED_STATES = ("abandoned", "handed-off-externally")
 HANDED_OFF_EXTERNALLY = "handed-off-externally"
+# What settling a ticket clears: nothing keeps it on a person's screen.
+SETTLE_CLEARS = {
+    "stuck": 0,
+    "stuck_reason": None,
+    "stuck_source_comment_id": None,
+    "stuck_wake_job_id": None,
+    "paused_action": None,
+    "paused_recipient": None,
+    "paused_head": None,
+    "paused_generation": None,
+    "paused_question_id": None,
+}
 # #130: an approved ticket on a finish_line: merge project stays watched,
 # polled every cycle, until its PR merges or closes.
 WATCHED_STATES = ("merge-queue", "updating")

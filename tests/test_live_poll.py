@@ -53,6 +53,7 @@ from lib.poll_source import (
     LINEAR_REQUESTS_PER_HOUR,
     LINEAR_SEARCH_MAX_PAGES,
     LINEAR_SEARCH_COMPLEXITY,
+    LINEAR_STATES_COMPLEXITY,
     LINEAR_SHARE,
     LINEAR_TRACKED_RESERVE,
     LivePollSource,
@@ -194,6 +195,15 @@ def linear_issue(
             "pageInfo": {"hasNextPage": False},
         },
     }
+
+
+def linear_states_page(variables: dict, state: str = "In Progress") -> HTTPResult:
+    team = variables["team"]
+    nodes = [
+        {"identifier": f"{team}-{number:04d}", "state": {"name": state, "type": "started"}}
+        for number in variables["numbers"]
+    ]
+    return HTTPResult(200, json.dumps({"data": {"issues": {"nodes": nodes}}}))
 
 
 def linear_search_page(
@@ -1776,10 +1786,10 @@ def test_linear_rate_limit_uses_retry_after_backoff(
         "expected_complexity_per_hour",
     ),
     [
-        (5, 1, 2, 300, 154_140),
-        (25, 5, 10, 1_020, 715_020),
-        (100, 20, 40, 1_080, 682_200),
-        (500, 20, 460, 1_080, 761_760),
+        (5, 1, 2, 360, 169_140),
+        (25, 5, 10, 1_080, 730_020),
+        (100, 20, 40, 1_080, 650_460),
+        (500, 20, 460, 1_080, 730_020),
     ],
 )
 def test_linear_poll_hour_stays_within_shared_budget(
@@ -1828,6 +1838,8 @@ def test_linear_poll_hour_stays_within_shared_budget(
                 has_next=end < len(searchable),
                 cursor=str(end) if end < len(searchable) else None,
             )
+        if request["query"].startswith("query FactoryStates"):
+            return linear_states_page(request["variables"])
         identifier = request["variables"]["id"]
         return HTTPResult(
             200,
@@ -1886,10 +1898,15 @@ def test_linear_poll_hour_stays_within_shared_budget(
         request["query"].startswith("query FactoryPoll")
         for _, request in requests
     )
-    issue_reads = len(requests) - searches
+    state_reads = sum(
+        request["query"].startswith("query FactoryStates")
+        for _, request in requests
+    )
+    issue_reads = len(requests) - searches - state_reads
     requests_per_hour = len(requests)
     complexity_per_hour = (
         searches * LINEAR_SEARCH_COMPLEXITY
+        + state_reads * LINEAR_STATES_COMPLEXITY
         + issue_reads * LINEAR_ISSUE_COMPLEXITY
     )
     requests_by_cycle = [
@@ -1922,6 +1939,7 @@ def test_linear_poll_hour_stays_within_shared_budget(
     )
 
     assert len(requests_by_cycle) == cycles == 60
+    assert state_reads == cycles
     assert max(requests_by_cycle) <= cycle_request_limit
     assert requests_per_hour == expected_requests_per_hour
     assert complexity_per_hour == expected_complexity_per_hour
@@ -3097,3 +3115,81 @@ def test_a_fresh_linear_read_of_a_merged_pr_says_merged() -> None:
     )
     ticket = source.fresh_ticket(TicketRef("acme/widgets", "AUT-42", "linear"))
     assert ticket is not None and ticket.merged is True and ticket.closed is False
+
+
+def test_one_factory_states_request_reads_every_open_ticket(tmp_path: Path) -> None:
+    requests: list[dict] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        requests.append(request)
+        if request["query"].startswith("query FactoryStates"):
+            return linear_states_page(request["variables"], state="Ready for Review")
+        if request["query"].startswith("query FactoryPoll"):
+            return linear_search_page([])
+        raise AssertionError(request["query"][:40])
+
+    database = tmp_path / "orch.db"
+    now = [5000.0]
+    queue = SQLiteJobQueue(database, clock=lambda: now[0])
+    dispatcher = Dispatcher(
+        database,
+        queue,
+        trusted_logins={"github": {}, "linear": {"linear:user-1": {"grok-bot"}}},
+        review_actions=Mock(),
+        grok_delivery=Mock(),
+    )
+    states = ["capped"] * 20 + ["handed-off"] * 5 + ["handed-off-externally"] * 5
+    states += ["merged", "done", "abandoned"]
+    with queue.connect() as connection:
+        for index, state in enumerate(states):
+            identifier = f"AUT-{index:04d}"
+            connection.execute(
+                "INSERT INTO tracked_tickets VALUES ('acme/widgets', ?, 'linear', 0)",
+                (identifier,),
+            )
+            connection.execute(
+                """
+                INSERT INTO ticket_state (repo, ticket_id, workflow_state, gate_count, stuck)
+                VALUES ('acme/widgets', ?, ?, 0, 0)
+                """,
+                (identifier, state),
+            )
+            connection.execute(
+                "INSERT INTO ticket_reads VALUES ('acme/widgets', ?, ?)",
+                (identifier, now[0] - 10),
+            )
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
+        linear_transport=transport,
+        error_sink=dispatcher.record_poll_error,
+        deferral_sink=dispatcher.record_poll_deferral,
+    )
+
+    dispatcher.poll_once(source)
+
+    state_requests = [
+        request for request in requests if request["query"].startswith("query FactoryStates")
+    ]
+    assert len(state_requests) == 1
+    assert state_requests[0]["variables"]["team"] == "AUT"
+    assert state_requests[0]["variables"]["numbers"] == list(range(30))
+    assert not any(request["query"].startswith("query FactoryIssue") for request in requests)
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT ticket_id, state_name, state_type, read_at FROM linear_states"
+        ).fetchall()
+        handed_off = connection.execute(
+            """
+            SELECT count(*) FROM ticket_state
+            WHERE workflow_state = 'handed-off-externally' AND external_from_state = 'capped'
+            """
+        ).fetchone()[0]
+    assert {row["ticket_id"] for row in rows} == {f"AUT-{index:04d}" for index in range(30)}
+    assert {(row["state_name"], row["state_type"], row["read_at"]) for row in rows} == {
+        ("Ready for Review", "started", 5000.0)
+    }
+    assert handed_off == 20
