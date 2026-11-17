@@ -11,6 +11,7 @@ from itertools import islice
 from typing import TYPE_CHECKING
 
 from lib import project_rules
+from lib.dispatch import ci_board
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     LINEAR_HANDOFF_QUERY,
@@ -20,7 +21,6 @@ from lib.dispatch.constants import (
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
 )
-from lib.dispatch import ci_board
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
 from lib.dispatch.helpers import _matching_head
@@ -119,7 +119,10 @@ class PollMixin:
             try:
                 ci_board.record(
                     self._connect,
-                    [self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket) for ticket in tracked],
+                    [
+                        self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+                        for ticket in tracked
+                    ],
                     self.queue.now(),
                     run_jobs=self.ci_runs,
                     ci_logs=self.ci_logs,

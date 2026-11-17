@@ -221,7 +221,10 @@ def _read_failures(
             try:
                 logs = ci_logs(run.repo, run.run_id)
             except Exception as exc:
-                _say(log, f"ci board: {run.repo} run {run.run_id} log unavailable: {type(exc).__name__}")
+                _say(
+                    log,
+                    f"ci board: {run.repo} run {run.run_id} log unavailable: {type(exc).__name__}",
+                )
                 continue
         with connect() as connection:
             connection.executemany(
@@ -261,7 +264,11 @@ def _failed_runs(connection: sqlite3.Connection) -> list[FailedRun]:
     ).fetchall()
     return [
         FailedRun(
-            row["repo"], row["ticket_id"], row["head"], row["run_id"], tuple(json.loads(row["checks"]))
+            repo=row["repo"],
+            ticket_id=row["ticket_id"],
+            head=row["head"],
+            run_id=row["run_id"],
+            checks=tuple(json.loads(row["checks"])),
         )
         for row in rows
     ]

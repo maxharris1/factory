@@ -409,7 +409,14 @@ def test_a_rerun_at_the_same_head_replaces_the_row_and_its_lookups(tmp_path: Pat
     board = Board(tmp_path)
     board.track("1")
     board.github.jobs["900"] = (
-        RunJob("1", "pytest", "completed", created_at=30.0, runner_name="pc-wsl-bots-2", runner_kind="self-hosted"),
+        RunJob(
+            "1",
+            "pytest",
+            "completed",
+            created_at=30.0,
+            runner_name="pc-wsl-bots-2",
+            runner_kind="self-hosted",
+        ),
     )
     board.github.logs["900"] = {"pytest": "FAILED tests/test_a.py::test_b"}
     board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
@@ -480,7 +487,10 @@ def test_an_adapter_error_spends_its_read_and_the_cycle_goes_on(tmp_path: Path) 
     board = Board(tmp_path)
     ids = ["1", "2", "3", "4"]
     board.track(*ids)
-    tickets = [pr(n, HEAD, check("pytest", "in_progress", run=f"90{n}", job=n, started=float(n))) for n in ids]
+    tickets = [
+        pr(n, HEAD, check("pytest", "in_progress", run=f"90{n}", job=n, started=float(n)))
+        for n in ids
+    ]
     for n in ids:
         board.github.jobs[f"90{n}"] = (hosted(n),)
     board.github.jobs["904"] = RuntimeError("HTTP 502")

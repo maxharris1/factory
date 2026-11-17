@@ -998,7 +998,8 @@ def _run_job(job: dict[str, Any]) -> RunJob:
     runner = job.get("runner_name")
     runner = runner if isinstance(runner, str) and runner else None
     if runner is not None:
-        kind = "github-hosted" if job.get("runner_group_name") == "GitHub Actions" else "self-hosted"
+        hosted = job.get("runner_group_name") == "GitHub Actions"
+        kind = "github-hosted" if hosted else "self-hosted"
     else:
         kind = "none" if status == "completed" else None
     return RunJob(
