@@ -7,7 +7,11 @@ Sources, chosen by Max (PR #234, 2026-11-14):
   with no model turn. `parse_get_usage` keeps `rate_limits.five_hour` and
   `rate_limits.seven_day`: `utilization` (0-100) and `resets_at`. While
   the login cannot report limits (`rate_limits_available` false) there is
-  no reading.
+  no reading. Each `rate_limit_event` in the job's own stream-json output
+  (lib/telemetry.py) is read too: `parse_rate_limit_event` keeps
+  `rate_limit_info.unifiedWindows.{five_hour,seven_day}`, with
+  `utilization` as a fraction (0-1) and `resetsAt`. A window that event
+  leaves out or reports invalid gives nothing, so it never clears a reading.
 * Codex: the `rate_limits` of the last `token_count` event in that job's
   own session rollout (lib/codex_rollout.py). `parse_codex` maps each of
   `primary` and `secondary` to a window by `window_minutes` (300, 10080),
@@ -238,6 +242,26 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
                 found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now, 0, now))
         return found
     return []
+
+
+def parse_rate_limit_event(event: object, now: float) -> list[Reading]:
+    """The windows a Claude stream-json `rate_limit_event` reports with a used
+    fraction and a reset; none for any other event."""
+    if not isinstance(event, dict) or event.get("type") != "rate_limit_event":
+        return []
+    info = event.get("rate_limit_info")
+    windows = info.get("unifiedWindows") if isinstance(info, dict) else None
+    if not isinstance(windows, dict):
+        return []
+    found = []
+    for window in WINDOWS:
+        entry = windows.get(window)
+        if not isinstance(entry, dict):
+            continue
+        used, resets_at = used_fraction(entry.get("utilization")), reset_time(entry.get("resetsAt"), now)
+        if used is not None and resets_at is not None:
+            found.append(Reading(window, used, resets_at, now))
+    return found
 
 
 def parse_codex(found: object, now: float) -> list[Reading]:

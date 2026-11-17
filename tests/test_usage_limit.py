@@ -23,7 +23,7 @@ from lib.machines_yml import load_machines_yml
 from lib.job_state import REQUEUED_USAGE_LIMIT, USAGE_LIMIT, link_drop_requeues, usage_limit_end
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.status import JobRow, SQLiteStatusReader, Status, render
-from lib.telemetry import EventLog, Scrubber, Session
+from lib.telemetry import EventLog, Scrubber, Session, stream_flags
 from lib.usage_readings import Reading, parse_get_usage, store
 from tests.pool_helpers import ROOT
 from tests.test_hooks import FakeGrokDelivery, say, setup, ticket
@@ -53,7 +53,7 @@ def _feed(db: Path, tmp_path: Path, job_id: str, harness: str, event: dict, now:
         bot=f"{harness}-bot",
         repo="owner/repo",
         harness=harness,
-        argv=[harness],
+        flags=stream_flags([harness]),
         raw_log=EventLog(tmp_path / job_id / "events.jsonl", log=lambda _: None),
         scrub=Scrubber({}),
         log=lambda _: None,
@@ -490,7 +490,7 @@ def test_an_older_full_reading_on_another_device_never_restores_a_lifted_limit(t
 def _feed_codex(poller, job_id: str, event: dict) -> None:
     session = Session(
         connect=lambda: sqlite3.connect(poller.path), job_id=job_id,
-        bot="codex-bot", repo="owner/repo", harness="codex", argv=["codex"],
+        bot="codex-bot", repo="owner/repo", harness="codex", flags=stream_flags(["codex"]),
         raw_log=None, scrub=Scrubber({}), log=lambda _: None, stdout=io.BytesIO(),
         clock=lambda: poller.now[0],
     )

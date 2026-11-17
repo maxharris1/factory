@@ -2052,17 +2052,23 @@ def _job_run_command(argv: list[str]) -> int:
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
-    if session is not None:
+    usage_read = None
+    if session is None:
+        log("usage probe: skipped (telemetry off)")
+    else:
         sessions.append(session)
-        command = session.argv
-        target, binary = placed.target, usage_probe.claude_binary(command)
-        if binary is not None:  # #151: the account's usage, once per job
-            usage_probe.start_claude(
+        command = session.flags.argv
+        if session.flags.harness != "claude":
+            log(f"usage probe: skipped ({session.flags.reason})")
+        else:  # #151: the account's usage, once per job
+            target, binary, probe_env = placed.target, command[0], dict(environment)
+            usage_read = usage_probe.start_claude(
                 session.add_usage,
                 session.clock,
                 (lambda: usage_probe.claude_remote(placed.transport, target))
                 if target is not None
-                else (lambda: usage_probe.claude_local(binary, dict(environment))),
+                else (lambda: usage_probe.claude_local(binary, probe_env)),
+                log,
             )
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
@@ -2217,6 +2223,8 @@ def _job_run_command(argv: list[str]) -> int:
             _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
+        if usage_read is not None:
+            usage_read.join(usage_probe.TIMEOUT_SECONDS)
         if session is not None:
             if placed.target is not None:  # #151: a remote Codex job's rollout rate limits
                 session.add_usage(usage_probe.remote_codex(

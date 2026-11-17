@@ -59,7 +59,8 @@ stdout on a pipe and hands the pipe to a `Session` here:
   checks of #91 and #92).
 * Subscription usage readings (lib/usage_readings.py, #151): the 5-hour
   and 7-day used fraction and reset time only. Claude's come from the
-  `get_usage` probe at the job's start (lib/usage_probe.py, `add_usage`);
+  `get_usage` probe at the job's start (lib/usage_probe.py, `add_usage`)
+  and from each `rate_limit_event` in the stream (`parse_rate_limit_event`);
   a box Codex run's come from its own session rollout, found by the
   `thread.started` thread id and read on each flush (lib/codex_rollout.py).
   They are written to `usage_readings` in the same transaction as the
@@ -130,7 +131,7 @@ from lib.codex_rollout import default_home as codex_home
 from lib import lane_limit
 from lib.job_state import USAGE_LIMIT, record_job_event
 from lib.machines_yml import DEFAULT_ORCH_HOST
-from lib.usage_readings import Reading, parse_codex, store
+from lib.usage_readings import Reading, parse_codex, parse_rate_limit_event, store
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.pstack_pin import Pin, load_pin
 
@@ -1560,7 +1561,7 @@ class Session:
         bot: str,
         repo: str,
         harness: str,
-        argv: Sequence[str],
+        flags: StreamFlags,
         raw_log: EventLog | None,
         scrub: Scrubber,
         log: Log,
@@ -1583,7 +1584,7 @@ class Session:
         self.bot = bot
         self.repo = repo
         self.harness = harness
-        self.argv = list(argv)
+        self.flags = flags
         self.raw_log = raw_log
         self.scrub = scrub
         self.log = log
@@ -1663,6 +1664,11 @@ class Session:
                 self._limit = lane_limit.detect(self.harness, event, self.clock())
                 if self._limit is not None:
                     self.flush()
+            if self.harness == "claude":
+                try:
+                    self.add_usage(parse_rate_limit_event(event, self.clock()))
+                except Exception as exc:  # a malformed event never stops the tee
+                    self._warn("usage", f"telemetry: skipped a rate limit event ({type(exc).__name__})")
             try:
                 message = final_message(event)
             except Exception:
@@ -1850,7 +1856,7 @@ def start_session(
         return None
     try:
         flags = stream_flags(command, HARNESS_BY_BOT.get(bot))
-        argv, harness = flags.argv, flags.harness or HARNESS_BY_BOT.get(bot, "other")
+        harness = flags.harness or HARNESS_BY_BOT.get(bot, "other")
         scrub = Scrubber(env, blind=worker_env)
         raw = EventLog(
             state_dir(job_id, bot, database, env) / RAW_LOG_NAME, max_bytes=max_log_bytes, log=log
@@ -1865,7 +1871,7 @@ def start_session(
         bot=bot,
         repo=repo,
         harness=harness,
-        argv=argv,
+        flags=flags,
         raw_log=raw,
         scrub=scrub,
         log=log,
