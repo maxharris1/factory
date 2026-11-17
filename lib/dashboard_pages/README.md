@@ -20,7 +20,7 @@ Name the module in a ticket's `Touches:` line.
 | every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop) | none (shared) |
 | `index.html` (Lanes) | `lanes.py` | `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
 | `health.html` (System) | `system.py` | `_broken` (Broken now, from `broken_items`; hidden when nothing is broken), `_components` (matrix, the per-device list a phone shows instead, and process details, down rows first), `_versions` (the always-present mount holding `_drift` only when a component is behind; otherwise the Components count carries the `drift` anchor), `_log_row` (`_health` beside `_log` in a `sys-row`), `_rules`, `_no_waiter` (inside the always-present `waiters` mount, drawn only when it has rows) | none |
-| `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns, Shipped shelf and Stopped group, from `board` and `phase_table`), `_tickets` (the table view), `_active_jobs` | #142 |
+| `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns with Stopped last, Shipped shelf, from `board` and `phase_table`), `_tickets` (the table view), `_active_jobs` | #142 |
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_headroom`, `_rounds`, `_savings`, `_jobs_lifetime` (cost: `rollup_panel` in `lib/dashboard_telemetry.py`); `top_row` and `middle_row` wrap two panels each in an `ef-row` | #144 |
 | `job.html#job-<id>` (ticket detail) | `ticket_detail.py` | `_job_article`, `_jobview`, `_flow_template`, `_legend`, `_meta`; the job page and flow CSS and script | #146, #149 |
@@ -28,9 +28,14 @@ Name the module in a ticket's `Touches:` line.
 
 ## Relay threads
 
-The Relay panel on `activity.html` merges `handoff_savings.recent` and
-`poller.verdicts` into one thread per ticket (`relay_threads`, and
-`relayThreads` in the script). A verdict's `age_seconds` is the first time
+The Relay panel on `activity.html` draws `relay.threads`, one thread per
+ticket (`relay_threads`, and `relayThreads` in the script). The collector
+(`_relay` in `lib/dashboard.py`) picks 12 tickets: stopped tickets first, the
+most recently stopped first, then the newest movers. Each thread carries
+its ticket's newest 40 handoffs and verdicts. A verdict reads as its `chip`
+and `words` (`_VERDICT_WORDS`), with the raw outcome only in its `title`; an
+outcome with no words shows its kind in a muted chip and its raw text. A
+verdict's `age_seconds` is the first time
 recorded for its comment: the job it queued (`jobs.created_at`), the job
 that posted it (`jobs.finished_at`), the approval it recorded
 (`ticket_state.approved_at`) or the ship hold it raised
@@ -46,8 +51,8 @@ on a ticket sweeps, not just the first. The rule:
    a verdict; two verdicts keep handled order (`seq`).
 3. A verdict with no time goes directly after the verdict handled just
    before it in the thread, or first when it is the thread's first verdict.
-4. Threads go newest timed step first. Threads with no timed step go last,
-   newest handled verdict first.
+4. Threads keep the snapshot's order: newest activity (job or handled
+   comment) first, tickets with no known time last.
 
 `tests/test_dashboard_activity.py` tests each case and holds the two
 derivations together.

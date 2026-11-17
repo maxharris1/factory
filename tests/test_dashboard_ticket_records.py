@@ -24,6 +24,7 @@ from lib.dashboard_pages.ticket_detail import _detail_model
 from lib.dashboard_push import SshTransport
 from tests.test_dashboard import NOW, TRACKED_AT, _fail_replacing, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_telemetry import add_telemetry
+from tests.test_dispatcher import setup
 
 PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "ticket.html")
 CLEFFY = "maxharris1/cleffy"
@@ -354,6 +355,43 @@ def test_a_stuck_flag_on_a_live_state_stops_in_that_state(tmp_path: Path) -> Non
         "reason": "job-timeout",
         "ways_out": ways_out("stuck"),
     }
+
+
+def test_a_stuck_flag_stops_when_its_wake_was_queued(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, CLEFFY, "93", state="building", stuck=1, stuck_reason="job-timeout")
+        add_job(connection, "w-93", action="stuck", recipient="grok", ticket_id="93", created_at=NOW - 70)
+        connection.execute(
+            "UPDATE ticket_state SET stuck_wake_job_id = 'w-93' WHERE repo = ? AND ticket_id = '93'", (CLEFFY,))
+    stopped = records(db, log, tmp_path)["maxharris1/cleffy#93"]["stopped"]
+    assert (stopped["state"], stopped["at"], stopped["stopped_in"]) == ("stuck", NOW - 70, "building")
+
+
+def test_a_stop_keeps_its_first_wake_time_until_the_ticket_stops_again(tmp_path: Path) -> None:
+    clock = [NOW - 300]
+    dispatcher, queue = setup(tmp_path, now=clock)
+    with queue.connect() as connection:
+        add_ticket(connection, CLEFFY, "95")
+
+    def stop() -> None:
+        dispatcher._mark_stuck_and_wake(repo=CLEFFY, ticket_id="95", source_comment_id="s-95",
+                                         timeout_seconds=600, reason="job-timeout", detail="job-timeout")
+
+    def stopped_at() -> float:
+        return records(tmp_path / "d.db", tmp_path / "poller.log", tmp_path)["maxharris1/cleffy#95"]["stopped"]["at"]
+
+    stop()
+    with queue.connect() as connection:
+        connection.execute("UPDATE jobs SET state = 'failed' WHERE action = 'stuck'")
+    clock[0] = NOW - 200
+    dispatcher._ensure_all_stuck_wakes()
+    assert stopped_at() == NOW - 300
+    with queue.connect() as connection:
+        connection.execute("UPDATE ticket_state SET stuck = 0, stuck_wake_job_id = NULL")
+    clock[0] = NOW - 100
+    stop()
+    assert stopped_at() == NOW - 100
 
 
 def test_a_stop_with_no_transition_time_has_no_stop_time(tmp_path: Path) -> None:

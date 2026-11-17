@@ -25,6 +25,7 @@ from lib.dashboard_pages import ticket_detail
 from lib.dashboard_pages.common import duration
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
+from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
 from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
@@ -226,7 +227,8 @@ def test_the_script_draws_clarify_and_update_from_main_heroes(tmp_path: Path, ac
     assert f'<span class="verb">{verb}…</span>' in view
 
 
-def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0) -> http.server.ThreadingHTTPServer:
+def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0,
+           records_gate: threading.Event | None = None) -> http.server.ThreadingHTTPServer:
     for name, snapshot in sites.items():
         site = tmp_path / "site" / name
         site.mkdir(parents=True)
@@ -239,6 +241,8 @@ def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0) ->
         def do_GET(self) -> None:
             if self.path.endswith("/status.json"):
                 time.sleep(status_delay)
+            if records_gate is not None and self.path.endswith("/tickets.json"):
+                records_gate.wait(30)
             super().do_GET()
 
     handler = functools.partial(Handler, directory=str(tmp_path / "site"))
@@ -1176,42 +1180,47 @@ def test_picking_a_log_row_on_the_ticket_page_selects_its_bar_and_the_reverse(tm
 KEEP_PLACE = r"""
 (async () => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const art = document.querySelector('article.ticketpage');
-  const row = art.querySelector('.runlog button[data-visit="2"]');
-  row.focus();
+  document.querySelector('article.ticketpage .runlog button[data-visit="2"]').focus();
   window.scrollTo(0, 240);
   await sleep(50);
-  const now = document.activeElement;
-  return {focused: !!(now && now.closest('.runlog') && now.getAttribute('data-visit') === '2'), y: window.scrollY};
+  window.oldTicket = document.querySelector('article.ticketpage');
+  return {focused: document.activeElement === document.querySelector('article.ticketpage .runlog button[data-visit="2"]'),
+          y: window.scrollY};
 })()"""
 
 AFTER_REDRAW = r"""
 (() => {
   const now = document.activeElement;
-  return {redrawn: !window.oldTicket.isConnected, visit: now && now.getAttribute('data-visit'),
-          inLog: !!(now && now.closest('.runlog')), y: window.scrollY};
+  const out = {redrawn: !window.oldTicket.isConnected, visit: now && now.getAttribute('data-visit'),
+               inLog: !!(now && now.closest('.runlog')), y: window.scrollY};
+  window.oldTicket = document.querySelector('article.ticketpage');
+  return out;
 })()"""
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
 def test_a_redraw_keeps_focus_and_scroll_on_the_ticket_page(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    server = _serve(tmp_path, {"fixture": snapshot})
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
     chrome = _Chrome(tmp_path / "profile")
     try:
         _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/ticket.html#t={_quote(LIVE['running'][0])}",
               "document.querySelector('article.ticketpage .runlog button')")
         before = chrome.run(KEEP_PLACE)
-        chrome.run("window.oldTicket = document.querySelector('article.ticketpage')")
+        records.set()
+        chrome.wait_for("!window.oldTicket.isConnected", "the records redraw")
+        on_records = chrome.run(AFTER_REDRAW)
         later = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
         (tmp_path / "site" / "fixture" / "status.json").write_text(json.dumps(later), encoding="utf-8")
-        chrome.wait_for("!window.oldTicket.isConnected", "a redraw")
-        after = chrome.run(AFTER_REDRAW)
+        chrome.wait_for("!window.oldTicket.isConnected", "the status redraw")
+        on_status = chrome.run(AFTER_REDRAW)
     finally:
+        records.set()
         chrome.close()
         server.shutdown()
     assert before == {"focused": True, "y": 240}
-    assert after == {"redrawn": True, "visit": "2", "inLog": True, "y": 240}
+    assert on_records == on_status == {"redrawn": True, "visit": "2", "inLog": True, "y": 240}
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
@@ -1296,6 +1305,43 @@ def test_every_tracked_ticket_opens_in_both_renders(tmp_path: Path, address: str
     assert _sections(views["server"]) == OPENS[address]
 
 
+def _board_links(markup: dict[str, str]) -> dict[str, str]:
+    cards = {card["attrs"]["data-ticket"]: board._id_link(card)["attrs"].get("href")
+             for card in board._all(board._dom(markup["pipeline"]), board._cls("tk-card"))}
+    tiles = {tile["attrs"]["data-ticket"]: tile["attrs"].get("href")
+             for tile in board._all(board._dom(markup["shipped"]), board._cls("tk-tile"))}
+    assert cards and tiles
+    return {**cards, **tiles}
+
+
+def _check_board_links_open(links: dict[str, str], rows: list[dict], open_page) -> None:
+    keys = {board._key(row): row for row in rows}
+    assert sorted(links) == sorted(keys)
+    assert {row["state"] for row in rows} >= {"capped", "post-merge", "merged", "intake"}, \
+        "a capped card, a post-merge card, a shipped tile and an idle card with no job"
+    for key, row in keys.items():
+        href = links[key]
+        assert href and href.startswith("ticket.html#t="), key
+        hash_ = href[len("ticket.html"):]
+        markup = open_page(urllib.parse.unquote(hash_[len("#t="):]), hash_)
+        assert markup.startswith(f'<article class="jobpage ticketpage" data-ticket="{html.escape(key)}">'), href
+        (title,) = _h1s(markup)
+        assert title != "Ticket not found" and str(row["ticket_id"]) in title, href
+
+
+def test_every_board_card_and_shelf_tile_opens_its_ticket(tmp_path: Path) -> None:
+    snapshot = board.board_snapshot(tmp_path)
+    _check_board_links_open(_board_links(board._server(snapshot)), snapshot["tickets"],
+                            lambda address, hash_: _ticket_server(snapshot, address))
+
+
+@needs_node
+def test_script_board_cards_and_shelf_tiles_open_their_ticket(tmp_path: Path) -> None:
+    snapshot = board.board_snapshot(tmp_path)
+    _check_board_links_open(_board_links(board._script(tmp_path, snapshot)["html"]), snapshot["tickets"],
+                            lambda address, hash_: _ticket_script(tmp_path, snapshot, hash_))
+
+
 @needs_node
 def test_a_record_opens_by_its_own_key_and_a_shared_address_by_the_first_key(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
@@ -1345,6 +1391,17 @@ def test_the_ticket_page_fetches_tickets_json_once_per_snapshot(tmp_path: Path) 
     assert counts == {"polls": [1, 1, 2], "held": [1, 2]}
 
 
+@needs_node
+@pytest.mark.parametrize("address", [RECORD["idle"], "maxharris1/cleffy#404"])
+def test_records_behind_a_status_only_push_are_fetched_once_per_snapshot(tmp_path: Path, address: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    ahead = {**_unloaded(snapshot), "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    actions = [["poll", ahead], ["poll", ahead], ["poll", ahead], ["count"]]
+    out = run_harness(tmp_path, POLLED, script, ahead, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
+                      tickets_json(snapshot))
+    assert out["steps"] == [{"tickets": 1}]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, address)
 SKEWED = (POLLED.replace("JSON.parse(ticketsText)", "JSON.parse(publishedTickets)")
           .replace("let ticketFetches = 0;", "let ticketFetches = 0;\nlet publishedTickets = ticketsText;")
           .replace("    } else if (kind === 'poll') {",
