@@ -311,7 +311,7 @@ def _with_no_waiters(snapshot: dict, count: int) -> dict:
     return snapshot
 
 
-@pytest.mark.parametrize(("count", "shown"), [(1, "1 harness"), (2, "2 harnesses")])
+@pytest.mark.parametrize(("count", "shown"), [(0, "0 harnesses"), (1, "1 harness"), (2, "2 harnesses")])
 def test_no_waiter_count_names_harness_in_the_singular_for_one(
         tmp_path: Path, count: int, shown: str) -> None:
     snapshot = _with_no_waiters(_snapshot(tmp_path), count)
@@ -320,7 +320,7 @@ def test_no_waiter_count_names_harness_in_the_singular_for_one(
 
 
 @needs_node
-@pytest.mark.parametrize(("count", "shown"), [(1, "1 harness"), (2, "2 harnesses")])
+@pytest.mark.parametrize(("count", "shown"), [(0, "0 harnesses"), (1, "1 harness"), (2, "2 harnesses")])
 def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
         tmp_path: Path, count: int, shown: str) -> None:
     snapshot = _with_no_waiters(_snapshot(tmp_path), count)
@@ -344,6 +344,10 @@ CLASSIFIED_TAIL = [
     ("2026-11-13 13:10:03 EST WARN retrying", "warn"),
     ("lib.linear.RateLimitException: slow down", "bad"),
     ("2026-11-13 13:10:04 EST poller exit rc=0", ""),
+    ("RuntimeError: poller start failed", "bad"),
+    ("ERROR another orch poll owns lock", "bad"),
+    ("2026-11-13 13:10:05 EST CRITICAL poller start aborted", "bad"),
+    ("WARNING another orch poll owns lock", "warn"),
 ]
 
 

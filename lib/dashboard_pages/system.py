@@ -56,8 +56,8 @@ font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
 SCRIPT_LOG = r"""
   // --- system page (#141) ------------------------------------------------------
 
-  var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/another orch poll owns/, 'warn'], [/poller start/, 'start'],
-                   [/Traceback/, 'bad'], [/\b\w*(?:Error|Exception):/, 'bad'], [/\b(?:ERROR|CRITICAL)\b/, 'bad'],
+  var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/Traceback/, 'bad'], [/\b\w*(?:Error|Exception):/, 'bad'],
+                   [/\b(?:ERROR|CRITICAL)\b/, 'bad'], [/another orch poll owns/, 'warn'], [/poller start/, 'start'],
                    [/\b(?:WARNING|WARN)\b/, 'warn']];
   function logKinds(lines) {
     var traceback = false;
@@ -294,7 +294,7 @@ SCRIPT_COMPONENTS = r"""
   function renderNoWaiter(d) {
     var h = d.health || {};
     var rows = h.no_waiter || [];
-    var root = panel('no-waiter', 'Queued jobs with no waiter', !rows.length ? 'none' : rows.length === 1 ? '1 harness' : rows.length + ' harnesses');
+    var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length === 1 ? '1 harness' : rows.length + ' harnesses');
     if (!root) return;
     if (!rows.length) {
       var aged = agedHealth(d);
@@ -318,11 +318,11 @@ SCRIPT_COMPONENTS = r"""
 
 _LOG_KINDS = (
     (re.compile(r"exit rc=(?!0\b)\d+"), "bad"),
-    (re.compile(r"another orch poll owns"), "warn"),
-    (re.compile(r"poller start"), "start"),
     (re.compile(r"Traceback"), "bad"),
     (re.compile(r"\b\w*(?:Error|Exception):"), "bad"),
     (re.compile(r"\b(?:ERROR|CRITICAL)\b"), "bad"),
+    (re.compile(r"another orch poll owns"), "warn"),
+    (re.compile(r"poller start"), "start"),
     (re.compile(r"\b(?:WARNING|WARN)\b"), "warn"),
 )
 
@@ -679,7 +679,7 @@ def _no_waiter(snapshot: dict) -> str:
             else "unknown until a component heartbeats"
         )
         return _panel("no-waiter", "Queued jobs with no waiter", f'<p class="empty">{_e(text)}</p>',
-                      count="none")
+                      count="0 harnesses")
     items = "".join(
         f'<li{_anchor_attr(row.get("anchor"))}>'
         + _chip("no waiter", "bad")
