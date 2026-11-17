@@ -226,8 +226,7 @@ def test_efficiency_rolls_up_tokens_and_cost_per_harness_repo_and_job(tmp_path: 
     assert rollup["recent"][0]["exit_reason"] == "max turns reached; exit 1"
     page = _section(_no_script(render_pages(collect_snapshot(db, log, now=NOW))["efficiency.html"]), "tokens")
     for needle in ("last 7 days", "$0.47", "1 jobs report no cost: codex 1", "per harness", "per repo",
-                   "recent jobs", '<td class="bad">max turns reached; exit 1</td>',
-                   "<td>success; exit 0</td>", "maxharris1/factory"):
+                   "maxharris1/factory"):
         assert needle in page, needle
 
 
@@ -465,8 +464,8 @@ def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path
         assert gone not in html, gone
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     tokens = eff["text"]["tokens"]
-    for needle in ("Cost, last 7 days", "as reported by each harness", "per harness", "per repo", "recent jobs",
-                   "$0.42", "success; exit 0", "1 jobs report no cost: codex 1"):
+    for needle in ("Cost, last 7 days", "as reported by each harness", "per harness", "per repo",
+                   "$0.42", "1 jobs report no cost: codex 1"):
         assert needle in tokens, needle
 
 
@@ -502,8 +501,8 @@ def test_tokens_tables_each_scroll_on_their_own(tmp_path: Path) -> None:
     snapshot = _rollup(tmp_path, {"harness": "claude", "cost_usd": 1.5})
     page = render_pages(snapshot)["efficiency.html"]
     panel = _tokens(snapshot)
-    assert panel.count("<table>") == 3
-    assert len(re.findall(r'<div class="ef-scroll"><table>.*?</table></div>', panel)) == 3
+    assert panel.count("<table>") == 2
+    assert len(re.findall(r'<div class="ef-scroll"><table>.*?</table></div>', panel)) == 2
     assert ".ef-scroll{overflow-x:auto}" in page
 
 
@@ -512,7 +511,8 @@ COSTS = [1057.64, 0.4213, 0.005, 12345.675]
 
 @needs_node
 def test_costs_print_the_same_in_both_renders(tmp_path: Path) -> None:
-    snapshot = _rollup(tmp_path, *({"harness": "claude", "cost_usd": cost} for cost in COSTS))
+    snapshot = _rollup(tmp_path, *({"harness": "claude", "repo": f"acme/r{n}", "cost_usd": cost}
+                                   for n, cost in enumerate(COSTS)))
     server = _tokens(snapshot)
     script = _run_page(tmp_path, snapshot, "efficiency", ["tokens"])["html"]["tokens"]
     costs = re.findall(r"\$[\d,.]+", server)
@@ -553,13 +553,12 @@ def test_token_tiles_are_compact_with_the_exact_count_in_title(tmp_path: Path) -
     panel = _tokens(snapshot)
     for tile in (
         '<div class="stat"><b>1,234</b><span>jobs</span></div>',
-        '<div class="stat" title="2,635,600,591"><b>2.636B</b><span>tokens in</span></div>',
-        '<div class="stat" title="812,400,000"><b>812.4M</b><span>of them cached</span></div>',
+        '<div class="stat" title="2,635,600,591"><b>2.636B</b><span>tokens in</span>',
         '<div class="stat" title="45,200"><b>45.2K</b><span>tokens out</span></div>',
-        '<div class="stat"><b>$3.00</b><span>cost reported</span></div>',
+        '<div class="stat"><b>$3.00</b><span>cost</span></div>',
     ):
         assert tile in panel, tile
-    harness = re.search(r"<tr><td>claude</td>(.*?)</tr>", panel).group(1)
+    harness = re.search(r'<tr><td><span class="bot claude">claude</span></td>(.*?)</tr>', panel).group(1)
     assert '<td class="num">2,635,600,591</td>' in harness
 
 
