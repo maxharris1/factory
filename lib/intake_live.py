@@ -9,8 +9,9 @@ budget and its rate-limit backoff, and the API key is only read from the
 configured environment variable at request time.
 
 Reads:
-* ahead_commits and commit_pulls: a branch's commits past the base, and the
-  open PRs that carry a commit, for the stacked-branch hold (#205);
+* ahead_commits, commit_pulls and branch_has: a branch's commits past the
+  base, the open PRs that carry a commit with each PR's base, and whether a
+  branch already contains a commit, for the stacked-branch hold (#205);
 * github_intake: open issues carrying the label (`issues?labels=`), and for
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
@@ -45,6 +46,7 @@ from lib.github_actions import (
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+_NOT_A_BRANCH = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//|/\.|\.lock(/|$)|^[./-]|[./]$")
 # Every page of an issue's blocks relations is read (#157 review): a blocker
 # past the first page still holds the ticket. Past the cap the read fails.
 # The intake query reads the first 10 (it pages 50 issues at once); a further
@@ -127,6 +129,16 @@ def _epoch(value: object) -> float:
 
 def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _github_branch(name: object) -> bool:
+    return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
+
+
+def _branch_path(branch: str) -> str:
+    if not _github_branch(branch):
+        raise GitHubAdapterError("branch name is not safe")
+    return quote(branch, safe="/")
 
 
 class GitHubIntakeClient(GitHubReviewActions):
@@ -267,10 +279,9 @@ class GitHubIntakeClient(GitHubReviewActions):
         raise GitHubAdapterError("linked pull requests exceed the page cap")
 
     def branch_sha(self, repo: str, branch: str) -> str | None:
-        if not _BRANCH.fullmatch(branch):
-            raise GitHubAdapterError("branch name is not safe")
+        path = _branch_path(branch)
         try:
-            ref = self._json(f"{_repo_path(repo)}/git/ref/heads/{branch}")
+            ref = self._json(f"{_repo_path(repo)}/git/ref/heads/{path}")
         except GitHubAdapterError as exc:
             if _status(exc) == 404:
                 return None
@@ -337,10 +348,8 @@ class GitHubIntakeClient(GitHubReviewActions):
     def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         """The commits on tip that base lacks (#205). The compare read
         lists up to 250; a longer list fails rather than hide a commit."""
-        if not _BRANCH.fullmatch(base) or not _BRANCH.fullmatch(tip):
-            raise GitHubAdapterError("branch name is not safe")
         compared = self._json(
-            f"{_repo_path(repo)}/compare/{quote(base, safe='/')}...{quote(tip, safe='/')}"
+            f"{_repo_path(repo)}/compare/{_branch_path(base)}...{_branch_path(tip)}"
         )
         commits = compared.get("commits") if isinstance(compared, dict) else None
         if not isinstance(commits, list):
@@ -354,8 +363,7 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError(f"{tip} has {total} commits past {base}; read {len(shas)}")
         return shas
 
-    def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
-        """The open PRs that carry sha (#205), cached like the gate reads."""
+    def commit_pulls(self, repo: str, sha: str) -> dict[int, str]:
         if not _SHA.fullmatch(sha):
             raise GitHubAdapterError("commit sha is not a full sha")
         pulls = self._json(
@@ -363,14 +371,32 @@ class GitHubIntakeClient(GitHubReviewActions):
         )
         if not isinstance(pulls, list):
             raise GitHubAdapterError("commit pulls list is not a list")
-        return frozenset(
-            item["number"]
-            for item in pulls
-            if isinstance(item, dict)
-            and isinstance(item.get("number"), int)
-            and not isinstance(item.get("number"), bool)
-            and item.get("state") == "open"
+        found: dict[int, str] = {}
+        for item in pulls:
+            if not isinstance(item, dict) or item.get("state") != "open":
+                continue
+            number = item.get("number")
+            if not isinstance(number, int) or isinstance(number, bool):
+                continue
+            base = item.get("base")
+            ref = base.get("ref") if isinstance(base, dict) else None
+            if not _github_branch(ref):
+                raise GitHubAdapterError(f"open PR #{number} base branch is not readable")
+            found[number] = ref
+        return found
+
+    def branch_has(self, repo: str, branch: str, sha: str) -> bool:
+        path = _branch_path(branch)
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("commit sha is not a full sha")
+        compared = self._json(
+            f"{_repo_path(repo)}/compare/{path}...{sha}",
+            cache_ttl=REF_STATUS_CACHE,
         )
+        status = compared.get("status") if isinstance(compared, dict) else None
+        if status not in ("ahead", "behind", "identical", "diverged"):
+            raise GitHubAdapterError("compare status is not readable")
+        return status in ("behind", "identical")
 
     def pull_state(self, repo: str, number: int) -> str:
         """open, closed or merged: a recorded PR is rechecked before a feed resumes."""
@@ -386,7 +412,7 @@ class GitHubIntakeClient(GitHubReviewActions):
         pull = self._json(f"{_repo_path(repo)}/pulls/{int(number)}")
         base = pull.get("base") if isinstance(pull, dict) else None
         ref = base.get("ref") if isinstance(base, dict) else None
-        if not isinstance(ref, str) or not _BRANCH.fullmatch(ref):
+        if not _github_branch(ref):
             raise GitHubAdapterError("pull request base branch is not readable")
         return ref
 

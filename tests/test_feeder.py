@@ -218,13 +218,16 @@ class FakeGitHub:
         merged = set(self._commits_on(repo, base))
         return tuple(sha for sha in self._commits_on(repo, tip) if sha not in merged)
 
-    def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
-        return frozenset(
-            number
+    def commit_pulls(self, repo: str, sha: str) -> dict[int, str]:
+        return {
+            number: pull.get("base", "main")
             for (pull_repo, number), pull in self.pulls.items()
             if pull_repo == repo and pull.get("state", "open") == "open"
             and not pull.get("merged") and sha in self._commits_on(repo, pull["head"])
-        )
+        }
+
+    def branch_has(self, repo: str, branch: str, sha: str) -> bool:
+        return sha in self._commits_on(repo, branch)
 
     def _commits_on(self, repo: str, branch: str) -> tuple[str, ...]:
         if (repo, branch) in self.branch_commits:
