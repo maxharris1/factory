@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import tarfile
+import traceback
 from pathlib import Path
 
 import pytest
@@ -350,3 +351,42 @@ def test_fetched_result_wins_over_bundle_copy(root: Path) -> None:
 def test_bad_arguments_raise_value_error(root: Path, overrides: dict) -> None:
     with pytest.raises(ValueError):
         _collect(root, _storage(_result(), _bundle()), **overrides)
+
+
+SIGNATURE = "LEAKED_SIGNATURE"
+CAPABILITY = "https://bucket.example/object?X-Amz-Signature=" + SIGNATURE
+OVERLONG = "X-Amz-Signature=" + SIGNATURE + "S" * 300
+
+
+def _sparse_map_member() -> tuple[tarfile.TarInfo, bytes]:
+    info, data = _file("artifact.bin", b"x")
+    info.pax_headers = {"GNU.sparse.map": CAPABILITY}
+    return info, data
+
+
+@pytest.mark.parametrize(
+    "result,members",
+    [
+        pytest.param(_result(), [_sparse_map_member()], id="tar-parser-error"),
+        pytest.param(_result(), [_file(OVERLONG, b"x")], id="overlong-member-name"),
+        pytest.param(
+            _result(),
+            [_file("X-Amz-Signature=" + SIGNATURE, b"one"), _file("X-Amz-Signature=" + SIGNATURE, b"two")],
+            id="colliding-member-context",
+        ),
+        pytest.param(
+            _result(artifacts=[{"path": OVERLONG, "sha256": "0", "size": 1}]),
+            [_file("ok.txt", b"fine")],
+            id="overlong-artifact-path",
+        ),
+    ],
+)
+def test_untrusted_failure_text_never_reaches_the_refusal(root: Path, result: dict, members: list) -> None:
+    with pytest.raises(EvidenceRefused) as refused:
+        _collect(root, _storage(result, _bundle(*members)))
+
+    error = refused.value
+    assert SIGNATURE not in str(error)
+    assert SIGNATURE not in "".join(traceback.format_exception(error))
+    assert error.__context__ is None and error.__cause__ is None
+    _assert_nothing_stored(root)

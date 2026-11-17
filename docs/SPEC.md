@@ -1016,7 +1016,10 @@ ticket, root)`, treats everything in a bundle as untrusted:
 7. Return the parsed result with its mismatches.
 
 A refusal raises `EvidenceRefused`, whose text names the reason and the
-member, and nothing from that bundle reaches the evidence root. Intake
+scrubbed member, and nothing from that bundle reaches the evidence root.
+Any other failure while unpacking, checking or scrubbing becomes an
+`EvidenceRefused` that names only the exception type, with no chained
+exception, so lane data never reaches error text. Intake
 deletes only the staging folder it made. It does not judge whether a
 result is acceptable, delete old evidence, or serve it to people.
 

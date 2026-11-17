@@ -75,12 +75,7 @@ def collect(
         if not storage.fetch(prefix + BUNDLE_NAME, bundle, BUNDLE_CAP):
             raise EvidenceRefused(f"{BUNDLE_NAME} is missing")
         unpack = staging / "unpack"
-        unpack.mkdir()
-        _unpack(bundle, unpack, BUNDLE_CAP)
-        mismatches = _check_artifacts(result.get("artifacts", []), unpack)
-        mismatches += _scrub(unpack)
-        shutil.copyfile(result_file, unpack / RESULT_NAME)
-        _write_manifest(unpack, run_id, lane, result.get("commit"), mismatches)
+        mismatches = _intake(bundle, result_file, result, unpack, run_id, lane)
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.rename(unpack, dest)
@@ -91,6 +86,22 @@ def collect(
         return {**result, "mismatches": mismatches}
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _intake(
+    bundle: Path, result_file: Path, result: dict[str, Any], unpack: Path, run_id: str, lane: int
+) -> list[dict[str, str]]:
+    try:
+        unpack.mkdir()
+        _unpack(bundle, unpack, BUNDLE_CAP)
+        mismatches = _check_artifacts(result.get("artifacts", []), unpack)
+        mismatches += _scrub(unpack)
+        shutil.copyfile(result_file, unpack / RESULT_NAME)
+        _write_manifest(unpack, run_id, lane, result.get("commit"), mismatches)
+        return mismatches
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, EvidenceRefused) else f"evidence intake failed ({type(exc).__name__})"
+    raise EvidenceRefused(reason)
 
 
 def check_members(tar: tarfile.TarFile, cap: int) -> list[tarfile.TarInfo]:
