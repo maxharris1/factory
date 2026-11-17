@@ -1,12 +1,12 @@
-"""Read-only, redacted dashboard snapshot (status.json plus four pages).
+"""Read-only, redacted dashboard snapshot (status.json, the pages and tickets.json).
 
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
-It writes status.json and the self-contained pages (PAGES: index.html,
+It writes status.json, the self-contained pages (PAGES: index.html,
 job.html, activity.html, efficiency.html, health.html; see
-lib/dashboard_page.py) to an
-output directory, each atomically (temp file in the same directory, fsync,
-then rename). Each page's inline script fetches status.json every 1 to 2
+lib/dashboard_page.py) and tickets.json to an output directory, each
+atomically (temp file in the same directory, fsync, then rename), as one
+set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
 seconds and updates in place. Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
@@ -38,6 +38,34 @@ orch.health.db nothing is flagged.
 Projects (#152): `projects` is each orch.yml project's tracker, ship mode
 and round caps as the poller last read its factory.md (lib/project_rules.py).
 An unreadable or not-yet-read factory.md is `unknown` with the reason.
+
+Ticket records (#530): tickets.json holds one record per tracked ticket
+(the tickets in status.json's `tickets`), built from the database whether
+or not the ticket has a job. The snapshot carries them under RECORDS, so
+the final scrub covers every string; the writer keeps that key out of
+status.json and the pages. The file is compact JSON with sorted keys, and
+every <, > and & is written as a JSON escape:
+
+    {schema: 1, generated_at_epoch, tickets: {"<repo>#<ticket_id>": record}}
+    record:   {repo, ticket_id, state, state_age_seconds, round, hops,
+               off_chart_count, terminal, hops_to_shipped, all_durations_known,
+               visits, shipped, stopped, jobs}
+    visits:   job_flow's visits, unchanged: [{state, who, started_at,
+               duration_seconds, time_known, off_chart, reason, current}]
+    shipped:  null | {at, how: "merged" | "handed-off", intake_to_ship_seconds,
+               revise_rounds, jobs, tokens_in, tokens_out, cost_usd}
+    stopped:  null | {state, at, stopped_in, reason, ways_out: [{to, label}]}
+    jobs:     the ticket's status.json running rows, newest first, then its
+               queued rows, each without `flow`
+
+`shipped` is set when the ticket's state is on the Shipped shelf: `at` is
+when it first reached a Shipped state, and `how` is "handed-off" when that
+state was handed-off. Its totals cover every job the ticket ever had; tokens
+and cost are null when no job reported them. `stopped` is set when the board
+puts the ticket in its Stopped group; a stuck flag on a state that is not a
+stop reads as stopped in "stuck". A record is shaped so the ticket page's
+`_detail_model({"flow": record}, chart)` reads it as it reads a job row. A
+job whose ticket is not tracked has no record.
 """
 
 from __future__ import annotations
