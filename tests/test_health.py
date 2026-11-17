@@ -988,12 +988,13 @@ def test_the_page_script_renders_the_health_tab_and_the_queue_flag(tmp_path: Pat
                                    version="unknown")
     data = snapshot(tmp_path, db, PAGE_NOW, machines=ONLY_CODEX)
     (tmp_path / "health").mkdir()
-    page = _run_page(tmp_path / "health", data, "health", BAR + ["hud", "components", "no-waiter"])
+    page = _run_page(tmp_path / "health", data, "health", BAR + ["hud", "broken", "components", "waiters"])
     text = page["text"]
     assert "poller" in text["components"] and "UP" in text["components"]
     assert "linear-listener" in text["components"] and "DOWN" in text["components"]
     assert health.et(PAGE_NOW - 5).removesuffix(" ET") in text["components"]
-    assert "no waiter for codex: 1 queued job" in text["no-waiter"]
+    assert "no waiter for codex: 1 queued job" in text["waiters"]
+    assert "no waiter for codex: 1 queued job" in text["broken"]
     # Down: the listener and the codex waiter; codex has no waiter.
     assert attention_count(page) == "3"
     (tmp_path / "main").mkdir()
@@ -1107,7 +1108,7 @@ def test_the_page_ages_component_states_with_an_unchanged_snapshot(tmp_path: Pat
         pytest.skip("node is not installed")
     data = _page_with_fresh_rows(tmp_path)
     assert data["health"]["publish_seconds"] is None
-    ids = BAR + ["hud", "components", "no-waiter"]
+    ids = BAR + ["hud", "broken", "components", "waiters"]
     (tmp_path / "now").mkdir()
     fresh_out = _run_page(tmp_path / "now", data, "health", ids)
     fresh = fresh_out["text"]
@@ -1487,40 +1488,43 @@ def test_a_push_publishes_its_own_cadence_and_its_own_heartbeat(
 @pytest.mark.parametrize("advance", [0, 121, 299, 600, 897])  # the clock starts 3 s in
 def test_healthy_components_stay_up_between_scheduled_pushes(tmp_path: Path, monkeypatch, advance) -> None:
     """R2-1/R2-2: within its publication window a snapshot keeps every
-    state it observed, and the no-waiter panel agrees with them."""
+    state it observed, and nothing on the page is broken: no Broken now, no
+    no-waiter panel, and the no-waiter anchor lands on Components."""
     from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
     data = _published(tmp_path / "push", monkeypatch, every=5)
     (tmp_path / "page").mkdir()
-    out = _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+    out = _run_page(tmp_path / "page", data, "health", BAR + ["hud", "broken", "components", "waiters"],
                     actions=[["advance", advance]])
     page = out["text"]
     assert _states(page["components"]) == ["UP", "UP", "UP"]
     assert attention_count(out) == "0"
-    assert "every queued job has a live waiter" in page["no-waiter"]
+    assert out["hidden"]["broken"] and out["hidden"]["waiters"]
+    assert page["no-waiter"].startswith("Components")
 
 
 def test_an_overdue_snapshot_shows_unknown_and_only_its_writer_alerts(tmp_path: Path, monkeypatch) -> None:
     """R2-1/R2-2: once the next push is overdue the page cannot see the other
     components, so they are unknown, not down; the writer itself ages to
-    stale and then down, which is the one needs-attention item, and the
-    no-waiter panel no longer claims every queued job has a waiter."""
+    stale and then down, which is the one needs-attention item, and no
+    panel vouches for the waiters the snapshot can no longer see."""
     from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
     data = _published(tmp_path / "push", monkeypatch, every=5)
-    ids = BAR + ["hud", "components", "no-waiter"]
+    ids = BAR + ["hud", "broken", "components", "waiters"]
     (tmp_path / "stale").mkdir()
     stale_out = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 901]])
     stale = stale_out["text"]
     assert _states(stale["components"]) == ["UNKNOWN", "UNKNOWN", "STALE"]
     assert "DOWN" not in stale["components"]
     assert attention_count(stale_out) == "0"
-    assert "every queued job has a live waiter" not in stale["no-waiter"]
-    assert "unknown" in stale["no-waiter"]
+    assert stale_out["hidden"]["waiters"]
+    assert "no snapshot for " in stale["components"]
+    assert "dashboard" in stale["broken"] and "waiter" not in stale["broken"]
 
     (tmp_path / "down").mkdir()
     down = _run_page(tmp_path / "down", data, "activity", BAR + ["hud", "attention"],
@@ -1543,7 +1547,7 @@ def _overdue_page(tmp_path: Path, *, waiter_seen: float, writer_interval: int,
                             machines_path=machines_file(tmp_path, ONLY_CODEX), alive=None,
                             orch=orch(push=push), publish_seconds=publish_seconds)
     (tmp_path / "page").mkdir()
-    return _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+    return _run_page(tmp_path / "page", data, "health", BAR + ["hud", "broken", "components", "waiters"],
                      actions=[["advance", advance]])
 
 
@@ -1556,17 +1560,19 @@ def test_an_overdue_snapshot_vouches_for_no_state_past_its_up_window(
     tmp_path: Path, waiter_seen, expected,
 ) -> None:
     """R3-2: once the next push is overdue, a component the snapshot already
-    showed stale is as unseen as one it showed up: it is unknown, and the
-    no-waiter panel stops claiming a live waiter for its queued job."""
+    showed stale is as unseen as one it showed up: it is unknown, says how
+    long the snapshot is overdue, and no panel vouches for its waiter."""
     from tests.test_dashboard_layout import NODE
 
     if NODE is None:
         pytest.skip("node is not installed")
-    page = _overdue_page(tmp_path, waiter_seen=waiter_seen, writer_interval=15,
-                         publish_seconds=15, push=True, advance=46)["text"]
+    out = _overdue_page(tmp_path, waiter_seen=waiter_seen, writer_interval=15,
+                        publish_seconds=15, push=True, advance=46)
+    page = out["text"]
     assert _states(page["components"]) == expected
-    assert "every queued job has a live waiter" not in page["no-waiter"]
-    assert "unknown: no snapshot for " in page["no-waiter"]
+    assert out["hidden"]["waiters"]
+    assert "no snapshot for " in page["components"]
+    assert "waiter" not in page["broken"]
 
 
 def test_a_retired_writer_row_does_not_hide_an_old_one_off_snapshot(tmp_path: Path) -> None:
