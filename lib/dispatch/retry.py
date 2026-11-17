@@ -97,7 +97,7 @@ def _newest_harness_job(
         """,
         (*key, *_HARNESS_ACTIONS),
     ).fetchone()
-    return None if row is None else _job(row)
+    return None if row is None else _job(row, connection)
 
 
 def _clear_stuck(

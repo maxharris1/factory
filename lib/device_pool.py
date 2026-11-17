@@ -311,7 +311,7 @@ class DevicePool:
             ).fetchone()
             connection.commit()
         assert updated is not None
-        return _job(updated), Placement(
+        return _job(updated, connection), Placement(
             job_id=str(row["id"]),
             device=device.name,
             harness=harness,

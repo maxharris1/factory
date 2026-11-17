@@ -61,7 +61,7 @@ class ReadyMixin:
             ).fetchone()
         if poster is None:
             return
-        job = _job(poster)
+        job = _job(poster, connection)
         if repeated is None:
             self.queue.enqueue(
                 replace(job.request, generation=job.request.generation + 1),

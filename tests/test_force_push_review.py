@@ -157,7 +157,7 @@ def test_a_queued_unreviewed_head_is_never_the_range_diff_baseline(
     assert detail["rebase"]["last_reviewed_head"] == reviewed
     assert (
         f"git range-diff {git.base}..{reviewed} {git.base}..{latest}"
-        in brief(queue_job(rows[-1]))
+        in brief(queue_job(rows[-1], board.queue.connect()))
     )
 
 
@@ -214,7 +214,7 @@ def test_a_same_round_approval_is_the_range_diff_baseline(tmp_path: Path) -> Non
     assert (evidence["reviewed_head"], evidence["reviewed_base"]) == (approved, git.base)
     assert (
         f"git range-diff {git.base}..{approved} {git.base}..{reverted}"
-        in brief(queue_job(row))
+        in brief(queue_job(row, board.queue.connect()))
     )
 
 

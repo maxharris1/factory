@@ -168,7 +168,7 @@ class PollMixin:
                     (repo, ticket_id, read_from),
                 ).fetchall()
             for row in rows:
-                job = _job(row)
+                job = _job(row, connection)
                 problem = self._handoff_problem(ticket, job)
                 event = "handoff-unverified" if problem else "handoff-verified"
                 detail = problem or f"comment {job.handoff_comment_id} checked"

@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
+from lib import job_detail
 from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
@@ -464,7 +465,7 @@ class DetailMixin:
     ) -> dict[str, object] | None:
         row = connection.execute(
             """
-            SELECT detail FROM jobs
+            SELECT id, detail FROM jobs
             WHERE lower(repo) = ? AND ticket_id = ? AND action = ?
               AND source_comment_id != ?
               AND (? IS NULL OR handoff_comment_id = ? OR handoff_comment_id IS NULL)
@@ -481,7 +482,9 @@ class DetailMixin:
                 question_id,
             ),
         ).fetchone()
-        return json.loads(row["detail"] or "{}") if row is not None else None
+        if row is None:
+            return None
+        return json.loads(job_detail.load_row(connection, row["id"], row["detail"]) or "{}")
 
     def _job_detail(
         self,

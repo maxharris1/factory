@@ -54,4 +54,4 @@ def test_incoming_approval_is_the_review_baseline(tmp_path):
     assert (row['head'], row['state'], detail['round']) == (latest, 'queued', '2/3')
     assert detail['evidence']['findings']['reviewed_head'] == reviewed
     assert detail['rebase']['last_reviewed_head'] == reviewed
-    assert f'git range-diff {git.base}..{reviewed} {git.base}..{latest}' in brief(_job(row))
+    assert f'git range-diff {git.base}..{reviewed} {git.base}..{latest}' in brief(_job(row, board.queue.connect()))
