@@ -260,7 +260,7 @@ def _codex_session(tmp_path: Path, now: list[float]) -> tuple[Session, Path]:
 
 def _box_codex(tmp_path: Path, now: float) -> dict:
     with sqlite3.connect(tmp_path / "orch.db") as connection:
-        return _bots(read_usage(connection, now, BOX))[("box", "codex")]
+        return _accounts(read_usage(connection, now, BOX))["codex"]
 
 
 def test_rereading_the_same_rollout_event_never_makes_it_fresher(tmp_path: Path) -> None:
@@ -311,7 +311,7 @@ def test_a_later_claude_login_without_limits_clears_the_stored_numbers(tmp_path:
     assert [row[3:] for row in _stored(db)] == [
         ("five_hour", None, None, CAPTURED + 600, "job-2"), ("seven_day", None, None, CAPTURED + 600, "job-2")]
     with sqlite3.connect(db) as connection:
-        entry = _bots(read_usage(connection, CAPTURED + 660, BOX))[("box", "claude")]
+        entry = _accounts(read_usage(connection, CAPTURED + 660, BOX))["claude"]
     assert entry["state"] == "no reading" and entry["headroom"] is None
     assert entry["five_hour"]["used"] is None and entry["seven_day"]["used"] is None
     assert _source(db, CAPTURED + 660).read("claude") is None
@@ -514,11 +514,11 @@ def test_stale_or_missing_readings_give_no_report(tmp_path: Path) -> None:
 # --- the snapshot ------------------------------------------------------------------------
 
 
-def _bots(usage: dict) -> dict[tuple[str, str], dict]:
-    return {(entry["device"], entry["harness"]): entry for entry in usage["bots"]}
+def _accounts(usage: dict) -> dict[str, dict]:
+    return {entry["harness"]: entry for entry in usage["accounts"]}
 
 
-def test_snapshot_usage_has_one_entry_per_bot_account(tmp_path: Path) -> None:
+def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
@@ -533,12 +533,12 @@ def test_snapshot_usage_has_one_entry_per_bot_account(tmp_path: Path) -> None:
     snapshot = collect_snapshot(db, tmp_path / "poll.log", now=CAPTURED + 120, machines_path=machines)
     usage = snapshot["usage"]
     assert usage["state"] == "ok"
-    bots = _bots(usage)
-    assert set(bots) == {("box", "claude"), ("box", "codex"), ("box", "cursor")}
-    assert bots[("box", "claude")] == {
+    accounts = _accounts(usage)
+    assert set(accounts) == {"claude", "codex", "cursor"}
+    assert accounts["claude"] == {
         "bot": "claude-bot",
         "harness": "claude",
-        "device": "box",
+        "devices": ["box"],
         "state": "ok",
         "five_hour": {"used": 0.125, "resets_at": FIVE_HOUR_RESET, "observed_at": CAPTURED, "state": "ok"},
         "seven_day": {"used": 0.345, "resets_at": SEVEN_DAY_RESET, "observed_at": CAPTURED, "state": "ok"},
@@ -548,17 +548,43 @@ def test_snapshot_usage_has_one_entry_per_bot_account(tmp_path: Path) -> None:
         "limited_until": None,
         "limit_label": None,
     }
-    assert bots[("box", "codex")]["state"] == "no reading"
-    assert bots[("box", "codex")]["headroom"] is None
-    assert bots[("box", "cursor")]["state"] == "not tracked"
+    assert accounts["codex"]["state"] == "no reading"
+    assert accounts["codex"]["headroom"] is None
+    assert accounts["cursor"]["state"] == "not tracked"
     json.dumps(snapshot, allow_nan=False)
+
+
+SHARED = MachinesConfig((
+    Device("box", 3, {"claude": "claude-bot", "codex": "codex-bot"}, local=True),
+    Device("pc", 2, {"claude": "claude-bot"}),
+))
+
+
+def test_an_account_shared_by_devices_is_one_entry_with_the_newest_reading_per_window(tmp_path: Path) -> None:
+    connection = sqlite3.connect(tmp_path / "orch.db")
+    for device, harness, bot, window, used, observed in (
+        ("box", "claude", "claude-bot", "five_hour", 0.6, CAPTURED - 60),
+        ("box", "claude", "claude-bot", "seven_day", 0.2, CAPTURED - 60),
+        ("pc", "claude", "claude-bot", "five_hour", 0.3, CAPTURED - 30),
+        ("mac", "claude", "claude-old", "seven_day", 0.5, CAPTURED - 30),
+    ):
+        usage_readings.store(connection, harness=harness, bot=bot, device=device, job_id="j",
+                             readings=[Reading(window, used, SEVEN_DAY_RESET, observed)])
+    usage = read_usage(connection, CAPTURED, SHARED)
+    assert [(e["harness"], e["bot"], e["devices"]) for e in usage["accounts"]] == [
+        ("claude", "claude-bot", ["box", "pc"]), ("codex", "codex-bot", ["box"]),
+        ("claude", "claude-old", ["mac"])]
+    claude = usage["accounts"][0]
+    assert (claude["five_hour"]["used"], claude["five_hour"]["observed_at"]) == (0.3, CAPTURED - 30)
+    assert (claude["seven_day"]["used"], claude["seven_day"]["observed_at"]) == (0.2, CAPTURED - 60)
+    assert claude["headroom"] == 0.7 and claude["observed_at"] == CAPTURED - 30
 
 
 def test_a_database_without_the_table_reads_as_no_telemetry(tmp_path: Path) -> None:
     connection = sqlite3.connect(tmp_path / "orch.db")
     usage = read_usage(connection, CAPTURED, BOX)
     assert usage["state"] == "no telemetry"
-    assert {e["harness"]: e["state"] for e in usage["bots"]} == {
+    assert {e["harness"]: e["state"] for e in usage["accounts"]} == {
         "claude": "no telemetry", "codex": "no telemetry", "cursor": "not tracked"}
 
 
@@ -566,8 +592,8 @@ def test_a_reset_or_old_reading_is_stale_with_no_used_value(tmp_path: Path) -> N
     db = tmp_path / "orch.db"
     _with_rows(db, ("five_hour", 0.6, FIVE_HOUR_RESET, CAPTURED), ("seven_day", 0.2, SEVEN_DAY_RESET, CAPTURED))
     with sqlite3.connect(db) as connection:
-        reset = _bots(read_usage(connection, FIVE_HOUR_RESET + 1, BOX))[("box", "claude")]
-        old = _bots(read_usage(connection, CAPTURED + usage_readings.STALE_SECONDS + 1, BOX))[("box", "claude")]
+        reset = _accounts(read_usage(connection, FIVE_HOUR_RESET + 1, BOX))["claude"]
+        old = _accounts(read_usage(connection, CAPTURED + usage_readings.STALE_SECONDS + 1, BOX))["claude"]
     assert reset["five_hour"]["state"] == "stale" and reset["five_hour"]["used"] is None
     assert reset["seven_day"]["state"] == "ok" and reset["headroom"] == 0.8
     assert reset["state"] == "ok"
@@ -579,7 +605,7 @@ def test_headroom_is_the_tighter_fresh_window(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     _with_rows(db, ("five_hour", 0.6, FIVE_HOUR_RESET, CAPTURED), ("seven_day", 0.2, SEVEN_DAY_RESET, CAPTURED))
     with sqlite3.connect(db) as connection:
-        entry = _bots(read_usage(connection, CAPTURED + 1, BOX))[("box", "claude")]
+        entry = _accounts(read_usage(connection, CAPTURED + 1, BOX))["claude"]
     assert entry["headroom"] == 0.4
 
 
@@ -597,9 +623,9 @@ def test_bad_rows_never_reach_the_snapshot(tmp_path: Path) -> None:
             ],
         )
         usage = read_usage(connection, CAPTURED + 1, BOX)
-    assert [(e["device"], e["harness"], e["bot"]) for e in usage["bots"]] == [
-        ("box", "claude", "claude-bot"), ("box", "codex", "codex-bot"), ("box", "cursor", "cursor-bot")]
-    claude = usage["bots"][0]
+    assert [(e["devices"], e["harness"], e["bot"]) for e in usage["accounts"]] == [
+        (["box"], "claude", "claude-bot"), (["box"], "codex", "codex-bot"), (["box"], "cursor", "cursor-bot")]
+    claude = usage["accounts"][0]
     assert claude["five_hour"]["used"] is None and claude["five_hour"]["state"] == "no reading"
     assert claude["seven_day"]["state"] == "no reading" and claude["state"] == "no reading"
 

@@ -41,7 +41,8 @@ from tests.test_dashboard import (
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "model" / "chart.mmd"
 MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")  # nav order (#78, #92)
+NAV = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")  # nav order (#78, #92)
+PAGES = (*NAV, "ticket.html")
 
 
 def _slots_table(connection: sqlite3.Connection) -> None:
@@ -149,7 +150,7 @@ def test_every_page_links_every_other_page(tmp_path: Path) -> None:
     pages = _pages(tmp_path)
     for name, html in pages.items():
         nav = _section(html, "nav")
-        for target in PAGES:
+        for target in NAV:
             assert f'href="{target}"' in nav, (name, target)
 
 

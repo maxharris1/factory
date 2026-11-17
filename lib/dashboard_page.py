@@ -29,7 +29,7 @@ from lib.dashboard_pages.lanes import (  # noqa: F401
     _queue_lane, _slot, intake_groups, lane_devices, lanes_script, probe_down, queue_speed,
 )
 from lib.dashboard_pages.shell import (  # noqa: F401
-    _PAGE_NAMES, _PANELS, _PX_BAD, _PX_HEX, _PX_LINK, PAGES, PX_ACTIONS, PX_BOT_TINTS, PX_BROKEN,
+    _PAGE_NAMES, _PANELS, _PX_BAD, _PX_HEX, _PX_LINK, NAV_PAGES, PAGES, PX_ACTIONS, PX_BOT_TINTS, PX_BROKEN,
     PX_EFFECTS, PX_FALLBACK, PX_ONESHOTS, PX_SCRIPT, PX_STATE, STATUS_ABSENT_LINK, STATUS_LINKS,
     _attention_strip, _band, _count, _fixed3, _page, _px_progress, _segment, _statusline,
     _topbar, header_load, px_frame, px_job_strip, px_script, px_state, px_strip, px_table,

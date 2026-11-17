@@ -5,19 +5,22 @@ lib/usage_readings.py) inside the dashboard's read-only transaction. Only
 allowlisted columns are read and every value is checked again. The snapshot
 is then walked by lib/dashboard.py's `_scrub`.
 
-There is one entry per bot account: each harness and its bot user on every
-enabled machines.yml device, plus any account that has stored readings.
-Each window is `ok`, `stale` (the window has reset or the reading is older
-than STALE_SECONDS, and `used` is then null) or `no reading`. An account is
-`not tracked` (Cursor), `no reading` (no chosen source, or no row yet),
-`no telemetry` (no table: an older database, or telemetry never on),
-`stale` or `ok`. No value is guessed: a missing utilization stays null.
+There is one entry per account, a harness and its bot user. Accounts come
+from the enabled machines.yml devices (`devices` keeps their machines.yml
+order), then any account that has stored readings with the devices its rows
+name. Each window holds the newest reading across the account's devices and
+is `ok`, `stale` (the window has reset or the reading is older than
+STALE_SECONDS, and `used` is then null) or `no reading`. An account is `not tracked` (Cursor), `no reading` (no chosen
+source, or no row yet), `no telemetry` (no table: an older database, or
+telemetry never on), `stale` or `ok`. No value is guessed: a missing
+utilization stays null.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+from typing import NamedTuple
 
 from lib import lane_limit
 from lib.machines_yml import MachinesConfig
@@ -36,22 +39,24 @@ HARNESSES = ("claude", "codex", "cursor")
 ROW_LIMIT = 500
 _NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
-Account = tuple[str, str, str]  # (device, harness, bot)
+class Account(NamedTuple):
+    harness: str
+    bot: str
 
 
-def _accounts(machines: MachinesConfig | None) -> list[Account]:
-    found: list[Account] = []
+def _accounts(machines: MachinesConfig | None) -> dict[Account, list[str]]:
+    found: dict[Account, list[str]] = {}
     for device in machines.devices if machines is not None else ():
         if not device.enabled or device.placeholder or not _NAME.fullmatch(device.name):
             continue
         for harness in HARNESSES:
             bot = device.harnesses.get(harness)
             if isinstance(bot, str) and _NAME.fullmatch(bot):
-                found.append((device.name, harness, bot))
+                found.setdefault(Account(harness, bot), []).append(device.name)
     return found
 
 
-def _rows(connection: sqlite3.Connection) -> dict[Account, dict[str, Reading]] | None:
+def _rows(connection: sqlite3.Connection) -> dict[Account, tuple[list[str], dict[str, Reading]]] | None:
     try:
         rows = connection.execute(
             f"SELECT device, harness, bot, window, used, resets_at, observed_at"
@@ -59,16 +64,22 @@ def _rows(connection: sqlite3.Connection) -> dict[Account, dict[str, Reading]] |
         ).fetchall()
     except sqlite3.OperationalError:
         return None
-    readings: dict[Account, dict[str, Reading]] = {}
+    stored: dict[Account, tuple[list[str], dict[str, Reading]]] = {}
     for device, harness, bot, *values in rows:
         if harness not in HARNESSES or not all(
             isinstance(name, str) and _NAME.fullmatch(name) for name in (device, bot)
         ):
             continue
         reading = from_row(*values)
-        if reading is not None:
-            readings.setdefault((device, harness, bot), {})[reading.window] = reading
-    return readings
+        if reading is None:
+            continue
+        devices, windows = stored.setdefault(Account(harness, bot), ([], {}))
+        if device not in devices:
+            devices.append(device)
+        kept = windows.get(reading.window)
+        if kept is None or reading.observed_at > kept.observed_at:
+            windows[reading.window] = reading
+    return stored
 
 
 def _window(reading: Reading | None, now: float) -> dict:
@@ -83,14 +94,16 @@ def _window(reading: Reading | None, now: float) -> dict:
     }
 
 
-def _entry(account: Account, readings: dict[str, Reading] | None, now: float) -> dict:
-    device, harness, bot = account
+def _entry(
+    account: Account, devices: list[str], readings: dict[str, Reading] | None, now: float
+) -> dict:
+    harness, bot = account
     windows = readings or {}
     observed = max((r.observed_at for r in windows.values()), default=None)
     entry = {
         "bot": bot,
         "harness": harness,
-        "device": device,
+        "devices": devices,
         **{window: _window(windows.get(window), now) for window in WINDOWS},
         "headroom": headroom(list(windows.values()), now),
         "observed_at": observed,
@@ -115,25 +128,25 @@ def _entry(account: Account, readings: dict[str, Reading] | None, now: float) ->
 def read_usage(
     connection: sqlite3.Connection, now: float, machines: MachinesConfig | None
 ) -> dict:
-    """The snapshot's `usage`: {state, bots: [...]}, one entry per bot account."""
+    """The snapshot's `usage`: {state, accounts: [...]}, one entry per account."""
     stored = _rows(connection)
     accounts = _accounts(machines)
     for account in sorted(stored or {}):
-        if account not in accounts:
-            accounts.append(account)
+        accounts.setdefault(account, stored[account][0])
     limits = {(limit.harness, limit.bot): limit for limit in lane_limit.all_active(connection, now)}
-    bots = [
+    entries = [
         _limited(
             _entry(
                 account,
-                None if stored is None else stored.get(account, {}),
+                devices,
+                None if stored is None else stored.get(account, ([], {}))[1],
                 now,
             ),
-            limits.get((account[1], account[2])),
+            limits.get(account),
         )
-        for account in accounts
+        for account, devices in accounts.items()
     ]
-    return {"state": "no telemetry" if stored is None else "ok", "bots": bots}
+    return {"state": "no telemetry" if stored is None else "ok", "accounts": entries}
 
 
 def _limited(entry: dict, limit: lane_limit.LaneLimit | None) -> dict:

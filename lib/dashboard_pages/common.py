@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+import urllib.parse
 
 from lib.pr_title import label
 
@@ -35,9 +36,9 @@ CSS_PANEL = """\
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
 #ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#broken,#waiters{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
-.panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
+.panel h1,.panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
-.panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
+.panel h1>span:first-child::before,.panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
 vertical-align:.12em;background:var(--brand)}
 .panel h2 .count{color:var(--muted);font-weight:400;font-size:12px}
 """
@@ -243,6 +244,13 @@ SCRIPT_HEAD = r"""
     return hrefs;
   }
   function ticketHref(hrefs, r) { return hrefs[threadKey(r)] || 'job.html'; }
+  function ticketAddress(r) { return String(r.repo) + '#' + r.ticket_id; }
+  function ticketPageHref(r) { return 'ticket.html#t=' + encodeURIComponent(ticketAddress(r)); }
+  function hashAddress() {
+    var hash = String(location.hash || '');
+    if (hash.indexOf('#t=') !== 0) return null;
+    try { return decodeURIComponent(hash.slice(3)) || null; } catch (err) { return null; }
+  }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
   function checksNamed(ci) { return ci.checks.join(', ') || 'checks pending'; }
@@ -312,7 +320,8 @@ SCRIPT_TAIL = r"""
     job: [renderBoard, renderTickets, renderJobView],
     activity: [renderAttention, renderRelay],
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
-    health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
+    health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter],
+    ticket: [renderTicketView]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
@@ -704,6 +713,17 @@ def _job_hrefs(snapshot: dict) -> dict[str, str]:
 
 def ticket_href(hrefs: dict[str, str], row: dict) -> str:
     return hrefs.get(_thread_key(row), "job.html")
+
+
+def ticket_address(row: dict) -> str:
+    return f"{row['repo']}#{row['ticket_id']}"
+
+
+ENCODE_URI_COMPONENT_SAFE = "-_.!~*'()"
+
+
+def ticket_page_href(row: dict) -> str:
+    return "ticket.html#t=" + urllib.parse.quote(ticket_address(row), safe=ENCODE_URI_COMPONENT_SAFE)
 
 
 def _b(value: object, cls: str = "") -> str:

@@ -23,6 +23,7 @@ PAGE_FILES = {
     "activity.html": "test_activity_golden",
     "efficiency.html": "test_efficiency_golden",
     "health.html": "test_system_golden",
+    "ticket.html": "test_ticket_golden",
 }
 
 MARKERS = {"style": "\0style\0", "main": "\0main\0", "script": "\0script\0"}
