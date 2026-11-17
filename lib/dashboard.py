@@ -51,8 +51,11 @@ waiting_on} (who a held PR waits on, or None), or None for a ticket with
 no record. A running or queued job is not in `now`: the page joins it
 from `running` and `queued`.
 
-Ticket rows (#670): each status.json `tickets` row carries
-`state_age_seconds`, its record's value below (null when unknown).
+Ticket rows (#670, #671): each status.json `tickets` row carries
+`state_age_seconds`, its record's value below (null when unknown), and
+`shipped_at` and `shipped_how`, its record's `shipped.at` and `shipped.how`
+(both null when the ticket is not shipped; `shipped_at` is also null when
+the time is unknown).
 
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
@@ -1524,6 +1527,8 @@ def _read_db(
     )
     for row, key in ticket_rows:
         row["state_age_seconds"] = flows[key]["state_age_seconds"]
+        shipped = shipped_facts(chart, flows[key]) or {"at": None, "how": None}
+        row["shipped_at"], row["shipped_how"] = shipped["at"], shipped["how"]
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
         info = ticket_info.get(key, TicketInfo(None, False, None))
