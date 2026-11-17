@@ -46,53 +46,66 @@ def remote(**fields: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() -> None:
-    strict, strict_findings = load_machines_yml(ROOT / "machines.yml")
-    assert strict is None
-    assert errors(strict_findings) == [
-        "devices[2].workdir_root is an install placeholder; "
-        "Max must provide this inventory",
-        "devices[2].ssh_alias is an install placeholder; "
-        "Max must provide this inventory",
-    ]
-
-    config, findings = load_machines_yml(
-        ROOT / "machines.yml",
-        allow_placeholders=True,
-    )
+def test_shipped_machines_yml_runs_orch_on_pc_with_box_remote_and_mac_reported() -> None:
+    config, findings = load_machines_yml(ROOT / "machines.yml")
 
     assert config is not None
     assert errors(findings) == []
     assert warnings(findings) == [
-        "device 'pc' is disabled (enabled: false); it will not be scheduled",
         "device 'mac' is disabled (enabled: false); it will not be scheduled",
-        "accepted placeholder devices[2].workdir_root; device 'mac' will not be scheduled",
-        "accepted placeholder devices[2].ssh_alias; device 'mac' will not be scheduled",
+        "skipping device 'mac': devices[2].workdir_root is an install placeholder; "
+        "it will not be scheduled",
+        "skipping device 'mac': devices[2].ssh_alias is an install placeholder; "
+        "it will not be scheduled",
     ]
-    box, pc, mac = config.devices
-    assert (box.name, box.local, box.enabled, box.slot_max) == ("box", True, True, 3)
-    assert dict(box.harnesses) == {
-        "claude": "claude-bot",
-        "codex": "codex-bot",
-        "cursor": "cursor-bot",
-    }
-    assert box.tailscale_name is None
-    assert box.schedulable
+    assert orch_host(config) == "pc"
+    assert not any(device.local for device in config.devices)
+    pc, box, mac = config.devices
+    bots = {"claude": "claude-bot", "codex": "codex-bot", "cursor": "cursor-bot"}
+
+    assert (pc.name, pc.enabled, pc.slot_max, pc.ssh_user) == ("pc", True, 10, None)
     assert pc.tailscale_name == "pc-wsl-bots.tail68624b.ts.net"
-    assert (pc.slot_max, pc.enabled) == (3, False)
-    assert pc.workdir_root == "/home/{bot}/factory-work"
-    assert pc.ssh_alias == "pc-wsl-{bot}"
-    assert not pc.placeholder
-    assert dict(pc.harnesses) == dict(box.harnesses)
+    assert dict(pc.harnesses) == bots
+    assert (pc.workdir_root, pc.ssh_alias, pc.factory_root) == (
+        "/home/{bot}/factory-work",
+        "pc-wsl-{bot}",
+        "/home/{bot}/factory",
+    )
+    assert pc.login_for("codex") == "codex-bot"
+
+    assert (box.name, box.enabled, box.slot_max, box.ssh_user) == ("box", True, 6, "box")
+    assert box.tailscale_name == "grokbot-factory-box.tail68624b.ts.net"
+    assert dict(box.harnesses) == bots
+    assert (box.workdir_root, box.ssh_alias, box.factory_root) == (
+        "/home/box/factory-work",
+        "box-{bot}",
+        "/home/box/factory",
+    )
+    assert {harness: box.login_for(harness) for harness in bots} == dict.fromkeys(bots, "box")
+    assert {harness: box.ssh_alias_for(harness) for harness in bots} == {
+        "claude": "box-claude-bot",
+        "codex": "box-codex-bot",
+        "cursor": "box-cursor-bot",
+    }
+    assert pc.schedulable and box.schedulable
+
     assert mac.tailscale_name == "maxs-macbook-pro.tail68624b.ts.net"
-    assert (mac.slot_max, mac.enabled, dict(mac.harnesses)) == (2, False, {})
-    assert not pc.schedulable and not mac.schedulable
+    assert (mac.name, mac.slot_max, mac.enabled, dict(mac.harnesses)) == ("mac", 2, False, {})
+    assert not mac.schedulable
+
+
+def test_shipped_machines_yml_header_describes_orch_host_and_ssh_user() -> None:
+    header = (ROOT / "machines.yml").read_text(encoding="utf-8").split("\ndevices:", 1)[0]
+    comment = " ".join(line for line in header.splitlines() if line.startswith("#"))
+    assert "orch_host names the device that runs orch" in comment
+    assert "ssh_user" in comment and "identity" in comment
+    assert "Phase 1" not in header
 
 
 def test_shipped_pc_workdir_is_each_bots_home_off_the_windows_drive() -> None:
     """Factory decided (technical), Nov 11: /home/<bot>/factory-work on
     pc-wsl-bots, never under /mnt/c."""
-    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    config, _ = load_machines_yml(ROOT / "machines.yml")
     assert config is not None
     pc = config.device("pc")
     assert pc is not None
@@ -104,33 +117,26 @@ def test_shipped_pc_workdir_is_each_bots_home_off_the_windows_drive() -> None:
     for harness in pc.harnesses:
         assert not pc.workdir_for(harness).startswith("/mnt")
     box = config.device("box")
-    assert box is not None and box.workdir_for("claude") is None
+    assert box is not None and box.workdir_for("claude") == "/home/box/factory-work"
 
 
-def test_shipped_pc_and_mac_stay_disabled_until_f2_02_remote_start() -> None:
-    """Factory decided (technical), Nov 11, kept by F2-02 (Nov 12): both
-    remote devices ship enabled: false until Max turns them on, so neither
-    is ever eligible for any harness."""
-    config, findings = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+def test_shipped_mac_stays_disabled_and_only_pc_and_box_schedule() -> None:
+    config, findings = load_machines_yml(ROOT / "machines.yml")
     assert config is not None
-    for name in ("pc", "mac"):
-        device = config.device(name)
-        assert device is not None
-        assert device.enabled is False, name
-        assert not device.schedulable, name
-        for harness in ("claude", "codex", "cursor"):
-            assert not device.eligible(harness), (name, harness)
-        assert (
-            f"device {name!r} is disabled (enabled: false); it will not be scheduled"
-            in warnings(findings)
-        )
-    assert [d.name for d in config.devices if d.schedulable] == ["box"]
+    mac = config.device("mac")
+    assert mac is not None
+    assert mac.enabled is False
+    for harness in ("claude", "codex", "cursor"):
+        assert not mac.eligible(harness), harness
+    assert (
+        "device 'mac' is disabled (enabled: false); it will not be scheduled"
+        in warnings(findings)
+    )
+    assert [d.name for d in config.devices if d.schedulable] == ["pc", "box"]
 
 
-def test_shipped_machines_yml_names_the_pc_ssh_aliases_and_nothing_secret() -> None:
+def test_shipped_machines_yml_names_nothing_secret() -> None:
     text = (ROOT / "machines.yml").read_text(encoding="utf-8")
-    for alias in ("pc-wsl-claude-bot", "pc-wsl-codex-bot", "pc-wsl-cursor-bot"):
-        assert alias in text
     for secret_hint in ("IdentityFile", ".ssh/", "id_ed25519", "id_rsa", "2222"):
         assert secret_hint not in text
 
@@ -187,28 +193,29 @@ def test_workdir_root_bot_token_rules(tmp_path: Path, value: str, message: str) 
     ), findings
 
 
-def test_shipped_box_slot_max_states_its_real_basis() -> None:
-    """A2: the box keeps 3 slots because the box runs at most 3 heavy local
-    agent sessions at once. Slots are generic (3 claude jobs can take all
-    3), so "one per harness bot" is not the reason and must not be stated."""
-    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
-    assert config is not None
-    box = config.device("box")
-    assert box is not None
-    assert box.slot_max == 3
-
+def test_shipped_slots_are_never_described_as_one_per_bot() -> None:
     machines = (ROOT / "machines.yml").read_text(encoding="utf-8")
     spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for text in (machines, spec, readme):
         assert "one per harness bot" not in text
         assert "one slot per Phase 1 owning bot" not in text.replace("\n    # ", " ")
-    box_comment = machines.split("- name: box", 1)[1].split("slot_max: 3", 1)[0]
-    assert "3 heavy local" in box_comment
-    assert "generic" in box_comment
-    assert "OWNING_BOTS" not in box_comment
-    assert "at most 3 heavy local" in spec
-    assert "at most 3 heavy local" in readme
+    assert "OWNING_BOTS" not in machines
+    assert "slots are generic" in readme.replace("\n", " ").lower()
+
+
+def test_docs_place_an_unplaced_job_on_the_orch_host_not_the_box() -> None:
+    spec = " ".join((ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8").split())
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    for text in (spec, readme):
+        assert "listed under the box" not in text
+        assert "one slot on the box" not in text
+        assert "counted in the box's slots" not in text
+    assert "a job with no placement is listed under the orch host" in spec
+    assert "counts as one slot on the orch host" in spec
+    assert "runs on the orch host (`orch_host` in `machines.yml`" in readme
+    assert "refuses a placeholder unless `--allow-placeholders`" not in spec
+    assert "skips a device with a placeholder" in spec
 
 
 def test_example_passes_strict_check() -> None:
@@ -216,7 +223,14 @@ def test_example_passes_strict_check() -> None:
 
     assert findings == []
     assert config is not None
-    assert [device.name for device in config.devices] == ["box"]
+    assert orch_host(config) == "pc"
+    assert [device.name for device in config.devices] == ["pc", "box"]
+    assert not any(device.local for device in config.devices)
+    box = config.device("box")
+    assert box.ssh_user == "box"
+    assert box.login_for("codex") == "box"
+    assert box.ssh_alias_for("codex") == "box-codex-bot"
+    assert box.harnesses["codex"] == "codex-bot"
 
 
 def test_enabled_defaults_true_and_remote_device_schedules(tmp_path: Path) -> None:
@@ -253,23 +267,19 @@ def test_disabled_device_is_reported_and_never_eligible(tmp_path: Path) -> None:
         ("workdir_root", "REPLACE_WITH_PC_WORKDIR_ROOT"),
     ],
 )
-def test_placeholder_is_refused_unless_allowed_and_then_never_eligible(
+def test_placeholder_device_loads_with_a_warning_and_is_never_eligible(
     tmp_path: Path,
     field: str,
     value: str,
 ) -> None:
     path = write(tmp_path, "orch_host: pc\ndevices:\n" + remote(**{field: value}))
 
-    strict, strict_findings = load_machines_yml(path)
-    assert strict is None
-    assert errors(strict_findings) == [
-        f"devices[0].{field} is an install placeholder; Max must provide this inventory"
-    ]
-
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None
+    assert errors(findings) == []
     assert warnings(findings) == [
-        f"accepted placeholder devices[0].{field}; device 'pc' will not be scheduled"
+        f"skipping device 'pc': devices[0].{field} is an install placeholder; "
+        "it will not be scheduled"
     ]
     device = config.devices[0]
     assert device.placeholder
@@ -334,10 +344,7 @@ def test_placeholder_is_refused_unless_allowed_and_then_never_eligible(
     ],
 )
 def test_schema_errors(tmp_path: Path, text: str, message: str) -> None:
-    config, findings = load_machines_yml(
-        write(tmp_path, text),
-        allow_placeholders=True,
-    )
+    config, findings = load_machines_yml(write(tmp_path, text))
 
     assert config is None
     assert any(message in item for item in errors(findings)), findings
@@ -486,13 +493,6 @@ def test_target_shape_names_pc_as_orch_host_and_box_logs_in_as_box(tmp_path: Pat
     assert (box.ssh_user, pc.ssh_user) == ("box", None)
     assert box.login_for("claude") == "box"
     assert pc.login_for("codex") == "codex-bot"
-
-
-def test_shipped_machines_yml_derives_orch_host_from_its_local_device() -> None:
-    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
-
-    assert config is not None
-    assert orch_host(config) == "box"
 
 
 def test_orch_host_is_derived_from_the_one_local_device(tmp_path: Path) -> None:

@@ -44,7 +44,7 @@ def box_machines(tmp_path: Path, slots: int = 3) -> Path:
 def setup(tmp_path: Path, slots: int = 3) -> tuple[SQLiteJobQueue, DevicePool, Path]:
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
-    config, findings = load_machines_yml(box_machines(tmp_path, slots), allow_placeholders=True)
+    config, findings = load_machines_yml(box_machines(tmp_path, slots))
     assert config is not None, findings
     return queue, DevicePool(queue, config), db
 
@@ -238,7 +238,7 @@ def _pc_machines(tmp_path: Path) -> MachinesConfig:
         "    factory_root: /srv/factory\n",
         encoding="utf-8",
     )
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None, findings
     return config
 

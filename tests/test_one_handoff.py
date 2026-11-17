@@ -232,7 +232,7 @@ def test_r2_f2_2_a_run_checked_before_its_waiter_exited_still_attaches(tmp_path:
     assert checked == (waiter_pid, waiter_start)
     from tests.test_waiter import load_machines_yml, local_only
 
-    machines, _ = load_machines_yml(MACHINES, allow_placeholders=True)
+    machines, _ = load_machines_yml(MACHINES)
     assert machines is not None
     placed_run.prepare(
         pool, local_only(machines), job_id=job_id, bot="claude-bot", owner="claude",

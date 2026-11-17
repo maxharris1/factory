@@ -83,7 +83,7 @@ def _job(db: Path, job_id: str) -> tuple[str, int]:
 
 
 def _machines():
-    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    config, _ = load_machines_yml(ROOT / "machines.yml")
     assert config is not None
     return config
 

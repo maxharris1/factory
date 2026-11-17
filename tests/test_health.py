@@ -32,7 +32,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
-from tests.pool_helpers import write_target_machines
+from tests.pool_helpers import LOCAL_BOX_MACHINES, write_target_machines
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
@@ -111,7 +111,7 @@ def orch(*, listener: bool = False, push: bool = False, public_url: str | None =
 
 
 def machines_config(tmp_path: Path, text: str = MACHINES):
-    config, _ = load_machines_yml(machines_file(tmp_path, text), allow_placeholders=True)
+    config, _ = load_machines_yml(machines_file(tmp_path, text))
     return config
 
 
@@ -390,7 +390,7 @@ class FakeTransport:
 
 
 def test_probe_targets_are_enabled_remote_devices_only(tmp_path: Path) -> None:
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     targets = health.probe_targets(machines)
     assert [(t.device, t.target.alias, t.target.user) for t in targets] == [
         ("pc", "pc-wsl-codex-bot", "codex-bot"),
@@ -399,7 +399,7 @@ def test_probe_targets_are_enabled_remote_devices_only(tmp_path: Path) -> None:
 
 def test_device_probe_marks_reachable_devices_up_and_unreachable_ones_unseen(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     writer = store(db)
     health.HealthStore(db, devices={"retired"}, clock=lambda: NOW).beat(
         "device-probe", "retired", pid=1, started_at=NOW, version="unknown", interval=60.0)
@@ -452,7 +452,7 @@ def test_the_poller_beats_on_the_orch_host(tmp_path: Path) -> None:
 
 
 def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path) -> None:
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     assert health.waiter_devices(machines, "codex-bot") == ["box", "pc"]
     assert health.waiter_devices(machines, "claude-bot") == ["box"]  # mac is disabled
     assert health.waiter_devices(None, "claude-bot") == ["box"]
@@ -462,7 +462,7 @@ def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path)
 
 
 def eligible(tmp_path: Path) -> dict:
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     return health.eligible_devices(machines)
 
 
@@ -2131,7 +2131,7 @@ def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
         "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
         f"  public_url: {TUNNEL_URL}\n  tunnel_alert_minutes: 30\n"
     )
-    args = ["--db", str(db), "--orch", str(config)]
+    args = ["--db", str(db), "--orch", str(config), "--machines", str(LOCAL_BOX_MACHINES)]
 
     out = io.StringIO()
     assert health.main([*args, "--json"], stdout=out, clock=lambda: NOW,

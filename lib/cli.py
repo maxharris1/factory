@@ -175,7 +175,8 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders] [--digest]
   With no paths, checks orch.yml, machines.yml and the example factory.md
   files. When --orch is given, machines.yml is checked only with --machines.
-  --allow-placeholders permits and reports REPLACE_WITH_ install values only.
+  --allow-placeholders permits and reports REPLACE_WITH_ install values in
+  orch.yml only; a machines.yml device with one is always skipped with a warning.
   Warns about uncommitted edits to a tracked orch.yml or machines.yml.
   --digest prints the sha256 of each effective config (base plus overlay).
   A disabled or placeholder device is named on stderr and never scheduled.
@@ -589,10 +590,7 @@ def _check_config(argv: list[str]) -> int:
     if machines_path is not None:
         failed = _report(
             machines_path,
-            load_machines_yml(
-                machines_path,
-                allow_placeholders=args.allow_placeholders,
-            )[1],
+            load_machines_yml(machines_path)[1],
         ) or failed
     for path in factory_paths:
         factory, findings = load_factory_md(path)
@@ -1261,7 +1259,7 @@ def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | N
     machines_path = path if path is not None else ROOT / "machines.yml"
     if not machines_path.is_file() and not required and path is None:
         return None
-    config, findings = load_machines_yml(machines_path, allow_placeholders=True)
+    config, findings = load_machines_yml(machines_path)
     errors = [item for item in findings if item.severity == "error"]
     if config is None or errors:
         detail = errors[0].message if errors else "invalid machines.yml"

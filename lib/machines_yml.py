@@ -29,10 +29,8 @@ tailscale_name (compared case-insensitively): that would give one host
 two slot budgets.
 
 A device schedules only when it is enabled (the default), has no
-REPLACE_WITH_ placeholder, and lists the harness. check-config refuses
-placeholders unless --allow-placeholders is passed, then names each one;
-it always names a disabled device. Unknown fields are refused so v1
-stays closed. Nothing here checks that a device is reachable. A gitignored
+REPLACE_WITH_ placeholder, and lists the harness. Unknown fields are
+refused so v1 stays closed. Nothing here checks that a device is reachable. A gitignored
 machines.local.yml beside the file is merged in before validation
 (lib/config_overlay.py).
 
@@ -188,7 +186,6 @@ def is_placeholder(value: object) -> bool:
 def load_machines_yml(
     path: Path,
     *,
-    allow_placeholders: bool = False,
     overlay: bool = True,
 ) -> tuple[MachinesConfig | None, list[Finding]]:
     if not path.is_file():
@@ -205,14 +202,10 @@ def load_machines_yml(
         data, findings = apply_overlay(path, data)
         if data is None:
             return None, findings
-    return _validate(data, allow_placeholders=allow_placeholders)
+    return _validate(data)
 
 
-def _validate(
-    data: dict,
-    *,
-    allow_placeholders: bool,
-) -> tuple[MachinesConfig | None, list[Finding]]:
+def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
     findings: list[Finding] = []
     for key in sorted(data, key=lambda item: str(item)):
         if key not in _TOP_KEYS:
@@ -229,12 +222,7 @@ def _validate(
     seen: set[str] = set()
     local_names: list[str] = []
     for index, item in enumerate(value):
-        device = _device(
-            item,
-            f"devices[{index}]",
-            findings,
-            allow_placeholders=allow_placeholders,
-        )
+        device = _device(item, f"devices[{index}]", findings)
         if device is None:
             continue
         if device.name in seen:
@@ -293,13 +281,7 @@ def _orch_host(
     return host
 
 
-def _device(
-    item: object,
-    prefix: str,
-    findings: list[Finding],
-    *,
-    allow_placeholders: bool,
-) -> Device | None:
+def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None:
     if not isinstance(item, dict):
         findings.append(Finding("error", f"{prefix} must be a mapping"))
         return None
@@ -322,22 +304,13 @@ def _device(
 
     def placeholder(field_name: str) -> None:
         qualified = f"{prefix}.{field_name}"
-        if allow_placeholders:
-            findings.append(
-                Finding(
-                    "warning",
-                    f"accepted placeholder {qualified}; "
-                    f"device {name!r} will not be scheduled",
-                )
+        findings.append(
+            Finding(
+                "warning",
+                f"skipping device {name!r}: {qualified} is an install placeholder; "
+                "it will not be scheduled",
             )
-        else:
-            findings.append(
-                Finding(
-                    "error",
-                    f"{qualified} is an install placeholder; "
-                    "Max must provide this inventory",
-                )
-            )
+        )
         placeholders.append(field_name)
 
     local = _bool(item, "local", False, prefix, findings)
