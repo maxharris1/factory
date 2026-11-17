@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 from dataclasses import replace
@@ -433,6 +434,11 @@ def _red_fix(tmp_path: Path, fraction: float = 0.0):
     return board, pr, fix
 
 
+def _close_leaked_connections_and_lose_state_dir(board) -> None:
+    gc.collect()
+    shutil.rmtree(board.queue.path.parent)
+
+
 def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_it(
     tmp_path: Path,
 ) -> None:
@@ -442,7 +448,7 @@ def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_
     board.finish("claude")
     pr.push(sha(1))
     board.ready(pr, sha(1), "ready-rollback")
-    shutil.rmtree(board.queue.path.parent)
+    _close_leaked_connections_and_lose_state_dir(board)
     restore(saved, board.queue.path)
     board.poll()
     board.poll()
@@ -472,7 +478,7 @@ def test_a_ready_github_dates_to_the_fixs_own_second_still_settles_it(
         )
     )
     assert reported < fix["created_at"] < board.now[0]
-    shutil.rmtree(board.queue.path.parent)
+    _close_leaked_connections_and_lose_state_dir(board)
     restore(saved, board.queue.path)
     board.poll()
     board.poll()

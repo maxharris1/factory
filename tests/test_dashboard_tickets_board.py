@@ -1687,7 +1687,7 @@ def test_a_phone_whose_status_fetch_fails_lists_every_phase(snapshot: dict) -> N
         browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)
         browser.call("Page.navigate", url=page.as_uri())
         deadline = time.monotonic() + 30
-        while "static view" not in browser.eval("document.body.textContent") and time.monotonic() < deadline:
+        while "static view" not in browser.eval("document.body ? document.body.textContent : ''") and time.monotonic() < deadline:
             time.sleep(0.05)
         link = browser.eval("document.body.textContent.includes('NO LINK · static view')")
         seen = browser.eval(PHONE_BOARD)

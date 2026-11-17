@@ -1141,3 +1141,41 @@ def test_two_devices_sharing_the_tunnel_user_never_end_each_others_live_tunnel(
     stopped = _service(home, "stop")
     assert stopped.returncode == 0, f"device A stop failed: {stopped.stdout}{stopped.stderr}"
     assert _processes_of(home) == [], "a fake ssh or loop outlived both devices' stop"
+
+
+def _retire(home: Path) -> Path:
+    retired = home / ".config" / "factory" / "orch-retired"
+    retired.parent.mkdir(parents=True, exist_ok=True)
+    retired.write_text("pc 2026-11-17T13:00:00Z\nsecond line\n", encoding="utf-8")
+    return retired
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "ensure", "_listener-loop", "_tunnel-loop"])
+def test_a_retired_host_starts_no_listener_and_no_tunnel(home: Path, command: str) -> None:
+    retired = _retire(home)
+
+    result = _service(home, command)
+
+    assert result.returncode == 79, result.stdout + result.stderr
+    assert f"{retired}: pc 2026-11-17T13:00:00Z" in result.stderr
+    assert "second line" not in result.stderr
+    time.sleep(0.5)
+    assert _loops(home, "_listener-loop") == []
+    assert _loops(home, "_tunnel-loop") == []
+    assert _calls(home, "orch") == []
+    assert _calls(home, "ssh") == []
+
+
+def test_a_retired_host_can_still_see_and_stop_its_listener(home: Path) -> None:
+    started = _service(home, "start")
+    assert started.returncode == 0, started.stdout + started.stderr
+    _wait_for(lambda: _calls(home, "orch") and _calls(home, "ssh"), what="serve and ssh")
+    _retire(home)
+
+    status = _service(home, "status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "listener: running" in status.stdout
+    stopped = _service(home, "stop")
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    assert _processes_of(home) == []
+    assert _service(home, "status").returncode == 3

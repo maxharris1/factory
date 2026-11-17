@@ -245,6 +245,26 @@ def test_poll_lock_refuses_a_second_poller(tmp_path: Path) -> None:
                 pass
 
 
+@pytest.mark.parametrize(("locked", "spilled"), [("orch.db", "alias.db"), ("alias.db", "orch.db")])
+def test_poll_lock_is_shared_by_a_symlinked_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], locked: str, spilled: str
+) -> None:
+    database = tmp_path / "orch.db"
+    original = json.dumps({"instruction": "keep inline while locked"})
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE jobs (id TEXT, detail TEXT)")
+        connection.execute("INSERT INTO jobs VALUES (?, ?)", ("j1", original))
+    (tmp_path / "alias.db").symlink_to(database)
+
+    with cli._poll_lock(tmp_path / locked):
+        rc = cli.main(["db-spill-detail", "--db", str(tmp_path / spilled), "--vacuum"])
+
+    assert rc == 1
+    assert "another orch poll owns" in capsys.readouterr().err
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT detail FROM jobs").fetchone() == (original,)
+
+
 def test_poll_reloads_the_machines_yml_it_was_started_with(tmp_path: Path) -> None:
     database = tmp_path / "orch.db"
     orch = tmp_path / "orch.yml"

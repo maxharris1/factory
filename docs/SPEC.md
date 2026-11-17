@@ -322,7 +322,7 @@ Full report: <link>
 
 The review brief gives the reviewer this form and calls it exact: the criteria by `ac-<n>`, then one numbered item per finding, `[blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.`, with the tag first. The tags are `[blocking]`, `[minor]` and, while follow-ups are filed (section 8), `[follow-up]`; under `review.block_on: user-impact` `[minor]` is not used. From round 2 an item `[closed] f-<n>. <what shows it closed>.` closes an earlier finding. The dispatcher reads the tag, the id and the `Rule:` sentence to carry a finding into later rounds (`lib/evidence/findings.py`). `tests/test_handoff.py` parses every fenced handoff example in this file.
 
-Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`, `ok`, `decline`, `done`, `stuck`, `retry`.
+Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`, `ok`, `decline`, `done`, `stuck`, `retry`, `qa`.
 
 Max may also post two plain commands with no `orch:v1` header:
 
@@ -362,6 +362,27 @@ A `plan` may add `lines=<n>`, the changed lines the plan expects (a non-negative
 A `verdict=APPROVE` with `ac=unmet` does not parse (issue #187). It is a refused verdict (T7, `rejected-approve-ac-unmet`), never a ship. An APPROVE with no `ac` still parses, so readers of accepted verdicts see them as before, but `orch job done` and T4 refuse it (issue #508). `orch job done` also refuses an APPROVE with an open `[blocking]` list item and names what to change; T4 applies both rules only to comments posted at or after the `approve_rule_floor` time.
 A `plan` uses `ac=met|unmet` and `round=<n>/2`: `n=1` for the first plan and `n=2` after one gap. The round is checked against the persisted plan-gap count. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
 A `go` may name `builder=<harness>` and `reviewer=<harness>` (issue #206). T1 queues the step to that builder and records the pair in the job detail as `routing`; later steps of the ticket use the pair of its newest plan, build or fix step (a T6 retry repeats an older step and does not change the pair). T2 accepts a ready only from that pair's builder, so an obsolete retry under the old pair cannot start a review. A side it leaves out is factory.md's. A pair whose families are the same, or whose family cannot be resolved (the section 6 rule, with factory.md's model hint only for a side whose harness matches factory.md's), is refused with no job. A go on a capped ticket is routed the same way before its extra round's fix is queued. When a later poll restores the pair and it no longer passes that rule (factory.md's model hint changed), the ticket is marked stuck (`route-same-family`), its queued jobs are cancelled and Grok wakes, before any review or ship. A watched PR that closed unmerged is abandoned first.
+
+A `qa` reports a QA run (issue #758): an agent drove the project's real UI at the PR head and checked each criterion. The orchestrator posts it, as it posts `brief` and `go`. Its `from` is the label the orchestrator's own comments already use, and it is trusted by the same `trusted_logins` rule; there is no QA identity. On a Linear-ticket repo it uses the visible header form, as a `verdict` does. Nothing queues, reads or acts on it yet, and `orch job done` refuses it as the handoff of every job kind.
+
+```
+<!-- orch:v1 kind=qa from=grok-bot role=qa round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=met result=PASS scope=full lanes=3 env=full-stack runner=cursor-cloud arm=primary attempt=1 -->
+**QA round 1 of 3: PASS** (full run, 3 lanes, 14 min)
+| Flow | Proves | Result | Evidence |
+|---|---|---|---|
+| qa-1 | ac-1 | Verified | after screenshot, video |
+Evidence: <link>
+```
+
+A `qa` requires `head`, `result`, `scope`, `runner` and `arm`, and its `head` is the full 40-character sha. Its `role`, when present, is `qa`. It may carry `round` and `ac`. These keys are valid only on `kind=qa`; any other kind that carries one does not parse:
+
+- `result`: `PASS`, `FAIL` or `BLOCKED`.
+- `scope`: `full`, `targeted` or `smoke`.
+- `lanes`: an integer from 1 to 3.
+- `env`: `full-stack`, `supabase` or `none`.
+- `runner`: `claude-cloud` or `cursor-cloud`, the harness that ran the agent.
+- `arm`: `primary` or `shootout`; a shootout runs both runners on the same head.
+- `attempt`: an integer of 1 or more.
 
 ## 6. `factory.md` schema
 
@@ -405,6 +426,33 @@ Optional:
 - `ci` — an optional mapping (issue #615). `branches` is a non-empty list of the base branches CI runs on for a pull request; `local_checks` is a list of short labels for the checks a builder runs by hand, default none. A head with no check run and no commit status on a PR whose base is not in `branches` is CI `not-run`: T2, T3, T4 and TQ do not wait on it and never record it as green, the dashboard shows `no CI on this base`, the build and fix briefs ask the builder to run the `local_checks` and paste each command and result in the ready, and the review brief makes a missing paste a `[blocking]` finding. `check-config` refuses a `ci` that is not a mapping, an empty or non-list `branches`, a bad branch name, a bad `local_checks` and an unknown key. `ci` is a trust section (T4H). Absent, every base is a CI base. This repo sets none.
 - `shared_paths` — a list of repo-relative paths or globs (issue #261), for shared docs that many tickets add a few lines to. Globs follow `hold.paths`: `*` and `?` stay inside one directory and `**` spans directories. A trailing `/` names a directory and everything under it. Default none. A `Touches:` path that matches never causes a feeder collision wait (a `Conflicts with` edge still holds). In a matching file, an update from base whose conflict hunk is resolved to both sides, ours then theirs or theirs then ours, byte for byte with nothing added, still counts as trivial and keeps the approval. Absent, the feeder and the update check behave exactly as before. `check-config` refuses a value that is not a list and any item that is not a repo-relative path or glob. This repo sets `shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]`.
 - `feeder` — an optional mapping (issue #269). `max_holders_per_path` is how many tickets in flight may hold one `Touches:` path at once, an integer of at least 1, default 2. `exclusive_paths` is a list of paths or globs, matched like `shared_paths`, that keep one holder; default none. A path in `shared_paths` never collides, even when `exclusive_paths` lists it too. `check-config` refuses a `feeder` that is not a mapping, an unknown key under it, a `max_holders_per_path` that is not an integer of at least 1 and an `exclusive_paths` item that is not a repo-relative path or glob. The poller, feeder and waiter read a bad `max_holders_per_path` as a warning and use 1. This repo sets `max_holders_per_path: 4` (issue #405) and `exclusive_paths: [model/]`, so the statechart keeps one writer.
+- `qa` is an optional mapping (issue #759). It says what a project's QA lane must run: which cloud runners drive the real UI, what the lane loads, and how to boot it. Nothing reads it yet. A later ticket queues the `qa` job from it. Absent, or with `enabled: false`, a project behaves exactly as without it.
+
+  | Key | Type | Default | Meaning |
+  |---|---|---|---|
+  | `qa.enabled` | boolean | required | False keeps QA off. The other keys are still checked. |
+  | `qa.gate` | `report` \| `block` | `report` | `report` posts the result and never gates a ship. `block` gates the ship. |
+  | `qa.runners` | list of `claude-cloud`, `cursor-cloud` | required when enabled | One or two runners, no repeat. The first is the primary. |
+  | `qa.claude_cloud`, `qa.cursor_cloud` | mapping | none | One block for each listed runner, and none for an unlisted one. `environment` is a required token. `model` is an optional model hint, checked like `builder.model`. |
+  | `qa.shootout` | boolean | false | True sends every run to every listed runner, for comparison. It needs two runners and `gate: report`. |
+  | `qa.profile` | `full-stack` \| `supabase` \| `none` | required when enabled | What the lane loads: every service, only the database, or no backend. |
+  | `qa.lanes` | integer, 1 to 3 | 1 | The number of QA lanes. |
+  | `qa.paths` | list of repo-relative globs | none | Matched like `hold.paths`. |
+  | `qa.full_rerun_lines` | positive integer | 400 | The changed-line size at which a run covers the whole app. |
+  | `qa.setup` | command | none | The cloud environment's setup script. |
+  | `qa.lane.boot` | command | required when enabled | Starts the lane. |
+  | `qa.lane.base_url` | `http://` or `https://` URL | required when enabled | Where the lane serves the app. |
+  | `qa.lane.doctor` | list of commands | none | Health checks for a booted lane. |
+  | `qa.lane.recover` | command | none | Brings a broken lane back. |
+  | `qa.fixtures.load` | command | none | Loads the test data. |
+  | `qa.outside` | list of setting names | none | Outside services the lane needs. Names only: an entry with `=`, `://` or whitespace is refused. |
+  | `qa.secrets` | list of secret names | none | Secrets the lane needs. Names only, under the same rule. |
+  | `qa.verify` | skill name | none | The verify skill a QA run uses. |
+  | `qa.timeout_minutes` | integer, 5 to 120 | 60 | The most one run may take. |
+  | `qa.evidence.video` | `multi-step` \| `always` \| `never` | `multi-step` | When a run records video. |
+  | `qa.evidence.trace` | `on-failure` \| `always` \| `never` | `on-failure` | When a run keeps a trace. |
+
+  `check-config` refuses an unknown key anywhere in `qa`, any value outside its row, and a `qa` that is not a mapping. The poller, feeder and waiter read a bad block as warnings plus `qa is off: its block is invalid`, and treat QA as off. `qa` is a trust section (T4H). This repo sets none.
 
 Free-text sections after the front block:
 
@@ -442,6 +490,28 @@ ship: merge
 # ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
 #   branches: [main]
 #   local_checks: [pytest]
+# qa:  # optional; what the QA lane must run. Nothing reads it yet
+#   enabled: true
+#   gate: report  # report posts the result; block gates the ship
+#   runners: [claude-cloud, cursor-cloud]  # one or two; the first is the primary
+#   shootout: true  # every run goes to both runners; needs gate: report
+#   profile: full-stack  # full-stack | supabase | none
+#   lanes: 1  # 1 to 3
+#   paths: [src/**]
+#   setup: scripts/qa/cloud-setup.sh
+#   claude_cloud:
+#     environment: qa-example
+#   cursor_cloud:
+#     environment: qa-example
+#   lane:
+#     boot: bash scripts/qa/boot-lane.sh
+#     doctor: [bash scripts/qa/doctor.sh]
+#     base_url: http://127.0.0.1:8080
+#   fixtures:
+#     load: node scripts/qa/load-fixtures.mjs
+#   outside: [EXAMPLE_SERVICE_URL]  # setting names, never values
+#   secrets: [EXAMPLE_API_KEY]  # secret names, never values
+#   timeout_minutes: 60
 skills:
   - verify-cleffy
 ---
@@ -463,7 +533,7 @@ A Tracy-style file would set `ship: after:tracy-site` and describe the Site OK i
 - **Cleffy:** risky areas (migrations, RLS, Edge Functions under `supabase/`, and billing/Stripe); never apply migrations or change config on a hosted Supabase project from an agent session; privacy policy forbids tracking pixels; marketing surfaces use public-domain repertoire only and the primary CTA is always "Start free"; PRs target `dev`; never push to `dev` or `main` directly; `dev` → `main` is Max's merge. Name the repo's verify skill if one exists, otherwise `review.verify: none` (the old block had `verify: off`). The existing `ui-check` skill can stay in Context for UI changes. `ship: merge` applies to PRs into `dev`.
 - **Tracy:** small static marketing site; a push to `main` deploys production on Vercel and other branches get previews; Tracy approves the preview, then `main` is fast-forwarded to that exact SHA (no force-push, no merge commit); work runs on the box; before ship, run lint, typecheck and build plus the "Never ship" grep in `CLAUDE.md`; copy, pricing, photo and motion rules in `CLAUDE.md` stay. `ship: after:tracy-site`. Drop `review: none`; the new review rules apply.
 
-Fields from the old Aut0 Factory block that this schema drops on purpose: `owner_bot`, `stages`, `reviewers: a+b`, `judge` / `judge_session`, fixer lanes and cloud overflow, `tests_gate`, `qa`, `small_ticket` path lists, and cloud env IDs. Those are not part of this factory. Cloud env IDs may come back later if a real run needs them; that is open.
+Fields from the old Aut0 Factory block that this schema drops on purpose: `owner_bot`, `stages`, `reviewers: a+b`, `judge` / `judge_session`, fixer lanes and cloud overflow, `tests_gate`, `small_ticket` path lists, and cloud env IDs. Those are not part of this factory. Cloud env IDs may come back later if a real run needs them; that is open.
 
 ## 7. `orch.yml` schema
 
@@ -653,6 +723,22 @@ seconds; a stopped one (section 4.2) is read every 300 seconds, about 48 an
 hour. Ten active tickets with any reasonable number of stopped ones stay
 under the limit. Comment and CI reads retry with backoff, and a rate-limit
 403 or 429 backs every GitHub read off.
+
+The dashboard's CI board (`lib/dispatch/ci_board.py`, issue #717) adds at
+most 4 requests a cycle, each a single `gh api` request with no
+`--paginate`. Its rows come from the check runs `ci_status` already read,
+at no cost, one per check per workflow at the ticket's head. Runner names
+and queue times take at most 3 `actions/runs/{id}/jobs` reads a cycle,
+each run read until every started job's runner is saved. Failing tests
+take at most 1 `actions/jobs/{id}/logs` read a cycle, once per failed job
+attempt, as soon as that job completes. GitHub answers it with a redirect
+to the log blob, which is not an API request. It passes
+`--allow-escape-sequences` (gh 2.97 or later), since gh refuses a coloured
+pytest log without it. A read that fails is not retried, so the job shows
+its log link without test names. At about 20 runs an hour that is
+about 60 to 80 requests an hour; the worst case is 480 an hour at
+`poll_seconds: 30`. Recent failures are listed for 24 hours from the time
+the job completed.
 
 **State backup (issue #108, #66).** After every cycle `orch poll` backs
 `orch.db` up with SQLite's online backup API to `$ORCH_DB_BACKUP`, default

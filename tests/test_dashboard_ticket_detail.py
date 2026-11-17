@@ -1289,6 +1289,31 @@ def test_a_running_ticket_opened_by_its_record_key_stays_live_when_its_repo_is_c
 
 
 @needs_node
+def test_two_live_jobs_whose_shown_ids_collide_open_their_own_records(tmp_path: Path) -> None:
+    import sqlite3
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import add_job, add_ticket, seeded
+    db, log = seeded(tmp_path / "db")
+    repos = ["owner/" + "a" * 95 + suffix for suffix in ("A", "B")]
+    with sqlite3.connect(db) as connection:
+        for index, (repo, action, age) in enumerate(zip(repos, ("build", "review"), (600, 20)), 1):
+            add_ticket(connection, repo, "7")
+            add_job(connection, f"1234567800004000800000000000000{index}", state="running", repo=repo,
+                    ticket_id="7", action=action, created_at=NOW - age)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    for repo, action, elapsed, other in ((repos[0], "build", 600, "review"), (repos[1], "review", 20, "build")):
+        key = f"{repo}#7"
+        found = ticket_detail.resolve_ticket(snapshot, key, snapshot[RECORDS])
+        assert (found["row"]["action"], found["row"]["elapsed_seconds"]) == (action, elapsed), key
+        views = _both(tmp_path, snapshot, key)
+        assert views["script"] == views["server"], key
+        assert f'<span class="phase">{action.upper()}</span>' in views["server"], key
+        assert f'<span class="phase">{other.upper()}</span>' not in views["server"], key
+    found = ticket_detail.resolve_ticket(snapshot, f"{repos[0]}#7", None)
+    assert (found["row"]["action"], found["row"]["elapsed_seconds"]) == ("build", 600)
+
+
+@needs_node
 def test_a_no_job_ticket_shows_a_loading_panel_until_its_record_arrives(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     address = RECORD["idle"]

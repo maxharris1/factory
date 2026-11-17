@@ -499,7 +499,11 @@ nonzero exit.
 *State loss (#66).* After every cycle `orch poll` backs the database up to
 `$ORCH_DB_BACKUP`, else `~/.local/share/factory/backup/orch.db` (outside the
 state directory a reboot can lose; a path inside the database's own directory
-is refused). A failed backup is one `poll_errors` row. `deploy/poller-service.sh`
+is refused). `ORCH_DB_BACKUP_EVERY` (seconds, default 0) spaces those
+backups out: with 900, a cycle backs up only when 900 seconds have passed since
+the last good one, and a failed one is tried again the next cycle; a value that
+is not a whole number makes `orch poll` exit 1. The weekly snapshot still
+checks every cycle. A failed backup is one `poll_errors` row. `deploy/poller-service.sh`
 `start` and `ensure` restore a missing database with `orch restore-db` before
 launching (`RESTORED orch.db from backup`), or, with no backup, create an empty
 one with `orch init-db` and log a `WARNING`. On an empty or stale database the
@@ -1158,7 +1162,8 @@ environment file.
 
 ### Poller service without systemd
 
-`orch poll` holds the database's single-poller lock (`orch.db.lock`); while it
+`orch poll` holds the database's single-poller lock (`orch.db.lock`, beside
+the database file a symlinked `ORCH_DB` points to); while it
 holds it, it writes its own pid to `--pidfile`, else `$ORCH_POLL_PIDFILE`,
 else `poller.pid` beside the database, and removes that file on exit,
 including SIGTERM (exit 143). A second poller is refused and does not touch
@@ -1172,7 +1177,11 @@ On a host with no systemd user session (the box), use
 running or held stopped). It runs `deploy/run-poller.sh --pidfile
 ~/.local/state/factory/poller.pid` under `nohup`, appending to `poller.log`
 beside it, and treats a pidfile whose process is gone or is not `orch poll`
-(argv `orch poll ...`, read from `/proc`, else `ps`) as not running. `start`,
+(argv `orch poll ...`, read from `/proc`, else `ps`) as not running. With no
+live poller in that pidfile, it looks in `/proc` for the `orch poll` that has
+this host's `orch.db.lock` open, so `stop` and `status` also find a poller
+started by `orch-poll.service`, which writes `poller.pid` beside its own
+`ORCH_DB`. `start`,
 `stop`, `restart` and `ensure` serialize on `poller-service.lock` (where
 `flock` exists), and `ensure` never clears a stop.
 `deploy/install.sh --autostart` (or `poller-service.sh install-autostart`)
@@ -1192,7 +1201,7 @@ changes neither. Run `poller-service.sh stop` before re-running
 `start` and `ensure` also probe `orch.db.lock` with `flock` before
 launching, beside the `ORCH_DB` that `run-poller.sh` ends up with after
 sourcing its env files (`run-poller.sh --print-db`), else the caller's
-`ORCH_DB`: while it is held, a poller runs even if its pid is
+`ORCH_DB`, with symlinks resolved as `orch poll` resolves them: while it is held, a poller runs even if its pid is
 not visible from this shell, so they launch nothing (`start` says
 `orch poll already running (poll lock held)`).
 [`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh) runs
@@ -1216,6 +1225,113 @@ copy-in still restoring files: while `ORCH_COPY_IN_STATUS` (default
 they check every `ORCH_COPY_IN_POLL_SEC` (default 5) for up to
 `ORCH_COPY_IN_WAIT` seconds (default 600). An `orch.db` the copy-in brings
 back is kept; after the wait runs out the restore goes ahead.
+
+### Move the orch host
+
+`orch.db` must have one writer at a time.
+[`deploy/orch-move.sh`](deploy/orch-move.sh) moves it to another host, and
+moves it back. Run it from the factory checkout, as the bot user, on each host.
+Before a move, re-run `deploy/install.sh` on both hosts, so the installed
+`~/.local/share/factory/linear-webhook-service.sh` carries the fence
+described below.
+
+Cutover from the box to the PC:
+
+```sh
+# on the box: prints the export directory
+deploy/orch-move.sh export --to pc
+# on the PC
+deploy/orch-move.sh import box:<export>
+```
+
+`export` writes `waiter-<bot>.drain` for the three bots, so no waiter claims a
+new job. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it writes back any
+drain file self-heal removed or replaced, copies `orch.db` with `orch
+backup-db` and asks `orch move-db drained` whether a job still runs or a
+device slot is still held. Once none is, it writes
+`~/.config/factory/orch-retired`. Only then does it stop the poller, the
+waiters, self-heal and the Linear listener through their service scripts.
+While `orch-retired` exists, the poller, waiter, self-heal and Linear service
+scripts refuse to start (exit 79), and so does the `self-heal.sh once` pass
+the systemd timer runs. After stopping self-heal, `export` runs `self-heal.sh
+wait-idle`, which waits up to `ORCH_HEAL_IDLE_WAIT` seconds (default 900) for
+a self-heal pass already under way, and the device deploy it started
+detached, to finish before `export` takes its copy. A wait that runs out
+fails the export like a failed stop. `poller-service.sh stop` finds the
+poller by the `orch.db.lock` it holds open when its pidfile is not
+`~/.local/state/factory/poller.pid`, as with `orch-poll.service`. Before the
+copy, `orch move-db unlocked` checks that no process still holds
+`orch.db.lock`, the lock every `orch poll` on that database holds, and fails
+the export if one does. The export
+directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
+`orch.db`, `manifest.json` (sha256, row count per table, integrity, the
+retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
+It also holds `job-detail/`, the per-job detail files #653 keeps beside
+`orch.db`. The manifest records each file's sha256. `orch move-db manifest`
+refuses a copy with a spilled job row whose file is missing.
+
+After `export` and before `import`, check the source host by hand. A
+launch that was already under way when the export began can still start a
+poller (#775). Confirm `~/.config/factory/orch-retired` exists and that no
+`orch poll` or `orch wait` process runs:
+
+```sh
+# on the source host: ls lists the file, pgrep prints nothing
+ls ~/.config/factory/orch-retired
+pgrep -fl 'orch (poll|wait)'
+```
+
+If either check fails, do not import that export. Stop what runs with
+`deploy/poller-service.sh stop` or `deploy/waiter-service.sh <bot> stop`,
+remove `orch-retired` (`export` refuses on a retired host), and run `export`
+again.
+
+`import` copies the export into `~/.local/share/factory/orch-move/import-<UTC
+time>` and checks it with `orch move-db check`. It refuses when the copy's
+sha256 differs from the manifest, the copy fails `integrity_check`, or the
+manifest has no retired line. It refuses when a job-detail file the manifest
+names is missing or changed, or a spilled job's file is missing. For a
+`host:path` export it also refuses when that host has no `orch-retired`. It
+refuses when this host already has an `orch.db`, or its `-wal` or
+`-journal`. Both commands find `orch.db` with
+`deploy/run-poller.sh --print-db`, which still answers while `orch-retired`
+exists, so `import` places `orch.db` at the `ORCH_DB` that
+`~/.config/factory/orch-poll.env` gives the poller it then starts. When
+`--print-db` fails, for example on a missing env file, they refuse. A refusal
+places nothing and starts nothing. Otherwise it adds `machines.<dest>.yml`,
+this host's `machines.yml`, so both hosts' `machines.yml` sit beside the
+snapshot. It merges `job-detail/` into the one beside `orch.db`, and refuses,
+placing nothing, when a file of the same name there differs. Then it places
+`orch.db` with `cp` and `mv`. It never uses `orch restore-db`, which would
+cancel the queued jobs. It removes this host's `orch-retired`, then starts
+`poller-service.sh` first, then the waiter of each bot with
+`~/.config/factory/waiter-autostart-<bot>`, then self-heal and the Linear
+listener.
+
+On the new host, install autostart for what must survive a reboot:
+`poller-service.sh install-autostart`, `waiter-service.sh <bot>
+install-autostart`, `self-heal.sh install-autostart` and
+`~/.local/share/factory/linear-webhook-service.sh install-autostart`. On the
+retired host their autostart refuses to start anything (exit 79). Verify with
+`poller-service.sh status`, `bin/orch status --db "$ORCH_DB"` and the row
+counts `import` printed against `manifest.json`.
+
+Rollback is the same tool reversed. On the PC, run
+`deploy/orch-move.sh export --to box`. On the box, move the pre-cutover
+`orch.db` aside (`import` never replaces a database), then run
+`deploy/orch-move.sh import pc:<export>`. That removes the box's
+`orch-retired`. Then put the box checkout's pre-cutover `machines.yml` back
+from `machines.<source>.yml` in the cutover export.
+
+An export that does not drain within `ORCH_MOVE_DRAIN_TIMEOUT` seconds
+(default 9000, 150 minutes) exits 75. It removes the drain files and their
+acks and stops nothing, so the host keeps running. A failure after
+`orch-retired` is written leaves the host retired and stopped, which is the
+safe state. To undo it, remove `~/.config/factory/orch-retired` and start the
+services with `start`. `ORCH_MOVE_HOST` names this host (default
+`hostname`). `ORCH_MOVE_SCP` and `ORCH_MOVE_SSH` name the copy and remote
+commands (default `scp` and `ssh`). `ORCH_DB_BACKUP_EVERY` (see *State loss*
+above) spaces out only the cycle backup. `export` takes its own copies.
 
 ## Status
 
@@ -1436,9 +1552,15 @@ so the services it restarts outlive the run. Otherwise it writes
 (`self-heal.sh ensure`, every `ORCH_HEAL_SECONDS`, default 120), and adds an
 `@reboot` line and a 5-minute `ensure` watchdog tagged `# factory-self-heal`.
 `self-heal.sh` also has `start`, `stop` (held by `self-heal.stopped`),
-`restart`, `status`, `ensure` (silent while running) and
+`restart`, `status`, `ensure` (silent while running), `wait-idle` and
 `remove-autostart`. Passes never overlap: `self-heal.lock` makes a second
-pass exit at once.
+pass exit at once. Each pass and the device deploy it starts detached hold
+`self-heal-work.lock` shared. `wait-idle` waits up to `ORCH_HEAL_IDLE_WAIT`
+seconds (default 900) until none does, and exits 1 if one still does. On a
+host retired as the orch host (`~/.config/factory/orch-retired`, see *Move
+the orch host*), `once`, `kick`, `start`, `restart` and `ensure` exit 79 and
+run nothing. `factory-self-heal.service` counts that exit 79 as success
+(`SuccessExitStatus=79`), so the timer's unit is not marked failed there.
 
 ### Self-deploy
 

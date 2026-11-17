@@ -109,9 +109,13 @@ from lib.state_backup import (
     BackupError,
     CycleBackup,
     backup,
+    backup_every,
+    check_manifest,
+    db_facts,
     default_backup_path,
     labelled_backup,
     restore,
+    write_manifest,
 )
 from lib.status import main as status_main
 from lib.update_check import (
@@ -154,6 +158,7 @@ commands:
   backup-db        back up the dispatcher database (orch poll does each cycle)
   db-backup        labelled backup to take before a manual write to orch.db
   restore-db       restore a missing dispatcher database from its backup
+  move-db          check a dispatcher database moving to another host
   db-spill-detail  move bulky job detail out of the database (#653)
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
@@ -233,11 +238,35 @@ restore-db [--db PATH] [--backup PATH]
   online backup API, swapped into place atomically. --backup defaults to
   $ORCH_DB_BACKUP, else ~/.local/share/factory/backup/orch.db; a path in the
   database's own directory is refused. A failed cycle backup is one
-  poll_errors row and polling goes on. backup-db takes one by hand.
+  poll_errors row and polling goes on. $ORCH_DB_BACKUP_EVERY (seconds,
+  default 0: every cycle) spaces the rolling backups out; a failed one is
+  retried the next cycle, and orch poll exits 1 on a value that is not a
+  whole number. backup-db takes one by hand.
   restore-db restores a missing database from the backup after an
   integrity check: exit 0 restored, 3 no backup, 1 when the database
   already exists or the backup is bad. deploy/poller-service.sh start and
   ensure run it when the database is missing.
+
+move-db drained --db PATH
+move-db manifest --db PATH --out PATH --source-host HOST --to HOST
+                 --retired LINE
+move-db check --db PATH --manifest PATH
+move-db unlocked --db PATH
+  deploy/orch-move.sh runs these on copies taken with backup-db, each
+  opened read-only. drained exits 0 when the copy has no running job and
+  no held device slot, 1 (printing both counts) when it has, and 2 when
+  it is missing or unreadable. manifest writes --out as JSON (the copy's
+  sha256, per-table row counts, integrity, the hosts, the --retired line,
+  the time and the sha256 of each file in the job-detail/ beside the copy)
+  and exits 1, writing nothing, unless the copy passes integrity_check and
+  every spilled job row has its job-detail file. check prints each table's
+  row count and exits 0 when the copy has the manifest's sha256, passes
+  integrity_check, the manifest has a retired line, each job-detail file
+  the manifest names is beside the copy with its sha256, and every spilled
+  job row has its file; otherwise it exits 1 saying which failed.
+  unlocked reads the live database's poll lock, never the database: it
+  exits 0 when no poller holds PATH.lock (or there is none), 1 when one
+  does.
 
 db-backup <label> [--db PATH] [--dir PATH]
   Run this before any manual write to orch.db (#654). Copies the database
@@ -487,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_db_backup, argv[1:])
     if argv[0] == "restore-db":
         return _call(_restore_db, argv[1:])
+    if argv[0] == "move-db":
+        return _call(_move_db, argv[1:])
     if argv[0] == "db-spill-detail":
         return _call(_db_spill_detail, argv[1:])
     if argv[0] == "wait":
@@ -827,6 +858,7 @@ def _poll(argv: list[str]) -> int:
                     path,
                     default_backup_path(),
                     lambda *error: dispatcher.record_poll_error(*error),
+                    every=backup_every(),
                 ),
                 pusher,
                 _merge_kick(dispatcher, args.orch),
@@ -1141,6 +1173,8 @@ def _runtime(
         rebase_classifier=_rebase_check,
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
+        ci_runs=source.github.run_jobs,
+        ci_job_log=source.github.job_log,
         hold_carry=_hold_carry,
     )
     source.error_sink = dispatcher.record_poll_error
@@ -1244,6 +1278,24 @@ def _pidfile_path(explicit: Path | None, database: Path) -> Path:
     return database.with_name("poller.pid")
 
 
+def _lock_path(database: Path) -> Path:
+    return database.with_name(database.name + ".lock")
+
+
+def _poll_lock_free(database: Path) -> bool:
+    try:
+        handle = _lock_path(database).open("rb")
+    except FileNotFoundError:
+        return True
+    with handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return True
+
+
 @contextmanager
 def _poll_lock(path: Path, pidfile: Path | None = None):
     """Hold the single-poller lock; while held, own the pidfile.
@@ -1256,7 +1308,7 @@ def _poll_lock(path: Path, pidfile: Path | None = None):
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
-    lock_path = path.with_name(path.name + ".lock")
+    lock_path = Path(f"{path.resolve()}.lock")
     handle = lock_path.open("a+", encoding="utf-8")
     written = False
     try:
@@ -2381,6 +2433,49 @@ def _gc(argv: list[str]) -> int:
         dry_run=args.dry_run,
     )
     return 1 if problems else 0
+
+
+def _move_db(argv: list[str]) -> int:
+    parser = _Parser(prog="orch move-db", add_help=True)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    drained = commands.add_parser("drained")
+    drained.add_argument("--db", type=Path, required=True)
+    manifest = commands.add_parser("manifest")
+    manifest.add_argument("--db", type=Path, required=True)
+    manifest.add_argument("--out", type=Path, required=True)
+    manifest.add_argument("--source-host", required=True)
+    manifest.add_argument("--to", required=True)
+    manifest.add_argument("--retired", required=True)
+    check = commands.add_parser("check")
+    check.add_argument("--db", type=Path, required=True)
+    check.add_argument("--manifest", type=Path, required=True)
+    unlocked = commands.add_parser("unlocked")
+    unlocked.add_argument("--db", type=Path, required=True)
+    args = parser.parse_args(argv)
+    if args.command == "unlocked":
+        if _poll_lock_free(args.db):
+            return 0
+        print(f"orch move-db unlocked: a poller still holds {_lock_path(args.db)}", file=sys.stderr)
+        return 1
+    try:
+        if args.command == "drained":
+            facts = db_facts(args.db)
+            print(f"running jobs {facts.running_jobs}, held device slots {facts.held_slots}")
+            return 0 if facts.running_jobs == 0 and facts.held_slots == 0 else 1
+        if args.command == "check":
+            facts = check_manifest(args.db, args.manifest)
+            print(f"{args.db} matches {args.manifest}; integrity ok; row counts:")
+            for name, count in facts.tables.items():
+                print(f"  {name} {count}")
+            return 0
+        write_manifest(
+            args.db, args.out, source_host=args.source_host, to=args.to, retired=args.retired
+        )
+    except (BackupError, OSError) as exc:
+        print(f"orch move-db {args.command}: {exc}", file=sys.stderr)
+        return 2 if args.command == "drained" else 1
+    print(f"wrote {args.out}")
+    return 0
 
 
 def _db_path(path: Path | None) -> Path:

@@ -432,7 +432,7 @@ def test_a_tickets_live_jobs_are_attached_running_newest_first(tmp_path: Path) -
     assert [job["job"] for job in jobs] == ["rb-newer", "ra-older", "qc-next1"]
     rows = {row["job"]: row for row in [*status["running"], *status["queued"]]}
     for job in jobs:
-        assert job == {key: value for key, value in rows[job["job"]].items() if key != "flow"}
+        assert job == {key: value for key, value in rows[job["job"]].items() if key not in ("flow", "record")}
     assert jobs[0]["telemetry"]["current_task"] == "Read the diff"
     assert jobs[0]["telemetry"]["plan"] == [{"text": "Read the diff", "status": "in_progress"}]
 
@@ -509,7 +509,7 @@ def test_records_carry_only_the_named_fields(tmp_path: Path) -> None:
                 assert set(way) == WAY_OUT_KEYS
         for job in record["jobs"]:
             seen["jobs"] += 1
-            assert job == {key: value for key, value in rows[job["job"]].items() if key != "flow"}
+            assert job == {key: value for key, value in rows[job["job"]].items() if key not in ("flow", "record")}
     assert all(seen.values()), seen
 
 

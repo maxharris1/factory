@@ -15,6 +15,7 @@ from lib.dashboard_telemetry import TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key, _health_link, _relay
+from lib.dashboard_pages.ci import _ci_section
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket, ticket_page_href
 from lib.dashboard_pages.efficiency import _jobs_lifetime, middle_row, top_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
@@ -1445,7 +1446,7 @@ def _statusline(snapshot: dict) -> str:
 
 
 _PANELS = {
-    "index.html": (_lanes, _just_happened_and_intake),
+    "index.html": (_lanes, _ci_section, _just_happened_and_intake),
     "activity.html": (_attention, _relay),
     "efficiency.html": (top_row, middle_row, _jobs_lifetime),
     "health.html": (_broken, _components, _versions, _log_row, _rules, _no_waiter),

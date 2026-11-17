@@ -749,7 +749,7 @@ _DEADLINE = (
     'W=$1; B=$2; G=$3; C=$6; trap "" TERM INT HUP; '
     'late() { [ "$(date +%s)" -ge "$1" ]; }; '
     'live() { kill -0 "$W" 2>/dev/null && return 0; sh -c "$C" > /dev/null 2>&1; [ $? -eq 1 ]; }; '
-    'e=$(( $(date +%s) + B )); '
+    'e=$(( $(date +%s) + B + 1 )); '
     'while live; do late "$e" && break; sleep 1; done; '
     'live || exit 0; '
     'sh -c "$4"; e=$(( $(date +%s) + G )); '

@@ -1084,8 +1084,9 @@ def record_row(record: dict, ticket: dict | None) -> dict:
 
 def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) -> dict | None:
     repo, _, ticket_id = address.partition("#")
-    record = records.get(address) if records else None
-    own = {(job["job"], ticket_address(job)) for job in record["jobs"]} if record else set()
+
+    def record_key(row: dict) -> bool:
+        return row.get("record") == address
 
     def exact(row: dict) -> bool:
         return ticket_address(row) == address
@@ -1093,10 +1094,7 @@ def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) ->
     def any_case(row: dict) -> bool:
         return str(row["repo"]).lower() == repo.lower() and str(row["ticket_id"]) == ticket_id
 
-    def own_job(row: dict) -> bool:
-        return (row["job"], ticket_address(row)) in own
-
-    for rule in (exact, any_case, own_job):
+    for rule in (record_key, exact, any_case):
         for kind in LIVE_KINDS:
             rows = [row for row in snapshot[kind] if rule(row)]
             if rows:
@@ -2183,22 +2181,20 @@ _SCRIPT = r"""
   }
   function resolveTicket(d, address, records) {
     var keyed = records && Object.prototype.hasOwnProperty.call(records, address);
-    var own = keyed ? records[address].jobs : [];
-    var rules = [function (r) { return ticketAddress(r) === address; }, sameTicket(address), function (r) {
-      return own.some(function (j) { return j.job === r.job && ticketAddress(j) === ticketAddress(r); });
-    }];
+    var anyCase = sameTicket(address);
+    var rules = [function (r) { return r.record === address; }, function (r) { return ticketAddress(r) === address; }, anyCase];
     for (var i = 0; i < rules.length; i++) {
       for (var k = 0; k < DETAIL.liveKinds.length; k++) {
         var kind = DETAIL.liveKinds[k];
         var rows = (d[kind] || []).filter(rules[i]);
         if (!rows.length) continue;
         var row = PICK[kind](rows);
-        return {kind: kind, address: i === 1 ? ticketAddress(row) : address, row: row, ticket: ticketRow(d, row)};
+        return {kind: kind, address: rules[i] === anyCase ? ticketAddress(row) : address, row: row, ticket: ticketRow(d, row)};
       }
     }
     if (!records) return null;
     var key = keyed ? address
-      : Object.keys(records).sort().filter(function (k) { return rules[1](records[k]); })[0];
+      : Object.keys(records).sort().filter(function (k) { return anyCase(records[k]); })[0];
     if (key === undefined) return null;
     var rec = records[key], t = ticketRow(d, rec);
     var flag = DETAIL.recordFlags.filter(function (f) { return rec[f]; })[0];
