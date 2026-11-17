@@ -158,9 +158,9 @@ SCRIPT_TICKETS = r"""
               verdict: verdicts.get(key) || null, reason: reasons.get(key) || null};
     });
     function rank(c) {
-      var k = BOARD.kinds[c.kind], age = c[k[1]][k[2]];
+      var k = BOARD.kinds[c.kind], age = c[k.source][k.age];
       var unknown = age === null || age === undefined;
-      return [k[0], unknown ? 1 : 0, unknown ? 0 : -age];
+      return [k.group, unknown ? 1 : 0, unknown ? 0 : -age];
     }
     function byRank(a, b) {
       var x = rank(a), y = rank(b);
@@ -418,13 +418,11 @@ PHASE_GLYPH = {
     "Stop": {"effect": "static", "tint": "#f7768e", "seed": 76},
 }
 WAITING = ("awaiting-ok", "waiting-max")
-# kind: (sort group, card field, age field). A column lists the lowest group
-# first, each group longest in state first, unknown ages last.
 CARD_KINDS = {
-    "live": (0, "live", "elapsed_seconds"),
-    "stale": (0, "live", "elapsed_seconds"),
-    "queued": (1, "queued", "age_seconds"),
-    "idle": (2, "ticket", "state_age_seconds"),
+    "live": {"group": 0, "source": "live", "age": "elapsed_seconds"},
+    "stale": {"group": 0, "source": "live", "age": "elapsed_seconds"},
+    "queued": {"group": 1, "source": "queued", "age": "age_seconds"},
+    "idle": {"group": 2, "source": "ticket", "age": "state_age_seconds"},
 }
 CAP = 6
 JOB_CHIPS = {
@@ -494,9 +492,9 @@ def _kind(live: dict | None, queued: dict | None) -> str:
 
 
 def _rank(card: dict) -> tuple:
-    group, source, field = CARD_KINDS[card["kind"]]
-    age = card[source].get(field)
-    return group, age is None, -(age or 0)
+    kind = CARD_KINDS[card["kind"]]
+    age = card[kind["source"]].get(kind["age"])
+    return kind["group"], age is None, -(age or 0)
 
 
 def board(snapshot: dict, project: str | None = None) -> dict:
@@ -656,7 +654,7 @@ def _column(col: dict) -> str:
     )
     if col["more"]:
         cards += (
-            f'<details class="tk-more"><summary>{_e(f"+{len(col['more'])} more")}</summary>'
+            f'<details class="tk-more"><summary>+{len(col["more"])} more</summary>'
             f'<div class="tk-more-list">{"".join(_card(card) for card in col["more"])}</div></details>'
         )
     count = "tk-count tk-stopped" if phase == "Stop" and col["cards"] else "tk-count"
