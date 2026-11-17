@@ -30,6 +30,7 @@ QUEUED = ("plan-check", "j-queue1")
 VERDICT = ("post-merge", "queued-review")
 BOARD = ["ticket-filter", "pipeline", "shipped", "tickets"]
 IDS = layout.BAR + ["hud", *BOARD, "jobview", "flow-template"]
+COLUMNS = ["Ask", "Plan", "Build", "Review", "Ship", "Stop"]
 GLYPHS = {"Ask": ("twinkle", "#a9b1d6"), "Plan": ("field", "#a9b1d6"), "Build": ("fill", "#a9b1d6"),
           "Review": ("scan", "#a9b1d6"), "Ship": ("off", "#a9b1d6"), "Stop": ("static", "#f7768e")}
 
@@ -248,7 +249,7 @@ def test_server_board_places_every_ticket_once(snapshot: dict) -> None:
     assert sorted(placed) == sorted(_key(row) for row in snapshot["tickets"])
     assert len(placed) == len(set(placed))
     stuck = "#".join(STUCK)
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
+    stopped = _one(_dom(server["pipeline"]), _attr("data-phase", "Stop"))
     build = _one(_dom(server["pipeline"]), _attr("data-phase", "Build"))
     assert stuck in _placed_in(stopped) and stuck not in _placed_in(build)
 
@@ -270,14 +271,15 @@ def test_script_board_places_every_ticket_once_and_matches_the_server(tmp_path: 
 
 def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
     pipeline, shipped = _dom(markup["pipeline"]), _dom(markup["shipped"])
-    in_flight = 0
+    opened = 0
     for column in _all(pipeline, _cls("tk-col")):
         cards = _all(column, _cls("tk-card"))
         assert _number(_text(_one(column, _cls("tk-count")))) == len(cards)
-        in_flight += len(cards)
-    count = _text(_one(pipeline, _cls("count")))
-    assert count == f"{len(rows)} tracked · {in_flight} in flight"
+        opened += len(cards)
     tiles = _all(shipped, _cls("tk-tile"))
+    assert len(rows) == opened + len(tiles)
+    count = _text(_one(pipeline, _cls("count")))
+    assert count == f"{len(rows)} tracked · {opened} open · {len(tiles)} shipped"
     assert _text(_one(shipped, _cls("count"))) == f"{len(tiles)} tickets"
     for group in _all(shipped, _cls("tk-sub")):
         shown = len(_all(group, _attr("data-ticket")))
@@ -333,9 +335,8 @@ def _canvas(node: dict) -> dict:
 def test_phase_glyphs_follow_design_tokens_section_5(snapshot: dict) -> None:
     server = _server(snapshot)
     columns = _all(_dom(server["pipeline"]), _cls("tk-col"))
-    assert [c["attrs"]["data-phase"] for c in columns] == ["Ask", "Plan", "Build", "Review", "Ship"]
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
-    for node in columns + [stopped]:
+    assert [c["attrs"]["data-phase"] for c in columns] == COLUMNS
+    for node in columns:
         effect, tint = GLYPHS[node["attrs"]["data-phase"]]
         glyph = _canvas(_one(node, _cls("tk-glyph")))
         assert (glyph["data-px"], glyph["data-tint"], glyph["data-cell"]) == (effect, tint, "2")
@@ -355,7 +356,7 @@ def test_card_strips_show_the_step_and_bot_and_never_move_when_stopped_or_waitin
     for state, (effect, bot) in steps.items():
         strip = _canvas(_card(board, "#".join(tickets[state])))
         assert (strip["data-px"], strip["data-tint"], strip["style"].endswith("height:8px")) == (effect, bot, True)
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
+    stopped = _one(_dom(server["pipeline"]), _attr("data-phase", "Stop"))
     cards = _all(stopped, _cls("tk-card"))
     assert len(cards) == len([s for s, p in flow.ticket_phases(flow.load_chart(CHART)).items() if p == "Stop"]) + 1
     for card in cards:
@@ -397,7 +398,7 @@ def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> 
 def test_shelf_tiles_carry_their_revise_rounds(snapshot: dict) -> None:
     shipped = _dom(_server(snapshot)["shipped"])
     labels = [_text(_one(g, _cls("tk-label"))) for g in _all(shipped, _cls("tk-sub"))]
-    assert labels == ["handed-off · ready for review (1)", "merged (1)", "done · shipped (1)", "stopped (6)"]
+    assert labels == ["handed-off · ready for review (1)", "merged (1)", "done · shipped (1)"]
     rounds = {row["state"]: row["round"] for row in snapshot["tickets"]}
     for tile in _all(shipped, _cls("tk-tile")):
         assert "#" in _text(_one(tile, _cls("tk-tn")))
@@ -411,13 +412,62 @@ def test_empty_columns_are_dashed_boxes_with_their_copy(tmp_path: Path) -> None:
     make_db(db)
     (tmp_path / "poller.log").write_text("", encoding="utf-8")
     snapshot = collect_snapshot(db, tmp_path / "poller.log", now=NOW, chart_path=CHART)
-    server = _server(snapshot)
-    empties = [_text(n) for n in _all(_dom(server["pipeline"]), _cls("tk-empty"))]
+    _check_empty(_server(snapshot))
+
+
+def _check_empty(markup: dict[str, str]) -> None:
+    pipeline = _dom(markup["pipeline"])
+    empties = [_text(n) for n in _all(pipeline, _cls("tk-empty"))]
     assert empties == ["nothing waiting on questions", "nothing in plan", "nothing in build",
-                       "nothing in review", "nothing in ship"]
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
-    assert _text(_one(stopped, _cls("tk-none"))) == "nothing refused, stuck, abandoned, blocked or capped"
-    assert _text(_one(_dom(server["pipeline"]), _cls("count"))) == "0 tracked · 0 in flight"
+                       "nothing in review", "nothing in ship", "nothing stopped"]
+    stop = _one(pipeline, _attr("data-phase", "Stop"))
+    assert _one(stop, _cls("tk-count"))["attrs"]["class"] == "tk-count"
+    assert _text(_one(pipeline, _cls("count"))) == "0 tracked · 0 open · 0 shipped"
+    assert not _all(_dom(markup["shipped"]), _attr("data-phase"))
+
+
+@layout.needs_node
+def test_script_empty_columns_match_the_server(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    (tmp_path / "poller.log").write_text("", encoding="utf-8")
+    snapshot = collect_snapshot(db, tmp_path / "poller.log", now=NOW, chart_path=CHART)
+    out = _script(tmp_path, snapshot)
+    _check_empty(out["html"])
+    for ident in BOARD:
+        assert out["html"][ident] == _server(snapshot)[ident], ident
+
+
+def _check_stopped_column(markup: dict[str, str], rows: list[dict]) -> None:
+    pipeline = _dom(markup["pipeline"])
+    columns = _all(pipeline, _cls("tk-col"))
+    assert [c["attrs"]["data-phase"] for c in columns] == COLUMNS
+    assert [_text(_one(c, _cls("tk-name"))) for c in columns] == [*COLUMNS[:-1], "Stopped"]
+    states = {c["attrs"]["data-phase"]: _text(_one(c, _cls("tk-states"))).split(" · ") for c in columns}
+    assert states["Review"] == ["review"]
+    assert "capped" in states["Stop"]
+    stop = _one(pipeline, _attr("data-phase", "Stop"))
+    stopped = {_key(r) for r in rows if r["stuck"] or r["state"] in states["Stop"]}
+    assert {_key(r) for r in rows if r["state"] == "capped"} <= stopped
+    assert sorted(_placed_in(stop)) == sorted(stopped)
+    count = _one(stop, _cls("tk-count"))
+    assert count["attrs"]["class"].split() == (["tk-count", "tk-stopped"] if stopped else ["tk-count"])
+    for column in columns[:-1]:
+        assert _one(column, _cls("tk-count"))["attrs"]["class"] == "tk-count"
+    assert not _all(_dom(markup["shipped"]), _attr("data-phase"))
+
+
+def test_stopped_is_the_sixth_column_with_every_stuck_and_capped_ticket(snapshot: dict) -> None:
+    assert any(r["state"] == "capped" for r in snapshot["tickets"])
+    _check_stopped_column(_server(snapshot), snapshot["tickets"])
+    assert ".tk-count.tk-stopped{font-weight:600;color:var(--bad)}" in page.CSS
+
+
+@layout.needs_node
+def test_script_stopped_column_matches_the_server(tmp_path: Path, snapshot: dict) -> None:
+    out = _script(tmp_path, snapshot)
+    _check_stopped_column(out["html"], snapshot["tickets"])
+    assert out["html"]["pipeline"] == _server(snapshot)["pipeline"]
 
 
 def test_without_a_chart_the_board_says_so_and_the_table_lists_every_ticket(tmp_path: Path) -> None:

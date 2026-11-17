@@ -330,7 +330,8 @@ def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
     assert 'id="jobs"' not in html
     tickets = _text(_section(html, "tickets"))
     assert "AUT-7" in tickets and "waiting-max" in tickets
-    assert "AUT-7" in _text(_section(html, "shipped"))
+    assert "AUT-7" not in _text(_section(html, "shipped"))
+    assert "AUT-7" in _text(_section(html, "pipeline"))
     assert "tracy-harris-coaching#5" in _text(_section(html, "pipeline"))
 
 

@@ -23,7 +23,7 @@ CSS = """\
 border:1px solid var(--line-hi);background:var(--panel);color:var(--text)}
 .tk-btn[aria-pressed=true]{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent);color:var(--ok)}
 .tk-btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
-.tk-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr));gap:12px;align-items:start;
+.tk-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));gap:12px;align-items:start;
 font-family:var(--mono)}
 .tk-col{display:flex;flex-direction:column;gap:8px;min-width:0}
 .tk-head{display:flex;flex-direction:column;gap:4px;padding-bottom:8px;border-bottom:1px solid var(--line)}
@@ -31,7 +31,8 @@ font-family:var(--mono)}
 .tk-glyph{display:block;width:16px}
 .tk-name{font-size:13px;font-weight:600;color:var(--text)}
 .tk-count{margin-left:auto;font-size:12px;color:var(--muted)}
-.tk-states{font-size:11px;color:var(--muted)}
+.tk-count.tk-stopped{font-weight:600;color:var(--bad)}
+.tk-states{display:block;min-height:34px;font-size:11px;line-height:17px;color:var(--muted)}
 .tk-empty{padding:16px;border:1px dashed var(--line-hi);font-size:12px;color:var(--muted)}
 .tk-card{display:flex;flex-direction:column;min-width:0;background:var(--panel-hi);box-shadow:var(--elev)}
 .tk-card.tk-stop{border:1px solid color-mix(in srgb,var(--bad) 45%,transparent);box-shadow:none}
@@ -63,7 +64,6 @@ font-family:var(--mono)}
 .tk-tn{font-size:12px;color:var(--text)}
 .tk-r{font-size:11px;color:var(--muted)}
 .tk-scroll{overflow-x:auto}
-.tk-stops{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(250px,100%),1fr));gap:8px;align-items:start}
 @media (scripting:none){#tickets[hidden]{display:block !important}#ticket-filter{display:none}}
 """
 
@@ -73,7 +73,7 @@ SCRIPT_TICKETS = r"""
   var BOARD = __BOARD__;
   var WAITING = {'awaiting-ok': 1, 'waiting-max': 1};
   var WAIT_TINT = '#ff9e64';
-  var BOARD_EMPTY = {Ask: 'nothing waiting on questions'};
+  var BOARD_EMPTY = {Ask: 'nothing waiting on questions', Stop: 'nothing stopped'};
   var tkProject = tkLoad('tk-project') || '';
   var tkView = tkLoad('tk-view') === 'table' ? 'table' : 'board';
 
@@ -92,10 +92,6 @@ SCRIPT_TICKETS = r"""
   function ticketKey(r) { return r.repo + '#' + r.ticket_id; }
   function joinKey(r) { return ticketKey(r).toLowerCase(); }
   function cmp(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
-  function listed(names) {
-    if (!names.length) return 'stopped';
-    return names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' or ' + names[names.length - 1];
-  }
 
   function phaseTable(chart) {
     var phases = {}, order = [];
@@ -117,13 +113,12 @@ SCRIPT_TICKETS = r"""
     function states(phase) { return order.filter(function (n) { return phases[n] === phase; }); }
     return {
       states: phases,
-      columns: order.length ? BOARD.pipeline.map(function (phase) {
-        return {phase: phase, states: states(phase), glyph: BOARD.glyphs[phase]};
+      columns: order.length ? BOARD.columns.map(function (phase) {
+        return {phase: phase, name: BOARD.names[phase] || phase, states: states(phase), glyph: BOARD.glyphs[phase]};
       }) : [],
       shelf: BOARD.shipped.filter(function (n) { return phases[n] === 'Shipped'; }).map(function (n) {
         return {state: n, label: BOARD.gloss.hasOwnProperty(n) ? n + ' · ' + BOARD.gloss[n] : n};
-      }),
-      stop: {states: states('Stop'), glyph: BOARD.glyphs.Stop}
+      })
     };
   }
 
@@ -154,19 +149,18 @@ SCRIPT_TICKETS = r"""
               verdict: verdicts.get(key) || null, reason: reasons.get(key) || null};
     });
     var columns = table.columns.map(function (col) {
-      return {phase: col.phase, glyph: col.glyph, states: col.states,
+      return {phase: col.phase, name: col.name, glyph: col.glyph, states: col.states,
               cards: cards.filter(function (c) { return c.phase === col.phase; })};
     });
     return {
       projects: projects, total: rows.length, tracked: cards.length, available: table.columns.length > 0,
-      inFlight: columns.reduce(function (n, col) { return n + col.cards.length; }, 0),
+      open: columns.reduce(function (n, col) { return n + col.cards.length; }, 0),
+      shipped: cards.filter(function (c) { return c.phase === 'Shipped'; }).length,
       columns: columns,
       shelf: table.shelf.map(function (g) {
         return {state: g.state, label: g.label,
                 tiles: cards.filter(function (c) { return c.phase === 'Shipped' && c.ticket.state === g.state; })};
-      }),
-      stopped: cards.filter(function (c) { return c.phase === 'Stop'; }),
-      stop: table.stop
+      })
     };
   }
 
@@ -286,8 +280,9 @@ SCRIPT_TICKETS = r"""
     var head = add(box, el('div', 'tk-head'));
     var row = add(head, el('div', 'tk-headrow'));
     add(row, tkGlyph('phase-' + col.phase, col.glyph));
-    add(row, el('span', 'tk-name', col.phase));
-    add(row, el('span', 'tk-count', col.cards.length));
+    add(row, el('span', 'tk-name', col.name));
+    var count = col.phase === 'Stop' && col.cards.length ? 'tk-count tk-stopped' : 'tk-count';
+    add(row, el('span', count, col.cards.length));
     add(head, el('span', 'tk-states', col.states.join(' · ')));
     var empty = BOARD_EMPTY[col.phase] || 'nothing in ' + col.phase.toLowerCase();
     if (!col.cards.length) add(box, el('div', 'tk-empty', empty));
@@ -319,7 +314,7 @@ SCRIPT_TICKETS = r"""
     }
 
     var pipeline = panel('pipeline', 'Pipeline',
-                         b.tracked + ' tracked' + (b.available ? ' · ' + b.inFlight + ' in flight' : ''));
+                         b.tracked + ' tracked' + (b.available ? ' · ' + b.open + ' open · ' + b.shipped + ' shipped' : ''));
     if (pipeline) {
       pipeline.hidden = tkView !== 'board';
       if (!b.available) add(pipeline, el('p', 'empty', 'statechart unavailable'));
@@ -349,14 +344,6 @@ SCRIPT_TICKETS = r"""
         add(tile, el('span', 'tk-r', 'r' + c.ticket.round));
       });
     });
-    var stop = add(shelf, el('div', 'tk-sub'));
-    stop.setAttribute('data-phase', 'Stop');
-    var label = add(stop, el('div', 'tk-label'));
-    add(label, tkGlyph('phase-Stop', b.stop.glyph));
-    add(label, el('span', null, 'stopped (' + b.stopped.length + ')'));
-    if (!b.stopped.length) { add(stop, el('div', 'tk-none', 'nothing ' + listed(b.stop.states))); return; }
-    var cards = add(stop, el('div', 'tk-stops'));
-    b.stopped.forEach(function (c) { add(cards, tkCard(c)); });
   }
 
   function renderTickets(d) {
@@ -398,7 +385,9 @@ JOB_CHIPS = {
     "overdue": ["overdue", "bad"],
 }
 _WAIT_TINT = "#ff9e64"
-_EMPTY = {"Ask": "nothing waiting on questions"}
+_EMPTY = {"Ask": "nothing waiting on questions", "Stop": "nothing stopped"}
+COLUMNS = (*PIPELINE, "Stop")
+COLUMN_NAMES = {"Stop": "Stopped"}
 _ROUND = re.compile(r"([0-9]+)/([0-9]+)")
 
 
@@ -408,8 +397,8 @@ def _phase_glyph(phase: str) -> dict:
 
 def board_constants() -> dict:
     return {
-        "pipeline": PIPELINE, "phases": PHASES, "overrides": PHASE_OVERRIDES, "shipped": SHIPPED, "gloss": GLOSS,
-        "idle": IDLE, "chips": JOB_CHIPS,
+        "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
+        "shipped": SHIPPED, "gloss": GLOSS, "idle": IDLE, "chips": JOB_CHIPS,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -423,13 +412,16 @@ def phase_table(chart: dict | None) -> dict:
     return {
         "states": phases,
         "columns": [
-            {"phase": phase, "states": states(phase), "glyph": _phase_glyph(phase)} for phase in PIPELINE
+            {
+                "phase": phase, "name": COLUMN_NAMES.get(phase, phase), "states": states(phase),
+                "glyph": _phase_glyph(phase),
+            }
+            for phase in COLUMNS
         ] if phases else [],
         "shelf": [
             {"state": name, "label": f"{name} · {GLOSS[name]}" if name in GLOSS else name}
             for name in SHIPPED if phases.get(name) == "Shipped"
         ],
-        "stop": {"states": states("Stop"), "glyph": _phase_glyph("Stop")},
     }
 
 
@@ -478,14 +470,13 @@ def board(snapshot: dict, project: str | None = None) -> dict:
         "total": len(rows),
         "tracked": len(cards),
         "available": bool(table["columns"]),
-        "in_flight": sum(len(col["cards"]) for col in columns),
+        "open": sum(len(col["cards"]) for col in columns),
+        "shipped": sum(c["phase"] == "Shipped" for c in cards),
         "columns": columns,
         "shelf": [
             {**group, "tiles": [c for c in cards if c["phase"] == "Shipped" and c["ticket"]["state"] == group["state"]]}
             for group in table["shelf"]
         ],
-        "stopped": [c for c in cards if c["phase"] == "Stop"],
-        "stop": table["stop"],
     }
 
 
@@ -587,9 +578,10 @@ def _column(col: dict) -> str:
     cards = "".join(_card(card) for card in col["cards"]) or (
         f'<div class="tk-empty">{_e(_EMPTY.get(phase, f"nothing in {phase.lower()}"))}</div>'
     )
+    count = "tk-count tk-stopped" if phase == "Stop" and col["cards"] else "tk-count"
     return (
         f'<div class="tk-col" data-phase="{_e(phase)}"><div class="tk-head"><div class="tk-headrow">'
-        f'{_glyph(f"phase-{phase}", col["glyph"])}{_span("tk-name", phase)}{_span("tk-count", len(col["cards"]))}'
+        f'{_glyph(f"phase-{phase}", col["glyph"])}{_span("tk-name", col["name"])}{_span(count, len(col["cards"]))}'
         f'</div>{_span("tk-states", " · ".join(col["states"]))}</div>{cards}</div>'
     )
 
@@ -599,12 +591,6 @@ def _button(text: str, attr: str, value: str, on: bool) -> str:
         f'<button class="tk-btn" type="button" aria-pressed="{"true" if on else "false"}" '
         f'{attr}="{_e(value)}">{_e(text)}</button>'
     )
-
-
-def _listed(names: list[str]) -> str:
-    if not names:
-        return "stopped"
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
 
 
 def _shelf(found: dict) -> str:
@@ -623,17 +609,7 @@ def _shelf(found: dict) -> str:
         groups += (
             f'<div class="tk-sub" data-state="{_e(group["state"])}"><div class="tk-label">{label}</div>{body}</div>'
         )
-    stopped = found["stopped"]
-    cards = "".join(_card(card) for card in stopped)
-    body = (
-        f'<div class="tk-stops">{cards}</div>' if cards
-        else f'<div class="tk-none">{_e("nothing " + _listed(found["stop"]["states"]))}</div>'
-    )
-    return (
-        f'<div class="tk-shelf">{groups}<div class="tk-sub" data-phase="Stop"><div class="tk-label">'
-        f'{_glyph("phase-Stop", found["stop"]["glyph"])}{_span(None, f"stopped ({len(stopped)})")}</div>'
-        f"{body}</div></div>"
-    )
+    return f'<div class="tk-shelf">{groups}</div>'
 
 
 def _board(snapshot: dict) -> str:
@@ -652,7 +628,7 @@ def _board(snapshot: dict) -> str:
             "pipeline", "Pipeline",
             f'<div class="tk-board">{columns}</div>' if found["available"] else unavailable,
             count=f"{found['tracked']} tracked"
-            + (f" · {found['in_flight']} in flight" if found["available"] else ""),
+            + (f" · {found['open']} open · {found['shipped']} shipped" if found["available"] else ""),
         )
         + _panel(
             "shipped", "Shipped", _shelf(found) if found["available"] else unavailable,
