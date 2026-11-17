@@ -123,7 +123,7 @@ def test_orch_python_names_the_interpreter_orch_runs_under(tmp_path: Path) -> No
         check_environ(caller, None),
     )
 
-    assert (result.passed, result.tail) == (True, sys.executable)
+    assert (result.passed, os.path.abspath(result.tail)) == (True, os.path.abspath(sys.executable))
 
 
 def test_long_output_is_cut_to_its_last_lines(tmp_path: Path) -> None:
