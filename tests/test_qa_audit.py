@@ -24,7 +24,8 @@ def _entry(scenario: AskedScenario, result: str = "verified") -> dict:
 
 
 def _lane(entries: list[dict], *, lane: int = 1, mismatches: list[dict] | None = None, drop: tuple[str, ...] = (), **result_fields) -> LaneEvidence:
-    files = [a["path"] for e in entries for a in e["artifacts"] if a["path"] not in drop]
+    listed = [a for e in entries if isinstance(e, dict) for a in e["artifacts"] if isinstance(a, dict)]
+    files = [a["path"] for a in listed if isinstance(a["path"], str) and a["path"] not in drop]
     result = {"run_id": "run-1", "lane": lane, "commit": START, "method": METHOD, "scenarios": entries, **result_fields}
     manifest = {
         "run_id": "run-1",
