@@ -6,8 +6,9 @@ The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
 F1-03, F1-04, F1-05 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
-Phase 2 has the F2-01 device pool and F2-02 remote start; the PC and Mac
-still ship `enabled: false` until Max turns them on.
+Phase 2 has the F2-01 device pool and F2-02 remote start; the shipped
+`machines.yml` runs orch on the PC with the box as a remote device, and the
+Mac ships `enabled: false` until Max turns it on.
 
 ## Contracts
 
@@ -165,38 +166,45 @@ binary.
 
 [`machines.yml`](machines.yml) is the F2-01 device inventory
 ([docs/SPEC.md](docs/SPEC.md) section 13);
-[`config/machines.example.yml`](config/machines.example.yml) is the minimal
-file. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
+[`config/machines.example.yml`](config/machines.example.yml) is an example
+with orch on the PC and the box as a remote device. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
 `workdir_root`, `ssh_alias` and `enabled` (default `true`). `harnesses` maps each eligible
 harness to the bot OS user whose login Max provisioned there, and that user
 must be the harness's own bot (`claude: claude-bot`, `codex: codex-bot`,
-`cursor: cursor-bot`). The one `local: true` device is the box that runs
-`orch`; it omits `tailscale_name`, `workdir_root` and `ssh_alias`. Every other device names
+`cursor: cursor-bot`). The top-level `orch_host` names the device that runs
+`orch`; it must be a listed device, and a `local: true` device must be it.
+Without `orch_host`, the one local device is the orch host; with no local
+device, `orch_host` is required. The local device omits `tailscale_name`,
+`workdir_root` and `ssh_alias`. Every other device names
 a `workdir_root`, an absolute normalized path that may not be under `/mnt/`,
 so jobs on a WSL node stay off the Windows drives. A whole path component may
 be `{bot}`, which resolves to the harness's bot user
 (`Device.workdir_for(harness)`). Every remote device also names an
-`ssh_alias` (F2-02): the Host alias in the box user's own SSH client config,
+`ssh_alias` (F2-02): the Host alias in the orch host user's own SSH client config,
 which must contain `{bot}` so each bot logs in through its own alias
 (`Device.ssh_alias_for(harness)`; the PC's `pc-wsl-{bot}` gives
 `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`). It is a bare
 alias: no `user@`, no leading `-`, no space or shell character, never a key
-path; the host name and key stay in that SSH config. A Tailscale name is a device name, never an
+path; the host name and key stay in that SSH config. A remote device may
+name an `ssh_user`, the login (`ssh -l`) used in place of the bot user; the
+bot user stays the job's identity. A Tailscale name is a device name, never an
 IP address. Two devices may not share a `tailscale_name` (compared
 case-insensitively): slots are counted per device name, so a second entry
 would give one host a second `slot_max`. Release a device's held slots
 before renaming it. Unknown fields are refused, and `workdir_root` may not
 contain NUL or another control character.
 
-The shipped file lists the box (all three harnesses, 3 slots, because the box
-runs at most 3 heavy local agent sessions at once; slots are generic, so they
-are not one per bot and 3 Claude jobs can take all 3), the PC's WSL Ubuntu node
-and the Mac. The PC and Mac ship
-`enabled: false` and stay disabled until Max turns them on; the Mac also
-has no bot users and no SSH yet. The PC's `workdir_root` is
+The shipped file sets `orch_host: pc` and has no `local: true` device. It
+lists the PC's WSL Ubuntu node first (all three harnesses, 10 slots), then the
+box as a remote device (all three harnesses, 6 slots), then the Mac. Slots are
+generic, so they are not one per bot. The PC's `workdir_root` is
 `/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
-`/mnt/c`, and its `ssh_alias` is `pc-wsl-{bot}`, the box's existing aliases
-`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The Mac's
+`/mnt/c`, and its `ssh_alias` is `pc-wsl-{bot}`, the aliases
+`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The box sets
+`ssh_user: box`, so every bot logs in as `box` through its own `box-{bot}`
+alias and works in `/home/box/factory-work` from `/home/box/factory`; the bot
+user stays the job's identity. The Mac ships `enabled: false` and stays
+disabled until Max turns it on; it has no bot users and no SSH yet, and its
 `workdir_root` and `ssh_alias` are still `REPLACE_WITH_` placeholders. Nothing
 assumes a device is reachable: the poller checks it (below).
 
@@ -1245,7 +1253,8 @@ device slot is still held. Once none is, it writes
 waiters, self-heal and the Linear listener through their service scripts.
 While `orch-retired` exists, the poller, waiter, self-heal and Linear service
 scripts refuse to start (exit 79), and so does the `self-heal.sh once` pass
-the systemd timer runs. After stopping self-heal, `export` runs `self-heal.sh
+the systemd timer runs. `orch poll` and `orch wait` themselves exit 79 on a
+retired host. After stopping self-heal, `export` runs `self-heal.sh
 wait-idle`, which waits up to `ORCH_HEAL_IDLE_WAIT` seconds (default 900) for
 a self-heal pass already under way, and the device deploy it started
 detached, to finish before `export` takes its copy. A wait that runs out
@@ -1253,8 +1262,9 @@ fails the export like a failed stop. `poller-service.sh stop` finds the
 poller by the `orch.db.lock` it holds open when its pidfile is not
 `~/.local/state/factory/poller.pid`, as with `orch-poll.service`. Before the
 copy, `orch move-db unlocked` checks that no process still holds
-`orch.db.lock`, the lock every `orch poll` on that database holds, and fails
-the export if one does. The export
+`orch.db.lock`, the lock every `orch poll` on that database holds, or a
+`waiter-<bot>.lock` beside `orch.db`, the lock every `orch wait` holds, and
+fails the export if one does. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
@@ -1262,10 +1272,16 @@ It also holds `job-detail/`, the per-job detail files #653 keeps beside
 `orch.db`. The manifest records each file's sha256. `orch move-db manifest`
 refuses a copy with a spilled job row whose file is missing.
 
-After `export` and before `import`, check the source host by hand. A
-launch that was already under way when the export began can still start a
-poller (#775). Confirm `~/.config/factory/orch-retired` exists and that no
-`orch poll` or `orch wait` process runs:
+`orch poll` and `orch wait` check `orch-retired` again once they hold their
+lock, and exit 79 if it exists. `export` writes `orch-retired` before it
+checks those locks. A poller or waiter that took its lock before then still
+holds it, so `export` fails and writes no manifest. One that takes its lock
+after sees `orch-retired` and exits (#775). A successful export therefore
+leaves no `orch poll` or `orch wait` on that database able to poll or claim.
+
+Before `import`, you can confirm this on the source host by hand. Check that
+`~/.config/factory/orch-retired` exists and that no `orch poll` or `orch wait`
+process runs:
 
 ```sh
 # on the source host: ls lists the file, pgrep prints nothing
@@ -1354,9 +1370,10 @@ a `Feeder — eligible N, fed N, waiting for capacity N` section lists each
 ticket eligible at its last poll with its state and PR. Each device has one
 slot count (issue #90): a running harness job that holds no slot (claimed
 with no device by an older `orch wait`, or whose worker already ended) runs
-on the box, so it is listed under the box device, marked `no-placement`, and
-counted in the box's slots; the device pool counts it too, so the box never
-starts more than `slot_max`. A running grok wake holds no slot and is listed
+on the orch host (`orch_host` in `machines.yml`; the PC in the shipped file),
+so it is listed under that device, marked `no-placement`, and counted in its
+slots; the device pool counts it too, so the orch host never starts more than
+`slot_max`. A running grok wake holds no slot and is listed
 under `Grok wakes`.
 Once a Linear webhook listener or a webhook-mode poller has run on the
 database (the poller records `linear_webhook_polling`), a `Linear webhook`
@@ -1508,8 +1525,19 @@ The rules for each component:
   the marker its own stop wrote, so the next pass retries and, after 3
   failures, escalates.
 - A component restarted less than a minute ago is left to come up.
-- A component gets at most 3 restarts in 30 minutes. After that it is
-  skipped until the oldest restart leaves the window.
+- A restart that moves a running component onto a new checkout commit is a
+  version update. It succeeds when the restart command exits 0. It is free
+  only once the component was seen running the commit of its previous
+  update, so components keep up with any merge rate. Otherwise it counts
+  toward the restart budget. A component that was waiting (draining, busy,
+  settling) restarts once onto the current checkout, not onto each commit
+  it missed.
+- The restart budget is 3 restarts in 30 minutes. It counts down
+  restarts, failed restart commands, and version updates made before the
+  previous one was seen running. Once the budget is spent, the component
+  is skipped until the oldest counted restart leaves the window. The
+  Linear listener and its tunnel share one restart command, so they share
+  a spent budget: while either is in backoff, neither restarts.
 - Self-heal escalates once per component per 30 minutes: when that backoff
   trips, when the restart command fails 3 times, or when the component
   flaps (3 process changes in the window that self-heal did not cause).
@@ -1687,6 +1715,13 @@ CLI's own output, captured by `orch job run` for every job and stored in
   timestamp, so rereading an old event never makes it fresh. A newer
   `token_count` whose `rate_limits` is null or missing, or that leaves a
   window out, reads that window as `no reading`.
+
+A window that a reply with other limits leaves null or out, in 3 fresh
+readings in a row for the account on any of its devices (none more than 24
+hours after the one before, and a Codex event read twice counting once),
+reads `not on plan`, shown as "not on this plan": that plan has no such limit, as
+with a Codex plan that reports only its 7-day window. Its `used` stays null,
+and the other window alone is then the account's headroom.
 
 A newer `no reading` replaces older numbers. A window that has reset, or a
 reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked`, and a database without the
@@ -2132,10 +2167,11 @@ and still runs every other validation.
 `init-db` and runtime commands are always strict. An unknown model name is a
 warning on stderr.
 With no `--orch`, `check-config` also checks the shipped `machines.yml`; with
-`--orch`, it checks a machines file only when `--machines` names one. A
-`REPLACE_WITH_` device value follows the same `--allow-placeholders` rule and
-the warning says that device will not be scheduled. A disabled device is
-always named on stderr and does not fail the check.
+`--orch`, it checks a machines file only when `--machines` names one. A device
+with a `REPLACE_WITH_` value is skipped with or without `--allow-placeholders`:
+a warning names the device and the field and says it will not be scheduled,
+and the check still passes. Any other machines error fails it. A disabled
+device is always named on stderr and does not fail the check.
 
 ## orchestrate-project
 

@@ -335,7 +335,7 @@ def test_a_macos_writer_reparented_to_init_dies_before_the_retry(
         "devices:\n  - name: box\n    local: true\n    slot_max: 3\n"
         "    harnesses: {codex: codex-bot}\n"
     )
-    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    config, findings = load_machines_yml(machines)
     assert config is not None, findings
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     pool = DevicePool(queue, config)

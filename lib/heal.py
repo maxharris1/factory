@@ -34,8 +34,13 @@ Per component (its health label), in order:
    checkout): restart once idle. The Linear listener is busy while a
    delivery is under REQUEST_DEADLINE_SECONDS old; the poller (at its cycle
    boundary) and a waiter (outside a claim) stop at a safe point themselves.
-5. Backoff: at most MAX_ATTEMPTS restarts per WINDOW_SECONDS, then skipped
-   until the oldest attempt leaves the window.
+5. Backoff: a successful stale-code restart is a version update. It does
+   not use the budget when the component was seen running the commit of
+   its previous update; otherwise it counts. Down restarts, failed restart
+   commands, and counted updates get at most MAX_ATTEMPTS per
+   WINDOW_SECONDS, then are skipped until the oldest leaves the window.
+   Components that share one restart command (the Linear listener and
+   tunnel) share a spent budget: while one is in backoff, neither restarts.
 6. Escalation, once per component per window: the backoff tripped, the
    restart command failed MAX_ATTEMPTS times, or the component flaps
    (FLAP_CHANGES process changes in the window that self-heal did not
@@ -81,7 +86,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
@@ -154,6 +159,8 @@ class KeyState:
     escalated_at: float | None = None
     last: str | None = None
     alerted: str | None = None
+    target: str | None = None
+    restarted_at: float | None = None
 
 
 def service_of(component: str, bot: str) -> str | None:
@@ -193,17 +200,25 @@ def _recent(times: Sequence[float], now: float) -> list[float]:
     return [t for t in times if now - t < WINDOW_SECONDS]
 
 
+def _restarts(key: KeyState) -> list[float]:
+    return key.attempts if key.restarted_at is None else [*key.attempts, key.restarted_at]
+
+
 def observe(report: Mapping, states: dict[str, KeyState], now: float) -> None:
     """Record each component's process (pid, started_at); a change that no
-    self-heal restart since the last look explains counts toward flapping."""
+    self-heal restart since the last look explains counts toward flapping.
+    A component seen running its pending update target clears it."""
     for item in report.get("components") or ():
+        landed = states.get(item.get("label"))
+        if landed is not None and item.get("version") == landed.target:
+            landed.target = None
         if item.get("pid") is None:
             continue
         key = states.setdefault(item["label"], KeyState())
         process = [item["pid"], item.get("started_at")]
         if key.process is not None and key.process != process:
             since = key.observed_at if key.observed_at is not None else now
-            if not any(at >= since for at in key.attempts):
+            if not any(at >= since for at in _restarts(key)):
                 key.changes.append(now)
         key.process = process
         key.observed_at = now
@@ -217,6 +232,7 @@ def decide(
     actions: list[Action] = []
     if not report.get("known"):
         return actions
+    spent: set[str] = set()
     for item in report.get("components") or ():
         service = service_of(item.get("component", ""), item.get("bot", ""))
         if (
@@ -252,7 +268,8 @@ def decide(
         escalation = _escalation(key, attempts, now, broken=need is not None)
         if escalation is not None:
             actions.append(act(ESCALATE, escalation, flapping=escalation.startswith("flapping")))
-        if need is None or (attempts and now - max(attempts) < SETTLE_SECONDS):
+        restarts = _restarts(key)
+        if need is None or (restarts and now - max(restarts) < SETTLE_SECONDS):
             continue
         if item.get("state") != health.DOWN and service == LISTENER_SERVICE and facts.listener_busy:
             actions.append(act(DEFER, "stale code, busy with a delivery"))
@@ -272,11 +289,17 @@ def decide(
                                                  "waiting for the waiter to stop claiming"))
                 continue
         if len(attempts) >= MAX_ATTEMPTS:
+            spent.add(service)
             actions.append(act(SKIP, f"backoff: {len(attempts)} restarts in "
                                      f"{WINDOW_SECONDS // 60}m ({need})"))
             continue
         actions.append(act(RESTART, need))
-    return actions
+    return [
+        replace(a, kind=SKIP, reason=f"backoff: {a.service} shared with a component "
+                                     f"in backoff ({a.reason})")
+        if a.kind == RESTART and a.service in spent else a
+        for a in actions
+    ]
 
 
 def _escalation(key: KeyState, attempts: list[float], now: float, *, broken: bool) -> str | None:
@@ -293,6 +316,17 @@ def _escalation(key: KeyState, attempts: list[float], now: float, *, broken: boo
     if len(changes) >= FLAP_CHANGES:
         return f"flapping: {len(changes)} process changes in {WINDOW_SECONDS // 60}m"
     return None
+
+
+def _record_restart(key: KeyState, action: Action, version: str, code: int, now: float) -> None:
+    key.restarted_at = now
+    if code != 0:
+        key.failures = _recent(key.failures, now) + [now]
+    elif action.state != health.DOWN:
+        pending, key.target = key.target, version
+        if pending is None:
+            return
+    key.attempts = _recent(key.attempts, now) + [now]
 
 
 # --- state and log ---------------------------------------------------------------------------
@@ -379,12 +413,12 @@ class Webhook:
     url_env: str = "FACTORY_WEBHOOK_URL"
     auth_env: str | None = "FACTORY_WEBHOOK_AUTH"
     key_env: str = "FACTORY_WEBHOOK_KEY"
-    linear_key_env: str | None = None
+    config_secret_envs: tuple[str, ...] = ()
 
     @property
     def secret_names(self) -> tuple[str, ...]:
-        names = (self.url_env, self.auth_env, self.key_env, self.linear_key_env)
-        return tuple(name for name in names if name)
+        names = (self.url_env, self.auth_env, self.key_env, *self.config_secret_envs)
+        return tuple(dict.fromkeys(name for name in names if name))
 
 
 def escalate(
@@ -496,9 +530,7 @@ def heal(
                 f"{clock() - started:.1f}s")
         else:
             log(f"restart {action.label} ({action.reason}) with {action.service}")
-        key.attempts = _recent(key.attempts, now) + [now]
-        if done[action.service] != 0:
-            key.failures = _recent(key.failures, now) + [now]
+        _record_restart(key, action, version, done[action.service], now)
     if report.get("known") and not dry_run:
         for service in facts.owned:
             bot = service.split(":", 1)[1] if service.startswith("waiter:") else None
@@ -597,10 +629,10 @@ def _webhook(orch_path: Path | None) -> Webhook:
     if config is None:
         return Webhook()
     grok = config.grok
-    linear_key = config.linear.api_key_env if config.linear is not None else None
+    secrets = config.secret_env_names
     if grok is None:
-        return Webhook(linear_key_env=linear_key)
-    return Webhook(grok.webhook_url_env, grok.webhook_auth_env, grok.webhook_key_env, linear_key)
+        return Webhook(config_secret_envs=secrets)
+    return Webhook(grok.webhook_url_env, grok.webhook_auth_env, grok.webhook_key_env, secrets)
 
 
 def main(argv: list[str], *, stdin: TextIO | None = None,

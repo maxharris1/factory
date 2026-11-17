@@ -24,6 +24,7 @@ dashboard:
   push:
     transport: ssh
     host: pc-wsl-cursor-bot
+    # After orch moves to another device, this is the orch user's own SSH config.
     ssh_config: /home/box/.ssh/config
     remote_dir: factory-dashboard
     method: scp

@@ -1,41 +1,27 @@
 # machines.yml schema v1. See docs/SPEC.md sections 13 and 17 (F2-01, F2-02).
+# orch_host names the device that runs orch and must be a listed device. With
+# no local: true device it is required; a local: true device must be it.
 # Each device: name, tailscale_name (omitted only on the local device),
 # slot_max, harnesses (harness -> its bot OS user), workdir_root (required
 # on remote devices, never under /mnt/; a {bot} path component resolves to
 # the harness's bot user), ssh_alias (required on remote devices: the
-# Host alias in the box user's own SSH client config, containing {bot}, so
+# Host alias in the orch host's own SSH client config, containing {bot}, so
 # each bot logs in through its own alias; never a key path, user@ or
 # option), factory_root (required on remote devices: the deployed factory
-# checkout with skills/ and bin/orch, not workdir_root; same path rules), and
-# enabled (default true).
+# checkout with skills/ and bin/orch, not workdir_root; same path rules),
+# ssh_user (optional on a remote device: the ssh -l login in place of the bot
+# user; the bot user stays the job's identity and fills {bot} paths),
+# and enabled (default true).
 # A disabled device or one with a REPLACE_WITH_ value is never scheduled.
 # Slots are counted per device name: list each host (tailscale_name) once.
-# F2-02 starts a remote job over `ssh -l <bot user> <ssh_alias>`; nothing
-# here implies a device is reachable, and a remote device stays disabled
-# until Max enables it.
+# F2-02 starts a remote job over `ssh -l <login> <ssh_alias>`; nothing here
+# implies a device is reachable.
+orch_host: pc
 devices:
-  # The box runs orch and every bot today (Phase 1).
-  - name: box
-    local: true
-    # The box runs at most 3 heavy local agent sessions at once (Max's box
-    # rule; the retired factory's codex-local-box lane also had 3). Slots are
-    # generic, so any harness may use any of the 3 (3 claude jobs fill them).
-    slot_max: 3
-    harnesses:
-      claude: claude-bot
-      codex: codex-bot
-      cursor: cursor-bot
-    # The deployed checkout the box's units run from (%h/factory).
-    factory_root: /home/box/factory
   # The WSL Ubuntu node on the PC, not the Windows host.
-  # Stays disabled until Max enables it (F2-02 remote start is built; Max
-  # turns the device on). F2-02 reaches it through the box's SSH aliases
-  # pc-wsl-claude-bot, pc-wsl-codex-bot and pc-wsl-cursor-bot, one per bot
-  # user, resolved from ssh_alias below.
   - name: pc
-    enabled: false
     tailscale_name: pc-wsl-bots.tail68624b.ts.net
-    slot_max: 3
+    slot_max: 10
     harnesses:
       claude: claude-bot
       codex: codex-bot
@@ -46,6 +32,17 @@ devices:
     ssh_alias: pc-wsl-{bot}
     # Each bot's own deployed factory checkout, beside its workdir_root.
     factory_root: /home/{bot}/factory
+  - name: box
+    tailscale_name: grokbot-factory-box.tail68624b.ts.net
+    slot_max: 6
+    ssh_user: box
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+    workdir_root: /home/box/factory-work
+    ssh_alias: box-{bot}
+    factory_root: /home/box/factory
   # Its bot users do not exist yet and SSH is off. Stays disabled until Max
   # provisions them and enables it.
   - name: mac

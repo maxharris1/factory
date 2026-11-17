@@ -30,6 +30,7 @@ from lib.queue import JobRequest, SQLiteJobQueue
 from lib.grok_delivery import WebhookResult
 from lib.heal import Webhook, run_service
 from tests.handoff_store import serve_job
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 from tests.test_skills_reconcile import box_behind_new_pin
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -367,7 +368,7 @@ def test_a_job_running_through_a_deploy_finishes_and_hands_off(
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     proc = subprocess.Popen(
         [sys.executable, str(repo.box / "bin/orch"), "job", "run", "codex-bot", job.id,
-         "--db", str(queue.path), "--interval", "0.1", "--", sys.executable, "-c", script],
+         "--machines", str(LOCAL_BOX_MACHINES), "--db", str(queue.path), "--interval", "0.1", "--", sys.executable, "-c", script],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         deadline = time.monotonic() + 30

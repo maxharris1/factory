@@ -179,7 +179,7 @@ class DeviceMonitor:
             stamp = _stamp(path)
             if stamp == self._stamp:
                 return
-            config, findings = load_machines_yml(path, allow_placeholders=True)
+            config, findings = load_machines_yml(path)
         except OSError as exc:
             raise ValueError(f"{path}: cannot read: {type(exc).__name__}") from exc
         errors = [item for item in findings if item.severity == "error"]

@@ -31,7 +31,7 @@ from lib.wait import (
     wait_for_job,
 )
 from tests.handoff_store import env_store, serve_handoff
-from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF, pool_claim
+from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF, LOCAL_BOX_MACHINES, pool_claim
 
 
 class QueuePool:
@@ -521,7 +521,10 @@ def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> 
     queue = SQLiteJobQueue(db, clock=time.time)
     job = queue.enqueue(request(recipient="cursor"), dedupe_key="a")
     assert pool_claim(queue, "cursor").id == job.id
-    result = run(["job", "run", "cursor-bot", job.id, "--", "true"], PATH=path, ORCH_DB=str(db), ORCH_JOB_PROOF=CLAIM_PROOF)
+    result = run(
+        ["job", "run", "cursor-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--", "true"],
+        PATH=path, ORCH_DB=str(db), ORCH_JOB_PROOF=CLAIM_PROOF,
+    )
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
     for name in (
@@ -599,7 +602,10 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
          "--git-url-template", f"file://{remotes}/{{repo}}.git"]
         if worktree else []
     )
-    code = cli_main(["job", "run", "cursor-bot", job.id, "--db", str(db), *extra, "--", *command])
+    code = cli_main([
+        "job", "run", "cursor-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES),
+        "--db", str(db), *extra, "--", *command,
+    ])
     monkeypatch.setattr(subprocess, "Popen", real_popen)
 
     # The command is spawned behind lib/job_run.py's fixed gate (Codex r1

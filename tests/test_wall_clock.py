@@ -448,7 +448,7 @@ def test_an_expired_remote_job_whose_harness_exits_0_on_sigterm_fails(tmp_path: 
     ssh = Ssh(tmp_path)
     db = Poller(tmp_path / "schema").path
     queue = SQLiteJobQueue(db, clock=time.time)
-    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    config, _ = load_machines_yml(machines)
     pid_file = tmp_path / "pid"
     script = (
         "import os, signal, sys, time; "

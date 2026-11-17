@@ -44,7 +44,7 @@ background:repeating-linear-gradient(135deg,var(--dim) 0 8px,var(--bg) 8px 16px)
 .qrail a:hover .ticket{color:var(--brand)}
 .qrail .what{color:var(--text-2)}.qrail .when{color:var(--muted)}
 .qrail .belt{display:block;flex:1 1 120px;min-width:0}
-.tiles{flex:1 1 400px;min-width:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.tiles{flex:1 1 400px;min-width:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(clamp(180px,11vw,220px),1fr));gap:8px}
 .tile{display:block;min-width:0;min-height:124px;background:var(--panel-hi);border:1px solid transparent;color:var(--text);
 text-decoration:none;font:12px/1.3 var(--mono)}
 a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}

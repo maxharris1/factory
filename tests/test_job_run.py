@@ -14,7 +14,7 @@ from lib import job_run
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.handoff_store import serve_job
-from tests.pool_helpers import pool_claim
+from tests.pool_helpers import LOCAL_BOX_MACHINES, pool_claim
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -257,7 +257,7 @@ def test_cli_job_run_heartbeats_and_passes_the_job_to_the_command(tmp_path: Path
         "time.sleep(1.0)"
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--interval", "0.2", "--", sys.executable, "-c", script,
     )
     _, stderr = proc.communicate(timeout=20)
@@ -289,7 +289,7 @@ def test_cli_job_run_stops_heartbeating_when_the_command_finishes_the_job(
         "time.sleep(0.8)"
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(database),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(database),
         "--interval", "0.1", "--", sys.executable, "-c", script,
     )
     _, stderr = proc.communicate(timeout=20)
@@ -311,7 +311,7 @@ def test_cli_job_run_forwards_sigterm_and_heartbeat_dies_with_it(tmp_path: Path)
         "time.sleep(30)"
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--interval", "0.1", "--", sys.executable, "-c", script,
     )
     try:
@@ -346,7 +346,7 @@ def test_cli_job_run_stops_on_a_group_sigint_with_its_command(tmp_path: Path) ->
         "time.sleep(30)"
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--interval", "0.1", "--", sys.executable, "-c", script,
         start_new_session=True,
     )
@@ -463,7 +463,7 @@ def test_cli_job_run_gives_the_command_a_job_tmpdir_and_removes_it(
         f"json.dump({{k: os.environ.get(k) for k in ('TMPDIR', 'TMP', 'TEMP')}}, open({str(seen)!r}, 'w'))"
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--", sys.executable, "-c", script,
         env={"ORCH_JOB_STATE_DIR": str(job_dir) if waiter_dir else ""},
     )
@@ -484,7 +484,7 @@ def test_cli_job_run_removes_a_job_tmpdir_its_command_locked(tmp_path: Path) -> 
         "locked.mkdir(); (locked / 'x').write_text('scratch'); locked.chmod(0)"
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(queue.path),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(queue.path),
         "--", sys.executable, "-c", script,
         env={"ORCH_JOB_STATE_DIR": str(locked.parent.parent)},
     )
@@ -513,7 +513,7 @@ def test_cli_job_run_refuses_a_job_that_is_not_running(tmp_path: Path, state: st
         queue.finish(job.id, owner="codex", handoff_comment_id="5")
     marker = tmp_path / "ran"
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')",
     )
     _, stderr = proc.communicate(timeout=20)
@@ -530,7 +530,7 @@ def test_cli_job_run_refuses_another_bots_job_and_a_bad_interval(tmp_path: Path)
 
     marker = tmp_path / "ran"
     other = _orch(
-        "job", "run", "claude-bot", job.id, "--db", database,
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", database,
         "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')",
     )
     _, stderr = other.communicate(timeout=20)
@@ -539,13 +539,13 @@ def test_cli_job_run_refuses_another_bots_job_and_a_bad_interval(tmp_path: Path)
     assert not marker.exists()
 
     zero = _orch(
-        "job", "run", "codex-bot", job.id, "--db", database, "--interval", "0", "--", "true"
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", database, "--interval", "0", "--", "true"
     )
     _, stderr = zero.communicate(timeout=20)
     assert zero.returncode == 2
     assert "--interval" in stderr
 
-    bare = _orch("job", "run", "codex-bot", job.id, "--db", database)
+    bare = _orch("job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", database)
     _, stderr = bare.communicate(timeout=20)
     assert bare.returncode == 2
     assert "command" in stderr
@@ -557,7 +557,7 @@ def test_cli_job_run_caps_a_slow_interval_and_says_so(tmp_path: Path) -> None:
     queue = _queue(tmp_path)
     job = _running_job(queue, timeout=60)
     slow = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--interval", "600", "--", "true",
     )
     _, stderr = slow.communicate(timeout=20)
@@ -615,7 +615,7 @@ def test_cli_job_run_worktree_runs_in_a_worktree_and_cleans_it_up(
         + ("pathlib.Path('scratch.txt').write_text('wip')" if dirty else "pass")
     )
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--worktree", "--work-root", str(work), "--git-url-template", template,
         "--", sys.executable, "-c", script,
         env=GIT_ENV,
@@ -643,7 +643,7 @@ def test_cli_job_run_worktree_failure_does_not_run_the_command(tmp_path: Path) -
     job = _running_job(queue)
     marker = tmp_path / "ran"
     proc = _orch(
-        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--worktree", "--work-root", str(tmp_path / "work"),
         "--git-url-template", f"file://{tmp_path}/missing/{{repo}}.git",
         "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')",

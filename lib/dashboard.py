@@ -794,8 +794,8 @@ def collect_snapshot(
     # One slot count per device (#90): a running harness job with no
     # placement runs on the orch host, so it counts in that host's held slots,
     # and slots.box.running is every running job on the host, placed or not.
-    devices, box_max = _machines(machine_items, host, db["held"], unplaced=db["box_running"])
-    box_running = db["box_running"] + db["running_on"].get(host, 0)
+    devices, box_max = _machines(machine_items, host, db["held"], unplaced=db["unplaced_running"])
+    box_running = db["unplaced_running"] + db["running_on"].get(host, 0)
     attach_telemetry([*db["running"], *db["queued"]], telemetry, now)
     report = component_health.load_report(
         db_path,
@@ -893,6 +893,14 @@ def _without_checkout_paths(health: dict) -> dict:
                                   for device in health["devices"]]}
 
 
+def _ship_rule(labels: list[str]) -> str:
+    parts = [label.removeprefix("ship = ").partition(", ") for label in labels]
+    text = "{}, {}, or {}".format(*(way for way, _, _ in parts))
+    conditions = {condition for _, _, condition in parts}
+    shared = conditions.pop() if len(conditions) == 1 else ""
+    return f"{text}, when {shared}" if shared else text
+
+
 _CHART_RULES = (
     ("stuck", (("building", "stuck"),), lambda labels: labels[0]),
     ("plan-check", (("plan-check", "planning"), ("plan-check", "stuck")),
@@ -900,7 +908,7 @@ _CHART_RULES = (
     ("rounds", (("review", "fixing"), ("review", "capped"), ("capped", "fixing")),
      lambda labels: f"{labels[0]} → fixing; {labels[1]} → capped ({labels[2]})"),
     ("ship", (("ship", "merged"), ("ship", "handed-off"), ("ship", "waiting-external")),
-     lambda labels: "{}, {}, or {}".format(*(label.removeprefix("ship = ") for label in labels))),
+     _ship_rule),
     ("approver", (("waiting-external", "stuck"),),
      lambda labels: f"{labels[0]} from an external approver → stuck"),
 )
@@ -1475,7 +1483,7 @@ def _read_db(
     overdue: list[dict] = []
     # Each running or queued job's ticket as stored, to find its history.
     active: list[tuple[dict, str, str]] = []
-    box_running = 0  # running harness jobs with no placement: on the box (#90)
+    unplaced_running = 0
     marks = priority_marks(connection) if jobs else {}
     running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
@@ -1537,11 +1545,8 @@ def _read_db(
                 }
                 running.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
-                # Like `orch status`, a job holding a device-pool slot counts
-                # on its device; a harness job with no placement runs on the
-                # box and counts there (#90; added in collect_snapshot).
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
-                    box_running += 1
+                    unplaced_running += 1
                 elif placement is not None:
                     running_on[placement[0]] = running_on.get(placement[0], 0) + 1
             else:
@@ -1887,7 +1892,7 @@ def _read_db(
         "ticket_records": ticket_records,
         "record_keys": record_keys,
         "ticket_jobs": ticket_jobs,
-        "box_running": box_running,
+        "unplaced_running": unplaced_running,
         "running_on": running_on,
         "overdue_jobs": overdue,
         "tickets": tickets,

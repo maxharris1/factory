@@ -20,11 +20,17 @@ without a window (a null or missing window, a login without limits, a
 RESET_HORIZON_SECONDS of now) gives that window an explicit no-reading
 (`used` and `resets_at` None), which replaces any older numbers. A Codex
 reading is observed at its event's own time, so rereading the same event
-never makes it fresher. `Session._write`
-(lib/telemetry.py) stores them in `usage_readings` in the same transaction
-as the job's telemetry row, on the existing heartbeat flush. A reading is
-keyed by harness, bot (the account's OS user) and device, and an older
-reading never replaces a newer one. Cursor is not tracked.
+never makes it fresher. A window the account's readings, on any of its
+devices, leave out of its newest NOT_ON_PLAN_READINGS distinct source
+observations, ordered by source time (fresh readings that report other
+limits: a null or missing window in a reply with limits), is `not on plan`:
+the plan has no such limit. A Codex event read again is the same
+observation, and any reading that reports the window ends the streak.
+`Session._write` (lib/telemetry.py) stores them in `usage_readings` in the
+same transaction as the job's telemetry row, on the existing heartbeat
+flush. A reading is keyed by harness, bot (the account's
+OS user) and device, and replaces one only when its source time is newer.
+Cursor is not tracked.
 
 `TelemetryUsage` is a `lib.usage.UsageSource` over the table. Its report is
 verified only when both windows are fresh, so routing keeps the existing
@@ -57,6 +63,7 @@ GET_USAGE_ID = "orch-usage"
 RESET_HORIZON_SECONDS = 30 * 24 * 3600
 CLOCK_SKEW_SECONDS = 300
 STALE_SECONDS = 24 * 3600
+NOT_ON_PLAN_READINGS = 3
 MAX_REPLY_BYTES = 256 * 1024
 
 DDL = f"""
@@ -69,19 +76,56 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     resets_at INTEGER,
     observed_at REAL NOT NULL,
     job_id TEXT NOT NULL,
+    absent INTEGER NOT NULL DEFAULT 0,
+    source_at REAL,
     PRIMARY KEY (harness, bot, device, window)
 )
 """
 
+ADDED_COLUMNS = {"absent": "INTEGER NOT NULL DEFAULT 0", "source_at": "REAL"}
+
+OBSERVATIONS = "usage_observations"
+OBSERVATIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {OBSERVATIONS} (
+    harness TEXT NOT NULL,
+    bot TEXT NOT NULL,
+    window TEXT NOT NULL,
+    source_at REAL NOT NULL,
+    absent INTEGER NOT NULL,
+    PRIMARY KEY (harness, bot, window, source_at)
+)
+"""
+
 _UPSERT = f"""
-INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id, absent, source_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (harness, bot, device, window) DO UPDATE SET
     used = excluded.used,
     resets_at = excluded.resets_at,
     observed_at = excluded.observed_at,
-    job_id = excluded.job_id
-WHERE excluded.observed_at > {TABLE}.observed_at
+    job_id = excluded.job_id,
+    absent = excluded.absent,
+    source_at = excluded.source_at
+WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.source_at, {TABLE}.observed_at)
+"""
+
+_OBSERVE = f"""
+INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
+"""
+
+_NEWEST = f"""
+SELECT source_at, absent FROM {OBSERVATIONS}
+WHERE harness = ? AND bot = ? AND window = ?
+ORDER BY source_at DESC LIMIT {NOT_ON_PLAN_READINGS}
+"""
+
+_PRUNE = f"""
+DELETE FROM {OBSERVATIONS} WHERE harness = ? AND bot = ? AND window = ? AND source_at < ?
+"""
+
+_MARK = f"""
+UPDATE {TABLE} SET absent = MAX(?, 1) WHERE harness = ? AND bot = ? AND window = ? AND absent > 0
 """
 
 
@@ -91,14 +135,26 @@ class Reading:
     used: float | None
     resets_at: int | None
     observed_at: float
+    absent: int = 0
+    source_at: float | None = None
 
 
-def missing(window: str, observed_at: float) -> Reading:
-    return Reading(window, None, None, observed_at)
+def missing(window: str, observed_at: float, absent: int = 0, source_at: float | None = None) -> Reading:
+    return Reading(window, None, None, observed_at, absent, source_at)
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
     connection.execute(DDL)
+    connection.execute(OBSERVATIONS_DDL)
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+    for name, kind in ADDED_COLUMNS.items():
+        if name in columns:
+            continue
+        try:
+            connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {kind}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
 
 def _number(value: object) -> float | None:
@@ -137,8 +193,8 @@ def iso_time(value: object) -> float | None:
 def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
     """The 5-hour and 7-day readings in Claude Code's `get_usage` reply.
 
-    A null window or a bad reset gives that window a no-reading, and a
-    login without limits (`rate_limits_available` not true) gives both.
+    A null window (counted as absent) or a bad reset gives that window a
+    no-reading, and a login without limits (`rate_limits_available` not true) gives both.
     An error reply, or no reply, is no observation at all."""
     for line in stdout[:MAX_REPLY_BYTES].splitlines():
         try:
@@ -155,16 +211,19 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
             return []
         limits = reply.get("rate_limits")
         if reply.get("rate_limits_available") is not True or not isinstance(limits, dict):
-            return [missing(window, now) for window in WINDOWS]
+            return [missing(window, now, 0, now) for window in WINDOWS]
         found = []
         for window in WINDOWS:
             info = limits.get(window)
+            if info is None:
+                found.append(missing(window, now, 1, now))
+                continue
             resets = iso_time(info.get("resets_at")) if isinstance(info, dict) else None
             resets_at = reset_time(int(resets), now) if resets is not None else None
             if resets_at is None:
-                found.append(missing(window, now))
+                found.append(missing(window, now, 0, now))
             else:
-                found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now))
+                found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now, 0, now))
         return found
     return []
 
@@ -178,7 +237,8 @@ def parse_codex(found: object, now: float) -> list[Reading]:
     CLOCK_SKEW_SECONDS) gives nothing. A reset is `resets_at` (epoch
     seconds), else the event time plus `resets_in_seconds`. A window the
     event does not report, or reports without a valid reset, is a
-    no-reading; null `rate_limits` makes both windows no-readings."""
+    no-reading, counted as absent only when the event reports another
+    window; null `rate_limits` makes both windows no-readings."""
     if not isinstance(found, dict):
         return []
     emitted = iso_time(found.get("timestamp"))
@@ -200,11 +260,13 @@ def parse_codex(found: object, now: float) -> list[Reading]:
         if resets_at is None and seconds is not None and seconds >= 0:
             resets_at = reset_time(round(emitted + seconds), now)
         readings[window] = (
-            missing(window, observed)
+            missing(window, observed, 0, emitted)
             if resets_at is None
-            else Reading(window, used_percent(info.get("used_percent")), resets_at, observed)
+            else Reading(window, used_percent(info.get("used_percent")), resets_at, observed, 0, emitted)
         )
-    return [readings.get(window) or missing(window, observed) for window in WINDOWS]
+    return [
+        readings.get(window) or missing(window, observed, 1 if readings else 0, emitted) for window in WINDOWS
+    ]
 
 
 def store(
@@ -219,17 +281,33 @@ def store(
     if not readings:
         return
     ensure_table(connection)
-    connection.executemany(
-        _UPSERT,
-        [
-            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id)
-            for r in readings
-        ],
-    )
+    for r in readings:
+        source = r.observed_at if r.source_at is None else r.source_at
+        absent = 1 if r.absent else 0
+        account = (harness, bot, r.window)
+        connection.execute(_OBSERVE, (*account, source, absent))
+        newest = connection.execute(_NEWEST, account).fetchall()
+        connection.execute(_PRUNE, (*account, newest[-1][0]))
+        connection.execute(
+            _UPSERT,
+            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, absent, source),
+        )
+        connection.execute(_MARK, (_omissions(newest), *account))
     lane_limit.reevaluate(connection, harness, bot, readings)
 
 
-def from_row(window: object, used: object, resets_at: object, observed_at: object) -> Reading | None:
+def _omissions(newest: list[tuple[float, int]]) -> int:
+    run, newer = 0, None
+    for source_at, absent in newest:
+        if not absent or (newer is not None and newer - source_at > STALE_SECONDS):
+            break
+        run, newer = run + 1, source_at
+    return run
+
+
+def from_row(
+    window: object, used: object, resets_at: object, observed_at: object, absent: object = 0
+) -> Reading | None:
     """A stored row, re-validated; None when any key value is not what `store` writes."""
     if window not in WINDOWS:
         return None
@@ -237,19 +315,25 @@ def from_row(window: object, used: object, resets_at: object, observed_at: objec
     if observed is None:
         return None
     if resets_at is None:
-        return missing(str(window), observed) if used is None else None
+        count = absent if type(absent) is int and absent >= 0 else 0
+        return missing(str(window), observed, count) if used is None else None
     if isinstance(resets_at, bool) or not isinstance(resets_at, int):
         return None
     return Reading(str(window), used_fraction(used), resets_at, observed)
 
 
 def window_state(reading: Reading, now: float) -> str:
-    """`ok`; `stale` once the window has reset or the reading is old; else `no reading`."""
+    """`stale` once the window has reset or the reading is old; else `ok`;
+    `not on plan` once absent from NOT_ON_PLAN_READINGS readings; else `no reading`."""
     if (reading.resets_at is not None and reading.resets_at <= now) or (
         now - reading.observed_at > STALE_SECONDS
     ):
         return "stale"
-    return "ok" if reading.used is not None else "no reading"
+    if reading.used is not None:
+        return "ok"
+    if reading.resets_at is None and reading.absent >= NOT_ON_PLAN_READINGS:
+        return "not on plan"
+    return "no reading"
 
 
 def headroom(readings: list[Reading], now: float) -> float | None:

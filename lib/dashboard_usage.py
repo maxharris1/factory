@@ -10,7 +10,9 @@ from the enabled machines.yml devices (`devices` keeps their machines.yml
 order), then any account that has stored readings with the devices its rows
 name. Each window holds the newest reading across the account's devices and
 is `ok`, `stale` (the window has reset or the reading is older than
-STALE_SECONDS, and `used` is then null) or `no reading`. An account is `not tracked` (Cursor), `no reading` (no chosen
+STALE_SECONDS, and `used` is then null), `not on plan` (left out of
+NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
+`no reading`. An account is `not tracked` (Cursor), `no reading` (no chosen
 source, or no row yet), `no telemetry` (no table: an older database, or
 telemetry never on), `stale` or `ok`. No value is guessed: a missing
 utilization stays null.
@@ -58,8 +60,10 @@ def _accounts(machines: MachinesConfig | None) -> dict[Account, list[str]]:
 
 def _rows(connection: sqlite3.Connection) -> dict[Account, tuple[list[str], dict[str, Reading]]] | None:
     try:
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
         rows = connection.execute(
-            f"SELECT device, harness, bot, window, used, resets_at, observed_at"
+            f"SELECT device, harness, bot, window, used, resets_at, observed_at,"
+            f" {'absent' if 'absent' in columns else '0'}"
             f" FROM {TABLE} ORDER BY device, harness, bot LIMIT {ROW_LIMIT}"
         ).fetchall()
     except sqlite3.OperationalError:

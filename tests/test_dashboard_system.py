@@ -758,7 +758,7 @@ def test_rules_read_their_values_from_the_chart() -> None:
     assert rules["stuck"] == labels[("building", "stuck")]
     assert labels[("plan-check", "planning")] in rules["plan-check"]
     assert labels[("review", "capped")] in rules["rounds"]
-    assert rules["ship"] == "merge, handoff, or after an approver"
+    assert rules["ship"] == "merge, handoff, or after an approver, when QA covers the head"
     assert rules["approver"].startswith(labels[("waiting-external", "stuck")])
 
 

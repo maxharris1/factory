@@ -52,7 +52,7 @@ from lib.eval_report import (
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.grok_delivery import GrokDeliveryError, NoGrokWebhook, WebhookGrokDelivery
+from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hold import MergeUpdate
@@ -127,6 +127,7 @@ from lib.update_check import (
     rebase_scope,
 )
 from lib.wait import (
+    OWNING_BOTS,
     WaitError,
     open_queue,
     owned_job,
@@ -175,7 +176,8 @@ check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
   With no paths, checks orch.yml, machines.yml and the example factory.md
   files. When --orch is given, machines.yml is checked only with --machines.
-  --allow-placeholders permits and reports REPLACE_WITH_ install values only.
+  --allow-placeholders permits and reports REPLACE_WITH_ install values in
+  orch.yml only; a machines.yml device with one is always skipped with a warning.
   Warns about uncommitted edits to a tracked orch.yml or machines.yml.
   --digest prints the sha256 of each effective config (base plus overlay).
   owner/name=PATH names the project a factory.md belongs to; a file with
@@ -266,9 +268,9 @@ move-db unlocked --db PATH
   integrity_check, the manifest has a retired line, each job-detail file
   the manifest names is beside the copy with its sha256, and every spilled
   job row has its file; otherwise it exits 1 saying which failed.
-  unlocked reads the live database's poll lock, never the database: it
-  exits 0 when no poller holds PATH.lock (or there is none), 1 when one
-  does.
+  unlocked reads the live database's locks, never the database: it exits
+  0 when no poller holds PATH.lock and no `orch wait` holds a
+  waiter-<bot>.lock beside PATH, 1 (naming each held lock) when one does.
 
 db-backup <label> [--db PATH] [--dir PATH]
   Run this before any manual write to orch.db (#654). Copies the database
@@ -591,10 +593,7 @@ def _check_config(argv: list[str]) -> int:
     if machines_path is not None:
         failed = _report(
             machines_path,
-            load_machines_yml(
-                machines_path,
-                allow_placeholders=args.allow_placeholders,
-            )[1],
+            load_machines_yml(machines_path)[1],
         ) or failed
     for repo, path in factory_paths:
         factory, findings = load_factory_md(path)
@@ -753,6 +752,12 @@ def _wait(argv: list[str]) -> int:
     except (waiter.WaiterError, OSError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
+    if (retired := _retired()) is not None:
+        print(
+            f"orch wait: this host is retired as the orch host ({retired}); not waiting",
+            file=sys.stderr,
+        )
+        return 79
     # Heartbeats (#92): one waiter row per device this waiter claims on.
     # An autostart waiter marks its rows stopped on exit; a plain wait,
     # which exits by design once it claims, removes them.
@@ -855,6 +860,12 @@ def _poll(argv: list[str]) -> int:
         path = _db_path(args.db)
         signal.signal(signal.SIGTERM, _exit_on_term)
         with _poll_lock(path, _pidfile_path(args.pidfile, path)):
+            if (retired := _retired()) is not None:
+                print(
+                    f"orch poll: this host is retired as the orch host ({retired}); not polling",
+                    file=sys.stderr,
+                )
+                return 79
             dispatcher, source = _runtime(
                 path,
                 args.orch,
@@ -954,9 +965,6 @@ class _AfterPoll:
 
 
 def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
-    """#219: after a cycle that merged a PR of this checkout's own repo,
-    start `deploy/self-heal.sh kick`; the webhook and Linear secrets stay
-    out of its environment (self-heal.sh reads webhook.env itself)."""
     from lib import heal, self_deploy
 
     return self_deploy.MergeKick(
@@ -1119,7 +1127,11 @@ def _runtime(
         and not config.trusted_linear_users
     ):
         raise ValueError("trusted_linear_users is required for Linear polling")
-    if config.grok is None and any(project.grok_webhook for project in config.projects):
+    if (
+        config.driver == "grok"
+        and config.grok is None
+        and any(project.grok_webhook for project in config.projects)
+    ):
         raise ValueError("grok webhook env names are required for polling")
     path = _db_path(db_path)
     queue = (
@@ -1133,17 +1145,7 @@ def _runtime(
     }
     if create and not any(trusted.values()):
         trusted["github"]["init-db"] = frozenset({"init-db"})
-    cleared: list[str] = []
-    delivery: WebhookGrokDelivery | NoGrokWebhook = NoGrokWebhook()
-    if config.grok is not None:
-        cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
-        delivery = WebhookGrokDelivery(
-            url_env=config.grok.webhook_url_env,
-            key_env=config.grok.webhook_key_env,
-            auth_env=config.grok.webhook_auth_env,
-        )
-    if config.linear is not None:
-        cleared.append(config.linear.api_key_env)
+    delivery = wake_delivery(config)
     t8 = T8Hook()
     source = LivePollSource(
         config,
@@ -1165,7 +1167,7 @@ def _runtime(
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
-        feeder = _feeder(config, queue, machines, source, cleared)
+        feeder = _feeder(config, queue, machines, source)
     dispatcher = Dispatcher(
         path,
         queue,
@@ -1230,7 +1232,6 @@ def _feeder(
     queue: SQLiteJobQueue,
     machines: MachinesConfig | None,
     source: LivePollSource,
-    cleared: list[str],
 ) -> Feeder:
     """The backlog feeder (issue #85) for projects with an orch.yml intake."""
     linear = None
@@ -1247,7 +1248,9 @@ def _feeder(
         queue,
         config,
         machines,
-        github=GitHubIntakeClient(runner=source._adapter_runner, cleared_variables=cleared),
+        github=GitHubIntakeClient(
+            runner=source._adapter_runner, cleared_variables=config.secret_env_names
+        ),
         linear=linear,
         factory_for=source.factory_context,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
@@ -1263,7 +1266,7 @@ def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | N
     machines_path = path if path is not None else ROOT / "machines.yml"
     if not machines_path.is_file() and not required and path is None:
         return None
-    config, findings = load_machines_yml(machines_path, allow_placeholders=True)
+    config, findings = load_machines_yml(machines_path)
     errors = [item for item in findings if item.severity == "error"]
     if config is None or errors:
         detail = errors[0].message if errors else "invalid machines.yml"
@@ -1287,13 +1290,27 @@ def _pidfile_path(explicit: Path | None, database: Path) -> Path:
     return database.with_name("poller.pid")
 
 
+def _retired() -> str | None:
+    path = Path.home() / ".config/factory/orch-retired"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    return f"{path}: {lines[0] if lines else ''}"
+
+
 def _lock_path(database: Path) -> Path:
     return database.with_name(database.name + ".lock")
 
 
-def _poll_lock_free(database: Path) -> bool:
+def _held_locks(database: Path) -> list[Path]:
+    waiters = [waiter.lock_path(database, bot) for bot in OWNING_BOTS]
+    return [path for path in [_lock_path(database), *waiters] if not _lock_free(path)]
+
+
+def _lock_free(path: Path) -> bool:
     try:
-        handle = _lock_path(database).open("rb")
+        handle = path.open("rb")
     except FileNotFoundError:
         return True
     with handle:
@@ -2462,10 +2479,11 @@ def _move_db(argv: list[str]) -> int:
     unlocked.add_argument("--db", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "unlocked":
-        if _poll_lock_free(args.db):
-            return 0
-        print(f"orch move-db unlocked: a poller still holds {_lock_path(args.db)}", file=sys.stderr)
-        return 1
+        held = _held_locks(args.db)
+        for path in held:
+            role = "poller" if path == _lock_path(args.db) else "waiter"
+            print(f"orch move-db unlocked: a {role} still holds {path}", file=sys.stderr)
+        return 1 if held else 0
     try:
         if args.command == "drained":
             facts = db_facts(args.db)

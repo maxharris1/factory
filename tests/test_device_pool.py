@@ -304,32 +304,33 @@ def test_device_power_loss_keeps_slot_held_and_never_done(
     assert pool.used() == {"pc": 1}
 
 
-def test_shipped_inventory_never_places_on_the_disabled_pc_or_mac(
+def test_shipped_inventory_fills_pc_and_box_and_never_places_on_the_mac(
     tmp_path: Path,
 ) -> None:
-    """The PC and Mac stay enabled: false until F2-02. With the shipped
-    machines.yml, every claim lands on the box and, once the box is full,
-    work stays queued instead of spilling onto a remote device."""
     root = Path(__file__).resolve().parents[1]
-    config, _ = load_machines_yml(root / "machines.yml", allow_placeholders=True)
+    config, _ = load_machines_yml(root / "machines.yml")
     assert config is not None
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
     pool = DevicePool(queue, config)
-    for index in range(4):
-        for harness in ("claude", "codex", "cursor"):
+    harnesses = ("claude", "codex", "cursor")
+    for index in range(6):
+        for harness in harnesses:
             enqueue(queue, harness, f"{harness}-{index}")
 
     placements = []
-    for harness in ("claude", "codex", "cursor", "claude", "codex", "cursor"):
-        claimed = pool.claim(harness)
+    for index in range(17):
+        claimed = pool.claim(harnesses[index % 3])
         if claimed is not None:
             placements.append(claimed[1])
 
-    box = config.device("box")
-    assert box is not None and box.slot_max is not None
-    assert len(placements) == box.slot_max
-    assert {placement.device for placement in placements} == {"box"}
-    assert pool.used() == {"box": box.slot_max}
+    assert len(placements) == 16
+    assert pool.used() == {"pc": 10, "box": 6}
+    assert {placement.os_user for placement in placements} == {
+        "claude-bot",
+        "codex-bot",
+        "cursor-bot",
+    }
+    assert [job.state for job in queue.outstanding()].count("queued") == 2
 
 
 def slot_rows(queue: SQLiteJobQueue) -> list[tuple[str, str]]:

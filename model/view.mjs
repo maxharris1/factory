@@ -62,10 +62,10 @@ export const step = (action, from, to) => {
   if (action === "T4ApproveCiRed") return "APPROVE on red CI, CI fix";
   if (action === "T4HeadMoves") return "a new head is pushed";
   if (action === "T4PatchDiffers") return "head changed and the patch differs";
-  if (action === "T4ShipMerge") return "ship = merge";
-  if (action === "T4ShipHandoff") return "ship = handoff";
-  if (action === "T4ShipAfter") return "ship = after an approver";
-  if (action === "T4Hold") return "ship = merge or handoff and the PR is held";
+  if (action === "T4ShipMerge") return "ship = merge, QA covers the head";
+  if (action === "T4ShipHandoff") return "ship = handoff, QA covers the head";
+  if (action === "T4ShipAfter") return "ship = after an approver, QA covers the head";
+  if (action === "T4Hold") return "ship = merge or handoff and the PR is held, QA covers the head";
   if (action === "T4HoldOk") return "approver's OK at the head, or approver removes a label-only hold";
   if (action === "T4HoldOkQueue") return "approver's OK at the head, finish_line merge";
   if (action === "T4HoldOkHandoff") return "approver's OK at the head, ship = handoff, finish_line ready-for-review";
@@ -87,7 +87,7 @@ export const step = (action, from, to) => {
   // handed-off one, and section 4.1 says the rest in prose. From merge-queue
   // the QueueMerge arrow's label names it.
   if (action === "MergeObserved") return from.state === "handed-off" ? "PR merged" : null;
-  if (action === "T4ShipQueue") return "APPROVE, finish_line merge";
+  if (action === "T4ShipQueue") return "APPROVE, finish_line merge, QA covers the head";
   if (action === "QueueMerge") {
     return "poller squash-merges the queue head (clean, CI green, approval covers the head), or the merge is observed";
   }
@@ -99,5 +99,7 @@ export const step = (action, from, to) => {
   if (action === "UpdateNonTrivial") return "non-trivial update, cross-family re-review";
   if (action === "UpdateRetry") return "update fails, one more update";
   if (action === "UpdateStuck") return "two failed updates (update-failed-2)";
+  if (action === "QaEnvFailPark") return "QA environment fails twice at one head";
+  if (action === "QaParkAnswered") return "answer, QA runs again at the same head";
   return action;
 };
