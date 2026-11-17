@@ -103,10 +103,12 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
 .ilabel{min-width:108px;font:500 12px/1.3 var(--mono);color:var(--muted)}
 .itext{font-size:12px;color:var(--text-2)}
 .imeter{display:block;width:176px}.imeter .px{height:8px}
-#intake .feed{margin-top:10px}
+#intake .intake+.feed{margin-top:10px}
+#intake .what{min-width:0;overflow-wrap:anywhere}#intake .what.bad{color:var(--bad)}
+.igroup{margin:14px 0 2px;font:11px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 #intake details{margin-top:4px}
 .fed-more{margin:4px 0 0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
-.fed-more li{display:flex;gap:8px;padding:4px 6px;border-bottom:1px solid var(--line)}
+.fed-more li{display:flex;flex-wrap:wrap;gap:8px;padding:4px 6px;border-bottom:1px solid var(--line)}
 .fed-more li:last-child{border-bottom:0}
 .fed-more .ticket{color:var(--text)}.fed-more .when{margin-left:auto;color:var(--muted)}
 """
@@ -144,10 +146,19 @@ BELT_TINT = "#9ece6a"
 CI_TINT = "#ff9e64"
 _BAD = "#f7768e"
 
+INTAKE_GROUP = {
+    "error": "trouble",
+    "refused-intake": "trouble",
+    "waiting-blocked": "waiting",
+    "waiting-capacity": "waiting",
+}
+FED_TODAY_SECONDS = 86400
+
 
 def lanes_table() -> dict:
     return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
-            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "step_after_ci": STEP_AFTER_CI, "ci_tint": CI_TINT}
+            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "step_after_ci": STEP_AFTER_CI, "ci_tint": CI_TINT,
+            "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS}
 
 
 def queue_speed(age: object) -> float:
@@ -463,23 +474,36 @@ SCRIPT = r"""
   }
 
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
-    'waiting-blocked': 'waiting on a blocker', 'feeding': 'feeding', 'error': 'feed error, retrying',
-    'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
+    'waiting-blocked': 'waiting on a blocker', 'refused-intake': 'refused at intake', 'feeding': 'feeding',
+    'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
 
   function tierChip(parent, tier) {
     if (tier !== null && tier !== undefined) add(parent, chip('tier ' + tier, 'accent'));
   }
 
-  function intakeSplit(items) {
-    var fed = items.filter(function (x) { return x.fed_age_seconds !== null && x.fed_age_seconds !== undefined; })
-      .sort(function (a, b) { return a.fed_age_seconds - b.fed_age_seconds; }).slice(0, 3);
-    return {top: fed, rest: items.filter(function (x) { return fed.indexOf(x) < 0; })};
+  function intakeGroups(items) {
+    var groups = {trouble: [], waiting: [], fed: []};
+    items.forEach(function (x) {
+      var age = x.fed_age_seconds;
+      var group = LANES.intake_group[x.state] || (age !== null && age !== undefined && age < LANES.fed_today ? 'fed' : null);
+      if (group) groups[group].push(x);
+    });
+    return groups;
+  }
+
+  function intakeRow(ul, x, cls) {
+    var li = add(ul, el('li'));
+    add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
+    tierChip(li, x.tier);
+    add(li, el('span', cls || 'what', x.reason || FEEDER_STATE[x.state] || x.state));
+    return li;
   }
 
   function renderIntake(d) {
     var w = d.poller && d.poller.linear_webhook;
     var f = d.feeder;
-    var root = panel('intake', 'Intake', f ? f.fed + ' fed · ' + (f.waiting_capacity + (f.waiting_blocked || 0)) + ' waiting' : null);
+    var g = f ? intakeGroups(f.items || []) : null;
+    var root = panel('intake', 'Intake', g ? g.waiting.length + ' waiting · ' + g.fed.length + ' fed today' : null);
     if (!root) return;
     var box = add(root, el('div', 'intake'));
     if (w) {
@@ -511,28 +535,26 @@ SCRIPT = r"""
                                            slots: Math.max(1, f.eligible), seed: 24, height: 8, still: true}));
     }
     if (!w && !f) { add(box, el('p', 'empty', 'no listener or feeder has run')); return; }
-    if (!f || !(f.items || []).length) return;
-    var split = intakeSplit(f.items);
-    var state = function (x) { return x.reason || FEEDER_STATE[x.state] || x.state; };
-    if (split.top.length) {
-      var ul = add(root, el('ul', 'feed'));
-      split.top.forEach(function (x) {
-        var li = add(ul, el('li'));
-        add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
-        tierChip(li, x.tier);
-        add(li, el('span', 'what', state(x)));
-        add(li, el('span', 'when', x.pr ? '→ PR #' + x.pr : ''));
-      });
+    if (!g) return;
+    if (g.trouble.length) {
+      var trouble = add(root, el('ul', 'feed'));
+      g.trouble.forEach(function (x) { intakeRow(trouble, x, 'what bad'); });
     }
-    if (split.rest.length) {
-      var more = details(root, 'intake-more', split.rest.length + ' more');
-      var list2 = add(more, el('ul', 'fed-more'));
-      split.rest.forEach(function (x) {
-        var li = add(list2, el('li'));
-        add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
-        tierChip(li, x.tier);
-        add(li, el('span', 'what', state(x)));
-        add(li, el('span', 'when', x.pr ? '→ PR #' + x.pr : ''));
+    if (g.waiting.length) {
+      add(root, el('div', 'igroup', g.waiting.length + ' waiting'));
+      var waiting = add(root, el('ul', 'feed'));
+      g.waiting.slice(0, 3).forEach(function (x) { intakeRow(waiting, x); });
+      if (g.waiting.length > 3) {
+        var rest = add(details(root, 'intake-waiting-more', (g.waiting.length - 3) + ' more'), el('ul', 'feed'));
+        g.waiting.slice(3).forEach(function (x) { intakeRow(rest, x); });
+      }
+    }
+    if (g.fed.length) {
+      var fed = add(details(root, 'intake-fed', g.fed.length + ' fed today'), el('ul', 'fed-more'));
+      g.fed.forEach(function (x) {
+        var li = intakeRow(fed, x);
+        if (x.pr) add(li, el('span', null, '→ PR #' + x.pr));
+        ticking(add(li, el('span', 'when')), x.fed_age_seconds, 'fed ', ' ago');
       });
     }
   }
@@ -846,6 +868,7 @@ _FEEDER_STATE = {
     "eligible": "eligible",
     "waiting-capacity": "waiting for capacity",
     "waiting-blocked": "waiting on a blocker",
+    "refused-intake": "refused at intake",
     "feeding": "feeding",
     "error": "feed error, retrying",
     "fed": "fed",
@@ -878,12 +901,14 @@ def _linear_webhook(snapshot: dict) -> str:
     )
 
 
-def intake_split(items: list[dict]) -> tuple[list[dict], list[dict]]:
-    """The three newest fed items, then every other item in feeder order."""
-    fed = sorted(
-        (x for x in items if x.get("fed_age_seconds") is not None), key=lambda x: x["fed_age_seconds"]
-    )[:3]
-    return fed, [x for x in items if not any(x is y for y in fed)]
+def intake_groups(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    groups: dict[str, list[dict]] = {"trouble": [], "waiting": [], "fed": []}
+    for item in items:
+        age = item.get("fed_age_seconds")
+        group = INTAKE_GROUP.get(item["state"]) or ("fed" if age is not None and age < FED_TODAY_SECONDS else None)
+        if group:
+            groups[group].append(item)
+    return groups["trouble"], groups["waiting"], groups["fed"]
 
 
 def _feeder(snapshot: dict) -> str:
@@ -908,37 +933,44 @@ def _tier_chip(tier: object) -> str:
     return "" if tier is None else _chip(f"tier {tier}", "accent")
 
 
-def _fed_line(item: dict) -> str:
+def _intake_row(item: dict, cls: str = "what", tail: str = "") -> str:
     state = item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"])
-    pr = f"→ PR #{item['pr']}" if item.get("pr") else ""
     ticket = f"{_short(item['repo'])}#{item['issue']}"
-    return (
-        f'<li>{_span("ticket", ticket)}{_tier_chip(item.get("tier"))}'
-        f'{_span("what", state)}'
-        f'<span class="when">{_e(pr)}</span></li>'
-    )
+    return f'<li>{_span("ticket", ticket)}{_tier_chip(item.get("tier"))}{_span(cls, state)}{tail}</li>'
+
+
+def _fed_row(item: dict) -> str:
+    pr = _span(None, f"→ PR #{item['pr']}") if item.get("pr") else ""
+    return _intake_row(item, tail=pr + _when(item["fed_age_seconds"], prefix="fed ", suffix=" ago"))
 
 
 def _intake(snapshot: dict) -> str:
     feeder = snapshot.get("feeder")
     lines = _linear_webhook(snapshot) + _feeder(snapshot)
-    count = None
-    if feeder:
-        waiting = feeder["waiting_capacity"] + (feeder.get("waiting_blocked") or 0)
-        count = f"{feeder['fed']} fed · {waiting} waiting"
     if not lines:
         return _panel("intake", "Intake", '<div class="intake"><p class="empty">no listener or feeder has run</p></div>')
     inner = f'<div class="intake">{lines}</div>'
-    if feeder and feeder["items"]:
-        top, rest = intake_split(feeder["items"])
-        if top:
-            inner += f'<ul class="feed">{"".join(_fed_line(x) for x in top)}</ul>'
-        if rest:
-            inner += (
-                f"<details><summary>{len(rest)} more</summary>"
-                f'<ul class="fed-more">{"".join(_fed_line(x) for x in rest)}</ul></details>'
-            )
-    return _panel("intake", "Intake", inner, count=count)
+    if not feeder:
+        return _panel("intake", "Intake", inner)
+    trouble, waiting, fed = intake_groups(feeder["items"])
+    if trouble:
+        inner += f'<ul class="feed">{"".join(_intake_row(x, "what bad") for x in trouble)}</ul>'
+    if waiting:
+        inner += (
+            f'<div class="igroup">{len(waiting)} waiting</div>'
+            f'<ul class="feed">{"".join(_intake_row(x) for x in waiting[:3])}</ul>'
+        )
+    if waiting[3:]:
+        inner += (
+            f"<details><summary>{len(waiting) - 3} more</summary>"
+            f'<ul class="feed">{"".join(_intake_row(x) for x in waiting[3:])}</ul></details>'
+        )
+    if fed:
+        inner += (
+            f"<details><summary>{len(fed)} fed today</summary>"
+            f'<ul class="fed-more">{"".join(_fed_row(x) for x in fed)}</ul></details>'
+        )
+    return _panel("intake", "Intake", inner, count=f"{len(waiting)} waiting · {len(fed)} fed today")
 
 
 def _just_happened_and_intake(snapshot: dict) -> str:
