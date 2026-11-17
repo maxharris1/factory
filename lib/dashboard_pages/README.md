@@ -24,7 +24,7 @@ Name the module in a ticket's `Touches:` line.
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_headroom`, `_rounds`, `_savings`, `_jobs_lifetime` (cost: `rollup_panel` in `lib/dashboard_telemetry.py`); `top_row` and `middle_row` wrap two panels each in an `ef-row` | #144 |
 | `job.html#job-<id>` (ticket detail) | `ticket_detail.py` | `_job_article`, `_jobview`, `_flow_template`, `_legend`, `_meta`; the job page and flow CSS and script | #146, #149 |
-| `ticket.html#t=<repo>#<ticket>` (Ticket, no nav item; Tickets is current) | `ticket_detail.py` | `resolve_ticket` (running before queued, exact repo before any case), `TICKET_KINDS` (strip, tiles and sections per kind, drawn from the `TILES` and `SECTIONS` registries), `ticket_view`; the address is `ticket_address` and the link `ticket_page_href` in `common.py`. The served file holds only the "No ticket chosen" panel; the script draws the ticket from the hash | #531 |
+| `ticket.html#t=<repo>#<ticket>` (Ticket, no nav item; Tickets is current) | `ticket_detail.py` | `resolve_ticket` (running before queued, exact repo before any case, then the tickets.json records: exact key, then the shown address), `record_row`, `TICKET_KINDS` (strip, tiles and sections per kind: running, queued, stopped, shipped, idle, drawn from the `TILES` and `SECTIONS` registries), `ticket_view`; the address is `ticket_address` and the link `ticket_page_href` in `common.py`. The served file holds only the "No ticket chosen" panel; the script draws the ticket from the hash and fetches tickets.json for tickets with no job | #531, #655 |
 
 ## Relay threads
 
