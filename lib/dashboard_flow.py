@@ -318,6 +318,50 @@ def ticket_phase(phases: dict[str, str], state: str, stuck: bool) -> str:
     return "Stop" if stuck else phases.get(state, "Stop")
 
 
+def shipped_facts(chart: dict | None, flow: dict) -> dict | None:
+    """{at, how} when the ticket's current state is on the Shipped shelf: when
+    it first reached a Shipped state, and whether that was a handoff."""
+    phases = ticket_phases(chart)
+    if phases.get(flow["state"]) != "Shipped":
+        return None
+    first = next(visit for visit in flow["visits"] if phases.get(visit["state"]) == "Shipped")
+    return {
+        "at": first["started_at"],
+        "how": "handed-off" if first["state"] == "handed-off" else "merged",
+    }
+
+
+def stop_facts(chart: dict | None, flow: dict, state: str, stuck: bool) -> dict | None:
+    """{state, at, stopped_in, ways_out} when the board puts the ticket in its
+    Stopped group (ticket_phase). `state` is the ticket's stored state; a stuck
+    flag on a state that is not itself a stop reads as stopped in "stuck"."""
+    if chart is None:
+        return None
+    phases = ticket_phases(chart)
+    if ticket_phase(phases, state, stuck) != "Stop":
+        return None
+    stop = state if ticket_phase(phases, state, False) == "Stop" else "stuck"
+    visits = flow["visits"]
+    index = next(
+        (i for i, visit in enumerate(visits) if visit["current"] and visit["state"] == stop),
+        None,
+    )
+    if stop != state:
+        stopped_in: str | None = state
+    else:
+        stopped_in = visits[index - 1]["state"] if index else None
+    return {
+        "state": stop,
+        "at": None if index is None else visits[index]["started_at"],
+        "stopped_in": stopped_in,
+        "ways_out": [
+            {"to": edge["to"], "label": edge["label"]}
+            for edge in chart["edges"]
+            if edge["from"] == stop
+        ],
+    }
+
+
 def _started_at(visit: Visit) -> float | None:
     if not visit.steps:
         return None
