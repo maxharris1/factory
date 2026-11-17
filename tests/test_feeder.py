@@ -190,6 +190,9 @@ class FakeGitHub:
             return "merged"
         return pull.get("state", "open")
 
+    def pull_base(self, repo: str, number: int) -> str:
+        return self.pulls[(repo, number)]["base"]
+
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
         self._maybe_fail("pull")
         assert self.find_pull(repo, branch) is None, "second PR for one branch"
@@ -212,7 +215,8 @@ class FakeGitHub:
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         self.calls.append(f"ahead:{repo}:{tip}")
-        return self._commits_on(repo, tip)
+        merged = set(self._commits_on(repo, base))
+        return tuple(sha for sha in self._commits_on(repo, tip) if sha not in merged)
 
     def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
         return frozenset(
