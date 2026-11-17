@@ -8,13 +8,13 @@ from tests.golden.pages import page_digests, page_name, record
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "activity.CSS": "51ad4744666673c5e668ad042e11e65f48ace480ff85991b4436a256ba57e6f9",
-    "activity.SCRIPT": "06664951616bf8def28a5630e7ddab5dd2f1194115069e5ca72155f82121b9aa",
-    "seeded/main": "d0fcff172911a1d87399ad0b6b83791c1c71fdb8fafb31e8f198ddc35ae3f280",
+    "activity.CSS": "3a69efa664921ac94bc562b6dce0674409ed8285aed1cedfa01dd7d6ee774462",
+    "activity.SCRIPT": "9a5bf7fd1adce89751d5a4bee3a9665acbe6f2b9de1062e7c66fc423d288c6e1",
+    "seeded/main": "b81d28ec195a1f0ee76a2fdca71e7bc46b433499773741df41c03735140d5036",
     "seeded/chrome": "8bb0b2d25b62fd9f57078928f0de45c84b44d0d4abc7976c997b46bf9f168bb7",
-    "hostile/main": "81ed6c31be92f082a69a69f25504cb2823b89d987324b7fbcee14a6f1817b59b",
+    "hostile/main": "baeb0eb03c5bf8dc144494941cae187008c06d2db87c48b83714bd86e0be7229",
     "hostile/chrome": "1552f8c25f2ca83f930cf58660a86f5646b51c0178ed9d02841e9e5aa8c736b1",
-    "empty/main": "5ae29a1d33e19d8e1327d638b05372532e97d29662bbc2d5db039d1fa5882e12",
+    "empty/main": "029f149dfdae7ecbce89013737a96cfc215b095c1ee28cd309d9ece0cab74655",
     "empty/chrome": "4da2d0bf5812c623a819ffc8a1d860a597c6b242473a3deee3c57068275d7591",
 }
 

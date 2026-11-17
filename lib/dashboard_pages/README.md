@@ -28,9 +28,14 @@ Name the module in a ticket's `Touches:` line.
 
 ## Relay threads
 
-The Relay panel on `activity.html` merges `handoff_savings.recent` and
-`poller.verdicts` into one thread per ticket (`relay_threads`, and
-`relayThreads` in the script). A verdict's `age_seconds` is the first time
+The Relay panel on `activity.html` draws `relay.threads`, one thread per
+ticket (`relay_threads`, and `relayThreads` in the script). The collector
+(`_relay` in `lib/dashboard.py`) picks 12 tickets: stopped tickets first, the
+most recently stopped first, then the newest movers. Each thread carries
+its ticket's newest 40 handoffs and verdicts. A verdict reads as its `chip`
+and `words` (`_VERDICT_WORDS`), with the raw outcome only in its `title`; an
+outcome with no words shows its kind in a muted chip and its raw text. A
+verdict's `age_seconds` is the first time
 recorded for its comment: the job it queued (`jobs.created_at`), the job
 that posted it (`jobs.finished_at`), the approval it recorded
 (`ticket_state.approved_at`) or the ship hold it raised
@@ -46,8 +51,8 @@ on a ticket sweeps, not just the first. The rule:
    a verdict; two verdicts keep handled order (`seq`).
 3. A verdict with no time goes directly after the verdict handled just
    before it in the thread, or first when it is the thread's first verdict.
-4. Threads go newest timed step first. Threads with no timed step go last,
-   newest handled verdict first.
+4. Threads keep the snapshot's order: newest activity (job or handled
+   comment) first, tickets with no known time last.
 
 `tests/test_dashboard_activity.py` tests each case and holds the two
 derivations together.
