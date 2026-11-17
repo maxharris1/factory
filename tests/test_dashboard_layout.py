@@ -798,7 +798,7 @@ global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 eval(script);
 setTimeout(() => {
   act(JSON.parse(actionsText));
-  process.stdout.write(JSON.stringify({fetches, tickets: ticketFetches, steps,
+  process.stdout.write(JSON.stringify({fetches, steps, tickets: ticketFetches,
     text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
     html: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.children.map(c => c.html()).join('')])),
     hidden: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, !!v.hidden])),
