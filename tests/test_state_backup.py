@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gc
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -421,6 +422,69 @@ def test_labelled_backup_prunes_on_each_call(tmp_path: Path) -> None:
     second, pruned = labelled_backup(db, manual, "two", NOW + timedelta(minutes=1))
     assert _names(manual) == sorted([first.name, second.name, *old[:3]])
     assert pruned == [manual / old[3]]
+
+
+def test_two_labelled_backups_in_one_second_keep_both(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    manual = tmp_path / "share" / "manual"
+    try:
+        connection.execute("DELETE FROM notes")
+        connection.execute("INSERT INTO notes VALUES ('before write')")
+        connection.commit()
+        first, _ = labelled_backup(db, manual, "fix", NOW + timedelta(milliseconds=100))
+        connection.execute("UPDATE notes SET body = 'after write'")
+        connection.commit()
+        second, _ = labelled_backup(db, manual, "fix", NOW + timedelta(milliseconds=900))
+    finally:
+        connection.close()
+
+    assert first == manual / "orch-20261117T120000Z-fix.db"
+    assert second == manual / "orch-20261117T120001Z-fix.db"
+    assert _names(manual) == [first.name, second.name]
+    assert _rows(first) == ["before write"]
+    assert _rows(second) == ["after write"]
+
+
+def test_labelled_backup_never_replaces_an_existing_file(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+    manual.mkdir(parents=True)
+    taken = manual / _labelled_name(NOW)
+    taken.write_bytes(b"keep")
+
+    target, _ = labelled_backup(db, manual, "fix", NOW)
+
+    assert taken.read_bytes() == b"keep"
+    assert target == manual / _labelled_name(NOW + timedelta(seconds=1))
+    assert _rows(target) == ["one", "two"]
+    assert _names(manual) == [taken.name, target.name]
+
+
+def test_concurrent_labelled_backups_each_keep_a_copy(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        targets = list(pool.map(lambda _: labelled_backup(db, manual, "fix", NOW)[0], range(8)))
+
+    expected = [_labelled_name(NOW + timedelta(seconds=second)) for second in range(8)]
+    assert sorted(target.name for target in targets) == expected
+    assert _names(manual) == expected
+    for target in targets:
+        assert _rows(target) == ["one", "two"]
+
+
+def test_a_failed_labelled_backup_leaves_no_file_behind(tmp_path: Path) -> None:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    db.write_bytes(b"not a database" * 100)
+    manual = tmp_path / "share" / "manual"
+
+    with pytest.raises(sqlite3.DatabaseError):
+        labelled_backup(db, manual, "fix", NOW)
+    assert _names(manual) == []
 
 
 @pytest.mark.parametrize("label", ["", "-x", ".x", "a/b", "../x", "a b", "x" * 65])
