@@ -1,8 +1,7 @@
 """job.html#job-<id> and ticket.html#t=<repo>#<ticket>: the ticket detail page (Job.dc.html,
 TicketR2.dc.html). Breadcrumb, hero, Run log, Live run slot, Journey, Can come next and the
 collapsed Full state chart. The Run log and the Journey render from one visit list and share
-one selection. A ticket with a running or queued job draws from status.json; any other tracked
-ticket draws from its tickets.json record, which the script fetches on ticket.html only."""
+one selection."""
 
 from __future__ import annotations
 
@@ -759,14 +758,11 @@ def _ticket_of(snapshot: dict, row: dict) -> dict | None:
 
 
 def record_row(record: dict, ticket: dict | None) -> dict:
-    """A ticket row for a tracked ticket with no job: its record as the flow, its tracker refs."""
     refs = {k: ticket[k] for k in ROW_FROM_TICKET if k in ticket} if ticket else {}
     return {"repo": record["repo"], "ticket_id": record["ticket_id"], "flow": record, **refs}
 
 
 def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) -> dict | None:
-    """Live rows first, then the records (None until loaded): the exact key, then the shown
-    address case-folded, the first by key."""
     repo, _, ticket_id = address.partition("#")
 
     def exact(row: dict) -> bool:
