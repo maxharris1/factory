@@ -180,7 +180,7 @@ def test_full_chart_is_behind_a_collapsed_toggle(tmp_path: Path) -> None:
     assert toggle, "no full chart toggle"
     assert not re.search(r'<details class="jd-chart"[^>]*\bopen\b', article)
     assert re.search(r"<summary>Full state chart ", toggle.group(1))
-    assert '<canvas class="jd-flowmap" width="1000" height="352"' in toggle.group(1)
+    assert '<canvas class="jd-flowmap" width="1000" height="416"' in toggle.group(1)
 
 
 def test_lanes_page_links_jobs_to_the_job_page_without_script(tmp_path: Path) -> None:
