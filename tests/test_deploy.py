@@ -625,12 +625,82 @@ def test_the_orch_poll_launch_detector(text: str, runs: bool) -> None:
     assert bool(_orch_poll_launches(text)) is runs
 
 
+HIDDEN_LAUNCHERS = [
+    "cat <<'UNIT' > /dev/null\nDescription=Factory's poller\nUNIT\norch poll --once\n",
+    'cat <<"UNIT" > /dev/null\nDescription=Factory\'s poller\nUNIT\norch poll --once\n',
+    "cat <<\\UNIT > /dev/null\nDescription=Factory's poller\nUNIT\norch poll --once\n",
+    "cat <<UNIT > /dev/null\nDescription=Factory's poller\nUNIT\norch poll --once\n",
+    "cat <<U'NI'T > /dev/null\nDescription=Factory's poller\nUNIT\norch poll --once\n",
+    "cat<<UNIT>/dev/null\nDescription=Factory's poller\nUNIT\norch poll --once\n",
+    "\tcat <<-UNIT > /dev/null\n\tDescription=Factory's poller\n\tUNIT\norch poll --once\n",
+    "cat <<A <<B > /dev/null\nit's\nA\nit's\nB\norch poll --once\n",
+    "x=\"$(cat <<UNIT\nFactory's poller\nUNIT\n)\"\necho 'a\nb'; orch poll --once\n",
+    "cat <<UNIT > /dev/null\n$(orch poll --once)\nUNIT\n",
+    "cat <<UNIT > /dev/null\n`orch poll --once`\nUNIT\n",
+    "bash <<'EOF'\necho 'a\nb'; orch poll --once\nEOF\n",
+    "cat <<'EOF' | bash\necho it\\'s; orch poll --once\nEOF\n",
+    "echo $((1 << 2))\necho 'a\nb'; orch poll --once\n",
+    "echo \"$((1 << 2))\"\necho 'a\nb'; orch poll --once\n",
+    "x=1; ((x <<= 1))\necho 'a\nb'; orch poll --once\n",
+    "echo $'Factory\\'s poller'; orch poll --once\n",
+    "read -r x <<<'it'; orch poll --once\n",
+]
+
+
+@pytest.mark.parametrize("script", HIDDEN_LAUNCHERS)
+def test_the_detector_catches_a_launcher_bash_runs(tmp_path: Path, script: str) -> None:
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (bins / "orch").write_text('#!/bin/sh\necho "orch $*" >> "$0.calls"\n', encoding="utf-8")
+    (bins / "orch").chmod(0o755)
+    (tmp_path / "probe.sh").write_text(script, encoding="utf-8")
+    subprocess.run(["bash", "probe.sh"], cwd=tmp_path, capture_output=True,
+                   env={"PATH": f"{bins}:/usr/bin:/bin"}, timeout=10)
+    assert (bins / "orch.calls").read_text(encoding="utf-8") == "orch poll --once\n"
+    assert _orch_poll_launches(script)
+
+
+@pytest.mark.parametrize(
+    ("text", "runs"),
+    [
+        ("cat > x.service <<'UNIT'\nDescription=Factory's poller\nExecStart=%h/.local/bin/orch poll\nUNIT\n", True),
+        ("cat <<'EOF'\nit's data\nEOF\necho done", False),
+        ("cat <<'EOF'\n$(orch poll)\nEOF", True),
+        ("echo $((1 << 2)); echo done", False),
+        ("cat <<EOF\n'\nEOF\necho 'orch poll'", False),
+    ],
+)
+def test_the_detector_reads_heredoc_bodies_as_data(text: str, runs: bool) -> None:
+    assert bool(_orch_poll_launches(text)) is runs
+
+
+@pytest.mark.parametrize(
+    ("unit", "runs"),
+    [
+        ("[Unit]\nDescription=Factory's poller\n[Service]\nExecStart=%h/.local/bin/orch poll\n", True),
+        ("Description=Factory's poller\nExecStartPre=/bin/true ; /usr/bin/orch poll --once\n", True),
+        ("Description=Factory's poller\nExecStart=-orch poll\n", True),
+        ("Description=Factory's poller\nExecStart=/bin/sh -c 'orch poll'\n", True),
+        ("Description=Factory's poller\nExecStart=/bin/echo # ; /usr/bin/orch poll\n", True),
+        ("Description=Factory's poller\nExecStart=/usr/bin/env \\\n    orch poll\n", True),
+        ("Description=Factory's poller\nExecStart = orch poll\n", True),
+        ("Description=Factory's poller\nExecStart=%h/factory/deploy/run-poller.sh\n", False),
+        ("Description=runs orch poll through run-poller.sh\n", False),
+        ("# ExecStart=orch poll\n; ExecStart=orch poll\n", False),
+        ("ExecStart=/bin/echo 'orch poll'\n", False),
+    ],
+)
+def test_the_unit_file_launch_detector(unit: str, runs: bool) -> None:
+    assert bool(_unit_orch_poll_launches(unit)) is runs
+
+
 def test_run_poller_is_the_only_deploy_file_that_runs_orch_poll() -> None:
     deploy = ROOT / "deploy"
     hits = [
         (path.name, line)
-        for path in sorted([*deploy.glob("*.sh"), *deploy.glob("*.service")])
-        for line in _orch_poll_launches(path.read_text(encoding="utf-8"))
+        for pattern, launches in (("*.sh", _orch_poll_launches), ("*.service", _unit_orch_poll_launches))
+        for path in sorted(deploy.glob(pattern))
+        for line in launches(path.read_text(encoding="utf-8"))
     ]
     assert hits == [("run-poller.sh", 'exec "${HOME}/.local/bin/orch" poll "$@"')]
 
