@@ -227,7 +227,8 @@ def test_the_script_draws_clarify_and_update_from_main_heroes(tmp_path: Path, ac
     assert f'<span class="verb">{verb}…</span>' in view
 
 
-def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0) -> http.server.ThreadingHTTPServer:
+def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0,
+           records_gate: threading.Event | None = None) -> http.server.ThreadingHTTPServer:
     for name, snapshot in sites.items():
         site = tmp_path / "site" / name
         site.mkdir(parents=True)
@@ -240,6 +241,8 @@ def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0) ->
         def do_GET(self) -> None:
             if self.path.endswith("/status.json"):
                 time.sleep(status_delay)
+            if records_gate is not None and self.path.endswith("/tickets.json"):
+                records_gate.wait(30)
             super().do_GET()
 
     handler = functools.partial(Handler, directory=str(tmp_path / "site"))
@@ -1177,41 +1180,47 @@ def test_picking_a_log_row_on_the_ticket_page_selects_its_bar_and_the_reverse(tm
 KEEP_PLACE = r"""
 (async () => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const art = document.querySelector('article.ticketpage');
-  const row = art.querySelector('.runlog button[data-visit="2"]');
-  row.focus();
+  document.querySelector('article.ticketpage .runlog button[data-visit="2"]').focus();
   window.scrollTo(0, 240);
   await sleep(50);
-  return {focused: document.activeElement === row, y: window.scrollY};
+  window.oldTicket = document.querySelector('article.ticketpage');
+  return {focused: document.activeElement === document.querySelector('article.ticketpage .runlog button[data-visit="2"]'),
+          y: window.scrollY};
 })()"""
 
 AFTER_REDRAW = r"""
 (() => {
   const now = document.activeElement;
-  return {redrawn: !window.oldTicket.isConnected, visit: now && now.getAttribute('data-visit'),
-          inLog: !!(now && now.closest('.runlog')), y: window.scrollY};
+  const out = {redrawn: !window.oldTicket.isConnected, visit: now && now.getAttribute('data-visit'),
+               inLog: !!(now && now.closest('.runlog')), y: window.scrollY};
+  window.oldTicket = document.querySelector('article.ticketpage');
+  return out;
 })()"""
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
 def test_a_redraw_keeps_focus_and_scroll_on_the_ticket_page(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    server = _serve(tmp_path, {"fixture": snapshot})
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
     chrome = _Chrome(tmp_path / "profile")
     try:
         _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/ticket.html#t={_quote(LIVE['running'][0])}",
               "document.querySelector('article.ticketpage .runlog button')")
         before = chrome.run(KEEP_PLACE)
-        chrome.run("window.oldTicket = document.querySelector('article.ticketpage')")
+        records.set()
+        chrome.wait_for("!window.oldTicket.isConnected", "the records redraw")
+        on_records = chrome.run(AFTER_REDRAW)
         later = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
         (tmp_path / "site" / "fixture" / "status.json").write_text(json.dumps(later), encoding="utf-8")
-        chrome.wait_for("!window.oldTicket.isConnected", "a redraw")
-        after = chrome.run(AFTER_REDRAW)
+        chrome.wait_for("!window.oldTicket.isConnected", "the status redraw")
+        on_status = chrome.run(AFTER_REDRAW)
     finally:
+        records.set()
         chrome.close()
         server.shutdown()
     assert before == {"focused": True, "y": 240}
-    assert after == {"redrawn": True, "visit": "2", "inLog": True, "y": 240}
+    assert on_records == on_status == {"redrawn": True, "visit": "2", "inLog": True, "y": 240}
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
