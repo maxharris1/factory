@@ -182,6 +182,11 @@ class TrackingMixin:
                         f"rebound:{row['pr_number']}->{new}",
                         connection=connection,
                     )
+                    connection.execute(
+                        "UPDATE jobs SET dedupe_key = 'rebound:' || id || ':' || dedupe_key "
+                        "WHERE id = ?",
+                        (row["id"],),
+                    )
                     continue
                 connection.execute(
                     "UPDATE jobs SET detail = json_set(detail, '$.pr_number', ?, '$.post_to', ?) "

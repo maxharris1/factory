@@ -11,6 +11,7 @@ from lib.github_actions import GhResult
 from lib.pr_title import SOURCES_TABLE
 from lib.poll_source import FedPulls, LivePollSource
 from lib.queue import JobRequest
+from tests.test_dispatcher import READY, FakeSource
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue, linear_transport_for
 from tests.test_live_poll_no_webhook import _dispatcher
 
@@ -243,6 +244,58 @@ def test_a_queued_review_of_the_old_prs_head_is_cancelled_on_rebind(tmp_path: Pa
         assert connection.execute(
             "SELECT event, detail FROM job_events WHERE job_id = ?", (review.id,)
         ).fetchall() == [("cancelled", "rebound:1338->1462")]
+    replacement = dispatcher.queue.enqueue(
+        replace(
+            review.request,
+            source_comment_id="ready-1462",
+            detail=json.dumps({"pr_number": "1462", "post_to": "PR #1462 issue comments"}),
+        ),
+        dedupe_key="review-1338",
+    )
+    assert replacement.id != review.id
+    claimed = dispatcher.queue.claim("codex")
+    assert claimed is not None and claimed.id == replacement.id
+
+
+def test_a_ready_on_the_rebound_pr_queues_a_review_at_the_same_head(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    dispatcher.trusted_logins["github"] = {
+        "claude-login": frozenset({"claude-bot"}),
+        "codex-login": frozenset({"codex-bot"}),
+    }
+    record_fed_pull(database, "1338")
+    gh = TitleSearchGh()
+    with dispatcher.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES ('acme/widgets', 'AUT-2233', 'linear', 0)"
+        )
+    dispatcher.poll_once(FakeSource(poll(database, gh)))
+    build = dispatcher.queue.claim("claude")
+    assert build is not None
+    dispatcher.queue.finish(build.id, owner="claude", handoff_comment_id="500")
+
+    def ready(comment_id: str, minute: str) -> None:
+        gh.comments = [
+            {
+                "id": comment_id,
+                "body": READY.format(head=gh.head),
+                "created_at": f"2026-11-11T12:{minute}:00Z",
+                "user": {"login": "claude-login"},
+            }
+        ]
+        dispatcher.poll_once(FakeSource(poll(database, gh)))
+
+    ready("500", "01")
+    with dispatcher.queue.connect() as connection:
+        connection.execute("UPDATE feeder_items SET pr_number = '1462' WHERE issue = 'AUT-2233'")
+    ready("501", "02")
+    dispatcher.poll_once(FakeSource(poll(database, gh)))
+
+    review = dispatcher.queue.claim("codex")
+    assert review is not None
+    assert json.loads(review.request.detail or "{}")["pr_number"] == "1462"
+    assert dispatcher.queue.claim("codex") is None
 
 
 def test_the_dashboard_drops_the_pr_when_the_ticket_has_none(tmp_path: Path) -> None:
