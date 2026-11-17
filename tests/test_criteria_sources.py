@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from lib.github_actions import GhResult
 from lib.evidence.criteria import EMPTY
 from lib.orchestrate import brief_comment
 from lib.poll_source import LINEAR_ISSUE_QUERY, LivePollSource
-from tests.test_dispatcher import BRIEF, comment
+from tests.test_dispatcher import BRIEF, READY, comment, setup, track
 from tests.test_evidence_wiring import REVISE, CIFlow, claim, evidence
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue, linear_transport_for
 from tests.test_rounds_and_caps import HEADS
@@ -24,8 +25,14 @@ from tests.test_rounds_and_caps import HEADS
 SECTION = "## Acceptance criteria\n- {name} first.\n- {name} second.\n"
 PROSE = "Make the widgets faster.\n"
 FIVE = [f"Criterion {n} holds." for n in range(1, 6)]
-EDITED = "## Acceptance criteria\n" + "".join(f"- {text}\n" for text in FIVE[:4])
-ISSUE = re.compile(r"repos/acme/widgets/issues/(\d+)")
+
+
+def criteria_section(items: list[str]) -> str:
+    return "## Acceptance criteria\n" + "".join(f"- {text}\n" for text in items)
+
+
+EDITED = criteria_section(FIVE[:4])
+ISSUE = re.compile(r"repos/[^/]+/[^/]+/issues/(\d+)")
 
 
 class IssueGh(FakeGh):
@@ -248,3 +255,53 @@ def test_fix_after_a_scope_cut_lists_the_edited_criteria(tmp_path: Path) -> None
     flow.finish("codex")
     assert flow.post("revise-1", REVISE.format(head=HEADS[1]), "codex-login") == "queued-review-fix"
     assert_edited(evidence(claim(flow, "claude"))["criteria"])
+
+
+class CheckGh(IssueGh):
+    conclusion: str | None = None
+    db: Path | None = None
+
+    def __call__(self, argv, timeout):
+        if self.db is not None and any(ISSUE.fullmatch(part) for part in argv):
+            with sqlite3.connect(self.db, timeout=0) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.rollback()
+        if not any("/check-runs?" in part for part in argv):
+            return super().__call__(argv, timeout)
+        status = "completed" if self.conclusion else "in_progress"
+        run = {"name": "test", "status": status, "conclusion": self.conclusion}
+        return GhResult(0, json.dumps({"total_count": 1, "check_runs": [run]}), "")
+
+
+@pytest.mark.parametrize(("conclusion", "bot", "action"), [("success", "codex", "review"), ("failure", "claude", "fix")])
+def test_a_job_queued_when_ci_finishes_lists_the_criteria_edited_while_ci_ran(
+    tmp_path: Path, conclusion: str, bot: str, action: str
+) -> None:
+    gh = CheckGh()
+    gh.pull = {"body": "Fixes #631", "title": "#631: scope cut"}
+    gh.issue_bodies["631"] = criteria_section(FIVE)
+    brief = brief_comment(
+        risk="high", goal="Ship it.", acceptance_criteria=FIVE, likely_files=[], done_evidence="Tests pass."
+    )
+    ready = {**comment_json(2, READY.format(head=gh.head)), "user": {"login": "claude-login"}}
+    gh.comments = [comment_json(1, brief), ready]
+    project = replace(config().projects[0], repo="owner/repo", ready_starts_review=True)
+    source = LivePollSource(replace(config(), projects=(project,)), gh_runner=gh)
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    gh.db = tmp_path / "d.db"
+
+    def poll() -> None:
+        source.begin_cycle()
+        dispatcher.process(source._github_ticket(project, source._factory(project), "42", fresh=True))
+
+    poll()
+    assert queue.claim("codex") is None and queue.claim("claude") is None
+
+    gh.issue_bodies["631"], gh.conclusion = EDITED, conclusion
+    poll()
+    job = queue.claim(bot)
+
+    assert job is not None and job.request.action == action
+    assert_edited(evidence(job)["criteria"])
+    assert "--cache" not in [call for call in gh.calls if any(ISSUE.fullmatch(part) for part in call)][-1]

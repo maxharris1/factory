@@ -45,6 +45,7 @@ class ResumeMixin:
         comment: Comment,
     ) -> tuple[str, bool] | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -175,6 +176,7 @@ class ResumeMixin:
         comment: Comment,
     ) -> str | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -262,6 +264,7 @@ class ResumeMixin:
         comment: Comment,
     ) -> tuple[bool, str] | None:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             replayed = connection.execute(

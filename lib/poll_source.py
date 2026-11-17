@@ -1490,6 +1490,9 @@ class LivePollSource:
                 if source_issue is None
                 else self._source_issue_body(project.repo, number, source_issue, pull, comments)
             ),
+            read_issue_body=(
+                None if source_issue is None else self._issue_reader(project.repo, number, source_issue)
+            ),
             pr_body=_optional_string(pull.get("body")),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
@@ -1606,23 +1609,36 @@ class LivePollSource:
         comments: Sequence[Comment],
     ) -> str | None:
         """#495: the source issue's body, read once per PR head and newest PR
-        comment. Every review or fix job is queued by a new comment, so each
-        sees an issue edited since the last one (#631). A read that fails is
-        recorded and left None."""
-
-        def read() -> str | None:
-            issue = _json_object(
-                self._gh_call(f"repos/{repo}/issues/{source.removeprefix('#')}"),
-                "GitHub issue",
-            )
-            return _optional_string(issue.get("body")) or ""
+        comment. A read that fails is recorded and left None."""
 
         try:
             newest = comments[-1].id if comments else None
-            return self._per_head(f"issue{source}", repo, number, pull, read, newest)
+            return self._per_head(
+                f"issue{source}", repo, number, pull, lambda: self._issue_body(repo, source), newest
+            )
         except Exception as exc:
             self._record(repo, number, exc)
             return None
+
+    def _issue_reader(self, repo: str, number: str, source: str) -> Callable[[], str | None]:
+        """#631: an uncached read of the source issue, for evidence built
+        after the poll; a ticket can queue work with no new comment."""
+
+        def read() -> str | None:
+            try:
+                return self._issue_body(repo, source, fresh=True)
+            except Exception as exc:
+                self._record(repo, number, exc)
+                return None
+
+        return read
+
+    def _issue_body(self, repo: str, source: str, *, fresh: bool = False) -> str:
+        issue = _json_object(
+            self._gh_call(f"repos/{repo}/issues/{source.removeprefix('#')}", fresh=fresh),
+            "GitHub issue",
+        )
+        return _optional_string(issue.get("body")) or ""
 
     def _per_head(
         self,

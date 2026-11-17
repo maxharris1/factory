@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
@@ -116,8 +116,10 @@ class TrackedTicket:
     # #495: the trusted brief the poll picked once (canonical_brief); brief
     # and the reviewer's criteria both come from it. issue_body and pr_body
     # are the source issue's text and the PR description, None when unread.
+    # read_issue_body re-reads the issue when review or fix evidence is built.
     brief_comment: Comment | None = None
     issue_body: str | None = None
+    read_issue_body: Callable[[], str | None] | None = field(default=None, compare=False, repr=False)
     pr_body: str | None = None
     grok_bot: str = "grok-bot"
     linear_issue_id: str | None = None
