@@ -129,6 +129,50 @@ projects:
     assert config.grok.webhook_auth_env == "OTHER_WEBHOOK_AUTH"
 
 
+CLAUDE_BLOCK = """claude:
+  fire_url_env: FACTORY_CLAUDE_FIRE_URL
+  fire_token_env: FACTORY_CLAUDE_FIRE_TOKEN
+"""
+
+
+def _driver_config(tmp_path: Path, extra: str):
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        "poll_seconds: 60\n" + extra + "projects:\n  - repo: acme/widgets\n",
+        encoding="utf-8",
+    )
+    return load_orch_yml(path)
+
+
+def test_driver_claude_reads_the_claude_block(tmp_path: Path) -> None:
+    config, findings = _driver_config(tmp_path, "driver: claude\n" + CLAUDE_BLOCK)
+    assert findings == []
+    assert config is not None and config.claude is not None
+    assert config.driver == "claude"
+    assert config.claude.fire_url_env == "FACTORY_CLAUDE_FIRE_URL"
+    assert config.claude.fire_token_env == "FACTORY_CLAUDE_FIRE_TOKEN"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("driver: codex\n" + CLAUDE_BLOCK, "driver must be grok or claude"),
+        ("driver: claude\n", "driver: claude requires a claude block"),
+        (
+            "claude:\n  fire_url_env: FACTORY_CLAUDE_FIRE_URL\n",
+            "claude.fire_token_env must be an environment variable name",
+        ),
+    ],
+    ids=["unknown-driver", "claude-without-block", "claude-without-token"],
+)
+def test_check_config_refuses_a_bad_driver(
+    tmp_path: Path, extra: str, message: str
+) -> None:
+    config, findings = _driver_config(tmp_path, extra)
+    assert config is None
+    assert [(f.severity, f.message) for f in findings] == [("error", message)]
+
+
 def test_project_timeout_overrides_file_and_default(tmp_path: Path) -> None:
     path = tmp_path / "orch.yml"
     path.write_text(
