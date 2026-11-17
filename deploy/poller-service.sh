@@ -148,9 +148,13 @@ poll_lock_held() {
     ((status == 75))
 }
 
+retired() {
+    [[ -e "${CONFIG}/orch-retired" ]]
+}
+
 refuse_if_retired() {
     local retired="${CONFIG}/orch-retired"
-    [[ -e "$retired" ]] || return 0
+    retired || return 0
     echo "poller-service: refusing to $1 on a host retired as the orch host (${retired}: $(head -n 1 "$retired" 2>/dev/null || true))" >&2
     exit 79
 }
@@ -215,6 +219,7 @@ ensure_db() (
         loud "orch.db came back with the box copy-in; nothing restored"
         return 0
     fi
+    retired && return 79
     orch restore-db --db "$db" >&2 || status=$?
     case "$status" in
         0) loud "RESTORED orch.db from backup" ;;
@@ -240,7 +245,12 @@ launch() {
         say "orch poll already running (poll lock held)"
         return 0
     fi
-    ensure_db || return 1
+    refuse_if_retired start
+    ensure_db || {
+        refuse_if_retired start
+        return 1
+    }
+    refuse_if_retired start
     # fd 9 is the service lock; the poller must not inherit it.
     nohup "$RUNNER" --pidfile "$PIDFILE" >>"$LOG" 2>&1 </dev/null 9>&- &
     child=$!
@@ -449,11 +459,11 @@ remove_autostart() {
 }
 
 case "${1:-}" in
-    start) factory_host_pidns_or_refuse start && refuse_if_retired start && service_lock && start ;;
+    start) factory_host_pidns_or_refuse start && refuse_if_retired start && service_lock && refuse_if_retired start && start ;;
     stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && service_lock && restart ;;
+    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && service_lock && refuse_if_retired restart && restart ;;
     status) status ;;
-    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && service_lock && refuse_if_retired ensure && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) service_lock && remove_autostart ;;
     *)

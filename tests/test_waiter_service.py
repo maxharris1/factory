@@ -753,3 +753,46 @@ def test_a_retired_host_starts_no_waiter(home: Path, command: str) -> None:
     assert str(retired) in result.stderr
     assert _starts(home) == []
     assert not (home / ".local/state/factory/waiter-claude-bot.pid").exists()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+@pytest.mark.parametrize("command", ["start", "restart", "ensure"])
+def test_a_host_retired_while_queued_on_the_service_lock_starts_no_waiter(
+    home: Path, command: str
+) -> None:
+    import fcntl
+    import threading
+
+    state = home / ".local/state/factory"
+    state.mkdir(parents=True, exist_ok=True)
+    lock = os.open(state / "waiter-claude-bot-service.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    def retire_then_unlock() -> None:
+        time.sleep(1)
+        (home / ".config/factory/orch-retired").write_text("pc\n", encoding="utf-8")
+        fcntl.flock(lock, fcntl.LOCK_UN)
+
+    retirer = threading.Thread(target=retire_then_unlock)
+    retirer.start()
+    try:
+        result = _service(home, "claude-bot", command)
+    finally:
+        retirer.join()
+        os.close(lock)
+
+    assert result.returncode == 79, result.stderr
+    assert "orch-retired" in result.stderr
+    assert _starts(home) == []
+    assert not (state / "waiter-claude-bot.pid").exists()
+
+
+def test_a_running_supervisor_starts_no_waiter_once_the_host_is_retired(home: Path) -> None:
+    assert _service(home, "claude-bot", "start").returncode == 0
+    supervisor = int((home / ".local/state/factory/waiter-claude-bot.pid").read_text())
+    first = _wait_for(lambda: _starts(home))
+    (home / ".config/factory/orch-retired").write_text("pc\n", encoding="utf-8")
+    os.kill(first[0], signal.SIGTERM)
+
+    assert _wait_for(lambda: not alive(supervisor))
+    assert _starts(home) == first

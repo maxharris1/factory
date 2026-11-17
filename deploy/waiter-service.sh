@@ -262,9 +262,13 @@ stop_waiter() {
     return 1
 }
 
+retired() {
+    [[ -e "${CONFIG}/orch-retired" ]]
+}
+
 refuse_if_retired() {
     local retired="${CONFIG}/orch-retired"
-    [[ -e "$retired" ]] || return 0
+    retired || return 0
     echo "waiter-service ${BOT}: refusing to $1 on a host retired as the orch host (${retired}: $(head -n 1 "$retired" 2>/dev/null || true))" >&2
     exit 79
 }
@@ -299,6 +303,10 @@ supervise() {
     while [[ -z "$stopping" && ! -e "$STOPPED" ]]; do
         if ! owns_pidfile; then
             say "${PIDFILE} no longer names this supervisor (pid $$); exiting"
+            break
+        fi
+        if retired; then
+            say "this host is retired as the orch host (${CONFIG}/orch-retired); exiting"
             break
         fi
         started="$SECONDS"
@@ -342,6 +350,7 @@ launch() {
         say "waiter supervisor already running (pid ${pid})"
         return 0
     fi
+    refuse_if_retired start
     nohup bash "$SELF" "$BOT" _supervise "$STATE" >>"$LOG" 2>&1 </dev/null 9>&- &
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
@@ -496,11 +505,11 @@ remove_autostart() {
 
 case "$COMMAND" in
     _supervise) factory_host_pidns_or_refuse _supervise && refuse_if_retired _supervise && supervise ;;
-    start) factory_host_pidns_or_refuse start && refuse_if_retired start && service_lock && start ;;
+    start) factory_host_pidns_or_refuse start && refuse_if_retired start && service_lock && refuse_if_retired start && start ;;
     stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && service_lock && restart ;;
+    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && service_lock && refuse_if_retired restart && restart ;;
     status) status ;;
-    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && service_lock && refuse_if_retired ensure && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

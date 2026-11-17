@@ -1217,3 +1217,80 @@ def test_the_ensure_loop_exits_once_the_host_is_retired(home: Path, tmp_path: Pa
 
     assert result.returncode == 0, result.stderr
     assert calls.read_text() == "ensure\n"
+
+
+@pytest.mark.parametrize("brings_db_back", [False, True])
+def test_a_host_retired_during_the_copy_in_wait_restores_and_starts_nothing(
+    home: Path, tmp_path: Path, brings_db_back: bool
+) -> None:
+    database = _lost_db(home)
+    calls = home / "calls.txt"
+    starts = home / "starts.txt"
+    status = _copy_in(tmp_path, "copying")
+    log = home / ".local/state/factory/poller.log"
+
+    def retire_mid_wait() -> None:
+        deadline = time.monotonic() + 20
+        while not (log.exists() and "waiting up to" in log.read_text()):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        _retire(home)
+        if brings_db_back:
+            database.write_bytes(b"copied in")
+        status.write_text('{"phase": "done"}', encoding="utf-8")
+
+    import threading
+
+    retirer = threading.Thread(target=retire_mid_wait)
+    retirer.start()
+    result = _service(
+        home, "ensure", FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls),
+        FAKE_ORCH_STARTS=str(starts),
+        ORCH_COPY_IN_STATUS=str(status), ORCH_COPY_IN_WAIT="30", ORCH_COPY_IN_POLL_SEC="0.1",
+    )
+    retirer.join()
+
+    assert result.returncode == 79, result.stderr
+    assert "orch-retired" in result.stderr
+    assert not calls.exists()
+    assert not starts.exists()
+    assert database.exists() is brings_db_back
+    assert not _pidfile(home).exists()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+@pytest.mark.parametrize("command", ["start", "restart", "ensure"])
+def test_a_host_retired_while_queued_on_the_service_lock_restores_and_starts_nothing(
+    home: Path, command: str
+) -> None:
+    calls = home / "calls.txt"
+    starts = home / "starts.txt"
+    state = home / ".local/state/factory"
+    state.mkdir(parents=True, exist_ok=True)
+    lock = os.open(state / "poller-service.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    def retire_then_unlock() -> None:
+        time.sleep(1)
+        _retire(home)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+
+    import threading
+
+    retirer = threading.Thread(target=retire_then_unlock)
+    retirer.start()
+    try:
+        result = _service(
+            home, command, FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls),
+            FAKE_ORCH_STARTS=str(starts),
+        )
+    finally:
+        retirer.join()
+        os.close(lock)
+
+    assert result.returncode == 79, result.stderr
+    assert "orch-retired" in result.stderr
+    assert not calls.exists()
+    assert not starts.exists()
+    assert not _lost_db(home).exists()
+    assert not _pidfile(home).exists()

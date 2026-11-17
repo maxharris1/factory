@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -474,42 +475,102 @@ def test_systemd_does_not_restart_a_poller_a_retired_host_refused() -> None:
     assert "\nRestartPreventExitStatus=79\n" in unit
 
 
-_RUNS_ORCH_POLL = re.compile(
-    r"/orch[\"']?\s+poll(?![\w-])"
-    r"|(?:^|[;&|=]|\b(?:exec|nohup|env|command)\s)\s*orch\s+poll(?![\w-])"
-)
+_COMMAND_SEPARATORS = ";&|()`"
 
 
-def _runs_orch_poll(line: str) -> bool:
-    return not line.lstrip().startswith("#") and bool(_RUNS_ORCH_POLL.search(line))
+def _logical_lines(text: str):
+    pending = ""
+    for line in text.splitlines():
+        if not pending and line.lstrip().startswith("#"):
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        yield (pending + line).strip()
+        pending = ""
+    if pending:
+        yield pending.strip()
+
+
+def _words(line: str) -> list[str]:
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=_COMMAND_SEPARATORS)
+    # shlex starts a comment at any `#`, even mid-word as in `$#` or `${x##*/}`.
+    lexer.commenters = ""
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return re.findall(r"[;&|()`]+|[^\s;&|()`'\"]+", line)
+
+
+def _commands(words: list[str]):
+    command: list[str] = []
+    for word in words:
+        if word.startswith("#"):
+            break
+        if set(word) <= set(_COMMAND_SEPARATORS):
+            yield command
+            command = []
+        else:
+            command.append(word)
+    yield command
+
+
+def _runs_orch_poll(command: list[str]) -> bool:
+    for i, word in enumerate(command):
+        if word == "-c" and i + 1 < len(command) and _orch_poll_launches(command[i + 1]):
+            return True
+        if re.split(r"[/=]", word)[-1] == "orch" and "poll" in command[i + 1:]:
+            return True
+    return False
+
+
+def _orch_poll_launches(text: str) -> list[str]:
+    return [line for line in _logical_lines(text)
+            if any(_runs_orch_poll(command) for command in _commands(_words(line)))]
 
 
 @pytest.mark.parametrize(
-    ("line", "runs"),
+    ("text", "runs"),
     [
         ('exec "${HOME}/.local/bin/orch" poll "$@"', True),
         ("ExecStart=%h/.local/bin/orch poll", True),
+        ("ExecStart=/usr/bin/env orch poll", True),
         ("nohup orch poll --once &", True),
         ("orch poll", True),
         ('    true && orch poll --once', True),
+        ("env PYTHONUNBUFFERED=1 orch poll --once", True),
+        ("nohup -- orch poll --once", True),
+        ("nohup orch \\\n    poll --once", True),
+        ('bash -c "orch poll --once"', True),
+        ("sh -c 'exec nohup orch poll' &", True),
+        ("orch --some-flag poll", True),
+        ("python3 bin/orch poll", True),
+        ("a; orch poll", True),
+        ("x | orch poll", True),
+        ("pid=$(orch poll --once)", True),
+        ("pid=`orch poll --once`", True),
         ('say "started orch poll (pid ${pid})"', False),
         ('say "orch poll already running"', False),
+        ('echo "run-poller: retired ($(head -n 1 "$R")); not starting orch poll" >&2', False),
         ('"$RUNNER" --pidfile "$PIDFILE"', False),
         ("# ExecStart=%h/.local/bin/orch poll", False),
+        ("# nohup orch \\\norch dashboard push --once", False),
+        ("true  # orch poll", False),
         ("orch polling", False),
+        ("orch dashboard push --once; poll", False),
     ],
 )
-def test_the_orch_poll_launch_detector(line: str, runs: bool) -> None:
-    assert _runs_orch_poll(line) is runs
+def test_the_orch_poll_launch_detector(text: str, runs: bool) -> None:
+    assert bool(_orch_poll_launches(text)) is runs
 
 
 def test_run_poller_is_the_only_deploy_file_that_runs_orch_poll() -> None:
     deploy = ROOT / "deploy"
     hits = [
-        (path.name, line.strip())
+        (path.name, line)
         for path in sorted([*deploy.glob("*.sh"), *deploy.glob("*.service")])
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if _runs_orch_poll(line)
+        for line in _orch_poll_launches(path.read_text(encoding="utf-8"))
     ]
     assert hits == [("run-poller.sh", 'exec "${HOME}/.local/bin/orch" poll "$@"')]
 
