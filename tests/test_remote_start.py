@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import remote
+from lib import device_monitor, remote
 from lib.device_monitor import DeviceMonitor, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
@@ -680,7 +680,7 @@ def test_monitor_releases_a_remote_slot_no_worker_was_started_for_without_ssh(
 TAG = "d" * 32
 
 
-def lost_setup(tmp_path: Path, check: int = 255):
+def lost_setup(tmp_path: Path, check: int = 255, *, reload: bool = False):
     now = [0.0]
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
@@ -694,7 +694,13 @@ def lost_setup(tmp_path: Path, check: int = 255):
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
         grok_delivery=FakeGrokDelivery(),
-        devices=DeviceMonitor(pool, config, transport, alive=lambda *_: True),
+        devices=DeviceMonitor(
+            pool,
+            config,
+            transport,
+            alive=lambda *_: True,
+            machines_path=machines if reload else None,
+        ),
     )
     snapshot = ticket(comment("go-1", GO.format(state="building"), author="grok-login"), timeout=60)
     dispatcher.process(snapshot)
@@ -807,9 +813,12 @@ def test_a_device_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
 # --- disabled in machines.yml: lost within one poll (#679) --------------------
 
 
-def disable_pc(tmp_path: Path, dispatcher: Dispatcher) -> None:
-    config = config_of(machines_file(tmp_path, box_enabled=False, pc=False))
-    dispatcher.devices.config = dispatcher.devices.pool.config = config
+def stamp(path: Path, ns: int) -> None:
+    os.utime(path, ns=(ns, ns))
+
+
+def disable_pc(tmp_path: Path, ns: int = 10**18) -> None:
+    stamp(machines_file(tmp_path, box_enabled=False, pc=False), ns)
 
 
 def assert_lost(queue: SQLiteJobQueue, pool: DevicePool, job_id: str, reason: str) -> None:
@@ -827,11 +836,11 @@ def assert_lost(queue: SQLiteJobQueue, pool: DevicePool, job_id: str, reason: st
 def test_disabling_an_answering_device_loses_its_running_job_within_one_poll(
     tmp_path: Path,
 ) -> None:
-    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1)
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
     poll_at(now, dispatcher, 0.0)
     assert state(queue, job.id) == "running"
 
-    disable_pc(tmp_path, dispatcher)
+    disable_pc(tmp_path)
     poll_at(now, dispatcher, 60.0)
 
     assert_lost(queue, pool, job.id, "disabled")
@@ -840,12 +849,12 @@ def test_disabling_an_answering_device_loses_its_running_job_within_one_poll(
 def test_disabling_an_unreachable_device_loses_its_job_long_before_the_offline_limit(
     tmp_path: Path,
 ) -> None:
-    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True)
     poll_at(now, dispatcher, 0.0)
     assert pool.health("pc") == (None, 0.0)
     assert state(queue, job.id) == "running"
 
-    disable_pc(tmp_path, dispatcher)
+    disable_pc(tmp_path)
     poll_at(now, dispatcher, 60.0)
 
     assert_lost(queue, pool, job.id, "disabled")
@@ -856,6 +865,99 @@ def test_a_disabled_device_is_stranded_with_no_offline_clock(tmp_path: Path) -> 
     enabled = config_of(machines_file(tmp_path, pc=True)).device("pc")
     assert stranded(disabled, None, 0.0, 600.0) == "disabled"
     assert stranded(enabled, None, 0.0, 600.0) is None
+
+
+# --- machines.yml reloaded on change (#679) ---------------------------------
+
+
+def poll_errors(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute("SELECT repo, error FROM poll_errors ORDER BY rowid")
+        ]
+
+
+def test_the_monitor_reloads_machines_yml_when_its_mtime_changes(tmp_path: Path) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    monitor = dispatcher.devices
+    poll_at(now, dispatcher, 0.0)
+    assert monitor.config.device("pc").enabled
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert monitor.config.device("pc").enabled is False
+    assert pool.config is monitor.config
+
+
+def test_an_unchanged_machines_yml_is_not_loaded_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    loads: list[Path] = []
+    real = device_monitor.load_machines_yml
+
+    def counted(path: Path, **kwargs):
+        loads.append(path)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(device_monitor, "load_machines_yml", counted)
+    for at in (0.0, 60.0, 120.0):
+        poll_at(now, dispatcher, at)
+    assert loads == []
+
+    disable_pc(tmp_path)
+    for at in (180.0, 240.0, 300.0):
+        poll_at(now, dispatcher, at)
+    assert loads == [tmp_path / "machines.yml"]
+
+
+def test_a_broken_machines_yml_keeps_the_last_good_config_and_is_reported_until_fixed(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=0, reload=True)
+    monitor = dispatcher.devices
+    poll_at(now, dispatcher, 0.0)
+    good = monitor.config
+    queue.finish(job.id, owner="claude", handoff_comment_id="c1")
+    monitor.alive = lambda *_: False
+    machines = tmp_path / "machines.yml"
+    machines.write_text("devices: [\n", encoding="utf-8")
+    stamp(machines, 10**18)
+
+    poll_at(now, dispatcher, 60.0)
+
+    errors = poll_errors(queue)
+    assert [repo for repo, _ in errors] == ["devices"]
+    assert errors[0][1].startswith("machines.yml:")
+    assert monitor.config is good and pool.config is good
+    assert pool.placement(job.id) is None
+
+    poll_at(now, dispatcher, 120.0)
+    assert len(poll_errors(queue)) == 2
+
+    disable_pc(tmp_path, ns=2 * 10**18)
+    poll_at(now, dispatcher, 180.0)
+    assert monitor.config.device("pc").enabled is False
+    assert len(poll_errors(queue)) == 2
+
+
+def test_a_machines_local_yml_edit_reloads_and_disables_the_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "running"
+
+    (tmp_path / "machines.local.yml").write_text(
+        "devices:\n  - name: pc\n    enabled: false\n", encoding="utf-8"
+    )
+    poll_at(now, dispatcher, 60.0)
+
+    assert dispatcher.devices.config.device("pc").enabled is False
+    assert_lost(queue, pool, job.id, "disabled")
 
 
 # --- orphans: stopped once their device answers (#679) -----------------------
@@ -886,11 +988,11 @@ def test_an_orphan_is_stopped_when_its_device_answers_and_forgotten_once_gone(
 def test_disabling_an_answering_device_stops_the_lost_worker_in_the_same_poll(
     tmp_path: Path,
 ) -> None:
-    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1)
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
     poll_at(now, dispatcher, 0.0)
     assert STOP not in transport.calls
 
-    disable_pc(tmp_path, dispatcher)
+    disable_pc(tmp_path)
     poll_at(now, dispatcher, 60.0)
 
     assert state(queue, job.id) == "failed"

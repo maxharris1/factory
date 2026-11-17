@@ -1039,6 +1039,9 @@ def _runtime(
                 _device_pool(queue, machines),
                 machines,
                 SshTransport(),
+                machines_path=(
+                    machines_path if machines_path is not None else ROOT / "machines.yml"
+                ),
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):

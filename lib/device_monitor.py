@@ -35,10 +35,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
+from lib.config_overlay import overlay_path
 from lib.device_pool import DevicePool, HeldSlot, Placement
 from lib.job_state import Liveness, liveness, never_started
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.remote import (
     GONE,
     RUNNING,
@@ -55,6 +57,7 @@ from lib.worktrees import pid_alive
 Log = Callable[[str], None]
 OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
+Stamp = tuple[int, int | None]  # st_mtime_ns of machines.yml and of its overlay
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,14 @@ def stranded(
     return f"unreachable {int((now - failing_since) // 60)} min"
 
 
+def _stamp(path: Path) -> Stamp:
+    try:
+        overlay: int | None = overlay_path(path).stat().st_mtime_ns
+    except FileNotFoundError:
+        overlay = None
+    return path.stat().st_mtime_ns, overlay
+
+
 class DeviceMonitor:
     def __init__(
         self,
@@ -110,11 +121,42 @@ class DeviceMonitor:
         transport: Transport,
         *,
         alive: Alive = pid_alive,
+        machines_path: Path | None = None,
     ):
         self.pool = pool
         self.config = config
         self.transport = transport
         self.alive = alive
+        self.machines_path = machines_path
+        self._stamp: Stamp | None = None
+        if machines_path is not None:
+            try:
+                self._stamp = _stamp(machines_path)
+            except OSError:
+                pass
+
+    def reload(self) -> None:
+        """Load machines.yml again if it or its overlay changed since the last good load.
+
+        A file that fails to load raises ValueError and keeps the old config
+        and stamp, so every poll retries and reports it until it is fixed.
+        """
+        path = self.machines_path
+        if path is None:
+            return
+        try:
+            stamp = _stamp(path)
+            if stamp == self._stamp:
+                return
+            config, findings = load_machines_yml(path, allow_placeholders=True)
+        except OSError as exc:
+            raise ValueError(f"{path}: cannot read: {type(exc).__name__}") from exc
+        errors = [item for item in findings if item.severity == "error"]
+        if config is None or errors:
+            detail = errors[0].message if errors else "invalid machines.yml"
+            raise ValueError(f"{path}: {detail}")
+        self.config = self.pool.config = config
+        self._stamp = stamp
 
     def reconcile(self, now: float, lost_after: float, on_lost: OnLost) -> MonitorResult:
         released: list[str] = []
