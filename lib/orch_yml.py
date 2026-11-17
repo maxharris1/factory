@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Literal, Mapping
 from urllib.parse import urlsplit
 
 import yaml
@@ -71,6 +71,8 @@ _TOP_KEYS = {
     "projects",
     "linear",
     "grok",
+    "driver",
+    "claude",
     "trusted_logins",
     "trusted_linear_users",
     "dashboard",
@@ -85,6 +87,7 @@ _TOP_KEYS = {
 _GITHUB_APP_KEYS = {"enabled", "apps"}
 _APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
 _MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
+Driver = Literal["grok", "claude"]
 APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
 _USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
@@ -188,6 +191,12 @@ class GrokConfig:
 
 
 @dataclass(frozen=True)
+class ClaudeDriverConfig:
+    fire_url_env: str
+    fire_token_env: str
+
+
+@dataclass(frozen=True)
 class LinearWebhookConfig:
     """Inbound Linear webhook listener (issue #55). Absent means no webhook.
 
@@ -260,6 +269,8 @@ class OrchConfig:
     job_timeout: int | None = None
     linear: LinearConfig | None = None
     grok: GrokConfig | None = None
+    driver: Driver = "grok"
+    claude: ClaudeDriverConfig | None = None
     trusted_logins: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -276,6 +287,23 @@ class OrchConfig:
     approver_logins: frozenset[str] | None = None
     approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
+
+    @property
+    def secret_env_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        if self.linear is not None:
+            names.append(self.linear.api_key_env)
+        if self.grok is not None:
+            names.extend(
+                (
+                    self.grok.webhook_url_env,
+                    self.grok.webhook_key_env,
+                    self.grok.webhook_auth_env,
+                )
+            )
+        if self.claude is not None:
+            names.extend((self.claude.fire_url_env, self.claude.fire_token_env))
+        return tuple(dict.fromkeys(names))
 
 
 def approvals(config: OrchConfig) -> Approvals:
@@ -449,6 +477,10 @@ def _validate(
     )
     linear = _linear(data, findings)
     grok = _grok(data, findings)
+    driver = _driver(data, findings)
+    claude = _claude(data, findings)
+    if driver == "claude" and data.get("claude") is None:
+        findings.append(Finding("error", "driver: claude requires a claude block"))
     trusted_logins = _trusted_logins(data, findings)
     trusted_linear_users = _trusted_linear_users(data, findings)
     dashboard = parse_dashboard(data.get("dashboard"), findings)
@@ -504,6 +536,8 @@ def _validate(
             job_timeout=job_timeout,
             linear=linear,
             grok=grok,
+            driver=driver,
+            claude=claude,
             trusted_logins=MappingProxyType(trusted_logins),
             trusted_linear_users=MappingProxyType(trusted_linear_users),
             dashboard=dashboard or DashboardConfig(),
@@ -1339,6 +1373,32 @@ def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
     if url_name is None or key_name is None or auth_name is None:
         return None
     return GrokConfig(url_name, key_name, auth_name)
+
+
+def _driver(data: dict, findings: list[Finding]) -> Driver:
+    value = data.get("driver", "grok")
+    if value == "claude":
+        return "claude"
+    if value != "grok":
+        findings.append(Finding("error", "driver must be grok or claude"))
+    return "grok"
+
+
+def _claude(data: dict, findings: list[Finding]) -> ClaudeDriverConfig | None:
+    value = data.get("claude")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "claude must be a mapping"))
+        return None
+    _unknown_keys(value, {"fire_url_env", "fire_token_env"}, "claude", findings)
+    url_name = _env_name(value.get("fire_url_env"), "claude.fire_url_env", findings)
+    token_name = _env_name(
+        value.get("fire_token_env"), "claude.fire_token_env", findings
+    )
+    if url_name is None or token_name is None:
+        return None
+    return ClaudeDriverConfig(url_name, token_name)
 
 
 def _trusted_logins(

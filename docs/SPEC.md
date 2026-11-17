@@ -572,6 +572,10 @@ grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_auth_env: FACTORY_WEBHOOK_AUTH
   webhook_key_env: FACTORY_WEBHOOK_KEY
+# driver: grok                      # or claude; absent means grok
+# claude:                           # required when driver is claude
+#   fire_url_env: FACTORY_CLAUDE_FIRE_URL
+#   fire_token_env: FACTORY_CLAUDE_FIRE_TOKEN
 trusted_logins:
   maxharris1: [grok-bot, claude-bot, codex-bot, cursor-bot]
 # Before install, Max adds the confirmed stable Linear user ID:
@@ -942,6 +946,20 @@ with `driver_inbox`) finishes each wake with an `inbox:` receipt and sends
 nothing to Grok's webhook. The top-level `grok` block is needed only while a
 project keeps `grok_webhook` on.
 
+`driver` (optional, issue #760) names the agent that receives wakes. It is
+`grok` or `claude`. `grok` is the default and means the same as no `driver`
+key. With `claude`, a top-level `claude:` block is required. It names two
+environment variables, `fire_url_env` and `fire_token_env`, and never holds
+their values. A `claude` wake POSTs the scheduled task's API-trigger fire URL
+with the token as a Bearer credential. The body is `{"text": ...}`, where
+`text` is the same JSON body a Grok wake sends, as a string. A wake goes to
+exactly one driver. There is no fan-out, and with `claude` nothing goes to
+Grok's webhook. A failed fire is recorded as a `grok-delivery:` poll error and
+retried on the next poll, like a failed Grok POST. That includes HTTP 429 from
+the routine limits of 30 fires per hour per task and 100 per hour per account.
+`grok_webhook: false` with `driver_inbox` keeps its meaning under either
+driver. Heal and deploy escalations still use the `grok:` webhook.
+
 ## 8. Review and merge rules
 
 - **One reviewer**, from a **different model family** than the builder, gives the **final factory verdict**.
@@ -1012,7 +1030,7 @@ Grok Bot reports each stop once. It does not poll Max about the same stop.
 
 - The factory never creates logins or credentials without Max's OK. Max provisions harness logins and registers self-hosted runners himself.
 - A bot process can write only to a job whose claim it holds (issue #127). Every claim records the SHA-256 of a per-claim token on the job, and a running job's `orch job heartbeat`, `orch job done` and `orch job run` need that token, or the autostart run's token (issue #96), in `ORCH_JOB_PROOF`. The token is printed once, on the `orch wait` line, and never stored, logged or sent to a remote device; telemetry scrubs `ORCH_JOB_PROOF`. Like the run token, it stops a process that was never handed it, not a hostile process of the same Unix user that reads another's environment.
-- Never read credentials, runner tokens, or `FACTORY_WEBHOOK_*` values. Never `cat` `.credentials*`, `.runner`, `auth.json`, or `.env`.
+- Never read credentials, runner tokens, `FACTORY_WEBHOOK_*` or `FACTORY_CLAUDE_FIRE_*` values. Never `cat` `.credentials*`, `.runner`, `auth.json`, or `.env`.
 - Component heartbeat rows (issue #92, `orch.health.db`) hold only a fixed component name, a plain device name, a bot name, a pid, times and a short git SHA; anything else is refused before it is written, so no argv, environment value, path, URL or token reaches a row or the Health tab. A tunnel-down needs-attention item (issue #581) is derived from those rows and the tunnel's held record and is never stored; it carries only the component's label and reason (at most the held port and the ssh alias the service checked), times and its anchor.
 - Self-deploy (issue #219) runs git with no webhook, Linear or GitHub token variables and logs only a failed fetch's exit code, never its output or the remote URL.
 - The device deploy (issue #297) runs ssh and the remote git with no webhook, Linear or GitHub token variables in the environment, and logs only exit codes and its own fixed reasons, never git output or the remote URL.

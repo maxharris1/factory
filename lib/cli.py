@@ -52,7 +52,7 @@ from lib.eval_report import (
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.grok_delivery import GrokDeliveryError, NoGrokWebhook, WebhookGrokDelivery
+from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hold import MergeUpdate
@@ -960,9 +960,6 @@ class _AfterPoll:
 
 
 def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
-    """#219: after a cycle that merged a PR of this checkout's own repo,
-    start `deploy/self-heal.sh kick`; the webhook and Linear secrets stay
-    out of its environment (self-heal.sh reads webhook.env itself)."""
     from lib import heal, self_deploy
 
     return self_deploy.MergeKick(
@@ -1125,7 +1122,11 @@ def _runtime(
         and not config.trusted_linear_users
     ):
         raise ValueError("trusted_linear_users is required for Linear polling")
-    if config.grok is None and any(project.grok_webhook for project in config.projects):
+    if (
+        config.driver == "grok"
+        and config.grok is None
+        and any(project.grok_webhook for project in config.projects)
+    ):
         raise ValueError("grok webhook env names are required for polling")
     path = _db_path(db_path)
     queue = (
@@ -1139,17 +1140,7 @@ def _runtime(
     }
     if create and not any(trusted.values()):
         trusted["github"]["init-db"] = frozenset({"init-db"})
-    cleared: list[str] = []
-    delivery: WebhookGrokDelivery | NoGrokWebhook = NoGrokWebhook()
-    if config.grok is not None:
-        cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
-        delivery = WebhookGrokDelivery(
-            url_env=config.grok.webhook_url_env,
-            key_env=config.grok.webhook_key_env,
-            auth_env=config.grok.webhook_auth_env,
-        )
-    if config.linear is not None:
-        cleared.append(config.linear.api_key_env)
+    delivery = wake_delivery(config)
     t8 = T8Hook()
     source = LivePollSource(
         config,
@@ -1171,7 +1162,7 @@ def _runtime(
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
-        feeder = _feeder(config, queue, machines, source, cleared)
+        feeder = _feeder(config, queue, machines, source)
     dispatcher = Dispatcher(
         path,
         queue,
@@ -1236,7 +1227,6 @@ def _feeder(
     queue: SQLiteJobQueue,
     machines: MachinesConfig | None,
     source: LivePollSource,
-    cleared: list[str],
 ) -> Feeder:
     """The backlog feeder (issue #85) for projects with an orch.yml intake."""
     linear = None
@@ -1253,7 +1243,9 @@ def _feeder(
         queue,
         config,
         machines,
-        github=GitHubIntakeClient(runner=source._adapter_runner, cleared_variables=cleared),
+        github=GitHubIntakeClient(
+            runner=source._adapter_runner, cleared_variables=config.secret_env_names
+        ),
         linear=linear,
         factory_for=source.factory_context,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),

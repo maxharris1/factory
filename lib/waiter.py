@@ -153,7 +153,7 @@ from lib.handoff_check import (
 )
 from lib.handoff_check import problems as handoff_problems
 from lib.handoff_marker import handoff_marker
-from lib.heal import Webhook
+from lib.heal import _webhook
 from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, approvals, load_orch_yml
 from lib.pre_ready import ContextUnavailable, check_environ, spec_for
@@ -739,7 +739,7 @@ class Waiter:
             return ""
         refused = device_deploy.sync_local(
             checkout, url=url_template(None).format(repo=own_repo(FACTORY_CHECKOUT) or ""),
-            sha=target, environ=git_env(self.environ, Webhook()),
+            sha=target, environ=git_env(self.environ, _webhook(self.orch_yml)),
         )
         return f"checkout: {refused}" if refused else ""
 

@@ -203,9 +203,12 @@ def test_the_feeder_reads_github_through_the_bounded_poll_runner(tmp_path: Path)
     source = LivePollSource(mixed_config())
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 10)
 
-    feeder = _feeder(mixed_config(), queue, None, source, [])
+    feeder = _feeder(mixed_config(), queue, None, source)
 
     assert feeder.github.runner == source._adapter_runner
+    assert mixed_config().secret_env_names
+    for name in mixed_config().secret_env_names:
+        assert ("-u", name) in zip(feeder.github.gh, feeder.github.gh[1:])
 
 
 def test_the_cycle_line_names_the_reads_inside_feed_and_tracked_read(

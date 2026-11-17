@@ -21,7 +21,7 @@ SECRETS = {
     "FACTORY_WEBHOOK_AUTH": "Bearer secret-auth-value",
     "LINEAR_API_KEY": "lin_api_secretvalue",
 }
-WEBHOOK = Webhook(linear_key_env="LINEAR_API_KEY")
+WEBHOOK = Webhook(config_secret_envs=("LINEAR_API_KEY",))
 
 
 def component(name: str = "waiter", *, bot: str = "codex-bot", device: str = "box",
