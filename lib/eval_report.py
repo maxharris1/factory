@@ -491,12 +491,10 @@ def append_message(
             raise EvalError(f"bad {name} {value!r}")
     pr_field = "" if pr is None else f" pr={pr}"
     line = f"{_format_time(at)} repo={repo}{pr_field} message from={sender} to={recipient} kind={kind}\n"
-    with log.open("a+b") as handle:
-        if handle.tell() > 0:
-            handle.seek(handle.tell() - 1)
-            if handle.read(1) != b"\n":
-                line = "\n" + line
-        handle.write(line.encode("utf-8"))
+    # A last-byte check before the write races the dispatcher's torn append and glues this
+    # line onto its fragment, so always lead with a newline. The report skips blank lines.
+    with log.open("ab") as handle:
+        handle.write(f"\n{line}".encode("utf-8"))
 
 
 def render_json(report: Report) -> str:
