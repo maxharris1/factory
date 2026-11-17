@@ -747,7 +747,7 @@ def _run(args: argparse.Namespace) -> int:
         raise ProbeError("--plugin-dir must be an absolute path")
     _refuse_bot_home(args.out, "--out")
     _refuse_bot_home(args.work, "--work")
-    machines, findings = load_machines_yml(args.machines, allow_placeholders=True)
+    machines, findings = load_machines_yml(args.machines)
     if machines is None:
         errors = [f.message for f in findings if f.severity == "error"] or ["invalid"]
         raise ProbeError(f"{args.machines}: {errors[0]}")

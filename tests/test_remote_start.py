@@ -87,7 +87,7 @@ devices:
 
 
 def config_of(path: Path) -> MachinesConfig:
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None, findings
     return config
 
@@ -228,15 +228,20 @@ def test_the_local_device_names_no_ssh_alias(tmp_path: Path) -> None:
 def test_a_placeholder_alias_is_reported_and_never_scheduled(tmp_path: Path) -> None:
     path = tmp_path / "machines.yml"
     path.write_text(_remote_yaml(ssh_alias="REPLACE_WITH_PC_SSH_ALIAS"), encoding="utf-8")
-    assert load_machines_yml(path)[0] is None
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None
-    assert "accepted placeholder devices[0].ssh_alias" in findings[0].message
+    assert [(item.severity, item.message) for item in findings] == [
+        (
+            "warning",
+            "skipping device 'pc': devices[0].ssh_alias is an install placeholder; "
+            "it will not be scheduled",
+        )
+    ]
     pc = config.device("pc")
     assert pc is not None and not pc.eligible("codex") and pc.ssh_alias_for("codex") is None
 
 
-def test_shipped_pc_resolves_each_bot_to_its_own_box_alias_and_stays_disabled() -> None:
+def test_shipped_pc_and_box_resolve_each_bot_to_its_own_alias_and_login() -> None:
     config = config_of(ROOT / "machines.yml")
     pc, mac, box = config.device("pc"), config.device("mac"), config.device("box")
     assert pc is not None and mac is not None and box is not None
@@ -245,8 +250,18 @@ def test_shipped_pc_resolves_each_bot_to_its_own_box_alias_and_stays_disabled() 
         "codex": "pc-wsl-codex-bot",
         "cursor": "pc-wsl-cursor-bot",
     }
-    assert (pc.enabled, mac.enabled) == (False, False)
-    assert box.ssh_alias_for("claude") is None
+    assert {harness: box.ssh_alias_for(harness) for harness in box.harnesses} == {
+        "claude": "box-claude-bot",
+        "codex": "box-codex-bot",
+        "cursor": "box-cursor-bot",
+    }
+    assert (pc.enabled, box.enabled, mac.enabled) == (True, True, False)
+    assert remote.ssh_argv(remote_target(box, "codex", "job1"), "true")[-5:] == [
+        "-l", "box", "--", "box-codex-bot", "true",
+    ]
+    assert remote.ssh_argv(remote_target(pc, "codex", "job1"), "true")[-5:] == [
+        "-l", "codex-bot", "--", "pc-wsl-codex-bot", "true",
+    ]
     assert mac.ssh_alias_for("claude") is None
 
 

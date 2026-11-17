@@ -413,12 +413,12 @@ class Webhook:
     url_env: str = "FACTORY_WEBHOOK_URL"
     auth_env: str | None = "FACTORY_WEBHOOK_AUTH"
     key_env: str = "FACTORY_WEBHOOK_KEY"
-    linear_key_env: str | None = None
+    config_secret_envs: tuple[str, ...] = ()
 
     @property
     def secret_names(self) -> tuple[str, ...]:
-        names = (self.url_env, self.auth_env, self.key_env, self.linear_key_env)
-        return tuple(name for name in names if name)
+        names = (self.url_env, self.auth_env, self.key_env, *self.config_secret_envs)
+        return tuple(dict.fromkeys(name for name in names if name))
 
 
 def escalate(
@@ -629,10 +629,10 @@ def _webhook(orch_path: Path | None) -> Webhook:
     if config is None:
         return Webhook()
     grok = config.grok
-    linear_key = config.linear.api_key_env if config.linear is not None else None
+    secrets = config.secret_env_names
     if grok is None:
-        return Webhook(linear_key_env=linear_key)
-    return Webhook(grok.webhook_url_env, grok.webhook_auth_env, grok.webhook_key_env, linear_key)
+        return Webhook(config_secret_envs=secrets)
+    return Webhook(grok.webhook_url_env, grok.webhook_auth_env, grok.webhook_key_env, secrets)
 
 
 def main(argv: list[str], *, stdin: TextIO | None = None,

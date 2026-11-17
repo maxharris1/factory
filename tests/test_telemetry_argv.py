@@ -22,6 +22,7 @@ import pytest
 from lib import dashboard_telemetry, telemetry
 from lib.telemetry import STREAM_REASONS, Scrubber, Summary, stream_flags, stream_flags_line
 from lib.dashboard_pages.ticket_detail import live_run
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 from tests.test_telemetry import _orch, _row, _running_job, _session, fixture_lines
 
 CLAUDE_FLAGS = ["--output-format", "stream-json", "--verbose"]
@@ -136,7 +137,8 @@ def test_a_box_claude_wrapper_job_records_events_turns_and_tokens(tmp_path: Path
     _, job = _running_job(tmp_path)
     wrapper = _fake_bin(tmp_path / "bin")
     done = _orch(
-        "job", "run", "claude-bot", job.id, "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES),
+        "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
         "--", str(wrapper), *CLAUDE_BOT,
         env={"ORCH_JOB_STATE_DIR": str(tmp_path / "state")},
     )

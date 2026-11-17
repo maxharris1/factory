@@ -241,13 +241,16 @@ def test_cli_maps_every_linear_id_to_its_repo(tmp_path: Path) -> None:
     assert orch is not None, findings
 
     source = type("Source", (), {"factory_context": None, "_adapter_runner": None})()
-    feeder = cli._feeder(orch, SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW), None, source, [])
+    feeder = cli._feeder(orch, SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW), None, source)
 
     assert feeder.linear.repo_for_project == {
         "proj-a": "acme/app",
         "proj-b": "acme/app",
         "proj-c": "acme/solo",
     }
+    assert orch.secret_env_names
+    for name in orch.secret_env_names:
+        assert ("-u", name) in zip(feeder.github.gh, feeder.github.gh[1:])
 
 
 def two_projects():

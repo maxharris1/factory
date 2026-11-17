@@ -26,15 +26,15 @@ PC = """\
 {pc_extra}"""
 
 
-def _load(tmp_path, text, **kwargs):
+def _load(tmp_path, text):
     path = tmp_path / "machines.yml"
     path.write_text(text, encoding="utf-8")
-    return load_machines_yml(path, **kwargs)
+    return load_machines_yml(path)
 
 
-def _two_devices(tmp_path, *, box_extra="", pc_extra="", **kwargs):
+def _two_devices(tmp_path, *, box_extra="", pc_extra=""):
     text = "devices:\n" + BOX.format(box_extra=box_extra) + PC.format(pc_extra=pc_extra)
-    return _load(tmp_path, text, **kwargs)
+    return _load(tmp_path, text)
 
 
 def _errors(findings):
@@ -73,24 +73,15 @@ def test_local_device_factory_root_is_optional(tmp_path, box_extra, expected):
     assert config.factory_root("box", "claude") == expected
 
 
-def test_placeholder_is_an_error_by_default(tmp_path):
+def test_placeholder_factory_root_skips_the_device_with_a_warning(tmp_path):
     config, findings = _two_devices(
         tmp_path, pc_extra="    factory_root: REPLACE_WITH_PC_FACTORY_ROOT\n"
     )
-    assert config is None
-    assert _errors(findings) == [
-        "devices[1].factory_root is an install placeholder; "
-        "Max must provide this inventory"
-    ]
-
-
-def test_placeholder_is_a_warning_and_unschedulable_when_allowed(tmp_path):
-    config, findings = _two_devices(
-        tmp_path,
-        pc_extra="    factory_root: REPLACE_WITH_PC_FACTORY_ROOT\n",
-        allow_placeholders=True,
-    )
     assert _errors(findings) == []
+    assert [item.message for item in findings if item.severity == "warning"] == [
+        "skipping device 'pc': devices[1].factory_root is an install placeholder; "
+        "it will not be scheduled"
+    ]
     pc = config.device("pc")
     assert pc.placeholders == ("factory_root",)
     assert not pc.schedulable
@@ -188,9 +179,7 @@ def test_helper_returns_factory_root_for_box_pc_and_mac(tmp_path):
 
 
 def test_repo_machines_yml_names_factory_roots():
-    config, findings = load_machines_yml(
-        ROOT / "machines.yml", allow_placeholders=True
-    )
+    config, findings = load_machines_yml(ROOT / "machines.yml")
     assert _errors(findings) == []
     assert config.factory_root("box", "claude") == "/home/box/factory"
     assert config.factory_root("pc", "claude") == "/home/claude-bot/factory"
@@ -202,16 +191,15 @@ def test_example_documents_factory_root_apart_from_workdir_root():
     config, findings = load_machines_yml(path)
     assert _errors(findings) == []
     assert config.factory_root("box", "claude") == "/home/box/factory"
+    assert config.factory_root("pc", "claude") == "/home/claude-bot/factory"
+    assert config.device("pc").workdir_for("claude") == "/home/claude-bot/factory-work"
     comments = [
         line.strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip().startswith("#")
     ]
-    factory_lines = [line for line in comments if "factory_root" in line]
-    assert factory_lines
-    assert any("not workdir_root" in line for line in factory_lines)
-    assert "#   workdir_root: /home/{bot}/factory-work" in comments
-    assert "#   factory_root: /home/{bot}/factory" in comments
+    assert "# factory_root is the deployed factory checkout (skills/, bin/orch), not" in comments
+    assert "# workdir_root, and may not sit inside it." in comments
 
 
 def test_a_factory_root_with_a_backtick_is_refused(tmp_path):

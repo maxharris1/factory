@@ -482,7 +482,7 @@ def _command_refresh(args: argparse.Namespace) -> int:
         return 1
     if config.github_app is None:
         return 0
-    machines, machine_findings = load_machines_yml(Path(args.machines), allow_placeholders=True)
+    machines, machine_findings = load_machines_yml(Path(args.machines))
     devices = machines.devices if machines is not None else ()
     if machines is None:
         for finding in machine_findings:

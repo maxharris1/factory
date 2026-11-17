@@ -783,7 +783,7 @@ def main(
         if not value:
             parser.error("pass --db or set ORCH_DB to the dispatcher database")
         path = Path(value)
-    machines, findings = load_machines_yml(args.machines, allow_placeholders=True)
+    machines, findings = load_machines_yml(args.machines)
     if machines is None:
         errors = [item for item in findings if item.severity == "error"]
         detail = errors[0].message if errors else "invalid machines.yml"

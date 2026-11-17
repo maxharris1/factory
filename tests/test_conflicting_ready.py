@@ -215,7 +215,7 @@ def test_a_link_dropped_base_update_is_not_requeued_beside_the_queue_update(
     tmp_path: Path,
 ) -> None:
     board = Board(tmp_path)
-    config, findings = load_machines_yml(box_machines(tmp_path), allow_placeholders=True)
+    config, findings = load_machines_yml(box_machines(tmp_path))
     assert config is not None, findings
     DevicePool(board.queue, config)
     _base_update_queued(board)

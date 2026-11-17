@@ -1111,7 +1111,6 @@ class Feeder:
     def _room(self, harnesses: set[str], now: float) -> dict[str, int]:
         room: dict[str, int] = {}
         with self.queue.connect() as connection:
-            # Held slots, plus running jobs with no placement on the box (#90).
             used = slots_in_use(connection, self.machines)
             blocked = placement_blocked(connection, now)
             for harness in harnesses:

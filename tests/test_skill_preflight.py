@@ -34,6 +34,7 @@ from lib.queue import SQLiteJobQueue, _ensure_job_events
 from lib import waiter
 from lib.waiter import HarnessCommand, Waiter
 from tests.test_remote_start import Ssh
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 from tests.test_waiter import FakeContext, FakeSpawn, enqueue, state
 from tests.test_waiter_remote import remote_machines
 
@@ -161,7 +162,7 @@ class Device:
         machines.write_text(text, encoding="utf-8")
         self.db = tmp_path / "orch.db"
         self.queue = SQLiteJobQueue(self.db, clock=time.time)
-        config, findings = load_machines_yml(machines, allow_placeholders=True)
+        config, findings = load_machines_yml(machines)
         assert config is not None, findings
         self.spawn = FakeSpawn()
         self.ssh_calls_at_spawn: list[int] = []
@@ -650,8 +651,8 @@ def test_a_symlinked_skill_dir_counts(tmp_path: Path, lock_root: Path) -> None:
     assert skill_preflight.compare(expected, found) is None
 
 
-def test_the_box_checkout_is_its_factory_root_when_machines_yml_names_one(lock_root: Path) -> None:
-    config, findings = load_machines_yml(REPO / "machines.yml", allow_placeholders=True)
+def test_the_box_checkout_is_its_factory_root_when_its_device_names_one(lock_root: Path) -> None:
+    config, findings = load_machines_yml(LOCAL_BOX_MACHINES)
     assert config is not None, findings
     box = next(device for device in config.devices if device.local)
     named = box.factory_root_for("claude")

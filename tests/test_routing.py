@@ -29,7 +29,7 @@ def machines(tmp_path: Path, devices: list[tuple[str, int, bool]]):
         lines += [f"    slot_max: {slots}", "    harnesses: {claude: claude-bot, codex: codex-bot}"]
     path = tmp_path / "machines.yml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None, findings
     return config
 

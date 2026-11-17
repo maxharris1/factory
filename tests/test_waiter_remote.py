@@ -59,7 +59,7 @@ def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None
                 orch=("python3", "/factory/bin/orch"), alive=None, gone=None):
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
-    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    config, findings = load_machines_yml(machines)
     assert config is not None, findings
     waiter = Waiter(
         bot="claude-bot",
@@ -233,7 +233,7 @@ def test_remote_autostart_end_to_end_over_fake_ssh(tmp_path: Path) -> None:
     )
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
-    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    config, _ = load_machines_yml(machines)
     log: list[str] = []
     waiter = Waiter(
         bot="claude-bot",
@@ -502,7 +502,7 @@ def test_a_remote_run_whose_runner_is_killed_never_runs_two_workers(
     )
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
-    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    config, _ = load_machines_yml(machines)
     pool = DevicePool(queue, config)
     log: list[str] = []
     waiter = Waiter(
