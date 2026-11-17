@@ -283,6 +283,12 @@ def _first_start(model: dict) -> float | None:
     return min(starts) if starts else None
 
 
+def _intake_at(model: dict) -> float | None:
+    end = model["end"]
+    took = end["intake_to_ship_seconds"]
+    return None if end["at"] is None or took is None else end["at"] - took
+
+
 def _et_clock(epoch: float) -> str:
     at = datetime.fromtimestamp(epoch, ET)
     return f"{at.hour % 12 or 12}:{at.minute:02d} {'AM' if at.hour < 12 else 'PM'} ET"
@@ -341,7 +347,7 @@ def _shipped_line(model: dict) -> str:
 
 
 def _when(model: dict) -> str:
-    start = _first_start(model)
+    start = _intake_at(model)
     parts = ("" if start is None else "intake " + _et_clock(start), _ended_clock(model) or "")
     text = " · ".join(p for p in parts if p)
     return f'<div class="jd-when"><span class="mark" aria-hidden="true"></span>{_span(None, text)}</div>'
@@ -709,13 +715,17 @@ def _liverun(row: dict, started: bool) -> str:
 
 
 def time_by_who(model: dict) -> list[tuple[str, int, str]]:
+    end = model["end"]["at"]
     seconds: dict[str, int] = {}
     states: dict[str, dict[str, int]] = {}
     for visit in model["visits"]:
-        if visit["duration_seconds"] is None:
+        took, start = visit["duration_seconds"], visit["started_at"]
+        if took is not None and end is not None and start is not None:
+            took = int(min(took, end - start)) if start < end else None
+        if took is None:
             continue
         who = str(visit["who"])
-        seconds[who] = seconds.get(who, 0) + visit["duration_seconds"]
+        seconds[who] = seconds.get(who, 0) + took
         seen = states.setdefault(who, {})
         seen[visit["state"]] = seen.get(visit["state"], 0) + 1
     return [
@@ -745,7 +755,7 @@ def _time_by_who(model: dict) -> str:
 
 def _summary(model: dict) -> str:
     end, noun = model["end"], _how(model)[1]
-    start, at = _first_start(model), end["at"]
+    start, at = _intake_at(model), end["at"]
     run = " to ".join(p for p in ("" if start is None else f"intake {_et_clock(start)}",
                                   "" if at is None else f"{noun} {_et_clock(at)}") if p)
     tiles = _lr_tile_row((
@@ -1116,6 +1126,10 @@ _SCRIPT = r"""
     var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
     return starts.length ? Math.min.apply(null, starts) : null;
   }
+  function intakeAt(m) {
+    var end = m.end;
+    return known(end.at) && known(end.intake_to_ship_seconds) ? end.at - end.intake_to_ship_seconds : null;
+  }
   var ET = null;
   function etClock(epoch) {
     ET = ET || new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true});
@@ -1238,7 +1252,7 @@ _SCRIPT = r"""
     });
     var when = add(who, el('div', 'jd-when'));
     span(when, 'mark').setAttribute('aria-hidden', 'true');
-    var start = firstStart(m);
+    var start = intakeAt(m);
     span(when, null, [start === null ? '' : 'intake ' + etClock(start), endedClock(m)].filter(Boolean).join(' · '));
   }
   var LINES = {
@@ -1610,13 +1624,15 @@ _SCRIPT = r"""
     return sec;
   }
   function timeByWho(m) {
-    var rows = new Map();
+    var rows = new Map(), end = m.end.at;
     m.visits.forEach(function (v) {
-      if (!known(v.duration_seconds)) return;
+      var took = v.duration_seconds, start = v.started_at;
+      if (known(took) && known(end) && known(start)) took = start < end ? Math.floor(Math.min(took, end - start)) : null;
+      if (!known(took)) return;
       var who = String(v.who);
       if (!rows.has(who)) rows.set(who, {seconds: 0, states: new Map()});
       var row = rows.get(who);
-      row.seconds += v.duration_seconds;
+      row.seconds += took;
       row.states.set(v.state, (row.states.get(v.state) || 0) + 1);
     });
     return Array.from(rows, function (e) {
@@ -1645,7 +1661,7 @@ _SCRIPT = r"""
     return group;
   }
   function summaryPanel(m) {
-    var end = m.end, start = firstStart(m);
+    var end = m.end, start = intakeAt(m);
     var run = [start === null ? '' : 'intake ' + etClock(start),
                known(end.at) ? howOf(m)[1] + ' ' + etClock(end.at) : ''].filter(Boolean).join(' to ');
     var sec = jdPanel('jd-sum', 'Run summary', ['the whole run', run].filter(Boolean).join(' · '));

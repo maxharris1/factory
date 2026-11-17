@@ -1641,6 +1641,58 @@ def test_a_hostile_actor_and_state_are_escaped_in_the_run_summary(tmp_path: Path
         summary = _panel(markup, "Run summary")
         assert "&lt;img src=x onerror=y&gt;" in summary and "&lt;script&gt;x()&lt;/script&gt;" in summary, render
 
+
+def _time_by_who(markup: str) -> tuple[str, set[str]]:
+    summary = _panel(markup, "Run summary")
+    total = re.search(r'<span class="lr-label">Time by who</span><span class="lr-count">([^<]*)</span>', summary).group(1)
+    key = re.search(r'<div class="sum-key">(.*?)</div>', summary, re.S).group(1)
+    states = {re.sub(r"^\d+× ", "", state)
+              for item in re.findall(r'<span><i[^>]*></i>(.*?)</span>(?=<span><i|$)', key)
+              for state in _text(item).split(" · ", 1)[1].split(", ")}
+    return total, states
+
+
+@needs_node
+def test_a_shipped_ticket_s_time_by_who_stops_at_shipment_however_long_it_sits_shipped(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard_ticket_records import _shipped
+    db, log = _shipped(tmp_path / "db")
+    address = "maxharris1/cleffy#80"
+    for offset in (0, 3600):
+        snapshot = collect_snapshot(db, log, now=NOW + offset)
+        took = snapshot[RECORDS][address]["shipped"]["intake_to_ship_seconds"]
+        assert took == 1200
+        for render, markup in _both(tmp_path, snapshot, address).items():
+            total, states = _time_by_who(markup)
+            assert total == duration(took), (offset, render)
+            assert states == {"intake", "building", "review", "fixing", "ship"}, (offset, render)
+
+
+@needs_node
+def test_a_shipped_ticket_whose_intake_visit_has_no_clock_reads_intake_from_its_tracked_time(tmp_path: Path) -> None:
+    import sqlite3
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import TRACKED_AT, add_job, add_ticket, seeded
+    from tests.test_dashboard_ticket_records import transition
+    db, log = seeded(tmp_path / "db")
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "99", state="merged")
+        add_job(connection, "legacy-build", state="done", ticket_id="99", created_at=NOW - 3000)
+        transition(connection, "99", "building", "review", NOW - 1800)
+        transition(connection, "99", "review", "ship", NOW - 1200)
+        transition(connection, "99", "ship", "merged", NOW - 600)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    building = next(v for v in snapshot[RECORDS]["maxharris1/cleffy#99"]["visits"] if v["state"] == "building")
+    intake, wrong = ticket_detail._et_clock(TRACKED_AT), ticket_detail._et_clock(building["started_at"])
+    assert intake != wrong
+    for render, markup in _both(tmp_path, snapshot, "maxharris1/cleffy#99").items():
+        hero = re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).group(0)
+        when = _text(re.search(r'<div class="jd-when">(.*?)</div>', hero, re.S).group(1))
+        assert f"intake {intake}" in when, render
+        assert _count(_panel(markup, "Run summary")).startswith(f"the whole run · intake {intake} to "), render
+        assert f"intake {wrong}" not in _text(markup), render
+
+
 STILL_TICKET = r"""
 (async () => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
