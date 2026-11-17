@@ -32,6 +32,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
+from lib.dispatch.constants import HANDED_OFF_EXTERNALLY
+
 ROOT = Path(__file__).resolve().parent.parent
 CHART_PATH = ROOT / "model" / "chart.mmd"
 CHART_MAX_BYTES = 256 * 1024
@@ -266,7 +268,7 @@ def is_terminal(chart: dict | None, state: str | None) -> bool:
 
 
 PIPELINE = ("Ask", "Plan", "Build", "Review", "Ship")
-SHIPPED = ("handed-off", "merged", "done")
+SHIPPED = ("handed-off", "merged", "done", HANDED_OFF_EXTERNALLY)
 PHASES = (*PIPELINE, "Shipped", "Stop")
 PHASE_OVERRIDES = {"capped": "Stop", **{name: "Shipped" for name in SHIPPED}}
 
@@ -308,7 +310,8 @@ def hops_to_shipped(chart: dict | None, state: str | None) -> int | None:
         if name in SHIPPED:
             return hops[name]
         for nxt in adjacency[name]:
-            if nxt not in hops:
+            # Max's move in Linear is not a step the factory takes (#749).
+            if nxt not in hops and nxt != HANDED_OFF_EXTERNALLY:
                 hops[nxt] = hops[name] + 1
                 queue.append(nxt)
     return None

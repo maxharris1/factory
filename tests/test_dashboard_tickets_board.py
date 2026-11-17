@@ -19,7 +19,7 @@ from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
-from tests.test_dashboard import NOW, add_job, add_ticket, make_db
+from tests.test_dashboard import AUT0, NOW, _hand_off_in_linear, add_job, add_ticket, make_db
 
 CHART = Path(__file__).resolve().parents[1] / "model" / "chart.mmd"
 PROJECTS = (("maxharris1/factory", "github"), ("maxharris1/cleffy", "github"), ("aut0-code/aut0", "linear"))
@@ -240,7 +240,7 @@ def test_every_chart_state_has_exactly_one_phase_from_its_legend_group() -> None
         name = state["name"]
         if name == "capped":
             assert phases[name] == "Stop"
-        elif name in ("handed-off", "merged", "done"):
+        elif name in ("handed-off", "handed-off-externally", "merged", "done"):
             assert phases[name] == "Shipped"
         else:
             assert phases[name] == legend[state["group"]], name
@@ -252,9 +252,9 @@ def test_every_chart_state_has_exactly_one_phase_from_its_legend_group() -> None
 
 def test_a_new_teal_chart_state_joins_ship_with_no_code_change() -> None:
     text = CHART.read_text(encoding="utf-8")
-    text = text.replace("  s21: capped\n", "  s21: capped\n  s22: launch-pad\n")
-    text = text.replace("  class s21 yellow\n", "  class s21 yellow\n  class s22 teal\n")
-    text = text.replace("  s3 --> s3: CI red, fix\n", "  s3 --> s3: CI red, fix\n  s14 --> s22: go\n")
+    text = text.replace("  s22: capped\n", "  s22: capped\n  s23: launch-pad\n")
+    text = text.replace("  class s22 yellow\n", "  class s22 yellow\n  class s23 teal\n")
+    text = text.replace("  s3 --> s3: CI red, fix\n", "  s3 --> s3: CI red, fix\n  s14 --> s23: go\n")
     phases = flow.ticket_phases(flow.parse_chart(text))
     assert phases["launch-pad"] == "Ship"
 
@@ -314,7 +314,7 @@ def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
     count = _text(_one(pipeline, _cls("count")))
     assert count == f"{len(rows)} tracked · {opened} open · {len(tiles)} shipped"
     assert _text(_one(shipped, _cls("count"))) == str(len(tiles))
-    handed = sum(row["state"] == "handed-off" and not row["stuck"] for row in rows)
+    handed = sum(row["state"] in ("handed-off", "handed-off-externally") and not row["stuck"] for row in rows)
     if tiles:
         assert _text(_one(shipped, _cls("tk-sub"))) == f"{len(tiles) - handed} merged · {handed} handed off"
     else:
@@ -437,7 +437,7 @@ def test_cards_show_round_bot_device_time_and_link_their_ticket_page(snapshot: d
 def test_shelf_tiles_carry_their_revise_rounds(snapshot: dict) -> None:
     rounds = {_key(row): row["round"] for row in snapshot["tickets"]}
     tiles = _all(_dom(_server(snapshot)["shipped"]), _cls("tk-tile"))
-    assert len(tiles) == 3 and len({rounds[t["attrs"]["data-ticket"]] for t in tiles}) > 1
+    assert len(tiles) == 4 and len({rounds[t["attrs"]["data-ticket"]] for t in tiles}) > 1
     for tile in tiles:
         assert "#" in _text(_one(tile, _cls("tk-tn")))
         assert _text(_one(tile, _cls("tk-r"))) == f"r{rounds[tile['attrs']['data-ticket']]}"
@@ -608,6 +608,22 @@ def test_script_cards_join_jobs_whatever_the_repo_case(tmp_path: Path, snapshot:
     out, server = _script(tmp_path, _recased(snapshot)), _server(snapshot)
     for ident in ("pipeline", "shipped"):
         assert out["html"][ident] == server[ident], ident
+
+
+@layout.needs_node
+def test_script_draws_the_handed_off_in_linear_tile_as_the_server_does(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, AUT0, "AUT-2282", tracker="linear", state="capped", review_round=6)
+        _hand_off_in_linear(connection, "AUT-2282", "In Review")
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    out, server = _script(tmp_path, snapshot), _server(snapshot)
+    assert "handed off in Linear 2h 00m ago" in server["shipped"]
+    assert out["html"]["shipped"] == server["shipped"]
+    assert out["html"]["pipeline"] == server["pipeline"]
 
 
 @layout.needs_node
@@ -1752,13 +1768,13 @@ def test_the_toolbar_has_a_labelled_find_a_ticket_box_after_the_view_toggle(snap
 
 @layout.needs_node
 def test_find_lists_eight_matches_from_every_project_whatever_the_filter(tmp_path: Path, snapshot: dict) -> None:
-    found = _searched(tmp_path, snapshot, "1", [], project="maxharris1/cleffy")
+    found = _searched(tmp_path, snapshot, "10", [], project="maxharris1/cleffy")
     options = _options(found["snaps"][0])
     assert len(options) == 8 and len(snapshot["tickets"]) > 8
-    assert {label.split("#")[0] for label, _, _ in options} == {"factory", "cleffy"}
+    assert {label.split("#")[0] for label, _, _ in options} == {"factory", "cleffy", "aut0"}
     assert _expanded(found["snaps"][0]) == ("true", False)
     assert all(selected == "false" for _, _, selected in options)
-    assert found["focused"] == ["input", "find-ticket"] and found["value"] == "1"
+    assert found["focused"] == ["input", "find-ticket"] and found["value"] == "10"
 
 
 @layout.needs_node

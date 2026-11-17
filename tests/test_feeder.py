@@ -534,6 +534,26 @@ def test_a_linear_move_by_an_untrusted_user_is_ignored(tmp_path: Path) -> None:
     assert github.pulls == {} and linear.posted == {}
 
 
+def test_started_ticket_back_in_intake_state_is_not_fed(tmp_path: Path) -> None:
+    linear = FakeLinear()
+    linear.issues = [linear_issue("AUT-2282"), linear_issue("AUT-9")]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=LINEAR_ORCH, linear=linear,
+                                           factory_text=LINEAR_FACTORY_MD)
+    dispatcher_for(tmp_path, queue)
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.executemany(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state, gate_count, stuck) "
+            "VALUES ('acme/linear-app', ?, ?, 0, 0)",
+            [("AUT-2282", "building"), ("AUT-9", "questions")],
+        )
+
+    report = feeder.feed_once()
+
+    assert report.fed == (TicketRef("acme/linear-app", "AUT-9", "linear"),)
+    assert "AUT-2282" not in rows(tmp_path / "orch.db")
+    assert "uuid-AUT-2282" not in linear.posted
+
+
 # --- A. idempotency: one PR per issue, keyed on the issue number -------------
 
 
