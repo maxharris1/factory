@@ -40,6 +40,8 @@ from tests.test_dashboard_layout import BAR, _run_page, attention_count, needs_n
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, TRUSTED_LOGINS
 from tests.test_remote_start import FakeTransport, config_of, machines_file
 
+REVIEW_72 = "ticket.html#t=maxharris1%2Ffactory%2372"
+
 ROOT = Path(__file__).resolve().parents[1]
 ET = timezone(timedelta(hours=-5))
 # bbfa3217 (issue #75): Codex's `orch wait` claimed this review of #72 at
@@ -651,7 +653,7 @@ def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> No
     pages = render_pages(snapshot)
     index = re.sub(r"<script>.*?</script>", "", pages["index.html"], flags=re.S)
     card = re.search(
-        rf'<a class="tile [^"]*" href="job.html#job-{ids["claimed"][:8]}"[^>]*>.*?</a>',
+        rf'<a class="tile [^"]*" href="{REVIEW_72}"[^>]*>.*?</a>',
         index,
         re.S,
     )
@@ -678,7 +680,7 @@ def test_the_page_script_draws_the_same_states(tmp_path: Path) -> None:
     assert "round 0" not in lanes
     assert attention_count(out) == "2"
     dump = out["dump"]["lanes"]
-    card = dump[dump.index(f"job-{ids['claimed'][:8]}") :]
+    card = dump[dump.index(REVIEW_72) :]
     card = card[: card.index("a.tile", 1)] if "a.tile" in card[1:] else card
     assert 'span.hbt "hb —"' in card and "span.chip.warn \"claimed\"" in card
 

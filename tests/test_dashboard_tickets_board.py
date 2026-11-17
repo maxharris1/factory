@@ -30,7 +30,7 @@ JOBS = {"planning": ("j-plan01", "plan", "claude", None),
 QUEUED = ("plan-check", "j-queue1")
 VERDICT = ("post-merge", "queued-review")
 BOARD = ["ticket-filter", "pipeline", "shipped", "tickets"]
-IDS = layout.BAR + ["hud", *BOARD, "jobview", "flow-template"]
+IDS = layout.BAR + ["hud", *BOARD, "flow-template"]
 COLUMNS = ["Ask", "Plan", "Build", "Review", "Ship", "Stop"]
 GLYPHS = {"Ask": ("twinkle", "#a9b1d6"), "Plan": ("field", "#a9b1d6"), "Build": ("fill", "#a9b1d6"),
           "Review": ("scan", "#a9b1d6"), "Ship": ("off", "#a9b1d6"), "Stop": ("static", "#f7768e")}

@@ -28,7 +28,8 @@ import pytest
 import lib.dashboard as dashboard
 import lib.dashboard_flow as flow
 from lib.dashboard import collect_snapshot, render_pages, tickets_json, write_snapshot, write_snapshot_pages
-from lib.dashboard_pages.common import ticket_page_href
+from lib.dashboard_pages.common import ticket_address, ticket_page_href
+from lib.dashboard_pages.ticket_detail import ticket_view
 from tests.test_dashboard import (
     FREE_TEXT_SECRETS,
     GH_CLASSIC,
@@ -122,6 +123,19 @@ def _text(markup: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", markup)).strip()
 
 
+def _job_row(snapshot: dict, job: str) -> dict:
+    return next(row for row in snapshot["running"] + snapshot["queued"] if row["job"] == job)
+
+
+def _ticket_page(snapshot: dict, job: str) -> str:
+    return ticket_view(snapshot, ticket_address(_job_row(snapshot, job)))
+
+
+def _tile(html: str, snapshot: dict, job: str) -> re.Match | None:
+    href = re.escape(ticket_page_href(_job_row(snapshot, job)))
+    return re.search(rf'<a class="tile [^"]*" href="{href}" title="[^"]*\(job {re.escape(job)}\)">.*?</a>', html, re.S)
+
+
 def _chart_source(path: Path) -> tuple[set[str], set[tuple[str, str]]]:
     """States and transitions read straight from a chart file, independently
     of lib.dashboard_flow."""
@@ -189,9 +203,9 @@ def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> 
 
 
 def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) -> None:
-    html = _no_script(_pages(tmp_path)["index.html"])
-    lanes = _section(html, "lanes")
-    card = re.search(r'<a class="tile [^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
+    snapshot = _snapshot(tmp_path)
+    lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+    card = _tile(lanes, snapshot, "h-review")
     assert card, lanes
     text = _text(card.group(0))
     assert "cleffy#40" in text and "PR" not in text.split()
@@ -206,18 +220,18 @@ def test_a_linear_slot_shows_its_ticket_not_a_pr(tmp_path: Path) -> None:
     with sqlite3.connect(db) as connection:
         add_job(connection, "lin-build", state="running", repo="aut0-code/aut0",
                 ticket_id="AUT-7", created_at=NOW - 30)
-    html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["index.html"])
-    card = re.search(r'<a class="tile [^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    card = _tile(_no_script(render_pages(snapshot)["index.html"]), snapshot, "lin-buil")
     assert card
     text = _text(card.group(0))
     assert "AUT-7" in text and "ticket" not in text.split() and "PR" not in text.split()
 
 
-def test_queue_items_open_their_job_page(tmp_path: Path) -> None:
-    html = _no_script(_pages(tmp_path)["index.html"])
-    queue = _section(html, "queue")
-    assert 'href="job.html#job-q-claude"' in queue
-    assert 'href="job.html#job-g-grok-c"' in queue
+def test_queue_items_open_their_ticket_page(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    queue = _section(_no_script(render_pages(snapshot)["index.html"]), "queue")
+    assert sorted(re.findall(r'<li><a href="([^"]*)"', queue)) == sorted(
+        ticket_page_href(_job_row(snapshot, job)) for job in ("q-claude", "g-grok-c"))
     assert "cleffy#12" in _text(queue)
 
 
@@ -326,7 +340,7 @@ def test_activity_page_has_attention_and_relay_only(tmp_path: Path) -> None:
 
 def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
     html = _no_script(render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))["job.html"])
-    for panel in ("ticket-filter", "pipeline", "shipped", "tickets", "jobview"):
+    for panel in ("ticket-filter", "pipeline", "shipped", "tickets"):
         assert f'id="{panel}"' in html, panel
     assert 'id="jobs"' not in html
     tickets = _text(_section(html, "tickets"))
@@ -410,8 +424,7 @@ def test_job_page_diagram_is_the_real_statechart(tmp_path: Path) -> None:
     states, transitions = _chart_source(CHART)
     assert _layout_of(CHART) == (states, transitions)
     assert len(states) == 22  # section 4.1, with awaiting-ok (#86), merge-queue and updating (#130)
-    html = _no_script(render_pages(snapshot)["job.html"])
-    assert "Full state chart <span class=\"count\">· 22 states," in _section(html, "job-h-review")
+    assert "Full state chart <span class=\"count\">· 22 states," in _ticket_page(snapshot, "h-review")
 
 
 def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> None:
@@ -428,8 +441,7 @@ def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> 
     nodes, edges = _layout_of(changed)
     assert nodes == {"intake", "building", "review", "fixing", "handed-off", "waiting-max"}
     assert ("review", "handed-off") not in edges
-    html = _no_script(render_pages(_snapshot(tmp_path / "b", chart_path=changed))["job.html"])
-    assert "· 6 states," in _section(html, "job-h-review")
+    assert "· 6 states," in _ticket_page(_snapshot(tmp_path / "b", chart_path=changed), "h-review")
 
 
 def _flowmap_names(html: str) -> set[str]:
@@ -543,9 +555,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     }
 
 
-def test_job_page_shows_the_path_and_current_state(tmp_path: Path) -> None:
-    html = _no_script(_pages(tmp_path)["job.html"])
-    article = _section(html, "job-h-review")
+def test_ticket_page_shows_the_path_and_current_state(tmp_path: Path) -> None:
+    article = _ticket_page(_snapshot(tmp_path), "h-review")
     runlog = re.search(r'<ol class="runlog">(.*?)</ol>', article, re.S).group(1)
     assert re.findall(r'data-state="([^"]+)"', runlog) == [
         "intake", "building", "review", "fixing", "review"]
@@ -557,14 +568,18 @@ def test_job_page_shows_the_path_and_current_state(tmp_path: Path) -> None:
     assert "codex" in text and "cleffy#40" in text
 
 
-def test_job_page_lists_every_running_and_queued_job(tmp_path: Path) -> None:
+def test_every_running_and_queued_job_opens_on_its_ticket_page(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     html = _no_script(render_pages(snapshot)["job.html"])
     for row in snapshot["running"] + snapshot["queued"]:
-        assert f'id="job-{row["job"]}"' in html, row["job"]
+        article = _ticket_page(snapshot, row["job"])
+        assert f'<article class="jobpage ticketpage" data-ticket="{ticket_address(row)}">' in article, row["job"]
+        assert 'id="liverun-job-' in article, row["job"]
     board = _section(html, "pipeline") + _section(html, "shipped")
     for row in snapshot["tickets"]:
-        assert f'href="{ticket_page_href(row)}"' in board, row["ticket_id"]
+        assert f'href="{ticket_page_href(row)}"' in board, ticket_address(row)
+    for job in ("h-review", "r-codex-"):
+        assert f'href="{ticket_page_href(_job_row(snapshot, job))}"' in board, job
     assert 'href="job.html#job-' not in board
 
 
@@ -577,7 +592,7 @@ def test_a_job_with_no_ticket_state_still_gets_a_run_log(tmp_path: Path) -> None
     assert job["round"] is None
     assert job["flow"]["state"] is None
     assert job["flow"]["path"] == ["intake", "building"]
-    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-orphan-b")
+    article = _ticket_page(snapshot, "orphan-b")
     (runlog,) = re.findall(r'<ol class="runlog">.*?</ol>', article, re.S)
     assert not re.search(r'class="[^"]*\bnow\b', runlog)
 
@@ -600,11 +615,6 @@ def test_every_page_reads_without_script(tmp_path: Path) -> None:
             assert re.search(r"<h2[ >]", section), (name, panel)
     lanes = _text(_section(_no_script(pages["index.html"]), "lanes"))
     assert "cleffy#13" in lanes and "cleffy#14" in lanes
-    job = _no_script(pages["job.html"])
-    # Without script the job page shows every job; a slot link scrolls to its
-    # own and :target marks it.
-    assert ":target" in re.search(r"<style>(.*?)</style>", html, re.S).group(1)
-    assert 'id="job-h-review"' in job
 
 
 def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
@@ -774,7 +784,8 @@ function act(actions) {
     }
   }
 }
-global.location = {hash, reload: () => { console.log('RELOAD'); }};
+const replaced = [];
+global.location = {hash, reload: () => { console.log('RELOAD'); }, replace: (url) => { replaced.push(url); }};
 let fetches = 0;
 let ticketFetches = 0;
 const heldTickets = [];
@@ -796,7 +807,7 @@ global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 eval(script);
 setTimeout(() => {
   act(JSON.parse(actionsText));
-  process.stdout.write(JSON.stringify({fetches, steps, tickets: ticketFetches,
+  process.stdout.write(JSON.stringify({fetches, steps, tickets: ticketFetches, replaced,
     text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
     html: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.children.map(c => c.html()).join('')])),
     hidden: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, !!v.hidden])),
@@ -851,7 +862,7 @@ def test_the_harness_takes_an_action_list_past_the_linux_argument_cap(tmp_path: 
 # The shell on every page (#139): the TopBar's link state and caret, the band,
 # the attention strip and the status line.
 BAR = ["link", "link-text", "age", "clock", "caret", "band", "attention-strip", "statusline"]
-JOB = BAR + ["hud", "ticket-filter", "pipeline", "shipped", "tickets", "jobview", "flow-template"]
+JOB = BAR + ["hud", "ticket-filter", "pipeline", "shipped", "tickets", "flow-template"]
 
 
 def attention_count(out: dict) -> str:
@@ -870,7 +881,7 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     assert "LIVE" in out["text"]["link-text"]
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
-    assert "a.tile.codex[href=job.html#job-r-codex-]" in lanes
+    assert f"a.tile.codex[href={ticket_page_href(_job_row(snapshot, 'r-codex-'))}]" in lanes
     for needle in ("cleffy#13", "codex", "review", "3/3", "T+ ", "overdue", "DISABLED",
                    "stale"):
         assert needle in out["text"]["lanes"], (needle, lanes)
@@ -879,7 +890,7 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     pc = pc[: pc.index("[data-device=", 1)] if "[data-device=" in pc[1:] else pc
     assert '"2 / 2 slots"' in pc and '"held"' in pc and '"idle"' not in pc
     queue = lanes[lanes.index("[data-device=queue]") : lanes.index("[data-device=", lanes.index("[data-device=queue]") + 1)]
-    assert "a[href=job.html#job-q-claude]" in queue
+    assert f"a[href={ticket_page_href(_job_row(snapshot, 'q-claude'))}]" in queue
     assert "cleffy#12" in queue
 
 
@@ -902,26 +913,28 @@ def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> Non
 @needs_node
 def test_script_shows_the_selected_jobs_path(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
-    view = out["dump"]["jobview"]
-    assert "cleffy#40" in out["text"]["jobview"]
-    assert "round 2 of 3" in out["text"]["jobview"]
-    assert "33m 2" in out["text"]["jobview"]  # time in state, ticking from 33m 20s
+    out = _run_page(tmp_path / "job", snapshot, "job", JOB, hash_="#job-h-review")
+    assert out["replaced"] == [ticket_page_href(_job_row(snapshot, "h-review"))]
+    assert f"a[href={ticket_page_href(_job_row(snapshot, 'r-codex-'))}]" in out["dump"]["pipeline"]
+    assert "AUT-7" in out["text"]["tickets"]
+    page = _run_page(tmp_path / "ticket", snapshot, "ticket", BAR + ["hud", "ticketview"],
+                     hash_=out["replaced"][0].removeprefix("ticket.html"))
+    view = page["dump"]["ticketview"]
+    assert "cleffy#40" in page["text"]["ticketview"]
+    assert "round 2 of 3" in page["text"]["ticketview"]
+    assert "33m 2" in page["text"]["ticketview"]  # time in state, ticking from 33m 20s
     runlog = view[view.index("ol.runlog"):view.index("ol.journey")]
     assert re.findall(r"button[.a-z]*\[data-state=([^\]]+)\]", runlog) == [
         "intake", "building", "review", "fixing", "review"]
     assert re.findall(r"button\.visit\.now\[data-state=([^\]]+)\]", runlog) == ["review"]
-    # Only the selected job is shown.
-    assert "cleffy#13" not in out["text"]["jobview"]
-    codex = next(row for row in snapshot["tickets"] if row["ticket_id"] == "13")
-    assert f"a[href={ticket_page_href(codex)}]" in out["dump"]["pipeline"]
-    assert "AUT-7" in out["text"]["tickets"]
+    assert "cleffy#13" not in page["text"]["ticketview"]
 
 
 @needs_node
-def test_script_says_when_the_selected_job_is_gone(tmp_path: Path) -> None:
+def test_script_stays_on_the_board_when_the_selected_job_is_gone(tmp_path: Path) -> None:
     out = _run_page(tmp_path, _snapshot(tmp_path), "job", JOB, hash_="#job-finished")
-    assert "no longer running or queued" in out["text"]["jobview"]
+    assert out["replaced"] == []
+    assert "AUT-7" in out["text"]["tickets"]
 
 
 # --- the full push carries every page ------------------------------------------------------
@@ -982,5 +995,5 @@ def test_jobs_on_a_database_without_ticket_tables_still_render(tmp_path: Path) -
     # bridge, so it stays a jump.
     assert job["flow"]["path"] == ["intake", "review"]
     pages = render_pages(snapshot)
-    assert 'id="job-r-codex-"' in pages["job.html"]
+    assert 'id="liverun-job-r-codex-"' in _ticket_page(snapshot, "r-codex-")
     assert "3/3" in _text(_section(_no_script(pages["index.html"]), "lanes"))

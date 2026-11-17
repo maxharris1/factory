@@ -291,6 +291,7 @@ SCRIPT_TICKETS = r"""
   }
 
   function renderBoard(d) {
+    if (!GH.started) { GH.started = true; ghStart(); }
     if (tkProject && !(d.tickets || []).some(function (r) { return r.repo === tkProject; })) {
       tkProject = '';
       tkSave('tk-project', '');
@@ -659,9 +660,3 @@ def _tickets(snapshot: dict) -> str:
         )
         inner = f'<div class="tk-scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
     return _panel("tickets", "Tickets", inner, count=f"{len(rows)} tracked", hidden=True)
-
-
-def _active_jobs(snapshot: dict) -> list[tuple[dict, str]]:
-    return [(row, "running") for row in snapshot["running"]] + [
-        (row, "queued") for row in snapshot["queued"]
-    ]
