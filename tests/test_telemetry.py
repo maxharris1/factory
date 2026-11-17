@@ -23,11 +23,13 @@ from pathlib import Path
 import pytest
 
 from lib import job_run, telemetry, waiter
+from lib.pstack_pin import load_pin
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.telemetry import (
     EventLog,
     Scrubber,
     Session,
+    SkillReads,
     Summary,
     count_tests,
     exit_reason,
@@ -327,7 +329,13 @@ def test_an_unwritable_raw_log_is_one_line_and_never_stops_the_run(tmp_path: Pat
 
 
 def _session(
-    tmp_path: Path, *, connect=None, max_bytes: int = telemetry.MAX_LOG_BYTES, environ=None, worker_env=False
+    tmp_path: Path,
+    *,
+    connect=None,
+    max_bytes: int = telemetry.MAX_LOG_BYTES,
+    environ=None,
+    worker_env=False,
+    skills=None,
 ):
     db = tmp_path / "orch.db"
     messages: list[str] = []
@@ -346,6 +354,7 @@ def _session(
         stdout=out,
         clock=lambda: float(next(clock)),
         worker_env=worker_env,
+        skills=skills,
     )
     return session, db, out, messages
 
@@ -1669,3 +1678,219 @@ def test_cli_job_run_writes_the_live_run_and_counters_only_writes_none(tmp_path:
     no_secret(rows["on"])
     assert all(rows["counters"][name] is None for name in LIVE_RUN)
     assert rows["counters"]["events"] == rows["on"]["events"] == 31
+    assert rows["on"]["skill_reads"] == rows["counters"]["skill_reads"] == "[]"
+
+
+
+@pytest.mark.parametrize(
+    "name, root, expected",
+    [
+        (
+            "claude_skill_reads_stream.jsonl",
+            "/home/claude-bot/factory/skills",
+            [
+                "cursor-team-kit/deslop/SKILL.md",
+                "factory/factory-builder/SKILL.md",
+                "pstack/agents/comment-sicko.md",
+                "pstack/agents/poteto-agent.md",
+                "pstack/docs/harness/claude-code.md",
+                "pstack/skills/figure-it-out/SKILL.md",
+                "pstack/skills/no-comments/SKILL.md",
+                "pstack/skills/poteto-mode/SKILL.md",
+                "pstack/skills/poteto-mode/playbooks/feature.md",
+                "pstack/skills/poteto-mode/playbooks/opening-a-pr.md",
+                "pstack/skills/principle-model-the-domain/SKILL.md",
+                "pstack/skills/principle-prove-it-works/SKILL.md",
+            ],
+        ),
+        (
+            "codex_skill_reads_exec.jsonl",
+            "/Users/codex-bot/factory/skills",
+            [
+                "factory/factory-reviewer/SKILL.md",
+                "factory/harness/codex.md",
+                "pstack/skills/arena/SKILL.md",
+                "pstack/skills/blast-radius/SKILL.md",
+                "pstack/skills/in-your-own-words/SKILL.md",
+                "pstack/skills/interrogate/SKILL.md",
+                "pstack/skills/poteto-mode/SKILL.md",
+                "pstack/skills/principle-prove-it-works/SKILL.md",
+                "pstack/skills/unslop/SKILL.md",
+            ],
+        ),
+    ],
+)
+def test_a_recorded_session_stores_the_pinned_skill_files_it_read(
+    tmp_path: Path, name: str, root: str, expected: list[str]
+) -> None:
+    session, db, _, messages = _session(tmp_path, skills=SkillReads.pinned(root, load_pin(ROOT)))
+    session.consume(io.BytesIO("".join(line + "\n" for line in fixture_lines(name)).encode()))
+    session.finish(0)
+    assert json.loads(_row(db)["skill_reads"]) == expected
+    assert messages == []
+
+
+SKILLS = "/r/factory/skills"
+LOCKED = frozenset({"pstack/skills/arena/SKILL.md", "pstack/skills/unslop/SKILL.md", "factory/factory-builder/SKILL.md"})
+
+
+def _exec(command: str) -> dict:
+    return {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command}}
+
+
+def _exec_done(exit_code: int, output: str = "") -> dict:
+    status = "completed" if exit_code == 0 else "failed"
+    item = {"id": "item_1", "type": "command_execution", "exit_code": exit_code, "status": status}
+    item["aggregated_output"] = output
+    return {"type": "item.completed", "item": item}
+
+
+def _succeeded(event: dict) -> dict:
+    if event["type"] == "item.started":
+        return _exec_done(0)
+    return _result(event["message"]["content"][0]["id"])
+
+
+@pytest.mark.parametrize(
+    "event, expected",
+    [
+        (_use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/arena/SKILL.md"}), ["pstack/skills/arena/SKILL.md"]),
+        (_use("t1", "Read", {"file_path": "/elsewhere/skills/pstack/skills/arena/SKILL.md"}), []),
+        (_use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/arena/notes.md"}), []),
+        (_use("t1", "Skill", {"skill": "pstack:unslop"}), ["pstack/skills/unslop/SKILL.md"]),
+        (_use("t1", "Skill", {"skill": "claude-api"}), []),
+        (_use("t1", "Bash", {"command": f"test -f {SKILLS}/pstack/skills/arena/SKILL.md && ls {SKILLS}/pstack"}), []),
+        (_use("t1", "Bash", {"command": f"grep -n x {SKILLS}/pstack/skills/arena/SKILL.md | wc -l"}), []),
+        (_use("t1", "Bash", {"command": f"sed -n 1,9p {SKILLS}/pstack/skills/arena/SKILL.md"}), ["pstack/skills/arena/SKILL.md"]),
+        (_use("t1", "Bash", {"command": f"cd {SKILLS}/pstack/skills/unslop; head -n 3 ../arena/SKILL.md"}), ["pstack/skills/arena/SKILL.md"]),
+        (_use("t1", "Bash", {"command": "cat pstack/skills/arena/SKILL.md"}), []),
+        (_use("t1", "Bash", {"command": f"cat '{SKILLS}/pstack/skills/arena/SKILL.md"}), []),
+        (_exec(f"/bin/zsh -lc 'cd {SKILLS}\ncat factory/factory-builder/SKILL.md > /tmp/out'"), ["factory/factory-builder/SKILL.md"]),
+        (_exec(f"bash -lc 'cd $HOME && cat {SKILLS}/pstack/skills/*/SKILL.md'"), []),
+    ],
+    ids=[
+        "read", "read-outside-root", "read-not-locked", "skill-tool", "skill-not-locked", "test-f-probe",
+        "grep-is-no-read", "sed", "cd-base", "relative-without-cd", "unbalanced-quote",
+        "codex-multi-line", "codex-glob",
+    ],
+)
+def test_only_reads_of_locked_files_under_the_skills_tree_count(event: dict, expected: list[str]) -> None:
+    summary = _feed(Summary("claude", Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), event, _succeeded(event))
+    assert json.loads(summary.row()["skill_reads"]) == expected
+
+
+ARENA = f"{SKILLS}/pstack/skills/arena/SKILL.md"
+
+
+@pytest.mark.parametrize(
+    "harness, events, expected",
+    [
+        ("claude", [_use("t1", "Skill", {"skill": "pstack:unslop"})], []),
+        ("claude", [_use("t1", "Skill", {"skill": "pstack:unslop"}), _result("t1", "disable-model-invocation", error=True)], []),
+        ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t1", "File does not exist.", error=True)], []),
+        ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t1", "EACCES", error=True)], []),
+        (
+            "claude",
+            [_use("t1", "Bash", {"command": f"cat {ARENA}"}), _result("t1", f"Exit code 1\ncat: {ARENA}: No such file or directory", error=True)],
+            [],
+        ),
+        (
+            "claude",
+            [_use("t1", "Bash", {"command": f"cat {ARENA}"}), _result("t1", f"Permission to use Bash with command cat {ARENA} has been denied.", error=True)],
+            [],
+        ),
+        (
+            "claude",
+            [_use("t1", "Bash", {"command": f"cat {ARENA} /tmp/gone.md"}), _result("t1", "# Arena\ncat: /tmp/gone.md: No such file or directory", error=True)],
+            ["pstack/skills/arena/SKILL.md"],
+        ),
+        (
+            "claude",
+            [
+                _use("t1", "Bash", {"command": f"cd {SKILLS} && cat pstack/skills/arena/SKILL.md pstack/skills/unslop/SKILL.md"}),
+                _result("t1", "# Arena\ncat: pstack/skills/unslop/SKILL.md: No such file or directory", error=True),
+            ],
+            ["pstack/skills/arena/SKILL.md"],
+        ),
+        ("claude", [_use("t1", "Read", {"file_path": ARENA}), _result("t2")], []),
+        ("codex", [_exec(f"cat {ARENA}")], []),
+        ("codex", [_exec(f"cat {ARENA}"), _exec_done(1)], []),
+        ("codex", [_exec(f"cat {ARENA} /tmp/gone.md"), _exec_done(1, "# Arena\ncat: /tmp/gone.md: No such file or directory\n")], ["pstack/skills/arena/SKILL.md"]),
+        (
+            "claude",
+            [
+                _use("t1", "Read", {"file_path": ARENA}), _result("t1"),
+                _use("t2", "Bash", {"command": f"cat {ARENA}"}), _result("t2", "Exit code 1", error=True),
+            ],
+            ["pstack/skills/arena/SKILL.md"],
+        ),
+    ],
+    ids=[
+        "claude-no-result", "claude-skill-refused", "claude-read-failed", "claude-read-error-unnamed",
+        "claude-bash-failed", "claude-bash-denied", "claude-bash-other-operand-failed", "claude-bash-relative-operand-failed",
+        "claude-other-call-result", "codex-not-completed", "codex-failed", "codex-other-operand-failed", "earlier-success-kept",
+    ],
+)
+def test_a_skill_file_counts_as_read_unless_its_call_failed_on_it(
+    harness: str, events: list[dict], expected: list[str]
+) -> None:
+    summary = _feed(Summary(harness, Scrubber({}), skills=SkillReads(SKILLS, LOCKED)), *events)
+    assert json.loads(summary.row()["skill_reads"]) == expected
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_shell_read_that_fails_on_a_later_operand_keeps_the_file_it_printed(tmp_path: Path, harness: str) -> None:
+    root = tmp_path / "skills"
+    router = root / "factory" / "factory-builder" / "SKILL.md"
+    router.parent.mkdir(parents=True)
+    router.write_text("# Factory builder\n", encoding="utf-8")
+    command = f"cat {shlex.quote(str(router))} {shlex.quote(str(tmp_path / 'missing.md'))}"
+    run = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=False)
+    assert run.returncode == 1 and run.stdout == router.read_text(encoding="utf-8")
+    if harness == "claude":
+        events = [_use("t1", "Bash", {"command": command}), _result("t1", run.stdout + run.stderr, error=True)]
+    else:
+        events = [_exec(command), _exec_done(run.returncode, run.stdout + run.stderr)]
+    summary = _feed(Summary(harness, Scrubber({}), skills=SkillReads(str(root), LOCKED)), *events)
+    assert json.loads(summary.row()["skill_reads"]) == ["factory/factory-builder/SKILL.md"]
+
+
+def test_a_refused_skill_tool_call_records_no_read(tmp_path: Path) -> None:
+    skills = SkillReads("/tmp/skill-probe/skills", frozenset({"pstack/skills/poteto-mode/SKILL.md"}))
+    session, db, _, _ = _session(tmp_path, skills=skills)
+    lines = (ROOT / "tests" / "fixtures" / "skill_probe" / "claude_skill_refused.jsonl").read_text(encoding="utf-8")
+    session.consume(io.BytesIO(lines.encode()))
+    session.finish(0)
+    assert json.loads(_row(db)["skill_reads"]) == []
+
+
+def test_skill_reads_are_null_without_a_tree_and_empty_when_nothing_was_read(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    messages: list[str] = []
+    kwargs = dict(
+        connect=lambda: sqlite3.connect(db),
+        database=db,
+        bot="claude-bot",
+        repo="acme/widgets",
+        command=["claude", "-p"],
+        log=messages.append,
+        environ={"ORCH_TELEMETRY": "counters", "ORCH_JOB_STATE_DIR": str(tmp_path / "state")},
+        stdout=io.BytesIO(),
+    )
+    read = [_use("t1", "Read", {"file_path": f"{SKILLS}/pstack/skills/poteto-mode/SKILL.md"}), _result("t1")]
+    for job, root, events in (("none", None, read), ("tree", SKILLS, read), ("nothing", SKILLS, [{"type": "turn.started"}])):
+        session = start_session(job_id=job, skills_root=root, **kwargs)
+        session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
+        session.finish(0)
+    monkeypatch.setattr(telemetry, "FACTORY_CHECKOUT", tmp_path)
+    session = start_session(job_id="no-lock", skills_root=SKILLS, **kwargs)
+    session.finish(0)
+    assert _row(db, "none")["skill_reads"] is None
+    assert _row(db, "tree")["skill_reads"] == '["pstack/skills/poteto-mode/SKILL.md"]'
+    assert _row(db, "nothing")["skill_reads"] == "[]"
+    assert _row(db, "no-lock")["skill_reads"] is None
+    assert [line for line in messages if "skill" in line] == [
+        "telemetry: skill reads not recorded (skills.lock: FileNotFoundError)"
+    ]

@@ -533,6 +533,8 @@ class DetailMixin:
             context["rebase"] = asdict(rebase)
         if ci_failure:
             context["ci_failure"] = {"failed_checks": list(ci_failure)}
+        if (no_ci_base := ticket.no_ci_base) is not None:
+            context.update(no_ci_base=no_ci_base, local_checks=list(ticket.factory.ci_local_checks))
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -14,7 +15,17 @@ from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
 from lib.evidence.ci import ci_evidence
 from lib.github_actions import GhResult, GitHubReviewActions
 from tests.regenerate_brief_snapshots import HEAD, _job
-from tests.test_dispatcher import ANSWERS, QUESTIONS, RETRY, comment, fail_once_through_t6, handled_outcome
+from tests.test_dispatcher import (
+    ANSWERS,
+    QUESTIONS,
+    RETRY,
+    comment,
+    factory,
+    fail_once_through_t6,
+    handled_outcome,
+    setup,
+    ticket,
+)
 from tests.test_rounds_and_caps import HEADS, Flow
 
 GO_URL = "https://github.com/owner/repo/pull/42#issuecomment-501"
@@ -513,3 +524,92 @@ def test_an_answered_review_fix_keeps_its_verdict_after_max_retries_it(tmp_path:
     task = _claimed_task(flow)
     assert _is_review_fix(task)
     assert "REVISE verdict at https://github.com/owner/repo/pull/42#issuecomment-revise-1/3" in task
+
+
+NO_CI_BASE = "feature/upload-only-intake"
+NO_CI = {"no_ci_base": NO_CI_BASE, "local_checks": ["typecheck", "Jest", "pgTAP"]}
+LOCAL_RUN = (
+    f"CI does not run on `{NO_CI_BASE}`. Run typecheck, Jest and pgTAP locally at the head you push, "
+    "paste each command and its result in the ready, and say that CI did not run."
+)
+REVIEW = ("review", 1, HEAD, {"round": "1/3"})
+
+
+def _no_ci(variant: tuple, **detail: object) -> str:
+    action, attempt, head, extra = variant
+    return _task(_render(action, attempt, head, {**extra, **NO_CI, **detail}))
+
+
+@pytest.mark.parametrize("variant", [BUILD, REVIEW_FIX, CI_FIX], ids=["build", "review-fix", "ci-fix"])
+def test_a_builder_on_a_base_without_ci_runs_the_local_checks_and_pastes_them(variant: tuple):
+    task = _no_ci(variant)
+    assert LOCAL_RUN in task
+    assert "CI runs the full suite and is the gate" not in task
+    assert "Print mode stops background tasks after your last turn" in task
+
+
+def test_an_empty_local_checks_list_asks_for_the_repos_checks():
+    task = _no_ci(BUILD, local_checks=[])
+    assert f"CI does not run on `{NO_CI_BASE}`. Run the repo's checks locally at the head you push" in task
+
+
+def test_the_local_checks_join_in_plain_english():
+    assert "Run typecheck locally" in _no_ci(BUILD, local_checks=["typecheck"])
+    assert "Run typecheck and Jest locally" in _no_ci(BUILD, local_checks=["typecheck", "Jest"])
+
+
+def test_a_review_on_a_base_without_ci_requires_the_pasted_local_checks():
+    job = _job("review", "codex", 1, HEAD, {"round": "1/3", **NO_CI})
+    task = _task(render_brief(job, bot="codex-bot", context=None, factory_root="/srv/orch/factory"))
+    assert (
+        f"Read the whole diff. CI does not run on `{NO_CI_BASE}`. The ready must paste the commands and results "
+        "of typecheck, Jest and pgTAP run at this head. A ready without that paste is a `[blocking]` finding, "
+        "so REVISE."
+    ) in task
+    assert "the CI result on that head" not in task
+
+
+def test_a_review_with_empty_local_checks_requires_the_repos_checks():
+    job = _job("review", "codex", 1, HEAD, {"round": "1/3", **NO_CI, "local_checks": []})
+    task = _task(render_brief(job, bot="codex-bot", context=None, factory_root="/srv/orch/factory"))
+    assert "The ready must paste the commands and results of the repo's checks run at this head." in task
+
+
+@pytest.mark.parametrize("variant", [BUILD, REVIEW_FIX], ids=["build", "review-fix"])
+def test_a_ci_base_keeps_the_ci_gate_wording(variant: tuple):
+    task = _task(_render(*variant))
+    assert "CI runs the full suite and is the gate" in task
+    assert "CI does not run on" not in task
+
+
+def test_the_job_detail_names_a_base_without_ci_and_its_local_checks(tmp_path: Path):
+    dispatcher, _queue = setup(tmp_path)
+    config = replace(factory(), ci_branches=("main",), ci_local_checks=("typecheck", "Jest", "pgTAP"))
+    off_ci = replace(ticket(factory_config=config), pr_base=NO_CI_BASE)
+    on_ci = replace(off_ci, pr_base="main")
+    unlisted = replace(off_ci, factory=factory())
+
+    detail = json.loads(dispatcher._job_detail(off_ci, action="build"))
+    assert {key: detail[key] for key in NO_CI} == NO_CI
+    for tracked in (on_ci, unlisted):
+        assert not set(NO_CI) & set(json.loads(dispatcher._job_detail(tracked, action="build")))
+
+    task = _task(render_brief(_job("build", "claude", 1, None, detail), bot="claude-bot", context=None,
+                              factory_root="/srv/orch/factory"))
+    assert LOCAL_RUN in task
+
+
+def test_a_ci_fix_on_a_base_without_ci_still_names_the_red_checks():
+    assert f"Fix the red CI on this PR. These checks failed on {HEAD}: `pytest (shard 2)`." in _no_ci(CI_FIX)
+
+
+@pytest.mark.parametrize("commits", [[], ["c" * 40]], ids=["merge", "merge-with-commits"])
+def test_an_update_review_on_a_base_without_ci_requires_the_pasted_local_checks(commits: list[str]):
+    task = _no_ci(REVIEW, kind="update", last_reviewed_head="a" * 40, update_merge="b" * 40, update_commits=commits)
+    assert "whether the base changes break this PR: read the ready's pasted local results" in task
+    assert (
+        f"CI does not run on `{NO_CI_BASE}`. The ready must paste the commands and results of typecheck, Jest "
+        "and pgTAP run at this head. A ready without that paste is a `[blocking]` finding, so REVISE."
+    ) in task
+    assert "CI result on this head" not in task
+    assert "CI may still be running" not in task

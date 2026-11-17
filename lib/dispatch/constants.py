@@ -10,6 +10,10 @@ GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 FINISHED_STATES = ("merged", "done")
 TERMINAL_STATES = frozenset({"merged", "done", "refused", "abandoned"})
 CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending")
+# #615: how long a ready on a CI base waits with no check run and no commit
+# status on its head before the ticket needs attention as ci-silent.
+CI_SILENT_SECONDS = 600.0
+CI_SILENT_REASON = "ci-silent"
 ORCHESTRATOR = "grok-bot"
 # #170: the kinds a worker bot's App login may post once the switch is on.
 WORKER_KINDS = frozenset({"plan", "questions", "ready", "verdict", "stuck"})

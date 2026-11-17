@@ -474,6 +474,29 @@ class SchemaMixin:
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
             attention.ensure_table(connection)
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_silence (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    since REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
+            # #615: tracked tickets whose PR base gets no CI (factory.md
+            # ci.branches), for the dashboard's no-CI chip.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS no_ci_bases (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    base TEXT NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
             # #75: what the poller did to a job because of its state
             # (released-claimed, dead; #94 requeued-unstarted from orch job run), one row each, for the log and audit.
             connection.execute(

@@ -20,6 +20,9 @@ review:
   # verify_unavailable: true  # optional; the verify skill may not be on the base yet, so the reviewer lists it as not run
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship
+# ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
+#   branches: [main]
+#   local_checks: [pytest]
 skills:
   - verify-cleffy
 ---

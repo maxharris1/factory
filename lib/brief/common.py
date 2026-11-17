@@ -7,7 +7,12 @@ import re
 from dataclasses import asdict
 
 from lib.brief.skills import skill_paths
-from lib.factory_md import DEFAULT_PLAN_MAX_CRITERIA, DEFAULT_PLAN_MAX_LINES, FactoryContext
+from lib.factory_md import (
+    CHECK_LABEL,
+    DEFAULT_PLAN_MAX_CRITERIA,
+    DEFAULT_PLAN_MAX_LINES,
+    FactoryContext,
+)
 from lib.github_actions import TOKEN_VARIABLES
 from lib.pr_title import SOURCE
 from lib.queue import Job, plan_round
@@ -92,6 +97,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     implement = job.request.action in ("plan", "build")
     brief_text = detail.get("brief_text") if implement else None
     brief_url = detail.get("brief_url")
+    no_ci_base = detail.get("no_ci_base")
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
@@ -107,6 +113,8 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "repo": _plain_repo(job.request.repo),
         "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
+        "no_ci_base": no_ci_base if isinstance(no_ci_base, str) and _BRANCH.fullmatch(no_ci_base) else None,
+        "local_checks": _check_labels(detail.get("local_checks")),
         "verify": verify,
         "verify_unavailable": context.config.verify_unavailable if context is not None else False,
         "reviewer": reviewer if isinstance(reviewer, str) and _HARNESS.fullmatch(reviewer) else None,
@@ -166,12 +174,25 @@ def _pr_number(value: object) -> int | None:
     return None
 
 
+def _check_labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and CHECK_LABEL.fullmatch(item))
+
+
 def _plain_repo(repo: str) -> str | None:
     if not _REPO.fullmatch(repo):
         return None
     if repo.partition("/")[2] in (".", ".."):
         return None
     return repo
+
+
+def local_checks(facts: dict) -> str:
+    checks = facts["local_checks"]
+    if not checks:
+        return "the repo's checks"
+    return checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + " and " + checks[-1]
 
 
 def opening(bot: str, kind: str) -> str:
@@ -250,21 +271,16 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
 
 
 def handoff_section(
-    bot: str, role: str, facts: dict, header: str, example: str, *, skills_read: bool
+    bot: str, role: str, facts: dict, header: str, example: str
 ) -> str:
     target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
-    read = (
-        "The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. "
-        if skills_read
-        else ""
-    )
     return (
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
         "not an inline comment). Its first line is this orch:v1 header, "
         "with each `<a|b>` replaced by one choice and each other `<...>` by its value:\n\n"
         f"{header}\n\n"
-        f"Then plain prose for people and agents: {example} {read}"
+        f"Then plain prose for people and agents: {example} "
         "If a product question blocks the work, post a questions handoff instead "
         f"(`<!-- orch:v1 kind=questions from={bot} role={role} -->`, "
         "then the question); it is this job's handoff.\n\n"

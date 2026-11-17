@@ -221,6 +221,12 @@ SCRIPT_TICKETS = r"""
     ticking(add(line, el('span', 'tk-t')), ci.waiting_seconds, 'waiting ');
   }
 
+  function tkNoCi(parent, noCi) {
+    var line = add(parent, el('div', 'tk-ci'));
+    add(line, chip('no CI on this base', 'muted'));
+    add(line, el('span', 'tk-out', noCi.base));
+  }
+
   function tkCard(c) {
     var t = c.ticket, job = c.live || c.queued;
     var stop = c.phase === 'Stop', waiting = WAITING.hasOwnProperty(t.state);
@@ -264,6 +270,7 @@ SCRIPT_TICKETS = r"""
     }
     if (ci) tkCi(main, t, ci);
     else if (BOARD.idle.indexOf(c.phase) >= 0) add(main, el('div', 'tk-none', 'no job running'));
+    if (t.no_ci) tkNoCi(main, t.no_ci);
     if (waiting && GH.on && ghRefs(t)) add(main, ghPanel(t, t));
     if (c.verdict && !(waitLine && c.verdict.kind === 'waiting')) {
       var said = add(main, el('div', 'tk-run'));
@@ -555,6 +562,11 @@ def _card(card: dict) -> str:
                 )
             elif card["phase"] in IDLE:
                 lines += '<div class="tk-none">no job running</div>'
+            if ticket.get("no_ci"):
+                lines += (
+                    f'<div class="tk-ci">{_chip("no CI on this base", "muted")}'
+                    f'{_span("tk-out", ticket["no_ci"]["base"])}</div>'
+                )
             verdict = card["verdict"]
             if verdict and not (wait_line and verdict["kind"] == "waiting"):
                 lines += (

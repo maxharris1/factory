@@ -189,7 +189,7 @@ class MergeQueueMixin:
         ci = fresh.ci.get(head)
         if ci is None or ci.status == "pending":
             return False, "ci-pending"
-        if approved is None or ci.status != "success":
+        if approved is None or not ci.clears:
             return None
         verdict = self._classify_update(fresh, str(approved), head)
         if not verdict.trivial:
@@ -438,7 +438,7 @@ class MergeQueueMixin:
             if polled is None or polled.current_head is None:
                 continue
             ci = polled.ci.get(polled.current_head)
-            if ci is None or ci.status != "success":
+            if ci is None or not ci.clears:
                 continue
             overlap_waits = merged_since_approval >= MERGES_BEFORE_OVERLAP_WAITS
             if overlap_waits and self._waits_behind(head, waiting, polled):
@@ -488,7 +488,7 @@ class MergeQueueMixin:
         if ticket.mergeable is not True:
             return f"not mergeable ({ticket.mergeable_state or 'pending'})"
         ci = ticket.ci.get(head)
-        if ci is None or ci.status != "success":
+        if ci is None or not ci.clears:
             return f"CI {'missing' if ci is None else ci.status} at {head[:12]}"
         approved = str(row["approved_head"])
         if not self._approval_covers(ticket, approved, head):

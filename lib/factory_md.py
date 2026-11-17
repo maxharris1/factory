@@ -64,6 +64,14 @@ handoff; merge keeps watching the approved PR until it merges or closes.
 Omitted, it follows ship: ship: merge gives merge, any other ship gives
 ready-for-review. ship: merge with finish_line: ready-for-review is refused.
 
+ci is optional (issue #615): a mapping with branches (a non-empty list of
+branch names CI runs on for a pull request into that base) and
+local_checks (a list of short check labels, default none). A head with no
+check run and no commit status on a PR whose base is not in branches is
+CI not-run: the CI gates do not wait, and the build, fix and review
+briefs ask for the local_checks results instead. Absent, every base is
+treated as a CI base.
+
 shared_paths is optional (issue #261): a list of repo-relative paths or
 globs, a trailing / naming a directory. A Touches: path that matches never
 causes a feeder collision wait, and in a matching file a conflict hunk kept
@@ -119,6 +127,7 @@ _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _APPROVER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _LABEL = re.compile(r"^(?=.{1,50}$)[^\s,](?:[^,\x00-\x1f\x7f]*[^\s,])?$")
+CHECK_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/+-]{0,39}$")
 _GLOB = re.compile(r"^[A-Za-z0-9._*?/@+=~-]+$")
 
 DEFAULT_HOLD_LABEL = "factory:hold"
@@ -145,12 +154,14 @@ _TOP_KEYS = {
     "shared_paths",
     "feeder",
     "plan",
+    "ci",
 }
+_CI_KEYS = {"branches", "local_checks"}
 _PLAN_KEYS = {"max_lines", "max_criteria"}
 DEFAULT_PLAN_MAX_LINES = 400
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
-TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer")
+TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci")
 _FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 
@@ -202,6 +213,8 @@ class FactoryConfig:
     pre_ready: PreReady | None = None
     plan_max_lines: int = DEFAULT_PLAN_MAX_LINES
     plan_max_criteria: int = DEFAULT_PLAN_MAX_CRITERIA
+    ci_branches: tuple[str, ...] | None = None
+    ci_local_checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -311,6 +324,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
     max_holders_per_path, exclusive_paths = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
+    ci_branches, ci_local_checks = _ci(data, findings, unknown)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -386,6 +400,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         exclusive_paths=exclusive_paths,
         plan_max_lines=plan_max_lines,
         plan_max_criteria=plan_max_criteria,
+        ci_branches=ci_branches,
+        ci_local_checks=ci_local_checks,
     )
     return config, findings
 
@@ -819,6 +835,33 @@ def _plan(data: dict, findings: list[Finding], unknown: str) -> tuple[int, int]:
         _positive(value, "max_lines", DEFAULT_PLAN_MAX_LINES, findings, unknown),
         _positive(value, "max_criteria", DEFAULT_PLAN_MAX_CRITERIA, findings, unknown),
     )
+
+
+def _ci(
+    data: dict, findings: list[Finding], unknown: str
+) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    if "ci" not in data:
+        return None, ()
+    value = data["ci"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "ci must be a mapping"))
+        return None, ()
+    findings.extend(_unknown(value, _CI_KEYS, "ci", "error"))
+    branches = value.get("branches")
+    if not isinstance(branches, list) or not branches:
+        findings.append(Finding("error", "ci.branches must be a non-empty list"))
+        branches = []
+    for index, item in enumerate(branches):
+        if not isinstance(item, str) or _BRANCH.fullmatch(item) is None:
+            findings.append(Finding("error", f"ci.branches[{index}] must be a branch name"))
+    checks = value.get("local_checks", [])
+    if not isinstance(checks, list):
+        findings.append(Finding("error", "ci.local_checks must be a list"))
+        checks = []
+    for index, item in enumerate(checks):
+        if not isinstance(item, str) or CHECK_LABEL.fullmatch(item) is None:
+            findings.append(Finding("error", f"ci.local_checks[{index}] must be a short label"))
+    return tuple(str(item) for item in branches), tuple(str(item) for item in checks)
 
 
 def _positive(

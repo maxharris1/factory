@@ -45,6 +45,7 @@ class CommentsMixin:
 
     def _process(self, ticket: TrackedTicket) -> None:
         self._remember_links(ticket, ticket.comments)
+        self._remember_no_ci_base(ticket)
         try:
             ticket = self._routed(ticket)
         except RouteError as error:
@@ -85,9 +86,26 @@ class CommentsMixin:
         self._settle_external_ships(ticket)
         self._park_followups(ticket)
         try:
+            self._watch_ci_silence(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
             self._drain_auto_extra(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+
+    def _remember_no_ci_base(self, ticket: TrackedTicket) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        base = ticket.no_ci_base
+        with self._connect() as connection:
+            if base is None:
+                connection.execute("DELETE FROM no_ci_bases WHERE repo = ? AND ticket_id = ?", key)
+            else:
+                connection.execute(
+                    "INSERT INTO no_ci_bases (repo, ticket_id, base) VALUES (?, ?, ?) "
+                    "ON CONFLICT (repo, ticket_id) DO UPDATE SET base = excluded.base",
+                    (*key, base),
+                )
 
     def _process_comments(
         self,

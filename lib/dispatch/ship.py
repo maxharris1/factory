@@ -320,7 +320,7 @@ class ShipMixin:
             ci = ticket.ci.get(head)
             if ci is None or ci.status == "pending":
                 continue
-            if ci.status != "success":
+            if not ci.clears:
                 self._set_redrive(ticket, comment_id, "spent", "eligible")
                 continue
             if self._held(ticket, head):
@@ -840,7 +840,7 @@ class ReviewShipper:
         if not dispatcher._merge_turn(ticket):
             raise RetryableStateError(f"{head} waits its turn in the merge queue")
         result = ticket.ci.get(head)
-        if result is None or result.status != "success":
+        if result is None or not result.clears:
             raise ShipError(f"CI on {head} is not green")
         status, fresh = dispatcher._prepare_external_ship(request)
         if status == "pending":

@@ -34,7 +34,7 @@ from tests.test_dispatcher import (
     setup,
     ticket,
 )
-from tests.test_live_poll import FACTORY, FakeGh, config
+from tests.test_live_poll import FACTORY, FakeGh, GhResult, config
 
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
@@ -880,3 +880,47 @@ def test_github_ticket_carries_the_prs_changed_line_count(pull: dict, expected: 
     project = config().projects[0]
 
     assert source._github_ticket(project, source._factory(project), "12").changed_lines == expected
+
+
+class ChecksGh(FakeGh):
+    def __init__(self, factory: str, runs: list[dict]) -> None:
+        super().__init__(factory)
+        self.runs = runs
+
+    def __call__(self, argv, timeout):
+        if any(part.endswith("/check-runs?per_page=100") for part in argv):
+            page = {"total_count": len(self.runs), "check_runs": self.runs}
+            return GhResult(0, json.dumps(page), "")
+        return super().__call__(argv, timeout)
+
+
+RUNNING = [{"name": "test", "status": "in_progress", "conclusion": None}]
+PASSED = [{"name": "test", "status": "completed", "conclusion": "success"}]
+CI_ON_DEV_AND_MAIN = "skills: []\nci:\n  branches: [dev, main]\n"
+
+
+@pytest.mark.parametrize(
+    ("ci_listed", "base", "runs", "expected"),
+    [
+        (True, "feature/upload-only-intake", [], CIResult("not-run", reported=False)),
+        (True, "feature/upload-only-intake", RUNNING, CIResult("pending", pending=("test",))),
+        (True, "feature/upload-only-intake", PASSED, CIResult("success")),
+        (True, "dev", [], CIResult("pending", reported=False)),
+        (False, "feature/upload-only-intake", [], CIResult("pending", reported=False)),
+    ],
+    ids=["unreported-off-ci", "reported-pending", "success", "ci-base", "ci-absent"],
+)
+def test_only_an_unreported_head_on_a_base_without_ci_is_not_run(
+    ci_listed: bool, base: str, runs: list[dict], expected: CIResult
+) -> None:
+    text = FACTORY.format(tickets="github", ship="handoff")
+    if ci_listed:
+        text = text.replace("skills: []\n", CI_ON_DEV_AND_MAIN)
+    gh = ChecksGh(text, runs)
+    gh.pull = {"base": {"ref": base}}
+    source = LivePollSource(config(), gh_runner=gh)
+    project = config().projects[0]
+
+    tracked = source._github_ticket(project, source._factory(project), "12")
+    assert tracked.pr_base == base
+    assert tracked.ci == {gh.head: expected}

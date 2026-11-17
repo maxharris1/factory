@@ -28,6 +28,7 @@ from lib import (
     job_token,
     linear_webhook,
     placed_run,
+    skill_preflight,
     telemetry,
     usage_probe,
     waiter,
@@ -1827,6 +1828,7 @@ def _job_run_command(argv: list[str]) -> int:
     if proof is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = proof
+    factory_root = skill_preflight.checkout_root(placed.device, owner, ROOT)
     # #100 r8: the summary's scrubber knows the harness's own environment,
     # the proof included.
     session = telemetry.start_session(
@@ -1841,6 +1843,7 @@ def _job_run_command(argv: list[str]) -> int:
         worker_env=placed.remote,
         device=placed.device.name,
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
+        skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
     if session is not None:
         sessions.append(session)

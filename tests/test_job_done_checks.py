@@ -27,7 +27,8 @@ from lib.queue import (
     SQLiteJobQueue,
 )
 from lib.job_token import PROOF_ENV
-from tests.handoff_store import HEAD, serve_handoff
+from lib.handoff import format_header
+from tests.handoff_store import HEAD, fitting_fields, serve_handoff
 from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
 
 REPO = "owner/repo"
@@ -134,6 +135,23 @@ def test_each_job_kind_completes_with_the_header_its_brief_asked_for(
 
     assert done(db, job, "1002", bot) == 0
     assert row(db, job.id)["state"] == "done"
+
+
+@pytest.mark.parametrize("skills_line", ["", "Skills read: /home/claude-bot/factory/skills/factory/factory-builder/SKILL.md\n"])
+@pytest.mark.parametrize(
+    ("action", "recipient", "bot"),
+    [("plan", "claude", "claude-bot"), ("build", "claude", "claude-bot"), ("review", "codex", "codex-bot")],
+)
+def test_a_handoff_completes_with_or_without_a_skills_read_line(
+    tmp_path: Path, store: Path, action: str, recipient: str, bot: str, skills_line: str
+) -> None:
+    db, _, job = running_job(tmp_path, action=action, recipient=recipient)
+    body = format_header(fitting_fields(job, bot)) + "\nprose\n" + skills_line
+    serve_handoff(store, job, "1003", body=body)
+
+    assert done(db, job, "1003", bot) == 0
+    assert row(db, job.id)["state"] == "done"
+    assert flags(db) == []
 
 
 def test_a_questions_handoff_completes_any_job(tmp_path: Path, store: Path) -> None:
