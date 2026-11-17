@@ -10,6 +10,13 @@ from lib.dispatch.types import FailedCheck
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
+FAILING_TESTS = 10
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# gh run view --log-failed prints job<TAB>step<TAB> before each stamped line.
+_JOB_STEP = re.compile(r"^[^\t]*\t[^\t]*\t(?=\ufeff?\d{4}-\d{2}-\d{2}T)")
+_PYTEST_SUMMARY = re.compile(
+    r"^(?:FAILED|ERROR) ([\w./-]+\.py(?:::[^\s\[]+)*(?:\[[^\]]*\])?)(?: - .*)?\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,19 @@ def ci_evidence(
         runs=tuple(runs.items()),
         jobs=tuple(jobs),
     )
+
+
+def failing_tests(log_text: str) -> list[str]:
+    """The test ids on pytest's FAILED and ERROR summary lines, first FAILING_TESTS distinct."""
+    found: dict[str, None] = {}
+    for line in log_text.splitlines():
+        entry = _ACTIONS_TIMESTAMP.sub("", _JOB_STEP.sub("", _ANSI.sub("", line)))
+        match = _PYTEST_SUMMARY.match(entry)
+        if match is not None:
+            found.setdefault(match.group(1))
+            if len(found) == FAILING_TESTS:
+                break
+    return list(found)
 
 
 def _tail(text: str, limit: int) -> tuple[str, str | None]:
