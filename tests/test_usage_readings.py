@@ -819,6 +819,24 @@ def test_an_older_table_gets_the_absent_count_on_store(tmp_path: Path) -> None:
     assert codex["five_hour"]["state"] == "not on plan"
 
 
+@pytest.mark.parametrize("omissions_first", [0, 1])
+def test_a_report_kept_in_an_older_table_interrupts_the_omissions_stored_after_migration(
+    tmp_path: Path, omissions_first: int
+) -> None:
+    db = tmp_path / "orch.db"
+    omissions = [("box", _seven_day_only(CAPTURED + offset), CAPTURED + 610) for offset in (600, 100, 200)]
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    _codex_polls(db, omissions[:omissions_first], CAPTURED + 610)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO usage_readings"
+            " (harness, bot, device, window, used, resets_at, observed_at, job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("codex", "codex-bot", "laptop", "five_hour", 0.1, FIVE_HOUR_RESET, CAPTURED + 500, "j"))
+    codex = _codex_polls(db, omissions[omissions_first:], CAPTURED + 610)
+    assert codex["five_hour"]["state"] == "no reading"
+
+
 def test_an_older_table_read_only_is_no_reading_not_no_telemetry(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     with sqlite3.connect(db) as connection:
