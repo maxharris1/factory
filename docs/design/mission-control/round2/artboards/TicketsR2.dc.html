@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tickets R2</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#c0caf5;text-decoration:none}a:hover{color:#9ece6a}
+input::placeholder{color:#8b93b8;opacity:1}
+</style>
+</helmet>
+<div style="min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1b26; color: #c0caf5; font-family: 'Geist', ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.5">
+<dc-import name="TopBarR2" current="tickets" hint-size="100%,116px"></dc-import>
+<main style="flex: 1 0 auto; box-sizing: border-box; width: 100%; max-width: 1600px; margin: 0 auto; padding: 20px 24px 32px; display: flex; flex-direction: column; gap: 16px">
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+<div role="group" aria-label="Project" style="display: flex; flex-wrap: wrap; gap: 8px">
+<button type="button" aria-pressed="true" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #9ece6a; background: rgba(158,206,106,0.09); color: #9ece6a">all 222</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">factory 189</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">cleffy 25</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">aut0 8</button>
+</div>
+<span style="flex-grow: 1"></span>
+<div role="group" aria-label="View" style="display: flex; gap: 8px">
+<button type="button" aria-pressed="true" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #9ece6a; background: rgba(158,206,106,0.09); color: #9ece6a">board</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">table</button>
+</div>
+<div role="search" style="display: flex; align-items: center; gap: 8px; margin-left: 8px">
+<label for="find-ticket" style="font-size: 12px; color: #8b93b8; white-space: nowrap">Find a ticket</label>
+<input id="find-ticket" type="text" name="ticket" placeholder="factory#470" autocomplete="off" spellcheck="false" style="box-sizing: border-box; width: 180px; height: 44px; margin: 0; padding: 0 12px; font-family: inherit; font-size: 12px; background: #0e0e14; color: #c0caf5; border: 1px solid #414868; border-radius: 0">
+<a href="TicketShippedR2.dc.html" style="display: inline-flex; align-items: center; box-sizing: border-box; height: 44px; padding: 0 14px; font-size: 12px; border: 1px solid #414868; background: #1f2230">open</a>
+</div>
+</div>
+
+<section style="min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Pipeline</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">222 tracked · 16 open · 206 shipped</span></h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 12px; align-items: start; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="twinkle" tint="#a9b1d6" cell="2" strip-height="16" seed="71" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Ask</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">9</span>
+</div>
+<span style="display: block; min-height: 34px; font-size: 11px; line-height: 17px; color: #8b93b8">intake · questions · waiting-max</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="field" tint="#e0af68" cell="4" strip-height="8" seed="61" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">AUT-2311</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">linear</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>questions</span><span style="font-size: 11px; color: #8b93b8">clarify</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 1m 02s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#479</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#478</a></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#480</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#479</a></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#481</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#480</a></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#482</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#481</a></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#483</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#482</a></div>
+</div>
+</div>
+
+<details style="min-width: 0">
+<summary style="cursor: pointer; padding: 6px 10px; border: 1px dashed #414868; font-size: 12px; line-height: 1.8; font-weight: 500; color: #a9b1d6">+3 more</summary>
+<div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#484</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#483</a></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#485</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#484</a></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#486</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="font-size: 12px; color: #a9b1d6; font-variant-numeric: tabular-nums">in intake 14m</div>
+<div style="font-size: 12px; color: #8b93b8">waits on <a href="TicketR2.dc.html" style="color: #a9b1d6">#485</a></div>
+</div>
+</div>
+
+</div>
+</details>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="field" tint="#a9b1d6" cell="2" strip-height="16" seed="72" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Plan</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">0</span>
+</div>
+<span style="display: block; min-height: 34px; font-size: 11px; line-height: 17px; color: #8b93b8">planning · plan-check</span>
+</div>
+<div style="padding: 16px; border: 1px dashed #414868; font-size: 12px; color: #8b93b8">nothing in planning</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="fill" tint="#a9b1d6" progress="0.6" cell="2" strip-height="16" seed="73" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Build</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">3</span>
+</div>
+<span style="display: block; min-height: 34px; font-size: 11px; line-height: 17px; color: #8b93b8">building · fixing</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; border: 1px solid rgba(255,158,100,0.45)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="decay" still="true" tint="#e0af68" cell="4" strip-height="8" seed="63" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">cleffy#131</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>building</span><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(255,158,100,0.4); background: rgba(255,158,100,0.09); color: #ff9e64; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">stale</span><span style="display: flex; align-items: center; gap: 8px"><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/1</span></span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 19m 40s</span></div>
+<div style="font-size: 12px; color: #ff9e64; font-variant-numeric: tabular-nums">no heartbeat for 4m 10s</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="patch" tint="#e0af68" cell="4" strip-height="8" seed="64" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#474</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>fixing</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #c0caf5"></span><span style="width: 6px; height: 6px; background: #7dcfff"></span><span style="width: 6px; height: 6px; background: #414868"></span></span><span style="font-size: 11px; color: #8b93b8">round 2/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 11m 05s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="fill" tint="#e0af68" progress="0.35" cell="4" strip-height="8" seed="65" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#478</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>building</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/1</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ box</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 6m 12s</span></div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="scan" tint="#a9b1d6" cell="2" strip-height="16" seed="74" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Review</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">2</span>
+</div>
+<span style="display: block; min-height: 34px; font-size: 11px; line-height: 17px; color: #8b93b8">review · capped</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="scan" tint="#7aa2f7" cell="4" strip-height="8" seed="66" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#471</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>review</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span><span style="width: 6px; height: 6px; background: #414868"></span><span style="width: 6px; height: 6px; background: #414868"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 3m 40s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="conveyor" still="true" tint="#7aa2f7" cell="4" strip-height="8" seed="67" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">cleffy#129</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>review</span><span style="font-size: 11px; color: #8b93b8">queued</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="color: #8b93b8">for</span><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">waiting 1m 30s</span></div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="off" done="true" tint="#a9b1d6" cell="2" strip-height="16" seed="75" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Ship</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">1</span>
+</div>
+<span style="display: block; min-height: 34px; font-size: 11px; line-height: 17px; color: #8b93b8">ship · merge-queue · updating · awaiting-ok · waiting-external</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="patch" tint="#e0af68" cell="4" strip-height="8" seed="68" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#475</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span>updating</span><span style="font-size: 11px; color: #8b93b8">update-from-main</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ mac</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 2m 18s</span></div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="2" strip-height="16" seed="76" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Stopped</span>
+<span style="margin-left: auto; font-size: 12px; font-weight: 600; color: #f7768e">1</span>
+</div>
+<span style="display: block; min-height: 34px; font-size: 11px; line-height: 17px; color: #8b93b8">refused · abandoned · blocked · stuck</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; border: 1px solid rgba(247,118,142,0.45)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="4" strip-height="8" seed="62" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="TicketStoppedR2.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">cleffy#103</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: #a9b1d6"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(247,118,142,0.4); background: rgba(247,118,142,0.09); color: #f7768e; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">stuck</span><span style="font-variant-numeric: tabular-nums">in planning 3d 2h</span></div>
+<div style="font-size: 12px; color: #a9b1d6; overflow-wrap: anywhere">cancelled: superseded by sanctioned intake (Factory 2026-11-13)</div>
+</div>
+</div>
+</div>
+
+</div>
+</section>
+
+<section style="min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 4px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Shipped</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8; font-variant-numeric: tabular-nums">206</span></h2>
+<p style="margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; color: #8b93b8">204 merged · 2 handed off</p>
+<div style="display: flex; flex-direction: column; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+
+<div style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ shipped }}" as="t" hint-placeholder-count="10">
+<a href="TicketShippedR2.dc.html" title="{{ t.title }}" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)"><span aria-hidden="true" style="width: 8px; height: 8px; background: #9ece6a"></span><span style="font-size: 12px; font-weight: 600">{{ t.id }}</span><span style="font-size: 11px; color: #8b93b8">{{ t.r }}</span><span style="font-size: 11px; color: #a9b1d6; font-variant-numeric: tabular-nums">{{ t.ago }}</span></a>
+</sc-for>
+</div>
+
+<details>
+<summary style="cursor: pointer; font-size: 12px; line-height: 1.8; font-weight: 500; color: #a9b1d6">196 earlier</summary>
+<div style="display: flex; flex-direction: column; gap: 10px; margin-top: 8px">
+<div style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ earlier }}" as="t" hint-placeholder-count="6">
+<a href="TicketShippedR2.dc.html" title="{{ t.title }}" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)"><span aria-hidden="true" style="width: 8px; height: 8px; background: #9ece6a"></span><span style="font-size: 12px; font-weight: 600">{{ t.id }}</span><span style="font-size: 11px; color: #8b93b8">{{ t.r }}</span><span style="font-size: 11px; color: #a9b1d6; font-variant-numeric: tabular-nums">{{ t.ago }}</span></a>
+</sc-for>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px">
+<button type="button" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">show 50 more</button>
+<span style="font-size: 12px; color: #8b93b8">190 older not shown · newest first · or use Find a ticket</span>
+</div>
+</div>
+</details>
+
+</div>
+</section>
+
+</main>
+<dc-import name="StatusLineR2" hint-size="100%,32px"></dc-import>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1260}}'>
+class Component extends DCLogic {
+  renderVals() {
+    /* shipped tickets, newest first: id, revise rounds, how it shipped, age */
+    var newest = [
+      ['factory#476', 1, 'merged', '38m ago'],
+      ['factory#472', 0, 'merged', '1h 12m ago'],
+      ['factory#470', 3, 'merged', '2h 14m ago'],
+      ['factory#469', 1, 'merged', '3h 01m ago'],
+      ['cleffy#130', 0, 'merged', '3h 40m ago'],
+      ['factory#468', 2, 'merged', '5h 22m ago'],
+      ['factory#467', 1, 'merged', '9h ago'],
+      ['AUT-2309', 1, 'handed off', '11h ago'],
+      ['factory#466', 0, 'merged', '14h ago'],
+      ['factory#465', 1, 'merged', '17h ago']
+    ];
+    /* the first few behind "196 earlier" (sample values in the same style) */
+    var older = [
+      ['factory#464', 0, 'merged', '19h ago'],
+      ['factory#463', 2, 'merged', '22h ago'],
+      ['cleffy#128', 1, 'merged', '1d 1h ago'],
+      ['factory#462', 0, 'merged', '1d 3h ago'],
+      ['factory#461', 1, 'merged', '1d 6h ago'],
+      ['factory#460', 0, 'merged', '1d 9h ago']
+    ];
+    var tile = function (d) {
+      var handed = d[2] === 'handed off';
+      var rounds = d[1] === 1 ? '1 revise round' : d[1] + ' revise rounds';
+      return {
+        id: d[0],
+        r: 'r' + d[1],
+        ago: handed ? 'handed off ' + d[3] : d[3],
+        title: d[0] + ' · ' + d[2] + ' ' + d[3] + ' · ' + rounds
+      };
+    };
+    return { shipped: newest.map(tile), earlier: older.map(tile) };
+  }
+}
+</script>
+</body>
+</html>
