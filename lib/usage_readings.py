@@ -109,8 +109,7 @@ def missing(window: str, observed_at: float, absent: int = 0) -> Reading:
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
-    """Create the table, or add `absent` to an older one; a runner that
-    loses a concurrent migration gets `duplicate column name`."""
+    """Create the table, or add `absent` to an older one."""
     connection.execute(DDL)
     if "absent" in {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}:
         return

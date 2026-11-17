@@ -632,7 +632,6 @@ def test_bad_rows_never_reach_the_snapshot(tmp_path: Path) -> None:
     assert claude["seven_day"]["state"] == "no reading" and claude["state"] == "no reading"
 
 
-# --- a window the plan does not have ------------------------------------------------------
 
 
 def _iso(at: float) -> str:
