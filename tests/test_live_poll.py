@@ -561,7 +561,9 @@ def test_failing_project_does_not_stop_healthy_project() -> None:
     )
 
     assert source.github_candidates("orch:state/") == ()
-    assert errors == [("bad/repo", "-", "PollSourceError:gh returned HTTP 404")]
+    assert errors == [
+        ("bad/repo", "-", "PollSourceError:gh api GET contents/factory.md returned HTTP 404")
+    ]
     assert any(
         "repos/acme/widgets/issues?state=open&per_page=100" in call
         for call in gh.calls
@@ -714,7 +716,7 @@ def test_gh_timeout_gives_up_with_a_retryable_error() -> None:
 
     source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
 
-    with pytest.raises(RetryableStateError, match="gh api timed out"):
+    with pytest.raises(RetryableStateError, match="gh api GET pulls/12 timed out"):
         source._gh_call("repos/acme/widgets/pulls/12")
     assert len(calls) == GH_CALL_ATTEMPTS
     assert len(sleeps) == GH_CALL_ATTEMPTS - 1
@@ -775,7 +777,7 @@ def test_gh_timeout_on_one_ref_records_it_and_the_cycle_continues(
         (
             "acme/widgets",
             "12",
-            f"PollSourceError:gh api timed out after {GH_CALL_ATTEMPTS} attempts",
+            f"PollSourceError:gh api GET pulls/12 timed out after {GH_CALL_ATTEMPTS} attempts",
         )
     ]
 
@@ -816,7 +818,7 @@ def test_project_error_is_recorded_in_dispatcher_database(tmp_path: Path) -> Non
     assert tuple(row) == (
         "bad/repo",
         "-",
-        "PollSourceError:gh returned HTTP 404",
+        "PollSourceError:gh api GET contents/factory.md returned HTTP 404",
     )
 
 
@@ -2631,7 +2633,7 @@ def test_adapter_read_timeout_on_one_ref_leaves_a_healthy_ref_alone(
         (
             "acme/widgets",
             "12",
-            f"PollSourceError:gh api timed out after {GH_CALL_ATTEMPTS} attempts",
+            f"PollSourceError:gh api GET issues/12/comments timed out after {GH_CALL_ATTEMPTS} attempts",
         )
     ]
 

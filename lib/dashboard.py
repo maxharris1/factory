@@ -51,6 +51,9 @@ waiting_on} (who a held PR waits on, or None), or None for a ticket with
 no record. A running or queued job is not in `now`: the page joins it
 from `running` and `queued`.
 
+Ticket rows (#670): each status.json `tickets` row carries
+`state_age_seconds`, its record's value below (null when unknown).
+
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
 or not the ticket has a job. The snapshot carries them under RECORDS, so
@@ -1420,6 +1423,7 @@ def _read_db(
         running.sort(key=lambda item: -item["heartbeat_age_seconds"])
 
     tickets: list[dict] = []
+    ticket_rows: list[tuple[dict, tuple[str, str]]] = []
     stuck_tickets: list[dict] = []
     paused: list[dict] = []
     ticket_info: dict[tuple[str, str], TicketInfo] = {}
@@ -1492,6 +1496,7 @@ def _read_db(
                     **({"no_ci": no_ci} if no_ci else {}),
                 }
             )
+            ticket_rows.append((tickets[-1], key))
             if stuck:
                 stuck_tickets.append(
                     {
@@ -1517,6 +1522,8 @@ def _read_db(
         now,
         tables,
     )
+    for row, key in ticket_rows:
+        row["state_age_seconds"] = flows[key]["state_age_seconds"]
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
         info = ticket_info.get(key, TicketInfo(None, False, None))

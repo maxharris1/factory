@@ -165,7 +165,7 @@ def test_a_ticket_the_live_source_cannot_read_flags_attention_on_the_third_poll(
     assert flagged == [[], [], ["poll-errors"], ["poll-errors"]]
     assert [ticket_id for ticket_id, _, _ in attention(queue)] == ["12"]
     assert attention(queue)[0][2] == (
-        "3 polls in a row failed: PollSourceError:gh returned HTTP 403"
+        "3 polls in a row failed: PollSourceError:gh api GET pulls/12 returned HTTP 403"
     )
 
     forbidden.clear()

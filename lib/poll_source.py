@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import queue
 import re
@@ -13,6 +14,7 @@ import subprocess
 import threading
 import time
 from bisect import bisect_right
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
@@ -42,6 +44,7 @@ from lib.dispatcher import (
 from lib.dispatch.types import ci_on_base, no_ci_base
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
+from lib.dispatch.errors_text import plain_fragment
 from lib.dispatch.cycle_clock import CycleClock
 from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
@@ -54,11 +57,13 @@ from lib.factory_md import (
 from lib.evidence.criteria import canonical_brief
 from lib.github_actions import (
     GhResult,
+    GitHubAdapterError,
     GitHubReviewActions,
     PULL_FILES_LIMIT,
     LinearReviewActions,
     Runner,
     _is_read,
+    _route,
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
@@ -134,6 +139,8 @@ GH_CALL_TIMEOUT_SECONDS = 20.0
 GH_CALL_ATTEMPTS = 3
 GH_RETRY_BACKOFF_SECONDS = 2.0
 READ_DEADLINE_SECONDS = 30.0
+TRACKED_READ_BUDGET_SECONDS = 120.0
+CYCLE_ERROR_DETAILS = 5
 HANG_STRIKES = 2
 LINEAR_CUTOFF_MARGIN_SECONDS = 1.0
 LINEAR_REQUESTS_PER_HOUR = 2_500
@@ -162,6 +169,16 @@ class FactoryParseError(PollSourceError):
 
 
 class PollCycleError(PollSourceError):
+    pass
+
+
+class GhHttpError(PollSourceError):
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class _BudgetSpent(PollSourceError):
     pass
 
 
@@ -427,6 +444,7 @@ class LivePollSource:
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
         read_deadline_seconds: float = READ_DEADLINE_SECONDS,
+        tracked_read_budget_seconds: float = TRACKED_READ_BUDGET_SECONDS,
         risks: IntakeRisks | None = None,
         fed_pulls: FedPulls | None = None,
     ):
@@ -444,6 +462,7 @@ class LivePollSource:
         self.sleep = sleep
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
         self.read_deadline_seconds = read_deadline_seconds
+        self.tracked_read_budget_seconds = tracked_read_budget_seconds
         self._hangs: dict[str, int] = {}
         self._linear_calls = _Abandoning(HANG_STRIKES)
         self._trusted = {
@@ -468,8 +487,12 @@ class LivePollSource:
         self._linear_complexity = 0
         self._linear_candidate_cursor: tuple[str, str] | None = None
         self._linear_tracked_cursor: tuple[str, str] | None = None
-        self._cycle_errors: dict[str, int] = {}
+        self._cycle_errors: list[tuple[str, str, str]] = []
         self._cycle_deferrals: dict[str, int] = {}
+        self._budget_deadline: float | None = None
+        self._budget_spent = False
+        self._tracked_turns: dict[tuple[str, str], int] = {}
+        self._tracked_turn = 0
         # Linear webhook mode (orch.yml linear_webhook). With no webhook
         # configured none of this is read and every cycle is as before.
         self.linear_dirty: DirtyQueue | None = None
@@ -555,7 +578,7 @@ class LivePollSource:
             self._linear_requests = 0
             self._linear_complexity = 0
         self._cycles_until_linear -= 1
-        self._cycle_errors = {}
+        self._cycle_errors = []
         self._cycle_deferrals = {}
         self._hangs = {}
         if self.config.linear_webhook is not None:
@@ -646,12 +669,20 @@ class LivePollSource:
             )
         self._cycle_deferrals = {}
         if self._cycle_errors:
-            sources = ", ".join(
-                f"{source} x{count}" for source, count in sorted(self._cycle_errors.items())
-            )
+            counts = Counter(repo for repo, _, _ in self._cycle_errors)
+            sources = ", ".join(f"{source} x{count}" for source, count in sorted(counts.items()))
+            details = [
+                plain_fragment(
+                    f"{repo} {reason}" if ticket_id == "-" else f"{repo} ticket {ticket_id} {reason}"
+                )
+                for repo, ticket_id, reason in self._cycle_errors[:CYCLE_ERROR_DETAILS]
+            ]
+            more = len(self._cycle_errors) - CYCLE_ERROR_DETAILS
+            if more > 0:
+                details.append(f"and {more} more")
             raise PollCycleError(
-                f"poll cycle recorded {sum(self._cycle_errors.values())} source error(s): "
-                f"{sources}"
+                f"poll cycle recorded {len(self._cycle_errors)} source error(s): "
+                f"{sources}; " + "; ".join(details)
             )
 
     def github_candidates(
@@ -747,11 +778,11 @@ class LivePollSource:
             return self._searched_candidates(projects, query, exclude, reserve)
         found: tuple[TrackedTicket, ...] = ()
         if self._reconcile_due():
-            errors = sum(self._cycle_errors.values())
+            errors = len(self._cycle_errors)
             deferrals = sum(self._cycle_deferrals.values())
             found = self._searched_candidates(projects, query, exclude, reserve)
             if (
-                sum(self._cycle_errors.values()) == errors
+                len(self._cycle_errors) == errors
                 and sum(self._cycle_deferrals.values()) == deferrals
             ):
                 self._last_reconcile = self.clock()
@@ -923,8 +954,12 @@ class LivePollSource:
         ordered = (
             linear_refs[start:]
             + linear_refs[:start]
-            + [ref for ref in tickets if ref.tracker != "linear"]
+            + sorted(
+                (ref for ref in tickets if ref.tracker != "linear"),
+                key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
+            )
         )
+        spent: dict[str, float] = {}
         for ref in ordered:
             project = projects.get(ref.repo.lower())
             if project is None:
@@ -932,15 +967,40 @@ class LivePollSource:
                     # Its repo left orch.yml: never read, so ack its dirty rows.
                     self._note_unread(ref.ticket_id)
                 continue
+            repo = ref.repo.lower()
+            left = self.tracked_read_budget_seconds - spent.get(repo, 0.0)
+            if left <= 0:
+                self._defer(f"tracked-read budget deferred {project.repo}")
+                continue
+            started = self.clock()
+            self._budget_deadline = started + left
+            self._budget_spent = False
             try:
                 ticket = self._tracked_ticket(ref, project)
             except Exception as exc:
                 if not isinstance(exc, _TerminalTicket):
                     self._record(ref.repo, ref.ticket_id, exc)
             else:
-                if ticket is not None:
+                if ticket is not None and not self._budget_spent:
                     found.append(ticket)
+            finally:
+                self._budget_deadline = None
+                spent[repo] = spent.get(repo, 0.0) + self.clock() - started
+            if self._budget_spent:
+                self._budget_spent = False
+                self._defer(f"tracked-read budget deferred {project.repo}")
+            self._tracked_turn += 1
+            self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
+
+    def _require_budget(self, reserve: float = 0.0) -> float:
+        if self._budget_deadline is None:
+            return math.inf
+        left = self._budget_deadline - self.clock()
+        if left <= reserve:
+            self._budget_spent = True
+            raise _BudgetSpent("tracked-read budget spent")
+        return left
 
     def _tracked_ticket(
         self,
@@ -1219,6 +1279,7 @@ class LivePollSource:
         complexity = _linear_request_complexity(query)
         if not self._linear_request_available(query):
             raise RetryablePollSourceError("Linear poll budget is exhausted")
+        deadline = min(self.timeout_seconds, self.read_deadline_seconds, self._require_budget())
         self._linear_requests += 1
         self._linear_complexity += complexity
         payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -1226,7 +1287,6 @@ class LivePollSource:
             "Authorization": self._linear_key(),
             "Content-Type": "application/json",
         }
-        deadline = min(self.timeout_seconds, self.read_deadline_seconds)
         cutoff = deadline - min(LINEAR_CUTOFF_MARGIN_SECONDS, deadline / 4)
         try:
             with self._timed("linear"):
@@ -1237,6 +1297,7 @@ class LivePollSource:
                     ),
                 )
         except TimeoutError:
+            self._require_budget()
             self._hung("linear")
             raise RetryablePollSourceError(
                 f"Linear request timed out after {deadline:g}s"
@@ -1619,8 +1680,8 @@ class LivePollSource:
     def _factory_text_at(self, repo: str, sha: str) -> str | None:
         try:
             return self._factory_text(repo, sha)
-        except PollSourceError as exc:
-            if str(exc) == "gh returned HTTP 404":
+        except GhHttpError as exc:
+            if exc.status == 404:
                 return None
             raise
 
@@ -2003,9 +2064,10 @@ class LivePollSource:
             )
             if _is_rate_limited(status, result.stdout, result.stderr):
                 self._backoff_until = now + BACKOFF_SECONDS
+            route = f"gh api {_route(args)}"
             if status is not None:
-                raise PollSourceError(f"gh returned HTTP {status}")
-            raise PollSourceError(f"gh exited {result.returncode}")
+                raise GhHttpError(f"{route} returned HTTP {status}", status)
+            raise PollSourceError(f"{route} exited {result.returncode}")
         if not conditional:
             return result.stdout
         status, headers, body = (
@@ -2054,23 +2116,27 @@ class LivePollSource:
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         self._check_hangs("github")
+        route = f"gh api {_route(argv[argv.index('api') + 1 :])}" if "api" in argv else "gh"
         with self._timed(_gh_source(argv)):
             deadline = self.clock() + self.read_deadline_seconds
             attempt = 1
             while True:
                 left = deadline - self.clock()
+                timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
                 try:
-                    return self.gh_runner(argv, min(self.gh_call_timeout_seconds, left))
+                    return self.gh_runner(argv, timeout)
                 except subprocess.TimeoutExpired:
+                    self._require_budget()
                     pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
                     if attempt >= GH_CALL_ATTEMPTS or deadline - self.clock() <= pause:
                         self._hung("github")
                         raise RetryablePollSourceError(
-                            f"gh api timed out after {attempt} attempts"
+                            f"{route} timed out after {attempt} attempts"
                         ) from None
+                    self._require_budget(pause)
                 except OSError as exc:
                     raise PollSourceError(
-                        f"gh could not run: {type(exc).__name__}"
+                        f"{route} could not run: {type(exc).__name__}"
                     ) from exc
                 self.sleep(pause)
                 attempt += 1
@@ -2098,15 +2164,16 @@ class LivePollSource:
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
-        self._cycle_errors[repo] = self._cycle_errors.get(repo, 0) + 1
-        if self.error_sink is None:
+        if isinstance(exc, _BudgetSpent):
             return
         reason = _safe_reason(exc)
         for name in _secret_env_names(self.config):
             value = self.environ.get(name)
             if value:
                 reason = reason.replace(value, "<secret>")
-        self.error_sink(repo, ticket_id, reason)
+        self._cycle_errors.append((repo, ticket_id, reason))
+        if self.error_sink is not None:
+            self.error_sink(repo, ticket_id, reason)
 
 
 class _Abandoning:
@@ -2335,9 +2402,10 @@ def _safe_reason(exc: Exception) -> str:
     its message scrubbed."""
     if isinstance(exc, PollSourceError):
         return f"PollSourceError:{str(exc)}"
-    status = _status_code(str(exc))
+    text = exc.safe_detail if isinstance(exc, GitHubAdapterError) else str(exc)
+    status = _status_code(text)
     kind = type(exc).__name__ if status is None else f"{type(exc).__name__}:HTTP-{status}"
-    detail = scrub_detail(str(exc))
+    detail = scrub_detail(text)
     return f"{kind}: {detail}" if detail else kind
 
 
