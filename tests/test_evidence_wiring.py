@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import job_detail
 from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
 from lib.queue import Job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
@@ -279,11 +280,10 @@ def test_extra_round_carries_the_go_and_the_last_fix_instruction(tmp_path: Path)
     flow = Flow(tmp_path)
     flow.to_cap()
     with flow.queue.connect() as connection:
-        last_fix = json.loads(
-            connection.execute(
-                "SELECT detail FROM jobs WHERE action = 'fix' ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()["detail"]
-        )
+        row = connection.execute(
+            "SELECT id, detail FROM jobs WHERE action = 'fix' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        last_fix = json.loads(job_detail.load_row(connection, row["id"], row["detail"]))
 
     assert flow.go("go-2") == "queued-fix"
 

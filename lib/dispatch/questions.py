@@ -416,7 +416,7 @@ class QuestionsMixin:
             ).fetchall()
         answered: list[tuple[Job, Comment]] = []
         for row in rows:
-            job = _job(row)
+            job = _job(row, connection)
             source = sources.get(job.request.source_comment_id)
             if source is None:
                 continue
@@ -490,7 +490,7 @@ class QuestionsMixin:
                 requeue_reason = f"answer-rejected:{answer_id}"
             else:
                 continue
-            job = _job(row)
+            job = _job(row, connection)
             if job.request.action == "review" and self._open_fix_for_head(job):
                 continue
             if self._resumed_by_answers(job) or self._waiting_max(job):
@@ -546,7 +546,7 @@ class QuestionsMixin:
         retry_prefix = f"review-refused:{_scope(ticket.repo, ticket.ticket_id)}:"
         owed: tuple[Job, Comment] | None = None
         for row in rows:
-            job = _job(row)
+            job = _job(row, connection)
             if job.state in ("queued", "running"):
                 return
             if (

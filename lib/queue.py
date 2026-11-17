@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from lib import attention, job_token, lane_limit
+from lib import attention, job_detail, job_token, lane_limit
 from lib.state_backup import RESTORED, RESTORED_CLAIM
 
 ACTIONS = (
@@ -210,7 +210,8 @@ class SQLiteJobQueue:
                     raise QueueError("retry requires one unhandled failed job")
                 if retire_requeued(connection, job.id, "t6-retry", now=self.now()):
                     job = _job(
-                        connection.execute("SELECT * FROM jobs WHERE id = ?", (job.id,)).fetchone()
+                        connection.execute("SELECT * FROM jobs WHERE id = ?", (job.id,)).fetchone(),
+                        connection,
                     )
             connection.commit()
             return job, inserted
@@ -257,7 +258,7 @@ class SQLiteJobQueue:
             (dedupe_key,),
         ).fetchone()
         assert row is not None
-        return _job(row)
+        return _job(row, connection)
 
     def claim(
         self,
@@ -299,7 +300,7 @@ class SQLiteJobQueue:
             ).fetchone()
             connection.commit()
         assert updated is not None
-        return _job(updated)
+        return _job(updated, connection)
 
     def release(self, job_id: str, *, owner: str) -> Job:
         """Undo a claim whose work never started: running -> queued.
@@ -345,7 +346,7 @@ class SQLiteJobQueue:
                     )
                 raise QueueError("release requires a running job")
             connection.commit()
-        return _job(updated)
+        return _job(updated, connection)
 
     def heartbeat(self, job_id: str, *, owner: str, proof: Proof | None = None) -> Job:
         if owner not in RECIPIENTS:
@@ -379,7 +380,7 @@ class SQLiteJobQueue:
             ).fetchone()
             connection.commit()
         assert row is not None
-        return _job(row)
+        return _job(row, connection)
 
     def finish(
         self,
@@ -423,10 +424,10 @@ class SQLiteJobQueue:
                     and updated["handoff_comment_id"] == handoff_comment_id
                 ):
                     connection.commit()
-                    return _job(updated)
+                    return _job(updated, connection)
                 raise QueueError("finish requires a running job")
             connection.commit()
-        return _job(updated)
+        return _job(updated, connection)
 
     def record_invalid_handoff(
         self,
@@ -497,7 +498,7 @@ class SQLiteJobQueue:
                 )
             updated = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             connection.commit()
-        return count, _job(updated)
+        return count, _job(updated, connection)
 
     def record_pre_ready_passed(
         self, job_id: str, *, comment_id: str, head: str, proof: Proof | None = None
@@ -607,7 +608,7 @@ class SQLiteJobQueue:
                 ORDER BY created_at, id
                 """
             ).fetchall()
-        return tuple(_job(row) for row in rows)
+        return tuple(_job(row, connection) for row in rows)
 
     def mark_timed_out(self, job: Job) -> bool:
         """Fail a job the timeout sweep read, unless it changed or may run.
@@ -658,7 +659,7 @@ class SQLiteJobQueue:
                 ORDER BY finished_at, id
                 """
             ).fetchall()
-        return tuple(_job(row) for row in rows)
+        return tuple(_job(row, connection) for row in rows)
 
     def mark_failure_handled(self, job_id: str) -> None:
         with self._connect() as connection:
@@ -931,7 +932,7 @@ def cancel_queued(
                 now,
             ),
         )
-    return _job(row)
+    return _job(row, connection)
 
 
 def retire_requeued(
@@ -1111,11 +1112,12 @@ def _validate_request(request: JobRequest) -> None:
         raise QueueError("attempt must be 1 or 2")
 
 
-def job_from_row(row: sqlite3.Row) -> Job:
-    return _job(row)
+def job_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Job:
+    return _job(row, connection)
 
 
-def _job(row: sqlite3.Row) -> Job:
+def _job(row: sqlite3.Row, connection: sqlite3.Connection) -> Job:
+    detail = job_detail.load_row(connection, str(row["id"]), row["detail"])
     request = JobRequest(
         repo=str(row["repo"]),
         ticket_id=str(row["ticket_id"]),
@@ -1126,7 +1128,7 @@ def _job(row: sqlite3.Row) -> Job:
         generation=int(row["generation"]),
         attempt=int(row["attempt"]),
         head=str(row["head"]) if row["head"] is not None else None,
-        detail=str(row["detail"]) if row["detail"] is not None else None,
+        detail=str(detail) if detail is not None else None,
     )
     return Job(
         id=str(row["id"]),

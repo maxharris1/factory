@@ -727,6 +727,7 @@ def test_ci_fixes_without_a_log_and_verdicts_on_an_accepted_head_are_counted(
     assert values["verdicts-on-accepted-head"] == 2
 
 
+
 @pytest.mark.parametrize("seed", [_seeded, _loop_db, lambda path: setup(path)[1].path])
 def test_an_empty_window_prints_zero_counts_and_no_ratio(seed, tmp_path: Path) -> None:
     metrics = build_metrics(seed(tmp_path), since=EMPTY[0], until=EMPTY[1])

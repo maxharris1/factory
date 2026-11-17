@@ -1362,7 +1362,7 @@ def _check_handoff(
         errors = [item.message for item in findings if item.severity == "error"]
         if config is None or errors:
             raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
-        expected = expected_for(job_from_row(row), args.bot)
+        expected = expected_for(job_from_row(row, connection), args.bot)
         read = gh_reader()
         found = handoff_problems(expected, args.handoff, read, config.trusted_logins)
         event, checked = SUBMITTED_INVALID, None

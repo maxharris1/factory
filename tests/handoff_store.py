@@ -99,6 +99,8 @@ def serve_job(db: Path, job_id: str, *comment_ids: str) -> None:
     """Serve each of comment_ids as a handoff that fits the job in db."""
     with sqlite3.connect(db) as connection:
         connection.row_factory = sqlite3.Row
-        job = job_from_row(connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+        job = job_from_row(
+            connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone(), connection
+        )
     for comment_id in comment_ids:
         serve_handoff(env_store(), job, comment_id)
