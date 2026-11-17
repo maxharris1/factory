@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -353,8 +354,10 @@ def test_a_job_running_through_a_deploy_finishes_and_hands_off(
     job = claimed[0]
     serve_job(queue.path, job.id, "123")
     go = tmp_path / "go"
+    running = tmp_path / "running"
     script = (
         "import pathlib, subprocess, sys, time\n"
+        f"pathlib.Path({str(running)!r}).touch()\n"
         f"while not pathlib.Path({str(go)!r}).exists(): time.sleep(0.05)\n"
         f"subprocess.run([sys.executable, {str(repo.box / 'bin/orch')!r}, 'job', 'done', "
         f"'codex-bot', {job.id!r}, '--handoff', '123', '--db', {str(queue.path)!r}], "
@@ -367,6 +370,10 @@ def test_a_job_running_through_a_deploy_finishes_and_hands_off(
          "--db", str(queue.path), "--interval", "0.1", "--", sys.executable, "-c", script],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
+        deadline = time.monotonic() + 30
+        while not running.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert running.exists(), "orch job run never started the job"
         handoff = repo.upstream / "lib/handoff.py"
         handoff.write_text(handoff.read_text(encoding="utf-8") + "\nDEPLOYED_WHILE_BUSY = True\n",
                            encoding="utf-8")
