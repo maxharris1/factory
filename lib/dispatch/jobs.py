@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import device_sync, lane_limit, skill_preflight
+from lib import device_sync, job_detail, lane_limit, skill_preflight
 from lib.device_pool import (
     UNREACHABLE_BACKOFF_SECONDS,
     back_off,
@@ -297,7 +297,7 @@ class JobsMixin:
             ORDER BY jobs.created_at, jobs.id
             """
         ).fetchall()
-        closed = [_job(row) for row in rows]
+        closed = [_job(row, connection) for row in rows]
         for job in closed:
             connection.execute(
                 """
@@ -364,11 +364,17 @@ class JobsMixin:
         device unreachable for job_states.unreachable_lost_seconds.
 
         Runs before T6 looks at timeouts, so T6 sees a lost job as a link
-        drop in the same poll. A failure here is recorded and never stops
-        the poll.
+        drop in the same poll. #679: machines.yml is reloaded first, and a
+        failure of either step is recorded and never stops the poll.
         """
         if self.devices is None:
             return
+        reload = getattr(self.devices, "reload", None)
+        if reload is not None:
+            try:
+                reload()
+            except Exception as exc:
+                self.record_poll_error("devices", "-", exc, prefix="machines.yml:")
         try:
             self.devices.reconcile(
                 self.queue.now(), self.job_states.unreachable_lost_seconds, self._device_lost
@@ -407,7 +413,7 @@ class JobsMixin:
             return
         check = getattr(self.devices, "liveness", None)
         for row in rows:
-            job = _job(row)
+            job = _job(row, connection)
             try:
                 placement = placements.get(job.id)
                 facts = (
@@ -682,7 +688,7 @@ class JobsMixin:
         ).fetchone()
         if row is None or str(row["state"]) != "running" or slot is None:
             return None
-        job = _job(row)
+        job = _job(row, connection)
         connection.execute(
             """
             UPDATE jobs
@@ -1537,7 +1543,7 @@ class JobsMixin:
             if stuck_since is None and wake is not None:
                 stuck_since = wake["created_at"]
             if wake is not None and isinstance(wake["detail"], str):
-                previous_detail = str(wake["detail"])
+                previous_detail = job_detail.load_row(connection, str(wake_job_id), wake["detail"])
             failed = connection.execute(
                 """
                 SELECT count(*) FROM jobs

@@ -98,6 +98,7 @@ class QuestionsMixin:
                 "paused_head": head,
                 "paused_generation": generation,
                 "paused_question_id": comment.id,
+                "paused_plan_text": None,
             }
             write_workflow_state(
                 connection,
@@ -194,7 +195,7 @@ class QuestionsMixin:
                 """
                 SELECT workflow_state, paused_action, paused_recipient,
                        paused_head, paused_generation, paused_question_id,
-                       plan_gap_count
+                       paused_plan_text, plan_gap_count
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
@@ -235,7 +236,9 @@ class QuestionsMixin:
             None,
         )
         paused_plan = gap_of(question) if question is not None else None
-        if action == "build" and paused_plan is not None:
+        if action == "build" and paused["paused_plan_text"] is not None:
+            plan_text = paused["paused_plan_text"]
+        elif action == "build" and paused_plan is not None:
             plan_text = paused_plan[0]
         elif action in ("build", "plan"):
             plan_text = (prior or {}).get("plan_text")
@@ -298,6 +301,7 @@ class QuestionsMixin:
                     "paused_head": None,
                     "paused_generation": None,
                     "paused_question_id": None,
+                    "paused_plan_text": None,
                 },
             )
         self._write_state_label(ticket, resumed_state)
@@ -416,7 +420,7 @@ class QuestionsMixin:
             ).fetchall()
         answered: list[tuple[Job, Comment]] = []
         for row in rows:
-            job = _job(row)
+            job = _job(row, connection)
             source = sources.get(job.request.source_comment_id)
             if source is None:
                 continue
@@ -490,7 +494,7 @@ class QuestionsMixin:
                 requeue_reason = f"answer-rejected:{answer_id}"
             else:
                 continue
-            job = _job(row)
+            job = _job(row, connection)
             if job.request.action == "review" and self._open_fix_for_head(job):
                 continue
             if self._resumed_by_answers(job) or self._waiting_max(job):
@@ -546,7 +550,7 @@ class QuestionsMixin:
         retry_prefix = f"review-refused:{_scope(ticket.repo, ticket.ticket_id)}:"
         owed: tuple[Job, Comment] | None = None
         for row in rows:
-            job = _job(row)
+            job = _job(row, connection)
             if job.state in ("queued", "running"):
                 return
             if (

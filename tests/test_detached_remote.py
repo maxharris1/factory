@@ -249,7 +249,7 @@ def test_darwin_launch_records_the_start_and_polls_it(
     monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
     assert word(box.send(box.launch(lines=30, pause=0.1))) == "started"
     wrapper, start = (int(x) for x in (box.run_dir() / "pid").read_text().split())
-    record = Path(box.target.job_dir) / remote.darwin_record(box.target.require_tag())
+    record = Path(box.target.job_dir) / remote.start_record(box.target.require_tag())
     fields = wait_file(record).split()
     assert fields[0] == str(start) and fields[2] == box.target.tag
     assert box.poll()[0][1] == "running"
@@ -267,7 +267,7 @@ def test_a_poll_never_fences_the_darwin_start_it_follows(
     gate, paused = tmp_path / "gate", tmp_path / "paused"
     gate.touch()
     mac.pause_starts(gate, paused)
-    record = Path(box.target.job_dir) / remote.darwin_record(box.target.require_tag())
+    record = Path(box.target.job_dir) / remote.start_record(box.target.require_tag())
     try:
         assert word(box.send(box.launch(lines=1, pause=0))) == "started"
         deadline = time.monotonic() + 10
@@ -410,6 +410,23 @@ def test_a_refused_launch_ends_without_a_follow(tmp_path: Path) -> None:
     end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", Stop())
     assert (end.kind, end.code) == (REFUSED, remote.START_REFUSED)
     assert transport.calls == ["LAUNCH"]
+    assert not end.in_transit
+
+
+def test_a_refused_launch_after_a_short_answer_has_nothing_in_transit(tmp_path: Path) -> None:
+    clock = Clock()
+    transport = Script([launched("short"), launched("refused rundir")])
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", Stop())
+    assert (end.kind, end.code, end.in_transit) == (REFUSED, remote.START_REFUSED, False)
+
+
+def test_a_refused_launch_after_an_unanswered_call_may_still_have_one_in_transit(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    transport = Script([DROP, launched("refused rundir")])
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", Stop())
+    assert (end.kind, end.code, end.in_transit) == (REFUSED, remote.START_REFUSED, True)
 
 
 def test_a_partial_transfer_is_discarded_and_fetched_again(tmp_path: Path) -> None:

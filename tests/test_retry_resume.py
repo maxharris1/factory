@@ -291,9 +291,7 @@ def test_a_stale_verdict_after_a_retried_review_is_still_refused(tmp_path: Path)
     assert _queued_fix_heads(b) == []
 
 
-def _fix_running_on_pc(
-    tmp_path: Path, *, answers: bool, pc_enabled: bool = True
-) -> tuple[Board, PR, DevicePool, Job]:
+def _fix_running_on_pc(tmp_path: Path, *, answers: bool) -> tuple[Board, PR, DevicePool, Job]:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
     b.go(p, "go")
@@ -311,13 +309,22 @@ def _fix_running_on_pc(
     pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
     pool.attach_worker(job.id, owner="claude", remote=True, tag="e" * 32)
     (tmp_path / "now").mkdir()
-    now_config = config_of(machines_file(tmp_path / "now", box_enabled=False, pc=pc_enabled))
+    now_config = config_of(machines_file(tmp_path / "now", box_enabled=False))
     b.dispatcher.devices = DeviceMonitor(
         pool, now_config, FakeTransport(check=1 if answers else 255), alive=lambda *_: True
     )
     b.poll()
     assert (job.request.action, b.jobs("fix")[0]["state"]) == ("fix", "running")
     return b, p, pool, job
+
+
+def _disable_pc_since_last_poll(b: Board, tmp_path: Path) -> None:
+    # The poll itself loses a disabled device's jobs (issue #679), so the
+    # retry meets a disable made after the last poll.
+    (tmp_path / "off").mkdir()
+    b.dispatcher.devices.config = config_of(
+        machines_file(tmp_path / "off", box_enabled=False, pc=False)
+    )
 
 
 def _events(b: Board, job_id: str) -> list[str]:
@@ -344,7 +351,9 @@ def _orphans(b: Board) -> list[tuple[str, str]]:
 def test_retry_requeues_a_job_stranded_on_its_device(
     tmp_path: Path, answers: bool, pc_enabled: bool
 ) -> None:
-    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers, pc_enabled=pc_enabled)
+    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers)
+    if not pc_enabled:
+        _disable_pc_since_last_poll(b, tmp_path)
 
     b.post(p, "retry-1", REASON, "grok-login")
     b.poll()
@@ -387,11 +396,13 @@ def test_retry_still_refuses_a_job_on_a_reachable_enabled_device(tmp_path: Path)
 def test_retry_of_a_stranded_job_on_a_stuck_ticket_lets_the_replacement_resume_it(
     tmp_path: Path, answers: bool, pc_enabled: bool
 ) -> None:
-    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers, pc_enabled=pc_enabled)
+    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers)
     b.dispatcher.hooks = (T7Hook(),)
     b.post(p, "stuck-report", STUCK_FIXTURE.read_text(), "grok-login")
     b.poll()
     assert b.state("42")["stuck"] == 1
+    if not pc_enabled:
+        _disable_pc_since_last_poll(b, tmp_path)
 
     b.post(p, "retry-1", REASON, "grok-login")
     b.now[0] += 600

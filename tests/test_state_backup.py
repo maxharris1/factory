@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import gc
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from lib.state_backup import (
     CycleBackup,
     backup,
     default_backup_path,
+    labelled_backup,
+    prune_labelled,
     restore,
     weekly_snapshot,
 )
@@ -266,3 +269,311 @@ def test_retention_never_deletes_the_newest_snapshot(tmp_path: Path) -> None:
         "orch-2026-11-16.db",
         "orch-2027-01-04.db",
     ]
+
+
+NOW = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+
+
+def _labelled_name(at: datetime, label: str = "fix") -> str:
+    return f"orch-{at.astimezone(UTC):%Y%m%dT%H%M%SZ}-{label}.db"
+
+
+def _make(directory: Path, *ages: timedelta) -> list[str]:
+    directory.mkdir(parents=True, exist_ok=True)
+    names = [_labelled_name(NOW - age) for age in ages]
+    for name in names:
+        (directory / name).write_bytes(b"")
+    return names
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(path.name for path in directory.iterdir())
+
+
+def test_prune_keeps_the_newest_five_old_backups(tmp_path: Path) -> None:
+    manual = tmp_path / "manual"
+    names = _make(manual, *(timedelta(days=days) for days in range(3, 10)))
+
+    deleted = prune_labelled(manual, NOW)
+
+    assert sorted(path.name for path in deleted) == sorted(names[5:])
+    assert _names(manual) == sorted(names[:5])
+    assert prune_labelled(manual, NOW) == []
+    assert _names(manual) == sorted(names[:5])
+
+
+def test_prune_keeps_every_backup_under_48_hours_old(tmp_path: Path) -> None:
+    manual = tmp_path / "manual"
+    names = _make(manual, *(timedelta(hours=hours) for hours in range(1, 8)))
+
+    assert prune_labelled(manual, NOW) == []
+    assert _names(manual) == sorted(names)
+
+
+def test_prune_deletes_old_backups_past_the_newest_five_and_keeps_recent_ones(
+    tmp_path: Path,
+) -> None:
+    manual = tmp_path / "manual"
+    recent = _make(manual, *(timedelta(hours=hours) for hours in range(1, 7)))
+    old = _make(manual, timedelta(days=3), timedelta(days=30))
+
+    prune_labelled(manual, NOW)
+
+    assert _names(manual) == sorted(recent)
+    assert set(old).isdisjoint(_names(manual))
+
+
+def test_prune_age_boundary_is_48_hours(tmp_path: Path) -> None:
+    manual = tmp_path / "manual"
+    newest = _make(manual, *(timedelta(hours=hours) for hours in range(1, 6)))
+    [inside] = _make(manual, timedelta(hours=48) - timedelta(seconds=1))
+    [at_limit] = _make(manual, timedelta(hours=48))
+
+    prune_labelled(manual, NOW)
+
+    assert _names(manual) == sorted([*newest, inside])
+    assert at_limit not in _names(manual)
+
+
+def test_prune_deletes_wal_and_shm_siblings_with_their_backup(tmp_path: Path) -> None:
+    manual = tmp_path / "manual"
+    names = _make(manual, *(timedelta(days=days) for days in range(3, 9)))
+    for name in names:
+        (manual / f"{name}-wal").write_bytes(b"w")
+        (manual / f"{name}-shm").write_bytes(b"s")
+
+    prune_labelled(manual, NOW)
+
+    kept = names[:5]
+    assert _names(manual) == sorted(
+        [*kept, *(f"{name}-wal" for name in kept), *(f"{name}-shm" for name in kept)]
+    )
+
+
+def test_prune_never_touches_unrelated_files(tmp_path: Path) -> None:
+    manual = tmp_path / "manual"
+    names = _make(manual, *(timedelta(days=days) for days in range(3, 10)))
+    unrelated = [
+        "orch.db",
+        "orch-2020-01-06.db",
+        "notes.txt",
+        "orch-20200101T000000Z-x.db.tmp",
+        "orch-20201399T000000Z-baddate.db",
+        "orch-20200101T000000Z-.db",
+    ]
+    for name in unrelated:
+        (manual / name).write_bytes(b"")
+    (manual / "weekly").mkdir()
+    (manual / "weekly" / "orch-2020-01-06.db").write_bytes(b"")
+
+    prune_labelled(manual, NOW)
+
+    assert _names(manual) == sorted([*names[:5], *unrelated, "weekly"])
+    assert _names(manual / "weekly") == ["orch-2020-01-06.db"]
+
+
+def test_prune_of_a_missing_directory_deletes_nothing(tmp_path: Path) -> None:
+    assert prune_labelled(tmp_path / "absent", NOW) == []
+
+
+def _wal_source(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db)
+    assert connection.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    connection.execute("CREATE TABLE notes (body TEXT)")
+    connection.executemany("INSERT INTO notes VALUES (?)", [("one",), ("two",)])
+    connection.commit()
+    return db, connection
+
+
+def _rows(path: Path) -> list[str]:
+    with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        return [row[0] for row in connection.execute("SELECT body FROM notes ORDER BY body")]
+
+
+def test_labelled_backup_copies_rows_still_in_the_wal(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    manual = tmp_path / "share" / "manual"
+    try:
+        assert Path(f"{db}-wal").stat().st_size > 0
+
+        target, pruned = labelled_backup(db, manual, "pre-fix", NOW)
+    finally:
+        connection.close()
+
+    assert target == manual / "orch-20261117T120000Z-pre-fix.db"
+    assert _rows(target) == ["one", "two"]
+    assert _names(manual) == [target.name]
+    assert pruned == []
+
+
+def test_labelled_backup_prunes_on_each_call(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+    old = _make(manual, *(timedelta(days=days) for days in range(3, 8)))
+
+    first, pruned = labelled_backup(db, manual, "one", NOW)
+    assert _names(manual) == sorted([first.name, *old[:4]])
+    assert pruned == [manual / old[4]]
+
+    second, pruned = labelled_backup(db, manual, "two", NOW + timedelta(minutes=1))
+    assert _names(manual) == sorted([first.name, second.name, *old[:3]])
+    assert pruned == [manual / old[3]]
+
+
+def test_two_labelled_backups_in_one_second_keep_both(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    manual = tmp_path / "share" / "manual"
+    try:
+        connection.execute("DELETE FROM notes")
+        connection.execute("INSERT INTO notes VALUES ('before write')")
+        connection.commit()
+        first, _ = labelled_backup(db, manual, "fix", NOW + timedelta(milliseconds=100))
+        connection.execute("UPDATE notes SET body = 'after write'")
+        connection.commit()
+        second, _ = labelled_backup(db, manual, "fix", NOW + timedelta(milliseconds=900))
+    finally:
+        connection.close()
+
+    assert first == manual / "orch-20261117T120000Z-fix.db"
+    assert second == manual / "orch-20261117T120001Z-fix.db"
+    assert _names(manual) == [first.name, second.name]
+    assert _rows(first) == ["before write"]
+    assert _rows(second) == ["after write"]
+
+
+def test_labelled_backup_never_replaces_an_existing_file(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+    manual.mkdir(parents=True)
+    taken = manual / _labelled_name(NOW)
+    taken.write_bytes(b"keep")
+
+    target, _ = labelled_backup(db, manual, "fix", NOW)
+
+    assert taken.read_bytes() == b"keep"
+    assert target == manual / _labelled_name(NOW + timedelta(seconds=1))
+    assert _rows(target) == ["one", "two"]
+    assert _names(manual) == [taken.name, target.name]
+
+
+def test_concurrent_labelled_backups_each_keep_a_copy(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        targets = list(pool.map(lambda _: labelled_backup(db, manual, "fix", NOW)[0], range(8)))
+
+    expected = [_labelled_name(NOW + timedelta(seconds=second)) for second in range(8)]
+    assert sorted(target.name for target in targets) == expected
+    assert _names(manual) == expected
+    for target in targets:
+        assert _rows(target) == ["one", "two"]
+
+
+def test_a_failed_labelled_backup_leaves_no_file_behind(tmp_path: Path) -> None:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    db.write_bytes(b"not a database" * 100)
+    manual = tmp_path / "share" / "manual"
+
+    with pytest.raises(sqlite3.DatabaseError):
+        labelled_backup(db, manual, "fix", NOW)
+    assert _names(manual) == []
+
+
+@pytest.mark.parametrize("label", ["", "-x", ".x", "a/b", "../x", "a b", "x" * 65])
+def test_labelled_backup_refuses_a_bad_label(tmp_path: Path, label: str) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+
+    with pytest.raises(BackupError, match="label"):
+        labelled_backup(db, manual, label, NOW)
+    assert not manual.exists()
+
+
+def test_labelled_backup_refuses_a_directory_inside_the_databases(tmp_path: Path) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+
+    with pytest.raises(BackupError, match="own directory"):
+        labelled_backup(db, db.parent / "manual", "fix", NOW)
+    assert not (db.parent / "manual").exists()
+
+
+def test_cycle_prunes_labelled_backups_once_a_day(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    dest = tmp_path / "share" / "backup" / "orch.db"
+    manual = dest.parent / "manual"
+    names = _make(manual, *(timedelta(days=days) for days in range(3, 10)))
+    errors: list[str] = []
+    at = [NOW]
+    cycle = CycleBackup(
+        queue.path, dest, lambda *error: errors.append(error[2]), clock=lambda: at[0]
+    )
+
+    cycle()
+    assert _names(manual) == sorted(names[:5])
+
+    later = _make(manual, timedelta(days=20), timedelta(days=21))
+    at[0] = NOW + timedelta(hours=23, minutes=59)
+    cycle()
+    assert _names(manual) == sorted([*names[:5], *later])
+
+    at[0] = NOW + timedelta(hours=24)
+    cycle()
+    assert _names(manual) == sorted(names[:5])
+    assert errors == []
+
+
+def test_cycle_records_a_labelled_prune_failure_and_goes_on(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    dest = tmp_path / "share" / "backup" / "orch.db"
+    dest.parent.mkdir(parents=True)
+    (dest.parent / "manual").write_text("not a directory")
+
+    assert _cycle(queue, dest, NOW) == ["labelled-prune:NotADirectoryError"]
+    assert _dedupe_keys(dest) == ["t1:build"]
+
+
+def test_db_backup_command_backs_up_and_prints_what_it_pruned(tmp_path: Path, capsys) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+    manual.mkdir(parents=True)
+    old = [f"orch-2020010{day}T000000Z-old.db" for day in range(1, 7)]
+    for name in old:
+        (manual / name).write_bytes(b"")
+
+    code = cli.main(["db-backup", "pre-fix", "--db", str(db), "--dir", str(manual)])
+
+    assert code == 0
+    [target] = [path for path in manual.iterdir() if path.name.endswith("-pre-fix.db")]
+    assert _rows(target) == ["one", "two"]
+    assert _names(manual) == sorted([target.name, *old[2:]])
+    assert capsys.readouterr().out.splitlines() == [
+        f"backed up {db} to {target}",
+        f"pruned {manual / old[0]}",
+        f"pruned {manual / old[1]}",
+    ]
+
+
+def test_db_backup_command_refuses_a_bad_label(tmp_path: Path, capsys) -> None:
+    db, connection = _wal_source(tmp_path)
+    connection.close()
+    manual = tmp_path / "share" / "manual"
+
+    assert cli.main(["db-backup", "../x", "--db", str(db), "--dir", str(manual)]) == 1
+    assert capsys.readouterr().err.startswith("orch db-backup: ")
+    assert not manual.exists()
+
+
+def test_help_lists_db_backup(capsys) -> None:
+    assert cli.main(["--help"]) == 0
+    assert "db-backup <label> [--db PATH] [--dir PATH]" in capsys.readouterr().out

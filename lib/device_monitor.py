@@ -1,7 +1,21 @@
-"""Slot release and the lost check (docs/SPEC.md F2-02, #662).
+"""Slot release, the lost check and the orphan sweep (docs/SPEC.md F2-02,
+#662, #679).
 
 The dispatcher runs `DeviceMonitor.reconcile` once per poll, before T6
-looks at timeouts. It does two things with the device pool's held slots.
+looks at timeouts. First it calls `DeviceMonitor.reload`, which loads
+machines.yml again on the first poll (the config the monitor was built
+with was read before it could stamp the file) and then whenever its
+mtime or its machines.local.yml overlay's has changed since the last good
+load; a file that fails to load raises and the monitor keeps the last
+good config, so the next poll tries again. `reconcile` then walks each
+device that holds a slot or an orphan. A remote device gets all three
+steps below. On the box (a local device) a finished job's slot is
+released as below; when machines.yml sets it `enabled: false`, each
+running job whose worker started is handed to `on_lost` as below. A box
+orphan keeps the pids of its `orch job run` and its worker: while either
+lives it is sent SIGTERM, through the runner or through the worker once
+that runner is gone, and SIGKILL on each later poll; its row is forgotten
+once both are gone.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -13,7 +27,9 @@ whose job is no longer running (done, failed or timed out) and whose
   released;
 * on the box, the slot is released once the recorded command pid is gone;
 * on a remote device, the device is asked over SSH, by the start's worker
-  tag (lib/remote.py). Gone releases the slot. A worker still running
+  tag (lib/remote.py). The check first fences the tag's launch, so one
+  still in transit from a runner since lost can never start after it.
+  Gone releases the slot. A worker still running
   there with no runner on the box is an orphan: it is sent SIGTERM and the
   slot is kept until a later poll finds it gone. An unreachable device, a
   check that cannot tell, or a remote start with no recorded tag keeps
@@ -25,20 +41,34 @@ run, or their runners still live) gets one plain SSH round trip. The
 first failed probe after a good one starts the device's offline clock; a
 good probe stops it, and a device that holds no slot is forgotten. Once a
 device has failed every probe for `lost_after` seconds (orch.yml
-job_states.unreachable_lost_minutes, 10 by default; `stranded`), each job
+job_states.unreachable_lost_minutes, 10 by default; `stranded`), or at once
+when machines.yml sets it `enabled: false` (answering or not), each job
 still running on it whose worker started is handed to `on_lost`: the
 dispatcher fails it as lost, moves its slot to device_orphans and backs the
 device off, and T6 requeues it under the link-drop budget.
+
+Orphans. After the lost step, each device_orphans row on the device is
+checked by its worker tag, so a job lost this poll is swept this poll. A
+worker still running is sent SIGTERM and its row kept; a gone worker's row
+is forgotten, as is a row whose worker no check can name. An unreachable
+device ends its sweep for the poll after one failed check. A requeue
+placed back on the same device carries a new tag and is never stopped by
+mistake.
 """
 
 from __future__ import annotations
 
+import os
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import NamedTuple
 
-from lib.device_pool import DevicePool, HeldSlot, Placement
+from lib.config_overlay import overlay_path
+from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
 from lib.job_state import Liveness, liveness, never_started
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.remote import (
     GONE,
     RUNNING,
@@ -57,11 +87,17 @@ OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
 
 
+class Stamp(NamedTuple):
+    machines_ns: int
+    overlay_ns: int | None
+
+
 @dataclass(frozen=True)
 class MonitorResult:
     released: tuple[str, ...] = ()
     stopped: tuple[str, ...] = ()
     lost: tuple[str, ...] = ()
+    forgotten: tuple[str, ...] = ()
 
 
 def remote_target(
@@ -94,9 +130,19 @@ def stranded(
     device: Device, failing_since: float | None, now: float, limit: float
 ) -> str | None:
     """Why device's running jobs are lost now, or None while they may still run."""
+    if not device.enabled:
+        return "disabled"
     if failing_since is None or now - failing_since < limit:
         return None
     return f"unreachable {int((now - failing_since) // 60)} min"
+
+
+def _stamp(path: Path) -> Stamp:
+    try:
+        overlay: int | None = overlay_path(path).stat().st_mtime_ns
+    except FileNotFoundError:
+        overlay = None
+    return Stamp(path.stat().st_mtime_ns, overlay)
 
 
 def retry_stranded(device: Device, failing_since: float | None, now: float) -> str | None:
@@ -113,31 +159,57 @@ class DeviceMonitor:
         transport: Transport,
         *,
         alive: Alive = pid_alive,
+        kill: Callable[[int, int], None] = os.kill,
+        machines_path: Path | None = None,
     ):
         self.pool = pool
         self.config = config
         self.transport = transport
         self.alive = alive
+        self.kill = kill
+        self.machines_path = machines_path
+        self._stamp: Stamp | None = None
+
+    def reload(self) -> None:
+        """Load machines.yml again if it or its overlay changed since the last good load."""
+        path = self.machines_path
+        if path is None:
+            return
+        try:
+            stamp = _stamp(path)
+            if stamp == self._stamp:
+                return
+            config, findings = load_machines_yml(path, allow_placeholders=True)
+        except OSError as exc:
+            raise ValueError(f"{path}: cannot read: {type(exc).__name__}") from exc
+        errors = [item for item in findings if item.severity == "error"]
+        if config is None or errors:
+            detail = errors[0].message if errors else "invalid machines.yml"
+            raise ValueError(f"{path}: {detail}")
+        self.config = self.pool.config = config
+        self._stamp = stamp
 
     def reconcile(self, now: float, lost_after: float, on_lost: OnLost) -> MonitorResult:
         released: list[str] = []
         stopped: list[str] = []
         lost: list[str] = []
+        forgotten: list[str] = []
         groups: dict[str, list[HeldSlot]] = {}
         for slot in self.pool.held():
             groups.setdefault(slot.placement.device, []).append(slot)
+        for orphan in self.pool.orphans():
+            groups.setdefault(orphan.device, [])
         for name, slots in groups.items():
             device = self.config.device(name)
             if device is None:
                 continue  # renamed or removed: keep the slot, status shows it
             if device.local:
-                for slot in slots:
-                    if self._local_gone(slot):
-                        self._release(slot, released)
+                self._local(device, slots, now, on_lost, released, stopped, lost, forgotten)
                 continue
             self._remote(device, slots, now, lost_after, on_lost, released, stopped, lost)
+            self._sweep_orphans(device, stopped, forgotten)
         self.pool.forget_health(keep=self.pool.used().keys())
-        return MonitorResult(tuple(released), tuple(stopped), tuple(lost))
+        return MonitorResult(tuple(released), tuple(stopped), tuple(lost), tuple(forgotten))
 
     def liveness(self, placement: Placement) -> Liveness:
         """Is the job's recorded runner gone, and then its worker? (job_state)"""
@@ -158,6 +230,54 @@ class DeviceMonitor:
         if status == RUNNING:
             return False
         return None
+
+    def _local(
+        self,
+        device: Device,
+        slots: list[HeldSlot],
+        now: float,
+        on_lost: OnLost,
+        released: list[str],
+        stopped: list[str],
+        lost: list[str],
+        forgotten: list[str],
+    ) -> None:
+        for slot in slots:
+            if self._local_gone(slot):
+                self._release(slot, released)
+            elif (
+                not device.enabled
+                and slot.job_state == "running"
+                and not never_started(slot.placement)
+            ):
+                on_lost(slot.placement.job_id, device.name, "disabled")
+                lost.append(slot.placement.job_id)
+        for orphan in self.pool.orphans():
+            if orphan.device == device.name:
+                self._stop_local(orphan, now, stopped, forgotten)
+
+    def _stop_local(
+        self, orphan: Orphan, now: float, stopped: list[str], forgotten: list[str]
+    ) -> None:
+        live = [
+            pid
+            for pid, start in (
+                (orphan.runner_pid, orphan.runner_start),
+                (orphan.worker_pid, orphan.worker_start),
+            )
+            if pid is not None and self.alive(pid, start)
+        ]
+        if not live:
+            self.pool.forget_orphan(orphan.job_id)
+            forgotten.append(orphan.job_id)
+            return
+        kill = orphan.lost_at < now
+        for pid in live if kill else live[:1]:
+            try:
+                self.kill(pid, signal.SIGKILL if kill else signal.SIGTERM)
+            except OSError:
+                continue
+        stopped.append(orphan.job_id)
 
     def _local_gone(self, slot: HeldSlot) -> bool:
         if slot.job_state == "running":
@@ -209,9 +329,9 @@ class DeviceMonitor:
                 stopped.append(placement.job_id)
         if answered is None and held and probe is not None:
             answered = probe_device(self.transport, probe)
-        if answered is None:
-            return
-        failing_since = self.pool.record_contact(device.name, ok=answered, at=now)
+        failing_since = None
+        if answered is not None:
+            failing_since = self.pool.record_contact(device.name, ok=answered, at=now)
         reason = stranded(device, failing_since, now, lost_after)
         if reason is None:
             return
@@ -219,6 +339,25 @@ class DeviceMonitor:
             if slot.job_state == "running" and not never_started(slot.placement):
                 on_lost(slot.placement.job_id, device.name, reason)
                 lost.append(slot.placement.job_id)
+
+    def _sweep_orphans(self, device: Device, stopped: list[str], forgotten: list[str]) -> None:
+        """Stop each lost job's worker still running on device; forget it once gone."""
+        for orphan in self.pool.orphans():
+            if orphan.device != device.name:
+                continue
+            target = remote_target(device, orphan.harness, orphan.job_id, orphan.worker_tag)
+            if target is None or orphan.worker_tag is None:
+                self.pool.forget_orphan(orphan.job_id)
+                forgotten.append(orphan.job_id)
+                continue
+            status = check_worker(self.transport, target)
+            if status == UNREACHABLE:
+                return
+            if status == GONE:
+                self.pool.forget_orphan(orphan.job_id)
+                forgotten.append(orphan.job_id)
+            elif status == RUNNING and stop_worker(self.transport, target):
+                stopped.append(orphan.job_id)
 
     def _release(self, slot: HeldSlot, released: list[str]) -> None:
         if self.pool.release(slot.placement.job_id, owner=slot.placement.harness):

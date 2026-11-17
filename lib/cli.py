@@ -24,6 +24,7 @@ from typing import Any
 from lib import (
     codex_sandbox,
     health,
+    job_detail,
     job_run,
     job_token,
     linear_webhook,
@@ -90,6 +91,7 @@ from lib.handoff_check import (
 from lib.pre_ready import ContextUnavailable, PreReadyResult, check_environ, spec_for
 from lib.pre_ready import run as run_pre_ready
 from lib.queue import (
+    BUSY_TIMEOUT_SECONDS,
     MAX_INVALID_HANDOFFS,
     PRE_READY_FAILED,
     SLOTS_TABLE,
@@ -103,7 +105,14 @@ from lib.queue import (
     require_proof,
 )
 from lib.remote import SshTransport
-from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
+from lib.state_backup import (
+    BackupError,
+    CycleBackup,
+    backup,
+    default_backup_path,
+    labelled_backup,
+    restore,
+)
 from lib.status import main as status_main
 from lib.update_check import (
     RebaseScope,
@@ -143,7 +152,9 @@ commands:
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
+  db-backup        labelled backup to take before a manual write to orch.db
   restore-db       restore a missing dispatcher database from its backup
+  db-spill-detail  move bulky job detail out of the database (#653)
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
@@ -226,6 +237,22 @@ restore-db [--db PATH] [--backup PATH]
   integrity check: exit 0 restored, 3 no backup, 1 when the database
   already exists or the backup is bad. deploy/poller-service.sh start and
   ensure run it when the database is missing.
+
+db-backup <label> [--db PATH] [--dir PATH]
+  Run this before any manual write to orch.db (#654). Copies the database
+  with the online backup API to --dir/orch-<UTC stamp>-<label>.db; --dir
+  defaults to manual/ beside the backup-db path. It then keeps the newest 5
+  labelled backups plus any under 48 hours old and deletes the rest with
+  their -wal and -shm files; `orch poll` prunes the same way once a day.
+  label: letters, digits, '.', '_' and '-', at most 64. Exit 1 on failure.
+
+db-spill-detail [--db PATH] [--vacuum]
+  One-time migration (#653): move the bulky keys of every older job's
+  detail (lib/job_detail.py SPILLED) to job-detail/<id>.json beside the
+  database. A rerun moves nothing new. --vacuum then runs VACUUM and prints
+  the database size before and after. Holds the poller's lock, so it
+  refuses to run while `orch poll` does; stop the waiters too before
+  --vacuum, which needs the database to itself.
 
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -455,8 +482,12 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_init_db, argv[1:])
     if argv[0] == "backup-db":
         return _call(_backup_db, argv[1:])
+    if argv[0] == "db-backup":
+        return _call(_db_backup, argv[1:])
     if argv[0] == "restore-db":
         return _call(_restore_db, argv[1:])
+    if argv[0] == "db-spill-detail":
+        return _call(_db_spill_detail, argv[1:])
     if argv[0] == "wait":
         return _call(_wait, argv[1:])
     if argv[0] == "job":
@@ -969,6 +1000,25 @@ def _backup_db(argv: list[str]) -> int:
     return 0
 
 
+def _db_backup(argv: list[str]) -> int:
+    parser = _Parser(prog="orch db-backup", add_help=True)
+    parser.add_argument("label")
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--dir", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        directory = args.dir or default_backup_path().parent / "manual"
+        target, pruned = labelled_backup(path, directory, args.label, datetime.now(timezone.utc))
+    except (BackupError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch db-backup: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print(f"backed up {path} to {target}")
+    for old in pruned:
+        print(f"pruned {old}")
+    return 0
+
+
 def _restore_db(argv: list[str]) -> int:
     """Exit 0 restored, 3 no backup, 1 the database exists or the backup is bad."""
     parser = _Parser(prog="orch restore-db", add_help=True)
@@ -986,6 +1036,31 @@ def _restore_db(argv: list[str]) -> int:
         print(f"orch restore-db: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
     print(f"restored {path} from {source} (backup taken {taken:%Y-%m-%d %H:%M:%S} UTC)")
+    return 0
+
+
+def _db_spill_detail(argv: list[str]) -> int:
+    parser = _Parser(prog="orch db-spill-detail", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--vacuum", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        with _poll_lock(path):
+            before = path.stat().st_size
+            connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+            try:
+                moved = job_detail.spill_existing(connection)
+                print(f"moved the detail of {moved} jobs to {path.parent / job_detail.DIRECTORY}")
+                if args.vacuum:
+                    connection.execute("VACUUM")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    print(f"vacuumed {path}: {before} -> {path.stat().st_size} bytes")
+            finally:
+                connection.close()
+    except (ValueError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch db-spill-detail: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1045,6 +1120,9 @@ def _runtime(
                 _device_pool(queue, machines),
                 machines,
                 SshTransport(),
+                machines_path=(
+                    machines_path if machines_path is not None else ROOT / "machines.yml"
+                ),
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
@@ -1362,7 +1440,7 @@ def _check_handoff(
         errors = [item.message for item in findings if item.severity == "error"]
         if config is None or errors:
             raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
-        expected = expected_for(job_from_row(row), args.bot)
+        expected = expected_for(job_from_row(row, connection), args.bot)
         read = gh_reader()
         found = handoff_problems(expected, args.handoff, read, config.trusted_logins)
         event, checked = SUBMITTED_INVALID, None

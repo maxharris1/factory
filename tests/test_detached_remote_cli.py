@@ -383,7 +383,7 @@ def placed_for_finish(tmp_path: Path, end: FollowEnd):
         worktree=False, log=lambda _: None, transport=transport, alive=lambda *_: True,
     )
     assert placed.target is not None
-    transport.check = remote.check_script(placed.target)
+    transport.check = remote.fenced_check_script(placed.target)
     placed.before_start()
     placed.follow_end = end
     placed.sleep = lambda _: None

@@ -13,7 +13,7 @@ import pytest
 
 from datetime import datetime, timezone
 
-from lib import cli, feeder, remote, telemetry
+from lib import cli, feeder, job_detail, remote, telemetry
 from lib.device_pool import DevicePool
 from lib.eval_report import (
     NO_RATIO,
@@ -725,6 +725,33 @@ def test_ci_fixes_without_a_log_and_verdicts_on_an_accepted_head_are_counted(
     values = _values(build_metrics(queue.path, since=SINCE, until=UNTIL))
     assert values["ci-fix-without-log"] == 1
     assert values["verdicts-on-accepted-head"] == 2
+
+
+def test_ci_fixes_and_hand_written_gos_read_detail_moved_out_of_the_database(
+    tmp_path: Path,
+) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    resumed = {"evidence": {"instructions": {"cause": "go"}}}
+    with sqlite3.connect(queue.path) as connection:
+        _raw_job(connection, "20", "fix", {"instruction": "CI failed on h1"}, head="h1")
+        _raw_job(connection, "20", "fix", {"instruction": "failed: pytest"}, head="h2")
+        _raw_job(connection, "20", "fix", {"instruction": "address the review"}, head="h2")
+        _raw_job(connection, "21", "build", resumed)
+        feeder.ensure_tables(connection)
+        _feeder_go(connection, "99", "other-go")
+        connection.execute(
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) "
+            "VALUES ('owner/repo', '21', 's', 'resumed-build')"
+        )
+    with queue.connect() as connection:
+        assert job_detail.spill_existing(connection) == 4
+        assert connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE json_type(detail, '$.instruction') IS NOT NULL"
+            " OR json_type(detail, '$.evidence') IS NOT NULL"
+        ).fetchone()[0] == 0
+    values = _values(build_metrics(queue.path, since=SINCE, until=UNTIL))
+    assert values["ci-fix-without-log"] == 2
+    assert _values(build_metrics(queue.path))["hand-written-gos"] == 1
 
 
 @pytest.mark.parametrize("seed", [_seeded, _loop_db, lambda path: setup(path)[1].path])

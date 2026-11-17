@@ -791,6 +791,8 @@ class MergeQueueMixin:
 
     def _abandon_closed(self, ticket: TrackedTicket) -> None:
         """A watched PR closed without merging: the watch ends (#130)."""
+        if self._emptied_by_running_job(ticket):
+            return
         key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

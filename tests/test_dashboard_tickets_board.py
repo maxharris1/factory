@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import sqlite3
+import time
 from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
@@ -17,6 +18,7 @@ from lib.dashboard_pages.common import _ticket, ticket_page_href
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
+from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db
 
 CHART = Path(__file__).resolve().parents[1] / "model" / "chart.mmd"
@@ -130,6 +132,11 @@ def _one(node: dict, pred) -> dict:
 
 def _text(node: dict) -> str:
     return "".join(kid if isinstance(kid, str) else _text(kid) for kid in node["kids"])
+
+
+def _wide(node: dict) -> dict:
+    return {**node, "kids": [_wide(kid) if isinstance(kid, dict) else kid for kid in node["kids"]
+                             if not (isinstance(kid, dict) and _cls("tk-narrow")(kid))]}
 
 
 def _inner(html: str, ident: str) -> str:
@@ -296,7 +303,7 @@ def test_script_board_places_every_ticket_once_and_matches_the_server(tmp_path: 
 
 
 def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
-    pipeline, shipped = _dom(markup["pipeline"]), _dom(markup["shipped"])
+    pipeline, shipped = _dom(markup["pipeline"]), _wide(_dom(markup["shipped"]))
     opened = 0
     for column in _all(pipeline, _cls("tk-col")):
         cards = _all(column, _cls("tk-card"))
@@ -313,7 +320,7 @@ def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
     else:
         assert not _all(shipped, _cls("tk-sub"))
         assert _text(_one(shipped, _cls("empty"))) == "nothing shipped"
-    assert sorted(_placed(markup["pipeline"] + markup["shipped"])) == sorted(_key(r) for r in rows)
+    assert sorted(_placed_in(pipeline) + _placed_in(shipped)) == sorted(_key(r) for r in rows)
 
 
 def _check_buttons(markup: str, rows: list[dict], pressed: str) -> None:
@@ -524,7 +531,7 @@ def test_script_card_ids_link_their_ticket_page(tmp_path: Path, snapshot: dict) 
 def _check_tile_links(markup: str, rows: list[dict], hidden: int = 0) -> None:
     by_key = {_key(row): row for row in rows}
     shipped = {key for key, row in by_key.items() if row["state"] in flow.SHIPPED and not row["stuck"]}
-    tiles = _all(_dom(markup), _cls("tk-tile"))
+    tiles = _all(_wide(_dom(markup)), _cls("tk-tile"))
     assert tiles
     for tile in tiles:
         key = tile["attrs"]["data-ticket"]
@@ -862,9 +869,21 @@ def _stored(tmp_path: Path, snapshot: dict, store: dict | None, actions: list) -
         "    } else if (kind === 'press') {",
         "    } else if (kind === 'store') {\n"
         "      steps.push({store: global.sessionStorage.data || null});\n"
+        "    } else if (kind === 'poll') {\n"
+        "      status = arg;\n"
+        "      polls.splice(0).forEach(fn => fn());\n"
+        "      await new Promise(resolve => realSetTimeout(resolve, 50));\n"
         "    } else if (kind === 'press') {",
+    ).replace("const status = JSON.parse(statusText);", "let status = JSON.parse(statusText);").replace(
+        "const intervals = [];",
+        "const intervals = [];\nconst realSetTimeout = setTimeout;\nconst polls = [];\n"
+        "global.setTimeout = (fn, ms) => { if (ms === 1500) polls.push(fn); return 0; };",
+    ).replace("function act(actions) {", "async function act(actions) {").replace(
+        "setTimeout(() => {\n  act(JSON.parse(actionsText));",
+        "realSetTimeout(async () => {\n  await act(JSON.parse(actionsText));",
     )
     assert "global.sessionStorage = " in harness and "kind === 'store'" in harness
+    assert "await act(" in harness and "polls.push(fn)" in harness
     html = render_pages(snapshot)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     return layout.run_harness(tmp_path, harness, script, snapshot, "job", IDS, actions)
@@ -921,6 +940,149 @@ def test_the_board_works_when_storage_throws(tmp_path: Path, snapshot: dict) -> 
     assert first["snap"]["pipeline"] == server["pipeline"] and first["hidden"]["pipeline"] is False
     assert _pressed(last["snap"]["ticket-filter"], "data-project") == [repo]
     assert last["hidden"] == {"ticket-filter": False, "pipeline": True, "tickets": False}
+
+
+def _picked(markup: str) -> tuple[list[str], list[str]]:
+    pipeline = _dom(markup)
+    return (_pressed(markup, "data-pick"),
+            [c["attrs"]["data-phase"] for c in _all(pipeline, _cls("tk-col")) if _cls("tk-picked")(c)])
+
+
+def _check_phases(markup: str, rows: list[dict], picked: str) -> None:
+    phases = flow.ticket_phases(flow.load_chart(CHART))
+    counts = Counter(flow.ticket_phase(phases, row["state"], row["stuck"]) for row in rows)
+    (bar,) = _all(_dom(markup), _cls("tk-phases"))
+    assert bar["attrs"] == {"class": "tk-phases", "role": "group", "aria-label": "Phase"}
+    buttons = [kid for kid in bar["kids"] if isinstance(kid, dict)]
+    assert [b["attrs"]["data-pick"] for b in buttons] == COLUMNS
+    for phase, button in zip(COLUMNS, buttons):
+        n, name = counts[phase], "Stopped" if phase == "Stop" else phase
+        assert (button["tag"], button["attrs"]["class"], button["attrs"]["type"]) == ("button", "tk-ph", "button")
+        assert button["attrs"]["aria-label"] == f"{name}, {n} ticket" + ("" if n == 1 else "s")
+        tone = "tk-phc tk-none" if not n else "tk-phc tk-stopped" if phase == "Stop" else "tk-phc"
+        assert [(kid["attrs"]["class"], _text(kid)) for kid in button["kids"]] == [("tk-phn", name), (tone, str(n))]
+    assert _picked(markup) == ([picked], [picked])
+
+
+def _ask_live(snapshot: dict) -> dict:
+    found = copy.deepcopy(snapshot)
+    repo, ticket_id = _state_tickets()["questions"]
+    found["running"].append({**found["running"][0], "job": "j-clarify", "repo": repo, "ticket_id": ticket_id,
+                             "action": "clarify"})
+    return found
+
+
+def _stale_plan(snapshot: dict) -> dict:
+    found = copy.deepcopy(snapshot)
+    plan = _state_tickets()["planning"]
+    found["running"] = [{**row, "job_state": "stale"} for row in found["running"]
+                        if (row["repo"], row["ticket_id"]) == plan]
+    found["queued"] = []
+    return found
+
+
+def _nothing(tmp_path: Path) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    (tmp_path / "poller.log").write_text("", encoding="utf-8")
+    return collect_snapshot(db, tmp_path / "poller.log", now=NOW, chart_path=CHART)
+
+
+STARTS = {
+    "a live job in Ask": (lambda snap, tmp: _ask_live(snap), "Ask"),
+    "live jobs in Plan, Build and Review": (lambda snap, tmp: snap, "Plan"),
+    "only a stale job, in Plan": (lambda snap, tmp: _stale_plan(snap), "Plan"),
+    "only a queued job, in Plan": (lambda snap, tmp: {**snap, "running": []}, "Ask"),
+    "no job, Build first to hold cards": (lambda snap, tmp: ci_wait_snapshot(tmp), "Build"),
+    "an empty board": (lambda snap, tmp: _nothing(tmp), "Ask"),
+}
+
+
+@pytest.mark.parametrize("case", list(STARTS))
+def test_the_phase_bar_counts_each_column_and_starts_where_work_runs(tmp_path: Path, snapshot: dict,
+                                                                    case: str) -> None:
+    build, picked = STARTS[case]
+    found = build(snapshot, tmp_path)
+    _check_phases(_server(found)["pipeline"], found["tickets"], picked)
+
+
+@layout.needs_node
+@pytest.mark.parametrize("case", list(STARTS))
+def test_script_phase_bar_matches_the_server(tmp_path: Path, snapshot: dict, case: str) -> None:
+    build, picked = STARTS[case]
+    found = build(snapshot, tmp_path)
+    out, server = _script(tmp_path, found), _server(found)
+    _check_phases(out["html"]["pipeline"], found["tickets"], picked)
+    for ident in BOARD:
+        assert out["html"][ident] == server[ident], ident
+
+
+def test_phase_buttons_read_like_the_spec(snapshot: dict) -> None:
+    bar = _one(_dom(_server(_ask_live(snapshot))["pipeline"]), _cls("tk-phases"))
+    labels = [b["attrs"]["aria-label"] for b in _all(bar, _cls("tk-ph"))]
+    assert labels == ["Ask, 3 tickets", "Plan, 2 tickets", "Build, 2 tickets", "Review, 1 ticket",
+                      "Ship, 6 tickets", "Stopped, 6 tickets"]
+
+
+def _moved(snapshot: dict) -> dict:
+    review = _state_tickets()["review"]
+    moved = copy.deepcopy(snapshot)
+    moved["generated_at_epoch"] += 30
+    moved["running"] = [row for row in moved["running"] if (row["repo"], row["ticket_id"]) == review]
+    return moved
+
+
+def _redrawn(before: str, after: str) -> bool:
+    planning = "#".join(_state_tickets()["planning"])
+    strips = [_all(_card(markup, planning), lambda n: n["tag"] == "canvas") for markup in (before, after)]
+    return bool(strips[0]) and not strips[1]
+
+
+@layout.needs_node
+def test_a_pressed_phase_survives_a_redraw_and_is_stored(tmp_path: Path, snapshot: dict) -> None:
+    out = _stored(tmp_path, snapshot, {}, [["press", ["data-pick", "Build"]], ["snap", ["pipeline"]],
+                                           ["poll", _moved(snapshot)], ["snap", ["pipeline"]], ["store", None]])
+    before, after = (step["snap"]["pipeline"] for step in out["steps"] if "snap" in step)
+    assert _redrawn(before, after)
+    assert _picked(before) == _picked(after) == (["Build"], ["Build"])
+    assert out["steps"][-1]["store"] == {"tk-phase": "Build"}
+
+
+@layout.needs_node
+def test_a_redraw_keeps_the_first_pick_when_the_work_moves(tmp_path: Path, snapshot: dict) -> None:
+    moved = _moved(snapshot)
+    assert _picked(_server(moved)["pipeline"]) == (["Review"], ["Review"])
+    out = _stored(tmp_path, snapshot, {}, [["snap", ["pipeline"]], ["poll", moved], ["snap", ["pipeline"]],
+                                           ["store", None]])
+    first, after = (step["snap"]["pipeline"] for step in out["steps"] if "snap" in step)
+    assert _redrawn(first, after)
+    assert _picked(first) == _picked(after) == (["Plan"], ["Plan"])
+    assert out["steps"][-1]["store"] == {}
+
+
+@layout.needs_node
+def test_a_stored_phase_comes_back_after_a_reload(tmp_path: Path, snapshot: dict) -> None:
+    out = _stored(tmp_path, snapshot, {"tk-phase": "Review"}, [["snap", ["pipeline"]]])
+    assert _picked(out["steps"][0]["snap"]["pipeline"]) == (["Review"], ["Review"])
+
+
+@layout.needs_node
+@pytest.mark.parametrize("stored", ["Shipped", "review", ""])
+def test_a_stored_phase_that_is_no_column_falls_back_to_where_work_runs(tmp_path: Path, snapshot: dict,
+                                                                       stored: str) -> None:
+    out = _stored(tmp_path, snapshot, {"tk-phase": stored}, [["snap", ["pipeline"]]])
+    assert out["steps"][0]["snap"]["pipeline"] == _server(snapshot)["pipeline"]
+    assert _picked(out["steps"][0]["snap"]["pipeline"]) == (["Plan"], ["Plan"])
+
+
+@layout.needs_node
+def test_phase_presses_work_when_storage_throws(tmp_path: Path, snapshot: dict) -> None:
+    out = _stored(tmp_path, snapshot, None, [["snap", ["pipeline"]], ["press", ["data-pick", "Stop"]],
+                                             ["poll", _moved(snapshot)], ["snap", ["pipeline"]]])
+    first, last = (step["snap"]["pipeline"] for step in out["steps"] if "snap" in step)
+    assert first == _server(snapshot)["pipeline"]
+    assert _redrawn(first, last)
+    assert _picked(last) == (["Stop"], ["Stop"])
 
 
 CI_WAIT = ("maxharris1/factory", "591")
@@ -1306,7 +1468,7 @@ def _got_tile(tile: dict) -> dict:
 
 
 def _check_shelf(markup: str, order: list[int], shown: int = 50) -> None:
-    shelf = _dom(markup)
+    shelf = _wide(_dom(markup))
     handed = sum(i in HANDED for i in order)
     assert _text(_one(shelf, _cls("count"))) == str(len(order))
     assert _text(_one(shelf, _cls("tk-sub"))) == f"{len(order) - handed} merged · {handed} handed off"
@@ -1379,6 +1541,161 @@ def test_a_project_press_recomputes_the_shelf(tmp_path: Path, shelf: dict) -> No
         _check_shelf(snap["shipped"], [i for i in SHIP_ORDER if repo in ("", _shipped(i)[0])])
         if repo:
             _check_counts(snap, [row for row in shelf["tickets"] if row["repo"] == repo])
+
+
+def _fewer(shelf: dict, count: int) -> dict:
+    keep = {"#".join(_shipped(i)) for i in range(count)} | {f"{repo}#{ticket}" for repo, ticket, _ in SHELF_OPEN}
+    return {**shelf, "tickets": [row for row in shelf["tickets"] if _key(row) in keep]}
+
+
+def _check_phone_shelf(markup: str, order: list[int]) -> None:
+    shelf = _dom(markup)
+    assert [_got_tile(t) for t in _all(_all(shelf, _cls("tk-tiles"))[0], _cls("tk-tile"))] == [
+        _want_tile(i) for i in order[:10]]
+    drawers = _all(shelf, lambda n: n["tag"] == "details")
+    if len(order) <= 5:
+        assert not drawers
+        return
+    (drawer,) = drawers
+    earlier = max(0, len(order) - 10)
+    assert drawer["attrs"]["class"] == ("tk-earlier" if earlier else "tk-earlier tk-narrow")
+    summary = _one(drawer, lambda n: n["tag"] == "summary")
+    assert [(kid["attrs"]["class"], _text(kid)) for kid in summary["kids"]] == [
+        ("tk-wide", f"{earlier} earlier"), ("tk-narrow", f"{len(order) - 5} earlier")]
+    box = _one(drawer, _cls("tk-drawer"))
+    again = box["kids"][0]
+    assert again["attrs"]["class"] == "tk-narrow"
+    assert [_got_tile(t) for t in _all(again, _cls("tk-tile"))] == [_want_tile(i) for i in order[5:10]]
+    assert len(_all(box, _cls("tk-tiles"))) == (2 if earlier else 1)
+
+
+SHELF_SIZES = (SHIPPED_COUNT, 8, 5)
+
+
+def test_a_phone_drawer_opens_on_tiles_six_to_ten_then_the_earlier_ones(shelf: dict) -> None:
+    for count in SHELF_SIZES:
+        _check_phone_shelf(_server(_fewer(shelf, count))["shipped"], [i for i in SHIP_ORDER if i < count])
+
+
+@layout.needs_node
+def test_script_phone_drawer_matches_the_server(tmp_path: Path, shelf: dict) -> None:
+    for count in SHELF_SIZES:
+        found = _fewer(shelf, count)
+        out = _script(tmp_path / str(count), found)
+        _check_phone_shelf(out["html"]["shipped"], [i for i in SHIP_ORDER if i < count])
+        assert out["html"]["shipped"] == _server(found)["shipped"], count
+
+
+SHOWN = "e => e.getClientRects().length > 0"
+PHONE_BOARD = """(() => {
+  const shown = """ + SHOWN + """;
+  const buttons = [...document.querySelectorAll('#pipeline .tk-ph')];
+  return {buttons: buttons.length, heights: buttons.filter(shown).map(b => b.getBoundingClientRect().height),
+          pressed: buttons.filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.dataset.pick),
+          columns: [...document.querySelectorAll('#pipeline .tk-col')].filter(shown).map(c => c.dataset.phase),
+          tops: [...document.querySelectorAll('#pipeline .tk-col')].filter(shown).map(c => c.offsetTop),
+          scroll: document.documentElement.scrollWidth, inner: innerWidth};
+})()"""
+SHELF_ROWS = """(() => {
+  const shown = """ + SHOWN + """;
+  const row = document.querySelector('#shipped .tk-shelf > .tk-tiles');
+  const drawer = document.querySelector('#shipped details');
+  drawer.open = true;
+  const opened = [...drawer.querySelectorAll('.tk-tile')].filter(shown).map(t => t.dataset.ticket);
+  drawer.open = false;
+  return {row: row.getBoundingClientRect().width,
+          tiles: [...row.children].filter(shown).map(t => [t.getBoundingClientRect().width,
+                                                           t.getBoundingClientRect().height]),
+          summary: [...drawer.querySelectorAll('summary span')].filter(shown).map(s => s.textContent),
+          summaryHeight: drawer.querySelector('summary').getBoundingClientRect().height, opened};
+})()"""
+
+
+@needs_chrome
+def test_a_phone_shows_one_phase_and_five_shelf_rows(snapshot: dict, shelf: dict) -> None:
+    browser = Browser()
+    try:
+        browser.open(_page_with_status_stub(snapshot, "job.html"), 375)
+        start = browser.eval(PHONE_BOARD)
+        pressed = []
+        for phase in COLUMNS:
+            browser.eval(f"document.querySelector('[data-pick={phase}]').click()")
+            pressed.append(browser.eval(PHONE_BOARD))
+        browser.open(_page_with_status_stub(shelf, "job.html"), 375)
+        rows = browser.eval(SHELF_ROWS)
+        wide = browser.eval("document.documentElement.scrollWidth")
+    finally:
+        browser.close()
+    assert len(start["heights"]) == 6 and min(start["heights"]) >= 44
+    assert (start["pressed"], start["columns"]) == (["Plan"], ["Plan"])
+    for phase, seen in zip(COLUMNS, pressed):
+        assert (seen["pressed"], seen["columns"]) == ([phase], [phase])
+        assert seen["scroll"] <= seen["inner"] == 375, phase
+    assert len(rows["tiles"]) == 5
+    assert all(width == rows["row"] and height >= 44 for width, height in rows["tiles"]), rows
+    assert rows["summary"] == ["65 earlier"] and rows["summaryHeight"] >= 44
+    order = [_want_tile(i)["key"] for i in SHIP_ORDER]
+    assert rows["opened"] == order[5:60]
+    assert wide <= 375
+
+
+@needs_chrome
+def test_a_desktop_keeps_six_columns_in_a_row_and_ten_shelf_tiles(shelf: dict) -> None:
+    browser = Browser()
+    try:
+        browser.open(_page_with_status_stub(shelf, "job.html"), 1440)
+        board = browser.eval(PHONE_BOARD)
+        bar = browser.eval("document.querySelector('#pipeline .tk-phases').getClientRects().length")
+        rows = browser.eval(SHELF_ROWS)
+    finally:
+        browser.close()
+    assert bar == 0 and board["heights"] == []
+    assert board["columns"] == COLUMNS and len(set(board["tops"])) == 1
+    assert len(rows["tiles"]) == 10 and rows["summary"] == ["60 earlier"]
+    order = [_want_tile(i)["key"] for i in SHIP_ORDER]
+    assert rows["opened"] == order[10:60]
+
+
+@needs_chrome
+def test_a_phone_without_scripts_lists_every_phase(snapshot: dict) -> None:
+    browser = Browser()
+    try:
+        browser.call("Emulation.setScriptExecutionDisabled", value=True)
+        page = Path(browser.tmp.name) / "page.html"
+        page.write_text(render_pages(snapshot)["job.html"], encoding="utf-8")
+        browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)
+        browser.call("Page.navigate", url=page.as_uri())
+        deadline = time.monotonic() + 30
+        while browser.eval("document.readyState") != "complete" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        scripting = browser.eval("matchMedia('(scripting:none)').matches")
+        seen = browser.eval(PHONE_BOARD)
+    finally:
+        browser.close()
+    assert scripting
+    assert seen["buttons"] == 6 and seen["heights"] == [] and seen["columns"] == COLUMNS
+    assert seen["scroll"] <= seen["inner"] == 375
+
+
+@needs_chrome
+def test_a_phone_whose_status_fetch_fails_lists_every_phase(snapshot: dict) -> None:
+    shim = "<script>window.fetch = function () { return Promise.reject(new Error('offline')); };</script>"
+    browser = Browser()
+    try:
+        page = Path(browser.tmp.name) / "page.html"
+        page.write_text(render_pages(snapshot)["job.html"].replace("<script>", shim + "<script>", 1), encoding="utf-8")
+        browser.call("Emulation.setDeviceMetricsOverride", width=375, height=900, deviceScaleFactor=1, mobile=False)
+        browser.call("Page.navigate", url=page.as_uri())
+        deadline = time.monotonic() + 30
+        while "static view" not in browser.eval("document.body.textContent") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        link = browser.eval("document.body.textContent.includes('NO LINK · static view')")
+        seen = browser.eval(PHONE_BOARD)
+    finally:
+        browser.close()
+    assert link
+    assert seen["heights"] == [] and seen["columns"] == COLUMNS
+    assert seen["scroll"] <= seen["inner"] == 375
 
 
 def _find(markup: str) -> dict:
