@@ -123,7 +123,6 @@ def missing(window: str, observed_at: float, absent: int = 0, source_at: float |
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
-    """Create the table, or add the columns an older one lacks."""
     connection.execute(DDL)
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
     for name, kind in ADDED_COLUMNS.items():
@@ -275,14 +274,6 @@ def store(
 
 
 def _streak(source_at: float, latest: tuple | None) -> int:
-    """The omission streak ending at `source_at`, given the account's row with
-    the latest source time for that window.
-
-    Ordered by source time, not observed time: a Codex event stamped ahead of
-    now is observed at each poll's now, so another event could land between
-    its polls and make it count twice. A reading older than the latest
-    restarts at 1, since each device keeps only its newest row and the
-    reading that interrupted the streak may be gone."""
     if latest is None:
         return 1
     latest_at, streak = latest
