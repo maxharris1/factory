@@ -15,6 +15,7 @@ from lib.dispatch import ci_board
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     HANDED_OFF_EXTERNALLY,
+    HARNESS_WORK,
     LINEAR_HANDOFF_QUERY,
     OFF_LOOP_VERIFY_READS,
     POLL_ERROR_RETENTION_SECONDS,
@@ -460,10 +461,10 @@ class PollMixin:
             return False
         with self._connect() as connection:
             return connection.execute(
-                """
+                f"""
                 SELECT 1 FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND state = 'running'
-                  AND recipient != 'grok'
+                  AND {HARNESS_WORK}
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone() is not None

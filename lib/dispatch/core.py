@@ -33,6 +33,7 @@ from lib.dispatch.types import (
     GrokDelivery,
     Hook,
     HoldCarry,
+    QaDiff,
     RebaseClassifier,
     Registration,
     RetryableStateError,
@@ -72,6 +73,7 @@ class DispatcherBase:
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
         hold_carry: HoldCarry | None = None,
+        qa_diff: QaDiff | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -99,6 +101,7 @@ class DispatcherBase:
         self.update_classifier = update_classifier
         self.rebase_classifier = rebase_classifier
         self.hold_carry = hold_carry
+        self.qa_diff = qa_diff
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs

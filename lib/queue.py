@@ -56,8 +56,11 @@ ACTIONS = (
     "done",
     "awaiting-ok",
     "go-not-from-approver",
+    "qa",
+    "qa-failed",
 )
-RECIPIENTS = ("claude", "codex", "cursor", "grok")
+QA_RECIPIENT = "qa"
+RECIPIENTS = ("claude", "codex", "cursor", "grok", QA_RECIPIENT)
 STATES = ("queued", "running", "done", "failed", "cancelled")
 BUSY_TIMEOUT_SECONDS = 30
 # Device-pool placements (lib/device_pool.py). The table exists once a

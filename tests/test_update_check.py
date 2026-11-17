@@ -9,7 +9,7 @@ import pytest
 
 from lib import update_check
 from lib.hold import ok_carries
-from lib.update_check import classify, merge_update
+from lib.update_check import HeadDiff, classify, head_diff, merge_update
 
 BASE = "".join(f"line {n}\n" for n in range(1, 21))
 
@@ -484,3 +484,61 @@ def test_a_clean_merge_amended_to_change_a_hold_file_needs_a_fresh_ok(repo: Repo
     head = repo.git("rev-parse", "HEAD")
 
     assert not ok_carries(carry(repo, approved, head), HOLD_PATTERNS)
+
+
+def qa_branch(repo: Repo) -> str:
+    """A PR that edits one line of app.py, adds a 3-line file and a binary
+    file, on a base main has since moved past."""
+    repo.git("checkout", "-q", "-b", "pr", repo.base)
+    repo.edit("app.py", "line 2\n", "line 2 pr\n")
+    repo.write("new.txt", "a\nb\nc\n")
+    (repo.root / "img.bin").write_bytes(b"\x00\x01\x02")
+    head = repo.commit("pr")
+    repo.git("checkout", "-q", "main")
+    repo.edit("other.py", "1", "2")
+    repo.commit("main moved")
+    return head
+
+
+def diff(repo: Repo, since: str | None, head: str) -> HeadDiff:
+    return head_diff(repo.gitdir, since, head, "refs/heads/main")
+
+
+def test_763_since_none_lists_the_prs_own_files_from_its_fork_with_a_binary_as_one_line(
+    repo: Repo,
+) -> None:
+    head = qa_branch(repo)
+
+    assert diff(repo, None, head).files == (("app.py", 2), ("img.bin", 1), ("new.txt", 3))
+
+
+def test_763_since_a_head_lists_only_what_changed_after_it(repo: Repo) -> None:
+    first = qa_branch(repo)
+    repo.git("checkout", "-q", "pr")
+    repo.write("new.txt", "a\nb\nc\nd\n")
+    second = repo.commit("pr again")
+
+    assert diff(repo, first, second).files == (("new.txt", 1),)
+
+
+def test_763_the_same_patch_on_two_heads_has_the_same_patch_id(repo: Repo) -> None:
+    head = qa_branch(repo)
+    repo.git("checkout", "-q", "-b", "rebased", "main")
+    repo.git("cherry-pick", head)
+    rebased = repo.git("rev-parse", "HEAD")
+    repo.edit("new.txt", "c\n", "c changed\n")
+    changed = repo.commit("another patch")
+
+    patch_id = diff(repo, None, head).patch_id
+    assert rebased != head and patch_id is not None
+    assert diff(repo, None, rebased).patch_id == patch_id
+    assert diff(repo, None, changed).patch_id != patch_id
+
+
+def test_763_a_head_with_no_change_from_base_has_no_patch_id(repo: Repo) -> None:
+    assert diff(repo, None, repo.base) == HeadDiff(patch_id=None, files=())
+
+
+def test_763_an_unknown_head_raises(repo: Repo) -> None:
+    with pytest.raises(ValueError):
+        diff(repo, None, "f" * 40)

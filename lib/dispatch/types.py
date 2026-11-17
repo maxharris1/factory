@@ -11,7 +11,7 @@ from lib.factory_md import FactoryConfig
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
-from lib.update_check import RebaseScope, UpdateClass
+from lib.update_check import HeadDiff, RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
     from lib.dispatcher import Dispatcher
@@ -499,3 +499,7 @@ RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]
 
 class HoldCarry(Protocol):
     def __call__(self, repo: str, base: str, approved: str, head: str) -> MergeUpdate: ...
+
+
+class QaDiff(Protocol):
+    def __call__(self, repo: str, base: str, since: str | None, head: str) -> HeadDiff: ...
