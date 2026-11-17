@@ -46,11 +46,13 @@ TICKET_KINDS = {
                "tiles": ("waiting", "not_started", "round", "hops"), "sections": SECTION_ORDER},
     "stopped": {"started": False, "still": True, "tail": "", "strip": {"state": "stuck"},
                 "tiles": ("stopped_for", "record_round", "hops"), "sections": _ENDED},
-    "shipped": {"started": False, "still": True, "tail": "", "strip": {"effect": "off", "done": True},
-                "tiles": ("in_state", "record_round", "hops"), "sections": _ENDED},
+    "shipped": {"started": False, "still": True, "tail": "", "line": "shipped",
+                "strip": {"effect": "off", "done": True, "tint": "#9ece6a"},
+                "tiles": ("total", "rounds_done", "hops", "cost"), "sections": ("summary", "journey", "ended", "chart")},
     "idle": {"started": False, "still": True, "tail": "", "strip": {},
              "tiles": ("in_state", "record_round", "hops"), "sections": ("journey", "next", "chart")},
 }
+HOW = {"merged": ("merged", "merge"), "handed-off": ("handed off", "hand-off")}
 PANELS = {
     "none": ("No ticket chosen", ""),
     "loading": ("Loading ticket", "Loading ticket {}… "),
@@ -75,6 +77,9 @@ CSS = """\
 .jd-hero .device,.jd-hero .tracker{font:12px var(--mono);color:var(--muted)}
 .jd-hero .line{margin:0;font-size:15px;line-height:1.5;color:var(--text-2)}
 .jd-hero .line b{font-family:var(--mono);font-weight:600;color:var(--accent)}
+.jd-hero .line b.ok{color:var(--ok)}
+.jd-when{display:flex;align-items:center;gap:8px;font:12px/1.5 var(--mono);color:var(--muted)}
+.jd-when .mark{width:8px;height:8px;background:var(--ok)}
 .jd-gh{display:flex;flex-direction:column;gap:8px;font:12px/1.5 var(--mono);color:var(--text-2)}
 .jd-gh .gh-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .jd-gh button,.jd-gh select,.jd-gh textarea{font:12px var(--mono);color:var(--text);background:var(--field);border:1px solid var(--line-hi)}
@@ -115,7 +120,7 @@ CSS = """\
 .runlog .main{display:block;min-width:0}
 .runlog .top{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}
 .runlog .name{font-size:13px;line-height:1.5;font-weight:600;color:var(--text)}
-.runlog .now .name{color:var(--accent)}.runlog .stop .name{color:var(--bad)}
+.runlog .now .name{color:var(--accent)}.runlog .stop .name{color:var(--bad)}.runlog .shipped .name{color:var(--ok)}
 .runlog .who{font-size:11px;color:var(--m)}
 .runlog .dur{font-size:11px;color:var(--text-2)}
 .runlog .offchip{padding:0 6px;border:1px solid rgba(255,158,100,0.4);background:rgba(255,158,100,0.09);color:#ff9e64;font-size:11px;line-height:1.6;font-weight:500;white-space:nowrap}
@@ -198,6 +203,18 @@ CSS = """\
 .lr-tile b{display:block;font-size:16px;line-height:1.25;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
 .lr-tile span{color:var(--muted)}
 @media (max-width:640px){.lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.jd-sum .lr{box-shadow:var(--elev)}
+.sum-who{display:flex;flex-direction:column;gap:8px}
+.sum-bar{display:flex;gap:2px;height:12px}
+.sum-key{display:flex;flex-wrap:wrap;gap:4px 20px;color:var(--text-2)}
+.sum-key>span{display:flex;align-items:center;gap:6px}
+.sum-key i{width:8px;height:8px}.sum-key b{font-weight:400}
+.sum-foot{margin:0;font-size:11px;line-height:1.5;color:var(--muted)}
+.jd-ended{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;padding:10px 12px;background:var(--bg);box-shadow:var(--elev)}
+.jd-ended .mark{align-self:center;width:8px;height:8px;background:var(--ok)}
+.jd-ended .how{font:600 13px/1.5 var(--mono);color:var(--ok)}
+.jd-ended .at{font-size:13px;color:var(--text)}
+.jd-ended .ago{margin-left:auto;font:12px/1.5 var(--mono);color:var(--muted)}
 @media (scripting:none){.jd-box canvas,.journey button,.jd-ctl .axis,.jd-ctl [data-replay],.jd-chart .jd-box{display:none}.journey{position:static;width:auto;padding:8px 12px 8px 36px;list-style:decimal;font:12px/1.6 var(--mono);color:var(--text-2)}.journey li{display:list-item}.journey .step{display:inline}}
 """
 
@@ -271,6 +288,14 @@ def _et_clock(epoch: float) -> str:
     return f"{at.hour % 12 or 12}:{at.minute:02d} {'AM' if at.hour < 12 else 'PM'} ET"
 
 
+def _how(model: dict) -> tuple[str, str]:
+    return HOW[model["end"]["how"]]
+
+
+def _reading(value: object, fmt) -> str:
+    return "no reading" if value is None else fmt(value)
+
+
 def _hero_line(row: dict, model: dict) -> str:
     parts = []
     if model["state"]:
@@ -292,6 +317,42 @@ def _verb(row: dict, motion: str) -> str:
     glyph = '<span class="glyph" aria-hidden="true"><span></span><span></span><span class="lit"></span><span></span></span>'
     word = _span("verb", VERBS[motion][0] + "…") if motion in _px().PX_ACTIONS else ""
     return f'<div class="jd-verb">{glyph}{word}{_span("phase", action.upper()) if action else ""}</div>'
+
+
+def _started(model: dict) -> str | None:
+    start = _first_start(model)
+    return None if start is None else "started " + _et_clock(start)
+
+
+def _ended_clock(model: dict) -> str | None:
+    at = model["end"]["at"]
+    return None if at is None else f"{_how(model)[0]} {_et_clock(at)}"
+
+
+def _shipped_line(model: dict) -> str:
+    end, (word, noun) = model["end"], _how(model)
+    age = "" if end["at"] is None else f' <span>{duration(model["now"] - end["at"])} ago</span>'
+    rounds, took = end["revise_rounds"], end["intake_to_ship_seconds"]
+    rest = (
+        "" if rounds is None else f"{rounds} revise round{'' if rounds == 1 else 's'}",
+        "" if took is None else f"{duration(took)} from intake to {noun}",
+    )
+    return f'<p class="line"><b class="ok">{_e(word)}</b>{age}{"".join(" · " + _e(p) for p in rest if p)}</p>'
+
+
+def _when(model: dict) -> str:
+    start = _first_start(model)
+    parts = ("" if start is None else "intake " + _et_clock(start), _ended_clock(model) or "")
+    text = " · ".join(p for p in parts if p)
+    return f'<div class="jd-when"><span class="mark" aria-hidden="true"></span>{_span(None, text)}</div>'
+
+
+HERO_LINES = {
+    "state": {"crumb": _started, "chip": lambda model: "",
+              "body": lambda row, model, motion: _hero_line(row, model) + _verb(row, motion)},
+    "shipped": {"crumb": _ended_clock, "chip": lambda model: _chip(_how(model)[0], "ok"),
+                "body": lambda row, model, motion: _shipped_line(model) + _when(model)},
+}
 
 
 def _tile(value: str, label: str, cls: str = "") -> str:
@@ -316,7 +377,22 @@ def _round_tile(row: dict, model: dict) -> str:
 
 
 def _age_tile(age: float | None, label: str) -> str:
-    return _tile("no reading" if age is None else duration(age), label)
+    return _tile(_reading(age, duration), label)
+
+
+def _rounds_done(row: dict, model: dict) -> str:
+    rounds = model["end"]["revise_rounds"]
+    if rounds is None:
+        return _tile("no round", "revise rounds")
+    pips = '<span class="done"></span>' * rounds
+    return _tile(f'{rounds}<span class="jd-pips" aria-hidden="true">{pips}</span>', "revise rounds")
+
+
+def _cost_tile(row: dict, model: dict) -> str:
+    end = model["end"]
+    if end["cost_usd"] is None:
+        return ""
+    return _tile(_dollars(end["cost_usd"]), f"cost, {end['jobs']} job{'' if end['jobs'] == 1 else 's'}")
 
 
 def _stopped_for(row: dict, model: dict) -> str:
@@ -339,6 +415,9 @@ TILES = {
     "in_state": lambda row, model: _age_tile(model["state_age_seconds"], f"in {model['state']}"),
     "stopped_for": _stopped_for,
     "hops": lambda row, model: _tile(f"{model['hops']} hops", f"{model['off_chart_count']} off-chart"),
+    "total": lambda row, model: _age_tile(model["end"]["intake_to_ship_seconds"], f"total, intake to {_how(model)[1]}"),
+    "rounds_done": _rounds_done,
+    "cost": _cost_tile,
 }
 
 
@@ -350,11 +429,11 @@ def _trouble(row: dict) -> str:
     )
 
 
-def _hero(row: dict, model: dict, motion: str, strip: str, title: str, tiles: tuple[str, ...]) -> str:
+def _hero(row: dict, model: dict, motion: str, strip: str, title: str, tiles: tuple[str, ...], line: str = "state") -> str:
     cells = "".join(TILES[name](row, model) for name in tiles)
     return (
         f'<section class="jd-hero">{strip}<div class="body"><div class="who"><div class="title">{title}</div>'
-        f'{_hero_line(row, model)}{_verb(row, motion)}</div><div class="jd-tiles">{cells}</div></div></section>'
+        f'{HERO_LINES[line]["body"](row, model, motion)}</div><div class="jd-tiles">{cells}</div></div></section>'
     )
 
 
@@ -406,13 +485,15 @@ def _ticket_hero(found: dict, model: dict, spec: dict) -> str:
     strip = _px().px_strip(f"ticket-hero-{found['address']}", **{
         "state": motion, "bot": row.get("recipient"), "still": spec["still"], "cell": 4, "height": 40, "seed": 2,
         **spec["strip"]})
+    line = spec.get("line", "state")
     title = (
         f'<h1>{_e(_tile_label(row))}</h1>'
         + (_bot(row["recipient"]) if "recipient" in row else "")
+        + HERO_LINES[line]["chip"](model)
         + _ticket_tracker(row, spec["tail"])
         + _trouble(row)
     )
-    return _hero(row, model, motion, strip, title, spec["tiles"])
+    return _hero(row, model, motion, strip, title, spec["tiles"], line)
 
 
 def _now_dur(model: dict) -> str:
@@ -420,7 +501,19 @@ def _now_dur(model: dict) -> str:
     return "in progress" if age is None else f"{duration(age)} so far"
 
 
+def _shipped_dur(visit: dict) -> str:
+    return "—" if visit["started_at"] is None else f"at {_et_clock(visit['started_at'])}"
+
+
+def _visit_tag(visit: dict, model: dict) -> str:
+    if not visit["current"]:
+        return ""
+    return "shipped" if model["ended"] == "shipped" else "now"
+
+
 def _visit_dur(visit: dict, model: dict) -> str:
+    if visit["current"] and model["ended"] == "shipped":
+        return _shipped_dur(visit)
     if visit["current"]:
         return _now_dur(model)
     return "—" if visit["duration_seconds"] is None else duration(visit["duration_seconds"])
@@ -442,9 +535,10 @@ def _reason(visit: dict) -> str:
 
 def _runlog_row(visit: dict, model: dict, pressable: bool) -> str:
     tint = _who_tint(visit["who"])
-    cls = " ".join(c for c in ("visit", "now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
-    mark_tint = STOP_TINT if visit["stop"] else tint
-    name = visit["state"] + (" · now" if visit["current"] else "")
+    tag = _visit_tag(visit, model)
+    cls = " ".join(c for c in ("visit", tag, "stop" if visit["stop"] else "") if c)
+    mark_tint = STOP_TINT if visit["stop"] else END_TINT.get(tag, tint)
+    name = visit["state"] + (f" · {tag}" if tag else "")
     num = f"{visit['index'] + 1:02d}"
     on = visit["index"] == model["selected"]
     if pressable:
@@ -500,20 +594,23 @@ def _dollars(cost: float) -> str:
     return f"${cents // 100}.{cents % 100:02d}"
 
 
+def _lr_tile_row(tiles: tuple[tuple[str, str], ...]) -> str:
+    body = "".join(f'<div class="lr-tile"><b>{_e(v)}</b>{_span(None, label)}</div>' for v, label in tiles)
+    return f'<div class="lr-tiles">{body}</div>'
+
+
 def _lr_tiles(t: dict) -> str:
     known = t.get("tokens_known", True)
     tokens_in, cached = t["tokens_in"], t["tokens_cached"]
     in_label = "tokens in"
     if known and tokens_in:
         in_label += f" · {(200 * cached + tokens_in) // (2 * tokens_in)}% cached"
-    tiles = (
+    return _lr_tile_row((
         (compact(tokens_in) if known else NO_DATA, in_label),
         (compact(t["tokens_out"]) if known else NO_DATA, "tokens out"),
         (NO_DATA if t["cost_usd"] is None else _dollars(t["cost_usd"]), "cost so far"),
         (f"{t['files_touched']} files · {t['commands']} commands", "touched and run"),
-    )
-    body = "".join(f'<div class="lr-tile"><b>{_e(v)}</b>{_span(None, label)}</div>' for v, label in tiles)
-    return f'<div class="lr-tiles">{body}</div>'
+    ))
 
 
 def _lr_head(row: dict, t: dict, moving: bool) -> str:
@@ -611,6 +708,70 @@ def _liverun(row: dict, started: bool) -> str:
     )
 
 
+def time_by_who(model: dict) -> list[tuple[str, int, str]]:
+    seconds: dict[str, int] = {}
+    states: dict[str, dict[str, int]] = {}
+    for visit in model["visits"]:
+        if visit["duration_seconds"] is None:
+            continue
+        who = str(visit["who"])
+        seconds[who] = seconds.get(who, 0) + visit["duration_seconds"]
+        seen = states.setdefault(who, {})
+        seen[visit["state"]] = seen.get(visit["state"], 0) + 1
+    return [
+        (who, seconds[who], ", ".join(state if n == 1 else f"{n}× {state}" for state, n in states[who].items()))
+        for who in sorted(seconds, key=lambda who: -seconds[who])
+    ]
+
+
+def _who_key(who: str, seconds: int, states: str) -> str:
+    tint = _who_tint(who)
+    return (
+        f'<span><i style="background:{tint}"></i><b style="color:{tint}">{_e(who)}</b>'
+        f'{_e(f" {duration(seconds)} · {states}")}</span>'
+    )
+
+
+def _time_by_who(model: dict) -> str:
+    rows = time_by_who(model)
+    total = _reading(sum(s for _, s, _ in rows) if rows else None, duration)
+    body = f'<div class="lr-colhead">{_span("lr-label", "Time by who")}{_span("lr-count", total)}</div>'
+    if rows:
+        bar = "".join(f'<span style="flex:{s} 1 0;background:{_who_tint(who)}"></span>' for who, s, _ in rows)
+        key = "".join(_who_key(*row) for row in rows)
+        body += f'<div class="sum-bar" aria-hidden="true">{bar}</div><div class="sum-key">{key}</div>'
+    return f'<div class="sum-who">{body}</div>'
+
+
+def _summary(model: dict) -> str:
+    end, noun = model["end"], _how(model)[1]
+    start, at = _first_start(model), end["at"]
+    run = " to ".join(p for p in ("" if start is None else f"intake {_et_clock(start)}",
+                                  "" if at is None else f"{noun} {_et_clock(at)}") if p)
+    tiles = _lr_tile_row((
+        (_reading(end["jobs"], str), "jobs"),
+        (_reading(end["tokens_in"], compact), "tokens in"),
+        (_reading(end["tokens_out"], compact), "tokens out"),
+        (_reading(end["cost_usd"], _dollars), "cost"),
+    ))
+    return (
+        f'<section class="jd-panel jd-sum"><h2>{_span("t", "Run summary")}'
+        f'{_span("count", " · ".join(p for p in ("the whole run", run) if p))}</h2>'
+        f'<div class="lr">{tiles}{_time_by_who(model)}'
+        '<p class="sum-foot">Totals over every job this ticket ran. Nothing is running now.</p></div></section>'
+    )
+
+
+def _ended(model: dict) -> str:
+    at, word = model["end"]["at"], _how(model)[0]
+    when = _span("at", "no reading") if at is None else (
+        _span("at", f"{word} at {_et_clock(at)}") + _span("ago", f"{duration(model['now'] - at)} ago"))
+    return (
+        f'<section class="jd-panel jd-end"><h2>{_span("t", "Ended")}{_span("count", "end state · nothing comes next")}</h2>'
+        f'<div class="jd-ended"><span class="mark" aria-hidden="true"></span>{_span("how", word)}{when}</div></section>'
+    )
+
+
 def _journey_label(model: dict) -> str:
     path = " → ".join(v["state"] for v in model["visits"]) or "no visits"
     if model["ended"]:
@@ -645,7 +806,7 @@ def _legend_who(model: dict) -> list[str]:
 
 def _caption_dur(visit: dict, model: dict) -> str:
     if visit["current"] and model["ended"] == "shipped":
-        return "—" if visit["started_at"] is None else f"at {_et_clock(visit['started_at'])}"
+        return _shipped_dur(visit)
     if visit["current"] and model["ended"] == "stopped":
         return "—" if model["state_age_seconds"] is None else f"for {duration(model['state_age_seconds'])}"
     if visit["current"]:
@@ -760,6 +921,8 @@ SECTIONS = {
     "journey": lambda part: _journey(part["row"], part["model"]),
     "next": lambda part: _next(part["model"]),
     "chart": lambda part: _chart(part["key"], part["model"], part["chart"]),
+    "summary": lambda part: _summary(part["model"]),
+    "ended": lambda part: _ended(part["model"]),
 }
 
 
@@ -838,11 +1001,10 @@ def _ticket_article(found: dict, snapshot: dict) -> str:
     spec = TICKET_KINDS[found["kind"]]
     chart = snapshot.get("statechart")
     model = {**_detail_model(row, chart), "now": snapshot.get("generated_at_epoch")}
-    start = _first_start(model)
     part = {"row": row, "model": model, "chart": chart, "key": address, "started": spec["started"]}
     return (
         f'<article class="jobpage ticketpage" data-ticket="{_e(address)}">'
-        + _crumb(_tile_label(row), None if start is None else "started " + _et_clock(start))
+        + _crumb(_tile_label(row), HERO_LINES[spec.get("line", "state")]["crumb"](model))
         + _ticket_hero(found, model, spec)
         + _cols(part, spec["sections"], pressable=True)
         + "</article>"
@@ -879,7 +1041,7 @@ _SCRIPT = r"""
                 first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__, trackers: __TRACKERS__, sections: __SECTIONS__, jobTiles: __JOBTILES__,
                 kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
-                panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__};
+                panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__, how: __HOW__};
   var SEL = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -961,6 +1123,9 @@ _SCRIPT = r"""
     ET.formatToParts(new Date(epoch * 1000)).forEach(function (part) { p[part.type] = part.value; });
     return p.hour + ':' + p.minute + ' ' + p.dayPeriod + ' ET';
   }
+  function known(x) { return x !== null && x !== undefined; }
+  function reading(x, fmt) { return known(x) ? fmt(x) : 'no reading'; }
+  function howOf(m) { return DETAIL.how[m.end.how]; }
   function tile(parent, value, label, cls) {
     var t = add(parent, el('div', 'jd-tile'));
     var b = add(t, el('b', cls || null));
@@ -997,7 +1162,19 @@ _SCRIPT = r"""
       var at = r.flow.stopped.at;
       ageTile(box, at === null || at === undefined ? null : m.now - at, 'stopped');
     },
-    hops: function (box, r, m) { tile(box, m.hops + ' hops', m.off_chart_count + ' off-chart'); }
+    hops: function (box, r, m) { tile(box, m.hops + ' hops', m.off_chart_count + ' off-chart'); },
+    total: function (box, r, m) { tile(box, reading(m.end.intake_to_ship_seconds, dur), 'total, intake to ' + howOf(m)[1]); },
+    rounds_done: function (box, r, m) {
+      var n = m.end.revise_rounds;
+      if (!known(n)) { tile(box, 'no round', 'revise rounds'); return; }
+      var pips = add(tile(box, String(n), 'revise rounds'), el('span', 'jd-pips'));
+      pips.setAttribute('aria-hidden', 'true');
+      for (var i = 0; i < n; i++) span(pips, 'done');
+    },
+    cost: function (box, r, m) {
+      var end = m.end;
+      if (known(end.cost_usd)) tile(box, dollars(end.cost_usd), 'cost, ' + end.jobs + (end.jobs === 1 ? ' job' : ' jobs'));
+    }
   };
   function ageTile(box, age, label) {
     if (age === null || age === undefined) tile(box, 'no reading', label);
@@ -1024,18 +1201,8 @@ _SCRIPT = r"""
     text = [text, tail === 'device' && r.device ? 'on ' + r.device : ''].filter(Boolean).join(' · ');
     if (text) span(title, 'tracker', text);
   }
-  function hero(c, strip, label, tags, ticket, tiles) {
-    var r = c.r, m = c.m, motion = c.motion;
-    var sec = el('section', 'jd-hero');
+  function stateLine(who, r, m, motion) {
     var action = String(r.action || '');
-    add(sec, strip);
-    var body = add(sec, el('div', 'body'));
-    var who = add(body, el('div', 'who'));
-    var title = add(who, el('div', 'title'));
-    add(title, el('h1', null, label));
-    if ('recipient' in r) add(title, bot(r.recipient));
-    tags(title);
-    if (GH.on && ghRefs(r)) add(who, ghPanel(r, ticket));
     var line = add(who, el('p', 'line'));
     var parts = 0;
     function sep() { if (parts++) line.appendChild(document.createTextNode(' · ')); }
@@ -1051,6 +1218,46 @@ _SCRIPT = r"""
     var verbs = PX.table.actions.hasOwnProperty(motion) ? DETAIL.verbs[motion] : null;
     if (verbs) span(verb, 'verb', verbs[Math.floor(Date.now() / 4000) % verbs.length] + '…');
     if (action) span(verb, 'phase', action.toUpperCase());
+  }
+  function startedClock(m) {
+    var start = firstStart(m);
+    return start === null ? null : 'started ' + etClock(start);
+  }
+  function endedClock(m) { return known(m.end.at) ? howOf(m)[0] + ' ' + etClock(m.end.at) : null; }
+  function shippedLine(who, r, m) {
+    var end = m.end, how = howOf(m), n = end.revise_rounds, took = end.intake_to_ship_seconds;
+    var line = add(who, el('p', 'line'));
+    add(line, el('b', 'ok', how[0]));
+    if (known(end.at)) {
+      line.appendChild(document.createTextNode(' '));
+      ticking(add(line, el('span')), m.now - end.at, '', ' ago');
+    }
+    [known(n) ? n + ' revise round' + (n === 1 ? '' : 's') : '',
+     known(took) ? dur(took) + ' from intake to ' + how[1] : ''].forEach(function (p) {
+      if (p) line.appendChild(document.createTextNode(' · ' + p));
+    });
+    var when = add(who, el('div', 'jd-when'));
+    span(when, 'mark').setAttribute('aria-hidden', 'true');
+    var start = firstStart(m);
+    span(when, null, [start === null ? '' : 'intake ' + etClock(start), endedClock(m)].filter(Boolean).join(' · '));
+  }
+  var LINES = {
+    state: {crumb: startedClock, chip: function () {}, body: stateLine},
+    shipped: {crumb: endedClock, chip: function (title, m) { add(title, chip(howOf(m)[0], 'ok')); }, body: shippedLine}
+  };
+  function hero(c, strip, label, tags, ticket, tiles, line) {
+    var r = c.r, m = c.m;
+    var sec = el('section', 'jd-hero');
+    add(sec, strip);
+    var body = add(sec, el('div', 'body'));
+    var who = add(body, el('div', 'who'));
+    var title = add(who, el('div', 'title'));
+    add(title, el('h1', null, label));
+    if ('recipient' in r) add(title, bot(r.recipient));
+    LINES[line].chip(title, m);
+    tags(title);
+    if (GH.on && ghRefs(r)) add(who, ghPanel(r, ticket));
+    LINES[line].body(who, r, m, c.motion);
     var box = add(body, el('div', 'jd-tiles'));
     tiles.forEach(function (name) { TILES[name](box, r, m); });
     return sec;
@@ -1257,7 +1464,8 @@ _SCRIPT = r"""
       var ol = add(sec, el('ol', 'runlog'));
       m.visits.forEach(function (v) {
         var tint = whoTint(v.who);
-        var btn = add(add(ol, el('li')), el('button', ['visit', v.current ? 'now' : '', v.stop ? 'stop' : ''].filter(Boolean).join(' ')));
+        var tag = v.current ? (m.ended === 'shipped' ? 'shipped' : 'now') : '';
+        var btn = add(add(ol, el('li')), el('button', ['visit', tag, v.stop ? 'stop' : ''].filter(Boolean).join(' ')));
         buttons.push(btn);
         btn.setAttribute('type', 'button');
         btn.setAttribute('data-visit', String(v.index));
@@ -1267,13 +1475,14 @@ _SCRIPT = r"""
         span(btn, 'num', pad(v.index + 1));
         var mk = span(btn, 'mark' + (v.off_chart ? ' off' : ''));
         mk.setAttribute('aria-hidden', 'true');
-        mk.setAttribute('style', '--m:' + (v.stop ? DETAIL.stop : tint));
+        mk.setAttribute('style', '--m:' + (v.stop ? DETAIL.stop : DETAIL.endTint[tag] || tint));
         var main = span(btn, 'main');
         var top = span(main, 'top');
-        span(top, 'name', v.state + (v.current ? ' · now' : ''));
+        span(top, 'name', v.state + (tag ? ' · ' + tag : ''));
         span(top, 'who', v.who);
         var d = span(top, 'dur');
-        if (v.current) nowDur(m, d);
+        if (tag === 'shipped') d.textContent = shippedDur(v);
+        else if (v.current) nowDur(m, d);
         else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : dur(v.duration_seconds);
         if (v.off_chart) span(top, 'offchip', 'off-chart');
         span(main, 'note', reasonOf(v));
@@ -1301,20 +1510,23 @@ _SCRIPT = r"""
     var cents = Math.floor(c * 100 + 0.5);
     return '$' + Math.floor(cents / 100) + '.' + pad(cents % 100);
   }
-  function lrTiles(t) {
-    var known = t.tokens_known !== false;
-    var inLabel = 'tokens in';
-    if (known && t.tokens_in) inLabel += ' · ' + Math.floor((200 * t.tokens_cached + t.tokens_in) / (2 * t.tokens_in)) + '% cached';
+  function lrTileRow(tiles) {
     var box = el('div', 'lr-tiles');
-    [[known ? compact(t.tokens_in) : 'no data', inLabel],
-     [known ? compact(t.tokens_out) : 'no data', 'tokens out'],
-     [t.cost_usd === null || t.cost_usd === undefined ? 'no data' : dollars(t.cost_usd), 'cost so far'],
-     [t.files_touched + ' files · ' + t.commands + ' commands', 'touched and run']].forEach(function (s) {
+    tiles.forEach(function (s) {
       var tile = add(box, el('div', 'lr-tile'));
       add(tile, el('b', null, s[0]));
       span(tile, null, s[1]);
     });
     return box;
+  }
+  function lrTiles(t) {
+    var known = t.tokens_known !== false;
+    var inLabel = 'tokens in';
+    if (known && t.tokens_in) inLabel += ' · ' + Math.floor((200 * t.tokens_cached + t.tokens_in) / (2 * t.tokens_in)) + '% cached';
+    return lrTileRow([[known ? compact(t.tokens_in) : 'no data', inLabel],
+                      [known ? compact(t.tokens_out) : 'no data', 'tokens out'],
+                      [t.cost_usd === null || t.cost_usd === undefined ? 'no data' : dollars(t.cost_usd), 'cost so far'],
+                      [t.files_touched + ' files · ' + t.commands + ' commands', 'touched and run']]);
   }
   function lrHead(r, t, moving) {
     var finished = !!t.finished, task = t.current_task, last = t.last_finished;
@@ -1397,6 +1609,64 @@ _SCRIPT = r"""
     add(sec, liveRun(r, !started));
     return sec;
   }
+  function timeByWho(m) {
+    var rows = new Map();
+    m.visits.forEach(function (v) {
+      if (!known(v.duration_seconds)) return;
+      var who = String(v.who);
+      if (!rows.has(who)) rows.set(who, {seconds: 0, states: new Map()});
+      var row = rows.get(who);
+      row.seconds += v.duration_seconds;
+      row.states.set(v.state, (row.states.get(v.state) || 0) + 1);
+    });
+    return Array.from(rows, function (e) {
+      var states = Array.from(e[1].states, function (s) { return s[1] === 1 ? s[0] : s[1] + '× ' + s[0]; });
+      return [e[0], e[1].seconds, states.join(', ')];
+    }).sort(function (a, b) { return b[1] - a[1]; });
+  }
+  function timeByWhoBlock(m) {
+    var rows = timeByWho(m);
+    var group = el('div', 'sum-who');
+    var head = add(group, el('div', 'lr-colhead'));
+    span(head, 'lr-label', 'Time by who');
+    span(head, 'lr-count', reading(rows.length ? rows.reduce(function (a, w) { return a + w[1]; }, 0) : null, dur));
+    if (!rows.length) return group;
+    var bar = add(group, el('div', 'sum-bar'));
+    bar.setAttribute('aria-hidden', 'true');
+    var key = add(group, el('div', 'sum-key'));
+    rows.forEach(function (w) {
+      var tint = whoTint(w[0]);
+      span(bar, null).setAttribute('style', 'flex:' + w[1] + ' 1 0;background:' + tint);
+      var item = span(key, null);
+      add(item, el('i')).setAttribute('style', 'background:' + tint);
+      add(item, el('b', null, w[0])).setAttribute('style', 'color:' + tint);
+      item.appendChild(document.createTextNode(' ' + dur(w[1]) + ' · ' + w[2]));
+    });
+    return group;
+  }
+  function summaryPanel(m) {
+    var end = m.end, start = firstStart(m);
+    var run = [start === null ? '' : 'intake ' + etClock(start),
+               known(end.at) ? howOf(m)[1] + ' ' + etClock(end.at) : ''].filter(Boolean).join(' to ');
+    var sec = jdPanel('jd-sum', 'Run summary', ['the whole run', run].filter(Boolean).join(' · '));
+    var box = add(sec, el('div', 'lr'));
+    add(box, lrTileRow([[reading(end.jobs, String), 'jobs'], [reading(end.tokens_in, compact), 'tokens in'],
+                        [reading(end.tokens_out, compact), 'tokens out'], [reading(end.cost_usd, dollars), 'cost']]));
+    add(box, timeByWhoBlock(m));
+    add(box, el('p', 'sum-foot', 'Totals over every job this ticket ran. Nothing is running now.'));
+    return sec;
+  }
+  function endedPanel(m) {
+    var at = m.end.at, word = howOf(m)[0];
+    var sec = jdPanel('jd-end', 'Ended', 'end state · nothing comes next');
+    var row = add(sec, el('div', 'jd-ended'));
+    span(row, 'mark').setAttribute('aria-hidden', 'true');
+    span(row, 'how', word);
+    if (!known(at)) { span(row, 'at', 'no reading'); return sec; }
+    span(row, 'at', word + ' at ' + etClock(at));
+    ticking(span(row, 'ago'), m.now - at, '', ' ago');
+    return sec;
+  }
   function legendItem(parent, cls, tint, text, bg) {
     var s = span(parent, null);
     var i = add(s, el('i', cls || null));
@@ -1405,6 +1675,7 @@ _SCRIPT = r"""
     s.appendChild(document.createTextNode(text));
     return s;
   }
+  function shippedDur(v) { return known(v.started_at) ? 'at ' + etClock(v.started_at) : '—'; }
   function nowDur(m, node) {
     if (m.state_age_seconds === null) node.textContent = 'in progress';
     else ticking(node, m.state_age_seconds, '', ' so far');
@@ -1435,7 +1706,7 @@ _SCRIPT = r"""
     span(cap, 'st', v.state + (tag ? ' · ' + tag : ''));
     span(cap, 'who', v.who).setAttribute('style', '--m:' + (JOURNEY.tint[v.who] || JOURNEY.tint.script));
     var d = span(cap, 'dur');
-    if (v.current && m.ended === 'shipped') d.textContent = v.started_at === null || v.started_at === undefined ? '—' : 'at ' + etClock(v.started_at);
+    if (v.current && m.ended === 'shipped') d.textContent = shippedDur(v);
     else if (v.current && m.ended === 'stopped') d.textContent = m.state_age_seconds === null ? '—' : 'for ' + dur(m.state_age_seconds);
     else if (v.current) nowDur(m, d);
     else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : 'took ' + dur(v.duration_seconds);
@@ -1594,7 +1865,9 @@ _SCRIPT = r"""
     liverun: function (c) { return liverun(c.r, c.started); },
     journey: function (c) { c.jp = journeyPanel(c.r, c.m, c.hitButtons, c.scales, c.s.scale); return c.jp.sec; },
     next: function (c) { return nextPanel(c.m); },
-    chart: function (c) { c.cp = chartPanel(c.key, c.m, c.chart); return c.cp.sec; }
+    chart: function (c) { c.cp = chartPanel(c.key, c.m, c.chart); return c.cp.sec; },
+    summary: function (c) { return summaryPanel(c.m); },
+    ended: function (c) { return endedPanel(c.m); }
   };
   function detailContext(key, r, d, started) {
     var chart = d.statechart || null;
@@ -1649,7 +1922,7 @@ _SCRIPT = r"""
       if (device) span(title, 'device', device);
       troubleChips(title, r);
       addGh(title, r);
-    }, ticketRow(d, r), DETAIL.jobTiles[state]));
+    }, ticketRow(d, r), DETAIL.jobTiles[state], 'state'));
     detailCols(art, c, DETAIL.sections);
     return art;
   }
@@ -1696,16 +1969,16 @@ _SCRIPT = r"""
     var c = detailContext(found.address, r, d, spec.started);
     c.still = spec.still;
     c.m.now = c.generated;
+    var line = spec.line || 'state';
     var art = el('article', 'jobpage ticketpage');
     art.setAttribute('data-ticket', found.address);
-    var start = firstStart(c.m);
-    add(art, crumb(tileLabel(r), start === null ? null : 'started ' + etClock(start)));
+    add(art, crumb(tileLabel(r), LINES[line].crumb(c.m)));
     var strip = PX.strip('ticket-hero-' + found.address, Object.assign({state: c.motion, bot: r.recipient, still: spec.still,
                                                                         cell: 4, height: 40, seed: 2}, spec.strip));
     add(art, hero(c, strip, tileLabel(r), function (title) {
       trackerSpan(title, r, spec.tail);
       troubleChips(title, r);
-    }, found.ticket, spec.tiles));
+    }, found.ticket, spec.tiles, line));
     detailCols(art, c, spec.sections);
     return art;
   }
@@ -1777,6 +2050,6 @@ _SCRIPT = r"""
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,
            "SECTIONS": SECTION_ORDER, "JOBTILES": JOB_TILES, "KINDS": TICKET_KINDS, "LIVEKINDS": LIVE_KINDS,
            "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS,
-           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT}
+           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT, "HOW": HOW}
 _SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT
