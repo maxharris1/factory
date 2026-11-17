@@ -179,7 +179,7 @@ class GhHttpError(PollSourceError):
 
 
 class _BudgetSpent(PollSourceError):
-    """The source's tracked-read budget ran out mid-ticket: a deferral, not an error."""
+    pass
 
 
 class RetryablePollSourceError(PollSourceError, RetryableStateError):
@@ -994,9 +994,7 @@ class LivePollSource:
                 self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
 
-    def _budget_left(self, reserve: float = 0.0) -> float:
-        """Seconds left in the tracked-read budget of the ticket being read;
-        raises _BudgetSpent when no more than `reserve` is left."""
+    def _require_budget(self, reserve: float = 0.0) -> float:
         if self._budget_deadline is None:
             return math.inf
         left = self._budget_deadline - self.clock()
@@ -1282,7 +1280,7 @@ class LivePollSource:
         complexity = _linear_request_complexity(query)
         if not self._linear_request_available(query):
             raise RetryablePollSourceError("Linear poll budget is exhausted")
-        deadline = min(self.timeout_seconds, self.read_deadline_seconds, self._budget_left())
+        deadline = min(self.timeout_seconds, self.read_deadline_seconds, self._require_budget())
         self._linear_requests += 1
         self._linear_complexity += complexity
         payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -1300,7 +1298,7 @@ class LivePollSource:
                     ),
                 )
         except TimeoutError:
-            self._budget_left()
+            self._require_budget()
             self._hung("linear")
             raise RetryablePollSourceError(
                 f"Linear request timed out after {deadline:g}s"
@@ -2125,18 +2123,18 @@ class LivePollSource:
             attempt = 1
             while True:
                 left = deadline - self.clock()
-                timeout = min(self.gh_call_timeout_seconds, left, self._budget_left())
+                timeout = min(self.gh_call_timeout_seconds, left, self._require_budget())
                 try:
                     return self.gh_runner(argv, timeout)
                 except subprocess.TimeoutExpired:
-                    self._budget_left()
+                    self._require_budget()
                     pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
                     if attempt >= GH_CALL_ATTEMPTS or deadline - self.clock() <= pause:
                         self._hung("github")
                         raise RetryablePollSourceError(
                             f"{route} timed out after {attempt} attempts"
                         ) from None
-                    self._budget_left(pause)
+                    self._require_budget(pause)
                 except OSError as exc:
                     raise PollSourceError(
                         f"{route} could not run: {type(exc).__name__}"
