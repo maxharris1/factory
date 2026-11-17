@@ -423,8 +423,8 @@ def test_job_page_diagram_is_the_real_statechart(tmp_path: Path) -> None:
     assert snapshot["statechart"]["source"] == "chart.mmd"
     states, transitions = _chart_source(CHART)
     assert _layout_of(CHART) == (states, transitions)
-    assert len(states) == 22  # section 4.1, with awaiting-ok (#86), merge-queue and updating (#130)
-    assert "Full state chart <span class=\"count\">· 22 states," in _ticket_page(snapshot, "h-review")
+    assert len(states) == 23  # section 4.1, with awaiting-ok (#86), merge-queue and updating (#130), handed-off-externally (#749)
+    assert "Full state chart <span class=\"count\">· 23 states," in _ticket_page(snapshot, "h-review")
 
 
 def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> None:
@@ -455,7 +455,7 @@ def test_the_flowmap_draws_the_snapshots_chart(tmp_path: Path) -> None:
     assert len(expected) == 5
     assert _flowmap_names(render_pages(snapshot)["job.html"]) == expected
     default = _snapshot(tmp_path / "default")
-    assert len(_flowmap_names(render_pages(default)["job.html"])) == 22
+    assert len(_flowmap_names(render_pages(default)["job.html"])) == 23
     broken = dict(snapshot, statechart=None)
     assert "var FLOWMAP = null;" in render_pages(broken)["job.html"]
 

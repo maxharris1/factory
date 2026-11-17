@@ -42,6 +42,7 @@ SPEC_STATE = {
     "Done": "done",
     "Stuck": "stuck",
     "Abandoned": "abandoned",
+    "HandedOffExternally": "handed-off-externally",
 }
 
 EXPECTED = """\
@@ -289,7 +290,7 @@ def test_t2_self_loops_are_charted() -> None:
     [
         ("spec", "  Fixing -->Review: CI green", "unparsed section 4.1 edge"),
         ("chart", "  s15 --> s9", "unparsed chart.mmd edge"),
-        ("chart", "  s3 --> s9: ready again", "draws .* twice"),
+        ("chart", "  s3 --> s10: ready again", "draws .* twice"),
     ],
     ids=["spec-unparsed", "chart-unlabelled", "chart-duplicate"],
 )

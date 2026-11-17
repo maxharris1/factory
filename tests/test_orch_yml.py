@@ -655,3 +655,36 @@ def test_check_config_refuses_grok_webhook_off_without_an_inbox(tmp_path: Path) 
     assert [f.message for f in findings] == [
         "projects[0].grok_webhook: false requires driver_inbox, or its wakes go nowhere"
     ]
+
+
+def test_linear_handoff_states_default_override_and_github_only_error(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    base = """
+poll_seconds: 60
+linear:
+  api_key_env: LINEAR_KEY
+projects:
+  - repo: acme/widgets
+    linear_project_id: 11111111-2222-3333-4444-555555555555
+""".strip()
+    path.write_text(base + "\n", encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None
+    assert config.projects[0].linear_handoff_states == ("Ready for Review", "In Review")
+
+    path.write_text(base + "\n    linear_handoff_states: [QA Review]\n", encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None
+    assert config.projects[0].linear_handoff_states == ("QA Review",)
+
+    path.write_text(
+        base + "\n  - repo: acme/other\n    linear_handoff_states: [In Review]\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(path)
+    assert config is None
+    assert [finding.message for finding in findings] == [
+        "projects[1].linear_handoff_states requires linear_project_id"
+    ]

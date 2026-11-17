@@ -14,6 +14,7 @@ from lib import project_rules
 from lib.dispatch import ci_board
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
+    HANDED_OFF_EXTERNALLY,
     LINEAR_HANDOFF_QUERY,
     OFF_LOOP_VERIFY_READS,
     POLL_ERROR_RETENTION_SECONDS,
@@ -53,6 +54,9 @@ class PollMixin:
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._cycle_failures: list[str] = []
         read_from = self.queue.now()
+        with self._phase("linear-states"):
+            self._read_linear_states(source)
+            self._apply_linear_moves()
         with self._phase("feed"):
             self._feed(source)
         with self._phase("github-candidates"):
@@ -115,6 +119,8 @@ class PollMixin:
                     self.process(self._polled.get(key, ticket))
                 except Exception as exc:
                     self._record_poll_error(ticket, exc)
+        with self._phase("linear-moves"):
+            self._apply_linear_moves(only=self._polled)
         with self._phase("ci-board"):
             try:
                 ci_board.record(
@@ -164,7 +170,15 @@ class PollMixin:
         ticket that left the poll loop (shipped, abandoned) is read here,
         newest job first, only while it has a job to verify.
         """
-        tickets = dict(self._polled)
+        with self._connect() as connection:
+            parked = {
+                (str(row["repo"]), str(row["ticket_id"]))
+                for row in connection.execute(
+                    "SELECT repo, ticket_id FROM ticket_state WHERE workflow_state = ?",
+                    (HANDED_OFF_EXTERNALLY,),
+                )
+            }
+        tickets = {key: ticket for key, ticket in self._polled.items() if key not in parked}
         unread = self._unpolled_handoff_refs(read_from)
         if unread:
             try:
@@ -210,7 +224,10 @@ class PollMixin:
                 JOIN tracked_tickets AS tracked
                   ON tracked.repo = lower(jobs.repo)
                  AND tracked.ticket_id = jobs.ticket_id
+                LEFT JOIN ticket_state AS state
+                  ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
                 WHERE {_UNVERIFIED_HANDOFF}
+                  AND COALESCE(state.workflow_state, '') != '{HANDED_OFF_EXTERNALLY}'
                 GROUP BY tracked.repo, tracked.ticket_id, tracked.tracker
                 ORDER BY max(jobs.finished_at) DESC, tracked.repo, tracked.ticket_id
                 """,

@@ -19,7 +19,11 @@ from lib.device_pool import (
     placement_blocks,
     used_slots,
 )
-from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
+from lib.dispatch.constants import (
+    HANDED_OFF_EXTERNALLY,
+    STUCK_WAKE_FAILURE_LIMIT,
+    _ABANDONED_JOB_DETAIL,
+)
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
     _REJECTED_OUTCOMES,
@@ -722,6 +726,8 @@ class JobsMixin:
                 job, "after-merge", "the ticket is finished; no T6 retry"
             )
             self.queue.mark_failure_handled(job.id)
+            return
+        if self._workflow_state(job.request.repo, job.request.ticket_id) == HANDED_OFF_EXTERNALLY:
             return
         if self._is_abandoned(job.request.repo, job.request.ticket_id):
             self._record_job_event_once(job, "abandoned", _ABANDONED_JOB_DETAIL)

@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
@@ -41,7 +41,7 @@ from lib.dispatcher import (
     scrub_detail,
     trusted_bots,
 )
-from lib.dispatch.types import ci_on_base, no_ci_base
+from lib.dispatch.types import LinearState, LinearStateRead, ci_on_base, no_ci_base
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.errors_text import kept_name, redacted_fragment
@@ -129,6 +129,16 @@ query FactoryIssue($id: String!) {
   }
 }
 """.strip()
+LINEAR_STATES_QUERY = """
+query FactoryStates($team: String!, $numbers: [Float!]!, $first: Int!) {
+  issues(
+    first: $first,
+    filter: { team: { key: { eq: $team } }, number: { in: $numbers } }
+  ) {
+    nodes { identifier state { name type } }
+  }
+}
+""".strip()
 LINEAR_READY_MUTATION = """
 mutation FactoryReadyForReview($issue: String!, $state: String!) {
   issueUpdate(id: $issue, input: {stateId: $state}) { success }
@@ -148,6 +158,8 @@ LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
 LINEAR_SEARCH_COMPLEXITY = 116
 LINEAR_ISSUE_COMPLEXITY = 779
+LINEAR_STATES_COMPLEXITY = 250
+LINEAR_STATES_PAGE = 100
 ORCHESTRATOR = "grok-bot"
 RISKY_PATH = re.compile(r"migration|realtime")
 RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
@@ -507,6 +519,7 @@ class LivePollSource:
         self._linear_complexity = 0
         self._linear_candidate_cursor: tuple[str, str] | None = None
         self._linear_tracked_cursor: tuple[str, str] | None = None
+        self._linear_states_cursor: tuple[str, int] | None = None
         self._cycle_errors: list[tuple[str, str, str]] = []
         self._cycle_deferrals: dict[str, int] = {}
         self._budget_deadline: float | None = None
@@ -998,6 +1011,84 @@ class LivePollSource:
             self._tracked_turn += 1
             self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
+
+    def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
+        if not self._linear_due:
+            return None
+        handoff = {
+            project.repo.lower(): frozenset(project.linear_handoff_states)
+            for project in self.config.projects
+            if project.linear_project_ids
+        }
+        numbered: dict[tuple[str, int], TicketRef] = {}
+        errors: dict[str, str] = {}
+        for ref in refs:
+            parsed = _team_number(ref.ticket_id)
+            if ref.repo.lower() not in handoff:
+                continue
+            if parsed is None:
+                errors[ref.ticket_id] = "not a Linear identifier"
+                continue
+            numbered[parsed] = ref
+        keys = sorted(numbered)
+        start = (
+            bisect_left(keys, self._linear_states_cursor)
+            if self._linear_states_cursor is not None
+            else 0
+        )
+        pages: list[list[tuple[str, int]]] = []
+        for key in keys[start:] + keys[:start]:
+            if pages and pages[-1][0][0] == key[0] and len(pages[-1]) < LINEAR_STATES_PAGE:
+                pages[-1].append(key)
+            else:
+                pages.append([key])
+        reserve = min(len(refs), LINEAR_TRACKED_RESERVE) + LINEAR_PROCESS_HEADROOM
+        states: dict[str, LinearState] = {}
+        self._linear_states_cursor = None
+        for page in pages:
+            team = page[0][0]
+            if not self._linear_request_available(LINEAR_STATES_QUERY, reserve=reserve):
+                self._linear_states_cursor = page[0]
+                self._defer("Linear poll budget deferred state reads")
+                return LinearStateRead(states, errors)
+            try:
+                document = self._linear_request(
+                    {
+                        "query": LINEAR_STATES_QUERY,
+                        "variables": {
+                            "team": team,
+                            "numbers": [number for _, number in page],
+                            "first": len(page),
+                        },
+                    }
+                )
+                nodes = _object(
+                    _object(document.get("data"), "Linear data").get("issues"),
+                    "Linear issues",
+                ).get("nodes")
+                if not isinstance(nodes, list):
+                    raise PollSourceError("Linear issues has no nodes")
+            except Exception as exc:
+                reason = _safe_reason(exc)
+                errors.update({numbered[key].ticket_id: reason for key in page})
+                continue
+            for node in nodes:
+                identifier = node.get("identifier") if isinstance(node, dict) else None
+                state = node.get("state") if isinstance(node, dict) else None
+                parsed = _team_number(identifier) if isinstance(identifier, str) else None
+                ref = numbered.get(parsed) if parsed and parsed[0] == team else None
+                if ref is None or not isinstance(state, dict):
+                    continue
+                name, kind = state.get("name"), state.get("type")
+                if isinstance(name, str) and isinstance(kind, str):
+                    states[ref.ticket_id] = LinearState(
+                        name, kind, name in handoff[ref.repo.lower()]
+                    )
+            for key in page:
+                identifier = numbered[key].ticket_id
+                if identifier not in states:
+                    errors[identifier] = "Linear returned no state"
+        return LinearStateRead(states, errors)
 
     def _require_budget(self, reserve: float = 0.0) -> float:
         if self._budget_deadline is None:
@@ -2344,11 +2435,18 @@ def _linear_ref_key(ref: TicketRef) -> tuple[str, str]:
 
 
 def _linear_request_complexity(query: object) -> int:
-    return (
-        LINEAR_SEARCH_COMPLEXITY
-        if query == LINEAR_SEARCH_QUERY
-        else LINEAR_ISSUE_COMPLEXITY
-    )
+    if query == LINEAR_SEARCH_QUERY:
+        return LINEAR_SEARCH_COMPLEXITY
+    if query == LINEAR_STATES_QUERY:
+        return LINEAR_STATES_COMPLEXITY
+    return LINEAR_ISSUE_COMPLEXITY
+
+
+def _team_number(identifier: str) -> tuple[str, int] | None:
+    team, _, number = identifier.rpartition("-")
+    if not team or not number.isdigit():
+        return None
+    return team, int(number)
 
 
 def _linear_rate_limited(errors: object) -> bool:

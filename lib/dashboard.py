@@ -138,7 +138,7 @@ from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
-from lib.dispatch.constants import CI_WAIT_REASONS
+from lib.dispatch.constants import CI_WAIT_REASONS, HANDED_OFF_EXTERNALLY
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
@@ -1586,6 +1586,8 @@ def _read_db(
             *(["wake.created_at"] if jobs else []),
             "NULL",
         ])
+        external_at = "state.external_at" if "external_at" in state_columns else "NULL"
+        linear = "linear_states" in tables
         for row in connection.execute(
             f"""
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -1594,11 +1596,16 @@ def _read_db(
                    COALESCE(state.gate_count, 0) AS gate_count,
                    COALESCE(state.stuck, 0) AS stuck,
                    state.stuck_reason, state.paused_action,
-                   COALESCE({stuck_at}, NULL) AS stuck_at
+                   COALESCE({stuck_at}, NULL) AS stuck_at,
+                   {external_at} AS external_at,
+                   {"linear.state_name" if linear else "NULL"} AS linear_state
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
             {"LEFT JOIN jobs AS wake ON wake.id = state.stuck_wake_job_id" if jobs else ""}
+            {'''LEFT JOIN linear_states AS linear
+              ON linear.repo = lower(tracked.repo) AND linear.ticket_id = tracked.ticket_id'''
+             if linear else ""}
             """
         ):
             ref = _ticket_ref(sources, row["repo"], row["ticket_id"])
@@ -1642,6 +1649,8 @@ def _read_db(
                     **waiting,
                     **({"ci_wait": ci_wait} if ci_wait else {}),
                     **({"no_ci": no_ci} if no_ci else {}),
+                    **({"external_at": row["external_at"]} if row["external_at"] is not None else {}),
+                    **({"linear_state": _clean(row["linear_state"], 64)} if row["linear_state"] else {}),
                 }
             )
             ticket_rows.append((tickets[-1], key))
@@ -1673,6 +1682,8 @@ def _read_db(
     for row, key in ticket_rows:
         row["state_age_seconds"] = flows[key]["state_age_seconds"]
         shipped = shipped_facts(chart, flows[key]) or {"at": None, "how": None}
+        if row["state"] == HANDED_OFF_EXTERNALLY:
+            shipped = {"at": row.get("external_at"), "how": "handed-off"}
         row["shipped_at"], row["shipped_how"] = shipped["at"], shipped["how"]
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)

@@ -7,6 +7,8 @@ from collections.abc import Mapping
 
 from lib.dispatch.constants import (
     _NOT_FINISHED,
+    HANDED_OFF_EXTERNALLY,
+    SETTLE_CLEARS,
     STOPPED_POLL_SECONDS,
     STOPPED_STATES,
     WATCHED_STATES,
@@ -122,17 +124,7 @@ class TrackingMixin:
             "merged",
             source="enter-merged",
             at=self.queue.now(),
-            also={
-                "stuck": 0,
-                "stuck_reason": None,
-                "stuck_source_comment_id": None,
-                "stuck_wake_job_id": None,
-                "paused_action": None,
-                "paused_recipient": None,
-                "paused_head": None,
-                "paused_generation": None,
-                "paused_question_id": None,
-            },
+            also=SETTLE_CLEARS,
             insert={"gate_count": 0, "stuck": 0},
         )
         connection.execute(
@@ -383,12 +375,16 @@ class TrackingMixin:
                       ON reads.repo = LOWER(tracked.repo)
                      AND reads.ticket_id = tracked.ticket_id
                 )
-                WHERE workflow_state IS NULL
-                   OR workflow_state NOT IN ('merged', 'done', 'abandoned')
-                   OR (workflow_state = 'merged' AND (replay OR unsettled))
-                   OR outbox
+                WHERE COALESCE(workflow_state, '') != ?
+                  AND (
+                      workflow_state IS NULL
+                      OR workflow_state NOT IN ('merged', 'done', 'abandoned')
+                      OR (workflow_state = 'merged' AND (replay OR unsettled))
+                      OR outbox
+                  )
                 ORDER BY repo, ticket_id
-                """
+                """,
+                (HANDED_OFF_EXTERNALLY,),
             ).fetchall()
         refs: list[TicketRef] = []
         first_reads: list[tuple[str, str, float]] = []

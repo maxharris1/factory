@@ -172,6 +172,7 @@ HOPS = {
     "waiting-external": 1,
     "post-merge": 1,
     "handed-off": 0,
+    "handed-off-externally": 0,
     "merged": 0,
     "done": 0,
     "stuck": None,

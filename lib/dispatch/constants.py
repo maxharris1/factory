@@ -21,6 +21,18 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # #108 (#42 N4): states where no bot is working and no person is waiting on
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
+HANDED_OFF_EXTERNALLY = "handed-off-externally"
+SETTLE_CLEARS = {
+    "stuck": 0,
+    "stuck_reason": None,
+    "stuck_source_comment_id": None,
+    "stuck_wake_job_id": None,
+    "paused_action": None,
+    "paused_recipient": None,
+    "paused_head": None,
+    "paused_generation": None,
+    "paused_question_id": None,
+}
 # #130: an approved ticket on a finish_line: merge project stays watched,
 # polled every cycle, until its PR merges or closes.
 WATCHED_STATES = ("merge-queue", "updating")

@@ -12,8 +12,8 @@ unblocks more open intake tickets, then the oldest. `ticket_priority` holds
 those marks (the backlog feeder writes them each poll); a database without
 that table orders on resume and age alone, and one without the tier and
 unblocks columns orders as if no ticket had them.
-A queued job on a ticket whose `ticket_state` is abandoned is never claimed
-(issue #109).
+A queued job on a ticket whose `ticket_state` is abandoned (issue #109) or
+handed-off-externally (issue #749) is never claimed.
 
 A handoff that `orch job done` finds does not fit its job (lib/handoff_check.py,
 #191) is recorded by record_invalid_handoff: a `submitted-invalid` job event
@@ -847,7 +847,7 @@ def claim_order(
             SELECT 1 FROM ticket_state AS ticket
             WHERE ticket.repo = lower(jobs.repo)
               AND ticket.ticket_id = jobs.ticket_id
-              AND ticket.workflow_state = 'abandoned'
+              AND ticket.workflow_state IN ('abandoned', 'handed-off-externally')
         )
         """
         if _has_table(connection, "ticket_state")

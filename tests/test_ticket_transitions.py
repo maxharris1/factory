@@ -44,6 +44,10 @@ WRITERS = {
     "unsat-fix": "lib/dispatch/caps/resume.py",
     "t-blocked": "lib/dispatch/verdict/blocked.py",
     "retry": "lib/dispatch/retry.py",
+    "linear-handoff": "lib/dispatch/linear_states.py",
+    "linear-resume": "lib/dispatch/linear_states.py",
+    "linear-done": "lib/dispatch/linear_states.py",
+    "linear-canceled": "lib/dispatch/linear_states.py",
 }
 
 RAW_WRITE = re.compile(
