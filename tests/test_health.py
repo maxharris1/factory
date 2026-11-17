@@ -563,7 +563,7 @@ def test_the_health_page_lists_components_with_state_et_pid_and_device(tmp_path:
     assert data["health"]["down"] == 4
     page = render_pages(data)["health.html"]
     assert 'id="components"' in page
-    assert health.et(NOW - 5) in page
+    assert health.et(NOW - 5).removesuffix(" ET") in page
     assert ">101<" in page and ">stale<" in page.lower()
 
 
@@ -992,7 +992,7 @@ def test_the_page_script_renders_the_health_tab_and_the_queue_flag(tmp_path: Pat
     text = page["text"]
     assert "poller" in text["components"] and "UP" in text["components"]
     assert "linear-listener" in text["components"] and "DOWN" in text["components"]
-    assert health.et(PAGE_NOW - 5) in text["components"]
+    assert health.et(PAGE_NOW - 5).removesuffix(" ET") in text["components"]
     assert "no waiter for codex: 1 queued job" in text["no-waiter"]
     # Down: the listener and the codex waiter; codex has no waiter.
     assert attention_count(page) == "3"

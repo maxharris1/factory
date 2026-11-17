@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import html as htmllib
 import http.server
 import json
 import os
@@ -21,10 +22,11 @@ from lib.dashboard import (
     rules_and_limits,
 )
 from lib.dashboard_flow import load_chart
-from lib.dashboard_page import CSS, render_pages
+from lib.dashboard_page import CSS, render_pages, version_drift
 from lib.factory_md import load_factory_md
 from tests.test_dashboard import NOW, seeded
-from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, _text, needs_node
+from tests import test_dashboard_tickets_board as board
+from tests.test_dashboard_layout import BAR, NODE, _no_script, _run_page, _section, _text, needs_node
 from tests.test_project_rules import FIXTURES, fixture_world
 
 NEWEST = "aaaaaaaaaaaa"
@@ -34,15 +36,15 @@ PANELS = ["components", "drift", "health", "log", "rules", "no-waiter"]
 
 def _component(component: str, device: str, *, bot: str = "", state: str = "up",
                version: str = NEWEST, age: int | None = 4, started: float | None = NOW - 600,
-               anchor: str | None = None) -> dict:
+               anchor: str | None = None, stale_code: bool = False) -> dict:
     label = f"waiter {bot} @ {device}" if bot else component
     return {
         "component": component, "device": device, "bot": bot, "pid": 10, "state": state,
         "reason": "never seen" if age is None else None,
-        "last_seen_et": None if age is None else "Nov 14 1:00:00 PM",
+        "last_seen_et": None if age is None else component_health.et(NOW - age),
         "last_seen_age_seconds": age, "interval_seconds": 15.0, "configured": True,
-        "started_at_et": None if started is None else f"started-{int(started)}",
-        "started_at": started, "version": version, "stale_code": False, "label": label,
+        "started_at_et": None if started is None else component_health.et(started),
+        "started_at": started, "version": version, "stale_code": stale_code, "label": label,
         "anchor": anchor or "health-" + re.sub(r"[^A-Za-z0-9_-]", "-", f"{component}-{bot}-{device}"),
     }
 
@@ -53,10 +55,10 @@ def _snapshot(tmp_path: Path) -> dict:
         _component("poller", "box"),
         _component("waiter", "box", bot="claude-bot"),
         _component("waiter", "pc", bot="claude-bot"),
-        _component("waiter", "box", bot="codex-bot", version=OLDER, started=NOW - 300),
+        _component("waiter", "box", bot="codex-bot", version=OLDER, started=NOW - 300, stale_code=True),
         _component("linear-listener", "box", state="down", version="unknown", age=None,
                    started=None),
-        _component("device-probe", "pc"),
+        _component("device-probe", "pc", version=OLDER),
     ]
     no_waiter = [{"harness": "codex", "bot": "codex-bot", "jobs": ["j1"], "count": 1,
                   "anchor": "health-no-waiter-codex"}]
@@ -127,6 +129,22 @@ def test_status_line_links_land_on_system_panels(tmp_path: Path) -> None:
 
 
 
+def _version_href(statusline: str) -> list[str]:
+    return re.findall(r'href="([^"]+)" data-seg="version"', statusline)
+
+
+def test_version_segment_links_to_the_drift_panel(tmp_path: Path) -> None:
+    html = render_pages(_snapshot(tmp_path))["health.html"]
+    assert _version_href(_no_script(html)) == ["health.html#drift"]
+    assert 'id="drift"' in _no_script(html)
+
+
+@needs_node
+def test_script_version_segment_links_to_the_drift_panel(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud"])
+    assert _version_href(out["html"]["statusline"]) == ["health.html#drift"]
+
+
 def test_drift_colours_newest_older_and_unknown(tmp_path: Path) -> None:
     html = _no_script(render_pages(_snapshot(tmp_path))["health.html"])
     drift = _section(html, "drift")
@@ -134,11 +152,29 @@ def test_drift_colours_newest_older_and_unknown(tmp_path: Path) -> None:
     names = re.findall(r'<span class="name (\w+)">([^<]+)</span>', drift)
     assert names == [("ok", NEWEST), ("warn", OLDER), ("bad", "unknown")]
     blocks = re.findall(r'<span class="sys-blk (\w+)"></span>', drift)
-    assert blocks == ["ok"] * 4 + ["warn"] + ["bad"]
+    assert blocks == ["ok"] * 3 + ["warn"] * 2 + ["bad"]
     text = _text(drift)
-    assert "4 components" in text
-    assert f"waiter codex-bot @ box · started started-{int(NOW - 300)}" in text
+    assert "3 components" in text
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in text
     assert "linear-listener" in text
+
+
+def test_drift_and_status_line_count_the_same_stale_code_components(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    html = _no_script(render_pages(snapshot)["health.html"])
+    assert version_drift(snapshot["health"])["behind"] == ["waiter codex-bot @ box"]
+    drift = _section(html, "drift")
+    assert '<span class="count warn">1 behind</span>' in drift
+    assert "<span>aaaaaaa · 1 behind</span>" in html
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(drift)
+
+
+@needs_node
+def test_script_drift_and_status_line_count_the_same_stale_code_components(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", "drift"])
+    assert '<span class="count warn">1 behind</span>' in out["html"]["drift"]
+    assert "<span>aaaaaaa · 1 behind</span>" in out["html"]["statusline"]
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
 
 
 def test_down_component_is_a_static_red_block_linking_its_row(tmp_path: Path) -> None:
@@ -163,7 +199,7 @@ def test_matrix_rows_by_kind_and_columns_by_device(tmp_path: Path) -> None:
     assert kinds == ["poller", "waiter · claude-bot", "waiter · codex-bot", "linear-listener",
                      "device-probe"]
     assert "UP 4s" in _text(matrix.group(1))
-    assert "process details" in html and "<details class=\"sys-details\" open>" in html
+    assert '<details class="sys-details"><summary>process details</summary>' in html
 
 
 @needs_node
@@ -183,7 +219,7 @@ def test_script_draws_the_same_matrix_drift_and_log(tmp_path: Path) -> None:
         r'<td class="sys-kind">([^<]+)</td>', _section(server, "components"))
     log_kinds = re.findall(r'<div class="(\w+)">', out["html"]["log"])
     assert log_kinds == re.findall(r'<div class="(\w+)">', _section(server, "log"))
-    assert log_kinds == ["bad", "start", "warn"]
+    assert log_kinds == ["warn", "start", "bad"]
 
 
 
@@ -194,6 +230,171 @@ def test_poller_log_lines_are_coloured_by_kind(tmp_path: Path) -> None:
     assert '<div class="warn">orch poll: another orch poll owns /tmp/orch.db.lock</div>' in log
     assert "<div>2026-11-13 13:09:20 EST poller exit rc=0</div>" in log
     assert "<div>cycle line</div>" in log
+
+
+def _cells(markup: str, anchor: str) -> list[str]:
+    row = re.search(rf'<tr id="{anchor}">(.*?)</tr>', markup, re.S)
+    assert row, anchor
+    return [_text(cell) for cell in re.findall(r"<td[^>]*>(.*?)</td>", row.group(1), re.S)]
+
+
+def _drift_meta(markup: str) -> list[str]:
+    return re.findall(r'<span class="meta">([^<]+)</span>', markup)
+
+
+def test_process_table_times_drop_the_et_their_header_already_names(tmp_path: Path) -> None:
+    html = _no_script(render_pages(_snapshot(tmp_path))["health.html"])
+    components = _section(html, "components")
+    assert re.findall(r"<th>([^<]+ \(ET\))</th>", components) == ["last seen (ET)", "started (ET)"]
+    cells = _cells(components, "health-poller--box")
+    assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
+    assert _cells(components, "health-linear-listener--box")[4::4] == ["never", "—"]
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(_section(html, "drift"))
+
+
+@needs_node
+def test_script_process_table_times_drop_the_et_their_header_already_names(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", *PANELS])
+    cells = _cells(out["html"]["components"], "health-poller--box")
+    assert (cells[4], cells[8]) == ("Jan 15 2:59:56 AM", "Jan 15 2:50:00 AM")
+    assert _cells(out["html"]["components"], "health-linear-listener--box")[4::4] == ["never", "—"]
+    assert "waiter codex-bot @ box, device-probe · started Jan 15 2:55:00 AM ET" in _drift_meta(out["html"]["drift"])
+
+
+DETAILS_HARNESS = board.HARNESS.replace(
+    "    } else if (kind === 'record') {",
+    "    } else if (kind === 'details') {\n"
+    "      const node = pick({cls: 'sys-details'});\n"
+    "      if (arg === 'toggle') { node.open = !node.open; fire(node, 'toggle'); }\n"
+    "      steps.push({open: !!node.open, kept: node === global.lastDetails});\n"
+    "      global.lastDetails = node;\n"
+    "    } else if (kind === 'record') {",
+)
+
+
+def _details_steps(tmp_path: Path, actions: list) -> list[dict]:
+    snapshot = _snapshot(tmp_path)
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["health.html"], flags=re.S)
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "harness.js").write_text(DETAILS_HARNESS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
+         "health", "", json.dumps(BAR + ["hud", "components"]), json.dumps(actions)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [step for step in json.loads(result.stdout)["steps"] if "open" in step]
+
+
+def test_process_details_start_closed(tmp_path: Path) -> None:
+    components = _section(_no_script(render_pages(_snapshot(tmp_path))["health.html"]), "components")
+    assert re.findall(r"<details[^>]*>", components) == ['<details class="sys-details">']
+
+
+@needs_node
+def test_script_process_details_start_closed_and_stay_open_once_opened(tmp_path: Path) -> None:
+    left = _details_steps(tmp_path / "left", [["details", "look"], ["hashchange", None], ["details", "look"]])
+    assert left == [{"open": False, "kept": False}, {"open": False, "kept": False}]
+    opened = _details_steps(tmp_path / "opened", [["details", "look"], ["details", "toggle"],
+                                                  ["hashchange", None], ["details", "look"]])
+    assert opened == [{"open": False, "kept": False}, {"open": True, "kept": True},
+                      {"open": True, "kept": False}]
+
+
+def _with_no_waiters(snapshot: dict, count: int) -> dict:
+    snapshot["health"]["no_waiter"] = [
+        {"harness": f"h{n}", "bot": f"bot{n}", "jobs": [f"j{n}"], "count": 1,
+         "anchor": f"health-no-waiter-h{n}"}
+        for n in range(count)
+    ]
+    return snapshot
+
+
+@pytest.mark.parametrize(("count", "shown"), [(0, "0 harnesses"), (1, "1 harness"), (2, "2 harnesses")])
+def test_no_waiter_count_names_harness_in_the_singular_for_one(
+        tmp_path: Path, count: int, shown: str) -> None:
+    snapshot = _with_no_waiters(_snapshot(tmp_path), count)
+    panel = _section(_no_script(render_pages(snapshot)["health.html"]), "no-waiter")
+    assert f'<span class="count">{shown}</span>' in panel
+
+
+@needs_node
+@pytest.mark.parametrize(("count", "shown"), [(0, "0 harnesses"), (1, "1 harness"), (2, "2 harnesses")])
+def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
+        tmp_path: Path, count: int, shown: str) -> None:
+    snapshot = _with_no_waiters(_snapshot(tmp_path), count)
+    out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "no-waiter"])
+    assert f'<span class="count">{shown}</span>' in out["html"]["no-waiter"]
+
+
+CLASSIFIED_TAIL = [
+    ("2026-11-13 13:08:59 EST poller exit rc=1", "bad"),
+    ("2026-11-13 13:09:19 EST poller start", "start"),
+    ("orch poll: another orch poll owns /tmp/orch.db.lock", "warn"),
+    ("Traceback (most recent call last):", "bad"),
+    ('  File "lib/orch.py", line 9, in poll', "bad"),
+    ("    raise ValueError(x)", "bad"),
+    ("ValueError: x", "bad"),
+    ("cycle line after the traceback", ""),
+    ("    indented after a plain line", ""),
+    ("2026-11-13 13:10:00 EST ERROR linear: HTTP 500", "bad"),
+    ("2026-11-13 13:10:01 EST CRITICAL disk full", "bad"),
+    ("2026-11-13 13:10:02 EST WARNING slow cycle", "warn"),
+    ("2026-11-13 13:10:03 EST WARN retrying", "warn"),
+    ("lib.linear.RateLimitException: slow down", "bad"),
+    ("2026-11-13 13:10:04 EST poller exit rc=0", ""),
+    ("RuntimeError: poller start failed", "bad"),
+    ("ERROR another orch poll owns lock", "bad"),
+    ("2026-11-13 13:10:05 EST CRITICAL poller start aborted", "bad"),
+    ("WARNING another orch poll owns lock", "warn"),
+    ("WARNING poller start delayed", "warn"),
+    ("WARN poller start retrying", "warn"),
+]
+
+
+def _classified(tmp_path: Path) -> dict:
+    snapshot = _snapshot(tmp_path)
+    snapshot["poller"]["log"]["tail"] = [line for line, _ in CLASSIFIED_TAIL]
+    return snapshot
+
+
+def test_poller_log_colours_errors_tracebacks_and_warnings(tmp_path: Path) -> None:
+    log = _section(_no_script(render_pages(_classified(tmp_path))["health.html"]), "log")
+    assert _log_rows(log) == [(kind, line) for line, kind in reversed(CLASSIFIED_TAIL)]
+
+
+@needs_node
+def test_script_poller_log_colours_errors_tracebacks_and_warnings(tmp_path: Path) -> None:
+    log = _run_page(tmp_path, _classified(tmp_path), "health", BAR + ["hud", "log"])["html"]["log"]
+    assert _log_rows(log) == [(kind, line) for line, kind in reversed(CLASSIFIED_TAIL)]
+
+
+def _log_rows(markup: str) -> list[tuple[str, str]]:
+    box = markup[markup.index('<div class="sys-log">') + len('<div class="sys-log">'):]
+    return [(kind, htmllib.unescape(line)) for kind, line in re.findall(r'<div(?: class="(\w+)")?>([^<]*)</div>', box)]
+
+
+NEWEST_FIRST = [
+    "cycle line",
+    "2026-11-13 13:09:20 EST poller exit rc=0",
+    "orch poll: another orch poll owns /tmp/orch.db.lock",
+    "2026-11-13 13:09:19 EST poller start",
+    "2026-11-13 13:08:59 EST poller exit rc=1",
+]
+
+
+def test_poller_log_shows_the_newest_line_first(tmp_path: Path) -> None:
+    log = _section(_no_script(render_pages(_snapshot(tmp_path))["health.html"]), "log")
+    assert [line for _, line in _log_rows(log)] == NEWEST_FIRST
+    assert '<p class="sys-note">last 5 lines, newest first, redacted</p>' in log
+
+
+@needs_node
+def test_script_poller_log_shows_the_newest_line_first(tmp_path: Path) -> None:
+    log = _run_page(tmp_path, _snapshot(tmp_path), "health", BAR + ["hud", "log"])["html"]["log"]
+    assert [line for _, line in _log_rows(log)] == NEWEST_FIRST
+    assert '<p class="sys-note">last 5 lines, newest first, redacted</p>' in log
 
 
 def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
