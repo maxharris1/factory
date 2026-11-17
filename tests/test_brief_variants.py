@@ -13,8 +13,10 @@ from markdown_it import MarkdownIt
 from lib.brief import render_brief
 from lib.dispatcher import CIResult, FailedCheck, TrackedTicket
 from lib.evidence.ci import ci_evidence
+from lib.evidence.scenarios import parse_live
 from lib.github_actions import GhResult, GitHubReviewActions
-from tests.regenerate_brief_snapshots import HEAD, _job
+from lib.factory_md import parse_factory_context
+from tests.regenerate_brief_snapshots import FACTORY_MD, HEAD, QA_FACTORY_MD, _job
 from tests.test_dispatcher import (
     ANSWERS,
     QUESTIONS,
@@ -613,3 +615,28 @@ def test_an_update_review_on_a_base_without_ci_requires_the_pasted_local_checks(
     ) in task
     assert "CI result on this head" not in task
     assert "CI may still be running" not in task
+
+
+def _task_under(factory_md: str, action: str, extra: dict[str, object]) -> str:
+    context, findings = parse_factory_context(factory_md)
+    assert context is not None, findings
+    job = _job(action, "claude", 1, None, {"gitBranchName": "factory/issue-42", **extra})
+    return _task(render_brief(job, bot="claude-bot", context=context, factory_root="/srv/orch/factory"))
+
+
+def test_live_scenarios_are_asked_for_only_with_qa_on_and_no_plan_to_carry_them():
+    assert "## Verify, live" in _task_under(QA_FACTORY_MD, "build", {})
+    assert "## Verify, live" in _task_under(QA_FACTORY_MD, "plan", {})
+    assert "## Verify, live" not in _task_under(QA_FACTORY_MD, "build", {"instruction": PLAN_URL})
+    assert "## Verify, live" not in _task_under(FACTORY_MD, "plan", {})
+
+
+def test_the_example_the_plan_brief_shows_parses_to_its_two_scenarios():
+    task = _task_under(QA_FACTORY_MD, "plan", {})
+    fences = [token.content for token in MarkdownIt("commonmark").parse(task) if token.type == "fence"]
+    examples = [text for text in fences if text.startswith("## Verify, live")]
+    assert len(examples) == 1
+    found = parse_live(examples[0])
+    assert [scenario.id for scenario in found.scenarios] == ["qa-1", "qa-2"]
+    assert found.regression == ("qa-1",)
+    assert [item.criterion for item in found.not_live] == ["ac-3", "ac-4"]
