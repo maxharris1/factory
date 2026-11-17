@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from lib.dispatcher import Comment
 from lib.evidence.scenarios import (
     InvalidSection,
@@ -194,3 +196,40 @@ def test_comments_without_a_header_or_section_give_nothing() -> None:
     assert live_scenarios([comment("1", EXAMPLE, 1.0)]) == LiveScenarios()
     assert live_scenarios([comment("2", PLAN_HEADER + "\n## Plan\n", 1.0)]) == LiveScenarios()
     assert live_scenarios([]) == LiveScenarios()
+
+
+def test_a_not_live_reason_keeps_its_nested_parentheses() -> None:
+    body = "## Verify, live\n- Not live: ac-4 (needs a human (approval) sends a real email).\n"
+    assert parse_live(body) == LiveScenarios(not_live=(NotLive("ac-4", "needs a human (approval) sends a real email"),))
+
+
+def test_a_not_live_entry_may_continue_on_an_indented_line() -> None:
+    body = "## Verify, live\n- Not live: ac-3 (unit only),\n  ac-4 (needs a human; sends a real email);\n"
+    assert parse_live(body) == LiveScenarios(
+        not_live=(NotLive("ac-3", "unit only"), NotLive("ac-4", "needs a human; sends a real email"))
+    )
+
+
+def test_text_after_the_not_live_pairs_names_the_entry() -> None:
+    first = "- Not live: ac-2 (unit only). ac-3 needs a human: sends a real email."
+    found = parse_live(f"## Verify, live\n- Regression lane: none.\n{first}\n")
+    assert isinstance(found, InvalidSection)
+    assert (found.line, found.text) == (3, first)
+    assert "ac-3 needs a human: sends a real email." in found.reason
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "- Not live: see below. ac-2 (unit only).",
+        "- Not live: ac-2 (unit only) and ac-3 (no account).",
+        "- Not live: ac-2 (unit only)ac-3 (no account).",
+        "- Not live: ac-2 (unit only). ac-4 (needs a human (approval).",
+        "- Not live:",
+        "- Not live: ac-0 (unit only).",
+    ],
+)
+def test_a_malformed_not_live_entry_is_refused_with_its_line(entry: str) -> None:
+    found = parse_live(f"## Verify, live\n{entry}\n")
+    assert isinstance(found, InvalidSection)
+    assert (found.line, found.text) == (2, entry)

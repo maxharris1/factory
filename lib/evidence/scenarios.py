@@ -20,7 +20,9 @@ and is one of:
   trailing period. The pack is the id after the word `pack` in the steps.
   A repeated `qa-<n>` makes the section invalid at the repeat.
 - `- Regression lane: <text>`, naming the `qa-<n>` ids to rerun on base.
-- `- Not live: <text>`, listing `ac-<n> (<reason>)` pairs.
+- `- Not live: <text>`, listing `ac-<n> (<reason>)` pairs. A reason may hold
+  balanced parentheses; any text outside the pairs, beyond one `.`, `,` or
+  `;` after each, makes the section invalid.
 
 Any other entry makes the section invalid at its first line. A text with no
 section reads as no scenarios.
@@ -43,7 +45,9 @@ _FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*$")
 _SECTION_END = re.compile(r"^ {0,3}#{1,2}(?:[ \t]|$)")
 _PACK = re.compile(r"\bpack ([A-Za-z0-9][\w-]*)")
 _QA_ID = re.compile(r"\bqa-[1-9][0-9]*\b")
-_NOT_LIVE = re.compile(r"\b(ac-[1-9][0-9]*) \(([^)]*)\)")
+_NOT_LIVE_PAIR = re.compile(r"(ac-[1-9][0-9]*) \(")
+_NOT_LIVE_GAP = re.compile(r"[.,;]?(?:\s+|$)")
+_NOT_A_PAIR = "not an ac-<n> (<reason>) pair"
 _UNKNOWN_ENTRY = "not a scenario, regression lane or not-live entry"
 _STRAY_LINE = "not a `- ` entry or an indented line continuing one"
 
@@ -114,7 +118,28 @@ def _regression(match: re.Match[str]) -> LiveScenarios | str:
 
 
 def _not_live(match: re.Match[str]) -> LiveScenarios | str:
-    return LiveScenarios(not_live=tuple(NotLive(ac, reason) for ac, reason in _NOT_LIVE.findall(match.group(1))))
+    body = match.group(1).strip()
+    if not body:
+        return f"{_NOT_A_PAIR}: nothing after Not live:"
+    pairs: list[NotLive] = []
+    at = 0
+    while at < len(body):
+        pair = _NOT_LIVE_PAIR.match(body, at)
+        if pair is None:
+            return f"{_NOT_A_PAIR}: {body[at:]}"
+        depth = 0
+        for close in range(pair.end() - 1, len(body)):
+            depth += {"(": 1, ")": -1}.get(body[close], 0)
+            if depth == 0:
+                break
+        else:
+            return f"unclosed ( in {body[at:]}"
+        pairs.append(NotLive(pair.group(1), body[pair.end() : close]))
+        gap = _NOT_LIVE_GAP.match(body, close + 1)
+        if gap is None:
+            return f"{_NOT_A_PAIR}: {body[close + 1 :]}"
+        at = gap.end()
+    return LiveScenarios(not_live=tuple(pairs))
 
 
 _SHAPES: tuple[tuple[re.Pattern[str], Callable[[re.Match[str]], LiveScenarios | str]], ...] = (
