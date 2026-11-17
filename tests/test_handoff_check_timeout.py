@@ -8,6 +8,7 @@ from typing import Literal
 import pytest
 
 import lib.handoff_check
+import lib.waiter
 import tests.test_pre_ready_remote as remote
 from lib.queue import PRE_READY_PASSED, SUBMITTED_INVALID
 from tests.test_pre_ready_remote import COMMENT, _events, _remote_ready, _row, origin
@@ -19,7 +20,7 @@ FAKE_GH = Path(__file__).with_name("fake_gh.py")
 
 @pytest.fixture
 def flaky_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    def install(how: Literal["stall", "502"], count: int) -> None:
+    def install(how: Literal["stall", "502"], count: int, only: str = "") -> None:
         directory = tmp_path / "flaky-gh"
         directory.mkdir()
         left = directory / "left"
@@ -28,11 +29,13 @@ def flaky_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         script = directory / "gh"
         script.write_text(
             "#!/bin/sh\n"
-            f'n=$(cat "{left}")\n'
-            'if [ "$n" -gt 0 ]; then\n'
-            f'  echo $((n - 1)) > "{left}"\n'
-            f"  {failure}\n"
-            "fi\n"
+            f'case "$*" in *"{only}"*)\n'
+            f'  n=$(cat "{left}")\n'
+            '  if [ "$n" -gt 0 ]; then\n'
+            f'    echo $((n - 1)) > "{left}"\n'
+            f"    {failure}\n"
+            "  fi ;;\n"
+            "esac\n"
             f'exec "{sys.executable}" "{FAKE_GH}" "$@"\n',
             encoding="utf-8",
         )
@@ -40,6 +43,7 @@ def flaky_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("PATH", f"{directory}:{os.environ['PATH']}")
 
     monkeypatch.setattr(lib.handoff_check, "GH_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(lib.waiter, "GH_TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr(lib.handoff_check, "RETRY_DELAYS", (0.0, 0.0))
     return install
 
@@ -98,3 +102,29 @@ def test_an_invalid_handoff_still_fails_the_job_with_no_retry(
     assert [event for event, _detail in _events(db, job_id)] == [SUBMITTED_INVALID]
     assert _retries(log) == []
     assert any(f"submitted-invalid {COMMENT}" in line and "role=reviewer" in line for line in log)
+
+
+def test_a_factory_md_read_that_times_out_once_finishes_the_job_done(
+    tmp_path: Path, origin: str, flaky_gh
+) -> None:
+    flaky_gh("stall", 1, only="contents/factory.md")
+    db, job_id, log = _remote_ready(tmp_path, origin, "sh ok.sh")
+    assert _row(db, job_id) == ("done", COMMENT)
+    assert _events(db, job_id) == [(PRE_READY_PASSED, f"handoff {COMMENT}: at {origin}")]
+    retries = _retries(log)
+    assert len(retries) == 1
+    assert "factory.md read" in retries[0] and "TimeoutExpired" in retries[0]
+    assert "attempt 1 of 3" in retries[0]
+
+
+def test_a_factory_md_read_that_never_answers_fails_the_job_after_three_attempts(
+    tmp_path: Path, origin: str, flaky_gh
+) -> None:
+    flaky_gh("stall", 3, only="contents/factory.md")
+    db, job_id, log = _remote_ready(tmp_path, origin, "sh ok.sh")
+    assert _row(db, job_id) == ("failed", None)
+    assert len(_retries(log)) == 2
+    assert any(
+        f"could not check handoff {COMMENT}" in line and "attempt 3 of 3" in line for line in log
+    )
+    assert _events(db, job_id) == []
