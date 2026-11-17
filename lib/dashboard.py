@@ -3,7 +3,7 @@
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
 It writes status.json, the self-contained pages (PAGES: index.html,
-job.html, activity.html, efficiency.html, health.html; see
+job.html, activity.html, efficiency.html, health.html, settings.html, ticket.html; see
 lib/dashboard_page.py) and tickets.json to an output directory, each
 atomically (temp file in the same directory, fsync, then rename), as one
 set: a failed rename puts back every file already renamed. Each page's inline script fetches status.json every 1 to 2
@@ -180,6 +180,11 @@ RECENT_HANDOFFS = 12
 RECENT_VERDICTS = 12
 RELAY_TICKETS = 12
 RELAY_STEPS = 40
+SETTINGS_AUDIT = "settings-audit.jsonl"
+SETTINGS_RESULTS = 50
+AUDIT_KEYS = ("id", "actor", "requested_at", "applied_at", "device", "field", "previous", "new",
+              "result", "error", "backup", "restarted", "pending")
+AUDIT_RESULTS = ("applied", "refused", "failed")
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
@@ -836,6 +841,7 @@ def collect_snapshot(
             "box": {"name": _clean(host, 40), "running": box_running, "slot_max": box_max},
             "devices": devices,
         },
+        "settings": {"results": _settings_results(db_path.parent / SETTINGS_AUDIT)},
         "stuck": {
             "tickets": db["stuck_tickets"],
             "overdue_jobs": db["overdue_jobs"],
@@ -2166,6 +2172,8 @@ def _machines(
                 "held": held.get(item["name"], 0)
                 + (unplaced if item["name"] == host else 0),
                 "enabled": enabled is True,
+                "drain": item.get("drain") is True,
+                "local": item["name"] == host,
                 "placeholder": _has_placeholder(item),
                 "harnesses": sorted(
                     {str(name) for name in names if str(name) in HARNESSES}
@@ -2175,6 +2183,30 @@ def _machines(
         if item["name"] == host:
             box_max = slot_max if box_max is None else box_max
     return devices, box_max
+
+
+def _audit_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, list):
+        return [_clean(item, 60) for item in value[:20]]
+    return _clean(value, 200)
+
+
+def _settings_results(path: Path) -> list[dict]:
+    """The last SETTINGS_RESULTS entries of the settings audit log (#777),
+    oldest first, each cut to the AuditEntry keys with its strings clipped."""
+    results = []
+    for line in read_log_tail(path, lines=SETTINGS_RESULTS):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            row = {key: _audit_value(entry.get(key)) for key in AUDIT_KEYS}
+            row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
+            results.append(row)
+    return results
 
 
 # --- writing --------------------------------------------------------------------

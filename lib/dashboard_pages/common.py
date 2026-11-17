@@ -298,6 +298,92 @@ SCRIPT_HEAD = r"""
 """
 
 
+SCRIPT_GITHUB = r"""
+  // The #563 GitHub sign-in every page with actions shares (ticket page, board,
+  // settings): present only when the server answers /api/session. The session
+  // is an HttpOnly cookie; the page only ever holds the CSRF value.
+  var GH = {started: false, on: false, login: null, csrf: null, flow: null, note: '', panels: {}};
+
+  function ghPost(path, body, csrf) {
+    var headers = {'Content-Type': 'application/json'};
+    if (csrf) headers['X-Factory-CSRF'] = GH.csrf || '';
+    return fetch(path, {method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: headers,
+                        body: JSON.stringify(body)})
+      .then(function (res) {
+        return res.json().then(function (data) { return data; }, function () { return null; }).then(function (data) {
+          data = data && typeof data === 'object' ? data : {};
+          return {status: res.status, ok: res.ok, data: data, error: res.ok ? null : String(data.error || 'http-' + res.status)};
+        });
+      }, function () { return {status: 0, ok: false, data: {}, error: 'network'}; });
+  }
+  function ghSet(signedIn, data) {
+    GH.login = signedIn ? String(data.login || '') : null;
+    GH.csrf = signedIn ? String(data.csrf || '') : null;
+    if (latest) render(latest);
+  }
+  function ghStart() {
+    var request;
+    try { request = fetch('/api/session', {cache: 'no-store', credentials: 'same-origin'}); } catch (err) { return; }
+    request.then(function (res) {
+      if (res.status !== 200) return null;
+      return res.json();
+    }).then(function (data) {
+      if (!data || typeof data.signed_in !== 'boolean') return;
+      GH.on = true;
+      ghSet(data.signed_in, data);
+    }, function () {});
+  }
+  function ghSignIn() {
+    GH.note = '';
+    ghPost('/api/signin', {}, false).then(function (res) {
+      if (!res.ok) { GH.note = 'sign-in failed: ' + res.error; ghSet(false, {}); return; }
+      var d = res.data;
+      GH.flow = {code: String(d.user_code || ''), uri: String(d.verification_uri || ''),
+                 interval: Math.max(1, Number(d.interval) || 5)};
+      ghSet(false, {});
+      setTimeout(ghPoll, GH.flow.interval * 1000);
+    });
+  }
+  function ghPoll() {
+    if (!GH.flow) return;
+    ghPost('/api/signin/poll', {}, false).then(function (res) {
+      var state = res.ok ? res.data.state : null;
+      if (state === 'pending') { setTimeout(ghPoll, GH.flow.interval * 1000); return; }
+      GH.flow = null;
+      GH.note = state === 'signed-in' ? '' : 'sign-in ' + (state || 'failed: ' + res.error);
+      ghSet(state === 'signed-in', res.data);
+    });
+  }
+  function ghSignOut() {
+    ghPost('/api/signout', {}, true).then(function () { GH.note = ''; ghSet(false, {}); });
+  }
+  function ghButton(parent, text, onClick, cls) {
+    var b = add(parent, el('button', cls || null, text));
+    b.setAttribute('type', 'button');
+    b.addEventListener('click', onClick);
+    return b;
+  }
+  function ghAuth(row) {
+    row.replaceChildren();
+    if (GH.login) {
+      add(row, el('span', null, 'signed in as ' + GH.login));
+      ghButton(row, 'Sign out', ghSignOut);
+    } else if (GH.flow) {
+      add(row, el('span', null, 'Code'));
+      add(row, el('code', null, GH.flow.code));
+      if (/^https:\/\/github\.com\//.test(GH.flow.uri)) {
+        var a = add(row, link(null, GH.flow.uri));
+        a.setAttribute('rel', 'noopener noreferrer');
+        a.setAttribute('target', '_blank');
+        a.textContent = GH.flow.uri;
+      }
+      add(row, el('span', null, 'Enter only this code on github.com.'));
+    } else ghButton(row, 'Sign in with GitHub', ghSignIn);
+    if (GH.note) add(row, el('span', 'warn', GH.note));
+  }
+"""
+
+
 SCRIPT_TELEMETRY = r"""
 __TELEMETRY__
 """
@@ -310,7 +396,8 @@ SCRIPT_TAIL = r"""
     activity: [renderAttention, renderRelay],
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter],
-    ticket: [renderTicketView]
+    ticket: [renderTicketView],
+    settings: [renderSettings]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
