@@ -15,10 +15,10 @@ empty. This server:
 - serves DASHBOARD_DIR, which must be set, absolute, an existing directory,
   and neither / nor $HOME nor any directory that contains $HOME (it is
   resolved through symlinks before those checks);
-- answers GET and HEAD for the snapshot, and only for /, /status.json, the five
+- answers GET and HEAD for the snapshot, and only for /, /status.json, the
   pages (/index.html, /activity.html, /efficiency.html, /job.html,
-  /health.html) and /tickets.json (the ticket records), the
-  files `orch dashboard push` writes. Every other path, including
+  /health.html, /ticket.html, /settings.html) and /tickets.json (the ticket
+  records), the files `orch dashboard push` writes. Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
   encoded slash, is 404, and no directory is ever listed;
 - opens the directory once at startup (O_NOFOLLOW) and keeps that
@@ -41,10 +41,21 @@ GitHub's OAuth device flow; the token stays in this process's memory and is
 never sent to a browser, written to disk or logged. Comments and OKs go
 only to tickets in the served status.json. With actions off, /api/* is 404
 and POST is refused exactly as before.
+
+Device settings (enabled, slot_max, drain) are on only with actions on and
+DASHBOARD_SETTINGS_SPOOL set: an absolute, existing directory that is not a
+symlink and not group- or world-writable, opened once at startup like
+DASHBOARD_DIR. POST /api/settings, from the signed-in approver, checks the
+change against the device row in the served status.json and only writes a
+request file <id>.json into that directory. The orch host applies it
+(`orch settings apply`); this server never touches machines.yml or runs
+anything. Setting the spool without actions is a configuration error, and
+without it /api/settings is 404.
 """
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
@@ -66,7 +77,10 @@ from urllib.parse import urlsplit
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 DEFAULT_PORT = 8787
 MAX_BYTES = 8 * 1024 * 1024
-PAGES = ("index.html", "activity.html", "efficiency.html", "job.html", "health.html", "ticket.html")
+PAGES = (
+    "index.html", "activity.html", "efficiency.html", "job.html", "health.html", "ticket.html",
+    "settings.html",
+)
 ROUTES = {
     "/": "index.html",
     "/status.json": "status.json",
@@ -154,13 +168,35 @@ class ActionsConfig(NamedTuple):
     clients: frozenset[ipaddress.IPv4Address]
     api_base: str = GITHUB_API
     web_base: str = GITHUB_WEB
+    settings_spool: Path | None = None
+
+
+def check_spool(value: str) -> Path:
+    if not os.path.isabs(value):
+        raise ConfigError("DASHBOARD_SETTINGS_SPOOL must be an absolute path")
+    try:
+        info = os.lstat(value)
+    except OSError:
+        raise ConfigError(f"DASHBOARD_SETTINGS_SPOOL does not exist: {value}") from None
+    if stat.S_ISLNK(info.st_mode):
+        raise ConfigError("DASHBOARD_SETTINGS_SPOOL must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        raise ConfigError(f"DASHBOARD_SETTINGS_SPOOL is not a directory: {value}")
+    if info.st_mode & 0o022:
+        raise ConfigError("DASHBOARD_SETTINGS_SPOOL must not be group- or world-writable")
+    return Path(value)
 
 
 def check_actions(
     environ: dict[str, str], own_address: str, process_user: str
 ) -> ActionsConfig | None:
     client_id = environ.get("DASHBOARD_GITHUB_CLIENT_ID", "")
+    spool = environ.get("DASHBOARD_SETTINGS_SPOOL", "")
     if not client_id:
+        if spool:
+            raise ConfigError(
+                "DASHBOARD_SETTINGS_SPOOL needs GitHub actions (DASHBOARD_GITHUB_CLIENT_ID)"
+            )
         return None
     if CLIENT_ID.fullmatch(client_id) is None:
         raise ConfigError("DASHBOARD_GITHUB_CLIENT_ID is not an OAuth App client id")
@@ -189,7 +225,8 @@ def check_actions(
                 "DASHBOARD_ACTION_CLIENTS must not hold this node's own TAILNET_IP"
             )
         clients.add(ipaddress.IPv4Address(entry))
-    return ActionsConfig(client_id, approver, frozenset(clients))
+    return ActionsConfig(client_id, approver, frozenset(clients),
+                         settings_spool=check_spool(spool) if spool else None)
 
 
 def current_user() -> str:
@@ -253,6 +290,8 @@ REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
 SHA = re.compile(r"[0-9a-f]{40}")
 REFUSED_FIRST_LINE = re.compile(r"\s*(?:<!--\s*orch:v1\b|`orch:v1\b|/ok\b)")
 OAUTH_APP_TOKEN = re.compile(r"gho_[A-Za-z0-9]+")
+MAX_PENDING = 20
+REQUEST_FILE = re.compile(r"([A-Za-z0-9_-]{16,64})\.json")
 DEVICE_ERRORS = {
     "authorization_pending": "pending",
     "slow_down": "pending",
@@ -507,14 +546,18 @@ def parse_target(payload: dict, kind: str, key: str) -> Target:
     return Target(repo, _number(payload.get(key)), kind)
 
 
+def read_status(root_fd: int) -> dict:
+    try:
+        status = json.loads(read_snapshot_file(root_fd, "status.json") or b"null")
+    except ValueError:
+        return {}
+    return status if isinstance(status, dict) else {}
+
+
 def snapshot_row(root_fd: int, target: Target) -> dict:
     """The status.json ticket row that names `target`. The snapshot is the
     allowlist, so the server never acts on a ticket the dashboard does not show."""
-    data = read_snapshot_file(root_fd, "status.json")
-    try:
-        tickets = json.loads(data or b"null").get("tickets")
-    except (ValueError, AttributeError):
-        tickets = None
+    tickets = read_status(root_fd).get("tickets")
     for row in tickets if isinstance(tickets, list) else []:
         if not isinstance(row, dict) or not isinstance(row.get("repo"), str):
             continue
@@ -525,6 +568,88 @@ def snapshot_row(root_fd: int, target: Target) -> dict:
         if target.kind == "pull" and row.get("pr") == str(target.number):
             return row
     raise ApiError(404, "not-in-snapshot")
+
+
+def _is_bool(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_slot_max(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 64
+
+
+FIELDS = {"enabled": _is_bool, "drain": _is_bool, "slot_max": _is_slot_max}
+
+
+def is_bot_login(login: str) -> bool:
+    return login.endswith("[bot]") or BOT_USER.fullmatch(login.casefold()) is not None
+
+
+def device_row(status: dict, device: object) -> dict:
+    """The status.json `slots.devices[]` row named `device`: only devices the
+    dashboard shows can be changed."""
+    slots = status.get("slots")
+    devices = slots.get("devices") if isinstance(slots, dict) else None
+    for row in devices if isinstance(devices, list) else []:
+        if isinstance(row, dict) and isinstance(device, str) and row.get("name") == device:
+            return row
+    raise ApiError(404, "not-in-snapshot")
+
+
+def applied_ids(status: dict) -> set[str]:
+    settings = status.get("settings")
+    results = settings.get("results") if isinstance(settings, dict) else None
+    return {
+        entry["id"] for entry in (results if isinstance(results, list) else [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+
+
+class Spool:
+    """The settings request directory, pinned like the served root. This
+    process is its only writer, so the lock makes the pending cap exact."""
+
+    def __init__(self, path: Path):
+        self.fd = open_root(path)
+        self.lock = threading.Lock()
+
+    def submit(self, request: dict, applied: set[str]) -> None:
+        with self.lock:
+            pending = 0
+            for name in os.listdir(self.fd):
+                found = REQUEST_FILE.fullmatch(name)
+                if found is None:
+                    continue
+                if found[1] in applied:
+                    with contextlib.suppress(OSError):
+                        os.unlink(name, dir_fd=self.fd)
+                else:
+                    pending += 1
+            if pending >= MAX_PENDING:
+                raise ApiError(429, "busy")
+            self._write(request)
+
+    def _write(self, request: dict) -> None:
+        temp, final = f".{request['id']}.tmp", f"{request['id']}.json"
+        data = (json.dumps(request, sort_keys=True) + "\n").encode()
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW
+            with os.fdopen(os.open(temp, flags, 0o644, dir_fd=self.fd), "wb") as handle:
+                os.fchmod(handle.fileno(), 0o644)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.rename(temp, final, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            os.fsync(self.fd)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(temp, dir_fd=self.fd)
+            raise ApiError(500, "spool") from None
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
 
 
 def cookie(name: str, value: str, max_age: int) -> str:
@@ -558,7 +683,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if actions is None:
             self.send_error(501, f"Unsupported method ({self.command!r})")
             return
-        route = POST_ROUTES.get(urlsplit(self.path).path)
+        route = self.server.post_routes.get(urlsplit(self.path).path)  # type: ignore[attr-defined]
         if route is None or not actions.allows(self.client_address[0]):
             self._json(404, {"error": "not-found"})
             return
@@ -671,6 +796,35 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             raise ApiError(409, "head-changed", head=current)
         return 201, {"url": actions.post_as_approver(session, target, f"/ok {seen}")}, []
 
+    def _settings(self, actions: Actions, session: Session | None, payload: dict):
+        assert session is not None
+        if session.login.casefold() != actions.config.approver.casefold() or is_bot_login(
+            session.login
+        ):
+            raise ApiError(403, "not-approver")
+        field = payload.get("field")
+        valid = FIELDS.get(field) if isinstance(field, str) else None
+        if valid is None:
+            raise ApiError(400, "bad-field")
+        expect, value = payload.get("expect"), payload.get("value")
+        if not (valid(expect) and valid(value)):
+            raise ApiError(400, "bad-value")
+        status = read_status(self.server.root_fd)  # type: ignore[attr-defined]
+        row = device_row(status, payload.get("device"))
+        if row.get(field) != expect:
+            raise ApiError(409, "changed")
+        request = {
+            "id": secrets.token_urlsafe(16),
+            "actor": session.login,
+            "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "device": row["name"],
+            "field": field,
+            "expect": expect,
+            "value": value,
+        }
+        self.server.spool.submit(request, applied_ids(status))  # type: ignore[attr-defined]
+        return 202, {"id": request["id"]}, []
+
     def _json(self, code: int, payload: dict, cookies: list[str] | None = None) -> None:
         data = json.dumps(payload).encode()
         self.send_response(code)
@@ -710,6 +864,7 @@ POST_ROUTES = {
     "/api/head": (SnapshotHandler._head, True),
     "/api/ok": (SnapshotHandler._ok, True),
 }
+SETTINGS_ROUTES = {"/api/settings": (SnapshotHandler._settings, True)}
 
 
 class SnapshotServer(ThreadingHTTPServer):
@@ -718,11 +873,17 @@ class SnapshotServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], root: Path, actions: ActionsConfig | None = None):
         self.root = root
         self.actions = Actions(actions) if actions is not None else None
+        self.spool: Spool | None = None
         self.root_fd = open_root(root)
         try:
+            if actions is not None and actions.settings_spool is not None:
+                self.spool = Spool(actions.settings_spool)
+            self.post_routes = {**POST_ROUTES, **(SETTINGS_ROUTES if self.spool else {})}
             super().__init__(address, SnapshotHandler)
         except BaseException:
             os.close(self.root_fd)
+            if self.spool is not None:
+                self.spool.close()
             raise
 
     def server_close(self) -> None:
@@ -730,6 +891,8 @@ class SnapshotServer(ThreadingHTTPServer):
         if self.root_fd >= 0:
             os.close(self.root_fd)
             self.root_fd = -1
+        if self.spool is not None:
+            self.spool.close()
 
 
 def make_server(
@@ -750,6 +913,8 @@ def main(argv: list[str]) -> int:
         return 1
     if argv == ["--check"]:
         suffix = f" with GitHub actions for {actions.approver}" if actions else ""
+        if actions and actions.settings_spool:
+            suffix += f" and settings requests to {actions.settings_spool}"
         print(f"ok: would serve {root} on {host}:{port}{suffix}")
         return 0
     server = make_server(host, port, root, actions)
