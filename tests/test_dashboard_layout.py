@@ -28,6 +28,7 @@ import pytest
 import lib.dashboard as dashboard
 import lib.dashboard_flow as flow
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot, write_snapshot_pages
+from lib.dashboard_pages.common import ticket_page_href
 from tests.test_dashboard import (
     FREE_TEXT_SECRETS,
     GH_CLASSIC,
@@ -562,13 +563,9 @@ def test_job_page_lists_every_running_and_queued_job(tmp_path: Path) -> None:
     for row in snapshot["running"] + snapshot["queued"]:
         assert f'id="job-{row["job"]}"' in html, row["job"]
     board = _section(html, "pipeline") + _section(html, "shipped")
-    tracked = {(row["repo"], row["ticket_id"]) for row in snapshot["tickets"]}
-    for ticket in tracked:
-        jobs = [row["job"] for row in snapshot["running"] + snapshot["queued"]
-                if (row["repo"], row["ticket_id"]) == ticket]
-        if jobs:
-            assert any(f'href="job.html#job-{job}"' in board for job in jobs), ticket
-    assert 'href="job.html#job-h-review"' in board and 'href="job.html#job-r-codex-"' in board
+    for row in snapshot["tickets"]:
+        assert f'href="{ticket_page_href(row)}"' in board, row["ticket_id"]
+    assert 'href="job.html#job-' not in board
 
 
 def test_a_job_with_no_ticket_state_still_gets_a_run_log(tmp_path: Path) -> None:
@@ -906,7 +903,8 @@ def test_script_shows_the_selected_jobs_path(tmp_path: Path) -> None:
     assert re.findall(r"button\.visit\.now\[data-state=([^\]]+)\]", runlog) == ["review"]
     # Only the selected job is shown.
     assert "cleffy#13" not in out["text"]["jobview"]
-    assert "a[href=job.html#job-r-codex-]" in out["dump"]["pipeline"]
+    codex = next(row for row in snapshot["tickets"] if row["ticket_id"] == "13")
+    assert f"a[href={ticket_page_href(codex)}]" in out["dump"]["pipeline"]
     assert "AUT-7" in out["text"]["tickets"]
 
 

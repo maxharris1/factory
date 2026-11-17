@@ -9,8 +9,8 @@ from lib.dashboard_flow import GLOSS, PHASE_OVERRIDES, PHASES, PIPELINE, SHIPPED
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.common import (
-    anchor, _bot, checks_link, checks_named, _chip, duration, _e, github_links, _panel, _short, _span, _td,
-    _ticket,
+    _bot, checks_link, checks_named, _chip, duration, _e, github_links, _panel, _short, _span, _td, _ticket,
+    ticket_page_href,
 )
 
 
@@ -39,7 +39,7 @@ font-family:var(--mono)}
 .tk-strip{display:block}
 .tk-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px}
 .tk-id{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
-.tk-id a,.tk-tid{font-size:13px;font-weight:600;overflow-wrap:anywhere;color:var(--text);text-decoration:none}
+.tk-id a{font-size:13px;font-weight:600;overflow-wrap:anywhere;color:var(--text);text-decoration:none}
 .tk-id a:hover{color:var(--ok)}
 .tk-tag{font-size:10px;line-height:1.5;padding:0 4px;border:1px solid var(--line-hi);color:var(--muted)}
 .tk-state{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2)}
@@ -239,8 +239,7 @@ SCRIPT_TICKETS = r"""
     }
     var main = add(card, el('div', 'tk-body'));
     var id = add(main, el('div', 'tk-id'));
-    if (job) add(id, link(null, 'job.html#' + anchor(job.job))).textContent = ticketOf(t);
-    else add(id, el('span', 'tk-tid', ticketOf(t)));
+    add(id, link(null, ticketPageHref(t))).textContent = ticketOf(t);
     add(id, el('span', 'tk-tag', t.tracker));
     addGh(id, t);
     var state = add(main, el('div', 'tk-state'));
@@ -527,8 +526,7 @@ def _card(card: dict) -> str:
         strip = px.px_strip(key, effect="static", tint=_WAIT_TINT, height=8)
     else:
         strip = px.px_job_strip(live, height=8) if live else ""
-    name = _ticket(ticket)
-    ident = f'<a href="job.html#{anchor(job["job"])}">{_e(name)}</a>' if job else _span("tk-tid", name)
+    ident = f'<a href="{_e(ticket_page_href(ticket))}">{_e(_ticket(ticket))}</a>'
     state = _span(None, ticket["state"]) + _chips(live)
     lines = ""
     if stop:

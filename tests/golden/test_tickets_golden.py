@@ -9,8 +9,8 @@ from tests.golden.pages import page_digests, page_name, record, snapshots, subst
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "tickets.CSS": "b68c0776465e9e2492e38dbad9c2467677b27859736dcd75f264b2c39da51ced",
-    "tickets.SCRIPT_TICKETS": "bfc493ddb70fcc7241e0ddb417366312355f27c4a3e8164ba7701225f2974ffd",
+    "tickets.CSS": "d9362c1e367e3bef80d360850c7aa6ef7a77ae0258ec9017051faf16dcd57ca8",
+    "tickets.SCRIPT_TICKETS": "8500a4df35eb19edaf4bf5cfa5a36479ee975252071ef3a4f1b7187c517161d2",
     "ticket_detail.CSS": "8c6af76772cf24486e8009cb75a344e1dd85f7acc1abc0231d494625ab4411c4",
     "ticket_detail.SCRIPT": "5e36028884030ed87adc81e7c1126009bf12d3e0f3e8e1ab7500dec7139040df",
     "__BOARD__": "988b51ce050bf3873af75787819c57711326377eaed5a138918d033658a9ef31",
@@ -18,9 +18,9 @@ GOLDEN = {
     "seeded/__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",
     "hostile/__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",
     "empty/__FLOWMAP__": "2242fbc61152aea08c578bb6d06f45ca4c8603f4c784f4e851c9e8758db93773",
-    "seeded/main": "ede90455068831c39ebbb27385e2ddf19660d4cce2e39be0281f4c3fb17aff1e",
+    "seeded/main": "8ce9c9bd7774c51d6eb475eb03017e1a638ef3bd3734252ddfd2f8a152da9a70",
     "seeded/chrome": "25243b2b23181bb500bb0ae75b458563a3776cbf60b71dd8a22b43fc11aa09d6",
-    "hostile/main": "ede90455068831c39ebbb27385e2ddf19660d4cce2e39be0281f4c3fb17aff1e",
+    "hostile/main": "8ce9c9bd7774c51d6eb475eb03017e1a638ef3bd3734252ddfd2f8a152da9a70",
     "hostile/chrome": "6dd91374a98a4768353983eae7bf8a94e47b1cbd49b4c407ae20f48df672f03f",
     "empty/main": "370600786fd2ae62b641bd7805b85471c05aed8b9765ea3b83b52659feb5366b",
     "empty/chrome": "2e576ea7d76b1582b5aed1b9bc4e6792f74a8379f9d21f33ec84ddca545478a4",

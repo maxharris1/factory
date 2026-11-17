@@ -13,6 +13,7 @@ import pytest
 import lib.dashboard_flow as flow
 import lib.dashboard_page as page
 from lib.dashboard_pages import tickets as tickets_page
+from lib.dashboard_pages.common import ticket_page_href
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
@@ -187,6 +188,16 @@ def _number(text: str) -> int:
 
 def _job_link(node: dict) -> bool:
     return node["tag"] == "a" and node["attrs"]["href"].startswith("job.html")
+
+
+def _id_link(card: dict) -> dict:
+    first = _one(card, _cls("tk-id"))["kids"][0]
+    assert first["tag"] == "a", first
+    return first
+
+
+def _page_of(repo_ticket: tuple[str, str]) -> str:
+    return "ticket.html#t=" + "%23".join(repo_ticket).replace("/", "%2F")
 
 
 def _card(markup: str, key: str) -> dict:
@@ -371,7 +382,7 @@ def test_card_strips_show_the_step_and_bot_and_never_move_when_stopped_or_waitin
     assert "cancelled: superseded by sanctioned intake" in _text(stuck)
 
 
-def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> None:
+def test_cards_show_round_bot_device_time_and_link_their_ticket_page(snapshot: dict) -> None:
     server = _server(snapshot)
     tickets = _state_tickets()
     board = server["pipeline"]
@@ -381,15 +392,17 @@ def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> 
     text = _text(fixing)
     for needle in ("fixing", "round 2/3", "claude", "@ box", "T+ 4m 06s", "github"):
         assert needle in text, needle
-    assert _one(fixing, _job_link)["attrs"]["href"] == "job.html#job-j-fix001"
+    assert _id_link(fixing)["attrs"]["href"] == _page_of(tickets["fixing"])
     assert "@ pc" in _text(_card(board, "#".join(tickets["review"])))
     planning = _card(board, "#".join(tickets["planning"]))
     assert "round —" in _text(planning) and not _all(planning, _cls("tk-pips"))
     queued = _card(board, "#".join(tickets[QUEUED[0]]))
-    assert _one(queued, _job_link)["attrs"]["href"] == f"job.html#job-{QUEUED[1]}"
+    assert _id_link(queued)["attrs"]["href"] == _page_of(tickets[QUEUED[0]])
     assert "queued" in _text(queued) and not _all(queued, lambda n: n["tag"] == "canvas")
     idle = _card(board, "#".join(tickets[VERDICT[0]]))
-    assert not _all(idle, lambda n: _job_link(n) or n["tag"] == "canvas")
+    assert not _all(idle, lambda n: n["tag"] == "canvas")
+    assert _id_link(idle)["attrs"]["href"] == _page_of(tickets[VERDICT[0]])
+    assert not _all(_dom(board), _job_link)
     assert "no job running" not in _text(idle)
     assert _text(_one(idle, _cls("chip"))) == "routed" and VERDICT[1] in _text(idle)
     assert {_text(node) for node in _all(_dom(board), _cls("tk-tag"))} == {"github", "linear"}
@@ -457,6 +470,17 @@ def _check_stopped_column(markup: dict[str, str], rows: list[dict]) -> None:
     assert not _all(_dom(markup["shipped"]), _attr("data-phase"))
 
 
+def _check_id_links(markup: str, rows: list[dict]) -> None:
+    by_key = {_key(row): row for row in rows}
+    cards = _all(_dom(markup), _cls("tk-card"))
+    assert cards
+    for card in cards:
+        row = by_key[card["attrs"]["data-ticket"]]
+        link = _id_link(card)
+        assert link["attrs"]["href"] == ticket_page_href(row), card["attrs"]["data-ticket"]
+        assert _text(link) == f"{row['repo'].rsplit('/', 1)[-1]}#{row['ticket_id']}"
+
+
 def test_stopped_is_the_sixth_column_with_every_stuck_and_capped_ticket(snapshot: dict) -> None:
     assert any(r["state"] == "capped" for r in snapshot["tickets"])
     _check_stopped_column(_server(snapshot), snapshot["tickets"])
@@ -468,6 +492,15 @@ def test_script_stopped_column_matches_the_server(tmp_path: Path, snapshot: dict
     out = _script(tmp_path, snapshot)
     _check_stopped_column(out["html"], snapshot["tickets"])
     assert out["html"]["pipeline"] == _server(snapshot)["pipeline"]
+
+
+def test_every_card_id_links_its_ticket_page(snapshot: dict) -> None:
+    _check_id_links(_server(snapshot)["pipeline"], snapshot["tickets"])
+
+
+@layout.needs_node
+def test_script_card_ids_link_their_ticket_page(tmp_path: Path, snapshot: dict) -> None:
+    _check_id_links(_script(tmp_path, snapshot)["html"]["pipeline"], snapshot["tickets"])
 
 
 def test_without_a_chart_the_board_says_so_and_the_table_lists_every_ticket(tmp_path: Path) -> None:
