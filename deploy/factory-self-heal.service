@@ -4,6 +4,7 @@ Description=Factory self-heal: restart down or stale-code components (deploy/sel
 [Service]
 Type=oneshot
 ExecStart=%h/factory/deploy/self-heal.sh once
+SuccessExitStatus=79
 # Services self-heal restarts must outlive this oneshot run.
 KillMode=process
 Environment=PYTHONUNBUFFERED=1

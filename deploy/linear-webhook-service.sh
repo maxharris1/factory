@@ -16,6 +16,11 @@
 #                                                cron lines, see below)
 #   linear-webhook-service.sh remove-autostart   remove them
 #
+# On a host retired as the orch host (~/.config/factory/orch-retired), start,
+# restart, ensure and the two loops do nothing and exit 79, so no listener
+# writes to orch.db after orch-move.sh export; stop, status,
+# install-autostart and remove-autostart still work.
+#
 # deploy/self-heal.sh restarts a down or stale-code listener or tunnel with
 # `linear-webhook-service.sh restart` (issue #107). A restart whose stop
 # fails drops the hold that stop just wrote, so ensure and self-heal still
@@ -215,6 +220,17 @@ service_lock() {
     mkdir -p "$STATE"
     exec 9>>"$SERVICE_LOCK"
     flock 9
+}
+
+retired() {
+    [[ -e "${CONFIG}/orch-retired" ]]
+}
+
+refuse_if_retired() {
+    local retired="${CONFIG}/orch-retired"
+    retired || return 0
+    echo "linear-webhook-service: refusing to $1 on a host retired as the orch host (${retired}: $(head -n 1 "$retired" 2>/dev/null || true))" >&2
+    exit 79
 }
 
 # --- the loops ---------------------------------------------------------------
@@ -852,13 +868,13 @@ remove_autostart() {
 }
 
 case "$COMMAND" in
-    _listener-loop) factory_host_pidns_or_refuse _listener-loop && check_settings && need_flock && listener_loop ;;
-    _tunnel-loop) factory_host_pidns_or_refuse _tunnel-loop && check_settings && need_flock && tunnel_loop ;;
-    start) factory_host_pidns_or_refuse start && check_settings && need_flock && service_lock && rm -f "$HELD" && start ;;
+    _listener-loop) factory_host_pidns_or_refuse _listener-loop && refuse_if_retired _listener-loop && check_settings && need_flock && listener_loop ;;
+    _tunnel-loop) factory_host_pidns_or_refuse _tunnel-loop && refuse_if_retired _tunnel-loop && check_settings && need_flock && tunnel_loop ;;
+    start) factory_host_pidns_or_refuse start && refuse_if_retired start && check_settings && need_flock && service_lock && refuse_if_retired start && rm -f "$HELD" && start ;;
     stop) factory_host_pidns_or_refuse stop && need_flock && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && check_settings && need_flock && service_lock && restart ;;
+    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && check_settings && need_flock && service_lock && refuse_if_retired restart && restart ;;
     status) need_flock && status ;;
-    ensure) factory_host_pidns_or_refuse ensure && check_settings && need_flock && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && check_settings && need_flock && service_lock && refuse_if_retired ensure && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;
