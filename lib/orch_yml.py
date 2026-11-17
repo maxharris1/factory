@@ -54,6 +54,7 @@ LINEAR_RECONCILE_MAX_SECONDS = 3600
 DEFAULT_TUNNEL_ALERT_MINUTES = 30
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_ISSUE_REF = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -101,6 +102,8 @@ _PROJECT_KEYS = {
     "linear_ready_for_review",
     "ready_starts_review",
     "intake",
+    "driver_inbox",
+    "grok_webhook",
 }
 _INTAKE_KEYS = {
     "label",
@@ -145,6 +148,12 @@ class Intake:
 
 
 @dataclass(frozen=True)
+class DriverInbox:
+    repo: str
+    number: int
+
+
+@dataclass(frozen=True)
 class Project:
     repo: str
     job_timeout: int | None = None
@@ -157,6 +166,8 @@ class Project:
     ready_starts_review: bool = False
     # Backlog feeder intake (issue #85). None: the feeder ignores the project.
     intake: Intake | None = None
+    driver_inbox: DriverInbox | None = None
+    grok_webhook: bool = True
 
     def base_for(self, linear_project_id: str | None) -> str | None:
         if self.intake is not None and linear_project_id in self.intake.base_branches:
@@ -666,6 +677,37 @@ def _projects(
             if intake is None:
                 ok = False
                 continue
+        driver_inbox = None
+        if "driver_inbox" in item:
+            value = item["driver_inbox"]
+            match = _ISSUE_REF.fullmatch(value) if isinstance(value, str) else None
+            if match is None:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"projects[{index}].driver_inbox must be owner/name#<issue number>",
+                    )
+                )
+                ok = False
+                continue
+            driver_inbox = DriverInbox(match.group(1), int(match.group(2)))
+        grok_webhook = item.get("grok_webhook", True)
+        if not isinstance(grok_webhook, bool):
+            findings.append(
+                Finding("error", f"projects[{index}].grok_webhook must be true or false")
+            )
+            ok = False
+            continue
+        if not grok_webhook and driver_inbox is None:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].grok_webhook: false requires driver_inbox,"
+                    " or its wakes go nowhere",
+                )
+            )
+            ok = False
+            continue
         projects.append(
             Project(
                 repo=repo,
@@ -676,8 +718,22 @@ def _projects(
                 linear_ready_for_review=linear_ready,
                 ready_starts_review=ready_starts_review,
                 intake=intake,
+                driver_inbox=driver_inbox,
+                grok_webhook=grok_webhook,
             )
         )
+    if not ok:
+        return None
+    for index, project in enumerate(projects):
+        inbox = project.driver_inbox
+        if inbox is not None and inbox.repo.lower() not in seen:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].driver_inbox repo {inbox.repo} is not a configured project",
+                )
+            )
+            ok = False
     if not ok:
         return None
     return tuple(projects)

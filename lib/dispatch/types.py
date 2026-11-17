@@ -305,6 +305,15 @@ class ReviewActions(Protocol):
         ...
 
 
+class IssueComments(Protocol):
+    def issue_has_marker(self, repo: str, number: int, marker: str) -> bool:
+        """Whether this login has a comment carrying marker on issue `number` in repo."""
+        ...
+
+    def post_issue_comment(self, repo: str, number: int, body: str) -> None:
+        ...
+
+
 class GrokDelivery(Protocol):
     """Push a Grok job and return a non-empty delivery receipt.
 

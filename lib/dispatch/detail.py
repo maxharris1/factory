@@ -40,11 +40,22 @@ class DetailMixin:
                 excluded_job_ids=deferred,
             )
         ) is not None:
+            route = self._wake_route(job)
+            inbox = route.driver_inbox if route is not None else None
             try:
-                receipt = self.grok_delivery.deliver(
-                    job,
-                    logical_key=_grok_logical_key(job),
-                )
+                if inbox is not None and not route.grok_webhook:
+                    self._queue_inbox_post(job, inbox)
+                    receipt = f"inbox:{_grok_logical_key(job)}"
+                else:
+                    if inbox is not None:
+                        try:
+                            self._queue_inbox_post(job, inbox)
+                        except Exception as exc:
+                            self._record_job_error(job, exc, prefix="driver-inbox:")
+                    receipt = self.grok_delivery.deliver(
+                        job,
+                        logical_key=_grok_logical_key(job),
+                    )
                 if not isinstance(receipt, str) or not receipt:
                     raise ValueError("Grok delivery receipt must be a non-empty string")
                 self.queue.finish(

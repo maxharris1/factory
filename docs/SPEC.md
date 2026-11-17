@@ -497,6 +497,8 @@ projects:
     # grok_bot: project-bot
     # linear_ready_for_review: false
     # ready_starts_review: false
+    # driver_inbox: owner/name#123    # optional: copy each Grok wake to this issue
+    # grok_webhook: true              # false only with driver_inbox
     # optional job_timeout: 60
     # Optional backlog feeder intake (issue #85). Absent: not fed.
     # intake:
@@ -812,6 +814,21 @@ the trust and head rules above decide, and the poller writes the label once
 it tracks the PR (issue #59). Only that trusted `ready` admits an unlabelled
 PR: a Grok `brief` or `go` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`
 or `go` on a labelled PR starts tracking.
+
+`driver_inbox` (optional, issue #737) names one GitHub issue as
+`owner/name#<n>`. Its repo must be a configured project. With it set, each
+Grok wake for the project's tickets is also posted on that issue as one
+comment: the wake kind, repo, ticket, PR link, cause link and detail. A wake
+from another repo than the inbox's carries IDs and links only, never its
+detail text, and a Linear link loses its title slug; a same-repo detail is
+redacted. A comment is posted once per
+wake job, across restarts. The post runs after Grok delivery, at most 10 per
+poll; a failed post stops that poll's posts, is recorded as a
+`driver-inbox:` poll error and is retried on the next poll, and never holds
+up a Grok wake. `grok_webhook` defaults to `true`. `false` (allowed only
+with `driver_inbox`) finishes each wake with an `inbox:` receipt and sends
+nothing to Grok's webhook. The top-level `grok` block is needed only while a
+project keeps `grok_webhook` on.
 
 ## 8. Review and merge rules
 

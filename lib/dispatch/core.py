@@ -45,7 +45,7 @@ from lib.dispatch.types import (
 )
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import JobStateConfig
-from lib.orch_yml import Approvals
+from lib.orch_yml import Approvals, Project
 from lib.queue import QueueError, SQLiteJobQueue
 
 
@@ -58,6 +58,7 @@ class DispatcherBase:
         trusted_logins: Mapping[str, object],
         review_actions: ReviewActions | Mapping[str, ReviewActions],
         grok_delivery: GrokDelivery,
+        projects: Sequence[Project] = (),
         hooks: Sequence[Hook] = (),
         devices: DeviceChecks | None = None,
         job_states: JobStateConfig | None = None,
@@ -84,6 +85,7 @@ class DispatcherBase:
         self.trusted_logins = _normalize_trusted_logins(trusted_logins)
         self.review_actions = review_actions
         self.grok_delivery = grok_delivery
+        self.wake_routes = {project.repo.lower(): project for project in projects}
         self.hooks = tuple(hooks)
         self.devices = devices
         self.job_states = job_states if job_states is not None else JobStateConfig()
