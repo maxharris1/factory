@@ -120,6 +120,42 @@ def test_answers_or_an_approver_go_build_with_the_plan(tmp_path: Path, author: s
     assert "## Proposed split" in task.split("## Plan\n", 1)[1]
 
 
+@pytest.mark.parametrize(
+    ("author", "body"), [("grok-login", ANSWERS), (MAX, "/go\nBuild it.")], ids=["answers", "slash-go"]
+)
+def test_an_edit_after_the_size_wait_does_not_change_the_plan_that_builds(
+    tmp_path: Path, author: str, body: str
+) -> None:
+    flow = SizeFlow(tmp_path)
+    assert flow.plan("500", "ac=met lines=760") == "waiting-max-size"
+    flow.comments[-1] = replace(
+        flow.comments[-1],
+        body=plan_header("ac=met lines=760") + "REPLACEMENT plan not present in the size wake.",
+        edited_at=flow.now[0] + 1,
+    )
+
+    assert flow.say("501", body, author) == "resumed-build"
+
+    assert json.loads(flow.claim("build").request.detail)["plan_text"] == PLAN_BODY.strip()
+    assert flow.state()["paused_plan_text"] is None
+
+
+def test_an_estimate_past_nine_digits_is_ignored_and_nine_digits_park(tmp_path: Path) -> None:
+    flow = SizeFlow(tmp_path)
+    flow.finish_with("500")
+    flow.now[0] += 10
+    flow.comments.append(
+        comment("500", plan_header("ac=met lines=" + "9" * 4301) + PLAN_BODY, author="claude-login", created_at=flow.now[0])
+    )
+
+    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.process(flow.snapshot())
+
+    assert flow.state()["workflow_state"] == "planning"
+    assert job_count(flow.queue, "build") == 0
+    assert flow.say("501", plan_header("ac=met lines=999999999") + PLAN_BODY, "claude-login") == "waiting-max-size"
+
+
 def test_a_go_from_a_bot_leaves_the_size_wait(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path)
     assert flow.plan("500", "ac=met lines=760") == "waiting-max-size"
