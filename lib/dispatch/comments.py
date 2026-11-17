@@ -6,7 +6,7 @@ import math
 import sqlite3
 from collections.abc import Mapping, Sequence
 
-from lib.approver_commands import parse_slash_go
+from lib.approver_commands import SlashQa, parse_slash_go, parse_slash_qa
 from lib.dispatch.constants import FINISHED_STATES, WATCHED_STATES
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
@@ -175,6 +175,8 @@ class CommentsMixin:
             if fields is None:
                 if parse_slash_go(comment.body) is not None:
                     self._mark_handled(ticket, comment.id, self._slash_go(ticket, comment))
+                elif (ruling := parse_slash_qa(comment.body)) is not None:
+                    self._mark_handled(ticket, comment.id, self._slash_qa(ticket, comment, ruling))
                 continue
             kind = fields["kind"]
             if kind == "ok" and _holds(ticket):
@@ -310,6 +312,13 @@ class CommentsMixin:
             or self._resume_paused(ticket, comment)
         )
         return "slash-go-no-target" if resumed is None else resumed[1]
+
+    def _slash_qa(self, ticket: TrackedTicket, comment: Comment, command: SlashQa) -> str:
+        if comment.edited_at is not None:
+            return "rejected-edited"
+        if not self.approvals.may_approve(comment.author):
+            return "qa-ruling-not-from-approver"
+        return self._qa_ruling(ticket, comment, command)
 
     def _after_finish(
         self, ticket: TrackedTicket, comment: Comment, fields: Mapping[str, str] | None
