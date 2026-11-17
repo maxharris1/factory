@@ -121,8 +121,7 @@ TILE_STATE: dict[str, dict] = {
 
 GLYPH_ORDER = [2, 0, 1, 3]
 
-# The step a ticket held for CI starts once its checks go green, by ci_wait reason.
-CI_NEXT = {"ci-pending": "review", "approved-ci-pending": "merge"}
+STEP_AFTER_CI = {"ci-pending": "review", "approved-ci-pending": "merge"}
 
 # Queue speed by wait age, through the Bits rail's anchors (0:40 → 1, 6:10 → 2.5, 22:05 → 5).
 QUEUE_SPEED = [[40, 1.0], [370, 2.5], [1325, 5.0]]
@@ -135,7 +134,7 @@ _BAD = "#f7768e"
 
 def lanes_table() -> dict:
     return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
-            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "ci_next": CI_NEXT, "ci_tint": CI_TINT}
+            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "step_after_ci": STEP_AFTER_CI, "ci_tint": CI_TINT}
 
 
 def queue_speed(age: object) -> float:
@@ -383,7 +382,7 @@ SCRIPT = r"""
 
   function ciCard(r) {
     var ci = r.ci_wait;
-    var step = LANES.ci_next.hasOwnProperty(ci.reason) ? LANES.ci_next[ci.reason] : null;
+    var step = LANES.step_after_ci.hasOwnProperty(ci.reason) ? LANES.step_after_ci[ci.reason] : null;
     var card = el('div', 'tile ci');
     add(card, PX.strip('ci-' + r.repo + '#' + r.ticket_id, {effect: 'static', tint: LANES.ci_tint, height: 8}));
     var bodyEl = add(card, el('div', 'tile-body'));
@@ -781,7 +780,7 @@ def _ci_card(row: dict) -> str:
     from lib.dashboard_pages.shell import px_strip
 
     ci = row["ci_wait"]
-    step = CI_NEXT.get(ci["reason"])
+    step = STEP_AFTER_CI.get(ci["reason"])
     strip = px_strip(f"ci-{row['repo']}#{row['ticket_id']}", effect="static", tint=CI_TINT, height=8)
     line3 = (
         (_span("action", f"then {step}") if step else "")
