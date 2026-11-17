@@ -27,6 +27,7 @@ _STEP_BY_REASON: Mapping[str, RetryStep] = {
     "ci-red-3": "ci-fix",
     "plan-gaps-2": "plan",
     "update-failed-2": "update",
+    "ready-at-base-2": "build",
 }
 _STEP_BY_STATE: Mapping[str, RetryStep] = {
     "planning": "plan",

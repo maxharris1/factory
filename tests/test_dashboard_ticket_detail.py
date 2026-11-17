@@ -55,7 +55,7 @@ def _article(snapshot: dict) -> str:
 
 
 def _journey(article: str) -> str:
-    return re.search(r'<section class="jd-panel"><h2><span class="t">Journey</span>.*?</section>', article, re.S).group(0)
+    return re.search(r'<section class="jd-panel"[^>]*><h2><span class="t">Journey</span>.*?</section>', article, re.S).group(0)
 
 
 def test_run_log_and_journey_render_from_one_list(tmp_path: Path) -> None:
@@ -1418,7 +1418,7 @@ def _text(fragment: str) -> str:
 
 
 def _panel(markup: str, title: str) -> str:
-    return re.search(rf'<section class="jd-panel[^"]*"><h2><span class="t">{title}</span>.*?</section>', markup, re.S).group(0)
+    return re.search(rf'<section class="jd-panel[^"]*"(?: data-sec="[a-z]+")?><h2><span class="t">{title}</span>.*?</section>', markup, re.S).group(0)
 
 
 def _count(panel: str) -> str:
@@ -1893,3 +1893,159 @@ def test_a_hostile_stop_reason_place_and_state_are_escaped_in_both_renders(tmp_p
         for escaped in ("&lt;img src=x onerror=y&gt;", "&lt;b&gt;planning&lt;/b&gt;", "&lt;i&gt;out&lt;/i&gt;",
                         "&lt;u&gt;why&lt;/u&gt;"):
             assert escaped in why, (render, escaped)
+
+
+PHONE_ORDER = ["hero", "liverun", "journey", "runlog", "next", "chart"]
+PHONE_SECS = {"running": PHONE_ORDER, "queued": PHONE_ORDER, "idle": ["hero", "journey", "runlog", "next", "chart"],
+              "shipped": ["hero", "summary", "journey", "runlog", "ended", "chart"], "stopped": ["hero", "journey", "runlog", "chart"]}
+ADDRESS = {**{k: a for k, (a, _) in LIVE.items()}, **RECORD}
+
+
+def _secs(markup: str) -> list[str]:
+    return re.findall(r'<(?:section|details) class="jd-[^"]*" (?:id="[^"]*" )?data-sec="([a-z]+)"', markup)
+
+
+@needs_node
+@pytest.mark.parametrize("kind", PHONE_SECS)
+def test_both_renders_name_each_section_for_the_phone_order(tmp_path: Path, kind: str) -> None:
+    views = _both(tmp_path, _with_shipped(_snapshot(tmp_path)), ADDRESS[kind])
+    secs = [s for s in PHONE_SECS[kind] if s != "hero"]
+    desktop = ["runlog", *(s for s in secs if s != "runlog")]
+    for render, markup in views.items():
+        assert _secs(markup) == desktop, render
+
+
+PHONE_LAYOUT = r"""
+(() => {
+  const art = document.querySelector('article.ticketpage');
+  const box = n => n && n.getBoundingClientRect();
+  const tops = {hero: box(art.querySelector('.jd-hero'))};
+  art.querySelectorAll('[data-sec]').forEach(n => { tops[n.dataset.sec] = box(n); });
+  const tiles = [...art.querySelectorAll('.jd-hero .jd-tile')].map(box);
+  const chart = art.querySelector('details.jd-chart');
+  return {order: Object.entries(tops).filter(([, r]) => r).sort((a, b) => a[1].top - b[1].top).map(([k]) => k),
+          runlog: tops.runlog && [tops.runlog.left, tops.runlog.right], journey: tops.journey && [tops.journey.left, tops.journey.right],
+          cols: new Set(tiles.map(r => Math.round(r.left))).size, rows: new Set(tiles.map(r => Math.round(r.top))).size,
+          open: chart.open, scrollWidth: document.documentElement.scrollWidth, innerWidth: innerWidth};
+})()"""
+
+
+def _ticket_at(chrome: _Chrome, base: str, address: str, width: int) -> None:
+    chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=width, height=800, deviceScaleFactor=1,
+                mobile=width < 700)
+    _open(chrome, f"{base}ticket.html#t={_quote(address)}",
+          f"document.querySelector('article.ticketpage[data-ticket=\"{address}\"] canvas.jd-journey')")
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_on_a_phone_the_ticket_page_reads_live_run_journey_run_log_next_then_chart(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    found = {}
+    try:
+        for kind in PHONE_SECS:
+            for width in (375, 1440):
+                _ticket_at(chrome, base, ADDRESS[kind], width)
+                found[kind, width] = chrome.run(PHONE_LAYOUT)
+    finally:
+        chrome.close()
+        server.shutdown()
+    for kind, order in PHONE_SECS.items():
+        phone, desk = found[kind, 375], found[kind, 1440]
+        assert phone["order"] == order, kind
+        assert (phone["cols"], phone["rows"]) == (2, 2), kind
+        assert phone["open"] is False, kind
+        assert phone["scrollWidth"] == phone["innerWidth"] == 375, kind
+        assert desk["runlog"][1] <= desk["journey"][0], kind
+
+
+def _current_node(snapshot: dict, address: str) -> tuple[float, float]:
+    from lib.dashboard_flow import flowmap_layout
+    found = ticket_detail.resolve_ticket(snapshot, address, snapshot.get(RECORDS))
+    model = ticket_detail._detail_model(found["row"], snapshot["statechart"])
+    state = model["end"]["state"] if model["ended"] == "stopped" else model["state"]
+    layout = flowmap_layout(snapshot["statechart"])
+    node = next(n for n in layout["nodes"] if n["name"] == state)
+    cell = layout["grid"]["cell"]
+    return node["x"] * cell, (node["x"] + layout["node"]["w"]) * cell
+
+
+CHART_OPEN = "window.oldTicket = document.querySelector('article.ticketpage'); oldTicket.querySelector('details.jd-chart').open = true"
+
+CHART_VIEW = r"""
+(async () => {
+  await new Promise(r => setTimeout(r, 300));
+  const chart = document.querySelector('article.ticketpage details.jd-chart');
+  const box = chart.querySelector('.jd-box');
+  return {open: chart.open, left: box.scrollLeft, width: box.clientWidth, scroll: box.scrollWidth,
+          page: document.documentElement.scrollWidth, inner: innerWidth};
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+@pytest.mark.parametrize("kind", ["running", "shipped", "stopped"])
+def test_on_a_phone_the_state_chart_opens_on_the_current_state_in_its_own_scroll_box(tmp_path: Path, kind: str) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    live = kind in LIVE
+    views = {}
+    try:
+        if not live:
+            records.set()
+        _ticket_at(chrome, base, ADDRESS[kind], 375)
+        chrome.run(CHART_OPEN)
+        views[375, "opened"] = chrome.run(CHART_VIEW)
+        if live:
+            records.set()
+            chrome.wait_for("!window.oldTicket.isConnected", "the records redraw")
+            views[375, "redrawn"] = chrome.run(CHART_VIEW)
+        _ticket_at(chrome, base, ADDRESS[kind], 320)
+        views[320, "resized"] = chrome.run(CHART_VIEW)
+    finally:
+        records.set()
+        chrome.close()
+        server.shutdown()
+    left, right = _current_node(snapshot, ADDRESS[kind])
+    for (width, when), view in views.items():
+        assert view["open"] and view["width"] < 1000 and view["scroll"] == 1000, (width, when, view)
+        assert view["left"] <= left and right <= view["left"] + view["width"], (width, when, view, left, right)
+        assert view["page"] == view["inner"] == width, (width, when)
+
+
+LIVE_RUN_STACK = r"""
+(() => {
+  const lr = document.querySelector('article.ticketpage .lr');
+  const top = s => lr.querySelector(s).getBoundingClientRect().top;
+  const cols = [...lr.querySelectorAll('.lr-col')].map(c => c.getBoundingClientRect().top);
+  const tiles = [...lr.querySelectorAll('.lr-tile')].map(t => t.getBoundingClientRect());
+  return {head: top('.lr-head'), plan: cols[0], agents: cols[1], tiles: top('.lr-tiles'),
+          xs: new Set(tiles.map(r => Math.round(r.left))).size, ys: new Set(tiles.map(r => Math.round(r.top))).size};
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_on_a_phone_live_run_stacks_task_plan_sub_agents_then_tiles_two_by_two(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot)["telemetry"] = {
+        "tokens_in": 1240000, "tokens_cached": 1080000, "tokens_out": 18200, "cost_usd": 0.94, "files_touched": 7,
+        "commands": 23, "current_task": "Re-run the dashboard tests", "last_finished": "Update the golden page digests",
+        "plan": [{"text": "Read the review notes", "status": "done"}, {"text": "Re-run the dashboard tests", "status": "in_progress"}],
+        "subagents": [{"kind": "Explore", "description": "Find the tile tests", "status": "running"}]}
+    server = _serve(tmp_path, {"fixture": snapshot})
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    found = {}
+    try:
+        for width in (375, 680):
+            _ticket_at(chrome, base, LIVE["running"][0], width)
+            found[width] = chrome.run(LIVE_RUN_STACK)
+    finally:
+        chrome.close()
+        server.shutdown()
+    for width, lr in found.items():
+        assert lr["head"] < lr["plan"] < lr["agents"] < lr["tiles"], (width, lr)
+        assert (lr["xs"], lr["ys"]) == (2, 2), (width, lr)
