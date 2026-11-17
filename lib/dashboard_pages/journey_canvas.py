@@ -65,6 +65,7 @@ function journeyFmt(sec) {
   var m = Math.floor(sec / 60), s = sec % 60;
   if (sec < 3600) return (s && m < 10) ? m + 'm ' + (s < 10 ? '0' : '') + s + 's' : m + 'm';
   var h = Math.floor(m / 60);
+  if (h >= 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
   m = m % 60;
   return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
 }
@@ -79,23 +80,30 @@ function journeyClock(epoch) {
   return JOURNEY_ET.format(new Date(epoch * 1000));
 }
 
+function journeyEnded(model) {
+  var e = model && model.ended;
+  return e === 'shipped' || e === 'stopped' ? e : '';
+}
+
 function journeyLayout(model, scale) {
   var visits = (model && model.visits) || [];
-  var n = visits.length, LX0 = 24, PW = 176;
+  var ended = journeyEnded(model), live = !ended;
+  var n = visits.length, LX0 = 24, PW = live ? 176 : 192, endW = 12;
+  var timed = live ? n : Math.max(0, n - 1);
   var bg = [14, 14, 20], white = [255, 255, 255];
-  var i, d, v, lane, hex, rgb, x;
+  var i, d, v, lane, hex, rgb, x, last;
   var durs = [], total = 0;
   for (i = 0; i < n; i++) {
     d = Number(visits[i].duration_seconds);
     durs.push(isFinite(d) && d > 0 ? d : 0);
-    total += durs[i];
+    if (i < timed) total += durs[i];
   }
   var toScale = scale === 'scale' && !!model.all_durations_known && total > 0;
   var even = Math.max(6, Math.min(24, Math.floor(PW / Math.max(1, n))));
   if (even * n > PW) even = Math.max(1, Math.floor(PW / n));
   var w = [], sum = 0, big = 0;
   for (i = 0; i < n; i++) {
-    w.push(toScale ? Math.max(3, Math.round(PW * durs[i] / total)) : even);
+    w.push(!toScale ? even : i < timed ? Math.max(3, Math.round((PW - (n - timed) * endW) * durs[i] / total)) : endW);
     sum += w[i];
     if (w[i] > w[big]) big = i;
   }
@@ -108,18 +116,19 @@ function journeyLayout(model, scale) {
   x = LX0;
   for (i = 0; i < n; i++) {
     v = visits[i];
-    lane = JOURNEY.lane[v.state] || 'ask';
-    hex = v.stop ? JOURNEY.stop : (JOURNEY.tint[v.who] || JOURNEY.tint.script);
+    last = ended && i === n - 1;
+    lane = !last ? (JOURNEY.lane[v.state] || 'ask') : ended === 'shipped' ? 'shipped' : 'stop';
+    hex = v.stop || lane === 'stop' ? JOURNEY.stop : (JOURNEY.tint[v.who] || JOURNEY.tint.script);
     rgb = journeyRgb(hex);
     bars.push({
       index: v.index === undefined ? i : v.index, name: String(v.state),
       x: x, w: w[i], y0: JOURNEY_LANE_Y[lane], lane: lane,
-      offChart: !!v.off_chart, stop: !!v.stop,
+      offChart: !!v.off_chart, stop: !!v.stop, end: last,
       lit: hex, dim: journeyMix(bg, rgb, 0.3), crest: journeyMix(rgb, white, 0.5), ink: journeyMix(rgb, white, 0.35)
     });
     if (!toScale) {
       ticks.push(x);
-      ruler.push({ label: journeyFmt(v.duration_seconds), left: x * 4, width: w[i] * 4, color: i === cur ? '#7dcfff' : '#8b93b8' });
+      if (!last) ruler.push({ label: journeyFmt(v.duration_seconds), left: x * 4, width: w[i] * 4, color: live && i === cur ? '#7dcfff' : '#8b93b8' });
     }
     x += w[i];
   }
@@ -128,7 +137,7 @@ function journeyLayout(model, scale) {
 
   if (toScale) {
     var acc = 0, k = 1, tx;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < timed; i++) {
       while (durs[i] > 0 && k * 900 <= acc + durs[i]) {
         tx = Math.round(bars[i].x + (k * 900 - acc) / durs[i] * bars[i].w);
         ticks.push(tx);
@@ -137,10 +146,11 @@ function journeyLayout(model, scale) {
       }
       acc += durs[i];
     }
+    if (timed < n) ticks.push(bars[n - 1].x);
   }
 
   return {
-    bars: bars, cur: cur, nowX: nowX, endX: nowX + 49, ticks: ticks, ruler: ruler,
+    bars: bars, cur: cur, nowX: nowX, endX: live ? nowX + 49 : nowX + 1, ticks: ticks, ruler: ruler, ended: ended,
     green: journeyMix(bg, journeyRgb('#9ece6a'), 0.34), red: journeyMix(bg, journeyRgb(JOURNEY.stop), 0.3)
   };
 }
@@ -155,19 +165,23 @@ function drawJourney(ctx, model, opts) {
   opts = opts || {};
   var L = journeyLayout(model, opts.scale);
   var bars = L.bars, n = bars.length, cur = L.cur, bay = JOURNEY_BAYER;
+  var shipped = L.ended === 'shipped', stopped = L.ended === 'stopped', live = !L.ended;
   var reduced = !!opts.reduced;
-  var still = reduced || !!opts.still || !!model.terminal || (n > 0 && bars[cur].stop);
-  var lively = !still;
+  var still = reduced || !!opts.still || stopped || (live && (!!model.terminal || (n > 0 && bars[cur].stop)));
+  var drawIn = !still;
+  var lively = drawIn && live;
   var t = Math.max(0, Number(opts.t) || 0);
-  var frac = reduced ? 1 : Math.min(1, t / 3);
+  var frac = (reduced || stopped) ? 1 : Math.min(1, t / 3);
   var arrived = frac >= 1;
-  var hops = Number(model.hops_to_shipped) || 0;
+  var hops = live ? Number(model.hops_to_shipped) || 0 : 0;
   var beat = opts.beat === undefined || opts.beat === null ? -1 : Number(opts.beat);
   var beatX = (lively && arrived && beat >= 0) ? 24 + beat * (L.nowX + 6 - 24) : -99;
+  var st = (shipped && arrived && !still) ? Math.min(1, Math.max(0, (t - 3) / 1.4)) : 1;
+  var front = 24 + (st / 0.7) * (248 - 24 + 8);
   var marchK = Math.floor(t * 8);
   var slow = Math.floor(t * 3);
   var block = function (bx, by, bw, bh) { ctx.fillRect(bx * 4, by * 4, bw * 4, bh * 4); };
-  var i, x, y, v, nx, k, a, b, step, bw, prevMid, ph;
+  var i, x, y, v, nx, k, a, b, step, bw, prevMid, ph, hot, dens;
 
   ctx.fillStyle = '#0e0e14';
   ctx.fillRect(0, 0, 1000, 336);
@@ -177,10 +191,24 @@ function drawJourney(ctx, model, opts) {
   for (i = 0; i < rules.length; i++) {
     for (x = 24; x < 248; x += 3) block(x, rules[i], 1, 1);
   }
-  ctx.fillStyle = L.green;
-  for (y = 4; y < 12; y++) {
-    for (x = L.nowX + 1; x < 248; x++) {
-      if ((lively ? 0.15 + 0.11 * Math.sin(t * 0.9 + ((x * 73 + y * 151) % 64) * 0.098) : 0.16) > bay[((y & 7) << 3) | (x & 7)]) block(x, y, 1, 1);
+  if (live) {
+    ctx.fillStyle = L.green;
+    for (y = 4; y < 12; y++) {
+      for (x = L.nowX + 1; x < 248; x++) {
+        if ((lively ? 0.15 + 0.11 * Math.sin(t * 0.9 + ((x * 73 + y * 151) % 64) * 0.098) : 0.16) > bay[((y & 7) << 3) | (x & 7)]) block(x, y, 1, 1);
+      }
+    }
+  } else if (shipped && arrived) {
+    for (y = 4; y < 12; y++) {
+      for (x = 24; x < 248; x++) {
+        if (x > front) continue;
+        hot = st < 1 && front - x < 8;
+        dens = hot ? 0.85 : 0.16 + 0.3 * (1 - st);
+        if (dens > bay[((y & 7) << 3) | (x & 7)]) {
+          ctx.fillStyle = hot ? '#9ece6a' : L.green;
+          block(x, y, 1, 1);
+        }
+      }
     }
   }
   ctx.fillStyle = L.red;
@@ -194,10 +222,12 @@ function drawJourney(ctx, model, opts) {
 
   ctx.fillStyle = '#414868';
   block(24, 74, L.nowX - 24, 1);
-  for (x = L.nowX + 2; x < 248; x += 3) block(x, 74, 1, 1);
+  if (live) {
+    for (x = L.nowX + 2; x < 248; x += 3) block(x, 74, 1, 1);
+  }
   for (i = 0; i < L.ticks.length; i++) block(L.ticks[i], 73, 1, 3);
 
-  if (arrived) {
+  if (arrived && live) {
     ctx.fillStyle = '#3c6f8c';
     for (y = 4; y < 74; y++) {
       if (lively ? ((y + slow) % 4) < 2 : y % 2 === 0) block(L.nowX, y, 1, 1);
@@ -221,6 +251,11 @@ function drawJourney(ctx, model, opts) {
       }
     }
   }
+  if (arrived && shipped) {
+    ctx.fillStyle = (st < 1 && Math.floor(st * 8) % 2 === 0) ? '#d6efbf' : '#9ece6a';
+    block(L.endX, 4, 1, 7);
+    block(L.endX + 1, 4, 3, 3);
+  }
 
   var revealX = arrived ? L.nowX : 24 + frac * (L.nowX - 24);
   var tokenX = 24, tokenY = n ? bars[0].y0 : 49;
@@ -230,25 +265,38 @@ function drawJourney(ctx, model, opts) {
     bw = Math.max(1, Math.min(v.w - 1, Math.ceil(revealX - v.x)));
     tokenX = v.x + bw;
     tokenY = v.y0;
-    if (arrived && i === cur) {
+    if (arrived && live && i === cur) {
       ctx.fillStyle = v.lit;
       block(v.x, v.y0 + 2, bw, 5);
       for (x = v.x; x < v.x + bw; x++) {
         ctx.fillStyle = (still || ((((x - marchK) % 6) + 6) % 6) < 3) ? v.crest : v.dim;
         block(x, v.y0 + 6, 1, 1);
       }
+    } else if (stopped && v.end) {
+      ctx.fillStyle = v.dim;
+      block(v.x, v.y0 + 2, bw, 5);
+      ctx.fillStyle = v.lit;
+      for (y = v.y0 + 2; y < v.y0 + 7; y++) {
+        for (x = v.x; x < v.x + bw; x++) {
+          if (y === v.y0 + 2 || 0.42 > bay[((y & 7) << 3) | (x & 7)]) block(x, y, 1, 1);
+        }
+      }
     } else {
       ctx.fillStyle = v.dim;
       block(v.x, v.y0 + 2, bw, 5);
       ctx.fillStyle = v.lit;
       block(v.x, v.y0 + 2, bw, 1);
-      if (!arrived && lively && revealX >= v.x + v.w - 1 && revealX - (v.x + v.w - 1) < 7) {
+      if (!arrived && drawIn && revealX >= v.x + v.w - 1 && revealX - (v.x + v.w - 1) < 7) {
         ctx.fillStyle = v.crest;
         block(v.x, v.y0 + 2, bw, 5);
       }
       if (beatX >= v.x && beatX < v.x + bw + 6) {
         ctx.fillStyle = v.crest;
         for (x = Math.max(v.x, Math.floor(beatX) - 5); x < Math.min(v.x + bw, Math.floor(beatX) + 1); x++) block(x, v.y0 + 2, 1, 1);
+      }
+      if (shipped && arrived && st < 1 && front >= v.x && front - 8 < v.x + bw) {
+        ctx.fillStyle = '#9ece6a';
+        for (x = Math.max(v.x, Math.floor(front) - 7); x < Math.min(v.x + bw, Math.floor(front) + 1); x++) block(x, v.y0 + 2, 1, 1);
       }
     }
     if (i < n - 1 && revealX >= bars[i + 1].x) {
@@ -267,7 +315,7 @@ function drawJourney(ctx, model, opts) {
 
   var sel = Number(opts.selected);
   if (!(sel >= 0 && sel < n)) sel = cur;
-  if (arrived && n && sel !== cur) {
+  if (arrived && n && (!live || sel !== cur)) {
     v = bars[sel];
     ctx.fillStyle = '#c0caf5';
     block(v.x - 1, v.y0 + 1, v.w + 1, 1);
@@ -275,13 +323,13 @@ function drawJourney(ctx, model, opts) {
     block(v.x - 1, v.y0 + 1, 1, 7);
     block(v.x + v.w - 1, v.y0 + 1, 1, 7);
   }
-  if (!reduced && n && Number(opts.flash) > 0) {
+  if (!reduced && !stopped && n && Number(opts.flash) > 0) {
     v = bars[sel];
     ctx.fillStyle = v.crest;
     block(v.x, v.y0 + 2, v.w - 1, 5);
   }
 
-  if (n) {
+  if (n && live) {
     if (arrived) {
       v = bars[cur];
       ctx.fillStyle = '#7dcfff';
@@ -300,13 +348,16 @@ function drawJourney(ctx, model, opts) {
     }
     ctx.fillStyle = (still || Math.floor(t * 2) % 2 === 0) ? '#b8e5ff' : '#7dcfff';
     block(tokenX, tokenY + 1, 2, 7);
+  } else if (n && shipped && !arrived) {
+    ctx.fillStyle = '#d6efbf';
+    block(tokenX, tokenY + 1, 2, 7);
   }
 
   journeyText(ctx, L, opts, hops, arrived ? L.nowX : revealX, arrived);
 }
 
 function journeyText(ctx, L, opts, hops, revealX, arrived) {
-  var i, r, v, tag, tw, spaced = 'letterSpacing' in ctx;
+  var i, r, v, tag, tw, tail, spaced = 'letterSpacing' in ctx;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   ctx.font = '11px ' + JOURNEY_FONT;
@@ -320,13 +371,18 @@ function journeyText(ctx, L, opts, hops, revealX, arrived) {
   for (i = 0; i < L.bars.length; i++) {
     v = L.bars[i];
     if (v.x + v.w > revealX || v.name.length * 6 + 4 > (v.w - 1) * 4) continue;
-    var now = arrived && i === L.cur;
-    ctx.font = (now ? '700' : '500') + ' 10px ' + JOURNEY_FONT;
-    ctx.fillStyle = now ? '#0c0e10' : v.ink;
+    var now = !L.ended && arrived && i === L.cur;
+    var mark = L.ended === 'stopped' && v.end;
+    ctx.font = (now || mark ? '700' : '500') + ' 10px ' + JOURNEY_FONT;
     ctx.save();
     ctx.beginPath();
     ctx.rect(v.x * 4, v.y0 * 4 + 8, (v.w - 1) * 4, 20);
     ctx.clip();
+    if (mark) {
+      ctx.fillStyle = v.dim;
+      ctx.fillRect(v.x * 4 + 3, v.y0 * 4 + 11, ctx.measureText(v.name).width + 4, 14);
+    }
+    ctx.fillStyle = now ? '#0c0e10' : v.ink;
     ctx.fillText(v.name, v.x * 4 + 5, v.y0 * 4 + 18);
     ctx.restore();
   }
@@ -348,10 +404,15 @@ function journeyText(ctx, L, opts, hops, revealX, arrived) {
     ctx.fillStyle = '#a9b1d6';
     ctx.fillText(String(opts.startClock), 10, 311);
   }
-  if (hops > 0) {
-    ctx.fillStyle = '#8b93b8';
-    ctx.fillText('ahead · ' + hops + '+ hops to shipped', L.nowX * 4 + 12, 311);
+  tail = null;
+  if (L.ended === 'shipped' && L.bars.length) tail = ['#9ece6a', L.bars[L.bars.length - 1].name];
+  else if (L.ended === 'stopped') tail = ['#f7768e', 'stopped'];
+  else if (hops > 0) tail = ['#8b93b8', 'ahead · ' + hops + '+ hops to shipped'];
+  if (tail) {
+    ctx.fillStyle = tail[0];
+    ctx.fillText(L.ended && opts.endClock ? tail[1] + ' ' + opts.endClock : tail[1], L.nowX * 4 + 12, 311);
   }
+  if (L.ended) return;
 
   tag = 'NOW · ' + (opts.nowClock ? opts.nowClock + ' ET' : '');
   ctx.font = '700 10px ' + JOURNEY_FONT;

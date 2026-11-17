@@ -62,6 +62,7 @@ Object.keys(input.frames).forEach(function (name) {
       error: null,
       texts: ctx.calls.filter(function (c) { return c[0] === 'fillText'; }).map(function (c) { return c[1]; }),
       rects: ctx.calls.filter(function (c) { return c[0] === 'fillRect'; }).length,
+      fills: ctx.calls.filter(function (c) { return c[0] === 'fillRect'; }).map(function (c) { return c.slice(1); }),
       sig: hash(JSON.stringify(ctx.calls))
     };
   } catch (e) {
@@ -72,7 +73,7 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-def _model(path=PATH, hops=len(FUTURE)) -> dict:
+def _model(path=PATH, hops=len(FUTURE), ended=None) -> dict:
     visits = [
         {
             "index": i, "state": state, "who": who, "started_at": 1000.0 + i,
@@ -81,7 +82,7 @@ def _model(path=PATH, hops=len(FUTURE)) -> dict:
         }
         for i, (state, who, dur, off, stop) in enumerate(path)
     ]
-    return {"visits": visits, "hops_to_shipped": hops, "all_durations_known": True, "terminal": False}
+    return {"visits": visits, "hops_to_shipped": hops, "all_durations_known": True, "terminal": False, "ended": ended}
 
 
 FRAME = {"scale": "even", "selected": 3, "flash": 0, "beat": -1, "reduced": False,
@@ -219,3 +220,108 @@ def test_tint_is_keyed_by_who_with_a_separate_stop_colour() -> None:
 def test_script_is_safe_to_splice_into_the_page() -> None:
     for needle in ("</script", "url(", "src=", "data:", "http://", "https://", "__JOURNEY__"):
         assert needle not in SCRIPT, needle
+
+
+SHIPPED = [
+    ("intake", "script", 20, False, False),
+    ("planning", "claude", 90000, False, False),
+    ("building", "claude", 1480, False, False),
+    ("review", "codex", 400, False, False),
+    ("merge-queue", "script", 1500, False, False),
+    ("merged", "script", 259200, False, False),
+]
+STOPPED = [
+    ("intake", "script", 20, False, False),
+    ("questions", "script", 180, False, False),
+    ("planning", "claude", 1200, False, False),
+    ("refused", "script", 266400, False, True),
+]
+ENDED = {"scale": "even", "selected": -1, "flash": 0, "beat": -1, "reduced": False, "still": False,
+         "startClock": "06:04", "nowClock": "10:10", "endClock": "07:56"}
+LANE_TOP = {"shipped": 4, "stop": 62}
+
+
+def _frame_rects(frame: dict, colour: str) -> list[list]:
+    return [f[1:] for f in frame["fills"] if f[0] == colour]
+
+
+def _ended_frames(**extra) -> dict:
+    return {
+        "t0": dict(ENDED, t=0), "t1_5": dict(ENDED, t=1.5, flash=0.5), "t3_5": dict(ENDED, t=3.5),
+        "t3_9": dict(ENDED, t=3.9), "t10": dict(ENDED, t=10, beat=0.4), "t10_4": dict(ENDED, t=10.4),
+        "reduced": dict(ENDED, t=0, reduced=True, flash=1), "scale": dict(ENDED, t=10, scale="scale"),
+        **extra,
+    }
+
+
+@needs_node
+def test_a_shipped_journey_draws_in_settles_green_once_then_never_moves(tmp_path: Path) -> None:
+    frames = _run(tmp_path, _model(SHIPPED, hops=0, ended="shipped"), _ended_frames())["frames"]
+    assert all(f["error"] is None for f in frames.values())
+    assert frames["t0"]["sig"] != frames["t10"]["sig"]
+    assert _frame_rects(frames["t1_5"], "#d6efbf"), "the draw-in carries a green token"
+    assert frames["t3_5"]["sig"] != frames["t3_9"]["sig"], "the green settle plays after the draw-in"
+    assert _frame_rects(frames["t3_5"], "#9ece6a")
+    assert frames["t10"]["sig"] == frames["t10_4"]["sig"], "nothing moves once settled"
+    assert frames["reduced"]["sig"] == frames["t10"]["sig"], "reduced motion shows the settled frame"
+    assert not _frame_rects(frames["t10"], "#d6efbf")
+    assert not _frame_rects(frames["t10"], "#7dcfff"), "no current bar, NOW tag or sparks"
+    assert not _frame_rects(frames["t10"], "#3c6f8c"), "no NOW line"
+
+
+@needs_node
+def test_a_shipped_journey_ends_in_the_shipped_lane_at_the_flag_with_the_end_time(tmp_path: Path) -> None:
+    out = _run(tmp_path, _model(SHIPPED, hops=0, ended="shipped"), _ended_frames())
+    frame = out["frames"]["t10"]
+    texts = frame["texts"]
+    assert not any(t.startswith("NOW") for t in texts)
+    assert not any("ahead" in t for t in texts)
+    assert texts[-1] == "merged 07:56", "the ruler ends with the end time"
+    assert "1d 1h" in texts, "a day-long step reads in days"
+    assert "3d 0h" not in texts, "the end bar carries no duration"
+    last = out["bars"]["even"][-1]
+    frame_top = [r for r in _frame_rects(frame, "#c0caf5") if r[1] == (LANE_TOP["shipped"] + 1) * 4]
+    assert frame_top and frame_top[0][0] == last["x"] - 4, "the selected last bar is framed white in the shipped lane"
+    pole = [r for r in _frame_rects(frame, "#9ece6a") if r[3] == 28 and r[1] == 16]
+    assert [r[0] for r in pole] == [last["x"] + last["w"] + 4], "the flag stands right after the last bar"
+    assert out["bars"]["scale"][-1]["w"] == 48, "to scale, the end bar is a fixed end mark"
+
+
+@needs_node
+def test_a_stopped_journey_lies_on_the_red_floor_and_never_moves(tmp_path: Path) -> None:
+    out = _run(tmp_path, _model(STOPPED, hops=3, ended="stopped"), _ended_frames())
+    frames = out["frames"]
+    assert all(f["error"] is None for f in frames.values())
+    sigs = {name: f["sig"] for name, f in frames.items() if name != "scale"}
+    assert len(set(sigs.values())) == 1, sigs
+    frame = frames["t10"]
+    texts = frame["texts"]
+    assert not any(t.startswith("NOW") for t in texts)
+    assert not any("ahead" in t for t in texts)
+    assert texts[-1] == "stopped 07:56"
+    assert not _frame_rects(frame, "#7dcfff") and not _frame_rects(frame, "#3c6f8c")
+    last = out["bars"]["even"][-1]
+    red = [r for r in _frame_rects(frame, STOP) if last["x"] <= r[0] < last["x"] + last["w"]]
+    rows = {r[1] // 4 for r in red}
+    assert rows and min(rows) == LANE_TOP["stop"] + 2 and max(rows) <= LANE_TOP["stop"] + 6
+    assert len(red) > last["w"] // 4, "a dithered red end bar, not one lit row"
+    frame_top = [r for r in _frame_rects(frame, "#c0caf5") if r[1] == (LANE_TOP["stop"] + 1) * 4]
+    assert frame_top and frame_top[0][0] == last["x"] - 4
+    assert out["bars"]["scale"][-1]["w"] == 48
+
+
+@needs_node
+def test_a_stuck_flag_puts_the_last_step_on_the_floor(tmp_path: Path) -> None:
+    path = STOPPED[:3]
+    out = _run(tmp_path, _model(path, hops=3, ended="stopped"), {"t": dict(ENDED, t=10)})
+    last = out["bars"]["even"][-1]
+    red = [r for r in _frame_rects(out["frames"]["t"], STOP) if last["x"] <= r[0] < last["x"] + last["w"]]
+    assert {r[1] // 4 for r in red} >= {LANE_TOP["stop"] + 2}
+
+
+@needs_node
+def test_a_live_journey_frames_only_a_picked_earlier_step(tmp_path: Path) -> None:
+    frames = {"own": dict(FRAME, t=10, selected=len(PATH) - 1), "picked": dict(FRAME, t=10, selected=2)}
+    out = _run(tmp_path, _model(), frames)["frames"]
+    assert not _frame_rects(out["own"], "#c0caf5")
+    assert _frame_rects(out["picked"], "#c0caf5")
