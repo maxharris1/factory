@@ -1246,7 +1246,7 @@ def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path, kind:
 SHIPPED = "maxharris1/cleffy#88"
 RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/aut0#AUT-7", "shipped": SHIPPED}
 NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
-                   "shipped": ["Run log", "Journey", "Full state chart"],
+                   "shipped": ["Run log", "Run summary", "Journey", "Ended", "Full state chart"],
                    "stopped": ["Run log", "Journey", "Full state chart"]}
 OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": SECTIONS, "maxharris1/cleffy#40": SECTIONS,
          **{address: NO_JOB_SECTIONS[kind] for kind, address in RECORD.items()}}
@@ -1469,8 +1469,8 @@ def _notes(markup: str) -> list[str]:
 
 
 ENDED = {
-    "shipped": (lambda record: None, {"data-px": "off", "data-done": "true"},
-                [("1h 00m", "in merged"), ("2", "revise round"), ("2 hops", "0 off-chart")],
+    "shipped": (lambda record: None, {"data-px": "off", "data-done": "true", "data-tint": "#9ece6a"},
+                [("1h 30m", "total, intake to merge"), ("2", "revise rounds"), ("2 hops", "0 off-chart")],
                 ["ticket arrives", "plan approved", "PR merged"]),
     "stopped": (lambda record: None, {"data-px": PX_STATE["stuck"]["effect"], "data-tint": PX_STATE["stuck"]["tint"]},
                 [("no reading", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
@@ -1493,13 +1493,153 @@ def test_a_shipped_or_stopped_ticket_draws_its_record_without_live_run_or_next(t
     record = snapshot[RECORDS][address]
     change(record)
     for render, markup in _both(tmp_path, snapshot, address).items():
-        assert _sections(markup) == ["Run log", "Journey", "Full state chart"], render
+        assert _sections(markup) == NO_JOB_SECTIONS[case.split()[0]], render
         assert [state for _, state, _ in _rows(markup, "runlog")] == [v["state"] for v in record["visits"]], render
         assert _notes(markup) == notes, render
         assert _ticket_tiles(markup) == tiles, render
         px = _hero_px(markup)
         assert {k: px.get(k) for k in strip} == strip and px["data-still"] == "true", render
 
+
+
+def _text(fragment: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", fragment))
+
+
+def _panel(markup: str, title: str) -> str:
+    return re.search(rf'<section class="jd-panel[^"]*"><h2><span class="t">{title}</span>.*?</section>', markup, re.S).group(0)
+
+
+def _count(panel: str) -> str:
+    return _text(re.search(r'<span class="count">(.*?)</span>', panel, re.S).group(1))
+
+
+HOW = {"merged": ("merged", "merge"), "handed-off": ("handed off", "hand-off")}
+RUN = [("intake", "script", 25), ("building", "claude", 1870), ("review", "codex", 425), ("fixing", "claude", 750),
+       ("review", "codex", 400), ("fixing", "claude", 555), ("merged", "script", None)]
+INTAKE_AT = NOW - 3600 - sum(took or 0 for _, _, took in RUN)
+
+
+def _seeded_run(snapshot: dict) -> dict:
+    record = snapshot[RECORDS][SHIPPED]
+    at, visits = INTAKE_AT, []
+    for i, (state, who, took) in enumerate(RUN):
+        visits.append(_visit(state, who, at, took, None if i == 0 else f"reason {i}", current=took is None))
+        at += took or 0
+    record.update(visits=visits, hops=len(RUN) - 1)
+    record["shipped"].update(jobs=11, tokens_in=6_900_000, tokens_out=96_000, cost_usd=4.18,
+                             intake_to_ship_seconds=NOW - 3600 - INTAKE_AT)
+    return record
+
+
+@needs_node
+@pytest.mark.parametrize("how", HOW)
+def test_a_shipped_ticket_s_hero_is_settled_green_with_its_line_and_tiles(tmp_path: Path, how: str) -> None:
+    word, noun = HOW[how]
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    snapshot[RECORDS][SHIPPED]["shipped"].update(how=how, jobs=11, cost_usd=4.18)
+    intake, shipped = ticket_detail._et_clock(NOW - 9000), ticket_detail._et_clock(NOW - 3600)
+    views = _both(tmp_path, snapshot, SHIPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        hero = re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).group(0)
+        assert f'<h1>cleffy#88</h1><span class="chip ok">{word}</span>' in hero, render
+        line = re.search(r'<p class="line">(.*?)</p>', hero, re.S).group(1)
+        assert line.startswith(f'<b class="ok">{word}</b> '), render
+        assert _text(line) == f"{word} 1h 00m ago · 2 revise rounds · 1h 30m from intake to {noun}", render
+        when = re.search(r'<div class="jd-when"><span class="mark" aria-hidden="true"></span>(.*?)</div>', hero, re.S)
+        assert _text(when.group(1)) == f"intake {intake} · {word} {shipped}", render
+        assert 'class="jd-verb"' not in hero, render
+        assert _ticket_tiles(markup) == [("1h 30m", f"total, intake to {noun}"), ("2", "revise rounds"),
+                                         ("2 hops", "0 off-chart"), ("$4.18", "cost, 11 jobs")], render
+        assert '<b>2<span class="jd-pips" aria-hidden="true"><span class="done"></span><span class="done"></span></span></b>' in hero
+        assert f'<span class="job">{word} {shipped}</span></nav>' in markup, render
+        px = _hero_px(markup)
+        assert (px["data-px"], px["data-tint"], px["data-done"], px["data-still"]) == ("off", "#9ece6a", "true", "true")
+
+
+@needs_node
+def test_a_shipped_ticket_with_no_reported_cost_has_no_cost_tile(tmp_path: Path) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    snapshot[RECORDS][SHIPPED]["shipped"].update(intake_to_ship_seconds=None, revise_rounds=1)
+    views = _both(tmp_path, snapshot, SHIPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        assert _ticket_tiles(markup) == [("no reading", "total, intake to merge"), ("1", "revise rounds"),
+                                         ("2 hops", "0 off-chart")], render
+        assert _text(re.search(r'<p class="line">(.*?)</p>', markup, re.S).group(1)) == "merged 1h 00m ago · 1 revise round"
+
+
+@needs_node
+def test_a_shipped_ticket_has_run_summary_and_ended_in_place_of_live_run_and_next(tmp_path: Path) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    _seeded_run(snapshot)
+    intake, shipped = ticket_detail._et_clock(INTAKE_AT), ticket_detail._et_clock(NOW - 3600)
+    views = _both(tmp_path, snapshot, SHIPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        assert _sections(markup) == ["Run log", "Run summary", "Journey", "Ended", "Full state chart"], render
+        summary = _panel(markup, "Run summary")
+        assert _count(summary) == f"the whole run · intake {intake} to merge {shipped}", render
+        assert re.findall(r'<div class="lr-tile"><b>([^<]*)</b><span>([^<]*)</span></div>', summary) == [
+            ("11", "jobs"), ("6.9M", "tokens in"), ("96k", "tokens out"), ("$4.18", "cost")], render
+        assert re.search(r'<span class="lr-label">Time by who</span><span class="lr-count">1h 07m</span>', summary), render
+        bar = re.search(r'<div class="sum-bar" aria-hidden="true">(.*?)</div>', summary, re.S).group(1)
+        assert re.findall(r'<span style="flex:(\d+) 1 0;background:(#[0-9a-f]{6})"></span>', bar) == [
+            ("3175", TINT["claude"]), ("825", TINT["codex"]), ("25", TINT["script"])], render
+        key = re.search(r'<div class="sum-key">(.*?)</div>', summary, re.S).group(1)
+        assert [_text(k) for k in re.findall(r'<span><i[^>]*></i>(.*?)</span>(?=<span><i|$)', key)] == [
+            "claude 52m 55s · building, 2× fixing", "codex 13m 45s · 2× review", "script 25s · intake"], render
+        assert '<p class="sum-foot">Totals over every job this ticket ran. Nothing is running now.</p>' in summary
+        ended = _panel(markup, "Ended")
+        assert _count(ended) == "end state · nothing comes next", render
+        assert re.findall(r'<span class="(how|at|ago)">([^<]*)</span>', ended) == [
+            ("how", "merged"), ("at", f"merged at {shipped}"), ("ago", "1h 00m ago")], render
+        assert "Live run" not in markup and "Can come next" not in markup, render
+
+
+@needs_node
+def test_a_shipped_run_with_nothing_measured_reads_no_reading(tmp_path: Path) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    record = snapshot[RECORDS][SHIPPED]
+    for visit in record["visits"]:
+        visit["duration_seconds"] = None
+    record["shipped"]["at"] = None
+    views = _both(tmp_path, snapshot, SHIPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        summary = _panel(markup, "Run summary")
+        assert re.findall(r'<div class="lr-tile"><b>([^<]*)</b><span>([^<]*)</span></div>', summary) == [
+            ("3", "jobs"), ("no reading", "tokens in"), ("no reading", "tokens out"), ("no reading", "cost")], render
+        assert re.search(r'<span class="lr-label">Time by who</span><span class="lr-count">no reading</span>', summary)
+        assert 'class="sum-bar"' not in summary and 'class="sum-key"' not in summary, render
+        ended = _panel(markup, "Ended")
+        assert re.findall(r'<span class="(how|at|ago)">([^<]*)</span>', ended) == [("how", "merged"), ("at", "no reading")]
+
+
+@needs_node
+def test_a_shipped_run_log_lists_every_visit_and_ends_on_shipped(tmp_path: Path) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    _seeded_run(snapshot)
+    for render, markup in _both(tmp_path, snapshot, SHIPPED).items():
+        assert [state for _, state, _ in _rows(markup, "runlog")] == [state for state, _, _ in RUN], render
+        log = re.search(r'<ol class="runlog">(.*?)</ol>', markup, re.S).group(1)
+        last = re.findall(r"<li>.*?</li>", log, re.S)[-1]
+        assert 'class="visit shipped"' in last and 'style="--m:#9ece6a"' in last, render
+        assert '<span class="name">merged · shipped</span>' in last, render
+        assert f'<span class="dur">at {ticket_detail._et_clock(NOW - 3600)}</span>' in last, render
+        assert " · now" not in log and "so far" not in log, render
+
+
+@needs_node
+def test_a_hostile_actor_and_state_are_escaped_in_the_run_summary(tmp_path: Path) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    visit = snapshot[RECORDS][SHIPPED]["visits"][1]
+    visit.update(who="<img src=x onerror=y>", state='"><script>x()</script>')
+    for render, markup in _both(tmp_path, snapshot, SHIPPED).items():
+        assert "<img src=x" not in markup and "<script>x()" not in markup, render
+        summary = _panel(markup, "Run summary")
+        assert "&lt;img src=x onerror=y&gt;" in summary and "&lt;script&gt;x()&lt;/script&gt;" in summary, render
 
 STILL_TICKET = r"""
 (async () => {
@@ -1603,10 +1743,11 @@ ENDED_STILL = r"""
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   document.querySelector('details.jd-chart').open = true;
   await sleep(__WAIT__);
-  const shot = () => [...document.querySelectorAll('canvas.jd-journey, canvas.jd-flowmap')].map(c => c.toDataURL());
+  const shot = () => [...document.querySelectorAll('.jd-hero canvas.px, canvas.jd-journey, canvas.jd-flowmap')]
+    .map(c => c.toDataURL());
   const a = shot();
   await sleep(600);
-  return {frames: a, still: a.length === 2 && a.every((x, i) => x === shot()[i])};
+  return {frames: a, still: a.length === 3 && a.every((x, i) => x === shot()[i])};
 })()"""
 
 
