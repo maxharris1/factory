@@ -764,7 +764,12 @@ def follow(
             timer = threading.Timer(budget.remaining(), _out_of_budget, (budget, control, log))
             timer.daemon = True
             timer.start()
-        return _past_budget(body(control), budget)
+        code = body(control)
+        if timer is not None:
+            timer.cancel()
+            timer.join()
+            _ended_past_budget(budget, control, log)
+        return _past_budget(code, budget)
     finally:
         if timer is not None:
             timer.cancel()
@@ -778,10 +783,21 @@ def follow(
 def _out_of_budget(budget: Budget, control: Control, log: Log) -> None:
     if control.signum is not None:
         return  # already stopping for another reason
+    _expire(budget, log, "stopping its remote worker")
+    control.stop(signal.SIGTERM, f"past its {budget.describe()}")
+
+
+def _ended_past_budget(budget: Budget, control: Control, log: Log) -> None:
+    """#776: the device's own deadline (lib/remote.py) can end the run
+    before the local timer runs; the run still passed its budget."""
+    if control.signum is None and budget.remaining() <= 0:
+        _expire(budget, log, "its device stopped its remote worker")
+
+
+def _expire(budget: Budget, log: Log, then: str) -> None:
     budget.expired = True
     budget.signum = signal.SIGTERM
-    log(f"the run passed its {budget.describe()}; stopping its remote worker")
-    control.stop(signal.SIGTERM, f"past its {budget.describe()}")
+    log(f"the run passed its {budget.describe()}; {then}")
 
 
 def _one_line(exc: BaseException) -> str:
