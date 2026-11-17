@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from lib.branch_stack import stack_wait, stacked_pulls
-from lib.dispatcher import CIResult, Comment, Dispatcher
+from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.feeder_gates import Progress, RefStatus, blocker_waits, github_ref, parse_gate_lines
 from lib.github_actions import GhResult, GitHubAdapterError
 from lib.handoff import Handoff, format_comment
@@ -27,7 +27,7 @@ from tests.test_feeder import (
     make_feeder,
     rows,
 )
-from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
+from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions, factory
 from tests.test_github_actions import RecordedGh
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_transport_for
 from tests.test_live_poll import linear_issue as live_linear_issue
@@ -419,6 +419,7 @@ def test_a_fork_pr_is_held_on_its_pinned_head_not_a_same_named_base_branch(tmp_p
                 ok({"total_commits": 1, "commits": [{"sha": A}]}))
     reads.route((f"{prefix}/compare/main...{C}",),
                 ok({"total_commits": 2, "commits": [{"sha": B}, {"sha": C}]}))
+    reads.route((f"{prefix}/pulls/12",), ok({"base": {"ref": "main"}}))
     for sha, pulls in ((A, []), (B, [{"number": 113, "state": "open"}]),
                        (C, [{"number": 12, "state": "open"}])):
         reads.route(("--cache", "60s", f"{prefix}/commits/{sha}/pulls?per_page=100"), ok(pulls))
@@ -430,3 +431,133 @@ def test_a_fork_pr_is_held_on_its_pinned_head_not_a_same_named_base_branch(tmp_p
     assert reviews(queue) == []
     assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
     assert not [call for call in reads.calls if "compare/main...feature" in str(call)]
+
+
+LINEAR_REPO = "acme/linear-app"
+FEATURE = "feature/upload-only-intake"
+AUT = linear_issue("AUT-2231")
+F1, F2, OTHER, OWN = "1" * 40, "2" * 40, "3" * 40, "4" * 40
+BASE_NOTE = (
+    f"feeder: {LINEAR_REPO}#AUT-2231 recorded base dev differs from PR base {FEATURE}; "
+    "using the PR base"
+)
+
+
+def upload_only_intake(github: FakeGitHub, *, beyond_base: tuple[str, ...] = ()) -> None:
+    for number, head, commits in ((1400, FEATURE, (F1, F2)), (1452, "max/aut-2200", (F1,)),
+                                  (1470, "max/aut-2240", (F1, F2, OTHER))):
+        github.branches[(LINEAR_REPO, head)] = commits[-1]
+        github.branch_commits[(LINEAR_REPO, head)] = commits
+        github.pulls[(LINEAR_REPO, number)] = {"head": head, "base": "dev"}
+    github.branches[(LINEAR_REPO, AUT.branch)] = OWN
+    github.branch_commits[(LINEAR_REPO, AUT.branch)] = (F1, F2, *beyond_base, OWN)
+
+
+def linear_feeder(tmp_path: Path, github: FakeGitHub):
+    linear = FakeLinear()
+    linear.issues = [AUT]
+    feeder, queue, _, _ = make_feeder(tmp_path, orch=LINEAR_ORCH, github=github, linear=linear,
+                                      factory_text=LINEAR_FACTORY_MD)
+    logs: list[str] = []
+    feeder.log = logs.append
+    return feeder, queue, linear, logs
+
+
+def review_after_retarget(tmp_path: Path, *, beyond_base: tuple[str, ...] = ()):
+    github = FakeGitHub()
+    github._next_pr = 1460
+    feeder, queue, _, logs = linear_feeder(tmp_path, github)
+    assert [ref.ticket_id for ref in feeder.feed_once().fed] == ["AUT-2231"]
+    assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == "dev"
+    upload_only_intake(github, beyond_base=beyond_base)
+    github.pulls[(LINEAR_REPO, 1461)]["base"] = FEATURE
+    ticket = TrackedTicket(
+        repo=LINEAR_REPO, ticket_id="AUT-2231",
+        factory=replace(factory(tickets="linear", ship="handoff"), base_branch="dev"),
+        comments=(ready_for(OWN),), current_head=OWN, ci={OWN: CIResult("success")},
+        risk="low", pr_number="1461", ready_starts_review=True,
+    )
+    return dispatcher_for(tmp_path, queue, feeder=feeder), queue, ticket, logs
+
+
+def test_a_pr_on_a_feature_base_is_reviewed_against_that_base(tmp_path: Path) -> None:
+    dispatcher, queue, ticket, logs = review_after_retarget(tmp_path)
+
+    dispatcher.process(ticket)
+
+    assert [job.request.head for job in reviews(queue)] == [OWN]
+    assert grok_wakes(tmp_path) == []
+    assert logs.count(BASE_NOTE) == 1
+    assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == FEATURE
+
+
+def test_a_head_carrying_another_pr_beyond_its_pr_base_is_still_held(tmp_path: Path) -> None:
+    dispatcher, queue, ticket, logs = review_after_retarget(tmp_path, beyond_base=(OTHER,))
+
+    dispatcher.process(ticket)
+    dispatcher.process(ticket)
+
+    assert reviews(queue) == []
+    assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[1470]]
+    assert logs.count(BASE_NOTE) == 1, "noted once per head however many polls hold it"
+    assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == FEATURE
+
+
+def test_intake_reuses_an_open_pr_against_its_own_base(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github)
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, _, linear, logs = linear_feeder(tmp_path, github)
+
+    first = feeder.feed_once()
+    feeder.feed_once()
+
+    assert [ref.ticket_id for ref in first.fed] == ["AUT-2231"] and first.blocked == 0
+    assert grok_wakes(tmp_path) == []
+    assert logs.count(BASE_NOTE) == 1
+    assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == FEATURE
+    assert f"on branch `{AUT.branch}` off `{FEATURE}`" in linear.posted[AUT.linear_id][0].body
+
+
+def test_intake_holds_an_open_pr_carrying_another_pr_beyond_its_base(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github, beyond_base=(OTHER,))
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, _, linear, logs = linear_feeder(tmp_path, github)
+
+    report = feeder.feed_once()
+
+    assert report.fed == () and report.blocked == 1
+    row = rows(tmp_path / "orch.db")["AUT-2231"]
+    assert row["waiting_reason"] == f"waiting on #1470 (branch {AUT.branch} carries its commits)"
+    assert row["base_branch"] == FEATURE
+    assert logs.count(BASE_NOTE) == 1
+    assert linear.posted == {}
+
+
+def test_a_branch_with_no_pr_is_read_against_the_recorded_base(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github)
+    feeder, _, _, logs = linear_feeder(tmp_path, github)
+
+    report = feeder.feed_once()
+
+    assert report.fed == () and report.blocked == 1
+    assert rows(tmp_path / "orch.db")["AUT-2231"]["waiting_reason"] == (
+        f"waiting on #1400, #1452, #1470 (branch {AUT.branch} carries their commits)"
+    )
+    assert not [line for line in logs if "differs from PR base" in line]
+
+
+def test_pull_base_reads_the_open_prs_base_ref() -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO_PATH}/pulls/1461",), ok({"state": "open", "base": {"ref": FEATURE}}))
+    assert GitHubIntakeClient(gh).pull_base(HOME, 1461) == FEATURE
+
+
+@pytest.mark.parametrize("pull", [{"state": "open"}, {"base": {}}, {"base": {"ref": "-x"}}])
+def test_pull_base_refuses_an_unreadable_base(pull: dict) -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO_PATH}/pulls/1461",), ok(pull))
+    with pytest.raises(GitHubAdapterError, match="base branch"):
+        GitHubIntakeClient(gh).pull_base(HOME, 1461)
