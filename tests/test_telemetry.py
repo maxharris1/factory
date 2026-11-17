@@ -1882,11 +1882,16 @@ BSD_SED = """sed() {
         ("sed -n -l 80 '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
         ("sed -nl80 '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
         ("sed -n --line-length 80 '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("test -f {missing} || cat {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ('bash -c "cat {missing} || cat {guide}" && cat {skill}; cat {missing}', 1, ["factory/factory-builder/SKILL.md"]),
+        ('bash -c "cat {missing}; cat {guide}" && cat {skill}; cat {missing}', 1, ["factory/factory-builder/SKILL.md"]),
+        ('bash -c "cat {guide} && cat {missing}" && cat {skill}', 1, []),
     ],
     ids=[
         "and-after-failure", "and-before-failure", "semicolon", "or-after-failure", "option-value-in-output",
         "sed-program-in-output", "head-failure", "or-after-head-failure", "bsd-sed-joined-l", "bsd-sed-spaced-l",
-        "gnu-sed-spaced-l", "gnu-sed-joined-l", "gnu-sed-line-length",
+        "gnu-sed-spaced-l", "gnu-sed-joined-l", "gnu-sed-line-length", "or-after-failed-probe",
+        "and-after-recovered-shell", "and-after-shell-recovered-by-semicolon", "and-after-failed-shell",
     ],
 )
 def test_a_shell_read_counts_only_if_its_place_in_the_chain_ran(

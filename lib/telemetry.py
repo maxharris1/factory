@@ -1091,6 +1091,11 @@ class _Step(NamedTuple):
     joined: str
     reads: list[tuple[str, str]]
     found: dict[str, str | None]
+    inner: list[_Step]
+
+
+def _found(steps: list[_Step]) -> set[str]:
+    return {rel for step in steps for rel in [*step.found, *_found(step.inner)]}
 
 
 class SkillReads:
@@ -1103,9 +1108,10 @@ class SkillReads:
     nothing. A failed shell call loses the operands its output names, as
     `cat: <path>: No such file` does, and all of them when it printed
     nothing. In a failed call, a read failed when an output line from its
-    program names one of its file operands, and every other command is taken
-    to have succeeded, so a read behind a failed `&&`, or behind a `||` whose
-    left side succeeded, did not run."""
+    program names one of its file operands and succeeded otherwise, a
+    `bash -c` ends as its own chain ended, and any other command's outcome is
+    unknown. A read behind a failed `&&`, or behind a `||` whose left side
+    succeeded, did not run."""
 
     def __init__(self, root: str, locked: frozenset[str]):
         self.root = posixpath.normpath(root)
@@ -1135,7 +1141,7 @@ class SkillReads:
         elif name == "Bash":
             self.command(call_id, _command_text(data.get("command")))
             return
-        self._started(call_id, [_Step("always", [], found)])
+        self._started(call_id, [_Step("always", [], found, [])])
 
     def command(self, call_id: str, text: str) -> None:
         try:
@@ -1147,25 +1153,33 @@ class SkillReads:
     def finished(self, call_id: str, error: bool, output: str) -> None:
         steps = self.pending.pop(call_id, [])
         if not error:
-            self.read |= {rel for step in steps for rel in step.found}
-            return
-        if not output:
-            return
-        errors = _error_lines(output)
-        ok = True
-        for step in steps:
-            if (step.joined == "&&" and not ok) or (step.joined == "||" and ok):
-                continue
-            ok = not any(
-                program == verb and operand in message for verb, operand in step.reads for program, message in errors
-            )
-            self.read |= {rel for rel, operand in step.found.items() if operand is not None and operand not in output}
+            self.read |= _found(steps)
+        elif output:
+            self._chain(steps, _error_lines(output), output)
 
     def row(self) -> str:
         return json.dumps(sorted(self.read))
 
+    def _chain(self, steps: list[_Step], errors: list[tuple[str, str]], output: str) -> bool | None:
+        ok: bool | None = None
+        for step in steps:
+            if (step.joined == "&&" and ok is False) or (step.joined == "||" and ok is True):
+                continue
+            if step.inner:
+                ok = self._chain(step.inner, errors, output)
+            elif step.reads:
+                ok = not any(
+                    program == verb and operand in message
+                    for verb, operand in step.reads
+                    for program, message in errors
+                )
+            else:
+                ok = None
+            self.read |= {rel for rel, operand in step.found.items() if operand is not None and operand not in output}
+        return ok
+
     def _started(self, call_id: str, steps: list[_Step]) -> None:
-        if any(step.found for step in steps):
+        if _found(steps):
             self.pending[call_id] = steps
 
     def _path(self, found: dict[str, str | None], operand: str, base: str | None) -> None:
@@ -1179,7 +1193,7 @@ class SkillReads:
     def _script(self, script: str, base: str | None) -> list[_Step]:
         steps = []
         for joined, words in _simple_commands(script):
-            steps.append(_Step(joined, [], {}))
+            steps.append(_Step(joined, [], {}, []))
             base = self._cwd_after(steps[-1], words, base)
         return steps
 
@@ -1194,9 +1208,7 @@ class SkillReads:
                 return None
             return posixpath.normpath(posixpath.join(base or "", target))
         if verb in _SHELLS and len(args) > 1 and args[0].startswith("-") and "c" in args[0]:
-            for inner in self._script(args[1], base):
-                step.reads.extend(inner.reads)
-                step.found.update(inner.found)
+            step.inner.extend(self._script(args[1], base))
         elif verb in _VALUED_OPTIONS:
             for operand in _read_operands(verb, args):
                 step.reads.append((verb, operand))
