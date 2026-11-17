@@ -25,9 +25,10 @@ devices, leave out of its newest NOT_ON_PLAN_READINGS distinct source
 observations, ordered by source time (fresh readings that report other
 limits: a null or missing window in a reply with limits), is `not on plan`:
 the plan has no such limit. A Codex event read again is the same
-observation, and any reading that reports the window ends the streak. `Session._write` (lib/telemetry.py) stores them in
-`usage_readings` in the same transaction as the job's telemetry row, on the
-existing heartbeat flush. A reading is keyed by harness, bot (the account's
+observation, and any reading that reports the window ends the streak.
+`Session._write` (lib/telemetry.py) stores them in `usage_readings` in the
+same transaction as the job's telemetry row, on the existing heartbeat
+flush. A reading is keyed by harness, bot (the account's
 OS user) and device, and replaces one only when its source time is newer.
 Cursor is not tracked.
 
