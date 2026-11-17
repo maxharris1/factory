@@ -766,9 +766,11 @@ def follow(
             timer.start()
         code = body(control)
         if timer is not None:
+            ended_past_budget = budget.remaining() <= 0
             timer.cancel()
             timer.join()
-            _expire_if_it_ended_past_budget(budget, control, log)
+            if ended_past_budget and control.signum is None:
+                _expire(budget, log, "its device stopped its remote worker")
         return _past_budget(code, budget)
     finally:
         if timer is not None:
@@ -785,11 +787,6 @@ def _out_of_budget(budget: Budget, control: Control, log: Log) -> None:
         return  # already stopping for another reason
     _expire(budget, log, "stopping its remote worker")
     control.stop(signal.SIGTERM, f"past its {budget.describe()}")
-
-
-def _expire_if_it_ended_past_budget(budget: Budget, control: Control, log: Log) -> None:
-    if control.signum is None and budget.remaining() <= 0:
-        _expire(budget, log, "its device stopped its remote worker")
 
 
 def _expire(budget: Budget, log: Log, then: str) -> None:

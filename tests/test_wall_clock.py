@@ -142,6 +142,37 @@ def test_a_remote_run_its_device_stopped_past_its_budget_still_expires_it() -> N
     assert any("passed its 1-minute wall-clock budget" in line for line in lines), lines
 
 
+def test_a_remote_run_that_ends_in_time_stays_successful_when_its_timer_cleanup_is_late() -> None:
+    from unittest.mock import patch
+
+    now = [0.0]
+
+    class LateCancel:
+        def __init__(self, *_args: object) -> None:
+            self.daemon = False
+
+        def start(self) -> None:
+            pass
+
+        def cancel(self) -> None:
+            now[0] = 60.1
+
+        def join(self) -> None:
+            pass
+
+    budget = Budget(60, clock=lambda: now[0])
+
+    def ends_in_time(_control: job_run.Control) -> int:
+        now[0] = 59.9
+        return 0
+
+    with patch.object(job_run.threading, "Timer", LateCancel):
+        code = job_run.follow(
+            ends_in_time, beat=lambda: None, interval=0.1, log=lambda _m: None, budget=budget
+        )
+    assert code == 0 and not budget.expired, (code, budget.expired)
+
+
 def test_a_remote_run_that_ends_in_time_cancels_its_budget_timer() -> None:
     budget = Budget(0.3)
     code = job_run.follow(
@@ -675,7 +706,8 @@ def test_a_remote_deadline_never_stops_the_run_before_its_budget(tmp_path: Path)
     clock, stopped = tmp_path / "clock", tmp_path / "stopped"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "date").write_text(f"#!/bin/sh\ncat {clock}\n")
+    read = tmp_path / "read"
+    (bin_dir / "date").write_text(f"#!/bin/sh\ncat {clock}\ntouch {read}\n")
     (bin_dir / "date").chmod(0o755)
     clock.write_text("100\n")
     worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
@@ -687,7 +719,10 @@ def test_a_remote_deadline_never_stops_the_run_before_its_budget(tmp_path: Path)
         env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
     )
     try:
-        time.sleep(0.3)
+        waited = time.monotonic() + 10
+        while not read.exists() and time.monotonic() < waited:
+            time.sleep(0.05)
+        assert read.exists(), "the deadline never read the clock"
         clock.write_text("101\n")
         time.sleep(1.5)
         assert not stopped.exists(), "stopped within the second its budget started in"
