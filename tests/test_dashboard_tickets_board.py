@@ -1206,9 +1206,6 @@ def _shipped_age(i: int) -> int:
 
 
 def shelf_snapshot(tmp_path: Path) -> dict:
-    """Ticket i shipped i + 1 minutes before NOW (handed off when i is in HANDED,
-    merged then done a little later when i % 10 == 7); UNDATED has no recorded
-    transition."""
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
