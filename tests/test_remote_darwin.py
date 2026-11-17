@@ -188,7 +188,7 @@ def start(t: remote.RemoteTarget, command: list[str]) -> subprocess.Popen:
 
 
 def record_of(t: remote.RemoteTarget) -> Path:
-    return Path(t.job_dir) / remote.darwin_record(t.require_tag())
+    return Path(t.job_dir) / remote.start_record(t.require_tag())
 
 
 def write_record(t: remote.RemoteTarget, line: str) -> None:
@@ -425,7 +425,7 @@ def test_r3_darwin_child_forked_by_the_leaders_sigterm_handler_is_found_and_kill
     ["{pid} 00000000-0000-0000-0000-000000000000 {tag} {start}\n", "fenced\n"],
     ids=["earlier-boot", "fenced"],
 )
-def test_darwin_record_naming_no_worker_of_this_start_is_gone_and_signals_nothing(
+def test_start_record_naming_no_worker_of_this_start_is_gone_and_signals_nothing(
     tmp_path: Path, mac_ssh, record: str
 ) -> None:
     ssh, mac = mac_ssh
@@ -479,7 +479,7 @@ def test_darwin_malformed_or_reused_records_are_unknown_and_never_signalled(
         other.wait()
 
 
-def test_darwin_record_matching_a_live_group_and_its_leader_is_running(
+def test_start_record_matching_a_live_group_and_its_leader_is_running(
     tmp_path: Path, mac_ssh
 ) -> None:
     """The start time format the start writes is the one the check reads back."""
@@ -609,7 +609,7 @@ def test_darwin_remote_job_runs_and_releases_its_slot_once_the_worker_is_gone(
     assert proc.returncode == 3, err
     calls = ssh.calls()
     tag = calls[0]["script"].split()[2].removeprefix("ORCH_WORKER_TAG=")
-    record = (job_dir(tmp_path, "codex-bot", job_id) / remote.darwin_record(tag)).read_text(
+    record = (job_dir(tmp_path, "codex-bot", job_id) / remote.start_record(tag)).read_text(
         encoding="utf-8"
     )
     assert record.split()[1:3] == [BOOT, tag]
@@ -972,7 +972,7 @@ def test_r1_f13_darwin_ps_that_fails_after_listing_part_cannot_tell(
 
 
 @pytest.mark.parametrize("pgid", ["0", "1"])
-def test_r1_darwin_record_of_group_0_or_1_is_unknown_even_when_all_else_matches(
+def test_r1_start_record_of_group_0_or_1_is_unknown_even_when_all_else_matches(
     tmp_path: Path, mac_ssh, pgid: str
 ) -> None:
     """Check only: a stop built from these must never be run here (it would hit every process)."""
@@ -1015,7 +1015,7 @@ def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(
     assert not marker.exists()
     [start_call] = starts(ssh)
     tag = start_call["script"].split()[2].removeprefix(f"{remote.TAG_ENV}=")
-    fence = job_dir(tmp_path, "codex-bot", job_id) / remote.darwin_record(tag)
+    fence = job_dir(tmp_path, "codex-bot", job_id) / remote.start_record(tag)
     assert fence.read_text(encoding="utf-8").split() == ["fenced"]
 
     if pool.placement(job_id) is None:

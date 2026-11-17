@@ -8,7 +8,7 @@ from types import MappingProxyType
 import pytest
 
 from lib import device_pool, device_sync
-from lib.device_pool import DevicePool, choose_device
+from lib.device_pool import DevicePool, Orphan, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from lib.wait import wait_for_job
@@ -585,6 +585,59 @@ def test_a_device_with_no_sync_row_stays_placeable(tmp_path: Path) -> None:
     claimed = pool.claim("claude")
     assert claimed is not None and claimed[1].device == "mac"
     assert device_pool.free_slots(pool.config, "claude", {}, device_pool.placement_blocks(queue)) == 2
+
+
+def test_orphans_are_read_and_forgotten_and_a_missing_table_reads_empty(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 2, "codex"))
+    assert pool.orphans() == []
+    pool.forget_orphan("never-lost")
+    enqueue(queue, "codex", "1")
+    enqueue(queue, "codex", "2")
+    first, _ = pool.claim("codex")
+    second, _ = pool.claim("codex")
+    pool.attach_worker(first.id, owner="codex", remote=True, tag="t" * 32)
+    with queue.connect() as connection:
+        device_pool.orphan_slot(connection, second.id, 300.0)
+        device_pool.orphan_slot(connection, first.id, 200.0)
+
+    assert pool.orphans() == [
+        Orphan(first.id, "pc", "codex", "codex-bot", "t" * 32, 200.0),
+        Orphan(second.id, "pc", "codex", "codex-bot", None, 300.0),
+    ]
+
+    pool.forget_orphan(first.id)
+    assert [orphan.job_id for orphan in pool.orphans()] == [second.id]
+
+
+def test_an_orphan_keeps_its_runner_and_worker_pids_and_a_legacy_table_gains_them(
+    tmp_path: Path,
+) -> None:
+    pool, queue = make_pool(tmp_path, device("box", 2, "claude"))
+    enqueue(queue, "claude", "1")
+    enqueue(queue, "claude", "2")
+    legacy, _ = pool.claim("claude")
+    job, _ = pool.claim("claude")
+    with queue.connect() as connection:
+        connection.execute(
+            "CREATE TABLE device_orphans (job_id TEXT PRIMARY KEY, device TEXT NOT NULL, "
+            "harness TEXT NOT NULL, os_user TEXT NOT NULL, worker_tag TEXT, lost_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO device_orphans VALUES (?, 'box', 'claude', 'claude-bot', NULL, 100.0)",
+            (legacy.id,),
+        )
+        connection.commit()
+    assert pool.orphans()[0].worker_pid is None
+
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", pid=12, start="w")
+    with queue.connect() as connection:
+        device_pool.orphan_slot(connection, job.id, 200.0)
+
+    lost = pool.orphans()[1]
+    assert (lost.runner_pid, lost.runner_start, lost.worker_pid, lost.worker_start) == (
+        11, "r", 12, "w",
+    )
 
 
 def target_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue]:

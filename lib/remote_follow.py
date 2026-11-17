@@ -83,6 +83,7 @@ class FollowEnd:
     kind: str
     code: int | None = None
     detail: str = ""
+    in_transit: bool = True
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class Follower:
     ) -> FollowEnd | None:
         contact = self.clock()
         failures = 0
+        unanswered = False
         while control.signum is None:
             result = self._call(launch, brief)
             word = _marked(result.stdout.decode("utf-8", "replace"), LAUNCH_MARK)
@@ -151,11 +153,17 @@ class Follower:
                     self.log(f"launched on {self.target.device} ({head}); following it")
                     return None
                 if head == LAUNCH_BUSY:
-                    return FollowEnd(REFUSED, BUSY_EXIT, "another run of the job is live there")
+                    return FollowEnd(
+                        REFUSED, BUSY_EXIT, "another run of the job is live there", unanswered
+                    )
                 if head != LAUNCH_SHORT:
-                    return FollowEnd(REFUSED, START_REFUSED, why or head)
+                    return FollowEnd(REFUSED, START_REFUSED, why or head, unanswered)
             elif result.code != 255:
-                return FollowEnd(REFUSED, START_REFUSED, f"the launch exited {result.code}")
+                return FollowEnd(
+                    REFUSED, START_REFUSED, f"the launch exited {result.code}", unanswered
+                )
+            else:
+                unanswered = True
             if self.clock() - contact >= self.grace:
                 return FollowEnd(LOST, None, "the launch never got an answer")
             wait = backoff(failures)

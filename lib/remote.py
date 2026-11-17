@@ -61,7 +61,9 @@ the bot's login shell is (bash on Linux, zsh on macOS).
 keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
 it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
 they find the detached start by its tag or record as before; the stop of
-a cancelled run escalates to SIGKILL.
+a cancelled run escalates to SIGKILL. #679: the box's check
+(`check_worker`) first makes the tag's run directory itself, so a launch
+that reaches the device after it starts nothing (`fenced_check_script`).
 
 On a device whose `uname -s` is Darwin (macOS: no /proc, and no way to read
 another process's environment) the same contract holds through the record,
@@ -305,8 +307,8 @@ _DARWIN_KEEPER = (
 _FENCE = "fenced"
 
 
-def darwin_record(tag: str) -> str:
-    """The Darwin record's file name in the job directory: one per start."""
+def start_record(tag: str) -> str:
+    """The start's record file name in the job directory: one per start."""
     return f".orch-worker-{tag}.pid"
 
 
@@ -529,7 +531,7 @@ def start_script(
     )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
-    darwin_file = shlex.quote(darwin_record(tag))
+    record_file = shlex.quote(start_record(tag))
     darwin = (
         f"{_DARWIN_BOOT} || exit {START_REFUSED}; "
         "set -- $(ps -o pgid= -p $$ 2>/dev/null); "
@@ -541,7 +543,7 @@ def start_script(
         "< /dev/null > /dev/null 2>&1 & echo $!); "
         f'p=$k; {_LSTART}; [ -n "$k" ] && [ -n "$*" ] '
         f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
-        f'&& (set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
+        f'&& (set -C; echo "$$ $c {tag} $s" > {record_file}) 2>/dev/null '
         f'|| {{ kill -KILL "$k"; exit {START_REFUSED}; }}; '
         f"{login}"
     )
@@ -552,6 +554,7 @@ def start_script(
         f"[ -r /proc/self/environ ] || exit {START_REFUSED}; "
         f"read -r b < /proc/sys/kernel/random/boot_id || exit {START_REFUSED}; "
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
+        f'(set -C; echo "$$ $b {tag}" > {record_file}) 2>/dev/null || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
         f"{login}"
     )
@@ -563,15 +566,29 @@ def check_script(target: RemoteTarget) -> str:
     return _sh(f"t={target.require_tag()}; {_check_body(target)}")
 
 
-def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
-    """check_script's test for the worker whose tag is in $t (fence: _darwin_worker)."""
+def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False) -> str:
+    """check_script's test for the worker whose tag is in $t (fence: _darwin_worker).
+
+    claim (Linux): first take the start's record as _darwin_worker's fence
+    does, or be unsure, so a start of $t not yet recorded refuses and never
+    runs after this check says gone, even one the process scan missed.
+    """
+    directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
         target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
     )
+    record = (
+        f'r={directory}/{start_record("$t")}; if [ ! -e "$r" ]; then '
+        f"mkdir -p -- {directory} 2>/dev/null; "
+        f'(set -C; echo {_FENCE} > "$r") 2>/dev/null; [ -e "$r" ] || exit 3; fi; '
+        if claim
+        else ""
+    )
     return (
         f"f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
+        f"{record}"
         f"{_CAN_SCAN} || exit 3; "
         "[ -r /proc/self/stat ] || exit 3; "
         f'[ -z "$({_TAGGED})" ] || exit 1; '
@@ -587,6 +604,21 @@ def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
         '[ "$3" = "$p" ] && exit 3; '
         "done; "
         "exit 0"
+    )
+
+
+def fenced_check_script(target: RemoteTarget) -> str:
+    """check_script, after taking the tag's run directory (as launch_script's mkdir
+    would) and, on Linux, the start's record.
+    """
+    tag = target.require_tag()
+    return _sh(
+        f"t={tag}; R={shlex.quote(run_dir(target))}; "
+        'mkdir -p -- "$R" 2>/dev/null; '
+        'if (umask 077 && mkdir -- "$R/$t") 2>/dev/null; then '
+        f'echo {START_REFUSED} > "$R/$t/exit" 2>/dev/null || :; '
+        'elif [ ! -d "$R/$t" ]; then exit 3; fi; '
+        f"{_check_body(target, claim=True)}"
     )
 
 
@@ -1205,13 +1237,17 @@ def harness_launched(transport: Transport, target: RemoteTarget) -> bool | None:
     return {0: True, 1: False}.get(code)
 
 
-def check_worker(transport: Transport, target: RemoteTarget) -> str:
+def check_worker(transport: Transport, target: RemoteTarget, *, fence: bool = True) -> str:
     """GONE (0), RUNNING (1), UNREACHABLE (ssh's 255) or UNKNOWN (anything else).
 
     Only GONE lets a slot go. UNKNOWN still proves the device answered.
-    The target must carry the start's worker tag.
+    The target must carry the start's worker tag. The check first fences
+    that tag's launch (fenced_check_script), so call it only once done with
+    the start; GONE then holds for good. Pass fence=False only when no launch
+    of the tag can still reach the device (it answered and none went unanswered).
     """
-    code = transport.run(ssh_argv(target, check_script(target)), timeout=PROBE_TIMEOUT_SECONDS)
+    script = fenced_check_script(target) if fence else check_script(target)
+    code = transport.run(ssh_argv(target, script), timeout=PROBE_TIMEOUT_SECONDS)
     if code == 0:
         return GONE
     if code == 1:
