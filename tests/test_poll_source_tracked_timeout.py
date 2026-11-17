@@ -7,10 +7,11 @@ from unittest.mock import Mock
 
 import pytest
 
+from lib.dispatch.errors_text import poll_error_detail
 from lib.dispatcher import Dispatcher, TicketRef
 from lib.github_actions import GhResult, run_gh
 from lib.orch_yml import OrchConfig, Project
-from lib.poll_source import LivePollSource, PollCycleError
+from lib.poll_source import LivePollSource, PollCycleError, PollSourceError
 from lib.queue import SQLiteJobQueue
 from tests.test_live_poll import FACTORY, FakeGh
 
@@ -128,21 +129,25 @@ def test_a_source_over_its_tracked_read_budget_is_deferred_and_the_cycle_goes_on
     dispatcher.reconcile_jobs.assert_called_once_with()
 
 
-def test_the_cycle_error_names_the_repo_ticket_and_failing_call() -> None:
+REPOS = ("acme/widgets", "acme/auth-service", "acme/session-keys")
+
+
+@pytest.mark.parametrize("repo", REPOS)
+def test_the_cycle_error_names_the_repo_ticket_and_failing_call(repo: str) -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
 
     def runner(argv, timeout):
-        if "repos/acme/widgets/pulls/12" in argv:
+        if f"repos/{repo}/pulls/12" in argv:
             return GhResult(1, "", "boom")
         return gh(argv, timeout)
 
-    source = LivePollSource(projects("acme/widgets"), gh_runner=runner)
+    source = LivePollSource(projects(repo), gh_runner=runner)
     source.begin_cycle()
 
     tracked = source.tracked_tickets(
         (
-            TicketRef("acme/widgets", "12", "github"),
-            TicketRef("acme/widgets", "13", "github"),
+            TicketRef(repo, "12", "github"),
+            TicketRef(repo, "13", "github"),
         )
     )
 
@@ -150,8 +155,8 @@ def test_the_cycle_error_names_the_repo_ticket_and_failing_call() -> None:
     with pytest.raises(PollCycleError) as raised:
         source.end_cycle()
     assert str(raised.value) == (
-        "poll cycle recorded 1 source error(s): acme/widgets x1; "
-        "acme/widgets ticket 12 PollSourceError:gh api GET pulls/12 exited 1"
+        f"poll cycle recorded 1 source error(s): {repo} x1; "
+        f"{repo} ticket 12 PollSourceError:gh api GET pulls/12 exited 1"
     )
 
 
@@ -250,21 +255,11 @@ def test_tickets_deferred_by_the_budget_are_read_in_a_later_cycle(tmp_path: Path
     assert set(widgets) <= seen
 
 
-def test_the_poller_log_and_stored_detail_name_the_repo_ticket_and_failing_call(
-    tmp_path: Path,
-) -> None:
+def logged_cycle_error(tmp_path: Path, repo: str, runner_for) -> tuple[str, str]:
     gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
-
-    def runner(argv, timeout):
-        if "repos/acme/widgets/pulls/12" in argv:
-            return GhResult(1, "", "boom")
-        return gh(argv, timeout)
-
-    dispatcher = dispatcher_tracking(
-        tmp_path, [("acme/widgets", "12"), ("acme/widgets", "13")]
-    )
+    dispatcher = dispatcher_tracking(tmp_path, [(repo, "12"), (repo, "13")])
     source = LivePollSource(
-        projects("acme/widgets"), gh_runner=runner, error_sink=dispatcher.record_poll_error
+        projects(repo), gh_runner=runner_for(gh), error_sink=dispatcher.record_poll_error
     )
     with pytest.raises(PollCycleError) as raised:
         dispatcher.poll_once(source)
@@ -272,14 +267,70 @@ def test_the_poller_log_and_stored_detail_name_the_repo_ticket_and_failing_call(
     log = StringIO()
     with redirect_stderr(log):
         dispatcher.record_poll_exception("poll", "-", raised.value)
-
-    named = "acme/widgets ticket 12 PollSourceError:gh api GET pulls/12 exited 1"
-    assert named in log.getvalue()
     with dispatcher.queue.connect() as connection:
         (detail,) = connection.execute(
             "SELECT detail FROM poll_errors WHERE repo = 'poll'"
         ).fetchone()
+    return log.getvalue(), detail
+
+
+@pytest.mark.parametrize("repo", REPOS)
+def test_the_poller_log_and_stored_detail_name_the_repo_ticket_and_failing_call(
+    tmp_path: Path, repo: str
+) -> None:
+    def runner_for(gh):
+        def runner(argv, timeout):
+            if f"repos/{repo}/pulls/12" in argv:
+                return GhResult(1, "", "boom")
+            return gh(argv, timeout)
+
+        return runner
+
+    log, detail = logged_cycle_error(tmp_path, repo, runner_for)
+
+    named = f"{repo} ticket 12 PollSourceError:gh api GET pulls/12 exited 1"
+    assert named in log
     assert named in detail
+    assert "<credential omitted>" not in log
+    assert "<credential omitted>" not in detail
+
+
+def test_the_poller_log_and_stored_detail_keep_secrets_in_source_errors_redacted(
+    tmp_path: Path,
+) -> None:
+    repo = "acme/auth-service"
+
+    def runner_for(gh):
+        def runner(argv, timeout):
+            if f"repos/{repo}/pulls/12" in argv:
+                raise RuntimeError(
+                    "gh read failed Authorization: Bearer abc123def456 "
+                    "password=hunter2 ghp_abcdefghij1234567890"
+                )
+            if f"repos/{repo}/pulls/13" in argv:
+                raise PollSourceError("gh read failed token=s3cr3tvalue passphrase tail2of2")
+            return gh(argv, timeout)
+
+        return runner
+
+    log, detail = logged_cycle_error(tmp_path, repo, runner_for)
+
+    for text in (log, detail):
+        assert f"{repo} ticket 12" in text
+        for secret in (
+            "abc123def456",
+            "hunter2",
+            "ghp_abcdefghij1234567890",
+            "s3cr3tvalue",
+            "tail2of2",
+        ):
+            assert secret not in text
+
+
+def test_a_cycle_error_not_built_from_source_errors_is_still_cut() -> None:
+    detail = poll_error_detail(PollCycleError("acme/auth-service ticket 12 failed"))
+
+    assert detail.endswith("PollCycleError: acme/<credential omitted>")
 
 
 def test_the_ticket_that_spends_the_budget_yields_its_turn_to_the_next(tmp_path: Path) -> None:

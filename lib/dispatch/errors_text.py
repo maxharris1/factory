@@ -59,6 +59,9 @@ def _without_body(exc: BaseException) -> str:
     name, separator, message = "".join(
         traceback.format_exception_only(type(exc), exc)
     ).partition(": ")
+    scrubbed = getattr(exc, "scrubbed_message", None)
+    if isinstance(scrubbed, str) and scrubbed:
+        return name.rstrip() + ": " + scrubbed + "\n"
     safe = getattr(exc, "safe_detail", None)
     if isinstance(safe, str) and safe:
         separator, message = ": ", safe
