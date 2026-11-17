@@ -349,10 +349,13 @@ worker checks count, and a device that needed none (its jobs still run, or their
 runners still live) gets a plain round trip. The first failed check
 after a good one starts that device's offline clock, a good one stops it, and a
 device holding no slot is forgotten. Once a device has failed every check for
-60 minutes, each job still running on it is failed with its failure already
-handled (so T6 does not retry it), its ticket is marked `stuck` with reason
-`device-offline`, and Grok Bot is woken once through the stuck flag. The job is
-never `done`, and its slot stays held until the device confirms the worker gone.
+`job_states.unreachable_lost_minutes` (default 10), each job still running on
+it is lost (issue #662): in one transaction it is failed for T6 with a
+`device-lost` job event, its slot row moves to `device_orphans` (so the slot is
+free at once) and the device is backed off for 5 minutes. T6 requeues a lost
+job as it does a link drop, under the same budget, so it lands on another
+device when one has room. A lost `update-from-main` job is not requeued; it
+counts one update failure and the merge queue settles any head it pushed.
 An unreachable device counts against its offline clock; an error raised while
 checking (the database, say) is recorded as a `devices` poll error and never
 stops the poll.
@@ -374,7 +377,7 @@ hooks, GitHub review actions, and Grok webhook delivery. `--db` falls back to
 the existing `gh` login with token environment variables removed. GitHub
 discovery is PR-only in Phase 1; a label on an issue is not enough. Linear
 projects use GraphQL search with `LINEAR_HANDOFF_QUERY`. Each poll also runs
-the F2-02 device checks (slot release and the 60-minute offline check, see
+the F2-02 device checks (slot release and the device-lost check, see
 "Remote start") from `--machines`, default the checkout's `machines.yml`;
 without that file no device is checked, and an invalid one is refused.
 
@@ -1039,6 +1042,7 @@ heartbeat` by hand) is never `claimed`, so it is never requeued.
 job_states:                 # optional; whole minutes, defaults shown
   stale_minutes: 2
   release_claimed_minutes: 5
+  unreachable_lost_minutes: 10
 ```
 
 ## Install after merge
