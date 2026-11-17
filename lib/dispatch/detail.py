@@ -19,6 +19,7 @@ from lib.dispatch.helpers import (
     _comment_link,
     _detail_round_number,
     _grok_logical_key,
+    _post_to,
     _scope,
     failed_checks,
 )
@@ -521,11 +522,7 @@ class DetailMixin:
                 f".claude/skills/{skill}/SKILL.md"
                 for skill in ticket.factory.skills
             ],
-            "post_to": (
-                f"PR #{ticket.pr_number} issue comments (not reviews or inline comments)"
-                if ticket.pr_number is not None
-                else "the linked PR issue comments (not reviews or inline comments)"
-            ),
+            "post_to": _post_to(ticket.pr_number),
             "action": action,
             "head": head,
             "project_bot": ticket.grok_bot,

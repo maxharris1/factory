@@ -101,11 +101,11 @@ _HTML_LINE = re.compile(r"^<!--\s*orch:v1\b\s*(.*?)\s*-->$")
 _VISIBLE_LINE = re.compile(r"^`orch:v1\b\s*(.*?)\s*`$")
 _ATTR = re.compile(r"^[a-z][a-z0-9_]*=[A-Za-z0-9_.:/-]+$")
 _TOKEN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_ROUND = re.compile(r"^([1-9][0-9]*)(?:/([1-9][0-9]*))?$")
+_ROUND = re.compile(r"^([1-9][0-9]{0,8})(?:/([1-9][0-9]{0,8}))?$")
 _HEAD = re.compile(r"^[0-9a-f]{7,40}$")
 _REPEAT = re.compile(r"^(?:ac|f)-[1-9][0-9]*$")
 _UNSAT = re.compile(r"^ac-[1-9][0-9]*$")
-_LINES = re.compile(r"^(?:0|[1-9][0-9]*)$")
+_LINES = re.compile(r"^(?:0|[1-9][0-9]{0,8})$")
 
 
 class HandoffError(ValueError):

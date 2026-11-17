@@ -347,6 +347,24 @@ class RetryMixin:
             return None
         return newest
 
+    def _retire_superseded_handoff_audit(
+        self, connection: sqlite3.Connection, superseded: Job, generation: int
+    ) -> None:
+        if connection.execute(
+            """
+            SELECT 1 FROM job_events
+            WHERE job_id = ? AND event IN ('handoff-verified', 'handoff-unverified')
+            """,
+            (superseded.id,),
+        ).fetchone() is None:
+            self._record_job_event(
+                connection,
+                superseded,
+                "handoff-unverified",
+                f"superseded by the generation {generation} plan",
+                self.queue.now(),
+            )
+
     def _replan_in_transaction(
         self,
         connection: sqlite3.Connection,
@@ -368,6 +386,7 @@ class RetryMixin:
             """,
             (generation, *key),
         )
+        superseded = _newest_harness_job(connection, key)
         job, _ = self._enqueue_step(
             connection,
             ticket,
@@ -384,6 +403,8 @@ class RetryMixin:
             ),
             dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:plan:g{generation}",
         )
+        if superseded is not None:
+            self._retire_superseded_handoff_audit(connection, superseded, generation)
         connection.execute(
             """
             DELETE FROM needs_attention

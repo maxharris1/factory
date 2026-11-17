@@ -86,6 +86,7 @@ class PlanMixin:
                     "paused_head": None,
                     "paused_generation": generation,
                     "paused_question_id": comment.id,
+                    "paused_plan_text": plan_text,
                 }
                 self.queue.enqueue_in_transaction(
                     connection,

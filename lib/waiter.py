@@ -142,6 +142,7 @@ from lib.machines_yml import Device, MachinesConfig, orch_host
 from lib import device_deploy, job_token
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
+    SERVER_ERROR,
     Expected,
     Read,
     ReadError,
@@ -397,11 +398,15 @@ class GhContextSource:
         run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
         environ: Mapping[str, str] | None = None,
         note: str | None = None,
+        retry_log: Callable[[str], None] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self.config = config
         self.run = run
         self.environ = environ if environ is not None else os.environ
         self.note = note
+        self.retry_log = retry_log
+        self.sleep = sleep
 
     def load(self, repo: str) -> ContextResult:
         owner, _, name = repo.partition("/")
@@ -420,25 +425,43 @@ class GhContextSource:
             return ContextResult(None, None, f"{repo} has no usable factory_ref in orch.yml")
         if not _REPO.fullmatch(project.repo):
             return ContextResult(None, None, f"repo {project.repo!r} is not owner/name")
-        argv = [*GH_ARGV_PREFIX, f"repos/{project.repo}/contents/factory.md", "-f", f"ref={ref}"]
         env = {key: value for key, value in self.environ.items() if key not in GH_TOKEN_VARIABLES}
+
+        def read(path: str) -> Mapping[str, object]:
+            try:
+                done = self.run(
+                    [*GH_ARGV_PREFIX, path, "-f", f"ref={ref}"],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=GH_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ReadError(
+                    f"gh api failed: {type(exc).__name__}",
+                    retryable=isinstance(exc, subprocess.TimeoutExpired),
+                ) from exc
+            if done.returncode != 0:
+                raise ReadError(
+                    f"gh api exited {done.returncode}",
+                    retryable=SERVER_ERROR.search(f"{done.stderr} {done.stdout}") is not None,
+                )
+            try:
+                payload = json.loads(done.stdout)
+            except ValueError:
+                return {}
+            return payload if isinstance(payload, dict) else {}
+
+        if self.retry_log is not None:
+            read = retrying(read, self.retry_log, self.sleep, label="factory.md read")
         try:
-            done = self.run(
-                argv,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=GH_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return ContextResult(None, ref, f"gh api failed: {type(exc).__name__}")
-        if done.returncode != 0:
-            return ContextResult(None, ref, f"gh api exited {done.returncode}")
+            payload = read(f"repos/{project.repo}/contents/factory.md")
+        except ReadError as exc:
+            return ContextResult(None, ref, str(exc))
         try:
-            payload = json.loads(done.stdout)
-            if not isinstance(payload, dict) or payload.get("encoding") != "base64":
+            if payload.get("encoding") != "base64":
                 raise ValueError("not base64")
             encoded = payload.get("content")
             if not isinstance(encoded, str):
@@ -1276,7 +1299,8 @@ class Waiter:
         head = ready_head(expected, comment_id, read)
         if head is None:
             return None
-        spec = spec_for(GhContextSource(config), expected.repo)
+        source = GhContextSource(config, retry_log=lambda line: self.log(f"job {job_id}: {line}"))
+        spec = spec_for(source, expected.repo)
         if spec is None:
             return None
         with detached_checkout(

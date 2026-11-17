@@ -422,6 +422,19 @@ class PollMixin:
                 ),
             )
 
+    def _emptied_by_running_job(self, ticket: TrackedTicket) -> bool:
+        if not (ticket.pr_commits == 0 and ticket.git_branch_name and ticket.pr_base):
+            return False
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'running'
+                  AND recipient != 'grok'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone() is not None
+
     def _reopen_emptied_pull(self, ticket: TrackedTicket) -> bool:
         """GitHub auto-closes a PR whose branch has no commits beyond base and
         freezes its head, so a rebuilt branch's ready is never read until the
