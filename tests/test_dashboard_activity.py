@@ -322,7 +322,7 @@ def test_each_thread_says_where_its_ticket_stopped_shipped_or_waits(tmp_path: Pa
 
 
 def _relay_links(relay: str) -> dict[str, str]:
-    return dict(re.findall(r'data-thread="([^"]*)"><a class="rl-tk" href="([^"]*)"', relay))
+    return dict(re.findall(r'data-thread="([^"]*)"><span class="rl-id"><a class="rl-tk" href="([^"]*)"', relay))
 
 
 def _assert_relay_links_open(snapshot: dict, relay: str) -> None:
@@ -572,7 +572,9 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
     for key, row in rows:
         repo, _, ticket_id = key.rpartition("#")
         href = ticket_page_href({"repo": repo, "ticket_id": ticket_id})
-        assert re.fullmatch(rf'<a class="rl-tk" href="{re.escape(href)}">[^<]*</a><span class="rl-steps">.*</span>', row), key
+        assert re.fullmatch(rf'<span class="rl-id"><a class="rl-tk" href="{re.escape(href)}">[^<]*</a>'
+                            r'(<button class="rl-more rl-more-phone" [^>]*>\+\d+ earlier</button>)?</span>'
+                            r'<span class="rl-steps">.*</span>', row), key
     row124 = dict(rows)["maxharris1/factory#124"]
     assert re.findall(r'class="(rl-step [^"]*|rl-verdict)"', row124) == [
         "rl-verdict", "rl-step rl-claude", "rl-verdict", "rl-step rl-codex", "rl-step rl-grok b2b", "rl-verdict"]
@@ -585,14 +587,17 @@ def test_relay_rows_follow_the_rule_and_dash_bot_to_bot_steps(snapshot: dict) ->
     assert re.search(r"\.rl-step\{[^}]*border:1px solid", page.CSS)
     buttons = re.findall(r'<button class="rl-btn" type="button" aria-pressed="(true|false)" data-relay="(\w+)">'
                          r"([^<]+)</button>", relay)
-    assert buttons == [("true", "all", "all"), ("false", "scripted", "scripted"),
-                       ("false", "wakes", "grok wakes"), ("false", "shipped", "shipped")]
+    assert buttons == [("true", "all", "all"), ("false", "needs", "needs me"),
+                       ("false", "shipped", "shipped"), ("false", "wakes", "grok wakes")]
+    assert '<div class="rl-filter" role="group" aria-label="Filter the relay"><button class="rl-btn"' in relay
     (legend,) = re.findall(r'<div class="rl-legend">(.*?)</div>', relay)
     keys = re.findall(r'<span class="rl-key"><span class="([^"]+)" aria-hidden="true">([^<]*)</span>'
                       r"<span>([^<]+)</span></span>", legend)
     assert keys == [("rl-sw", "", "handoff"), ("rl-sw b2b", "", "bot-to-bot (grok wake)"),
-                    ("chip accent", "routed", "verdict"), ("chip bad", "failed", "failed handoff")]
-    assert legend.count('class="rl-key"') == 4
+                    ("chip accent", "routed", "verdict"), ("chip bad", "failed", "failed handoff"),
+                    ("rl-sw now", "", "where the ticket is now")]
+    assert legend.count('class="rl-key"') == 5
+    assert legend.endswith('</span></span><a class="rl-find" href="job.html">find any of the 9 tickets</a>')
     for drawn in ('class="rl-step rl-claude"', 'class="rl-step rl-grok b2b"',
                   'class="rl-verdict" title="queued-review"><span class="chip accent">routed</span>',
                   '<span class="chip bad">failed</span>'):
@@ -614,20 +619,29 @@ def _threads(markup: str) -> list[str]:
     return re.findall(r'data-thread="([^"]+)"', markup)
 
 
+def _tickets(markup: str) -> list[str]:
+    return [key.removeprefix("maxharris1/factory#") for key in _threads(markup)]
+
+
 @layout.needs_node
 def test_filter_buttons_show_only_the_matching_threads(tmp_path: Path, snapshot: dict) -> None:
-    rich = _rich(snapshot)
+    snap = _endings(snapshot)
+    snap["relay"]["threads"][8]["handoffs"].append(_handoff("j-wake209", "209", 500, "bot_to_bot", "grok", "done"))
     actions: list = []
-    for name in ("scripted", "wakes", "shipped", "all"):
+    for name in ("needs", "shipped", "wakes", "all"):
         actions += [["press", ["data-relay", name]], ["snap", ["relay"]]]
-    snaps = [step["snap"]["relay"] for step in _script(tmp_path, rich, actions)["steps"] if "snap" in step]
-    every = ["maxharris1/factory#114", "maxharris1/factory#124", "maxharris1/factory#100", "maxharris1/factory#107"]
-    assert _threads(snaps[0]) == every[:2]
-    assert _threads(snaps[1]) == ["maxharris1/factory#124"]
-    assert _threads(snaps[2]) == ["maxharris1/factory#124"]
-    assert _threads(snaps[3]) == every
-    assert 'aria-pressed="true" data-relay="shipped"' in snaps[2]
-    assert '<span class="count">1 of 9 tickets · newest activity first</span>' in snaps[2]
+    snaps = [step["snap"]["relay"] for step in _script(tmp_path, snap, actions)["steps"] if "snap" in step]
+    assert _tickets(snaps[0]) == ["203", "204", "206", "210"]
+    assert _tickets(snaps[1]) == ["207", "208"]
+    assert _tickets(snaps[2]) == ["209"]
+    assert _tickets(snaps[3]) == [str(n) for n in range(201, 212)]
+    assert 'aria-pressed="true" data-relay="needs"' in snaps[0]
+    assert '<span class="count">4 of 11 tickets · newest activity first</span>' in snaps[0]
+    assert snaps[3] == _server(snap)["relay"]
+    flags = {t["key"].split("#")[1]: (t["needs"], t["shipped"], t["wakes"]) for t in page.relay_threads(snap)}
+    assert [ticket for ticket, flag in flags.items() if flag[0]] == ["203", "204", "206", "210"]
+    assert [ticket for ticket, flag in flags.items() if flag[1]] == ["207", "208"]
+    assert [ticket for ticket, flag in flags.items() if flag[2]] == ["209"]
 
 
 def _shipped(snapshot: dict, seq: int) -> dict:
@@ -749,10 +763,10 @@ def test_a_thread_shows_its_six_newest_steps_and_folds_the_rest_behind_a_button(
     relay = _server(snap)["relay"]
     assert _script(tmp_path, snap)["html"]["relay"] == relay
     row = _row(relay)
-    assert len(_early(row)) == hidden == row.count("rl-early")
+    assert len(_early(row)) == hidden == row.count('class="rl-early"')
     assert _shown(row) == _ages(count)[hidden:] and len(_shown(row)) == 6
     if not hidden:
-        assert "rl-more" not in row
+        assert 'class="rl-more"' not in row
         return
     noun = "step" if hidden == 1 else "steps"
     assert row.split('<span class="rl-steps">')[1].startswith(
@@ -906,7 +920,7 @@ def test_the_ending_counts_toward_the_six(tmp_path: Path, snapshot: dict) -> Non
         assert _script(tmp_path / str(steps), snap)["html"]["relay"] == relay
         row = _row(relay)
         assert row.endswith('<span class="rl-wait">queued 1m 30s</span></span></span>')
-        assert re.findall(r">(\+\d+ earlier)</button>", row) == ([button] if button else [])
+        assert re.findall(r'class="rl-more" [^>]*>(\+\d+ earlier)</button>', row) == ([button] if button else [])
 
 
 @layout.needs_node
@@ -952,14 +966,16 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
 
 RELAY_ROWS = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
   var box = row.getBoundingClientRect(), tk = row.querySelector('.rl-tk').getBoundingClientRect();
+  var block = innerWidth < 700;
   var parts = [].filter.call(row.querySelectorAll('*'), function (n) {
-    return !n.closest('.rl-tk') && n.getClientRects().length > 0;
+    return !n.closest('.rl-id') && n.getClientRects().length > 0;
   });
   return {
     thread: row.getAttribute('data-thread'),
     outside: parts.filter(function (n) {
       var b = n.getBoundingClientRect();
-      return b.left < tk.right || b.right > box.right + 0.5;
+      var start = block ? b.top < tk.bottom || b.left < box.left - 0.5 : b.left < tk.right;
+      return start || b.right > box.right + 0.5;
     }).map(function (n) { return n.className + ': ' + n.textContent; }),
     lines: new Set(parts.filter(function (n) { return n.matches('.rl-step, .rl-verdict'); }).map(function (n) {
       return Math.round(n.getBoundingClientRect().top);
@@ -969,7 +985,7 @@ RELAY_ROWS = """[].map.call(document.querySelectorAll('#relay .rl-row'), functio
 
 
 @needs_chrome
-def test_wrapped_relay_steps_start_in_the_second_column_in_a_browser(snapshot: dict) -> None:
+def test_wrapped_relay_steps_start_in_the_second_column_or_below_the_id_on_a_phone(snapshot: dict) -> None:
     long = _long(snapshot)
     browser = Browser()
     try:
@@ -999,7 +1015,7 @@ def test_the_relay_filter_shows_only_with_script_in_a_browser(snapshot: dict) ->
         assert browser.eval("document.querySelectorAll('#relay .rl-filter .rl-btn').length") == 4
         assert browser.eval(RELAY_FILTER) == []
         _load(browser, rich, 1440, True)
-        assert browser.eval(RELAY_FILTER)[1:] == ["all", "scripted", "grok wakes", "shipped"]
+        assert browser.eval(RELAY_FILTER)[1:] == ["all", "needs me", "shipped", "grok wakes"]
         threads = browser.eval("""(document.querySelector('[data-relay="wakes"]').click(),
           [].map.call(document.querySelectorAll('#relay .rl-row'), function (r) { return r.getAttribute('data-thread'); }))""")
         assert threads == ["maxharris1/factory#124"]
@@ -1019,5 +1035,131 @@ def test_every_ending_stays_inside_its_row_in_a_browser(snapshot: dict) -> None:
                 assert len(rows) == 11, (script, width)
                 for row in rows:
                     assert not row["outside"], (script, width, row)
+    finally:
+        browser.close()
+
+
+FILTER_BOX = """[].map.call(document.querySelectorAll('#relay .rl-btn'), function (n) {
+  var b = n.getBoundingClientRect();
+  return [n.textContent, Math.round(b.top), b.height];
+})"""
+
+
+@needs_chrome
+def test_the_relay_filter_is_one_row_of_28px_buttons_at_every_width_in_a_browser(snapshot: dict) -> None:
+    browser = Browser()
+    try:
+        for width in (1440, 375):
+            _load(browser, _rich(snapshot), width, True)
+            buttons = browser.eval(FILTER_BOX)
+            assert [text for text, _, _ in buttons] == ["all", "needs me", "shipped", "grok wakes"], width
+            assert len({top for _, top, _ in buttons}) == 1, (width, buttons)
+            assert {height for _, _, height in buttons} == {28}, (width, buttons)
+            assert browser.eval("document.documentElement.scrollWidth") <= width
+    finally:
+        browser.close()
+
+
+ATTENTION = [("paused", "1"), ("stuck", "2"), ("stale", "3"), ("down", "4")]
+
+
+def _attending(snapshot: dict) -> dict:
+    snap = copy.deepcopy(snapshot)
+    snap["attention"] = {"count": len(ATTENTION), "items": [
+        {"kind": kind, "repo": "maxharris1/factory", "ticket_id": ticket, "detail": f"{kind} detail"}
+        for kind, ticket in ATTENTION]}
+    return snap
+
+
+@layout.needs_node
+def test_needs_attention_lists_bad_items_first_in_both_renders(tmp_path: Path, snapshot: dict) -> None:
+    snap = _attending(snapshot)
+    server = _server(snap)["attention"]
+    assert _script(tmp_path, snap)["html"]["attention"] == server
+    assert re.findall(r'data-attn="(\w+):', server) == ["stuck", "down", "paused", "stale"]
+    assert '<span class="count">4 items · worst first</span>' in server
+    assert '<section class="panel" id="attention"' in render_pages(snap)["activity.html"]
+
+
+@needs_chrome
+def test_the_attention_panel_keeps_its_id_at_every_width_in_a_browser(snapshot: dict) -> None:
+    browser = Browser()
+    try:
+        for width in (1440, 375):
+            _load(browser, _attending(snapshot), width, True)
+            box = browser.eval("(function (b) { return [b.width, b.height]; })"
+                               "(document.getElementById('attention').getBoundingClientRect())")
+            assert box[0] > 0 and box[1] > 0, width
+    finally:
+        browser.close()
+
+
+def _phone_more(row: str) -> list[str]:
+    return re.findall(r'<button class="rl-more rl-more-phone" type="button" aria-expanded="(?:true|false)" '
+                      r'data-more="[^"]+" title="show \d+ earlier steps?">(\+\d+ earlier)</button></span>', row)
+
+
+@layout.needs_node
+@pytest.mark.parametrize(("count", "desktop", "phone"), [(9, "+3 earlier", "+5 earlier"), (5, None, "+1 earlier"),
+                                                         (4, None, None)])
+def test_a_phone_thread_folds_all_but_its_four_newest_steps(
+    tmp_path: Path, snapshot: dict, count: int, desktop: str | None, phone: str | None,
+) -> None:
+    snap = _only(snapshot, _steps(count))
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path, snap)["html"]["relay"] == relay
+    row = _row(relay)
+    assert re.findall(r'class="rl-more" [^>]*>(\+\d+ earlier)</button>', row) == ([desktop] if desktop else [])
+    assert _phone_more(row) == ([phone] if phone else [])
+    folded = re.findall(r'<span class="rl-early-phone">.*?class="rl-when">([^<]*)<', row)
+    assert folded == _ages(count)[max(count - 6, 0):max(count - 4, 0)]
+    tail = re.sub(r'<span class="rl-early(?:-phone)?">.*?→</span></span>', "", row)
+    assert re.findall(r'class="rl-when">([^<]*)<', tail) == _ages(count)[-4:]
+
+
+PHONE_ROWS = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
+  function seen(n) { return n.getClientRects().length > 0; }
+  var box = row.getBoundingClientRect();
+  var tk = row.querySelector('.rl-tk').getBoundingClientRect();
+  var more = [].filter.call(row.querySelectorAll('.rl-more'), seen);
+  var items = [].filter.call(row.querySelectorAll('.rl-step, .rl-verdict, .rl-now'), seen);
+  return {
+    more: more.map(function (n) {
+      var b = n.getBoundingClientRect();
+      return {text: n.textContent, line: Math.abs(b.top + b.bottom - tk.top - tk.bottom) < 2,
+              right: b.right - box.right,
+              height: b.height, expanded: n.getAttribute('aria-expanded')};
+    }),
+    tops: items.map(function (n) { return n.getBoundingClientRect().top; }),
+    whens: items.map(function (n) { var w = n.querySelector('.rl-when, .rl-wait'); return w && w.textContent; }),
+    last: items.length ? items[items.length - 1].className : null,
+    expanded: [].map.call(row.querySelectorAll('.rl-more'), function (n) { return n.getAttribute('aria-expanded'); })
+  };
+})"""
+
+
+@needs_chrome
+def test_a_phone_thread_is_a_block_of_four_steps_newest_last_in_a_browser(snapshot: dict) -> None:
+    snap = _only(snapshot, _steps(8))
+    snap["queued"] = [_job("q-1", "1", age_seconds=90)]
+    ages = _ages(8)
+    browser = Browser()
+    try:
+        _load(browser, snap, 375, True)
+        (row,) = browser.eval(PHONE_ROWS)
+        ((more,),) = [row["more"]]
+        assert more["text"] == "+5 earlier" and more["line"] and abs(more["right"]) < 0.5 and more["height"] == 28
+        assert len(row["tops"]) == 4 and row["tops"] == sorted(set(row["tops"]))
+        assert row["whens"] == [*ages[5:], "queued 1m 30s"]
+        assert row["last"].startswith("rl-now queued")
+        assert browser.eval("document.documentElement.scrollWidth") <= 375
+        browser.eval("document.querySelector('#relay .rl-more-phone').click()")
+        (row,) = browser.eval(PHONE_ROWS)
+        assert row["whens"] == [*ages, "queued 1m 30s"]
+        assert row["tops"] == sorted(set(row["tops"]))
+        assert row["expanded"] == ["true", "true"]
+        _load(browser, snap, 375, False)
+        (row,) = browser.eval(PHONE_ROWS)
+        assert row["more"] == [] and row["whens"] == [*ages, "queued 1m 30s"]
     finally:
         browser.close()
