@@ -145,10 +145,8 @@ def test_shipped_mac_stays_disabled_and_only_pc_and_box_schedule() -> None:
     assert [d.name for d in config.devices if d.schedulable] == ["pc", "box"]
 
 
-def test_shipped_machines_yml_names_the_pc_ssh_aliases_and_nothing_secret() -> None:
+def test_shipped_machines_yml_names_nothing_secret() -> None:
     text = (ROOT / "machines.yml").read_text(encoding="utf-8")
-    for alias in ("pc-wsl-claude-bot", "pc-wsl-codex-bot", "pc-wsl-cursor-bot"):
-        assert alias in text
     for secret_hint in ("IdentityFile", ".ssh/", "id_ed25519", "id_rsa", "2222"):
         assert secret_hint not in text
 
@@ -206,8 +204,6 @@ def test_workdir_root_bot_token_rules(tmp_path: Path, value: str, message: str) 
 
 
 def test_shipped_slots_are_never_described_as_one_per_bot() -> None:
-    """Slots are generic: any harness may take any free slot on a device, so
-    "one per harness bot" is not the basis of a slot_max and must not be stated."""
     machines = (ROOT / "machines.yml").read_text(encoding="utf-8")
     spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

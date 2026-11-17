@@ -307,9 +307,6 @@ def test_device_power_loss_keeps_slot_held_and_never_done(
 def test_shipped_inventory_fills_pc_and_box_and_never_places_on_the_mac(
     tmp_path: Path,
 ) -> None:
-    """The shipped machines.yml schedules pc (10 slots) and box (6 slots),
-    each bot keeping its own identity on either, and once both are full the
-    next job stays queued instead of spilling onto the disabled Mac."""
     root = Path(__file__).resolve().parents[1]
     config, _ = load_machines_yml(root / "machines.yml", allow_placeholders=True)
     assert config is not None

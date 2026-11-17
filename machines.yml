@@ -1,6 +1,6 @@
 # machines.yml schema v1. See docs/SPEC.md sections 13 and 17 (F2-01, F2-02).
 # orch_host names the device that runs orch and must be a listed device. With
-# no local: true device it is required; a local device would have to be it.
+# no local: true device it is required; a local: true device must be it.
 # Each device: name, tailscale_name (omitted only on the local device),
 # slot_max, harnesses (harness -> its bot OS user), workdir_root (required
 # on remote devices, never under /mnt/; a {bot} path component resolves to
@@ -10,18 +10,15 @@
 # option), factory_root (required on remote devices: the deployed factory
 # checkout with skills/ and bin/orch, not workdir_root; same path rules),
 # ssh_user (optional on a remote device: the ssh -l login in place of the bot
-# user; the bot user stays the job's identity, its slot and its {bot} paths),
+# user; the bot user stays the job's identity and fills {bot} paths),
 # and enabled (default true).
 # A disabled device or one with a REPLACE_WITH_ value is never scheduled.
 # Slots are counted per device name: list each host (tailscale_name) once.
-# F2-02 starts a remote job over `ssh -l <login> <ssh_alias>`, where the login
-# is ssh_user or else the bot user; nothing here implies a device is reachable.
+# F2-02 starts a remote job over `ssh -l <login> <ssh_alias>`; nothing here
+# implies a device is reachable.
 orch_host: pc
 devices:
-  # The WSL Ubuntu node on the PC, not the Windows host. It runs orch and
-  # reaches every device, itself included, over SSH through the aliases
-  # pc-wsl-claude-bot, pc-wsl-codex-bot and pc-wsl-cursor-bot, one per bot
-  # user, resolved from ssh_alias below.
+  # The WSL Ubuntu node on the PC, not the Windows host.
   - name: pc
     tailscale_name: pc-wsl-bots.tail68624b.ts.net
     slot_max: 10
@@ -35,8 +32,6 @@ devices:
     ssh_alias: pc-wsl-{bot}
     # Each bot's own deployed factory checkout, beside its workdir_root.
     factory_root: /home/{bot}/factory
-  # Every bot logs in to the box as the box user through its own alias
-  # (box-claude-bot and so on) and shares the box user's checkout.
   - name: box
     tailscale_name: grokbot-factory-box.tail68624b.ts.net
     slot_max: 6
