@@ -48,6 +48,18 @@ class FailedCheck:
 
 
 @dataclass(frozen=True)
+class CheckRow:
+    name: str
+    status: str
+    conclusion: str | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    log_url: str | None = None
+    run_id: str | None = None
+    job_id: str | None = None
+
+
+@dataclass(frozen=True)
 class CIResult:
     status: str
     log: str | None = None
@@ -56,6 +68,9 @@ class CIResult:
     reported: bool = True
     failed: tuple[FailedCheck, ...] = ()
     pending: tuple[str, ...] = ()
+    # #717: every latest-attempt check run, for the dashboard's CI section.
+    # Never part of the gate, so it never takes part in equality either.
+    checks: tuple[CheckRow, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:
