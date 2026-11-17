@@ -20,6 +20,7 @@ from lib.dispatch.constants import (
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
 )
+from lib.dispatch import ci_board
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
 from lib.dispatch.helpers import _matching_head
@@ -114,6 +115,18 @@ class PollMixin:
                     self.process(self._polled.get(key, ticket))
                 except Exception as exc:
                     self._record_poll_error(ticket, exc)
+        with self._phase("ci-board"):
+            try:
+                ci_board.record(
+                    self._connect,
+                    [self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket) for ticket in tracked],
+                    self.queue.now(),
+                    run_jobs=self.ci_runs,
+                    ci_logs=self.ci_logs,
+                    log=self.log,
+                )
+            except Exception as exc:
+                self.record_poll_exception("ci-board", "-", exc)
         with self._phase("merge-queue"):
             self._advance_merge_queues()
         with self._phase("verify-handoffs"):
