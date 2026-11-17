@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from lib.branch_stack import stack_wait, stacked_pulls
+from lib.brief.common import detail_of, facts_of, job_section
 from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.feeder_gates import Progress, RefStatus, blocker_waits, github_ref, parse_gate_lines
 from lib.github_actions import GhResult, GitHubAdapterError
@@ -485,10 +486,14 @@ def test_a_pr_on_a_feature_base_is_reviewed_against_that_base(tmp_path: Path) ->
 
     dispatcher.process(ticket)
 
-    assert [job.request.head for job in reviews(queue)] == [OWN]
+    queued = reviews(queue)
+    assert [job.request.head for job in queued] == [OWN]
     assert grok_wakes(tmp_path) == []
     assert logs.count(BASE_NOTE) == 1
     assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == FEATURE
+    assert json.loads(queued[0].request.detail)["base_branch"] == FEATURE
+    brief = job_section(queued[0], "codex-bot", "review", facts_of(queued[0], detail_of(queued[0]), None), None)
+    assert f"- base branch: {FEATURE}" in brief.splitlines()
 
 
 def test_a_head_carrying_another_pr_beyond_its_pr_base_is_still_held(tmp_path: Path) -> None:
@@ -533,6 +538,64 @@ def test_intake_holds_an_open_pr_carrying_another_pr_beyond_its_base(tmp_path: P
     assert row["base_branch"] == FEATURE
     assert logs.count(BASE_NOTE) == 1
     assert linear.posted == {}
+
+
+def test_a_held_branch_is_noted_again_on_each_new_head(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github, beyond_base=(OTHER,))
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, _, _, logs = linear_feeder(tmp_path, github)
+
+    assert feeder.feed_once().blocked == 1
+    assert feeder.feed_once().blocked == 1
+    assert logs.count(BASE_NOTE) == 1
+    head = "5" * 40
+    github.branches[(LINEAR_REPO, AUT.branch)] = head
+    github.branch_commits[(LINEAR_REPO, AUT.branch)] += (head,)
+    assert feeder.feed_once().blocked == 1
+    assert feeder.feed_once().blocked == 1
+
+    assert logs.count(BASE_NOTE) == 2
+
+
+def github_pr_on_a_feature_base(tmp_path: Path):
+    github = FakeGitHub()
+    github.issues[HOME] = [issue(205)]
+    github.branches[(HOME, BRANCH)] = OWN
+    github.branch_commits[(HOME, BRANCH)] = (OWN,)
+    github.branches[(HOME, FEATURE)] = "6" * 40
+    github.pulls[(HOME, 77)] = {"head": BRANCH, "base": FEATURE}
+    feeder, _, _, _ = make_feeder(tmp_path, github=github)
+    logs: list[str] = []
+    feeder.log = logs.append
+    assert len(feeder.feed_once().fed) == 1
+    assert rows(tmp_path / "orch.db")["205"]["base_branch"] == FEATURE
+    ticket = TrackedTicket(repo=HOME, ticket_id="77", factory=factory(), pr_number="77",
+                           comments=(), current_head=OWN, ci={}, risk="low")
+    return feeder, github, ticket, logs
+
+
+def test_one_head_is_noted_once_from_intake_to_review(tmp_path: Path) -> None:
+    feeder, _, ticket, logs = github_pr_on_a_feature_base(tmp_path)
+
+    assert feeder.review_base_unless_stacked(ticket, OWN) == FEATURE
+    assert feeder.review_base_unless_stacked(ticket, OWN) == FEATURE
+
+    assert [line for line in logs if "differs from PR base" in line] == [
+        f"feeder: {HOME}#205 recorded base main differs from PR base {FEATURE}; using the PR base"
+    ]
+
+
+def test_a_pr_retargeted_to_the_configured_base_corrects_its_row(tmp_path: Path) -> None:
+    feeder, github, ticket, logs = github_pr_on_a_feature_base(tmp_path)
+    github.pulls[(HOME, 77)]["base"] = "main"
+
+    assert feeder.review_base_unless_stacked(ticket, OWN) == "main"
+
+    assert rows(tmp_path / "orch.db")["205"]["base_branch"] == "main"
+    assert logs[-1] == (
+        f"feeder: {HOME}#77 recorded base {FEATURE} differs from PR base main; using the PR base"
+    )
 
 
 def test_a_branch_with_no_pr_is_read_against_the_recorded_base(tmp_path: Path) -> None:

@@ -271,8 +271,8 @@ def test_a_green_ready_held_for_its_stack_is_no_longer_waiting_on_ci(tmp_path: P
         def feed_once(self):
             return None
 
-        def hold_stacked_review(self, ticket, head):
-            return True
+        def review_base_unless_stacked(self, ticket, head):
+            return None
 
     board.dispatcher.feeder = StackHold()
     pr.ci[pr.head] = "success"

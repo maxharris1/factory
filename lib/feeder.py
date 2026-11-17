@@ -702,7 +702,7 @@ class Feeder:
         self.linear = linear
         self.factory_for = factory_for
         self.log = log or (lambda line: None)
-        self._base_notes: set[tuple[str, str, str]] = set()
+        self._base_notes: set[tuple[str, int, str, str, str]] = set()
         with self.queue.connect() as connection:
             ensure_tables(connection)
 
@@ -1282,7 +1282,8 @@ class Feeder:
                     raise _Held(wait)
             branch_found = number is not None or self.github.branch_sha(repo, branch) is not None
         if number is not None:
-            pull_base = self._pull_base(repo, issue.key, base, number, branch)
+            tip = self.github.branch_sha(repo, branch) or branch
+            pull_base = self._pull_base(repo, issue.key, base, number, tip)
             if pull_base != base:
                 base = pull_base
                 self._record(candidate, base_branch=base)
@@ -1351,17 +1352,22 @@ class Feeder:
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
-    def hold_stacked_review(self, ticket: TrackedTicket, head: str) -> bool:
-        base = ticket.factory.base_branch
+    def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None:
         number = int(ticket.pr_number) if ticket.pr_number else None
+        base = ticket.factory.base_branch
         if number is not None:
-            pull_base = self._pull_base(ticket.repo, ticket.ticket_id, base, number, head)
-            if pull_base != base:
-                base = pull_base
+            key = (ticket.repo.lower(), ticket.ticket_id)
+            with self.queue.connect() as connection:
+                row = connection.execute(
+                    f"SELECT base_branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?", key
+                ).fetchone()
+            recorded = row[0] if row is not None and row[0] else base
+            base = self._pull_base(ticket.repo, ticket.ticket_id, recorded, number, head)
+            if base != recorded:
                 with self.queue.connect() as connection:
                     connection.execute(
                         f"UPDATE {FEEDER_TABLE} SET base_branch = ? WHERE repo = ? AND ticket_id = ?",
-                        (base, ticket.repo.lower(), ticket.ticket_id),
+                        (base, *key),
                     )
         wait = self._stack_hold(
             ticket.repo, ticket.ticket_id, base, head, number,
@@ -1370,11 +1376,11 @@ class Feeder:
             held=f"{ticket.source_issue or '#' + ticket.ticket_id} was not sent to review",
             until="review starts",
         )
-        return wait is not None
+        return None if wait is not None else base
 
-    def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, tip: str) -> str:
+    def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
         base = self.github.pull_base(repo, number)
-        note = (repo.lower(), ticket_id, tip)
+        note = (repo.lower(), number, head, recorded, base)
         if base != recorded and note not in self._base_notes:
             self._base_notes.add(note)
             self.log(
