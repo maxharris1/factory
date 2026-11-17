@@ -33,6 +33,8 @@ CHART_SUB = "· {n} states, with this ticket's path drawn on the whole machine"
 ET = ZoneInfo("America/New_York")
 TRACKER_NAMES = {"github": "GitHub", "linear": "Linear"}
 SECTION_ORDER = ("liverun", "journey", "next", "chart")
+PHONE = "(max-width:699.98px)"
+PHONE_ORDER = ("liverun", "summary", "journey", "runlog", "next", "ended", "chart")
 LIVE_KINDS = ("running", "queued")
 RECORD_FLAGS = ("stopped", "shipped")
 ROW_FROM_TICKET = ("tracker", "source", "pr")
@@ -197,7 +199,6 @@ CSS = """\
 .lr-tile{padding:8px 10px;background:var(--dim);box-shadow:var(--elev)}
 .lr-tile b{display:block;font-size:16px;line-height:1.25;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
 .lr-tile span{color:var(--muted)}
-@media (max-width:640px){.lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .jd-sum .lr{box-shadow:var(--elev)}
 .sum-who{display:flex;flex-direction:column;gap:8px}
 .sum-bar{display:flex;gap:2px;height:12px}
@@ -212,6 +213,41 @@ CSS = """\
 .jd-ended .ago{margin-left:auto;font:12px/1.5 var(--mono);color:var(--muted)}
 @media (scripting:none){.jd-box canvas,.journey button,.jd-ctl .axis,.jd-ctl [data-replay],.jd-chart .jd-box{display:none}.journey{position:static;width:auto;padding:8px 12px 8px 36px;list-style:decimal;font:12px/1.6 var(--mono);color:var(--text-2)}.journey li{display:list-item}.journey .step{display:inline}}
 """
+
+PHONE_CSS = """\
+.ticketpage{gap:12px}
+.ticketpage .jd-cols{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:12px}
+.ticketpage .jd-right{display:contents}
+.ticketpage .jd-cols>*,.ticketpage .jd-right>*{flex:none}
+.ticketpage .jd-hero .body{flex-direction:column;align-items:stretch;gap:12px;padding:12px}
+.ticketpage .jd-hero .who,.ticketpage .jd-tiles{flex:none}
+.ticketpage .jd-hero .who{gap:8px}
+.ticketpage .jd-hero .title{gap:6px 10px}
+.ticketpage .jd-hero h1{font-size:20px}
+.ticketpage .jd-hero .line{font-size:14px}
+.ticketpage .jd-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ticketpage .jd-panel{padding:12px}
+.ticketpage .jd-panel h2{flex-wrap:wrap;gap:2px 8px;margin:0 0 10px}
+.ticketpage .runlog li{margin:0 -6px}
+.ticketpage .runlog .visit{min-height:44px;padding:8px 6px}
+.ticketpage .jd-foot{margin:10px 0 0}
+.ticketpage .jd-next .head{flex-wrap:wrap;gap:2px 8px}
+.ticketpage .jd-chart{padding:0 12px}
+.ticketpage .jd-chart summary{padding:12px 0;line-height:1.5}
+.ticketpage .jd-chart .jd-box{margin-top:0}
+.ticketpage .jd-legend{gap:6px 16px;margin-top:0;padding:10px 0 12px}
+.ticketpage .lr{padding:12px;gap:12px}
+.ticketpage .lr-head{gap:6px 8px}
+.ticketpage .lr-task,.ticketpage .lr-last{flex:1 0 100%}
+.ticketpage .lr-task{font-size:17px}
+.ticketpage .lr-cols{gap:12px}
+.ticketpage .lr-col{flex:1 0 100%}
+.lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+"""
+
+CSS += f"@media {PHONE}{{\n{PHONE_CSS}" + "".join(
+    f".ticketpage [data-sec={name}]{{order:{i}}}\n" for i, name in enumerate(PHONE_ORDER, 1)
+) + "}\n"
 
 
 def _who_tint(who: object) -> str:
@@ -542,7 +578,7 @@ def _runlog(model: dict) -> str:
     count = f"{len(model['visits'])} visits · oldest first"
     body = f'<ol class="runlog">{rows}</ol>' if rows else '<p class="empty">no visits recorded</p>'
     return (
-        f'<section class="jd-panel jd-runlog"><h2>{_span("t", "Run log")}{_span("count", count)}</h2>{body}'
+        f'<section class="jd-panel jd-runlog" data-sec="runlog"><h2>{_span("t", "Run log")}{_span("count", count)}</h2>{body}'
         '<p class="jd-foot">Pick a step here or on the chart; both follow.</p></section>'
     )
 
@@ -683,7 +719,7 @@ def live_run(row: dict, queued: bool = False) -> str:
 def _liverun(row: dict, started: bool) -> str:
     sub = f"{row.get('recipient')} · job {row['job']}"
     return (
-        f'<section class="jd-panel" id="liverun-{_e(anchor(row["job"]))}">'
+        f'<section class="jd-panel" id="liverun-{_e(anchor(row["job"]))}" data-sec="liverun">'
         f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{live_run(row, not started)}</section>'
     )
 
@@ -739,7 +775,7 @@ def _summary(model: dict) -> str:
         (_reading(end["cost_usd"], _dollars), "cost"),
     ))
     return (
-        f'<section class="jd-panel jd-sum"><h2>{_span("t", "Run summary")}'
+        f'<section class="jd-panel jd-sum" data-sec="summary"><h2>{_span("t", "Run summary")}'
         f'{_span("count", " · ".join(p for p in ("the whole run", run) if p))}</h2>'
         f'<div class="lr">{tiles}{_time_by_who(model)}'
         '<p class="sum-foot">Totals over every job this ticket ran. Nothing is running now.</p></div></section>'
@@ -751,7 +787,7 @@ def _ended(model: dict) -> str:
     when = _span("at", "no reading") if at is None else (
         _span("at", f"{word} at {_et_clock(at)}") + _span("ago", f"{duration(model['now'] - at)} ago"))
     return (
-        f'<section class="jd-panel jd-end"><h2>{_span("t", "Ended")}{_span("count", "end state · nothing comes next")}</h2>'
+        f'<section class="jd-panel jd-end" data-sec="ended"><h2>{_span("t", "Ended")}{_span("count", "end state · nothing comes next")}</h2>'
         f'<div class="jd-ended"><span class="mark" aria-hidden="true"></span>{_span("how", word)}{when}</div></section>'
     )
 
@@ -836,7 +872,7 @@ def _journey(row: dict, model: dict) -> str:
     legend += f'<span class="key"><i style="--m:{STOP_TINT}"></i>stopped</span>'
     legend += f'<span class="key"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
     return (
-        f'<section class="jd-panel"><h2>{_span("t", "Journey")}'
+        f'<section class="jd-panel" data-sec="journey"><h2>{_span("t", "Journey")}'
         f'{_span("count", "this ticket through time · pick a step for its reason")}</h2>'
         f'<div class="jd-box"><canvas class="jd-journey" width="1000" height="336" role="img" '
         f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>{_caption(model)}'
@@ -870,12 +906,12 @@ def _next(model: dict) -> str:
                 + f'</div>{_span("why", item["label"])}</div>'
             )
         body = f'<div class="jd-next">{"".join(cards)}</div>'
-    return f'<section class="jd-panel"><h2>{_span("t", "Can come next")}{_span("count", sub)}</h2>{body}</section>'
+    return f'<section class="jd-panel" data-sec="next"><h2>{_span("t", "Can come next")}{_span("count", sub)}</h2>{body}</section>'
 
 
 def _chart(key: str, model: dict, chart: dict | None) -> str:
     if chart is None:
-        return '<details class="jd-chart"><summary>Full state chart</summary><p class="empty">statechart unavailable</p></details>'
+        return '<details class="jd-chart" data-sec="chart"><summary>Full state chart</summary><p class="empty">statechart unavailable</p></details>'
     n = len(chart["states"])
     grid = flowmap_layout(chart)["grid"]
     legend = "".join(f'<span><i class="line" style="background:{TINT[w]}"></i>path taken · {w}</span>' for w in _legend_who(model))
@@ -885,7 +921,7 @@ def _chart(key: str, model: dict, chart: dict | None) -> str:
         tint = f' style="background:{bg}"' if bg else ""
         legend += f'<span><i class="{cls}"{tint}></i>{text}</span>'
     return (
-        f'<details class="jd-chart" data-key="full-chart:{_e(key)}"><summary>Full state chart '
+        f'<details class="jd-chart" data-sec="chart" data-key="full-chart:{_e(key)}"><summary>Full state chart '
         f'{_span("count", CHART_SUB.format(n=n))}</summary>'
         f'<div class="jd-box"><canvas class="jd-flowmap" width="1000" height="{grid["h"] * grid["cell"]}" role="img" '
         f'aria-label="{_e("Full state chart; path: " + " → ".join(v["state"] for v in model["visits"]))}"></canvas></div>'
@@ -1004,6 +1040,7 @@ _SCRIPT = r"""
                 kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
                 panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__, how: __HOW__};
   var SEL = {};
+  var chartScroll = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
@@ -1414,15 +1451,17 @@ _SCRIPT = r"""
       ghDraw(p);
     });
   }
-  function jdPanel(cls, title, count) {
+  function jdPanel(cls, slot, title, count, id) {
     var sec = el('section', 'jd-panel' + (cls ? ' ' + cls : ''));
+    if (id) sec.setAttribute('id', id);
+    sec.setAttribute('data-sec', slot);
     var h = add(sec, el('h2'));
     span(h, 't', title);
     span(h, 'count', count);
     return sec;
   }
   function runlog(r, m, buttons) {
-    var sec = jdPanel('jd-runlog', 'Run log', m.visits.length + ' visits · oldest first');
+    var sec = jdPanel('jd-runlog', 'runlog', 'Run log', m.visits.length + ' visits · oldest first');
     if (!m.visits.length) add(sec, el('p', 'empty', 'no visits recorded'));
     else {
       var ol = add(sec, el('ol', 'runlog'));
@@ -1568,8 +1607,7 @@ _SCRIPT = r"""
     return box;
   }
   function liverun(r, started) {
-    var sec = jdPanel(null, 'Live run', r.recipient + ' · job ' + r.job);
-    sec.setAttribute('id', 'liverun-' + anchor(r.job));
+    var sec = jdPanel(null, 'liverun', 'Live run', r.recipient + ' · job ' + r.job, 'liverun-' + anchor(r.job));
     add(sec, liveRun(r, !started));
     return sec;
   }
@@ -1614,7 +1652,7 @@ _SCRIPT = r"""
     var end = m.end, start = intakeAt(m);
     var run = [start === null ? '' : 'intake ' + etClock(start),
                known(end.at) ? howOf(m)[1] + ' ' + etClock(end.at) : ''].filter(Boolean).join(' to ');
-    var sec = jdPanel('jd-sum', 'Run summary', ['the whole run', run].filter(Boolean).join(' · '));
+    var sec = jdPanel('jd-sum', 'summary', 'Run summary', ['the whole run', run].filter(Boolean).join(' · '));
     var box = add(sec, el('div', 'lr'));
     add(box, lrTileRow([[reading(end.jobs, String), 'jobs'], [reading(end.tokens_in, compact), 'tokens in'],
                         [reading(end.tokens_out, compact), 'tokens out'], [reading(end.cost_usd, dollars), 'cost']]));
@@ -1624,7 +1662,7 @@ _SCRIPT = r"""
   }
   function endedPanel(m) {
     var at = m.end.at, word = howOf(m)[0];
-    var sec = jdPanel('jd-end', 'Ended', 'end state · nothing comes next');
+    var sec = jdPanel('jd-end', 'ended', 'Ended', 'end state · nothing comes next');
     var row = add(sec, el('div', 'jd-ended'));
     span(row, 'mark').setAttribute('aria-hidden', 'true');
     span(row, 'how', word);
@@ -1679,7 +1717,7 @@ _SCRIPT = r"""
     span(cap, 'note', reasonOf(v));
   }
   function journeyPanel(r, m, hits, scales, scale) {
-    var sec = jdPanel(null, 'Journey', 'this ticket through time · pick a step for its reason');
+    var sec = jdPanel(null, 'journey', 'Journey', 'this ticket through time · pick a step for its reason');
     var box = add(sec, el('div', 'jd-box'));
     var canvas = add(box, el('canvas', 'jd-journey'));
     canvas.setAttribute('width', '1000');
@@ -1724,7 +1762,7 @@ _SCRIPT = r"""
   }
   function nextPanel(m) {
     var sub = m.terminal || !m.state ? 'no way out' : m.next.length + ' ways out of ' + m.state;
-    var sec = jdPanel(null, 'Can come next', sub);
+    var sec = jdPanel(null, 'next', 'Can come next', sub);
     if (m.terminal) { add(sec, el('p', 'empty', 'no way out: this ticket is finished')); return sec; }
     if (!m.state) { add(sec, el('p', 'empty', 'state not recorded')); return sec; }
     var grid = add(sec, el('div', 'jd-next'));
@@ -1743,6 +1781,7 @@ _SCRIPT = r"""
   }
   function chartPanel(id, m, chart) {
     var box = el('details', 'jd-chart');
+    box.setAttribute('data-sec', 'chart');
     var key = 'full-chart:' + id;
     if (!chart) { add(box, el('summary', null, 'Full state chart')); add(box, el('p', 'empty', 'statechart unavailable')); return {sec: box}; }
     box.setAttribute('data-key', key);
@@ -1760,8 +1799,30 @@ _SCRIPT = r"""
     legendItem(legend, 'line', null, 'visited', '#5386a6');
     legendItem(legend, 'off', JOURNEY.tint.script, 'off-chart jump');
     DETAIL.chartKeys[m.ended || 'live'].forEach(function (k) { legendItem(legend, k[0], null, k[2], k[1]); });
-    box.addEventListener('toggle', function () { openDetails[key] = box.open; });
+    var auto = 0;
+    function place() {
+      if (!wrap.clientWidth) return;
+      auto = chartLeft(m, wrap);
+      wrap.scrollLeft = key in chartScroll ? chartScroll[key] : auto;
+    }
+    wrap.addEventListener('scroll', function () {
+      if (Math.abs(wrap.scrollLeft - auto) < 1) delete chartScroll[key];
+      else chartScroll[key] = wrap.scrollLeft;
+    });
+    box.addEventListener('toggle', function () {
+      openDetails[key] = box.open;
+      if (box.open) place();
+      else delete chartScroll[key];
+    });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(place).observe(wrap);
     return {sec: box, canvas: canvas};
+  }
+  function chartLeft(m, wrap) {
+    var state = flowModel(m).state;
+    var node = FLOWMAP && FLOWMAP.nodes.filter(function (n) { return n.name === state; })[0];
+    if (!node) return 0;
+    var centre = (node.x + FLOWMAP.node.w / 2) * FLOWMAP.grid.cell;
+    return Math.round(Math.max(0, Math.min(centre - wrap.clientWidth / 2, wrap.scrollWidth - wrap.clientWidth)));
   }
 
   function selection(key, r, m) {
