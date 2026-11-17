@@ -773,6 +773,7 @@ class ReadyMixin:
             ),
             dedupe_key=self._review_dedupe_key(ticket, head, review_round),
         )
+        self._queue_qa(ticket, comment, head=head, review_round=review_round)
         return True, answered
 
     def _review_dedupe_key(

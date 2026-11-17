@@ -10,7 +10,7 @@ from typing import Literal
 
 from lib.device_monitor import retry_stranded
 from lib.device_pool import HEALTH_TABLE
-from lib.dispatch.constants import UPDATE_FAILURES_TO_STOP
+from lib.dispatch.constants import HARNESS_WORK, UPDATE_FAILURES_TO_STOP
 from lib.dispatch.helpers import _comment_link, _queue_state, _scope
 from lib.dispatch.plan import gap_of
 from lib.dispatch.transitions import write_workflow_state
@@ -72,9 +72,9 @@ def _with_fields(detail: str | None, **fields: object) -> str | None:
 def _harness_job_active(connection: sqlite3.Connection, key: tuple[str, str]) -> bool:
     return (
         connection.execute(
-            """
+            f"""
             SELECT 1 FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+            WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK}
               AND state IN ('queued', 'running')
             LIMIT 1
             """,

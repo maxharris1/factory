@@ -44,6 +44,7 @@ GROK_WAKE_REASONS = (
     "done",
     "awaiting-ok",
     "go-not-from-approver",
+    "qa-failed",
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})
 CORE_KINDS = ("go", "plan", "ready", "retry")
@@ -87,8 +88,11 @@ SHIP_ERROR_LIMIT = 240
 POLL_ERROR_LIMIT = 500
 POLL_ERROR_STREAK = 3
 POLL_ERROR_RETENTION_SECONDS = 7 * 86400
-_UNVERIFIED_HANDOFF = """
-    jobs.state = 'done' AND jobs.recipient != 'grok'
+# #763: a harness is working on the ticket. A qa job is neither a wake nor
+# harness work, so it never holds a retry, a ship or a handoff check.
+HARNESS_WORK = "recipient NOT IN ('grok', 'qa')"
+_UNVERIFIED_HANDOFF = f"""
+    jobs.state = 'done' AND jobs.{HARNESS_WORK}
     AND jobs.handoff_comment_id IS NOT NULL
     AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?
     AND NOT EXISTS (

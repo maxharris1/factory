@@ -83,6 +83,7 @@ from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
     PRE_READY_FAILED,
     PRE_READY_PASSED,
+    QA_RECIPIENT,
     SLOTS_TABLE,
     Job,
     JobRequest,
@@ -710,6 +711,9 @@ class JobsMixin:
     def _t6(self, job: Job) -> None:
         # One dispatcher runs T6 at a time: orch poll holds the single-poller
         # flock (lib/cli.py _poll_lock), so these reads and writes do not race.
+        if job.request.recipient == QA_RECIPIENT:
+            self._qa_job_failed(job)
+            return
         if job.request.action == "stuck":
             self.queue.mark_failure_handled(job.id)
             return

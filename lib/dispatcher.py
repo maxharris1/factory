@@ -147,6 +147,7 @@ from lib.dispatch.poll import (
     PollMixin,
     _after_poll,
 )
+from lib.dispatch.qa import QaMixin
 from lib.dispatch.questions import (
     QuestionsMixin,
 )
@@ -232,6 +233,7 @@ from lib.update_check import UpdateClass
 class Dispatcher(
     CommentsMixin,
     ReadyMixin,
+    QaMixin,
     VerdictMixin,
     CapsMixin,
     MergeQueueMixin,

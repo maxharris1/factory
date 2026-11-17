@@ -126,6 +126,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `criterion-unsatisfiable` | A `clarify` wake whose `detail` starts `criterion-unsatisfiable:`. A reviewer says an acceptance criterion cannot be met. | Challenge the criterion as in Stalled ticket. A changed criterion is a product call: ask Max once, quoting it, and post his words with `answers_comment`. |
 | `ship-failed` | The merge or the merged-state write failed. `detail` has the error. | Tell Max once. Do not merge by hand. |
 | `awaiting-ok` | A `ship: merge` pull request is held before merge by `factory.md`'s `hold:`. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that the pull request at that head waits on his `ok` or `/ok <sha>`. |
+| `qa-failed` | The primary QA run reported `FAIL` with a `[blocking]` line at a head that already has a trusted APPROVE (`qa.gate: report`). `detail` names the first blocking finding and the evidence link. | Tell Max once with that finding and link. Nothing waits on QA, so the ship goes on. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, for example a Linear issue that was not moved. |
 
 ## Stalled ticket

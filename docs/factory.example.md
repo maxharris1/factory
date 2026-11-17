@@ -23,7 +23,7 @@ ship: merge
 # ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
 #   branches: [main]
 #   local_checks: [pytest]
-# qa:  # optional; what the QA lane must run. Nothing reads it yet
+# qa:  # optional; what the QA lane must run. The dispatcher queues qa jobs from it (section 4.2.1)
 #   enabled: true
 #   gate: report  # report posts the result; block gates the ship
 #   runners: [claude-cloud, cursor-cloud]  # one or two; the first is the primary

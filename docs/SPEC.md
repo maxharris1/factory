@@ -286,6 +286,20 @@ the Linear GraphQL API. Grok jobs are delivered to the owning bot through its
 existing routine webhook, with the queue's stable logical key as the delivery
 deduplication key.
 
+### 4.2.1 QA runs (issue #763)
+
+Only a project whose `factory.md` has `qa.enabled: true` gets QA runs. With QA absent or off, nothing here reads or writes anything. QA uses `gate: report` only: a result is recorded and shown, and no review, fix, round or ship waits on it.
+
+The queue has the action `qa` and the recipient `qa`, the factory's own QA worker, which a later ticket builds. Until then nothing claims a `qa` job. A `qa` job's `detail` carries `head`, `scope`, `runner`, `arm`, `scenarios` (the scenario ids to run), `run_id` and `pr_number`. Its dedupe key is `qa:<ticket scope>:<scope>:<head>:<runner>:<arm>`, and its timeout is `qa.timeout_minutes`.
+
+The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at` and `finished_at`. A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) is its only writer. QA adds no workflow state.
+
+Wherever the dispatcher queues a review for a head (T2, the patch review, the merge-queue re-review, and an approver's go on a BLOCKED ticket), it also decides QA for that head, once. A head with a `qa_runs` row is never decided again, so a T6 retry or a resume at the same head queues no second run. The ticket's first ready gets `full`, with every live scenario id from `lib/evidence/scenarios.py` read over the trusted builder's `plan` and `ready` comments.
+
+Runners: `qa.runners[0]` is the primary and gets `arm=primary`. With `shootout: true` every other runner gets its own row and job at the same head with `arm=shootout`. Without it, only the primary runs.
+
+A `qa` job is not harness work. It holds no device slot and counts against no builder's or reviewer's slots, and it never blocks a retry (`_harness_job_active`), a handoff ship (`_has_open_factory_work`), the emptied-PR check or the handoff check: those read `recipient NOT IN ('grok', 'qa')`. Merge, close, rebind and route cancels still cancel it with the rest. A failed or timed-out `qa` job is never retried and never marks the ticket stuck: T6 records `qa-no-retry`, marks the failure handled and cancels its row with reason `job-failed`.
+
 ### 4.3 Invariants, and where they live now
 
 | Rule | Where it lives |
@@ -445,7 +459,7 @@ Optional:
 - `ci` — an optional mapping (issue #615). `branches` is a non-empty list of the base branches CI runs on for a pull request; `local_checks` is a list of short labels for the checks a builder runs by hand, default none. A head with no check run and no commit status on a PR whose base is not in `branches` is CI `not-run`: T2, T3, T4 and TQ do not wait on it and never record it as green, the dashboard shows `no CI on this base`, the build and fix briefs ask the builder to run the `local_checks` and paste each command and result in the ready, and the review brief makes a missing paste a `[blocking]` finding. `check-config` refuses a `ci` that is not a mapping, an empty or non-list `branches`, a bad branch name, a bad `local_checks` and an unknown key. `ci` is a trust section (T4H). Absent, every base is a CI base. This repo sets none.
 - `shared_paths` — a list of repo-relative paths or globs (issue #261), for shared docs that many tickets add a few lines to. Globs follow `hold.paths`: `*` and `?` stay inside one directory and `**` spans directories. A trailing `/` names a directory and everything under it. Default none. A `Touches:` path that matches never causes a feeder collision wait (a `Conflicts with` edge still holds). In a matching file, an update from base whose conflict hunk is resolved to both sides, ours then theirs or theirs then ours, byte for byte with nothing added, still counts as trivial and keeps the approval. Absent, the feeder and the update check behave exactly as before. `check-config` refuses a value that is not a list and any item that is not a repo-relative path or glob. This repo sets `shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]`.
 - `feeder` — an optional mapping (issue #269). `max_holders_per_path` is how many tickets in flight may hold one `Touches:` path at once, an integer of at least 1, default 2. `exclusive_paths` is a list of paths or globs, matched like `shared_paths`, that keep one holder; default none. A path in `shared_paths` never collides, even when `exclusive_paths` lists it too. `check-config` refuses a `feeder` that is not a mapping, an unknown key under it, a `max_holders_per_path` that is not an integer of at least 1 and an `exclusive_paths` item that is not a repo-relative path or glob. The poller, feeder and waiter read a bad `max_holders_per_path` as a warning and use 1. This repo sets `max_holders_per_path: 4` (issue #405) and `exclusive_paths: [model/]`, so the statechart keeps one writer.
-- `qa` is an optional mapping (issue #759). It says what a project's QA lane must run: which cloud runners drive the real UI, what the lane loads, and how to boot it. Nothing reads it yet. A later ticket queues the `qa` job from it. Absent, or with `enabled: false`, a project behaves exactly as without it.
+- `qa` is an optional mapping (issue #759). It says what a project's QA lane must run: which cloud runners drive the real UI, what the lane loads, and how to boot it. The dispatcher queues `qa` jobs from it (section 4.2.1). Absent, or with `enabled: false`, a project behaves exactly as without it.
 
   | Key | Type | Default | Meaning |
   |---|---|---|---|
@@ -509,7 +523,7 @@ ship: merge
 # ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
 #   branches: [main]
 #   local_checks: [pytest]
-# qa:  # optional; what the QA lane must run. Nothing reads it yet
+# qa:  # optional; what the QA lane must run. The dispatcher queues qa jobs from it (section 4.2.1)
 #   enabled: true
 #   gate: report  # report posts the result; block gates the ship
 #   runners: [claude-cloud, cursor-cloud]  # one or two; the first is the primary
