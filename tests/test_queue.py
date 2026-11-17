@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from lib import cli, job_detail
+from lib.dashboard import _detail_round
 from lib.dispatcher import Dispatcher
 from lib import queue as queue_module
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -634,26 +635,35 @@ def _inline_jobs(path: Path, count: int, size: int) -> dict[str, str]:
     return details
 
 
+def _every_reader(path: Path) -> dict[str, dict[str, object]]:
+    queue = make_queue(path, [10.0])
+    with queue.connect() as connection:
+        rows = connection.execute("SELECT id, detail FROM jobs").fetchall()
+        return {
+            "job": {job.id: job.request.detail for job in queue.outstanding()},
+            "verdict": {
+                str(row["id"]): job_detail.load_row(connection, row["id"], row["detail"]) for row in rows
+            },
+            "dashboard round": {str(row["id"]): _detail_round(row["detail"]) for row in rows},
+        }
+
+
 def test_db_spill_detail_moves_inline_detail_out_and_vacuums(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = tmp_path / "orch.db"
     details = _inline_jobs(path, 300, 80_000)
-    assert path.stat().st_size > 20_000_000
+    before_size = path.stat().st_size
+    assert before_size > 20_000_000
+    before = _every_reader(path)
+    assert before["job"] == details
 
     assert cli.main(["db-spill-detail", "--db", str(path), "--vacuum"]) == 0
     out = capsys.readouterr().out
     assert "moved the detail of 300 jobs" in out
     assert "vacuumed" in out
-    assert path.stat().st_size < 2_000_000
-    queue = make_queue(path, [10.0])
-    with queue.connect() as connection:
-        loaded = {
-            str(row["id"]): job_detail.load_row(connection, row["id"], row["detail"])
-            for row in connection.execute("SELECT id, detail FROM jobs")
-        }
-    assert loaded == details
-    assert {job.id: job.request.detail for job in queue.outstanding()} == details
+    assert path.stat().st_size < before_size * 0.10
+    assert _every_reader(path) == before
 
     assert cli.main(["db-spill-detail", "--db", str(path)]) == 0
     assert "moved the detail of 0 jobs" in capsys.readouterr().out
