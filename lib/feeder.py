@@ -1307,7 +1307,8 @@ class Feeder:
                 return None
             branch_found = True
         else:
-            number = self._ticket_pull(repo, row["ticket_id"] or (issue.key if issue.tracker == "linear" else None))
+            tracked = row["ticket_id"] or (issue.key if issue.tracker == "linear" else None)
+            number = self._tracked_open_pull(repo, tracked)
             if number is None:
                 number = self.github.find_pull(repo, branch)
             if number is not None:
@@ -1386,13 +1387,11 @@ class Feeder:
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
-    def _ticket_pull(self, repo: str, ticket_id: str | None) -> int | None:
-        """The open PR the dispatcher tracks for this ticket, when the feeder row has none."""
+    def _tracked_open_pull(self, repo: str, ticket_id: str | None) -> int | None:
         if ticket_id is None:
             return None
         with self.queue.connect() as connection:
-            source = read_sources(connection).get((repo.casefold(), ticket_id))
-        recorded = source[1] if source is not None else None
+            _, recorded = read_sources(connection).get((repo.casefold(), ticket_id), ("", None))
         if recorded is None or not recorded.isdigit():
             return None
         number = int(recorded)

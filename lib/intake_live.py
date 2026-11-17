@@ -132,8 +132,7 @@ def _text(value: object) -> str:
 
 
 def _git_branch(name: object) -> bool:
-    """A branch name `git check-ref-format --branch` allows, so any base GitHub returns."""
-    return isinstance(name, str) and 0 < len(name) <= 255 and name != "@" and not _NOT_A_BRANCH.search(name)
+    return isinstance(name, str) and name not in ("", "@") and not _NOT_A_BRANCH.search(name)
 
 
 def _branch_path(branch: str) -> str:
