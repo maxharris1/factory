@@ -1477,8 +1477,9 @@ The box cannot take inbound tailnet connections, so there is no live
 server on it. `orch dashboard snapshot` opens the dispatcher database
 read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
 refused, never created), reads the last 50 lines of `poller.log`, and
-writes `status.json` and five self-contained pages (`index.html`,
-`job.html`, `activity.html`, `efficiency.html`, `health.html`) to `--out`.
+writes `status.json`, five self-contained pages (`index.html`,
+`job.html`, `activity.html`, `efficiency.html`, `health.html`) and
+`tickets.json` to `--out`.
 The database path is resolved through symlinks first, and the dashboard
 never uses `immutable=1`: SQLite takes its normal shared locks and reads
 the WAL, so a read stays consistent while the poller commits or
@@ -1491,6 +1492,20 @@ written to a temp file in the same directory and fsynced, then renamed into
 place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
+
+`tickets.json` holds one detail record per tracked ticket, keyed
+`<repo>#<ticket_id>` from the stored identifiers, redacted but never cut
+short (issue #530). A record exists for a shipped or stuck
+ticket with no job too. It has the ticket's state, time in state, round,
+hops, off-chart count and its visits in order. A shipped ticket's record
+says when and how it shipped, the time from intake to ship, its revise
+rounds and its job, token and cost totals (null when nothing reported
+them). A stopped ticket's record names the stop state, when it stopped, the
+state it stopped in, the recorded reason and the chart's ways out. A
+ticket's running and queued jobs ride along as their `status.json` rows.
+Every string goes through the same redaction as `status.json`, and every
+`<`, `>` and `&` is written as a JSON escape. `status.json` itself does not
+change. The full shape is in `lib/dashboard.py`'s module docstring.
 
 `status.json`'s `projects` lists each `orch.yml` project in order with its
 tracker, ship mode (`merge`, `handoff`, or `after` plus the `approver`) and
@@ -1753,7 +1768,7 @@ dashboard:
 That is the confirmed target: the files land in
 `/home/cursor-bot/factory-dashboard` on pc-wsl-bots (the same upload by hand
 is `scp -F /home/box/.ssh/config status.json index.html activity.html
-efficiency.html job.html health.html pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
+efficiency.html job.html health.html tickets.json pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
 them tailnet-only at <http://pc-wsl-bots.tail68624b.ts.net:8090/>.
 `config/orch.example.yml` carries this section; the shipped `orch.yml` has
 it commented out, so nothing pushes until Max turns it on.
@@ -1837,9 +1852,10 @@ is an example systemd user unit for the pc-wsl-bots WSL node. It runs
 small standard-library server, instead of `python3 -m http.server` (which
 follows symlinks out of its directory, lists directories, and serves the
 home directory when `--directory` is empty). It answers GET and HEAD (and, with GitHub actions on, POST under `/api`, below) only,
-and only for `/`, `/status.json` and the four pages (`/index.html`,
+and only for `/`, `/status.json`, the five pages (`/index.html`,
 `/job.html`, `/activity.html`, `/efficiency.html`, `/health.html`; an older
-copy of the server answers 404 for the last four until it is replaced): every other path, dot-
+copy of the server answers 404 for the last four until it is replaced) and
+`/tickets.json` (404 from a server copied before issue #530): every other path, dot-
 file, `..` or encoded slash is a 404, and no directory is ever listed. Each
 file is opened, with `O_NOFOLLOW`, relative to a descriptor for the
 directory that the server opens once at startup (so swapping the directory

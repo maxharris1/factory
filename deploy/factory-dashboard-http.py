@@ -15,9 +15,9 @@ empty. This server:
 - serves DASHBOARD_DIR, which must be set, absolute, an existing directory,
   and neither / nor $HOME nor any directory that contains $HOME (it is
   resolved through symlinks before those checks);
-- answers GET and HEAD for the snapshot, and only for /, /status.json and the five
+- answers GET and HEAD for the snapshot, and only for /, /status.json, the five
   pages (/index.html, /activity.html, /efficiency.html, /job.html,
-  /health.html), the
+  /health.html) and /tickets.json (the ticket records), the
   files `orch dashboard push` writes. Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
   encoded slash, is 404, and no directory is ever listed;
@@ -70,10 +70,12 @@ PAGES = ("index.html", "activity.html", "efficiency.html", "job.html", "health.h
 ROUTES = {
     "/": "index.html",
     "/status.json": "status.json",
+    "/tickets.json": "tickets.json",
     **{f"/{name}": name for name in PAGES},
 }
 CONTENT_TYPES = {
     "status.json": "application/json",
+    "tickets.json": "application/json",
     **{name: "text/html; charset=utf-8" for name in PAGES},
 }
 SECURITY_HEADERS = {
