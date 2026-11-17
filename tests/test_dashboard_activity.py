@@ -12,11 +12,12 @@ import pytest
 
 import lib.dashboard_page as page
 from lib.dashboard import RELAY_STEPS, _VERDICT_TIMES, collect_snapshot, render_pages
-from lib.dashboard_pages.common import ticket_page_href
+from lib.dashboard_pages.common import duration, ticket_page_href
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
+from tests.test_dashboard_pixelstrip import _node as _px_node
 from tests.test_dispatcher import retry, seed_state, setup, ticket
 
 IDS = layout.BAR + ["hud", "attention", "relay"]
@@ -293,6 +294,33 @@ def test_a_merge_with_no_job_moves_its_ticket_to_the_top(tmp_path: Path) -> None
     assert _relay_ids(snapshot) == [15, *range(1, 12)]
 
 
+def test_each_thread_says_where_its_ticket_stopped_shipped_or_waits(tmp_path: Path) -> None:
+    from tests.test_dashboard_ticket_records import walk  # module-level import is circular via telemetry
+
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "90", state="stuck", stuck=1, stuck_reason="gaps-twice")
+        walk(connection, "90", ["intake", "planning", "stuck"], NOW - 266600)
+        add_ticket(connection, "maxharris1/cleffy", "70", state="merged")
+        walk(connection, "70", ["intake", "building", "review", "ship", "merged"], NOW - 3000)
+        add_ticket(connection, "maxharris1/cleffy", "71", state="handed-off")
+        walk(connection, "71", ["intake", "building", "ship", "handed-off"], NOW - 1000)
+        add_ticket(connection, "maxharris1/cleffy", "72", state="awaiting-ok")
+        walk(connection, "72", ["intake", "building", "awaiting-ok"], NOW - 3800)
+        connection.execute(
+            "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, held_at) "
+            "VALUES ('maxharris1/cleffy', '72', 'h', 'max', 'r', 'a-72', ?)", (NOW - 3600,))
+    threads = {t["ticket_id"]: t for t in collect_snapshot(db, log, now=NOW)["relay"]["threads"]}
+    assert threads["90"]["now"] == {"kind": "stopped", "state": "stuck", "stopped_in": "planning",
+                                    "age_seconds": 266400}
+    assert threads["70"]["now"] == {"kind": "shipped", "how": "merged", "age_seconds": 2600}
+    assert threads["71"]["now"] == {"kind": "shipped", "how": "handed-off", "age_seconds": 700}
+    assert threads["72"]["now"] == {"kind": "idle", "state": "awaiting-ok", "age_seconds": 3600,
+                                    "waiting_on": "max"}
+    assert threads["13"]["now"]["waiting_on"] is None
+    assert threads["14"]["now"] is None
+
+
 def _relay_links(relay: str) -> dict[str, str]:
     return dict(re.findall(r'data-thread="([^"]*)"><a class="rl-tk" href="([^"]*)"', relay))
 
@@ -326,7 +354,7 @@ def test_a_thread_carries_every_step_up_to_the_cap(tmp_path: Path) -> None:
     threads = {t["ticket_id"]: t for t in collect_snapshot(db, log, now=NOW)["relay"]["threads"]}
     assert [row["job"] for row in threads["12"]["handoffs"]] == [f"h-12-{n:02}" for n in range(RELAY_STEPS + 1, 1, -1)]
     assert len(threads["13"]["handoffs"]) == 15 and len(threads["13"]["verdicts"]) == 15
-    (thread,) = page.relay_threads({"relay": {"threads": [threads["13"]]}})
+    (thread,) = page.relay_threads({"relay": {"threads": [threads["13"]]}, "running": [], "queued": []})
     assert len(thread["steps"]) == 30
 
 
@@ -686,6 +714,216 @@ def test_attention_ticket_rows_link_github_in_both_renderers(tmp_path: Path, sna
     assert _script(tmp_path, snap)["html"]["attention"] == server
 
 
+def _only(snapshot: dict, handoffs: list[dict], verdicts: list[dict] | None = None) -> dict:
+    snap = copy.deepcopy(snapshot)
+    snap["relay"] = _snap(handoffs, verdicts or [])["relay"]
+    return snap
+
+
+def _steps(count: int, ticket: str = "1") -> list[dict]:
+    return [_handoff(f"j-{ticket}-{n:02}", ticket, 1000 - 10 * n) for n in range(count)]
+
+
+def _ages(count: int) -> list[str]:
+    return [duration(1000 - 10 * n) + " ago" for n in range(count)]
+
+
+def _row(relay: str, ticket: str = "1") -> str:
+    return re.search(rf'data-thread="maxharris1/factory#{ticket}">(.*?)</div>', relay).group(1)
+
+
+def _early(row: str) -> list[str]:
+    return re.findall(r'<span class="rl-early">(.*?<span class="rl-sep" aria-hidden="true">→</span>)</span>', row)
+
+
+def _shown(row: str) -> list[str]:
+    return re.findall(r'class="rl-when">([^<]*)<', re.sub(r'<span class="rl-early">.*?→</span></span>', "", row))
+
+
+@layout.needs_node
+@pytest.mark.parametrize(("count", "hidden"), [(6, 0), (7, 1), (9, 3)])
+def test_a_thread_shows_its_six_newest_steps_and_folds_the_rest_behind_a_button(
+    tmp_path: Path, snapshot: dict, count: int, hidden: int,
+) -> None:
+    snap = _only(snapshot, _steps(count))
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path, snap)["html"]["relay"] == relay
+    row = _row(relay)
+    assert len(_early(row)) == hidden == row.count("rl-early")
+    assert _shown(row) == _ages(count)[hidden:] and len(_shown(row)) == 6
+    if not hidden:
+        assert "rl-more" not in row
+        return
+    noun = "step" if hidden == 1 else "steps"
+    assert row.split('<span class="rl-steps">')[1].startswith(
+        '<button class="rl-more" type="button" aria-expanded="false" data-more="maxharris1/factory#1" '
+        f'title="show {hidden} earlier {noun}">+{hidden} earlier</button><span class="rl-early">')
+
+
+def _open(relay: str, ticket: str) -> bool | None:
+    row = _row(relay, ticket)
+    found = re.findall(r'class="rl-more" type="button" aria-expanded="(true|false)"', row)
+    assert len(found) == 1
+    assert (found[0] == "true") == ("rl-early" not in row)
+    return found[0] == "true"
+
+
+@layout.needs_node
+def test_the_earlier_button_opens_one_thread_in_place_and_it_stays_open_across_polls(
+    tmp_path: Path, snapshot: dict,
+) -> None:
+    snap = _only(snapshot, [*_steps(9, "1"), *_steps(8, "2")])
+    later = copy.deepcopy(snap)
+    later["generated_at_epoch"] += 2
+    later["relay"]["threads"][0]["handoffs"].insert(0, _handoff("j-1-99", "1", 5))
+    press = ["press", ["data-more", "maxharris1/factory#1"]]
+    actions = [press, ["snap", ["relay"]], ["poll", later], ["snap", ["relay"]], press, ["snap", ["relay"]]]
+    snaps = [step["snap"]["relay"] for step in _script(tmp_path, snap, actions)["steps"] if "snap" in step]
+    assert [(_open(relay, "1"), _open(relay, "2")) for relay in snaps] == [
+        (True, False), (True, False), (False, False)]
+    assert "+4 earlier" in snaps[1] and "+4 earlier" in snaps[2]
+    assert snaps[2] == _server(later)["relay"]
+
+
+@layout.needs_node
+def test_the_earlier_button_keeps_focus_when_pressed(tmp_path: Path, snapshot: dict) -> None:
+    key = "maxharris1/factory#1"
+    actions = [["focus", ["data-more", key]], ["press", ["data-more", key]], ["focused", "data-more"],
+               ["press", ["data-more", key]], ["focused", "data-more"]]
+    steps = _script(tmp_path, _only(snapshot, _steps(9)), actions)["steps"]
+    assert [step["focused"] for step in steps if "focused" in step] == [["button", key]] * 2
+
+
+RELAY_WINDOWED = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
+  function seen(n) { var b = n.getBoundingClientRect(); return b.width > 0 && b.height > 0; }
+  return {
+    shown: [].filter.call(row.querySelectorAll('.rl-step'), seen).map(function (n) {
+      return n.querySelector('.rl-when').textContent; }),
+    early: [].map.call(row.querySelectorAll('.rl-early, .rl-early *'), seen),
+    more: [].filter.call(row.querySelectorAll('.rl-more'), seen).map(function (n) { return n.textContent; })
+  };
+})"""
+
+
+@needs_chrome
+def test_the_earlier_steps_fold_only_with_script_in_a_browser(snapshot: dict) -> None:
+    snap = _only(snapshot, _steps(9))
+    ages = _ages(9)
+    browser = Browser()
+    try:
+        _load(browser, snap, 1440, True)
+        (row,) = browser.eval(RELAY_WINDOWED)
+        assert row["shown"] == ages[3:] and row["more"] == ["+3 earlier"]
+        assert row["early"] and not any(row["early"])
+        _load(browser, snap, 1440, False)
+        (row,) = browser.eval(RELAY_WINDOWED)
+        assert row["shown"] == ages and row["more"] == []
+    finally:
+        browser.close()
+
+
+def _job(job: str, ticket: str, action: str = "build", recipient: str = "claude", **row: object) -> dict:
+    return {"job": job, "repo": "maxharris1/factory", "ticket_id": ticket, "action": action, "recipient": recipient,
+            "source": None, "pr": None, "round": None, "timeout_seconds": 5400, "overdue": False, "stuck": False,
+            "tracker": "github", "device": "box", "elapsed_from": "queued", "heartbeat_at": None, "tier": None,
+            "telemetry": None, **row}
+
+
+def _endings(snapshot: dict) -> dict:
+    stopped = {"kind": "stopped", "state": "stuck", "stopped_in": "planning", "age_seconds": 266400}
+    shipped = {"kind": "shipped", "how": "merged", "age_seconds": 7200}
+    rests = {"206": stopped, "207": shipped, "208": shipped,
+             "209": {"kind": "idle", "state": "review", "age_seconds": 3600, "waiting_on": None},
+             "210": {"kind": "idle", "state": "awaiting-ok", "age_seconds": 3600, "waiting_on": "max"},
+             "201": stopped, "205": {"kind": "idle", "state": "review", "age_seconds": 50, "waiting_on": None}}
+    snap = _only(snapshot, [_handoff(f"j-{n}", str(n), 400) for n in range(201, 212)],
+                 [_verdict(1, "207", "merged", 300, "shipped")])
+    for thread in snap["relay"]["threads"]:
+        thread["now"] = rests.get(thread["ticket_id"])
+    snap["running"] = [
+        _job("old-201", "201", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=600),
+        _job("run-201", "201", job_state="running", elapsed_seconds=372, heartbeat_age_seconds=5),
+        _job("run-202", "202", "review", "codex", job_state="running", elapsed_seconds=220, heartbeat_age_seconds=5),
+        _job("run-203", "203", "update-from-main", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=250),
+        _job("run-204", "204", "update-from-main", "cursor", job_state="dead", elapsed_seconds=900, heartbeat_age_seconds=900),
+    ]
+    snap["queued"] = [_job("q-205", "205", "update-from-main", "codex", age_seconds=90),
+                      _job("q-205b", "205", age_seconds=30)]
+    return snap
+
+
+def _now(relay: str, ticket: str) -> str:
+    row = _row(relay, ticket)
+    return row[row.index('<span class="rl-now'):] if "rl-now" in row else ""
+
+
+NOW_TITLE = 'title="where the ticket is now"'
+ENDINGS = {
+    "201": ['class="rl-now rl-claude live" ' + NOW_TITLE, 'data-px="fill"', 'data-px-key="relay-now-run-201"',
+            '<span class="rl-px" aria-hidden="true"><canvas', '<span class="rl-run">running 6m 12s</span>'],
+    "202": ['class="rl-now rl-codex live" ' + NOW_TITLE, 'data-px="scan"', '<span class="rl-run">running 3m 40s</span>'],
+    "203": ['class="rl-now stale" ' + NOW_TITLE, '<span class="rl-blk rl-claude">', 'data-px="decay"',
+            'data-still="true"', '<span class="chip warn">stale</span>',
+            '<span class="rl-late">no heartbeat for 4m 10s</span>'],
+    "204": ['<span class="rl-blk rl-cursor">', 'data-px="decay"', 'data-still="true"', '<span class="chip bad">dead</span>',
+            '<span class="rl-late">no heartbeat for 15m 00s</span>'],
+    "205": ['class="rl-now queued rl-codex" ' + NOW_TITLE, '<span class="rl-bot">codex</span><span class="rl-what">update-from-main</span>',
+            '<span class="rl-wait">queued 1m 30s</span>'],
+    "206": [NOW_TITLE + '><span class="chip bad">stuck</span><span class="rl-say">in planning for 3d 2h</span></span>'],
+    "208": [NOW_TITLE + '><span class="chip ok">shipped</span><span class="rl-out">merged</span>'
+            '<span class="rl-when">2h 00m ago</span></span>'],
+    "209": [NOW_TITLE + '><span class="rl-when">in review for 1h 00m</span></span>'],
+    "210": [NOW_TITLE + '><span class="chip warn">waiting</span><span class="rl-say">on max for 1h 00m</span></span>'],
+}
+
+
+@layout.needs_node
+def test_each_thread_ends_on_where_its_ticket_is_now_in_both_renders(tmp_path: Path, snapshot: dict) -> None:
+    snap = _endings(snapshot)
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path, snap)["html"]["relay"] == relay
+    for ticket, parts in ENDINGS.items():
+        ending = _now(relay, ticket)
+        assert _row(relay, ticket).endswith('<span class="rl-sep" aria-hidden="true">→</span>' + ending), ticket
+        for part in parts:
+            assert part in ending, (ticket, part)
+        assert ending.count("rl-now") == 1 and ending.count("<canvas") == (1 if ticket < "205" else 0), ticket
+        if ticket in ("201", "202"):
+            assert "data-still" not in ending
+        else:
+            assert re.findall(r"<canvas [^>]*>", ending) == re.findall(r'<canvas [^>]*data-still="true"[^>]*>', ending)
+    assert "rl-now" not in _row(relay, "207")
+    assert _row(relay, "207").endswith('<span class="rl-out">merged</span><span class="rl-when">5m 00s ago</span></span></span>')
+    assert "rl-now" not in _row(relay, "211")
+
+
+@layout.needs_node
+def test_the_ending_counts_toward_the_six(tmp_path: Path, snapshot: dict) -> None:
+    for steps, button in ((5, None), (6, "+1 earlier")):
+        snap = _only(snapshot, _steps(steps))
+        snap["queued"] = [_job("q-1", "1", age_seconds=90)]
+        relay = _server(snap)["relay"]
+        assert _script(tmp_path / str(steps), snap)["html"]["relay"] == relay
+        row = _row(relay)
+        assert row.endswith('<span class="rl-wait">queued 1m 30s</span></span></span>')
+        assert re.findall(r">(\+\d+ earlier)</button>", row) == ([button] if button else [])
+
+
+@layout.needs_node
+def test_the_running_ending_is_a_pixelstrip_that_holds_still_under_reduced_motion(
+    tmp_path: Path, snapshot: dict,
+) -> None:
+    snap = _endings(snapshot)
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path / "still", snap, harness=STILL)["html"]["relay"] == relay
+    (canvas,) = re.findall(r"<canvas ([^>]*)>", _now(relay, "201"))
+    attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', canvas))
+    scenario = (f"const el = canvas({json.dumps(attrs)}, 40, 10); found = [el]; PX.bind();"
+                "for (let t = 50; t <= 3000; t += 50) frame(t); out.draws = draws(el);")
+    assert _px_node(tmp_path, scenario, reduced=False)["draws"] > 1
+    assert _px_node(tmp_path, scenario, reduced=True)["draws"] == 1
+
+
 def _long(snapshot: dict) -> dict:
     return _rich(snapshot, [
         _handoff("j-l1", "131", 3000), _handoff("j-l2", "131", 2800, recipient="codex", action="review"),
@@ -714,14 +952,16 @@ def _load(browser: Browser, snapshot: dict, width: int, script: bool) -> None:
 
 RELAY_ROWS = """[].map.call(document.querySelectorAll('#relay .rl-row'), function (row) {
   var box = row.getBoundingClientRect(), tk = row.querySelector('.rl-tk').getBoundingClientRect();
-  var parts = [].filter.call(row.querySelectorAll('*'), function (n) { return !n.closest('.rl-tk'); });
+  var parts = [].filter.call(row.querySelectorAll('*'), function (n) {
+    return !n.closest('.rl-tk') && n.getClientRects().length > 0;
+  });
   return {
     thread: row.getAttribute('data-thread'),
     outside: parts.filter(function (n) {
       var b = n.getBoundingClientRect();
       return b.left < tk.right || b.right > box.right + 0.5;
     }).map(function (n) { return n.className + ': ' + n.textContent; }),
-    lines: new Set([].map.call(row.querySelectorAll('.rl-step, .rl-verdict'), function (n) {
+    lines: new Set(parts.filter(function (n) { return n.matches('.rl-step, .rl-verdict'); }).map(function (n) {
       return Math.round(n.getBoundingClientRect().top);
     })).size
   };
@@ -763,5 +1003,21 @@ def test_the_relay_filter_shows_only_with_script_in_a_browser(snapshot: dict) ->
         threads = browser.eval("""(document.querySelector('[data-relay="wakes"]').click(),
           [].map.call(document.querySelectorAll('#relay .rl-row'), function (r) { return r.getAttribute('data-thread'); }))""")
         assert threads == ["maxharris1/factory#124"]
+    finally:
+        browser.close()
+
+
+@needs_chrome
+def test_every_ending_stays_inside_its_row_in_a_browser(snapshot: dict) -> None:
+    snap = _endings(snapshot)
+    browser = Browser()
+    try:
+        for script in (True, False):
+            for width in (1440, 375):
+                _load(browser, snap, width, script)
+                rows = browser.eval(RELAY_ROWS)
+                assert len(rows) == 11, (script, width)
+                for row in rows:
+                    assert not row["outside"], (script, width, row)
     finally:
         browser.close()

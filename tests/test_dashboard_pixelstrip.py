@@ -644,7 +644,9 @@ def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
             continue
         board = [key for key in own if key.startswith(("phase-", "job-", "ticket-"))]
         rows = [key for key in own if key.startswith("attention-")]
-        assert own == {"job.html": board, "activity.html": rows}.get(name, []), name
+        relay = [key for key in own if key.startswith("relay-now-")]
+        assert own == {"job.html": board, "activity.html": rows + relay}.get(name, []), name
+        assert len(relay) == (html.count('class="rl-now ') - html.count('class="rl-now queued ') if name == "activity.html" else 0), name
         assert len(rows) == (html.count('class="at-row"') if name == "activity.html" else 0), name
         assert 'class="px-held"' not in html, name
 

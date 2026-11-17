@@ -44,7 +44,12 @@ are the RELAY_TICKETS tickets that moved most recently, newest first, with
 stopped tickets kept until they move again. Each is the ticket's reference
 with its newest RELAY_STEPS `handoffs` (rows as in handoff_savings.recent)
 and `verdicts` (rows as in poller.verdicts, plus `chip` and `words`, None
-when the outcome has no plain words).
+when the outcome has no plain words). `now` is where the ticket rests,
+from its ticket record: {kind: "stopped", state, stopped_in, age_seconds},
+{kind: "shipped", how, age_seconds}, {kind: "idle", state, age_seconds,
+waiting_on} (who a held PR waits on, or None), or None for a ticket with
+no record. A running or queued job is not in `now`: the page joins it
+from `running` and `queued`.
 
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
@@ -1168,12 +1173,27 @@ def _verdict_row(sources: dict, row: sqlite3.Row, now: float) -> dict:
     }
 
 
+def _resting(record: dict | None, waiting_on: str | None, now: float) -> dict | None:
+    if record is None:
+        return None
+    if record["stopped"]:
+        stopped = record["stopped"]
+        return {"kind": "stopped", "state": stopped["state"], "stopped_in": stopped["stopped_in"],
+                "age_seconds": _age(now, stopped["at"])}
+    if record["shipped"]:
+        shipped = record["shipped"]
+        return {"kind": "shipped", "how": shipped["how"], "age_seconds": _age(now, shipped["at"])}
+    return {"kind": "idle", "state": record["state"], "age_seconds": record["state_age_seconds"],
+            "waiting_on": waiting_on}
+
+
 def _relay(
     connection: sqlite3.Connection,
     tables: set[str],
     sources: dict,
     handled: list[sqlite3.Row],
     records: dict[tuple[str, str], dict],
+    waiting_on: dict[tuple[str, str], str],
     tracked: int,
     now: float,
 ) -> dict:
@@ -1211,7 +1231,9 @@ def _relay(
     if not chosen:
         return {"tracked": tracked, "threads": []}
     threads = {
-        key: {**_ticket_ref(sources, *stored[key]), "handoffs": [], "verdicts": []} for key in chosen
+        key: {**_ticket_ref(sources, *stored[key]), "handoffs": [], "verdicts": [],
+              "now": _resting(records.get(key), waiting_on.get(key), now)}
+        for key in chosen
     }
     if "jobs" in tables:
         wanted = ", ".join("(lower(?), ?)" for _ in chosen)
@@ -1401,6 +1423,7 @@ def _read_db(
     stuck_tickets: list[dict] = []
     paused: list[dict] = []
     ticket_info: dict[tuple[str, str], TicketInfo] = {}
+    waiting_on: dict[tuple[str, str], str] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
         approvers = _hold_approvers(connection)
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
@@ -1442,6 +1465,8 @@ def _read_db(
             )
             waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            if approver:
+                waiting_on[key] = waiting["waiting_on"]
             ci_wait = ci_waits.get(key)
             no_ci = no_ci_bases.get(key)
             reason = (
@@ -1718,7 +1743,7 @@ def _read_db(
         "attention_flags": attention_flags,
         "held": held,
         "verdicts": verdicts,
-        "relay": _relay(connection, tables, sources, handled, ticket_records, len(tickets), now),
+        "relay": _relay(connection, tables, sources, handled, ticket_records, waiting_on, len(tickets), now),
         "linear_budget": {
             "state": budget_state,
             "deferrals_last_hour": budget["deferrals"],

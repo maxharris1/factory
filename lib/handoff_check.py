@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -35,8 +36,10 @@ from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job
 
 GH_TIMEOUT_SECONDS = 30.0
+RETRY_DELAYS = (2.0, 8.0)
 
 _COMMENT_ID = re.compile(r"^[1-9][0-9]{0,19}$")
+_SERVER_ERROR = re.compile(r"HTTP 5\d\d")
 _ISSUE_URL = re.compile(r"^https://api\.github\.com/repos/([^/]+/[^/]+)/issues/([1-9][0-9]*)$")
 
 
@@ -46,6 +49,10 @@ class NotFound(Exception):
 
 class ReadError(Exception):
     """GitHub could not be read (not a 404): nothing is decided."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 Read = Callable[[str], Mapping[str, object]]
@@ -100,12 +107,18 @@ def gh_reader(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) 
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ReadError(f"gh api {path}: {type(exc).__name__}") from exc
+            raise ReadError(
+                f"gh api {path}: {type(exc).__name__}",
+                retryable=isinstance(exc, subprocess.TimeoutExpired),
+            ) from exc
         if result.returncode != 0:
             text = " ".join(f"{result.stderr} {result.stdout}".split())
             if "HTTP 404" in text or "Not Found" in text:
                 raise NotFound(path)
-            raise ReadError(f"gh api {path}: {text[:300] or f'exit {result.returncode}'}")
+            raise ReadError(
+                f"gh api {path}: {text[:300] or f'exit {result.returncode}'}",
+                retryable=_SERVER_ERROR.search(text) is not None,
+            )
         try:
             value = json.loads(result.stdout)
         except ValueError as exc:
@@ -115,6 +128,30 @@ def gh_reader(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) 
         return value
 
     return read
+
+
+def retrying(
+    read: Read, log: Callable[[str], None], sleep: Callable[[float], None] = time.sleep
+) -> Read:
+    def read_again(path: str) -> Mapping[str, object]:
+        delays = RETRY_DELAYS
+        total = len(delays) + 1
+        for attempt, delay in enumerate(delays, 1):
+            try:
+                return read(path)
+            except ReadError as exc:
+                if not exc.retryable:
+                    raise
+                log(f"handoff check: {exc}; attempt {attempt} of {total}, retrying in {delay:g}s")
+            sleep(delay)
+        try:
+            return read(path)
+        except ReadError as exc:
+            if not exc.retryable:
+                raise
+            raise ReadError(f"{exc} (attempt {total} of {total})") from exc
+
+    return read_again
 
 
 def problems(

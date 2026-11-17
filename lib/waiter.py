@@ -141,7 +141,15 @@ from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
 from lib import device_deploy, job_token
 from lib.harness_env import ApproverProfileExposed, harness_environ
-from lib.handoff_check import Expected, Read, ReadError, expected_for, gh_reader, ready_head
+from lib.handoff_check import (
+    Expected,
+    Read,
+    ReadError,
+    expected_for,
+    gh_reader,
+    ready_head,
+    retrying,
+)
 from lib.handoff_check import problems as handoff_problems
 from lib.handoff_marker import handoff_marker
 from lib.heal import Webhook
@@ -1231,7 +1239,7 @@ class Waiter:
             if config is None or errors:
                 raise ValueError(f"{self.orch_yml}: {errors[0] if errors else 'invalid configuration'}")
             expected = expected_for(job_from_row(row), self.bot)
-            read = gh_reader()
+            read = retrying(gh_reader(), lambda line: self.log(f"job {job_id}: {line}"))
             found = handoff_problems(expected, comment_id, read, config.trusted_logins)
             if not found:
                 return self._refused_by_pre_ready(job_id, comment_id, proof, config, expected, read)
