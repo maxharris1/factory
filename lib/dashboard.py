@@ -11,8 +11,8 @@ seconds and updates in place. Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
 
-Secrets: only allowlisted columns are selected (never heads, comment
-bodies or environment values; the environment is not read except for the
+Secrets: only allowlisted columns are selected (never comment bodies or
+environment values, and of a head only the 7-character short sha in `ci_runs`; the environment is not read except for the
 ORCH_* path variables). jobs.detail is read only to take its `round`
 field, kept only when it is digits/digits; nothing else of it is copied.
 Every free-text value (stuck reasons, poll_errors, deferrals, log lines)
@@ -50,6 +50,22 @@ from its ticket record: {kind: "stopped", state, stopped_in, age_seconds},
 waiting_on} (who a held PR waits on, or None), or None for a ticket with
 no record. A running or queued job is not in `now`: the page joins it
 from `running` and `queued`.
+
+CI (#717): `ci_runs` is {runs, failures} from the ci_jobs table the poller
+writes. A run is one ticket head's jobs; its status is derived, never
+stored: any job in progress, or some done and some queued, is in_progress;
+all queued is queued; all completed is failed when any conclusion is in
+CI_FAILED, else passed. `runs` lists only queued and in_progress runs,
+newest first: {repo, ticket_id, source, pr, tracker, head_short, status,
+age_seconds, jobs}. A job is {name, status, conclusion, run_id, job_id,
+runner_kind, runner_name, created_at, started_at, completed_at,
+elapsed_seconds, queue_seconds}; runner_kind None means not looked up yet.
+`failures` is the newest RECENT_CI_FAILURES failed jobs seen in the last
+CI_FAILURE_WINDOW on any head: the ticket reference, head_short, name,
+conclusion, run_id, job_id, tests (the first CI_TESTS_SHOWN failing test
+names), more_tests and age_seconds. No URL is stored, since redaction
+hides every URL: the pages build the github.com PR, commit, job log and
+issue-search links from these parts.
 
 Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
@@ -850,6 +866,7 @@ def collect_snapshot(
         },
         "handoff_savings": db["handoff_savings"],
         "relay": db["relay"],
+        "ci_runs": db["ci_runs"],
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
             report,
@@ -929,6 +946,130 @@ def _no_ci_bases(connection: sqlite3.Connection) -> dict[tuple[str, str], dict]:
     return {
         (str(row["repo"]).casefold(), str(row["ticket_id"])): {"base": _clean(row["base"], 80)}
         for row in connection.execute("SELECT repo, ticket_id, base FROM no_ci_bases")
+    }
+
+
+CI_JOB_STATUSES = ("queued", "in_progress", "completed")
+CI_CONCLUSIONS = (
+    "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required",
+    "startup_failure", "stale",
+)
+CI_FAILED = ("failure", "timed_out", "cancelled", "action_required", "startup_failure")
+CI_RUNNER_KINDS = ("self-hosted", "github-hosted", "none")
+CI_FAILURE_WINDOW = 86400
+RECENT_CI_FAILURES = 10
+CI_TESTS_SHOWN = 5
+_CI_ID = re.compile(r"[0-9]{1,20}")
+_CI_HEAD = re.compile(r"[0-9a-f]{7,64}")
+_CI_JOB_LOG = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/actions/runs/([0-9]{1,20})/job/([0-9]{1,20})")
+
+
+def _ci_run_status(jobs: list[dict]) -> str:
+    """A run's status from its jobs; never stored."""
+    statuses = {job["status"] for job in jobs}
+    if statuses == {"completed"}:
+        return "failed" if any(job["conclusion"] in CI_FAILED for job in jobs) else "passed"
+    if "in_progress" in statuses or "completed" in statuses:
+        return "in_progress"
+    return "queued"
+
+
+def _ci_log_ids(row: sqlite3.Row) -> dict:
+    """The job log's run and job ids, from the columns or the stored log URL.
+    The pages build the github.com link from them; a URL itself would not
+    survive redaction."""
+    run_id, job_id = (str(row[name] or "") for name in ("run_id", "job_id"))
+    if not (_CI_ID.fullmatch(run_id) and _CI_ID.fullmatch(job_id)):
+        found = _CI_JOB_LOG.fullmatch(str(row["log_url"] or ""))
+        run_id, job_id = found.groups() if found else (None, None)
+    return {"run_id": run_id, "job_id": job_id}
+
+
+def _ci_tests(text: object) -> tuple[list[str], int]:
+    try:
+        names = json.loads(str(text)) if text is not None else []
+    except ValueError:
+        names = []
+    names = [_clean(name, 200) for name in names if isinstance(name, str)] if isinstance(names, list) else []
+    return names[:CI_TESTS_SHOWN], max(0, len(names) - CI_TESTS_SHOWN)
+
+
+def _ci_runs(
+    connection: sqlite3.Connection,
+    now: float,
+    sources: dict[tuple[str, str], tuple[str | None, str | None]],
+    trackers: dict[tuple[str, str], str | None],
+) -> dict:
+    """#717: the CI section. `runs` is every (repo, ticket, head) whose jobs are
+    still queued or running, newest first; `failures` is the newest failed
+    jobs seen in the last CI_FAILURE_WINDOW, on any head."""
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    refs: dict[tuple[str, str, str], dict] = {}
+    failures = []
+    for row in connection.execute(
+        "SELECT * FROM ci_jobs ORDER BY COALESCE(created_at, seen_at), check_name"
+    ):
+        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+        head = str(row["head"])
+        ref = _ticket_ref(sources, row["repo"], row["ticket_id"])
+        pr = str(row["pr"] or "")
+        if _CI_ID.fullmatch(pr):
+            ref["pr"] = pr
+        ref.setdefault("pr", None)
+        ref.setdefault("source", None)
+        ref["tracker"] = trackers.get(key)
+        ref["head_short"] = head[:7] if _CI_HEAD.fullmatch(head) else None
+        status = _enum(row["status"], CI_JOB_STATUSES)
+        conclusion = _enum(row["conclusion"], CI_CONCLUSIONS) if row["conclusion"] is not None else None
+        created, started, completed = (
+            _telemetry_time(row[name]) for name in ("created_at", "started_at", "completed_at")
+        )
+        queue_end = started if started is not None else (None if status == "completed" else now)
+        job = {
+            "name": _clean(row["check_name"], 120),
+            "status": status,
+            "conclusion": conclusion,
+            **_ci_log_ids(row),
+            "runner_kind": _enum(row["runner_kind"], CI_RUNNER_KINDS) if row["runner_kind"] is not None else None,
+            "runner_name": _clean(row["runner_name"], 64) if row["runner_name"] is not None else None,
+            "created_at": created,
+            "started_at": started,
+            "completed_at": completed,
+            "elapsed_seconds": (
+                _age(completed if completed is not None and status == "completed" else now, started)
+                if started is not None else None
+            ),
+            "queue_seconds": _age(queue_end, created) if created is not None and queue_end is not None else None,
+        }
+        grouped.setdefault((*key, head), []).append(job)
+        refs.setdefault((*key, head), ref)
+        if status == "completed" and conclusion in CI_FAILED and float(row["seen_at"]) >= now - CI_FAILURE_WINDOW:
+            tests, more = _ci_tests(row["failing_tests"])
+            failures.append({
+                **ref,
+                "name": job["name"],
+                "conclusion": conclusion,
+                "run_id": job["run_id"],
+                "job_id": job["job_id"],
+                "tests": tests,
+                "more_tests": more,
+                "at": completed if completed is not None else float(row["seen_at"]),
+            })
+    runs = []
+    for run_key, jobs in grouped.items():
+        status = _ci_run_status(jobs)
+        if status not in ("queued", "in_progress"):
+            continue
+        began = min((job["created_at"] for job in jobs if job["created_at"] is not None), default=None)
+        runs.append({**refs[run_key], "status": status, "age_seconds": _age(now, began), "jobs": jobs})
+    runs.sort(key=lambda run: (run["age_seconds"] is None, run["age_seconds"] or 0))
+    failures.sort(key=lambda item: -item["at"])
+    return {
+        "runs": runs,
+        "failures": [
+            {**{k: v for k, v in item.items() if k != "at"}, "age_seconds": _age(now, item["at"])}
+            for item in failures[:RECENT_CI_FAILURES]
+        ],
     }
 
 
@@ -1545,6 +1686,10 @@ def _read_db(
         for key, info in ticket_info.items()
     }
     record_keys = _record_keys(ticket_info)
+    ci_runs = (
+        _ci_runs(connection, now, sources, {key: info.tracker for key, info in ticket_info.items()})
+        if "ci_jobs" in tables else {"runs": [], "failures": []}
+    )
     ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
     ticket_jobs: dict[tuple[str, str], list[dict]] = {}
     for item in [*sorted(running, key=lambda item: item["elapsed_seconds"]), *queued]:
@@ -1761,6 +1906,7 @@ def _read_db(
         "held": held,
         "verdicts": verdicts,
         "relay": _relay(connection, tables, sources, handled, ticket_records, waiting_on, len(tickets), now),
+        "ci_runs": ci_runs,
         "linear_budget": {
             "state": budget_state,
             "deferrals_last_hour": budget["deferrals"],
