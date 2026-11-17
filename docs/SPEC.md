@@ -585,6 +585,7 @@ projects:
     # ready_starts_review: false
     # driver_inbox: owner/name#123    # optional: copy each Grok wake to this issue
     # grok_webhook: true              # false only with driver_inbox
+    # qa_storage: {...}               # host value in orch.local.yml; see "QA storage" below
     # optional job_timeout: 60
     # Optional backlog feeder intake (issue #85). Absent: not fed.
     # intake:
@@ -937,6 +938,84 @@ up a Grok wake. `grok_webhook` defaults to `true`. `false` (allowed only
 with `driver_inbox`) finishes each wake with an `inbox:` receipt and sends
 nothing to Grok's webhook. The top-level `grok` block is needed only while a
 project keeps `grok_webhook` on.
+
+### QA storage and evidence intake
+
+A QA lane runs pull-request code on a machine that is thrown away when the
+lane ends, so it holds no storage key (issue #787). The factory signs
+short-lived links for each lane, and fetches and stores what the lane
+uploads. A signed link is a credential. No log line, error text, `repr` or
+comment holds one.
+
+`projects[].qa_storage` names the project's bucket. Its values are host
+values: they go in the gitignored `orch.local.yml`, under the project's
+`repo`, and tracked `orch.yml` carries comment lines only. There is one
+bucket per owner, so company and personal data never share one (Max,
+2026-11-17).
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `bucket` | yes | S3 bucket name (lowercase, 3 to 63 characters). |
+| `region` | yes | Region name, used in the signature and the default endpoint. |
+| `endpoint` | no | An `https` URL with no credentials, query or fragment. Default `https://s3.<region>.amazonaws.com`. Objects are addressed path-style, `<endpoint>/<bucket>/<key>`. |
+| `access_key_env`, `secret_key_env` | yes | Names of the two environment variables that hold the key on the host. Never the values. A missing variable's error names the variable only. |
+| `evidence_root` | yes | Absolute host path where intake stores evidence. |
+
+`check-config` refuses an unknown key, a missing required key and any value
+outside its row. A `factory.md` with `qa.enabled: true` needs its project's
+entry. Pass the file as `--factory owner/name=PATH` so `check-config` knows
+the project. It then refuses the file when that project has no `qa_storage`
+entry, and refuses an unpaired path to a file with qa enabled. A plain
+`--factory PATH` with qa off checks as before.
+
+**Key layout.** The bucket is per owner, so keys carry the repo name.
+`run_id`, `pack_id` and `ticket` must match `[A-Za-z0-9._-]{1,64}` and must
+not be `.` or `..`. Anything else is refused before signing.
+
+| Key | Link | Cap |
+| --- | --- | --- |
+| `qa/<repo>/<run_id>/lane-<n>/result.json` | upload | 1 MiB |
+| `qa/<repo>/<run_id>/lane-<n>/bundle.tar.gz` | upload | 500 MiB |
+| `packs/<pack_id>` | download | none |
+
+`lib/qa_storage.py` signs with AWS SigV4 using the standard library only.
+`links_for_lane(run_id, lane, pack_ids, timeout, *, storage, repo)` signs
+the two upload links and one download link per pack id, each expiring after
+`timeout` seconds. An upload link is a POST policy with the exact key and a
+`content-length-range` of 0 to the cap, so the bucket itself refuses a
+larger upload. `fetch` caps the size a second time: it stops at the cap
+plus one byte and keeps no partial file. A missing object is "not there
+yet", not an error. Nothing calls these functions yet. Putting the links
+into a lane's brief is a later ticket, which must keep the same no-logging
+rule.
+
+**Intake.** `lib/qa_evidence.py`, `collect(run_id, lane, *, storage, repo,
+ticket, root)`, treats everything in a bundle as untrusted:
+
+1. Fetch `result.json` (1 MiB cap). If it is not there yet, return `None`.
+   A result whose `run_id` or `lane` differs from the request is refused.
+2. Fetch the bundle (500 MiB cap) into a staging folder made under
+   `<root>/.staging/`. Before anything is written, scan every member and
+   refuse an absolute name, a `..` part, a symbolic or hard link, a device
+   or any member that is not a regular file or directory, and a bundle
+   whose sizes add up to more than twice its cap. Extraction then uses
+   tarfile's `data` filter and a running byte count as second guards.
+3. Check every artifact the result lists (`path`, `sha256`, `size`) against
+   the uploaded bytes. Each missing file, sha256 difference or size
+   difference is recorded as a mismatch.
+4. Pass every `*.log` file through `scrub_detail`, line by line. In each
+   `network.json`, drop request headers. A `network.json` that is not
+   valid JSON is removed and recorded as a mismatch.
+5. Write `manifest.json`: the run id, lane, commit, every file with its
+   sha256 and size after scrubbing, and the mismatches.
+6. Move the folder to `<root>/<owner>/<repo>/<ticket>/<run_id>/lane-<n>/`
+   in one rename. An existing destination is refused, never replaced.
+7. Return the parsed result with its mismatches.
+
+A refusal raises `EvidenceRefused`, whose text names the reason and the
+member, and nothing from that bundle reaches the evidence root. Intake
+deletes only the staging folder it made. It does not judge whether a
+result is acceptable, delete old evidence, or serve it to people.
 
 ## 8. Review and merge rules
 
