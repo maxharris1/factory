@@ -305,7 +305,7 @@ __TELEMETRY__
 
 SCRIPT_TAIL = r"""
   var PAGES = {
-    main: [renderLanes, renderJustHappened, renderIntake],
+    main: [renderLanes, renderCiRuns, renderJustHappened, renderIntake],
     job: [redirectMoved, renderBoard, renderTickets],
     activity: [renderAttention, renderRelay],
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
