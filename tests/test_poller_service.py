@@ -679,6 +679,29 @@ def test_ensure_and_start_launch_nothing_while_the_poll_lock_is_held(home: Path)
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_ensure_and_start_see_the_poll_lock_through_a_symlinked_database(
+    home: Path, tmp_path: Path
+) -> None:
+    database = tmp_path / "real" / "orch.db"
+    database.parent.mkdir()
+    database.write_bytes(b"")
+    configured = tmp_path / "alias.db"
+    configured.symlink_to(database)
+    log = home / ".local/state/factory/poller.log"
+
+    with cli._poll_lock(database):
+        ensured = _service(home, "ensure", ORCH_DB=str(configured))
+        started = _service(home, "start", ORCH_DB=str(configured))
+
+    assert ensured.returncode == 0, ensured.stderr
+    assert ensured.stdout == ""
+    assert started.returncode == 0, started.stderr
+    assert "orch poll already running (poll lock held)" in started.stdout
+    assert not _pidfile(home).exists()
+    assert not log.exists() or "polling as" not in log.read_text()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
 def test_poller_ensure_loop_is_a_singleton(home: Path, tmp_path: Path) -> None:
     deploy = tmp_path / "deploy"
     deploy.mkdir()

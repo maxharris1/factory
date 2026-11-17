@@ -27,9 +27,10 @@
 # about to launch, and remove-autostart returns only after any ensure that
 # still saw poller-autostart has finished.
 # Before launching, start and ensure also probe orch.db.lock, the lock
-# `orch poll` holds beside its database: the ORCH_DB run-poller.sh ends up
-# with after sourcing its env files (`run-poller.sh --print-db`), else the
-# caller's ORCH_DB, else ~/.local/state/factory/orch.db. While it is held, a
+# `orch poll` holds beside its database after resolving symlinks: the ORCH_DB
+# run-poller.sh ends up with after sourcing its env files
+# (`run-poller.sh --print-db`), else the caller's ORCH_DB, else
+# ~/.local/state/factory/orch.db. While it is held, a
 # poller runs even if its pid is not visible from here (another PID
 # namespace), so nothing is launched (issue #134).
 #
@@ -142,7 +143,8 @@ poll_lock_held() {
     local db lock status=0
     command -v flock >/dev/null 2>&1 || return 1
     db="$("$RUNNER" --print-db 2>/dev/null 9>&-)" || db=""
-    lock="${db:-${ORCH_DB:-${STATE}/orch.db}}.lock"
+    db="${db:-${ORCH_DB:-${STATE}/orch.db}}"
+    lock="$(readlink -f -- "$db" || printf '%s' "$db").lock"
     [[ -e "$lock" ]] || return 1
     flock -n -E 75 "$lock" true 9>&- || status=$?
     ((status == 75))
