@@ -249,9 +249,9 @@ def test_status_and_dashboard_show_the_limit(tmp_path: Path) -> None:
     assert f"claude: {label}" in report
     assert f"[{label}]" in report
 
-    claude = [e for e in usage["bots"] if e["harness"] == "claude"]
+    claude = [e for e in usage["accounts"] if e["harness"] == "claude"]
     assert claude and all(e["limited_until"] == RESET and e["limit_label"] == label for e in claude)
-    assert all(e["limit_label"] is None for e in usage["bots"] if e["harness"] != "claude")
+    assert all(e["limit_label"] is None for e in usage["accounts"] if e["harness"] != "claude")
 
 
 # --- ac-3: the lane resumes by itself ------------------------------------------
@@ -527,7 +527,7 @@ def test_the_dashboard_shows_a_limit_before_any_reading(tmp_path: Path) -> None:
     log = tmp_path / "orch.log"
     log.write_text("")
     snapshot = collect_snapshot(db, log, now=now[0], machines_path=ROOT / "machines.yml")
-    entry = next(e for e in snapshot["usage"]["bots"] if e["harness"] == "claude")
+    entry = next(e for e in snapshot["usage"]["accounts"] if e["harness"] == "claude")
     assert entry["state"] == "no telemetry"
     page = render_pages(snapshot)["efficiency.html"]
     assert entry["limit_label"] in page.split("<script>")[0]

@@ -37,13 +37,38 @@ CSS = """\
 .ef-life{font:13px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--text-2)}.ef-life b{font-weight:600}
 .ef-dot{font:13px/1.5 var(--mono);color:var(--muted)}
 .ef-pct{margin-left:auto;font-size:12px;color:var(--muted)}
-.ef-lede{margin:0 0 12px;max-width:880px;font-size:13px;color:var(--text-2)}
 .ef-scroll{overflow-x:auto}
-.ef-usage{min-width:640px;margin:0}
-.ef-usage .ef-v{font:12px/1.5 var(--mono)}
-.ef-usage .ef-v.ok{color:var(--ok)}.ef-usage .ef-v.warn{color:var(--warn)}.ef-usage .ef-v.bad{color:var(--bad)}
-.ef-usage .ef-v.muted{color:var(--muted)}
-.ef-usage td .muted{margin-left:6px;font:12px/1.5 var(--mono)}
+.ef-usage{min-width:660px;margin:0}
+.ef-usage td{padding:10px 12px 10px 0}
+.ef-usage th:last-child,.ef-usage td:last-child{padding-right:0}
+.ef-usage .ef-un td{padding-top:6px;padding-bottom:6px}
+.ef-who{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.ef-name{font-size:12px;color:var(--text-2)}
+.ef-dev{margin-top:3px;font:11px/1.5 var(--mono);color:var(--muted)}
+#headroom .ef-v{font:12px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+#headroom .ef-v.muted{color:var(--muted)}
+.ef-room{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}
+.ef-hn{flex:0 0 40px;font:600 16px/1.25 var(--mono);font-variant-numeric:tabular-nums}
+.ef-hn.neutral{color:var(--text-2)}
+.ef-lim{font:12px/1.5 var(--mono)}
+.ef-meter{display:grid;grid-template-columns:repeat(20,8px);grid-auto-rows:8px;gap:2px;flex:none}
+.ef-meter span{background:var(--line-hi)}
+.ef-meter .ok{background:var(--ok)}.ef-meter .warn{background:var(--warn)}.ef-meter .bad{background:var(--bad)}
+.ef-meter .neutral{background:var(--text-2)}
+.ef-tag{font:11px/1.5 var(--mono);color:var(--muted)}
+.ef-hnote{margin:12px 0 0;max-width:720px;font-size:12px;color:var(--muted)}
+.ef-accts{display:none;flex-direction:column;gap:8px}
+.ef-acct{min-width:0;padding:10px 12px 12px;background:var(--bg);box-shadow:var(--elev)}
+.ef-acct .ef-room{margin-top:10px}
+.ef-acct .ef-hn{flex:none;font-size:22px;line-height:1.15;letter-spacing:-.03em}
+.ef-hl{font:500 12px/1.3 var(--mono);color:var(--muted)}
+.ef-wins{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px;padding-top:8px;
+border-top:1px solid var(--line)}
+.ef-wins>div{min-width:0}
+.ef-wk{font:11px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ef-accts .ef-un{display:flex;align-items:baseline;gap:8px}
+.ef-acct+.ef-un{padding:2px 0 0}
+.ef-hnote-ph{display:none;margin:10px 0 0;font-size:12px;color:var(--muted)}
 @media (max-width:699.98px){
 body[data-page="efficiency"] main{padding:12px 12px 24px;gap:12px}
 .ef-row{gap:12px}.ef-row>.panel,.ef-row>.panel.ef-wide{flex:1 1 100%;padding:12px}
@@ -51,6 +76,7 @@ body[data-page="efficiency"] main{padding:12px 12px 24px;gap:12px}
 .ef-rb{grid-template-columns:68px minmax(0,1fr) 66px;gap:8px}.ef-n b{font-size:12px}
 .ef-foot{display:block;margin:12px 0 0}.ef-note{margin:0 0 4px}
 #jobs-lifetime{gap:2px 10px;padding:10px 12px}#jobs-lifetime h2{flex:1 0 100%}.ef-pct{flex:1 0 100%;margin-left:0}
+#headroom .ef-scroll,.ef-hnote{display:none}.ef-accts{display:flex}.ef-hnote-ph{display:block}
 }
 """
 
@@ -125,69 +151,117 @@ SCRIPT = r"""
     add(foot, link(null, 'job.html')).textContent = 'see shipped tickets';
   }
 
-  var USAGE_HARNESSES = ['claude', 'codex', 'cursor', 'grok'];
-  var USAGE_UNTRACKED = {cursor: true, grok: true};
-  function pct(x) { return halfUp(x * 100) + '%'; }
+  var WINDOWS = ['five_hour', 'seven_day'];
   var WINDOW_NAMES = {five_hour: '5-hour', seven_day: '7-day'};
-  function usageLevel(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }
-  function usageCells(e, now) {
-    if (e.state === 'not tracked' || e.state === 'no telemetry') {
-      return [0, 1, 2].map(function () { return [e.state, 'muted']; })
-        .concat([e.limit_label ? [e.limit_label, 'bad'] : [e.state, 'muted']]);
+  var METER_CELLS = 20;
+  var HEADROOM_NOTE = 'Headroom is what is left in the fullest window. ' +
+    'One account is shared by every device that runs that harness';
+  function usageTone(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }
+  function accountView(e, now) {
+    var fresh = WINDOWS.filter(function (w) { return e[w].state === 'ok'; });
+    var v = {entry: e, limit: e.limit_label, pct: null, tone: null, tag: null, lit: 0};
+    if (e.state === 'no telemetry') {
+      v.windows = WINDOWS.map(function () { return [e.state, 'muted']; });
+      v.resets = [e.state, 'muted'];
+    } else {
+      v.windows = WINDOWS.map(function (w) {
+        return fresh.indexOf(w) >= 0 ? [halfUp(e[w].used * 100) + '% used', null] : [e[w].state, 'muted'];
+      });
+      var ends = fresh.filter(function (w) { return e[w].resets_at !== null; })
+        .map(function (w) { return e[w].resets_at; });
+      v.resets = ends.length ? ['in ' + dur(Math.min.apply(null, ends) - now), null] : ['no reading', 'muted'];
     }
-    var cells = ['five_hour', 'seven_day'].map(function (w) {
-      return e[w].state === 'ok' ? [pct(e[w].used) + ' used', null] : [e[w].state, 'muted'];
-    });
-    var resets = ['five_hour', 'seven_day'].filter(function (w) { return e[w].state === 'ok' && e[w].resets_at !== null; })
-      .map(function (w) { return e[w].resets_at; });
-    cells.push(resets.length ? ['in ' + dur(Math.min.apply(null, resets) - now), null] : ['—', 'muted']);
-    if (e.limit_label) cells.push([e.limit_label, 'bad']);
-    else if (e.headroom !== null) {
-      var fresh = ['five_hour', 'seven_day'].filter(function (w) { return e[w].state === 'ok'; });
-      cells.push(fresh.length === 2 ? [pct(e.headroom), usageLevel(e.headroom)]
-        : [pct(e.headroom) + ' (' + WINDOW_NAMES[fresh[0]] + ' only)', null]);
+    if (e.limit_label || !fresh.length) {
+      v.label = e.harness + ' headroom: ' +
+        (e.limit_label || (e.state === 'no telemetry' ? 'no telemetry' : 'no reading'));
+      return v;
     }
-    else if (e.state === 'stale' && e.age_seconds !== null) cells.push(['reading ' + dur(e.age_seconds) + ' old', 'muted']);
-    else if (e.age_seconds === null) cells.push(['no reading yet', 'muted']);
-    else cells.push([e.state, 'muted']);
-    return cells;
+    var only = fresh.length === 1 ? WINDOW_NAMES[fresh[0]] : null;
+    v.pct = halfUp(e.headroom * 100);
+    v.lit = Math.floor((2 * v.pct + 5) / 10);
+    v.tone = only ? 'neutral' : usageTone(e.headroom);
+    v.tag = only ? '(' + only + ' only)' : null;
+    v.label = e.harness + ' headroom ' + v.pct + ' percent' + (only ? ', from the ' + only + ' window only' : '') +
+      ': ' + v.lit + ' of ' + METER_CELLS + ' cells lit';
+    return v;
+  }
+  function usageCell(parent, c, tag) { add(parent, el(tag, c[1] ? 'ef-v ' + c[1] : 'ef-v', c[0])); }
+  function accountWho(parent, e) {
+    var line = add(parent, el('div', 'ef-who'));
+    add(line, el('span', 'bot ' + e.harness, e.harness));
+    add(line, el('span', 'ef-name', e.bot));
+    add(parent, el('div', 'ef-dev', 'used on ' + e.devices.join(' · ')));
+  }
+  function headroomRoom(parent, v, phone) {
+    var room = add(parent, el('div', 'ef-room'));
+    if (v.limit) add(room, el('span', 'ef-lim bad', v.limit));
+    else if (v.pct !== null) add(room, el('span', 'ef-hn ' + v.tone, v.pct + '%'));
+    else if (!phone) add(room, el('span', 'ef-hn'));
+    var meter = add(room, el('span', 'ef-meter'));
+    meter.setAttribute('role', 'img');
+    meter.setAttribute('aria-label', v.label);
+    for (var i = 0; i < METER_CELLS; i++) add(meter, el('span', i < v.lit ? v.tone : null));
+    if (!phone && v.tag) add(room, el('span', 'ef-tag', v.tag));
+  }
+  function untrackedLine(parent, h, row) {
+    if (row) {
+      var tr = add(parent, el('tr', 'ef-un'));
+      add(add(tr, el('td')), el('span', 'bot ' + h, h));
+      add(tr, el('td', 'ef-v muted', 'not tracked')).setAttribute('colspan', '4');
+      return;
+    }
+    var line = add(parent, el('div', 'ef-un'));
+    add(line, el('span', 'bot ' + h, h));
+    add(line, el('span', 'ef-v muted', 'not tracked'));
   }
   function renderHeadroom(d) {
-    var usage = d.usage;
-    var root = panel('headroom', 'Subscription headroom');
+    var root = panel('headroom', 'Subscription headroom', 'per account');
     if (!root) return;
-    add(root, el('p', 'ef-lede', "Usage per bot account against each plan's limit, read at the start of every job, " +
-      'so it is clear which bot has room before the queue backs up.'));
+    var accounts = d.usage.accounts;
+    var views = accounts.filter(function (e) { return e.state !== 'not tracked'; })
+      .map(function (e) { return accountView(e, d.generated_at_epoch); });
+    var untracked = [];
+    accounts.filter(function (e) { return e.state === 'not tracked'; }).map(function (e) { return e.harness; })
+      .concat(['grok']).forEach(function (h) { if (untracked.indexOf(h) < 0) untracked.push(h); });
     var table = add(add(root, el('div', 'ef-scroll')), el('table', 'ef-usage'));
     var head = add(add(table, el('thead')), el('tr'));
-    ['bot', '5-hour window', '7-day window', 'resets', 'headroom'].forEach(function (h) { add(head, el('th', null, h)); });
+    ['account', '5-hour window', '7-day window', 'resets', 'headroom']
+      .forEach(function (h) { add(head, el('th', null, h)); });
     var body = add(table, el('tbody'));
-    var per = {};
-    usage.bots.forEach(function (e) { per[e.harness] = (per[e.harness] || 0) + 1; });
-    var rows = usage.bots.map(function (e) { return [e.harness, e.bot, per[e.harness] > 1 ? e.device : null, usageCells(e, d.generated_at_epoch)]; });
-    USAGE_HARNESSES.forEach(function (h) {
-      if (per[h]) return;
-      var text = USAGE_UNTRACKED[h] ? 'not tracked' : usage.state === 'no telemetry' ? 'no telemetry' : 'no reading yet';
-      rows.push([h, h, null, [0, 1, 2, 3].map(function () { return [text, 'muted']; })]);
-    });
-    rows.forEach(function (r) {
+    views.forEach(function (v) {
       var tr = add(body, el('tr'));
-      var who = add(tr, el('td'));
-      add(who, el('span', 'bot ' + r[0], r[1]));
-      if (r[2] !== null) add(who, el('span', 'muted', r[2]));
-      r[3].forEach(function (c) { add(tr, el('td', c[1] ? 'ef-v ' + c[1] : 'ef-v', c[0])); });
+      accountWho(add(tr, el('td')), v.entry);
+      v.windows.concat([v.resets]).forEach(function (c) { usageCell(tr, c, 'td'); });
+      headroomRoom(add(tr, el('td')), v, false);
     });
+    untracked.forEach(function (h) { untrackedLine(body, h, true); });
+    add(root, el('p', 'ef-hnote', HEADROOM_NOTE + ', so the reading is per account, not per device.'));
+    var list = add(root, el('div', 'ef-accts'));
+    views.forEach(function (v) {
+      var block = add(list, el('div', 'ef-acct'));
+      accountWho(block, v.entry);
+      headroomRoom(block, v, true);
+      add(block, el('div', 'ef-hl', v.tag ? 'headroom ' + v.tag : 'headroom'));
+      var wins = add(block, el('div', 'ef-wins'));
+      ['5-hour', '7-day', 'resets'].forEach(function (name, i) {
+        var col = add(wins, el('div'));
+        add(col, el('div', 'ef-wk', name));
+        usageCell(col, v.windows.concat([v.resets])[i], 'div');
+      });
+    });
+    untracked.forEach(function (h) { untrackedLine(list, h, false); });
+    add(root, el('p', 'ef-hnote-ph', HEADROOM_NOTE + '.'));
   }
 """
 
-HEADROOM_LEDE = (
-    "Usage per bot account against each plan's limit, read at the start of every job, "
-    "so it is clear which bot has room before the queue backs up."
+HEADROOM_NOTE = (
+    "Headroom is what is left in the fullest window. "
+    "One account is shared by every device that runs that harness"
 )
 SHIPPED = ("merged", "done", "handed-off")
 ROUND_BUCKETS = ("0 rounds", "1 round", "2 rounds", "3 rounds", "4 or more")
-USAGE_HARNESSES = ("claude", "codex", "cursor", "grok")
-USAGE_UNTRACKED = ("cursor", "grok")
+ALWAYS_UNTRACKED = "grok"
+METER_CELLS = 20
 WINDOWS = ("five_hour", "seven_day")
 WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "7-day"}
 
@@ -281,75 +355,111 @@ def _rounds(snapshot: dict) -> str:
     )
 
 
-def _usage_cells(entry: dict, now: float) -> list[tuple[str, str | None]]:
+def _tone(room: float) -> str:
+    return "ok" if room >= 0.5 else "warn" if room >= 0.2 else "bad"
+
+
+def _view(entry: dict, now: float) -> dict:
+    """One account's window and reset cells, headroom number, tag and meter."""
     state = entry["state"]
-    if state in ("not tracked", "no telemetry"):
-        last = (entry["limit_label"], "bad") if entry.get("limit_label") else (state, "muted")
-        return [(state, "muted")] * 3 + [last]
-    cells: list[tuple[str, str | None]] = [
-        (f"{_half_up(entry[w]['used'] * 100)}% used", None) if entry[w]["state"] == "ok"
-        else (entry[w]["state"], "muted")
-        for w in WINDOWS
-    ]
-    resets = [entry[w]["resets_at"] for w in WINDOWS
-              if entry[w]["state"] == "ok" and entry[w]["resets_at"] is not None]
-    cells.append((f"in {duration(min(resets) - now)}", None) if resets else ("—", "muted"))
-    room = entry["headroom"]
-    if entry.get("limit_label"):
-        cells.append((entry["limit_label"], "bad"))
-    elif room is not None:
-        fresh = [w for w in WINDOWS if entry[w]["state"] == "ok"]
-        if len(fresh) == len(WINDOWS):
-            cells.append((f"{_half_up(room * 100)}%", "ok" if room >= 0.5 else "warn" if room >= 0.2 else "bad"))
-        else:
-            cells.append((f"{_half_up(room * 100)}% ({WINDOW_NAMES[fresh[0]]} only)", None))
-    elif state == "stale" and entry["age_seconds"] is not None:
-        cells.append((f"reading {duration(entry['age_seconds'])} old", "muted"))
-    elif entry["age_seconds"] is None:
-        cells.append(("no reading yet", "muted"))
+    fresh = [w for w in WINDOWS if entry[w]["state"] == "ok"]
+    if state == "no telemetry":
+        windows = [(state, "muted")] * len(WINDOWS)
+        resets = (state, "muted")
     else:
-        cells.append((state, "muted"))
-    return cells
+        windows = [(f"{_half_up(entry[w]['used'] * 100)}% used", None) if w in fresh
+                   else (entry[w]["state"], "muted") for w in WINDOWS]
+        ends = [entry[w]["resets_at"] for w in fresh if entry[w]["resets_at"] is not None]
+        resets = (f"in {duration(min(ends) - now)}", None) if ends else ("no reading", "muted")
+    view = {"entry": entry, "windows": windows, "resets": resets, "limit": entry["limit_label"],
+            "pct": None, "tone": None, "tag": None, "lit": 0}
+    if entry["limit_label"] or not fresh:
+        reason = entry["limit_label"] or ("no telemetry" if state == "no telemetry" else "no reading")
+        return {**view, "label": f"{entry['harness']} headroom: {reason}"}
+    only = WINDOW_NAMES[fresh[0]] if len(fresh) == 1 else None
+    pct = _half_up(entry["headroom"] * 100)
+    lit = (2 * pct + 5) // 10
+    window = "" if only is None else f", from the {only} window only"
+    return {
+        **view, "pct": pct, "lit": lit, "tone": "neutral" if only else _tone(entry["headroom"]),
+        "tag": None if only is None else f"({only} only)",
+        "label": f"{entry['harness']} headroom {pct} percent{window}: {lit} of {METER_CELLS} cells lit",
+    }
+
+
+def _cell(text: str, cls: str | None, tag: str = "td") -> str:
+    return f'<{tag} class="{f"ef-v {cls}" if cls else "ef-v"}">{_e(text)}</{tag}>'
+
+
+def _who(entry: dict) -> str:
+    harness = entry["harness"]
+    return (
+        f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", entry["bot"])}</div>'
+        f'<div class="ef-dev">{_e("used on " + " · ".join(entry["devices"]))}</div>'
+    )
+
+
+def _number(view: dict, *, phone: bool) -> str:
+    if view["limit"]:
+        return _span("ef-lim bad", view["limit"])
+    if view["pct"] is not None:
+        return _span(f"ef-hn {view['tone']}", f"{view['pct']}%")
+    return "" if phone else _span("ef-hn", "")
+
+
+def _meter(view: dict) -> str:
+    lit = view["lit"]
+    cells = f'<span class="{view["tone"]}"></span>' * lit + "<span></span>" * (METER_CELLS - lit)
+    return f'<span class="ef-meter" role="img" aria-label="{_e(view["label"])}">{cells}</span>'
+
+
+def _account_row(view: dict) -> str:
+    tag = "" if view["tag"] is None else _span("ef-tag", view["tag"])
+    return (
+        f"<tr><td>{_who(view['entry'])}</td>"
+        + "".join(_cell(text, cls) for text, cls in (*view["windows"], view["resets"]))
+        + f'<td><div class="ef-room">{_number(view, phone=False)}{_meter(view)}{tag}</div></td></tr>'
+    )
+
+
+def _account_block(view: dict) -> str:
+    label = "headroom" if view["tag"] is None else f"headroom {view['tag']}"
+    columns = "".join(
+        f'<div><div class="ef-wk">{name}</div>{_cell(text, cls, "div")}</div>'
+        for name, (text, cls) in zip(("5-hour", "7-day", "resets"), (*view["windows"], view["resets"]))
+    )
+    return (
+        f'<div class="ef-acct">{_who(view["entry"])}'
+        f'<div class="ef-room">{_number(view, phone=True)}{_meter(view)}</div>'
+        f'<div class="ef-hl">{_e(label)}</div><div class="ef-wins">{columns}</div></div>'
+    )
 
 
 def _headroom(snapshot: dict) -> str:
-    usage = snapshot["usage"]
-    now = snapshot["generated_at_epoch"]
-    per: dict[str, int] = {}
-    for entry in usage["bots"]:
-        per[entry["harness"]] = per.get(entry["harness"], 0) + 1
-    rows = [
-        (e["harness"], e["bot"], e["device"] if per[e["harness"]] > 1 else None, _usage_cells(e, now))
-        for e in usage["bots"]
-    ]
-    for harness in USAGE_HARNESSES:
-        if harness in per:
-            continue
-        text = (
-            "not tracked" if harness in USAGE_UNTRACKED
-            else "no telemetry" if usage["state"] == "no telemetry"
-            else "no reading yet"
-        )
-        rows.append((harness, harness, None, [(text, "muted")] * 4))
-    body = "".join(
-        "<tr><td>"
-        + _span(f"bot {harness}", bot)
-        + ("" if device is None else _span("muted", device))
-        + "</td>"
-        + "".join(f'<td class="{f"ef-v {cls}" if cls else "ef-v"}">{_e(text)}</td>' for text, cls in cells)
-        + "</tr>"
-        for harness, bot, device, cells in rows
-    )
+    accounts = snapshot["usage"]["accounts"]
+    views = [_view(e, snapshot["generated_at_epoch"]) for e in accounts if e["state"] != "not tracked"]
+    untracked = list(dict.fromkeys(
+        [e["harness"] for e in accounts if e["state"] == "not tracked"] + [ALWAYS_UNTRACKED]
+    ))
     head = "".join(f"<th>{name}</th>" for name in
-                   ("bot", "5-hour window", "7-day window", "resets", "headroom"))
-    title = "Subscription headroom"
-    return (
-        f'<section class="panel ef-wide" id="headroom" aria-label="{title}">'
-        f"<h2>{_span(None, title)}</h2>"
-        f'<p class="ef-lede">{_e(HEADROOM_LEDE)}</p>'
-        f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
-        f"<tbody>{body}</tbody></table></div></section>"
+                   ("account", "5-hour window", "7-day window", "resets", "headroom"))
+    rows = "".join(_account_row(view) for view in views) + "".join(
+        f'<tr class="ef-un"><td>{_span("bot " + h, h)}</td>'
+        '<td class="ef-v muted" colspan="4">not tracked</td></tr>'
+        for h in untracked
     )
+    blocks = "".join(_account_block(view) for view in views) + "".join(
+        f'<div class="ef-un">{_span("bot " + h, h)}{_span("ef-v muted", "not tracked")}</div>'
+        for h in untracked
+    )
+    inner = (
+        f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>"
+        f'<p class="ef-hnote">{HEADROOM_NOTE}, so the reading is per account, not per device.</p>'
+        f'<div class="ef-accts">{blocks}</div>'
+        f'<p class="ef-hnote-ph">{HEADROOM_NOTE}.</p>'
+    )
+    return _panel("headroom", "Subscription headroom", inner, count="per account", extra="ef-wide")
 
 
 def top_row(snapshot: dict) -> str:
