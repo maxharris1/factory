@@ -40,7 +40,6 @@ from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
 from lib.dispatch.poll import sleep_on_either_clock
-from lib.dispatch.types import GrokDelivery
 from lib.dispatcher import Dispatcher, PollCycleFailed, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import (
     EvalError,
@@ -53,12 +52,7 @@ from lib.eval_report import (
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.grok_delivery import (
-    ClaudeDriverDelivery,
-    GrokDeliveryError,
-    NoGrokWebhook,
-    WebhookGrokDelivery,
-)
+from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hold import MergeUpdate
@@ -73,7 +67,6 @@ from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import (
-    Driver,
     OrchConfig,
     approvals,
     bot_approver_findings,
@@ -923,7 +916,7 @@ class _AfterPoll:
 
 def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
     """#219: after a cycle that merged a PR of this checkout's own repo,
-    start `deploy/self-heal.sh kick`; the webhook and Linear secrets stay
+    start `deploy/self-heal.sh kick`; every orch.yml delivery secret stays
     out of its environment (self-heal.sh reads webhook.env itself)."""
     from lib import heal, self_deploy
 
@@ -1105,9 +1098,7 @@ def _runtime(
     }
     if create and not any(trusted.values()):
         trusted["github"]["init-db"] = frozenset({"init-db"})
-    delivery, cleared = _wake_delivery(config)
-    if config.linear is not None:
-        cleared.append(config.linear.api_key_env)
+    delivery = wake_delivery(config)
     t8 = T8Hook()
     source = LivePollSource(
         config,
@@ -1129,7 +1120,7 @@ def _runtime(
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
-        feeder = _feeder(config, queue, machines, source, cleared)
+        feeder = _feeder(config, queue, machines, source)
     dispatcher = Dispatcher(
         path,
         queue,
@@ -1187,42 +1178,11 @@ def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
     return merge_update(clone, approved, head, f"refs/remotes/origin/{base}")
 
 
-def _grok_wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
-    if config.grok is None:
-        return NoGrokWebhook(), []
-    delivery = WebhookGrokDelivery(
-        url_env=config.grok.webhook_url_env,
-        key_env=config.grok.webhook_key_env,
-        auth_env=config.grok.webhook_auth_env,
-    )
-    return delivery, [config.grok.webhook_url_env, config.grok.webhook_key_env]
-
-
-def _claude_wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
-    assert config.claude is not None
-    delivery = ClaudeDriverDelivery(
-        url_env=config.claude.fire_url_env,
-        token_env=config.claude.fire_token_env,
-    )
-    return delivery, [config.claude.fire_url_env, config.claude.fire_token_env]
-
-
-_WAKE_DELIVERIES: dict[Driver, Callable[[OrchConfig], tuple[GrokDelivery, list[str]]]] = {
-    "grok": _grok_wake_delivery,
-    "claude": _claude_wake_delivery,
-}
-
-
-def _wake_delivery(config: OrchConfig) -> tuple[GrokDelivery, list[str]]:
-    return _WAKE_DELIVERIES[config.driver](config)
-
-
 def _feeder(
     config: OrchConfig,
     queue: SQLiteJobQueue,
     machines: MachinesConfig | None,
     source: LivePollSource,
-    cleared: list[str],
 ) -> Feeder:
     """The backlog feeder (issue #85) for projects with an orch.yml intake."""
     linear = None
@@ -1239,7 +1199,9 @@ def _feeder(
         queue,
         config,
         machines,
-        github=GitHubIntakeClient(runner=source._adapter_runner, cleared_variables=cleared),
+        github=GitHubIntakeClient(
+            runner=source._adapter_runner, cleared_variables=config.secret_env_names
+        ),
         linear=linear,
         factory_for=source.factory_context,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),

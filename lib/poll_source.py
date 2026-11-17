@@ -540,7 +540,7 @@ class LivePollSource:
         self._linear_window_seconds = self._linear_every * config.poll_seconds
         self._cycles_until_linear = 0
         self._linear_due = True
-        cleared = _secret_env_names(config)
+        cleared = config.secret_env_names
         # list_comments and ci_status are polling reads: they get the same
         # short timeout, retries and backoff as every other gh read here.
         self.github = GitHubReviewActions(
@@ -551,7 +551,7 @@ class LivePollSource:
         self.gh = self.github.gh
 
     def review_actions_by_repo(self) -> dict[str, ReviewActions]:
-        cleared = _secret_env_names(self.config)
+        cleared = self.config.secret_env_names
         actions: dict[str, ReviewActions] = {}
         for project in self.config.projects:
             if not project.linear_project_ids:
@@ -2173,7 +2173,7 @@ class LivePollSource:
         if isinstance(exc, _BudgetSpent):
             return
         reason = _safe_reason(exc)
-        for name in _secret_env_names(self.config):
+        for name in self.config.secret_env_names:
             value = self.environ.get(name)
             if value:
                 reason = reason.replace(value, "<secret>")
@@ -2420,23 +2420,6 @@ def _safe_reason(exc: Exception) -> str:
     kind = type(exc).__name__ if status is None else f"{type(exc).__name__}:HTTP-{status}"
     detail = scrub_detail(text)
     return f"{kind}: {detail}" if detail else kind
-
-
-def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
-    names: list[str] = []
-    if config.linear is not None:
-        names.append(config.linear.api_key_env)
-    if config.grok is not None:
-        names.extend(
-            (
-                config.grok.webhook_url_env,
-                config.grok.webhook_key_env,
-                config.grok.webhook_auth_env,
-            )
-        )
-    if config.claude is not None:
-        names.extend((config.claude.fire_url_env, config.claude.fire_token_env))
-    return tuple(dict.fromkeys(names))
 
 
 def _open_title(pull: Mapping[str, Any]) -> str | None:

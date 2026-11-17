@@ -288,6 +288,23 @@ class OrchConfig:
     approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
 
+    @property
+    def secret_env_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        if self.linear is not None:
+            names.append(self.linear.api_key_env)
+        if self.grok is not None:
+            names.extend(
+                (
+                    self.grok.webhook_url_env,
+                    self.grok.webhook_key_env,
+                    self.grok.webhook_auth_env,
+                )
+            )
+        if self.claude is not None:
+            names.extend((self.claude.fire_url_env, self.claude.fire_token_env))
+        return tuple(dict.fromkeys(names))
+
 
 def approvals(config: OrchConfig) -> Approvals:
     return _approvals(

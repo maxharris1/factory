@@ -4,11 +4,16 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from lib.queue import Job
+
+if TYPE_CHECKING:
+    from lib.dispatch.types import GrokDelivery
+    from lib.orch_yml import Driver, OrchConfig
 
 TIMEOUT_SECONDS = 8.0
 BEARER = "Bearer "
@@ -178,6 +183,34 @@ class ClaudeDriverDelivery:
         return authorization(
             self.environ, auth_env=None, key_env=self.token_env, label=CLAUDE_LABEL
         )
+
+
+def _grok_wake_delivery(config: OrchConfig) -> GrokDelivery:
+    if config.grok is None:
+        return NoGrokWebhook()
+    return WebhookGrokDelivery(
+        url_env=config.grok.webhook_url_env,
+        key_env=config.grok.webhook_key_env,
+        auth_env=config.grok.webhook_auth_env,
+    )
+
+
+def _claude_wake_delivery(config: OrchConfig) -> GrokDelivery:
+    assert config.claude is not None
+    return ClaudeDriverDelivery(
+        url_env=config.claude.fire_url_env,
+        token_env=config.claude.fire_token_env,
+    )
+
+
+_WAKE_DELIVERIES: dict[Driver, Callable[[OrchConfig], GrokDelivery]] = {
+    "grok": _grok_wake_delivery,
+    "claude": _claude_wake_delivery,
+}
+
+
+def wake_delivery(config: OrchConfig) -> GrokDelivery:
+    return _WAKE_DELIVERIES[config.driver](config)
 
 
 def wake_body(job: Job, logical_key: str) -> bytes:

@@ -1,11 +1,14 @@
 import json
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from lib import cli
+from lib import cli, heal, self_deploy
 from lib.dispatcher import Dispatcher
+from lib.github_actions import GhResult
 from lib.grok_delivery import (
     ClaudeDriverDelivery,
     GrokDeliveryError,
@@ -13,9 +16,9 @@ from lib.grok_delivery import (
     WebhookResult,
     send_fire,
     wake_body,
+    wake_delivery,
 )
 from lib.orch_yml import load_orch_yml
-from lib.poll_source import _secret_env_names
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
 FIRE_URL = "https://fire-secret.test/v1/claude_code/routines/trig_1/fire"
@@ -234,7 +237,7 @@ def test_claude_driver_wakes_only_the_claude_routine(
     monkeypatch.setenv("TEST_CLAUDE_FIRE_URL", "https://claude-host.test/fire")
     monkeypatch.setenv("TEST_CLAUDE_FIRE_TOKEN", "claude-token")
     sent = recording_opener(monkeypatch)
-    delivery, cleared = cli._wake_delivery(config_with(tmp_path, "driver: claude\n"))
+    delivery = wake_delivery(config_with(tmp_path, "driver: claude\n"))
     database = tmp_path / "orch.db"
     queue = SQLiteJobQueue(database, clock=lambda: 10)
     dispatcher = Dispatcher(
@@ -249,7 +252,6 @@ def test_claude_driver_wakes_only_the_claude_routine(
     dispatcher.reconcile_jobs()
 
     assert [url for url, _, _ in sent] == ["https://claude-host.test/fire"]
-    assert cleared == ["TEST_CLAUDE_FIRE_URL", "TEST_CLAUDE_FIRE_TOKEN"]
     with queue.connect() as connection:
         receipts = [
             row[0]
@@ -261,14 +263,96 @@ def test_claude_driver_wakes_only_the_claude_routine(
 def test_no_driver_key_keeps_the_grok_webhook(tmp_path: Path) -> None:
     config = config_with(tmp_path, "")
 
-    delivery, cleared = cli._wake_delivery(config)
+    delivery = wake_delivery(config)
 
     assert config.driver == "grok"
     assert isinstance(delivery, WebhookGrokDelivery)
-    assert cleared == ["TEST_GROK_URL", "TEST_GROK_KEY"]
 
 
-def test_poller_subprocesses_never_see_the_claude_secrets(tmp_path: Path) -> None:
-    cleared = _secret_env_names(config_with(tmp_path, "driver: claude\n"))
+SECRETS = {
+    name: f"{name.lower()}-value"
+    for name in (
+        "TEST_LINEAR_KEY",
+        "TEST_GROK_URL",
+        "TEST_GROK_AUTH",
+        "TEST_GROK_KEY",
+        "TEST_CLAUDE_FIRE_URL",
+        "TEST_CLAUDE_FIRE_TOKEN",
+    )
+}
+MACHINES_YML = (
+    "devices:\n  - name: box\n    local: true\n    slot_max: 1\n"
+    "    harnesses: {claude: claude-bot}\n"
+)
 
-    assert {"TEST_CLAUDE_FIRE_URL", "TEST_CLAUDE_FIRE_TOKEN"} <= set(cleared)
+
+def orch_with_every_secret(tmp_path: Path, driver: str) -> Path:
+    path = tmp_path / "orch.yml"
+    text = ORCH_YML.format(
+        driver=f"driver: {driver}\nlinear:\n  api_key_env: TEST_LINEAR_KEY\n"
+    )
+    path.write_text(
+        text + "    factory_ref: main\n    intake:\n      label: factory:ready\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def gh_child_env(argv) -> dict[str, str]:
+    prefix = list(argv[: list(argv).index("gh")])
+    shown = subprocess.run(
+        [*prefix, "env"],
+        env={**SECRETS, "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return dict(line.split("=", 1) for line in shown.splitlines())
+
+
+@pytest.mark.parametrize("driver", ["grok", "claude"])
+def test_feeder_gh_children_never_see_a_delivery_secret(
+    tmp_path: Path, driver: str
+) -> None:
+    orch = orch_with_every_secret(tmp_path, driver)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(MACHINES_YML, encoding="utf-8")
+    database = tmp_path / "orch.db"
+    cli._runtime(database, orch, create=True)
+    dispatcher, source = cli._runtime(database, orch, create=False, machines_path=machines)
+    children: list[dict[str, str]] = []
+
+    def gh(argv, timeout):
+        del timeout
+        children.append(gh_child_env(argv))
+        return GhResult(0, "[]", "")
+
+    source.gh_runner = gh
+
+    assert dispatcher.feeder.github.github_intake("acme/widgets", "factory:ready") == []
+    assert children
+    for env in children:
+        assert "PATH" in env
+        assert set(SECRETS) & env.keys() == set()
+
+
+@pytest.mark.parametrize("driver", ["grok", "claude"])
+def test_deploy_children_never_see_a_delivery_secret(tmp_path: Path, driver: str) -> None:
+    webhook = heal._webhook(orch_with_every_secret(tmp_path, driver))
+    environ = {**SECRETS, "PATH": "/bin", "ORCH_STATE_DIR": str(tmp_path)}
+    spawned: list[dict[str, str]] = []
+
+    git = self_deploy.git_env(environ, webhook)
+    self_deploy.MergeKick(
+        lambda: {"acme/widgets"},
+        repo="acme/widgets",
+        on_error=pytest.fail,
+        environ=environ,
+        secret_names=webhook.secret_names,
+        spawn=lambda argv, env, log_path: spawned.append(dict(env)),
+    )()
+
+    [kick] = spawned
+    for env in (git, kick):
+        assert env["PATH"] == "/bin"
+        assert set(SECRETS) & env.keys() == set()
