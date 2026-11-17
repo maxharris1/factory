@@ -16,7 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -35,7 +35,7 @@ jobs:
 
   changes:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 5
     outputs:
       macos: ${{ steps.diff.outputs.macos }}
@@ -84,7 +84,7 @@ jobs:
   macos-pickup:
     needs: changes
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true')
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 30
     permissions:
       actions: write
@@ -120,7 +120,7 @@ jobs:
 
   checks:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 15
     steps:
       - name: Runner identity
@@ -144,7 +144,7 @@ jobs:
 
   py311-compile:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -157,7 +157,7 @@ jobs:
 
   statechart:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

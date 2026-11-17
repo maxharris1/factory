@@ -1,8 +1,27 @@
-- **Decision:** Factory CI (`.github/workflows/ci.yml`) runs on self-hosted runners. Linux jobs use the `factory-linux` pool (3 PC WSL instances and 1 low-priority box instance), named in `factory.md` as `ci_runner: factory-linux`. The `macos` job uses the Mac runner (`factory-mac`). Merges still need green checks on the current head. Cleffy stays on hosted runners.
+- **Decision:** Factory CI (`.github/workflows/ci.yml`) runs on self-hosted runners. Linux jobs use the `factory-linux` pool (3 PC WSL instances and 1 low-priority box instance), named in `factory.md` as `ci_runner: factory-linux`. When every pool runner is busy, new Linux jobs overflow to `ubuntu-latest` through the repo Actions variable `FACTORY_LINUX_RUNNER`. The `macos` job uses the Mac runner (`factory-mac`) and never overflows. Merges still need green checks on the current head. Cleffy stays on hosted runners.
 - **When:** 2026-11-17 9:30 AM ET, by Max
-- **Source:** https://github.com/maxharris1/factory/pull/712#issuecomment-6951041562 (the go), on the plan at https://github.com/maxharris1/factory/pull/712#issuecomment-6950231924
+- **Source:** https://github.com/maxharris1/factory/pull/712#issuecomment-6951041562 (the go), on the plan at https://github.com/maxharris1/factory/pull/712#issuecomment-6950231924. Overflow: Max, 10:47 AM ET, relayed in https://github.com/maxharris1/factory/pull/712#issuecomment-6953668097
 
-Max approved the plan's defaults and changed one of them. The box runner comes now, not after a week on the PC. `grokbot-factory-box` gets no runner. The aut0 and Tracy follow-ups were not approved, and nothing here touches #708 or moves WSL. Max registers each runner himself from [docs/F2-03-RUNNER-CHECKLIST.md](../F2-03-RUNNER-CHECKLIST.md).
+Max approved the plan's defaults and changed one of them. The box runner comes now, not after a week on the PC. `grokbot-factory-box` gets no runner. The aut0 and Tracy follow-ups were not approved, and nothing here touches #708 or moves WSL. At 10:47 AM ET Max said: "Do whatever you need to do on either of my machines to set up the runners and get them wired into the factory, so we default to the local runners before we overflow to GitHub." Under that grant, Grok Bot registered `pc-wsl-bots-1` to `-3`, `box-1` and `maxs-macbook-pro` with short-lived registration tokens piped straight into `config.sh`. No token was printed or stored. Later registrations follow [docs/F2-03-RUNNER-CHECKLIST.md](../F2-03-RUNNER-CHECKLIST.md), by Max.
+
+## Overflow to hosted runners
+
+Every Linux job says:
+
+```yaml
+runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
+```
+
+Unset means the pool, so local is the default. [`deploy/runner-pool-sync.sh`](../../deploy/runner-pool-sync.sh) runs on the box as the orch login. Every 30 s it reads the runner list. It sets the variable to `"ubuntu-latest"` only after two checks in a row with no idle online `factory-linux` runner (or none online), and back to the pool on the first check with one idle. GitHub reads the variable when it queues each job, so jobs queued while the pool has room stay local and the rest overflow. The runner list is read with the orch login's own `gh`, so no secret is added to Actions.
+
+- **macOS** has no overflow. `macos` stays on `[self-hosted, macOS, factory-mac]`, and `macos-pickup` still cancels the run red after 10 minutes.
+- **Billing.** An overflowed job is billed like any hosted job. While the account is billing-blocked it fails in seconds and the run goes red; rerun failed jobs once the pool has room.
+- **D21 still holds.** The credential checks in `tests/test_ci_workflow.py` apply to every job whose fallback is self-hosted, since that is where it runs by default.
+- **Restarts.** `runner-pool-sync.sh ensure` starts the loop unless its pidfile names a live process. `box-1` is restarted by `~/.local/bin/box-runner-ensure.sh` from the box login's `.bashrc`. A hold file (`~/.config/factory/runner-pool-sync-hold`) stops the loop. The checklist has the commands.
+
+## Interim exception
+
+Until Max runs `sudo bash ~/factory-runner-mac-setup.sh` on the Mac, `maxs-macbook-pro` runs as `codex-bot` under `caffeinate`, not as a dedicated runner user. That breaks ac-3 for the Mac only, and only for the `macos` job, which runs `tests/test_process_discovery.py` from same-repo branches. The script moves it to a standard `gharunner` user as a boot-time LaunchDaemon.
 
 ## Merge rule
 

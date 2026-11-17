@@ -12,6 +12,16 @@ This document contains no token and no placeholder for one. The token only
 ever appears on GitHub's "New self-hosted runner" page and in the terminal
 where Max pastes the command from that page.
 
+**Registered on 2026-11-17 by Grok Bot, at Max's direction.** Max, 10:47 AM
+ET: "Do whatever you need to do on either of my machines to set up the
+runners and get them wired into the factory, so we default to the local
+runners before we overflow to GitHub." Grok Bot registered all five runners
+below with short-lived registration tokens piped straight into `config.sh`.
+That was a one-time grant from Max. Any later registration or removal is
+Max's again unless he says otherwise. The rule did not change: no token is
+ever printed, stored, or pasted into git, an issue, a comment, a chat, a
+file or orch config.
+
 ## What goes where
 
 | Item | Where | Who |
@@ -19,6 +29,7 @@ where Max pastes the command from that page.
 | Runner registration and its token | GitHub UI and the runner host's terminal | Max only |
 | Linux pool label for a repo | that repo's `factory.md` front matter as `ci_runner:` | a normal repo PR |
 | Which jobs use it | that repo's workflow `runs-on:` | a normal repo PR |
+| Overflow switch for factory's Linux jobs | repo Actions variable `FACTORY_LINUX_RUNNER` | `deploy/runner-pool-sync.sh` on the box |
 | Device inventory (hosts, Tailscale names) | `machines.yml` (F2-01) | already there, unchanged |
 | Credential-holding deploy workflows | GitHub-hosted runners, unchanged (D21) | nobody moves them |
 
@@ -48,13 +59,19 @@ ci_runner: factory-linux
 
 `ci_runner` must be one token (letters, digits, `.`, `_`, `:`, `-`);
 `orch check-config` validates it. Linux jobs select the pool with every
-label, so a job can never land on some other self-hosted runner:
+label, so a job can never land on some other self-hosted runner. They read
+the labels from the repo Actions variable `FACTORY_LINUX_RUNNER`, and fall
+back to the pool when it is unset:
 
 ```yaml
 jobs:
   test:
-    runs-on: [self-hosted, Linux, X64, factory-linux]
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
 ```
+
+The fallback is exactly the pool, `[self-hosted, Linux, X64, factory-linux]`,
+so local is the default. See "Overflow to hosted runners" below for what
+sets the variable.
 
 The one macOS job uses `[self-hosted, macOS, factory-mac]`. The host labels
 (`factory-pc-wsl`, `factory-box`) are for pinning a job to one host if that
@@ -62,7 +79,48 @@ is ever needed. No factory job pins today.
 
 `ci_runner` is repo policy that `check-config` validates and humans and
 bots read; the poller does not rewrite workflows. `tests/test_ci_workflow.py`
-checks that factory's Linux jobs use the `ci_runner` pool.
+checks that every factory Linux job uses that `runs-on:` expression with the
+`ci_runner` pool as its fallback, and that `macos` stays on
+`[self-hosted, macOS, factory-mac]`.
+
+## Overflow to hosted runners
+
+Max asked on 2026-11-17 that CI "default to the local runners before we
+overflow to GitHub". The switch is the repo Actions variable
+`FACTORY_LINUX_RUNNER`. It holds either the pool,
+`["self-hosted","Linux","X64","factory-linux"]`, or `"ubuntu-latest"`.
+
+- **What flips it.** `deploy/runner-pool-sync.sh` runs on the box as the
+  orch login (installed at `~/.local/bin/runner-pool-sync.sh`). Every 30 s
+  it lists the repo's runners and counts the online `factory-linux` ones
+  and how many of them are idle. It sets the variable to `"ubuntu-latest"`
+  only after two checks in a row with no idle pool runner (or none online),
+  and back to the pool on the first check with one idle. A failed runner
+  list changes nothing. It reads the runner list with the orch login's own
+  `gh` (repo admin), so no secret is added to Actions.
+- **When it applies.** GitHub reads the variable when it queues each job.
+  Jobs queued while the pool has room stay local. Jobs queued while it is
+  full go to hosted runners. A job already queued for the pool waits for a
+  pool runner even if the variable flips later.
+- **macOS never overflows.** `macos` stays on `factory-mac`, and
+  `macos-pickup` still cancels the run red after 10 minutes with no Mac.
+- **Billing.** An overflowed job is a normal hosted job. It uses included
+  minutes, and while the account is billing-blocked it fails in seconds,
+  which turns the run red. Rerun failed jobs once the pool has room.
+- **Log.** `~/.local/state/factory/runner-pool-sync.log` on the box, one
+  line per flip (`online=N idle=N -> <value>`).
+- **Restarts.** `runner-pool-sync.sh ensure` starts the loop in the
+  background unless its pidfile
+  (`~/.local/state/factory/runner-pool-sync.pid`) names a live process, so
+  it is safe to run any time. Run it after a box restart, from the same
+  place that runs `box-runner-ensure.sh`.
+- **Hold it.** `touch ~/.config/factory/runner-pool-sync-hold` stops the
+  loop at its next check and makes `ensure` a no-op. Remove the file and
+  run `ensure` to resume.
+- **Pin local or hosted by hand.** Hold the loop, then set the variable:
+  `env -u GH_TOKEN gh variable set FACTORY_LINUX_RUNNER --repo maxharris1/factory --body '"ubuntu-latest"'`.
+  `gh variable delete FACTORY_LINUX_RUNNER --repo maxharris1/factory`
+  returns every Linux job to the pool, since unset means local.
 
 ## Before registering (once)
 
@@ -183,7 +241,10 @@ instead.
    effect only under the `bfq` scheduler; the box's disks use
    `mq-deadline` today, so the core pin and the one-job limit are the real
    bounds. The box has about 9 GB of memory available today (measured); a job's peak use is not measured yet.
-5. It does not restart by itself. After a box restart, run step 4 again.
+5. It does not restart by itself. On 2026-11-17 Grok Bot added
+   `~/.local/bin/box-runner-ensure.sh`, which the box login's `.bashrc`
+   runs, so the runner comes back when that login next opens a shell after
+   a box restart. Run step 4 by hand if it has not.
    To stop it: `sudo pkill -u gha-runner -f Runner.Listener`.
 6. If the poller or waiters slow down (poll cycles stretch, waiter logs
    show gaps), stop `box-1` first and report it on the ticket.
@@ -198,6 +259,11 @@ Same rules, with these differences:
   independent of factory jobs; turning the Mac back on for jobs is a
   separate decision.
 - Create a separate **standard (non-admin)** macOS user, `gharunner`.
+- **Interim state on 2026-11-17.** `maxs-macbook-pro` runs as `codex-bot`
+  under `caffeinate`, which breaks the per-host rule above. That ends when
+  Max runs `sudo bash ~/factory-runner-mac-setup.sh` from his own home on
+  the Mac. It moves the runner to `gharunner` as a boot-time LaunchDaemon.
+  Until then, the Mac's isolation check below fails.
 - Install Python build prerequisites only if `actions/setup-python` fails
   there; it downloads its own Python into the runner's tool cache.
 - On GitHub's page pick macOS and the Mac's architecture (ARM64 on Apple
@@ -260,14 +326,18 @@ before adding instances.
 - Settings > Actions > Runners > the runner > Remove shows a
   `./config.sh remove` command carrying a one-time removal token. Paste it
   yourself in the runner's terminal, as above.
-- If you remove every runner in a pool, change the repo's `ci_runner:` and
-  `runs-on:` back to hosted runners in a PR first, or its jobs queue for a
-  day and then fail.
+- If you remove every Linux runner, the sync loop sees none online and
+  flips `FACTORY_LINUX_RUNNER` to `"ubuntu-latest"` within about a minute,
+  so new Linux jobs go to hosted runners. If the loop is held or stopped,
+  set the variable by hand first (see "Overflow to hosted runners"), or the
+  jobs queue for a day and then fail. `macos` has no overflow: with the Mac
+  runner removed, change its `runs-on:` in a PR.
 
 ## Acceptance (SPEC F2-03)
 
 - Max can register runners from this checklist without the factory handling
   any token: every token step is his, in GitHub's UI and his own terminal.
+  The one exception is the 2026-11-17 registration he directed (see the top).
 - Credential-holding deploy workflows stay on hosted runners.
 - Labels are read from each repo's `factory.md` (`ci_runner:`).
 - The device inventory stays in `machines.yml`.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -16,6 +17,10 @@ from lib.factory_md import load_factory_md
 ROOT = Path(__file__).resolve().parents[1]
 FORK_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
 MACOS_LABELS = ["self-hosted", "macOS", "factory-mac"]
+OVERFLOW = re.compile(
+    r"^\$\{\{ fromJSON\(vars\.\w+ \|\| '(?P<fallback>\[[^']*\])'\) \}\}$"
+)
+SYNC_SCRIPT = ROOT / "deploy/runner-pool-sync.sh"
 
 
 def _workflow() -> dict:
@@ -330,7 +335,15 @@ WORKFLOWS = sorted((ROOT / ".github/workflows").glob("*.yml"))
 
 def _labels(job: dict) -> list[str]:
     runs_on = job.get("runs-on", [])
-    return [runs_on] if isinstance(runs_on, str) else runs_on
+    if not isinstance(runs_on, str):
+        return runs_on
+    overflow = OVERFLOW.match(runs_on)
+    return json.loads(overflow["fallback"]) if overflow else [runs_on]
+
+
+def _overflow_runs_on(pool: list[str]) -> str:
+    fallback = json.dumps(pool, separators=(",", ":"))
+    return f"${{{{ fromJSON(vars.FACTORY_LINUX_RUNNER || '{fallback}') }}}}"
 
 
 def _grants_id_token(permissions: object) -> bool:
@@ -353,13 +366,95 @@ def _self_hosted_credential_jobs(workflow: dict) -> list[str]:
     ]
 
 
-def test_every_job_runs_on_a_self_hosted_factory_runner() -> None:
+def _ci_runner_pool() -> list[str]:
     config, findings = load_factory_md(ROOT / "factory.md")
     assert config is not None, findings
     assert config.ci_runner == "factory-linux"
-    linux = ["self-hosted", "Linux", "X64", config.ci_runner]
+    return ["self-hosted", "Linux", "X64", config.ci_runner]
+
+
+def test_every_linux_job_defaults_to_the_ci_runner_pool_and_macos_stays_on_the_mac() -> None:
+    pool = _ci_runner_pool()
     for name, job in _workflow()["jobs"].items():
-        assert job["runs-on"] == (MACOS_LABELS if name == "macos" else linux), name
+        if name == "macos":
+            assert job["runs-on"] == MACOS_LABELS
+        else:
+            assert job["runs-on"] == _overflow_runs_on(pool), name
+            assert _labels(job) == pool, name
+
+
+def test_the_sync_script_flips_between_the_same_pool_and_ubuntu_latest() -> None:
+    text = SYNC_SCRIPT.read_text(encoding="utf-8")
+    pool = json.dumps(_ci_runner_pool(), separators=(",", ":"))
+    assert f"POOL='{pool}'" in text
+    assert """HOSTED='"ubuntu-latest"'""" in text
+    assert "VAR=FACTORY_LINUX_RUNNER" in text
+
+
+FAKE_SYNC_GH = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *actions/runners*)
+    n=$(grep -c 'actions/runners' "$GH_LOG")
+    line=$(sed -n "${n}p" "$GH_RESPONSES")
+    if [[ -z "$line" ]]; then touch "$HOME/.config/factory/runner-pool-sync-hold"; exit 1; fi
+    [[ "$line" == FAIL ]] && exit 1
+    echo "$line" ;;
+  *"--jq .value") cat "$GH_VALUE" ;;
+esac
+"""
+
+
+def _run_sync(tmp_path: Path, start: str, counts: list[str]) -> list[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_SYNC_GH, encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    (tmp_path / ".config/factory").mkdir(parents=True)
+    (tmp_path / "responses").write_text("".join(f"{line}\n" for line in counts), encoding="utf-8")
+    (tmp_path / "value").write_text(start, encoding="utf-8")
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "EVERY": "0",
+        "GH_LOG": str(log),
+        "GH_RESPONSES": str(tmp_path / "responses"),
+        "GH_VALUE": str(tmp_path / "value"),
+    }
+    result = subprocess.run(
+        ["bash", str(SYNC_SCRIPT), "loop"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return [
+        call.split("value=", 1)[1]
+        for call in log.read_text(encoding="utf-8").splitlines()
+        if call.startswith("api -X PATCH repos/maxharris1/factory/actions/variables/FACTORY_LINUX_RUNNER ")
+    ]
+
+
+POOL_VALUE = '["self-hosted","Linux","X64","factory-linux"]'
+
+
+@pytest.mark.parametrize(
+    ("start", "counts", "writes"),
+    [
+        (POOL_VALUE, ["4 1", "4 0", "4 1", "4 0"], []),
+        (POOL_VALUE, ["4 0", "4 0", "4 0", "4 2"], ['"ubuntu-latest"', POOL_VALUE]),
+        (POOL_VALUE, ["0 0", "0 0"], ['"ubuntu-latest"']),
+        (POOL_VALUE, ["4 0", "FAIL", "4 0"], ['"ubuntu-latest"']),
+        ('"ubuntu-latest"', ["4 1"], [POOL_VALUE]),
+        ("", ["4 1"], [POOL_VALUE]),
+    ],
+    ids=["one-busy-check-stays", "two-busy-checks-overflow-then-return", "none-online",
+         "failed-list-keeps-count", "idle-returns", "unset-sets-pool"],
+)
+def test_the_sync_loop_overflows_only_after_two_full_checks(
+    tmp_path: Path, start: str, counts: list[str], writes: list[str]
+) -> None:
+    assert _run_sync(tmp_path, start, counts) == writes
 
 
 def test_no_ci_job_uses_a_github_hosted_runner() -> None:
@@ -388,6 +483,7 @@ def test_no_self_hosted_job_holds_a_credential(path: Path) -> None:
     assert _self_hosted_credential_jobs(yaml.safe_load(path.read_text(encoding="utf-8"))) == []
 
 
+@pytest.mark.parametrize("runs_on", [["self-hosted", "Linux"], _overflow_runs_on(["self-hosted", "Linux"])])
 @pytest.mark.parametrize(
     "workflow",
     [
@@ -399,8 +495,9 @@ def test_no_self_hosted_job_holds_a_credential(path: Path) -> None:
         {"permissions": {"id-token": "write"}, "jobs": {"deploy": {}}},
     ],
 )
-def test_a_self_hosted_job_holding_a_credential_is_flagged(workflow: dict) -> None:
-    workflow["jobs"]["deploy"]["runs-on"] = ["self-hosted", "Linux"]
+def test_a_self_hosted_job_holding_a_credential_is_flagged(workflow: dict, runs_on: object) -> None:
+    workflow = copy.deepcopy(workflow)
+    workflow["jobs"]["deploy"]["runs-on"] = runs_on
     assert _self_hosted_credential_jobs(workflow) == ["deploy"]
 
 
@@ -408,6 +505,7 @@ def test_a_self_hosted_job_holding_a_credential_is_flagged(workflow: dict) -> No
     "job",
     [
         {"runs-on": "ubuntu-latest", "env": {"KEY": "${{ secrets.DEPLOY_KEY }}"}},
+        {"runs-on": _overflow_runs_on(["ubuntu-latest"]), "env": {"KEY": "${{ secrets.DEPLOY_KEY }}"}},
         {"runs-on": ["self-hosted", "Linux"], "env": {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}},
     ],
 )
@@ -417,7 +515,7 @@ def test_a_hosted_job_or_a_github_token_is_not_a_held_credential(job: dict) -> N
 
 def test_no_runner_registration_token_is_committed() -> None:
     paths = [ROOT / "factory.md"] + [
-        path for root in (".github", "docs") for path in (ROOT / root).rglob("*") if path.is_file()
+        path for root in (".github", "docs", "deploy") for path in (ROOT / root).rglob("*") if path.is_file()
     ]
     hits = [
         f"{path.relative_to(ROOT)}:{text.count(chr(10), 0, match.start()) + 1}"
