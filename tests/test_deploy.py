@@ -475,7 +475,7 @@ def test_systemd_does_not_restart_a_poller_a_retired_host_refused() -> None:
     assert "\nRestartPreventExitStatus=79\n" in unit
 
 
-def _heredoc_bodies(text: str, i: int, pending: list[tuple[str, bool]], bodies: list[tuple[int, int]]) -> int:
+def _heredoc_bodies(text: str, i: int, pending: list[tuple[str, bool]], opaque: list[tuple[int, int]]) -> int:
     for delimiter, strip_tabs in pending:
         begin = i
         while i < len(text):
@@ -484,16 +484,16 @@ def _heredoc_bodies(text: str, i: int, pending: list[tuple[str, bool]], bodies: 
             line = text[i:end]
             i = end + 1
             if (line.lstrip("\t") if strip_tabs else line) == delimiter:
-                bodies.append((begin, end - len(line)))
+                opaque.append((begin, end - len(line)))
                 break
         else:
-            bodies.append((begin, len(text)))
+            opaque.append((begin, len(text)))
     pending.clear()
     return min(i, len(text))
 
 
 def _shell_commands(
-    text: str, pending: list[tuple[str, bool]], bodies: list[tuple[int, int]], i: int = 0, close: str = ""
+    text: str, pending: list[tuple[str, bool]], opaque: list[tuple[int, int]], i: int = 0, close: str = ""
 ) -> tuple[list[tuple[int, list[str]]], int]:
     commands: list[tuple[int, list[str]]] = []
     words: list[str] = []
@@ -522,7 +522,7 @@ def _shell_commands(
         words = []
 
     def substitution(begin: int, closer: str) -> int:
-        inner, after = _shell_commands(text, pending, bodies, begin, closer)
+        inner, after = _shell_commands(text, pending, opaque, begin, closer)
         commands.extend(inner)
         return after
 
@@ -537,7 +537,7 @@ def _shell_commands(
             else:
                 level += {"(": 1, ")": -1}.get(text[j], 0)
                 j += 1
-        bodies.append((begin, j))
+        opaque.append((begin, j))
         return j
 
     while i < len(text):
@@ -625,7 +625,7 @@ def _shell_commands(
             end_command()
             i += 1
             if c == "\n" and pending:
-                i = _heredoc_bodies(text, i, pending, bodies)
+                i = _heredoc_bodies(text, i, pending, opaque)
         elif c in " \t":
             end_word()
             i += 1
@@ -646,19 +646,20 @@ def _runs_orch_poll(command: list[str]) -> bool:
     return False
 
 
+def _opaque_launch_starts(span: str) -> list[int]:
+    starts = _orch_poll_launch_starts(span)
+    for line in re.finditer(r".+", span):
+        if _orch_poll_launch_starts(line.group()) or _unit_orch_poll_launches(line.group()):
+            starts.append(line.start())
+    return starts
+
+
 def _orch_poll_launch_starts(text: str) -> list[int]:
-    bodies: list[tuple[int, int]] = []
-    commands, _ = _shell_commands(text, [], bodies)
+    opaque: list[tuple[int, int]] = []
+    commands, _ = _shell_commands(text, [], opaque)
     starts = [start for start, words in commands if _runs_orch_poll(words)]
-    # A heredoc body may be a script (bash <<EOF) or a unit file (cat > x.service <<EOF), and bash
-    # reruns arithmetic it cannot parse as commands ($((orch poll) )). A stray quote in either must
-    # not hide the rest, so each counts on its own, whole and line by line.
-    for begin, end in bodies:
-        body = text[begin:end]
-        starts += [begin + start for start in _orch_poll_launch_starts(body)]
-        for line in re.finditer(r".+", body):
-            if _orch_poll_launch_starts(line.group()) or _unit_orch_poll_launches(line.group()):
-                starts.append(begin + line.start())
+    for begin, end in opaque:
+        starts += [begin + start for start in _opaque_launch_starts(text[begin:end])]
     return starts
 
 
