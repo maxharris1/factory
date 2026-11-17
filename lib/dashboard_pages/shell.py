@@ -171,9 +171,12 @@ SCRIPT = r"""
 
   function renderBand(d) {
     var root = byId('band');
-    var opts = {state: 'band', load: headerLoad(d), height: 24};
+    if (!root) return;
+    var shown = root.children[0];
+    var load = d ? headerLoad(d) : Number(shown && shown.getAttribute('data-load')) || 0;
+    var opts = {state: 'band', load: load, height: 24};
     if (!(FRESH[freshState] || FRESH.boot).band) { opts.tint = '#8b93b8'; opts.still = true; }
-    if (root) root.replaceChildren(PX.strip('band', opts));
+    root.replaceChildren(PX.strip('band', opts));
   }
 
   function attentionItems(d) {

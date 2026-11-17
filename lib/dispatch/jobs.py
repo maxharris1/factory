@@ -782,7 +782,7 @@ class JobsMixin:
         if job.request.action == "update-from-main":
             # #130: a failed update counts toward update-failed-2 in place of
             # the generic retry; the queue queues the next attempt.
-            self._update_failed(
+            counted = self._update_failed(
                 repo=job.request.repo,
                 ticket_id=job.request.ticket_id,
                 source_comment_id=job.request.source_comment_id,
@@ -793,6 +793,8 @@ class JobsMixin:
                 why=f"job {job.id} failed",
             )
             self.queue.mark_failure_handled(job.id)
+            if counted == "update-failed-1" and polled is not None:
+                self._settle_failed_update_head(polled)
             return
         if queue_owned:
             self._record_job_event_once(

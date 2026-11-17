@@ -20,6 +20,7 @@ from lib.dispatch.helpers import (
     _queue_state,
     _scope,
 )
+from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     BaseMismatch,
@@ -40,7 +41,7 @@ from lib.job_state import (
     never_started,
     read_placements,
 )
-from lib.queue import JobRequest
+from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, JobRequest
 from lib.update_check import UpdateClass, UpdateScope
 
 
@@ -199,7 +200,14 @@ class MergeQueueMixin:
                     f"{head[:12]}: {verdict.reason}"
                 )
             return verdict.scope
-        self._write_state_label(fresh, back_to)
+        self._carry_approval(fresh, str(approved), head, verdict.reason, from_state="updating")
+        return True, f"approval-carried:{str(approved)[:12]}->{head[:12]}"
+
+    def _carry_approval(
+        self, ticket: TrackedTicket, approved: str, head: str, reason: str, *, from_state: str
+    ) -> None:
+        back_to = _queue_state(ticket.factory.ship)
+        self._write_state_label(ticket, back_to)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             write_workflow_state(
@@ -214,24 +222,24 @@ class MergeQueueMixin:
                     "update_failures": 0,
                     "update_from_head": None,
                 },
-                guard="workflow_state = 'updating'",
+                guard="workflow_state = ?",
+                guard_args=(from_state,),
             )
             connection.commit()
         if self.log is not None:
             self.log(
                 f"approval carried: {ticket.repo}#{ticket.ticket_id} "
-                f"{str(approved)[:12]} -> {head[:12]} ({verdict.reason})"
+                f"{approved[:12]} -> {head[:12]} ({reason})"
             )
-        if fresh.factory.ship.startswith("after:"):
+        if ticket.factory.ship.startswith("after:"):
             try:
-                self._review_actions(fresh).await_approver(
-                    fresh, head, fresh.factory.ship.removeprefix("after:")
+                self._review_actions(ticket).await_approver(
+                    ticket, head, ticket.factory.ship.removeprefix("after:")
                 )
             except Exception as exc:
                 self.record_poll_error(
                     ticket.repo, ticket.ticket_id, f"carried-preview:{type(exc).__name__}"
                 )
-        return True, f"approval-carried:{str(approved)[:12]}->{head[:12]}"
 
     def _merged_since_job(self, ticket: TrackedTicket, job_id: str) -> bool:
         with self._connect() as connection:
@@ -362,6 +370,10 @@ class MergeQueueMixin:
         return True, "merge-queue"
 
     def _advance_merge_queues(self) -> None:
+        for row in self._merge_queue_members():
+            polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
+            if polled is not None and _failed_update_may_settle(row, polled):
+                self._settle_failed_update_head(polled)
         queues: dict[str, list[sqlite3.Row]] = {}
         for row in self._merge_queue_members():
             if str(row["repo"]) not in self._merged_repos:
@@ -402,7 +414,7 @@ class MergeQueueMixin:
             unanswered = self._update_unanswered(ticket)
             if unanswered is not None:
                 job_id, why = unanswered
-                self._update_failed(
+                counted = self._update_failed(
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
                     source_comment_id=self._queue_comment(ticket, row).id,
@@ -412,6 +424,8 @@ class MergeQueueMixin:
                     job_id=job_id,
                     why=why,
                 )
+                if counted == "update-failed-1":
+                    self._settle_failed_update_head(ticket)
             return True
         if ticket.factory.finish_line != "merge":
             return False
@@ -425,6 +439,149 @@ class MergeQueueMixin:
             return _waits_on_update_or_ci(ticket)
         self._merge_queue_head(ticket, row, head)
         return False
+
+    def _update_orphaned(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> bool:
+        """#660: no ready will settle a head its gone update job pushed.
+        Pending CI waits, as TU's ready would."""
+        if ticket.factory.finish_line != "merge":
+            return False
+        from_head = row["update_from_head"]
+        if from_head is None or not int(row["update_failures"]):
+            return False
+        if _matching_head(head, str(from_head)) is not None or ticket.mergeable is not True:
+            return False
+        ci = ticket.ci.get(head)
+        if ci is None or ci.status == "pending":
+            return False
+        with self._connect() as connection:
+            if _harness_job_active(connection, (ticket.repo.lower(), ticket.ticket_id)):
+                return False
+        return not self._approval_covers(ticket, str(row["approved_head"]), head)
+
+    def _settle_failed_update_head(self, polled: TrackedTicket) -> None:
+        row = next(
+            (
+                row
+                for row in self._merge_queue_members(polled.repo)
+                if row["ticket_id"] == polled.ticket_id
+            ),
+            None,
+        )
+        if row is None:
+            return
+        try:
+            ticket = self._fresh_ticket(polled)
+            if ticket is None or ticket.merged or ticket.closed:
+                return
+            head = ticket.current_head
+            if head is not None and self._update_orphaned(ticket, row, head):
+                self._settle_orphaned_update(ticket, row, head)
+        except BaseMismatch:
+            return
+        except Exception as exc:
+            self._record_queue_error(row, exc)
+
+    def _unmet_gate_instruction(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> str | None:
+        job_id = row["update_failed_job"]
+        events: list[sqlite3.Row] = []
+        with self._connect() as connection:
+            if job_id is not None and has_job_events(connection):
+                events = connection.execute(
+                    f"""
+                    SELECT event, detail FROM {JOB_EVENTS_TABLE}
+                    WHERE job_id = ? AND event IN (?, ?) ORDER BY id
+                    """,
+                    (job_id, PRE_READY_FAILED, PRE_READY_PASSED),
+                ).fetchall()
+        failed = [str(detail) for event, detail in events if event == PRE_READY_FAILED]
+        if failed:
+            return f"The update job pushed {head} but its pre_ready check failed: {failed[-1]}"
+        if ticket.factory.pre_ready is None or any(
+            event == PRE_READY_PASSED and str(detail).endswith(f": at {head}")
+            for event, detail in events
+        ):
+            return None
+        return f"The update job pushed {head} but its pre_ready check never passed at that head"
+
+    def _settle_orphaned_update(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> bool:
+        """True once the ticket left the queue, so another may merge ahead of it (#660)."""
+        approved = str(row["approved_head"])
+        source = self._queue_comment(ticket, row)
+        generation = int(row["generation"])
+        ci = ticket.ci[head]
+        if ci.clears:
+            unmet = self._unmet_gate_instruction(ticket, row, head)
+            if unmet is not None:
+                scope = _scope(ticket.repo, ticket.ticket_id)
+                self._enqueue_or_flag(
+                    ticket,
+                    source,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="fix",
+                        recipient=ticket.factory.builder_harness,
+                        source_comment_id=source.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        head=head,
+                        detail=self._job_detail(
+                            ticket,
+                            action="fix",
+                            head=head,
+                            round_number=int(row["review_round"]) + 1,
+                            instruction=unmet,
+                        ),
+                    ),
+                    dedupe_key=f"t-update-gate:{scope}:{head}:g{generation}",
+                )
+                self._leave_merge_queue(ticket, "update-gate-unmet")
+                self._set_workflow_state(ticket, "fixing")
+                if self.log is not None:
+                    self.log(
+                        f"update pre_ready unmet: {ticket.repo}#{ticket.ticket_id} at "
+                        f"{head[:12]}, its update job gone: fix queued"
+                    )
+                return True
+            verdict = self._classify_update(ticket, approved, head)
+            if verdict.trivial:
+                self._carry_approval(
+                    ticket, approved, head, verdict.reason, from_state=str(row["workflow_state"])
+                )
+                return False
+            queued, _answered = self._queue_review(
+                ticket, source, head=head, generation=generation, update=verdict.scope
+            )
+            if not queued:
+                return False
+            self._leave_merge_queue(ticket, "update-rereview")
+            self._set_workflow_state(ticket, "review")
+            if self.log is not None:
+                self.log(
+                    f"update re-review: {ticket.repo}#{ticket.ticket_id} at "
+                    f"{head[:12]}, its update job gone: {verdict.reason}"
+                )
+            return True
+        _status, count = self._record_ci_result(ticket, head, ci.status)
+        if self._mark_stuck_on_third_red(ticket, source, head, count):
+            return True
+        self._queue_ci_fix(
+            ticket,
+            source,
+            head,
+            ci,
+            int(row["review_round"]),
+            generation,
+            dedupe_key=self._ci_fix_dedupe_key(ticket, head, generation),
+        )
+        self._leave_merge_queue(ticket, "update-ci-red")
+        self._set_workflow_state(ticket, "fixing")
+        if self.log is not None:
+            self.log(
+                f"update CI red: {ticket.repo}#{ticket.ticket_id} at {head[:12]}, "
+                "its update job gone: CI fix queued"
+            )
+        return True
 
     def _merge_first_ready(self, head: sqlite3.Row, rows: list[sqlite3.Row]) -> None:
         waiting = self._polled.get((str(head["repo"]), str(head["ticket_id"])))
@@ -888,7 +1045,7 @@ class MergeQueueMixin:
         query = f"""
             SELECT repo, ticket_id, workflow_state, approved_head, approved_at,
                    approve_comment_id, update_failures, update_from_head,
-                   generation, review_round
+                   update_failed_job, generation, review_round
             FROM ticket_state
             WHERE {_MEMBER}
         """
@@ -934,6 +1091,17 @@ def _may_share_files(head: TrackedTicket | None, entry: TrackedTicket) -> bool:
     if head is None or head.changed_files is None or entry.changed_files is None:
         return True
     return not set(head.changed_files).isdisjoint(entry.changed_files)
+
+
+def _failed_update_may_settle(row: sqlite3.Row, polled: TrackedTicket) -> bool:
+    from_head = row["update_from_head"]
+    if from_head is None or not int(row["update_failures"]) or row["workflow_state"] == "updating":
+        return False
+    head = polled.current_head
+    if head is None or _matching_head(head, str(from_head)) is not None:
+        return False
+    ci = polled.ci.get(head)
+    return ci is not None and ci.status != "pending"
 
 
 def _waits_on_update_or_ci(ticket: TrackedTicket) -> bool:
