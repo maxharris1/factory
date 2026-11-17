@@ -177,7 +177,7 @@ class MachinesConfig:
 
 
 def orch_host(config: MachinesConfig | None) -> str:
-    """The device that runs orch; "box" only when machines.yml is missing or invalid."""
+    """The device that runs orch; DEFAULT_ORCH_HOST only when machines.yml is missing or invalid."""
     return DEFAULT_ORCH_HOST if config is None else config.orch_host
 
 

@@ -132,6 +132,7 @@ SCRIPT = r"""
   function laneDevices(d) {
     var slots = d.slots || {};
     var box = slots.box || {};
+    var host = box.name || 'box';
     var devices = (slots.devices || []).map(function (x) {
       return {name: x.name, slot_max: x.slot_max, held: x.held || 0, enabled: x.enabled,
               placeholder: x.placeholder, harnesses: x.harnesses || [], listed: true, jobs: []};
@@ -142,15 +143,15 @@ SCRIPT = r"""
     (d.running || []).forEach(function (r) {
       if (r.device === null || r.device === undefined) { wakes.push(r); return; }
       if (!Object.prototype.hasOwnProperty.call(byName, r.device)) {
-        var dev = {name: r.device, slot_max: r.device === 'box' ? box.slot_max : null, held: 0, enabled: true,
-                   placeholder: false, harnesses: [], listed: r.device === 'box' && !devices.length, jobs: []};
+        var dev = {name: r.device, slot_max: r.device === host ? box.slot_max : null, held: 0, enabled: true,
+                   placeholder: false, harnesses: [], listed: r.device === host && !devices.length, jobs: []};
         devices.push(dev);
         byName[r.device] = dev;
       }
       byName[r.device].jobs.push(r);
     });
     if (!devices.length) {
-      devices.push({name: 'box', slot_max: box.slot_max, held: 0, enabled: true, placeholder: false,
+      devices.push({name: host, slot_max: box.slot_max, held: 0, enabled: true, placeholder: false,
                     harnesses: [], listed: true, jobs: []});
     }
     // #63 FU-1: a slot held in device_slots is in use even when its job is

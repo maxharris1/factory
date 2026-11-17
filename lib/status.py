@@ -26,7 +26,7 @@ from lib.device_pool import SLOTS_TABLE, Placement
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
-from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.machines_yml import DEFAULT_ORCH_HOST, MachinesConfig, load_machines_yml, orch_host
 from lib.orch_yml import load_orch_yml
 from lib.pr_title import label, read_sources
 from lib.worktrees import pid_alive
@@ -98,7 +98,6 @@ class DeviceRow:
     enabled: bool = True
     placeholder: bool = False
     listed: bool = True
-    local: bool = False  # the box: running jobs with no placement count here (#90)
 
 
 @dataclass(frozen=True)
@@ -147,7 +146,7 @@ class Status:
     feeder: FeederState | None = None
     attention: tuple[AttentionRow, ...] = ()
     # Running harness jobs with no device placement (a claim made without a
-    # device, issue #90): listed and counted on the box device.
+    # device, issue #90): listed and counted on the orch host.
     unplaced: frozenset[str] = frozenset()
     # Component heartbeats (#92), when build_status was given a reader.
     health: component_health.HealthReport | None = None
@@ -478,7 +477,6 @@ def device_rows(
             slot_max=device.slot_max,
             enabled=device.enabled,
             placeholder=device.placeholder,
-            local=device.local,
         )
         for device in config.devices
     ]
@@ -507,11 +505,12 @@ def build_status(
     health: Callable[[float, list[tuple[str, str]]], component_health.HealthReport]
     | None = None,
     lane_limits: Callable[[float], Mapping[str, str]] | None = None,
+    host: str = DEFAULT_ORCH_HOST,
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device. A running
     harness job without one (a claim made with no device, issue #90) runs on
-    the box, so it is listed under the box device and counted in its slots:
+    the orch host `host`, so it is listed under that device and counted in its slots:
     one slot count per device. Running grok wakes hold no slot and are
     listed apart. Each running job gets its job_state from `slots` (the
     full placements), the stale threshold in `job_states`, and `alive` (a
@@ -555,28 +554,27 @@ def build_status(
         else None
     )
     device_rows_out = list(devices)
-    box = next((row.device for row in device_rows_out if row.local), "box")
     device_jobs: dict[str, tuple[JobRow, ...]] = {}
     unplaced: set[str] = set()
     for row in running:
         if row.id in placed:
             name = placed[row.id]
         elif row.recipient != "grok":
-            name = box
+            name = host
             unplaced.add(row.id)
         else:
             continue
         device_jobs[name] = (*device_jobs.get(name, ()), row)
     if unplaced:
         for index, row in enumerate(device_rows_out):
-            if row.device == box:
+            if row.device == host:
                 device_rows_out[index] = replace(row, used=row.used + len(unplaced))
                 break
         else:
             device_rows_out.insert(
                 0,
-                DeviceRow(device=box, harnesses=None, used=len(unplaced), slot_max=None,
-                          listed=False, local=True),
+                DeviceRow(device=host, harnesses=None, used=len(unplaced), slot_max=None,
+                          listed=False),
             )
     return Status(
         observed_at=observed_at,
@@ -828,6 +826,7 @@ def main(
                 feeder=reader.feeder(),
                 attention=reader.attention(),
                 lane_limits=reader.lane_limits,
+                host=orch_host(machines),
                 health=lambda now, queued: component_health.load_report(
                     path, now, queued=queued, machines=machines, orch=orch,
                     uptime=component_health.read_uptime(clock),

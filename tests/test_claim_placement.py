@@ -24,6 +24,7 @@ from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from lib.status import build_status, device_rows, render
 from lib.wait import WaitError, claim_once, wait_for_job
+from tests.pool_helpers import write_target_machines
 from tests.test_dashboard import NOW, add_job, seeded
 from tests.test_status import FakeStatusSource, job
 
@@ -197,7 +198,19 @@ def test_the_dashboard_counts_an_unplaced_job_on_the_box_device(tmp_path: Path) 
 
     box = next(device for device in slots["devices"] if device["name"] == "box")
     assert box["held"] == 4  # 2 placed + 2 with no placement: one count, over slot_max
-    assert slots["box"] == {"running": 4, "slot_max": 3}
+    assert slots["box"] == {"name": "box", "running": 4, "slot_max": 3}
+
+
+def test_the_dashboard_counts_an_unplaced_job_on_the_orch_host(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)  # two running harness jobs, neither placed
+
+    snapshot = collect_snapshot(db, log, now=NOW, machines_path=write_target_machines(tmp_path))
+
+    slots = snapshot["slots"]
+    assert slots["box"] == {"name": "pc", "running": 2, "slot_max": 10}
+    held = {device["name"]: device["held"] for device in slots["devices"]}
+    assert held == {"pc": 2, "box": 0, "mac": 0}
+    assert {job["device"] for job in snapshot["running"] if job["recipient"] != "grok"} == {"pc"}
 
 
 # --- #70 F2.1: takeover is decided on the row attach_runner read ------------

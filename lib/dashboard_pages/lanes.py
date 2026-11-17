@@ -568,6 +568,7 @@ def lane_devices(snapshot: dict) -> tuple[list[dict], list[dict]]:
     """The lanes the script draws: (devices with their running jobs, grok
     wakes). Mirrors laneDevices in the page script."""
     slots = snapshot["slots"]
+    host = slots["box"]["name"]
     devices = [
         {
             "name": row["name"],
@@ -590,12 +591,12 @@ def lane_devices(snapshot: dict) -> tuple[list[dict], list[dict]]:
         if row["device"] not in by_name:
             device = {
                 "name": row["device"],
-                "slot_max": slots["box"]["slot_max"] if row["device"] == "box" else None,
+                "slot_max": slots["box"]["slot_max"] if row["device"] == host else None,
                 "held": 0,
                 "enabled": True,
                 "placeholder": False,
                 "harnesses": [],
-                "listed": row["device"] == "box" and not devices,
+                "listed": row["device"] == host and not devices,
                 "jobs": [],
             }
             devices.append(device)
@@ -603,7 +604,7 @@ def lane_devices(snapshot: dict) -> tuple[list[dict], list[dict]]:
         by_name[row["device"]]["jobs"].append(row)
     if not devices:
         devices.append(
-            {"name": "box", "slot_max": slots["box"]["slot_max"], "held": 0, "enabled": True,
+            {"name": host, "slot_max": slots["box"]["slot_max"], "held": 0, "enabled": True,
              "placeholder": False, "harnesses": [], "listed": True, "jobs": []}
         )
     for device in devices:
