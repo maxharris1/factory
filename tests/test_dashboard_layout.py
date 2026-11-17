@@ -594,7 +594,10 @@ def test_every_page_reads_without_script(tmp_path: Path) -> None:
         assert not re.match(r"<main[^>]*\bhidden\b", main), name
         # Every panel is filled server-side, not left for the script.
         for panel in re.findall(r'<section class="panel[^"]*" id="([a-z-]+)"', main):
-            assert "<h2>" in _section(bare, panel), (name, panel)
+            section = _section(bare, panel)
+            if re.fullmatch(r"<section [^>]*\bhidden></section>", section):
+                continue
+            assert re.search(r"<h2[ >]", section), (name, panel)
     lanes = _text(_section(_no_script(pages["index.html"]), "lanes"))
     assert "cleffy#13" in lanes and "cleffy#14" in lanes
     job = _no_script(pages["job.html"])

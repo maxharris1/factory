@@ -19,7 +19,7 @@ Name the module in a ticket's `Touches:` line.
 | every page: TopBar, header band, attention strip, status line, nav, PixelStrip | `shell.py` | `_topbar`, `_band`, `_attention_strip`, `status_segments`, `_statusline`, `PAGES`, `_PAGE_NAMES`, `_PANELS`, `_page`, the `px_*` table and `PX_SCRIPT`; the shell CSS and the "every page" script | none (shared) |
 | every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop) | none (shared) |
 | `index.html` (Lanes) | `lanes.py` | `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
-| `health.html` (System) | `system.py` | `_components` (matrix and process details), `_drift`, `_health`, `_log`, `_rules`, `_no_waiter`; `_drift_row` and `_log_row` wrap two panels each in a `sys-row` | none |
+| `health.html` (System) | `system.py` | `_broken` (Broken now, from `broken_items`; hidden when nothing is broken), `_components` (matrix, the per-device list a phone shows instead, and process details, down rows first), `_versions` (the always-present mount holding `_drift` only when a component is behind; otherwise the Components count carries the `drift` anchor), `_log_row` (`_health` beside `_log` in a `sys-row`), `_rules`, `_no_waiter` (inside the always-present `waiters` mount, drawn only when it has rows) | none |
 | `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns, Shipped shelf and Stopped group, from `board` and `phase_table`), `_tickets` (the table view), `_active_jobs` | #142 |
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_headroom`, `_rounds`, `_savings`, `_jobs_lifetime` (cost: `rollup_panel` in `lib/dashboard_telemetry.py`); `top_row` and `middle_row` wrap two panels each in an `ef-row` | #144 |
@@ -62,16 +62,30 @@ served order. A new part goes into a module and into its list at the place it
 is to be served. A part opens with a blank line in `SCRIPT` (its literal opens
 with `r"""` and a newline) and with nothing in `CSS` (`"""\`).
 
-`tests/test_dashboard_pages_golden.py` pins the digests of `CSS`, `SCRIPT`,
-`PX_SCRIPT`, `page_script()` and every page for three snapshots. A change that
-alters the served bytes on purpose records them again with
-`python -m tests.test_dashboard_pages_golden`.
+The golden tests in `tests/golden/` pin every served byte for three snapshots,
+one file per page (#633). Each page splits into its `<style>`, its `<script>`,
+its `<main>` and the chrome around them (`tests/golden/pages.py`). A page's
+file pins its `<main>`, its chrome and the CSS, script and placeholder values
+its module owns: `test_lanes_golden.py` (`index.html`), `test_tickets_golden.py`
+(`job.html`, with `ticket_detail.py`), `test_activity_golden.py`,
+`test_efficiency_golden.py` (with the telemetry CSS and script) and
+`test_system_golden.py` (`health.html`). `test_shell_golden.py` pins the
+`common.py` and `shell.py` parts, the served order of the parts and how
+`page_script` fills its placeholders, and no page's rendered bytes. A change
+that alters a page's bytes on purpose records that page's file again, for
+example `python -m tests.golden.test_lanes_golden`. The chrome is the shell's
+`_topbar`, `_band`, `_attention_strip` and `_statusline`: a change to any of
+them records all five page files, and a ticket that makes one names all five on
+its Touches line (`tests/golden/test_chrome_golden.py`). A change to a shared
+part or the served order records `python -m tests.golden.test_shell_golden`.
 
 ## Shared files
 
-`common.py`, `shell.py`, `lib/dashboard_page.py` and the golden test are
-shared by every page: a ticket that touches one of them conflicts with every
-other Mission Control ticket.
+`common.py`, `shell.py`, `lib/dashboard_page.py` and
+`tests/golden/test_shell_golden.py` are shared by every page: a ticket that
+touches one of them conflicts with every other Mission Control ticket. A new
+part in the facade's join lists also goes into `CSS_ORDER` or `SCRIPT_ORDER`
+in `test_shell_golden.py`.
 
 Imports run one way: `common` ← the page modules ← `shell` ← the facade. A
 page module may import a sibling (`lanes` uses `activity._health_link`,
