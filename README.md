@@ -1246,9 +1246,10 @@ a `Feeder — eligible N, fed N, waiting for capacity N` section lists each
 ticket eligible at its last poll with its state and PR. Each device has one
 slot count (issue #90): a running harness job that holds no slot (claimed
 with no device by an older `orch wait`, or whose worker already ended) runs
-on the box, so it is listed under the box device, marked `no-placement`, and
-counted in the box's slots; the device pool counts it too, so the box never
-starts more than `slot_max`. A running grok wake holds no slot and is listed
+on the orch host (`orch_host` in `machines.yml`; the PC in the shipped file),
+so it is listed under that device, marked `no-placement`, and counted in its
+slots; the device pool counts it too, so the orch host never starts more than
+`slot_max`. A running grok wake holds no slot and is listed
 under `Grok wakes`.
 Once a Linear webhook listener or a webhook-mode poller has run on the
 database (the poller records `linear_webhook_polling`), a `Linear webhook`
@@ -2018,10 +2019,11 @@ and still runs every other validation.
 `init-db` and runtime commands are always strict. An unknown model name is a
 warning on stderr.
 With no `--orch`, `check-config` also checks the shipped `machines.yml`; with
-`--orch`, it checks a machines file only when `--machines` names one. A
-`REPLACE_WITH_` device value follows the same `--allow-placeholders` rule and
-the warning says that device will not be scheduled. A disabled device is
-always named on stderr and does not fail the check.
+`--orch`, it checks a machines file only when `--machines` names one. A device
+with a `REPLACE_WITH_` value is skipped with or without `--allow-placeholders`:
+a warning names the device and the field and says it will not be scheduled,
+and the check still passes. Any other machines error fails it. A disabled
+device is always named on stderr and does not fail the check.
 
 ## orchestrate-project
 

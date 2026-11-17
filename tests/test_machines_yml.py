@@ -204,6 +204,20 @@ def test_shipped_slots_are_never_described_as_one_per_bot() -> None:
     assert "slots are generic" in readme.replace("\n", " ").lower()
 
 
+def test_docs_place_an_unplaced_job_on_the_orch_host_not_the_box() -> None:
+    spec = " ".join((ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8").split())
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    for text in (spec, readme):
+        assert "listed under the box" not in text
+        assert "one slot on the box" not in text
+        assert "counted in the box's slots" not in text
+    assert "a job with no placement is listed under the orch host" in spec
+    assert "counts as one slot on the orch host" in spec
+    assert "runs on the orch host (`orch_host` in `machines.yml`" in readme
+    assert "refuses a placeholder unless `--allow-placeholders`" not in spec
+    assert "skips a device with a placeholder" in spec
+
+
 def test_example_passes_strict_check() -> None:
     config, findings = load_machines_yml(ROOT / "config" / "machines.example.yml")
 

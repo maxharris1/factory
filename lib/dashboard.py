@@ -1337,7 +1337,7 @@ def _read_db(
     overdue: list[dict] = []
     # Each running or queued job's ticket as stored, to find its history.
     active: list[tuple[dict, str, str]] = []
-    box_running = 0  # running harness jobs with no placement: on the box (#90)
+    box_running = 0  # running harness jobs with no placement: on the orch host (#90)
     marks = priority_marks(connection) if jobs else {}
     running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
@@ -1401,7 +1401,7 @@ def _read_db(
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
                 # Like `orch status`, a job holding a device-pool slot counts
                 # on its device; a harness job with no placement runs on the
-                # box and counts there (#90; added in collect_snapshot).
+                # orch host and counts there (#90; added in collect_snapshot).
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
                     box_running += 1
                 elif placement is not None:
