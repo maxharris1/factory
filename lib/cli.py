@@ -103,7 +103,14 @@ from lib.queue import (
     require_proof,
 )
 from lib.remote import SshTransport
-from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
+from lib.state_backup import (
+    BackupError,
+    CycleBackup,
+    backup,
+    backup_every,
+    default_backup_path,
+    restore,
+)
 from lib.status import main as status_main
 from lib.update_check import (
     RebaseScope,
@@ -221,7 +228,10 @@ restore-db [--db PATH] [--backup PATH]
   online backup API, swapped into place atomically. --backup defaults to
   $ORCH_DB_BACKUP, else ~/.local/share/factory/backup/orch.db; a path in the
   database's own directory is refused. A failed cycle backup is one
-  poll_errors row and polling goes on. backup-db takes one by hand.
+  poll_errors row and polling goes on. $ORCH_DB_BACKUP_EVERY (seconds,
+  default 0: every cycle) spaces the rolling backups out; a failed one is
+  retried the next cycle, and orch poll exits 1 on a value that is not a
+  whole number. backup-db takes one by hand.
   restore-db restores a missing database from the backup after an
   integrity check: exit 0 restored, 3 no backup, 1 when the database
   already exists or the backup is bad. deploy/poller-service.sh start and
@@ -798,6 +808,7 @@ def _poll(argv: list[str]) -> int:
                     path,
                     default_backup_path(),
                     lambda *error: dispatcher.record_poll_error(*error),
+                    every=backup_every(),
                 ),
                 pusher,
                 _merge_kick(dispatcher, args.orch),

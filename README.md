@@ -475,7 +475,11 @@ nonzero exit.
 *State loss (#66).* After every cycle `orch poll` backs the database up to
 `$ORCH_DB_BACKUP`, else `~/.local/share/factory/backup/orch.db` (outside the
 state directory a reboot can lose; a path inside the database's own directory
-is refused). A failed backup is one `poll_errors` row. `deploy/poller-service.sh`
+is refused). `ORCH_DB_BACKUP_EVERY` (seconds, default 0) spaces those
+backups out: with 900, a cycle backs up only when 900 seconds have passed since
+the last good one, and a failed one is tried again the next cycle; a value that
+is not a whole number makes `orch poll` exit 1. The weekly snapshot still
+checks every cycle. A failed backup is one `poll_errors` row. `deploy/poller-service.sh`
 `start` and `ensure` restore a missing database with `orch restore-db` before
 launching (`RESTORED orch.db from backup`), or, with no backup, create an empty
 one with `orch init-db` and log a `WARNING`. On an empty or stale database the

@@ -27,6 +27,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 BACKUP_ENV = "ORCH_DB_BACKUP"
+BACKUP_EVERY_ENV = "ORCH_DB_BACKUP_EVERY"
 # The job_events detail of a step restore() holds; the dispatcher's first
 # pass over the ticket queues it again unless the thread answered it (#108).
 RESTORED = "restored"
@@ -49,6 +50,16 @@ def default_backup_path(environ: dict[str, str] | None = None) -> Path:
     if explicit:
         return Path(explicit)
     return Path(env.get("HOME", str(Path.home()))) / ".local/share/factory/backup/orch.db"
+
+
+def backup_every(environ: dict[str, str] | None = None) -> int:
+    """Seconds between rolling backups from ORCH_DB_BACKUP_EVERY; 0, the
+    default, backs up every cycle."""
+    env = os.environ if environ is None else environ
+    text = env.get(BACKUP_EVERY_ENV, "").strip() or "0"
+    if not text.isdigit():
+        raise ValueError(f"{BACKUP_EVERY_ENV} must be a whole number of seconds, not {text!r}")
+    return int(text)
 
 
 def _check_apart(db: Path, backup: Path) -> None:
@@ -215,8 +226,9 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
 
 
 class CycleBackup:
-    """The poll loop's after-cycle hook: back up, take the weekly snapshot,
-    record a failure, go on."""
+    """The poll loop's after-cycle hook: back up (at most once per `every`
+    seconds once one has succeeded), take the weekly snapshot, record a
+    failure, go on."""
 
     def __init__(
         self,
@@ -224,18 +236,29 @@ class CycleBackup:
         dest: Path,
         record_error,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        every: float = 0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.db = db
         self.dest = dest
         self.weekly = dest.parent / "weekly"
         self.record_error = record_error
         self.clock = clock
+        self.every = every
+        self.monotonic = monotonic
+        self.last_success: float | None = None
+
+    def _due(self, now: float) -> bool:
+        return self.last_success is None or now - self.last_success >= self.every
 
     def __call__(self) -> None:
-        try:
-            backup(self.db, self.dest)
-        except Exception as exc:
-            self.record_error("backup", "-", f"backup:{type(exc).__name__}")
+        now = self.monotonic()
+        if self._due(now):
+            try:
+                backup(self.db, self.dest)
+                self.last_success = now
+            except Exception as exc:
+                self.record_error("backup", "-", f"backup:{type(exc).__name__}")
         try:
             weekly_snapshot(self.db, self.weekly, self.clock())
         except Exception as exc:
