@@ -1,9 +1,7 @@
-"""Signed links for QA lanes (issue #787, docs/SPEC.md section 7).
+"""Signed links for QA lanes (docs/SPEC.md section 7).
 
-A lane runs pull-request code on a throwaway machine, so it holds no
-storage key. The factory signs short-lived links for it and fetches what
-it uploads. A signed link is a credential: no repr, error text or log
-line here ever holds one.
+A signed link is a credential: no repr, error text or log line here ever
+holds one.
 """
 
 from __future__ import annotations
@@ -131,9 +129,8 @@ def _signing_key(secret: str, date: str, region: str) -> bytes:
     return key
 
 
-def _presign_query(*, host: str, path: str, region: str, access_key: str, secret_key: str,
+def _presign_query(*, host: str, encoded_path: str, region: str, access_key: str, secret_key: str,
                    when: datetime, expires_s: int) -> str:
-    """SigV4 query string for a GET of `path` (already URI-encoded) on `host`."""
     amz_date = when.strftime("%Y%m%dT%H%M%SZ")
     date = amz_date[:8]
     params = {
@@ -145,7 +142,7 @@ def _presign_query(*, host: str, path: str, region: str, access_key: str, secret
     }
     query = "&".join(f"{_uri_encode(k, keep_slash=False)}={_uri_encode(v, keep_slash=False)}"
                      for k, v in sorted(params.items()))
-    canonical = "\n".join(["GET", path, query, f"host:{host}", "", "host", "UNSIGNED-PAYLOAD"])
+    canonical = "\n".join(["GET", encoded_path, query, f"host:{host}", "", "host", "UNSIGNED-PAYLOAD"])
     to_sign = "\n".join([_ALGORITHM, amz_date, f"{date}/{region}/s3/aws4_request",
                          hashlib.sha256(canonical.encode()).hexdigest()])
     signature = hmac.new(_signing_key(secret_key, date, region), to_sign.encode(),
@@ -235,7 +232,7 @@ class S3Storage:
         _check_key(key)
         _check_expires(expires_s)
         path = _uri_encode(f"{self._base_path}/{self.bucket}/{key}", keep_slash=True)
-        query = _presign_query(host=self._host, path=path, region=self.region,
+        query = _presign_query(host=self._host, encoded_path=path, region=self.region,
                                access_key=self._access_key_id, secret_key=self._secret_key,
                                when=self._now().astimezone(timezone.utc), expires_s=expires_s)
         url = f"{self._origin}{path}?{query}"

@@ -52,7 +52,6 @@ def _signing_key(secret: str, date: str, region: str) -> bytes:
 
 
 def _expected_get_signature(url: str, secret: str) -> str:
-    """What S3 recomputes from a presigned GET URL it receives."""
     parts = urlsplit(url)
     default_port = {"http": 80, "https": 443}[parts.scheme]
     host = parts.hostname if parts.port in (None, default_port) else f"{parts.hostname}:{parts.port}"
@@ -151,7 +150,7 @@ def test_ac1_bad_ids_raise_before_anything_is_signed(bad, which):
 
 
 def test_presign_matches_aws_published_example():
-    query = _presign_query(host="examplebucket.s3.amazonaws.com", path="/test.txt", region="us-east-1",
+    query = _presign_query(host="examplebucket.s3.amazonaws.com", encoded_path="/test.txt", region="us-east-1",
                            access_key=AWS_ACCESS, secret_key=AWS_SECRET,
                            when=datetime(2013, 5, 24, tzinfo=timezone.utc), expires_s=86400)
 

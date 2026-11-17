@@ -162,9 +162,6 @@ class DriverInbox:
 
 @dataclass(frozen=True)
 class QaStorage:
-    """A project's QA evidence bucket (issue #787). Host values: they go in
-    orch.local.yml. The key itself lives only in the two named variables."""
-
     bucket: str
     region: str
     endpoint: str | None
@@ -408,8 +405,6 @@ def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[
 def qa_storage_findings(
     config: OrchConfig, repo: str | None, qa: QaConfig | None
 ) -> list[Finding]:
-    """QA on with nowhere to put its evidence (#787): the repo's project
-    needs a qa_storage entry, and check-config needs to know the repo."""
     if qa is None:
         return []
     if repo is None:

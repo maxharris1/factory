@@ -994,11 +994,13 @@ ticket, root)`, treats everything in a bundle as untrusted:
 
 1. Fetch `result.json` (1 MiB cap). If it is not there yet, return `None`.
    A result whose `run_id` or `lane` differs from the request is refused.
-2. Fetch the bundle (500 MiB cap) into a staging folder made under
-   `<root>/.staging/`. Before anything is written, scan every member and
-   refuse an absolute name, a `..` part, a symbolic or hard link, a device
-   or any member that is not a regular file or directory, and a bundle
-   whose sizes add up to more than twice its cap. Extraction then uses
+2. Refuse a lane whose destination already exists. Fetch the bundle
+   (500 MiB cap) into a staging folder made under `<root>/.staging/`.
+   Before anything is written, scan every member and refuse an absolute
+   name, a `..` part, a symbolic or hard link, a device or any member that
+   is not a regular file or directory, two members with one name, more than
+   10,000 members, and a bundle whose sizes add up to more than twice its
+   cap. Extraction then uses
    tarfile's `data` filter and a running byte count as second guards.
 3. Check every artifact the result lists (`path`, `sha256`, `size`) against
    the uploaded bytes. Each missing file, sha256 difference or size
@@ -1006,8 +1008,9 @@ ticket, root)`, treats everything in a bundle as untrusted:
 4. Pass every `*.log` file through `scrub_detail`, line by line. In each
    `network.json`, drop request headers. A `network.json` that is not
    valid JSON is removed and recorded as a mismatch.
-5. Write `manifest.json`: the run id, lane, commit, every file with its
-   sha256 and size after scrubbing, and the mismatches.
+5. Store the fetched `result.json` in the folder, over any copy in the
+   bundle. Write `manifest.json`: the run id, lane, commit, every file with
+   its sha256 and size after scrubbing, and the mismatches.
 6. Move the folder to `<root>/<owner>/<repo>/<ticket>/<run_id>/lane-<n>/`
    in one rename. An existing destination is refused, never replaced.
 7. Return the parsed result with its mismatches.

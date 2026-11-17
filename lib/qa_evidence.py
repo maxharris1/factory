@@ -1,8 +1,6 @@
-"""Fetch, check, scrub and store a QA lane's evidence (issue #787).
+"""Fetch, check, scrub and store a QA lane's evidence (docs/SPEC.md section 7).
 
-A lane ran pull-request code, so everything it uploaded is untrusted:
-result.json, every bundle member's name, type and size, and every byte.
-The bundle is unpacked into a staging dir under `root`, checked, scrubbed
+Everything a lane uploads is untrusted. The bundle is staged under `root`
 and renamed into place only when whole; a refusal leaves nothing behind.
 """
 
@@ -32,8 +30,6 @@ from lib.qa_storage import (
 
 MANIFEST_NAME = "manifest.json"
 NETWORK_NAME = "network.json"
-# Each header costs a decompression pass and a TarInfo in memory, so a
-# bundle of millions of empty members is refused before it costs either.
 MAX_MEMBERS = 10_000
 _RESERVED = {RESULT_NAME, MANIFEST_NAME}
 _CHUNK = 1024 * 1024

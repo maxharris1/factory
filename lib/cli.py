@@ -2510,7 +2510,6 @@ _FACTORY_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 def _factory_arg(value: str) -> tuple[str | None, Path]:
-    """PATH, or owner/name=PATH naming the project the file belongs to."""
     repo, sep, rest = value.partition("=")
     if sep and _FACTORY_REPO.fullmatch(repo):
         return repo, Path(rest)
