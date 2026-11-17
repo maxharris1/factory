@@ -9,8 +9,9 @@ budget and its rate-limit backoff, and the API key is only read from the
 configured environment variable at request time.
 
 Reads:
-* ahead_commits and commit_pulls: a branch's commits past the base, and the
-  open PRs that carry a commit, for the stacked-branch hold (#205);
+* ahead_commits, commit_pulls and branch_has: a branch's commits past the
+  base, the open PRs that carry a commit with each PR's base, and whether a
+  branch already contains a commit, for the stacked-branch hold (#205);
 * github_intake: open issues carrying the label (`issues?labels=`), and for
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
@@ -354,8 +355,7 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError(f"{tip} has {total} commits past {base}; read {len(shas)}")
         return shas
 
-    def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
-        """The open PRs that carry sha (#205), cached like the gate reads."""
+    def commit_pulls(self, repo: str, sha: str) -> dict[int, str]:
         if not _SHA.fullmatch(sha):
             raise GitHubAdapterError("commit sha is not a full sha")
         pulls = self._json(
@@ -363,14 +363,33 @@ class GitHubIntakeClient(GitHubReviewActions):
         )
         if not isinstance(pulls, list):
             raise GitHubAdapterError("commit pulls list is not a list")
-        return frozenset(
-            item["number"]
-            for item in pulls
-            if isinstance(item, dict)
-            and isinstance(item.get("number"), int)
-            and not isinstance(item.get("number"), bool)
-            and item.get("state") == "open"
+        found: dict[int, str] = {}
+        for item in pulls:
+            if not isinstance(item, dict) or item.get("state") != "open":
+                continue
+            number = item.get("number")
+            if not isinstance(number, int) or isinstance(number, bool):
+                continue
+            base = item.get("base")
+            ref = base.get("ref") if isinstance(base, dict) else None
+            if not isinstance(ref, str) or not _BRANCH.fullmatch(ref):
+                raise GitHubAdapterError(f"open PR #{number} base branch is not readable")
+            found[number] = ref
+        return found
+
+    def branch_has(self, repo: str, branch: str, sha: str) -> bool:
+        if not _BRANCH.fullmatch(branch):
+            raise GitHubAdapterError("branch name is not safe")
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("commit sha is not a full sha")
+        compared = self._json(
+            f"{_repo_path(repo)}/compare/{quote(branch, safe='/')}...{sha}",
+            cache_ttl=REF_STATUS_CACHE,
         )
+        status = compared.get("status") if isinstance(compared, dict) else None
+        if status not in ("ahead", "behind", "identical", "diverged"):
+            raise GitHubAdapterError("compare status is not readable")
+        return status in ("behind", "identical")
 
     def pull_state(self, repo: str, number: int) -> str:
         """open, closed or merged: a recorded PR is rechecked before a feed resumes."""

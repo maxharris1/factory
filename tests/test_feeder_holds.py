@@ -170,6 +170,16 @@ def test_stacked_pulls_skips_the_own_pr_and_sorts() -> None:
     assert stacked_pulls(github, HOME, "main", BRANCH, own=None) == (99, 113)
 
 
+def test_stacked_pulls_skips_a_pr_whose_base_already_has_the_commit() -> None:
+    github = stacked_github()
+    github.branch_commits[(HOME, "release")] = (A, B)
+    github.branches[(HOME, "factory/issue-120")] = B
+    github.branch_commits[(HOME, "factory/issue-120")] = (A, B)
+    github.pulls[(HOME, 120)] = {"head": "factory/issue-120", "base": "release"}
+    github.pulls[(HOME, 121)] = {"head": "factory/issue-120", "base": "main"}
+    assert stacked_pulls(github, HOME, "main", BRANCH, own=None) == (113, 121)
+
+
 def test_stack_wait_names_other_repos_in_full() -> None:
     assert stack_wait(HOME, f"branch {BRANCH}", (7,)).reason == f"waiting on #7 (branch {BRANCH} carries its commits)"
     assert stack_wait(HOME, BRANCH, (7, 8)).attention is None
@@ -196,14 +206,48 @@ def test_ahead_commits_refuses_a_partial_list() -> None:
         GitHubIntakeClient(gh).ahead_commits(HOME, "main", BRANCH)
 
 
-def test_commit_pulls_keeps_open_prs_only() -> None:
+def test_commit_pulls_keeps_open_prs_with_their_base() -> None:
     gh = RecordedGh()
     gh.route(("--cache", "60s", f"{REPO_PATH}/commits/{A}/pulls?per_page=100"), ok([
-        {"number": 113, "state": "open"},
-        {"number": 90, "state": "closed"},
-        {"number": True, "state": "open"},
+        {"number": 113, "state": "open", "base": {"ref": "main"}},
+        {"number": 114, "state": "open", "base": {"ref": FEATURE}},
+        {"number": 90, "state": "closed", "base": {"ref": "main"}},
+        {"number": True, "state": "open", "base": {"ref": "main"}},
     ]))
-    assert GitHubIntakeClient(gh).commit_pulls(HOME, A) == frozenset({113})
+    assert GitHubIntakeClient(gh).commit_pulls(HOME, A) == {113: "main", 114: FEATURE}
+
+
+@pytest.mark.parametrize("base", [None, {}, {"ref": "-x"}])
+def test_commit_pulls_refuses_an_open_pr_with_an_unreadable_base(base: object) -> None:
+    gh = RecordedGh()
+    gh.route(("--cache", "60s", f"{REPO_PATH}/commits/{A}/pulls?per_page=100"), ok([
+        {"number": 113, "state": "open", "base": base},
+    ]))
+    with pytest.raises(GitHubAdapterError, match="#113 base branch"):
+        GitHubIntakeClient(gh).commit_pulls(HOME, A)
+
+
+@pytest.mark.parametrize(
+    ("status", "has"), [("behind", True), ("identical", True), ("ahead", False), ("diverged", False)]
+)
+def test_branch_has_reads_the_compare_of_branch_and_commit(status: str, has: bool) -> None:
+    gh = RecordedGh()
+    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{FEATURE}...{A}"), ok({"status": status}))
+    assert GitHubIntakeClient(gh).branch_has(HOME, FEATURE, A) is has
+
+
+@pytest.mark.parametrize("compared", [{}, {"status": None}, {"status": "unknown"}, []])
+def test_branch_has_refuses_an_unreadable_compare(compared: object) -> None:
+    gh = RecordedGh()
+    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/main...{A}"), ok(compared))
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).branch_has(HOME, "main", A)
+
+
+@pytest.mark.parametrize(("branch", "sha"), [("-x", A), ("main", "abc")])
+def test_branch_has_refuses_unsafe_input(branch: str, sha: str) -> None:
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(RecordedGh()).branch_has(HOME, branch, sha)
 
 
 @pytest.mark.parametrize(
@@ -421,9 +465,10 @@ def test_a_fork_pr_is_held_on_its_pinned_head_not_a_same_named_base_branch(tmp_p
     reads.route((f"{prefix}/compare/main...{C}",),
                 ok({"total_commits": 2, "commits": [{"sha": B}, {"sha": C}]}))
     reads.route((f"{prefix}/pulls/12",), ok({"base": {"ref": "main"}}))
-    for sha, pulls in ((A, []), (B, [{"number": 113, "state": "open"}]),
-                       (C, [{"number": 12, "state": "open"}])):
+    for sha, pulls in ((A, []), (B, [{"number": 113, "state": "open", "base": {"ref": "main"}}]),
+                       (C, [{"number": 12, "state": "open", "base": {"ref": "main"}}])):
         reads.route(("--cache", "60s", f"{prefix}/commits/{sha}/pulls?per_page=100"), ok(pulls))
+    reads.route(("--cache", "60s", f"{prefix}/compare/main...{B}"), ok({"status": "ahead"}))
     feeder, queue, _, _ = make_feeder(tmp_path, orch=GITHUB_ORCH.replace("owner/app", repo))
     feeder.github = GitHubIntakeClient(reads)
     dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
@@ -438,18 +483,26 @@ LINEAR_REPO = "acme/linear-app"
 FEATURE = "feature/upload-only-intake"
 AUT = linear_issue("AUT-2231")
 F1, F2, OTHER, OWN = "1" * 40, "2" * 40, "3" * 40, "4" * 40
+DEV = "7" * 40
 BASE_NOTE = (
     f"feeder: {LINEAR_REPO}#AUT-2231 recorded base dev differs from PR base {FEATURE}; "
     "using the PR base"
 )
 
 
-def upload_only_intake(github: FakeGitHub, *, beyond_base: tuple[str, ...] = ()) -> None:
-    for number, head, commits in ((1400, FEATURE, (F1, F2)), (1452, "max/aut-2200", (F1,)),
-                                  (1470, "max/aut-2240", (F1, F2, OTHER))):
+def upload_only_intake(
+    github: FakeGitHub, *, beyond_base: tuple[str, ...] = (), dev_merge: bool = False
+) -> None:
+    on_dev = (DEV,) if dev_merge else ()
+    pulls = [(1400, FEATURE, (F1, F2)), (1452, "max/aut-2200", (F1,)),
+             (1470, "max/aut-2240", (F1, F2, OTHER, *on_dev))]
+    if dev_merge:
+        pulls.append((1475, "max/aut-2250", (DEV, "8" * 40)))
+    for number, head, commits in pulls:
         github.branches[(LINEAR_REPO, head)] = commits[-1]
         github.branch_commits[(LINEAR_REPO, head)] = commits
         github.pulls[(LINEAR_REPO, number)] = {"head": head, "base": "dev"}
+    github.branch_commits[(LINEAR_REPO, "dev")] = on_dev
     github.branches[(LINEAR_REPO, AUT.branch)] = OWN
     github.branch_commits[(LINEAR_REPO, AUT.branch)] = (F1, F2, *beyond_base, OWN)
 
@@ -464,13 +517,15 @@ def linear_feeder(tmp_path: Path, github: FakeGitHub):
     return feeder, queue, linear, logs
 
 
-def review_after_retarget(tmp_path: Path, *, beyond_base: tuple[str, ...] = ()):
+def review_after_retarget(
+    tmp_path: Path, *, beyond_base: tuple[str, ...] = (), dev_merge: bool = False
+):
     github = FakeGitHub()
     github._next_pr = 1460
     feeder, queue, _, logs = linear_feeder(tmp_path, github)
     assert [ref.ticket_id for ref in feeder.feed_once().fed] == ["AUT-2231"]
     assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == "dev"
-    upload_only_intake(github, beyond_base=beyond_base)
+    upload_only_intake(github, beyond_base=beyond_base, dev_merge=dev_merge)
     github.pulls[(LINEAR_REPO, 1461)]["base"] = FEATURE
     ticket = TrackedTicket(
         repo=LINEAR_REPO, ticket_id="AUT-2231",
@@ -506,6 +561,46 @@ def test_a_head_carrying_another_pr_beyond_its_pr_base_is_still_held(tmp_path: P
     assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[1470]]
     assert logs.count(BASE_NOTE) == 1, "noted once per head however many polls hold it"
     assert rows(tmp_path / "orch.db")["AUT-2231"]["base_branch"] == FEATURE
+
+
+def test_a_merge_of_dev_that_open_dev_prs_carry_does_not_hold_review(tmp_path: Path) -> None:
+    dispatcher, queue, ticket, _ = review_after_retarget(tmp_path, beyond_base=(DEV,), dev_merge=True)
+
+    dispatcher.process(ticket)
+
+    queued = reviews(queue)
+    assert [job.request.head for job in queued] == [OWN]
+    assert json.loads(queued[0].request.detail)["base_branch"] == FEATURE
+    assert grok_wakes(tmp_path) == []
+
+
+def test_intake_feeds_a_branch_carrying_a_merge_of_dev(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github, beyond_base=(DEV,), dev_merge=True)
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, _, _, _ = linear_feeder(tmp_path, github)
+
+    report = feeder.feed_once()
+
+    assert [ref.ticket_id for ref in report.fed] == ["AUT-2231"] and report.blocked == 0
+    assert grok_wakes(tmp_path) == []
+
+
+def test_intake_holds_on_a_feature_pr_carrying_a_commit_dev_already_has(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    upload_only_intake(github, beyond_base=(DEV,), dev_merge=True)
+    github.branches[(LINEAR_REPO, "max/aut-2260")] = "9" * 40
+    github.branch_commits[(LINEAR_REPO, "max/aut-2260")] = (F1, F2, DEV, "9" * 40)
+    github.pulls[(LINEAR_REPO, 1480)] = {"head": "max/aut-2260", "base": FEATURE}
+    github.pulls[(LINEAR_REPO, 1461)] = {"head": AUT.branch, "base": FEATURE}
+    feeder, _, _, _ = linear_feeder(tmp_path, github)
+
+    report = feeder.feed_once()
+
+    assert report.fed == () and report.blocked == 1
+    assert rows(tmp_path / "orch.db")["AUT-2231"]["waiting_reason"] == (
+        f"waiting on #1480 (branch {AUT.branch} carries its commits)"
+    )
 
 
 def test_intake_reuses_an_open_pr_against_its_own_base(tmp_path: Path) -> None:
