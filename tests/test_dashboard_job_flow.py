@@ -85,13 +85,13 @@ def _with_finished_tickets(tmp_path: Path) -> dict:
 
 def test_nav_order_is_lanes_jobs_activity_efficiency_on_every_page(tmp_path: Path) -> None:
     pages = render_pages(_snapshot(tmp_path))
-    assert set(pages) == {name for name, _ in NAV}
-    assert list(dashboard_page.PAGES) == [name for name, _ in NAV]
+    assert set(pages) == {name for name, _ in NAV} | {"ticket.html"}
+    assert list(dashboard_page.NAV_PAGES) == [name for name, _ in NAV]
     for name, html in pages.items():
         nav = _section(html, "nav")
         links = re.findall(r'<a href="([^"]+)"( aria-current="page")?>([^<]+)</a>', nav)
         assert [(href, label) for href, _, label in links] == NAV, name
-        assert [href for href, current, _ in links if current] == [name], name
+        assert [href for href, current, _ in links if current] == [{"ticket.html": "job.html"}.get(name, name)], name
 
 
 # --- 3. the path and the next steps on the job view ------------------------------------

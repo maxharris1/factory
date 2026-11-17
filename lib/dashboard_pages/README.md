@@ -16,7 +16,7 @@ Name the module in a ticket's `Touches:` line.
 
 | Page (nav label) | Module | Holds | Next ticket |
 |---|---|---|---|
-| every page: TopBar, header band, attention strip, status line, nav, PixelStrip | `shell.py` | `_topbar`, `_band`, `_attention_strip`, `status_segments`, `_statusline`, `PAGES`, `_PAGE_NAMES`, `_PANELS`, `_page`, the `px_*` table and `PX_SCRIPT`; the shell CSS and the "every page" script | none (shared) |
+| every page: TopBar, header band, attention strip, status line, nav, PixelStrip | `shell.py` | `_topbar`, `_band`, `_attention_strip`, `status_segments`, `_statusline`, `NAV_PAGES` (the nav), `PAGES` (every written page), `_PAGE_NAMES`, `_PANELS`, `_page`, the `px_*` table and `PX_SCRIPT`; the shell CSS and the "every page" script | none (shared) |
 | every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop) | none (shared) |
 | `index.html` (Lanes) | `lanes.py` | `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
 | `health.html` (System) | `system.py` | `_broken` (Broken now, from `broken_items`; hidden when nothing is broken), `_components` (matrix, the per-device list a phone shows instead, and process details, down rows first), `_versions` (the always-present mount holding `_drift` only when a component is behind; otherwise the Components count carries the `drift` anchor), `_log_row` (`_health` beside `_log` in a `sys-row`), `_rules`, `_no_waiter` (inside the always-present `waiters` mount, drawn only when it has rows) | none |
@@ -24,6 +24,7 @@ Name the module in a ticket's `Touches:` line.
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_headroom`, `_rounds`, `_savings`, `_jobs_lifetime` (cost: `rollup_panel` in `lib/dashboard_telemetry.py`); `top_row` and `middle_row` wrap two panels each in an `ef-row` | #144 |
 | `job.html#job-<id>` (ticket detail) | `ticket_detail.py` | `_job_article`, `_jobview`, `_flow_template`, `_legend`, `_meta`; the job page and flow CSS and script | #146, #149 |
+| `ticket.html#t=<repo>#<ticket>` (Ticket, no nav item; Tickets is current) | `ticket_detail.py` | `resolve_ticket` (running before queued, exact repo before any case), `TICKET_KINDS` (strip, tiles and sections per kind, drawn from the `TILES` and `SECTIONS` registries), `ticket_view`; the address is `ticket_address` and the link `ticket_page_href` in `common.py`. The served file holds only the "No ticket chosen" panel; the script draws the ticket from the hash | #531 |
 
 ## Relay threads
 
@@ -68,8 +69,9 @@ its `<main>` and the chrome around them (`tests/golden/pages.py`). A page's
 file pins its `<main>`, its chrome and the CSS, script and placeholder values
 its module owns: `test_lanes_golden.py` (`index.html`), `test_tickets_golden.py`
 (`job.html`, with `ticket_detail.py`), `test_activity_golden.py`,
-`test_efficiency_golden.py` (with the telemetry CSS and script) and
-`test_system_golden.py` (`health.html`). `test_shell_golden.py` pins the
+`test_efficiency_golden.py` (with the telemetry CSS and script),
+`test_system_golden.py` (`health.html`) and `test_ticket_golden.py`
+(`ticket.html`, its `<main>` and chrome only). `test_shell_golden.py` pins the
 `common.py` and `shell.py` parts, the served order of the parts and how
 `page_script` fills its placeholders, and no page's rendered bytes. A change
 that alters a page's bytes on purpose records that page's file again, for
