@@ -1137,6 +1137,8 @@ def test_a_redraw_keeps_focus_and_scroll_on_the_ticket_page(tmp_path: Path) -> N
 def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path, kind: str) -> None:
     snapshot = _with_shipped(_snapshot(tmp_path))
     _row(snapshot, "g-grok-c").update(source="#5310", pr="5770", round="2/3")
+    if kind == "stopped":
+        _stopped(snapshot, reason="superseded-by-sanctioned-intake/" * 30)
     address = {**{k: a for k, (a, _) in LIVE.items()}, **RECORD}[kind]
     server = _serve(tmp_path, {"fixture": snapshot})
     chrome = _Chrome(tmp_path / "profile")
@@ -1156,7 +1158,7 @@ SHIPPED = "maxharris1/cleffy#88"
 RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/aut0#AUT-7", "shipped": SHIPPED}
 NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
                    "shipped": ["Run log", "Run summary", "Journey", "Ended", "Full state chart"],
-                   "stopped": ["Run log", "Journey", "Full state chart"]}
+                   "stopped": ["Why it stopped", "Run log", "Journey", "Full state chart"]}
 OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": SECTIONS, "maxharris1/cleffy#40": SECTIONS,
          **{address: NO_JOB_SECTIONS[kind] for kind, address in RECORD.items()}}
 POLLED = POLLING.replace(
@@ -1381,14 +1383,14 @@ ENDED = {
     "shipped": (lambda record: None, {"data-px": "off", "data-done": "true", "data-tint": "#9ece6a"},
                 [("1h 30m", "total, intake to merge"), ("2", "revise rounds"), ("2 hops", "0 off-chart")],
                 ["ticket arrives", "plan approved", "PR merged"]),
-    "stopped": (lambda record: None, {"data-px": PX_STATE["stuck"]["effect"], "data-tint": PX_STATE["stuck"]["tint"]},
-                [("no reading", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
+    "stopped": (lambda record: None, {"data-px": "static", "data-tint": "#f7768e"},
+                [("no reading", "time stopped"), ("0 hops", "before it stopped"), ("none", "revise round")],
                 ["ticket arrives", "no direct transition on the chart"]),
     "stopped at a known time": (lambda record: record["stopped"].update(at=NOW - 5400), {},
-                                [("1h 30m", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
+                                [("1h 30m", "time stopped"), ("0 hops", "before it stopped"), ("none", "revise round")],
                                 ["ticket arrives", "no direct transition on the chart"]),
     "stopped with no round": (lambda record: record.update(round=None), {},
-                              [("no reading", "stopped"), ("no round", "revise round"), ("1 hops", "1 off-chart")],
+                              [("no reading", "time stopped"), ("0 hops", "before it stopped"), ("no round", "revise round")],
                               ["ticket arrives", "no direct transition on the chart"]),
 }
 
@@ -1708,7 +1710,10 @@ ENDED_STILL = r"""
     .map(c => c.toDataURL());
   const a = shot();
   await sleep(600);
-  return {frames: a, still: a.length === 3 && a.every((x, i) => x === shot()[i])};
+  const strip = document.querySelector('.jd-hero canvas.px');
+  return {frames: a, still: a.length === 3 && a.every((x, i) => x === shot()[i]),
+          strip: [strip.dataset.px, strip.dataset.tint],
+          why: [...document.querySelectorAll('section.jd-why .why-reason')].map(n => n.textContent)};
 })()"""
 
 
@@ -1734,3 +1739,159 @@ def test_ended_journeys_rest_and_reduced_motion_shows_the_rested_frame(tmp_path:
     for kind in ("stopped", "shipped"):
         assert found[kind, False]["still"] and found[kind, True]["still"], kind
         assert found[kind, False]["frames"] == found[kind, True]["frames"], kind
+    for reduced in (False, True):
+        assert found["stopped", reduced]["strip"] == ["static", "#f7768e"], reduced
+        assert found["stopped", reduced]["why"] == ["job-timeout"], reduced
+        assert found["shipped", reduced]["why"] == [], reduced
+
+
+# --- #669: the stopped ticket page's hero and "Why it stopped" -------------------------------------
+
+STOPPED = RECORD["stopped"]
+STOPPED_AT = NOW - (3 * 86400 + 2 * 3600)
+REASON = "cancelled: superseded by sanctioned intake (Factory 2026-11-13)"
+WAYS = [{"to": "planning", "label": "by an authorized unstick"}, {"to": "abandoned", "label": "ends the ticket"},
+        {"to": "questions", "label": "Max answers"}, {"to": "building", "label": "answer, same step resumes"}]
+
+
+def _stopped(snapshot: dict, stuck_flag: bool = False, **stopped) -> dict:
+    record = snapshot[RECORDS][STOPPED]
+    visits = [_visit("intake", "script", STOPPED_AT - 617, 25, None),
+              _visit("questions", "claude", STOPPED_AT - 592, 192, "brief posted"),
+              _visit("planning", "claude", STOPPED_AT - 400, None if stuck_flag else 400, REASON, current=stuck_flag)]
+    if not stuck_flag:
+        visits.append(_visit("stuck", "script", STOPPED_AT, None, "job-timeout", current=True))
+    record.update(state="planning" if stuck_flag else "stuck", visits=visits, round=0, hops=len(visits) - 1,
+                  off_chart_count=0)
+    record["stopped"] = {"state": "stuck", "at": STOPPED_AT, "stopped_in": "planning", "reason": REASON,
+                         "ways_out": WAYS[:2], **stopped}
+    return record
+
+
+def _hero_of(markup: str) -> str:
+    return re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).group(0)
+
+
+def _facts(why: str) -> list[tuple[str, str]]:
+    return [(th, _text(td)) for th, td in re.findall(r'<tr><th scope="row">([^<]*)</th><td>(.*?)</td></tr>', why, re.S)]
+
+
+def _ways(why: str) -> list[tuple[str, str, str, bool]]:
+    cards = re.findall(r'<div class="card( end)?"><div class="head"><span class="to">([^<]*)</span>'
+                       r'(?:<span class="tag">([^<]*)</span>)?</div><span class="why">([^<]*)</span></div>', why)
+    return [(to, tag, label, bool(end)) for end, to, tag, label in cards]
+
+
+def _read_only(why: str) -> str:
+    return re.search(r'<p class="why-ro">([^<]*)</p>', why).group(1)
+
+
+STOP_HERO = {
+    "on a stop state": ({}, "3d 2h", "Tue Jan 12, 1:00 AM ET"),
+    "by a stuck flag": ({"stuck_flag": True, "at": 1783969500}, "185d 12h", "Mon Jul 13, 3:05 PM ET"),
+}
+
+
+@needs_node
+@pytest.mark.parametrize("case", STOP_HERO)
+def test_a_stopped_ticket_s_hero_is_static_red_with_its_line_and_tiles(tmp_path: Path, case: str) -> None:
+    seed, age, day = STOP_HERO[case]
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, **seed)
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        hero = _hero_of(markup)
+        assert _chips(_title(hero)) == ["stuck"] and '</h1><span class="chip bad">stuck</span>' in hero, render
+        line = re.search(r'<p class="line">(.*?)</p>', hero, re.S).group(1)
+        assert line == f'<b class="bad">stuck</b> in planning for <span>{age}</span>', render
+        when = re.search(r'<div class="jd-when stop"><span class="mark" aria-hidden="true"></span>(.*?)</div>', hero, re.S)
+        assert _text(when.group(1)) == f"no job running · stopped {day}", render
+        assert 'class="jd-verb"' not in hero, render
+        assert _ticket_tiles(markup) == [(age, "time stopped"), ("2 hops", "before it stopped"), ("none", "revise round")]
+        assert f'<b class="bad">{age}</b><span>time stopped</span>' in hero, render
+        assert f'<span class="job">stopped {day}</span></nav>' in markup, render
+        px = _hero_px(markup)
+        assert (px["data-px"], px["data-tint"], px["data-still"]) == ("static", "#f7768e", "true"), render
+
+
+@needs_node
+@pytest.mark.parametrize("reason", [None, ""])
+def test_a_stopped_ticket_with_no_clock_round_place_or_reason_says_so(tmp_path: Path, reason: str | None) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, at=None, stopped_in=None, reason=reason)["round"] = None
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        hero = _hero_of(markup)
+        assert re.search(r'<p class="line">(.*?)</p>', hero, re.S).group(1) == '<b class="bad">stuck</b>', render
+        assert _text(re.search(r'<div class="jd-when stop">(.*?)</div>', hero, re.S).group(1)) == "no job running"
+        assert _ticket_tiles(markup) == [("no reading", "time stopped"), ("2 hops", "before it stopped"),
+                                         ("no round", "revise round")], render
+        assert 'class="job"' not in re.search(r'<nav class="jd-crumb".*?</nav>', markup, re.S).group(0), render
+        why = _panel(markup, "Why it stopped")
+        assert _count(why) == "", render
+        assert _text(re.search(r'<div class="why-reason">(.*?)</div>', why, re.S).group(1)) == "no reason recorded"
+        assert _facts(why) == [("when", "no reading"), ("where", "2 hops in (intake → questions → planning)"),
+                               ("job", "none running")], render
+
+
+@needs_node
+def test_a_stopped_ticket_says_why_it_stopped_under_the_hero(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot)
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        after_hero = markup[re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).end():]
+        assert after_hero.startswith('<section class="jd-panel jd-why"><h2><span class="t">Why it stopped</span>'), render
+        why = _panel(markup, "Why it stopped")
+        assert _count(why) == "stopped 3d 2h ago · in planning", render
+        assert _text(re.search(r'<div class="why-reason">(.*?)</div>', why, re.S).group(1)) == REASON, render
+        assert _facts(why) == [("when", "Tue Jan 12, 1:00 AM ET · 3d 2h ago"),
+                               ("where", "in planning, 2 hops in (intake → questions → planning)"),
+                               ("job", "none running")], render
+        assert '<span class="label">Ways out · 2, from the chart</span>' in why, render
+        assert _ways(why) == [("planning", "", "by an authorized unstick", False),
+                              ("abandoned", "end state", "ends the ticket", True)], render
+        assert _read_only(why) == "This page is read-only; neither is done from here.", render
+
+
+READ_ONLY = {0: "This page is read-only.", 1: "This page is read-only; it is not done from here.",
+             2: "This page is read-only; neither is done from here.",
+             3: "This page is read-only; none of these is done from here.",
+             4: "This page is read-only; none of these is done from here."}
+
+
+@needs_node
+@pytest.mark.parametrize("n", READ_ONLY)
+def test_the_read_only_line_reads_right_for_any_count_of_ways_out(tmp_path: Path, n: int) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, ways_out=WAYS[:n])
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        why = _panel(markup, "Why it stopped")
+        assert f'<span class="label">Ways out · {n}, from the chart</span>' in why, render
+        assert [to for to, _, _, _ in _ways(why)] == [w["to"] for w in WAYS[:n]], render
+        assert ('<p class="empty">no way out on the chart</p>' in why) is (n == 0), render
+        assert _read_only(why) == READ_ONLY[n], render
+
+
+@needs_node
+def test_a_hostile_stop_reason_place_and_state_are_escaped_in_both_renders(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, state='"><script>x()</script>', stopped_in="<b>planning</b>", reason="<img src=x onerror=y>",
+             ways_out=[{"to": "<i>out</i>", "label": "<u>why</u>"}])
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        for raw in ("<img src=x", "<script>x()", "<b>planning", "<i>out", "<u>why"):
+            assert raw not in markup, (render, raw)
+        hero = _hero_of(markup)
+        assert '<span class="chip bad">&quot;&gt;&lt;script&gt;x()&lt;/script&gt;</span>' in hero, render
+        assert '<b class="bad">&quot;&gt;&lt;script&gt;x()&lt;/script&gt;</b> in &lt;b&gt;planning&lt;/b&gt;' in hero, render
+        why = _panel(markup, "Why it stopped")
+        for escaped in ("&lt;img src=x onerror=y&gt;", "&lt;b&gt;planning&lt;/b&gt;", "&lt;i&gt;out&lt;/i&gt;",
+                        "&lt;u&gt;why&lt;/u&gt;"):
+            assert escaped in why, (render, escaped)
