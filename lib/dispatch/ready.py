@@ -126,10 +126,7 @@ class ReadyMixin:
             return True, f"ready-while-{parked}"
         if state == "blocked":
             return True, "blocked-ready"
-        if (
-            ticket.pr_commits == 0
-            and _matching_head(fields["head"], ticket.current_head) is not None
-        ):
+        if _at_base(ticket, fields["head"]):
             self._ready_at_base(ticket, comment)
             return True, "rejected-ready-at-base"
         reported_head = fields["head"]
@@ -177,6 +174,9 @@ class ReadyMixin:
             if head is None:
                 return True, "stale-ready-head"
             assert fresh is not None
+            if _at_base(fresh, reported_head):
+                self._ready_at_base(fresh, comment)
+                return True, "rejected-ready-at-base"
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         answered = self._verdict_after(
@@ -1073,3 +1073,7 @@ class ReadyMixin:
             )
             connection.commit()
         return status, count
+
+
+def _at_base(ticket: TrackedTicket, head: str) -> bool:
+    return ticket.pr_commits == 0 and _matching_head(head, ticket.current_head) is not None

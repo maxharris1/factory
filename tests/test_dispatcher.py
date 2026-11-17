@@ -8265,3 +8265,78 @@ def test_705_ac2_a_second_ready_at_the_base_marks_the_ticket_stuck(tmp_path: Pat
         ("build", "done", 1),
         ("build", "done", 1),
     ]
+
+
+@pytest.mark.job_bound
+def test_705_ac1_a_ready_job_done_accepted_while_the_pr_was_frozen_is_reviewed_after_reopen(
+    tmp_path: Path, _fake_gh_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from lib.factory_md import PreReady
+    from lib.job_token import PROOF_ENV
+    from tests.handoff_store import serve
+    from tests.pool_helpers import CLAIM_PROOF
+    from tests.test_job_done_checks import done_with, pre_ready_setup
+
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
+    db, build, orch, work = pre_ready_setup(tmp_path, _fake_gh_store, monkeypatch, "true")
+    rebuilt = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    serve(
+        _fake_gh_store,
+        "repos/owner/repo/pulls/7",
+        {
+            "number": 7,
+            "state": "closed",
+            "merged": False,
+            "commits": 0,
+            "head": {"sha": BASE_705, "ref": BRANCH_705},
+        },
+    )
+    serve(_fake_gh_store, f"repos/owner/repo/git/ref/heads/{BRANCH_705}", {"object": {"sha": rebuilt}})
+
+    assert done_with(db, build, orch) == 0
+
+    queue = SQLiteJobQueue(db, clock=time.time)
+    actions = BranchActions705(rebuilt, ahead=1)
+    dispatcher = Dispatcher(
+        db,
+        queue,
+        trusted_logins={"github": {"maxharris1": {"claude-bot"}}, "linear": {}},
+        review_actions=actions,
+        grok_delivery=FakeGrokDelivery(),
+    )
+    ready = comment("1101", READY.format(head=rebuilt), author="maxharris1", created_at=queue.now() + 1)
+
+    def pr(head: str, *, closed: bool, commits: int) -> TrackedTicket:
+        value = _pr_705(ready, head=head, closed=closed, commits=commits)
+        return replace(value, factory=replace(value.factory, pre_ready=PreReady("true", 30)))
+
+    dispatcher.process(pr(BASE_705, closed=True, commits=0))
+    assert actions.reopened == ["42"]
+    dispatcher.process(pr(rebuilt, closed=False, commits=1))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["1101"] == "queued-review"
+    assert _jobs_705(queue) == [("build", "done", 1), ("review", "queued", 1)]
+
+
+@pytest.mark.job_bound
+def test_705_ac2_a_ready_whose_fresh_read_is_at_the_base_is_rejected(tmp_path: Path) -> None:
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+    ready = comment("ready-base", READY.format(head=BASE_705), author="claude-login")
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('owner/repo', '42', 'github', 0)")
+    dispatcher._fresh_reader = lambda ref: _pr_705(ready, head=BASE_705, closed=True, commits=0)
+
+    dispatcher.process(_pr_705(ready, head=REBUILT_705, closed=False, commits=9))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
+    assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+    assert _stuck_705(queue) == (0, None)
