@@ -1,6 +1,5 @@
 import os
 import re
-import shlex
 import shutil
 import signal
 import socket
@@ -475,45 +474,92 @@ def test_systemd_does_not_restart_a_poller_a_retired_host_refused() -> None:
     assert "\nRestartPreventExitStatus=79\n" in unit
 
 
-_COMMAND_SEPARATORS = ";&|()`"
+def _shell_commands(text: str, i: int = 0, close: str = "") -> tuple[list[tuple[int, list[str]]], int]:
+    commands: list[tuple[int, list[str]]] = []
+    words: list[str] = []
+    word: str | None = None
+    start = i
+    depth = 0
 
+    def begin_word() -> None:
+        nonlocal word, start
+        if word is None:
+            if not words:
+                start = i
+            word = ""
 
-def _logical_lines(text: str):
-    pending = ""
-    for line in text.splitlines():
-        if not pending and line.lstrip().startswith("#"):
-            continue
-        if line.endswith("\\"):
-            pending += line[:-1] + " "
-            continue
-        yield (pending + line).strip()
-        pending = ""
-    if pending:
-        yield pending.strip()
+    def end_word() -> None:
+        nonlocal word
+        if word is not None:
+            words.append(word)
+            word = None
 
+    def end_command() -> None:
+        nonlocal words
+        end_word()
+        if words:
+            commands.append((start, words))
+        words = []
 
-def _words(line: str) -> list[str]:
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=_COMMAND_SEPARATORS)
-    # shlex starts a comment at any `#`, even mid-word as in `$#` or `${x##*/}`.
-    lexer.commenters = ""
-    lexer.whitespace_split = True
-    try:
-        return list(lexer)
-    except ValueError:
-        return re.findall(r"[;&|()`]+|[^\s;&|()`'\"]+", line)
+    def substitution(begin: int, closer: str) -> int:
+        inner, after = _shell_commands(text, begin, closer)
+        commands.extend(inner)
+        return after
 
-
-def _commands(words: list[str]):
-    command: list[str] = []
-    for word in words:
-        if word.startswith("#"):
-            break
-        if set(word) <= set(_COMMAND_SEPARATORS):
-            yield command
-            command = []
+    while i < len(text):
+        c = text[i]
+        if c == close and (close == "`" or depth == 0):
+            end_command()
+            return commands, i + 1
+        if c == "\\":
+            if text[i + 1:i + 2] != "\n":
+                begin_word()
+                word += text[i + 1:i + 2]
+            i += 2
+        elif c == "#" and word is None:
+            newline = text.find("\n", i)
+            i = len(text) if newline < 0 else newline
+        elif c == "'":
+            begin_word()
+            quote_end = text.find("'", i + 1)
+            quote_end = len(text) if quote_end < 0 else quote_end
+            word += text[i + 1:quote_end]
+            i = quote_end + 1
+        elif c == '"':
+            begin_word()
+            i += 1
+            while i < len(text) and text[i] != '"':
+                if text[i] == "\\":
+                    escaped = text[i + 1:i + 2]
+                    word += escaped if escaped in '"\\$`' else "" if escaped == "\n" else "\\" + escaped
+                    i += 2
+                elif text.startswith("$(", i):
+                    i = substitution(i + 2, ")")
+                elif text[i] == "`":
+                    i = substitution(i + 1, "`")
+                else:
+                    word += text[i]
+                    i += 1
+            i += 1
+        elif text.startswith("$(", i):
+            end_command()
+            i = substitution(i + 2, ")")
+        elif c == "`":
+            end_command()
+            i = substitution(i + 1, "`")
+        elif c in ";&|()\n":
+            depth += {"(": 1, ")": -1}.get(c, 0)
+            end_command()
+            i += 1
+        elif c in " \t":
+            end_word()
+            i += 1
         else:
-            command.append(word)
-    yield command
+            begin_word()
+            word += c
+            i += 1
+    end_command()
+    return commands, i
 
 
 def _runs_orch_poll(command: list[str]) -> bool:
@@ -526,8 +572,9 @@ def _runs_orch_poll(command: list[str]) -> bool:
 
 
 def _orch_poll_launches(text: str) -> list[str]:
-    return [line for line in _logical_lines(text)
-            if any(_runs_orch_poll(command) for command in _commands(_words(line)))]
+    commands, _ = _shell_commands(text)
+    starts = sorted({text.rfind("\n", 0, start) + 1 for start, words in commands if _runs_orch_poll(words)})
+    return [text[start:].split("\n", 1)[0].strip() for start in starts]
 
 
 @pytest.mark.parametrize(
@@ -559,6 +606,19 @@ def _orch_poll_launches(text: str) -> list[str]:
         ("true  # orch poll", False),
         ("orch polling", False),
         ("orch dashboard push --once; poll", False),
+        ("echo '# starting poller'; orch poll --once", True),
+        ('echo "# starting poller"; orch poll --once', True),
+        ("echo \\# starting poller; orch poll --once", True),
+        ("echo a#b; orch poll --once", True),
+        ('echo "starting\n# poller"; orch poll --once', True),
+        ("echo 'starting\n# poller' && orch poll --once", True),
+        ("true # comment \\\norch poll --once", True),
+        ('pid="$(orch poll --once)"', True),
+        ('echo "pid `orch poll --once`"', True),
+        ("echo $((1 + 2)); orch poll --once", True),
+        ("x=1;# orch poll", False),
+        ("echo 'orch poll'; orch dashboard push", False),
+        ('echo "\\$(orch poll)"', False),
     ],
 )
 def test_the_orch_poll_launch_detector(text: str, runs: bool) -> None:
