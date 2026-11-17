@@ -73,9 +73,11 @@ its module owns: `test_lanes_golden.py` (`index.html`), `test_tickets_golden.py`
 `common.py` and `shell.py` parts, the served order of the parts and how
 `page_script` fills its placeholders, and no page's rendered bytes. A change
 that alters a page's bytes on purpose records that page's file again, for
-example `python -m tests.golden.test_lanes_golden`. A change to the chrome of
-every page records each page's file. A change to a shared part or the served
-order records `python -m tests.golden.test_shell_golden`.
+example `python -m tests.golden.test_lanes_golden`. The chrome is the shell's
+`_topbar`, `_band`, `_attention_strip` and `_statusline`: a change to any of
+them records all five page files, and a ticket that makes one names all five on
+its Touches line (`tests/golden/test_chrome_golden.py`). A change to a shared
+part or the served order records `python -m tests.golden.test_shell_golden`.
 
 ## Shared files
 
