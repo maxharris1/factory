@@ -10,6 +10,7 @@ or Playwright's cached one.
 
 from __future__ import annotations
 
+import argparse
 import functools
 import glob
 import http.server
@@ -20,16 +21,17 @@ import tempfile
 import threading
 from pathlib import Path
 
-from lib.dashboard import write_snapshot_pages
+from lib.dashboard import RECORDS, write_snapshot_pages
+from lib.dashboard_flow import SHIPPED
 from tests.test_dashboard import NOW
-from tests.test_dashboard_tickets_board import board_snapshot
+from tests.test_dashboard_tickets_board import board_snapshot, shelf_snapshot
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "screenshots"
 NAMES = {"job": "tickets", "activity": "activity"}
-SHOTS = [(page, width) for page in NAMES for width in (1440, 375)]
+WIDTHS = (1440, 375)
 
 DRIVER = r"""
-const [chrome, base, out, nowMs, ...shots] = process.argv.slice(1);
+const [chrome, base, out, nowMs, issue, ...shots] = process.argv.slice(1);
 const { spawn } = require('child_process');
 const fs = require('fs');
 const proc = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', '--no-sandbox',
@@ -78,7 +80,7 @@ proc.stderr.on('data', async (chunk) => {
         await sleep(800);
         const { data } = await send('Page.captureScreenshot',
           { format: 'png', clip: { x: 0, y: 0, width: Number(width), height, scale: 1 } }, sessionId);
-        fs.writeFileSync(`${out}/issue-142-${page === 'job' ? 'tickets' : page}-${width}.png`,
+        fs.writeFileSync(`${out}/issue-${issue}-${page === 'job' ? 'tickets' : page}-${width}.png`,
           Buffer.from(data, 'base64'));
         await send('Target.closeTarget', { targetId });
       }
@@ -95,9 +97,10 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def _chrome() -> str:
-    if len(sys.argv) > 1:
-        return sys.argv[1]
+def _chrome(given: list[str] | None = None) -> str:
+    given = sys.argv[1:] if given is None else given
+    if given:
+        return given[0]
     if os.environ.get("CHROME"):
         return os.environ["CHROME"]
     found = sorted(glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome")))
@@ -106,24 +109,44 @@ def _chrome() -> str:
     return found[-1]
 
 
+def _with_shelf(snapshot: dict, tmp: Path) -> dict:
+    shelf = shelf_snapshot(tmp)
+    shipped = [row for row in shelf["tickets"] if row["state"] in SHIPPED]
+    keys = {f"{row['repo']}#{row['ticket_id']}" for row in shipped}
+    records = {key: record for key, record in shelf[RECORDS].items() if key in keys}
+    return {**snapshot, "tickets": snapshot["tickets"] + shipped, RECORDS: {**snapshot[RECORDS], **records}}
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("chrome", nargs="?")
+    parser.add_argument("--issue", default="142")
+    parser.add_argument("--pages", default=",".join(NAMES))
+    parser.add_argument("--shelf", action="store_true")
+    args = parser.parse_args()
+    shots = [(page, width) for page in args.pages.split(",") for width in WIDTHS]
+    chrome = _chrome([args.chrome] if args.chrome else [])
     with tempfile.TemporaryDirectory() as tmp:
         site = Path(tmp) / "site"
         site.mkdir()
-        write_snapshot_pages(site, board_snapshot(Path(tmp)))
+        snapshot = board_snapshot(Path(tmp))
+        if args.shelf:
+            (Path(tmp) / "shelf").mkdir()
+            snapshot = _with_shelf(snapshot, Path(tmp) / "shelf")
+        write_snapshot_pages(site, snapshot)
         handler = functools.partial(_Quiet, directory=str(site))
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             subprocess.run(
-                ["node", "-e", DRIVER, _chrome(), f"http://127.0.0.1:{server.server_port}", str(OUT),
-                 str(int(NOW * 1000)), *(f"{page}:{width}" for page, width in SHOTS)],
+                ["node", "-e", DRIVER, chrome, f"http://127.0.0.1:{server.server_port}", str(OUT),
+                 str(int(NOW * 1000)), str(args.issue), *(f"{page}:{width}" for page, width in shots)],
                 check=True, timeout=180,
             )
         finally:
             server.shutdown()
-    for page, width in SHOTS:
-        sys.stdout.write(f"{OUT / f'issue-142-{NAMES[page]}-{width}.png'}\n")
+    for page, width in shots:
+        sys.stdout.write(f"{OUT / f'issue-{args.issue}-{NAMES[page]}-{width}.png'}\n")
 
 
 if __name__ == "__main__":
