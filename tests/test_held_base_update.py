@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import shutil
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -437,6 +438,39 @@ def _red_fix(tmp_path: Path, fraction: float = 0.0):
 def _close_leaked_connections_and_lose_state_dir(board) -> None:
     gc.collect()
     shutil.rmtree(board.queue.path.parent)
+
+
+_real_scandir = os.scandir
+
+
+class _CollectAfterListing:
+    def __init__(self, path):
+        self._entries = _real_scandir(path)
+
+    def __enter__(self):
+        return self._entries.__enter__()
+
+    def __exit__(self, *exc):
+        self._entries.__exit__(*exc)
+        gc.collect()
+
+
+def test_removing_the_state_dir_survives_a_collection_that_closes_a_leaked_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board, _, _ = _red_fix(tmp_path)
+    gc.disable()
+    try:
+        leaked = [board.queue.connect()]
+        leaked.append(leaked)
+        leaked[0].execute("SELECT count(*) FROM jobs").fetchall()
+        del leaked
+        monkeypatch.setattr(os, "scandir", _CollectAfterListing)
+        _close_leaked_connections_and_lose_state_dir(board)
+    finally:
+        gc.enable()
+
+    assert not board.queue.path.parent.exists()
 
 
 def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_it(

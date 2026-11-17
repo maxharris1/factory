@@ -20,6 +20,21 @@ PSTACK_FIX_ROUND = (
     "Another full swarm runs only for new behavior, a redesign, or a large new diff. A rebase, a "
     "merge-conflict resolution, or a minor fix gets a single verifier at the new head"
 )
+_MISSING_SCENARIO = (
+    "An acceptance criterion a user can observe in the UI that has no live QA scenario in the plan is "
+)
+_QA_GATE_STEPS = {
+    "block": (
+        "Live QA scenarios (factory.md `qa.gate: block`). "
+        + _MISSING_SCENARIO
+        + "a `[blocking]` finding. Name the criterion and the scenario it lacks."
+    ),
+    "report": (
+        "Live QA scenarios (factory.md `qa.gate: report`). "
+        + _MISSING_SCENARIO
+        + "a note in the verdict, not a `[blocking]` finding. Name the criterion and the scenario it lacks."
+    ),
+}
 
 
 def filing_active(facts: dict) -> bool:
@@ -192,6 +207,7 @@ def task_lines(facts: dict) -> list[str]:
         "live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, "
         "request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it "
         "never leads to `APPROVE`.",
+        *([_QA_GATE_STEPS[facts["qa_gate"]]] if facts["qa_gate"] else []),
         *(
             _update_steps(facts, base, head, unchanged_tag)
             if facts["update"]

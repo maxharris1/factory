@@ -33,9 +33,12 @@ not run `orch job done`. It ends its output with `ORCH-HANDOFF: <comment-id>`
 
 The package splits the renderer by part: `common` (job facts and the shared
 sections), `context` (factory.md), `rules`, `skills`, and one module per job
-(`plan`, `build`, `fix`, `review`, `merge_only`). tests/snapshots/brief holds
-one rendered brief per job kind; regenerate it with
-`python tests/regenerate_brief_snapshots.py`, never by hand.
+(`plan`, `build`, `fix`, `review`, `merge_only`). `qa` renders the brief for
+one QA lane (#762), a cloud agent that drives the app live; it takes a lane's
+facts, not a job row, through `render_qa_brief`. tests/snapshots/brief holds
+one rendered brief per job kind and tests/snapshots/qa one per lane kind;
+regenerate both with `python tests/regenerate_brief_snapshots.py`, never by
+hand.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lib.brief import build, fix, merge_only, plan, review, skills
+from lib.brief.qa import render_qa_brief
 from lib.brief.common import (
     BOTS,
     TEXT_LIMIT,
@@ -70,6 +74,7 @@ __all__ = [
     "BriefError",
     "brief_kind",
     "render_brief",
+    "render_qa_brief",
 ]
 
 KINDS = ("implement", "fix", "review", "merge-only")

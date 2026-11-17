@@ -178,6 +178,7 @@ def merge_update_task(verify_unavailable: bool) -> str:
         "start_before_ci": False,
         "no_ci_base": None,
         "local_checks": (),
+        "qa_gate": None,
     }
     return "\n".join(review_task_lines(facts))
 

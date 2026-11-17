@@ -6,6 +6,7 @@ from lib.brief.common import (
     QUESTIONS_LINES,
     answers_lines,
     detail_of,
+    live_lines,
     read_ticket_line,
     resume_lines,
     title_line,
@@ -24,6 +25,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "2. Map every acceptance criterion to the work that meets it, and name each criterion's "
         "proof: the test, command or observation that will show it is met. The plan lives in the "
         "plan handoff comment, never in a file in the repo.",
+        *(live_lines("plan") if facts["qa"] else []),
         "3. Estimate the changed lines the build will add and remove, tests and docs included, and "
         "put the number in the header as `lines=<n>`. A plan without `lines=` counts as a plan "
         "with a criterion left unmapped.",
