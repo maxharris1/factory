@@ -3,12 +3,14 @@
 # run this, so `orch poll` never starts without its environment. Exits 78
 # naming a missing env file (never its contents), and 79 on a host retired as
 # the orch host (~/.config/factory/orch-retired). Redirect its output to
-# poller.log. --print-db prints the ORCH_DB orch poll would get, then exits.
+# poller.log. --print-db prints the ORCH_DB orch poll would get, then exits;
+# it answers on a retired host too, so orch-move.sh import places orch.db
+# where the poller it starts will read it.
 set -euo pipefail
 
 CONFIG="${HOME}/.config/factory"
 RETIRED="${CONFIG}/orch-retired"
-if [[ -e "$RETIRED" ]]; then
+if [[ -e "$RETIRED" && "${1:-}" != --print-db ]]; then
     echo "run-poller: this host is retired as the orch host (${RETIRED}: $(head -n 1 "$RETIRED" 2>/dev/null || true)); not starting orch poll" >&2
     exit 79
 fi

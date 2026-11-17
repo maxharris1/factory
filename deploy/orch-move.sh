@@ -29,6 +29,11 @@
 # retired and stopped and exits 1; to undo, remove orch-retired and start
 # the services. The host name is ORCH_MOVE_HOST, else hostname(1).
 #
+# Both read orch.db's path from `run-poller.sh --print-db`, which answers on a
+# retired host too: the ORCH_DB the poller gets from its env files, else
+# ${ORCH_DB:-<state dir>/orch.db}. When --print-db fails (a missing env file
+# exits 78) they refuse (exit 1) and change nothing.
+#
 # import runs on the host taking orch.db over. <export> is a local path or
 # [user@]host:path. It refuses (exit 1) when orch.db, or a -wal or -journal
 # beside it, already exists here. It copies <export> to a fresh
@@ -77,8 +82,9 @@ refuse() {
 }
 
 db_path() {
-    local db
-    db="$("${HERE}/run-poller.sh" --print-db 2>/dev/null)" || db=""
+    local db status=0
+    db="$("${HERE}/run-poller.sh" --print-db)" || status=$?
+    ((status == 0)) || refuse "cannot read the poller's database path (run-poller.sh --print-db exited ${status}); changed nothing"
     printf '%s\n' "${db:-${ORCH_DB:-${STATE}/orch.db}}"
 }
 

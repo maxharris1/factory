@@ -1224,8 +1224,12 @@ time>` and checks it with `orch move-db check`. It refuses when the copy's
 sha256 differs from the manifest, the copy fails `integrity_check`, or the
 manifest has no retired line. For a `host:path` export it also refuses when
 that host has no `orch-retired`. It refuses when this host already has an
-`orch.db`, or its `-wal` or `-journal`. A refusal places nothing and starts
-nothing. Otherwise it adds `machines.<dest>.yml`, this host's `machines.yml`,
+`orch.db`, or its `-wal` or `-journal`. Both commands find `orch.db` with
+`deploy/run-poller.sh --print-db`, which still answers while `orch-retired`
+exists, so `import` places `orch.db` at the `ORCH_DB` that
+`~/.config/factory/orch-poll.env` gives the poller it then starts. When
+`--print-db` fails, for example on a missing env file, they refuse. A refusal
+places nothing and starts nothing. Otherwise it adds `machines.<dest>.yml`, this host's `machines.yml`,
 so both hosts' `machines.yml` sit beside the snapshot. It places `orch.db`
 with `cp` and `mv`. It never uses `orch restore-db`, which would cancel the
 queued jobs. It removes this host's `orch-retired`, then starts

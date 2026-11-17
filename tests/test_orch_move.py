@@ -563,3 +563,72 @@ def test_a_cutover_and_its_rollback_round_trip_the_database(tmp_path: Path) -> N
     assert not box.retired.exists()
     assert _rows(box.db) == first["tables"]
     assert _integrity(box.db) == "ok"
+
+
+def _custom_db(host: Host) -> Path:
+    db = host.home / "custom-state" / "orch.db"
+    (host.config / "orch-poll.env").write_text(f"ORCH_DB={db}\n", encoding="utf-8")
+    return db
+
+
+def test_a_rollback_places_the_database_at_the_retired_hosts_configured_path(
+    tmp_path: Path,
+) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    box_db, pc_db = _custom_db(box), _custom_db(pc)
+    _seed(tmp_path, box_db)
+
+    cutover = _export(tmp_path, box, "pc")
+    first = json.loads((cutover / "manifest.json").read_text(encoding="utf-8"))
+    placed = pc.move("import", f"box:{cutover}", **_remote(tmp_path, box.home))
+    assert placed.returncode == 0, placed.stderr
+    assert _rows(pc_db) == first["tables"]
+    assert not pc.db.exists()
+
+    rollback = _export(tmp_path, pc, "box")
+    assert box.retired.exists()
+    box_db.rename(box_db.with_name("orch.db.pre-rollback"))
+    back = box.move("import", f"pc:{rollback}", **_remote(tmp_path, pc.home))
+    assert back.returncode == 0, back.stderr
+
+    assert not box.retired.exists()
+    assert _rows(box_db) == first["tables"]
+    assert not box.db.exists()
+    assert list(box.state.glob("orch.db*")) == []
+
+
+def test_print_db_answers_on_a_retired_host_while_a_launch_still_refuses(
+    tmp_path: Path,
+) -> None:
+    box = Host(tmp_path, "box")
+    db = _custom_db(box)
+    box.retired.write_text("pc 2026-11-17T13:00:00Z\n", encoding="utf-8")
+    run_poller = box.checkout / "deploy/run-poller.sh"
+
+    printed = subprocess.run(["bash", str(run_poller), "--print-db"], env=box.env(),
+                             text=True, capture_output=True, timeout=30, check=False)
+    launched = subprocess.run(["bash", str(run_poller)], env=box.env(),
+                              text=True, capture_output=True, timeout=30, check=False)
+
+    assert (printed.returncode, printed.stdout) == (0, f"{db}\n"), printed.stderr
+    assert launched.returncode == 79
+    assert "not starting orch poll" in launched.stderr
+
+
+def test_import_refuses_when_the_poller_database_path_cannot_be_read(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    export = _export(tmp_path, box, "pc")
+    pc.retired.write_text("box 2026-11-01T00:00:00Z\n", encoding="utf-8")
+    (pc.config / "orch-poll.env").unlink()
+    (pc.config / "waiter-autostart-claude-bot").touch()
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 1, result.stderr
+    assert "cannot read the poller's database path" in result.stderr
+    assert "missing ~/.config/factory/orch-poll.env" in result.stderr
+    assert list(pc.home.rglob("orch.db*")) == []
+    assert not (pc.home / ".local/share/factory/orch-move").exists()
+    assert pc.retired.exists()
+    assert pc.calls() == []
