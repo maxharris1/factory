@@ -503,6 +503,25 @@ def test_script_card_ids_link_their_ticket_page(tmp_path: Path, snapshot: dict) 
     _check_id_links(_script(tmp_path, snapshot)["html"]["pipeline"], snapshot["tickets"])
 
 
+def _check_tile_links(markup: str, rows: list[dict]) -> None:
+    by_key = {_key(row): row for row in rows}
+    tiles = _all(_dom(markup), _cls("tk-tile"))
+    assert tiles
+    for tile in tiles:
+        key = tile["attrs"]["data-ticket"]
+        assert tile["tag"] == "a", key
+        assert tile["attrs"]["href"] == ticket_page_href(by_key[key]), key
+
+
+def test_every_shelf_tile_links_its_ticket_page(snapshot: dict) -> None:
+    _check_tile_links(_server(snapshot)["shipped"], snapshot["tickets"])
+
+
+@layout.needs_node
+def test_script_shelf_tiles_link_their_ticket_page(tmp_path: Path, snapshot: dict) -> None:
+    _check_tile_links(_script(tmp_path, snapshot)["html"]["shipped"], snapshot["tickets"])
+
+
 def test_without_a_chart_the_board_says_so_and_the_table_lists_every_ticket(tmp_path: Path) -> None:
     snapshot = board_snapshot(tmp_path)
     snapshot["statechart"] = None

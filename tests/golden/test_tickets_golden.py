@@ -9,8 +9,8 @@ from tests.golden.pages import page_digests, page_name, record, snapshots, subst
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "tickets.CSS": "d9362c1e367e3bef80d360850c7aa6ef7a77ae0258ec9017051faf16dcd57ca8",
-    "tickets.SCRIPT_TICKETS": "8500a4df35eb19edaf4bf5cfa5a36479ee975252071ef3a4f1b7187c517161d2",
+    "tickets.CSS": "2432d51bbb001fc4a892b4c21146fe1904cb0717c8daffef5334b00f3abcc0b0",
+    "tickets.SCRIPT_TICKETS": "65c4eadb63677f53077c2fa065d25035f89efd98abee7775421df74fd7dd3359",
     "ticket_detail.CSS": "8c6af76772cf24486e8009cb75a344e1dd85f7acc1abc0231d494625ab4411c4",
     "ticket_detail.SCRIPT": "51a01c2764f35aa02dd75c97d9641bad3761f65a02f55362b3df39d55e1d1e19",
     "__BOARD__": "988b51ce050bf3873af75787819c57711326377eaed5a138918d033658a9ef31",

@@ -25,6 +25,7 @@ from lib.dashboard_pages import ticket_detail
 from lib.dashboard_pages.common import duration
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
+from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
 from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
@@ -1293,6 +1294,43 @@ def test_every_tracked_ticket_opens_in_both_renders(tmp_path: Path, address: str
     assert views["script"] == views["server"]
     assert views["server"].startswith(f'<article class="jobpage ticketpage" data-ticket="{html.escape(address)}">')
     assert _sections(views["server"]) == OPENS[address]
+
+
+def _board_links(markup: dict[str, str]) -> dict[str, str]:
+    cards = {card["attrs"]["data-ticket"]: board._id_link(card)["attrs"].get("href")
+             for card in board._all(board._dom(markup["pipeline"]), board._cls("tk-card"))}
+    tiles = {tile["attrs"]["data-ticket"]: tile["attrs"].get("href")
+             for tile in board._all(board._dom(markup["shipped"]), board._cls("tk-tile"))}
+    assert cards and tiles
+    return {**cards, **tiles}
+
+
+def _check_board_links_open(links: dict[str, str], rows: list[dict], open_page) -> None:
+    keys = {board._key(row): row for row in rows}
+    assert sorted(links) == sorted(keys)
+    assert {row["state"] for row in rows} >= {"capped", "post-merge", "merged", "intake"}, \
+        "a capped card, a post-merge card, a shipped tile and an idle card with no job"
+    for key, row in keys.items():
+        href = links[key]
+        assert href and href.startswith("ticket.html#t="), key
+        hash_ = href[len("ticket.html"):]
+        markup = open_page(urllib.parse.unquote(hash_[len("#t="):]), hash_)
+        assert markup.startswith(f'<article class="jobpage ticketpage" data-ticket="{html.escape(key)}">'), href
+        (title,) = _h1s(markup)
+        assert title != "Ticket not found" and str(row["ticket_id"]) in title, href
+
+
+def test_every_board_card_and_shelf_tile_opens_its_ticket(tmp_path: Path) -> None:
+    snapshot = board.board_snapshot(tmp_path)
+    _check_board_links_open(_board_links(board._server(snapshot)), snapshot["tickets"],
+                            lambda address, hash_: _ticket_server(snapshot, address))
+
+
+@needs_node
+def test_script_board_cards_and_shelf_tiles_open_their_ticket(tmp_path: Path) -> None:
+    snapshot = board.board_snapshot(tmp_path)
+    _check_board_links_open(_board_links(board._script(tmp_path, snapshot)["html"]), snapshot["tickets"],
+                            lambda address, hash_: _ticket_script(tmp_path, snapshot, hash_))
 
 
 @needs_node

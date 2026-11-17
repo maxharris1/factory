@@ -59,7 +59,8 @@ font-family:var(--mono)}
 .tk-sub{display:flex;flex-direction:column;gap:8px}
 .tk-label{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .tk-tiles{display:flex;flex-wrap:wrap;gap:6px}
-.tk-tile{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg);box-shadow:var(--elev)}
+.tk-tile{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg);box-shadow:var(--elev);text-decoration:none}
+.tk-tile:hover .tk-tn{color:var(--ok)}
 .tk-blk{width:8px;height:8px;background:var(--ok)}
 .tk-tn{font-size:12px;color:var(--text)}
 .tk-r{font-size:11px;color:var(--muted)}
@@ -336,7 +337,7 @@ SCRIPT_TICKETS = r"""
       if (!g.tiles.length) { add(sub, el('div', 'tk-none', 'nothing ' + g.state)); return; }
       var row = add(sub, el('div', 'tk-tiles'));
       g.tiles.forEach(function (c) {
-        var tile = add(row, el('span', 'tk-tile'));
+        var tile = add(row, link('tk-tile', ticketPageHref(c.ticket)));
         tile.setAttribute('data-ticket', ticketKey(c.ticket));
         add(tile, el('span', 'tk-blk')).setAttribute('aria-hidden', 'true');
         add(tile, el('span', 'tk-tn', ticketOf(c.ticket)));
@@ -595,8 +596,9 @@ def _shelf(found: dict) -> str:
     groups = ""
     for group in found["shelf"]:
         tiles = "".join(
-            f'<span class="tk-tile" data-ticket="{_e(_key(c["ticket"]))}"><span class="tk-blk" aria-hidden="true">'
-            f'</span>{_span("tk-tn", _ticket(c["ticket"]))}{_span("tk-r", "r" + str(c["ticket"]["round"]))}</span>'
+            f'<a class="tk-tile" href="{_e(ticket_page_href(c["ticket"]))}" data-ticket="{_e(_key(c["ticket"]))}">'
+            f'<span class="tk-blk" aria-hidden="true"></span>{_span("tk-tn", _ticket(c["ticket"]))}'
+            f'{_span("tk-r", "r" + str(c["ticket"]["round"]))}</a>'
             for c in group["tiles"]
         )
         body = (
