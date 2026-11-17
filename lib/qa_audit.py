@@ -1,5 +1,3 @@
-"""The receipts audit of a QA run, docs/SPEC.md section 7, "QA receipts audit"."""
-
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
