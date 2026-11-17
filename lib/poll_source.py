@@ -2487,6 +2487,7 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
         "draft": pull["draft"] if isinstance(pull.get("draft"), bool) else None,
         "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
         "pr_base": _pr_base(pull),
+        "pr_commits": pull["commits"] if type(pull.get("commits")) is int else None,
     }
 
 
