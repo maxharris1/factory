@@ -17,6 +17,8 @@
 # <bot> is claude-bot, codex-bot or cursor-bot. Run it as that bot's own user,
 # with that bot's harness login: the waiter starts that bot's harness, with the
 # command in ~/.config/factory/waiter-<bot>.yml (config/waiter.example.yml).
+# On a host retired as the orch host (~/.config/factory/orch-retired),
+# start, restart and ensure do nothing and exit 79; stop and status still work.
 #
 # The waiter starts each job's `orch job run` in its own session, so stopping
 # or restarting the waiter never stops a running job. The waiter holds a
@@ -260,6 +262,13 @@ stop_waiter() {
     return 1
 }
 
+refuse_if_retired() {
+    local retired="${CONFIG}/orch-retired"
+    [[ -e "$retired" ]] || return 0
+    echo "waiter-service ${BOT}: refusing to $1 on a host retired as the orch host (${retired}: $(head -n 1 "$retired" 2>/dev/null || true))" >&2
+    exit 79
+}
+
 service_lock() {
     mkdir -p "$STATE"
     exec 9>>"$SERVICE_LOCK"
@@ -486,12 +495,12 @@ remove_autostart() {
 }
 
 case "$COMMAND" in
-    _supervise) factory_host_pidns_or_refuse _supervise && supervise ;;
-    start) factory_host_pidns_or_refuse start && service_lock && start ;;
+    _supervise) factory_host_pidns_or_refuse _supervise && refuse_if_retired _supervise && supervise ;;
+    start) factory_host_pidns_or_refuse start && refuse_if_retired start && service_lock && start ;;
     stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && service_lock && restart ;;
+    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && service_lock && restart ;;
     status) status ;;
-    ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

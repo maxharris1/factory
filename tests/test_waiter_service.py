@@ -737,3 +737,19 @@ def test_install_profile_hook_ensures_each_autostarted_waiter(tmp_path: Path) ->
         reap_home(home)
     assert sorted(marker.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
     assert "bogus" not in marker.read_text()
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "ensure", "_supervise"])
+def test_a_retired_host_starts_no_waiter(home: Path, command: str) -> None:
+    retired = home / ".config/factory/orch-retired"
+    retired.write_text("pc 2026-11-17T13:00Z\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(SERVICE), "claude-bot", command],
+        env=_env(home), text=True, capture_output=True, timeout=10, check=False,
+    )
+
+    assert result.returncode == 79
+    assert str(retired) in result.stderr
+    assert _starts(home) == []
+    assert not (home / ".local/state/factory/waiter-claude-bot.pid").exists()

@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import signal
 import socket
@@ -444,6 +445,73 @@ def test_run_poller_refuses_to_start_without_its_env(tmp_path: Path, missing: st
     assert result.stderr == f"run-poller: missing ~/.config/factory/{missing}\n"
     assert "webhook.test" not in result.stderr + result.stdout
     assert not (tmp_path / "started").exists()
+
+
+def test_a_retired_host_refuses_to_run_the_poller(tmp_path: Path) -> None:
+    config = tmp_path / ".config/factory"
+    config.mkdir(parents=True)
+    for name in ("webhook.env", "orch-poll.env"):
+        (config / name).write_text("", encoding="utf-8")
+    retired = config / "orch-retired"
+    retired.write_text("pc 2026-11-17T13:00Z\nsecond line\n", encoding="utf-8")
+    orch = tmp_path / ".local/bin/orch"
+    orch.parent.mkdir(parents=True)
+    orch.write_text("#!/bin/sh\ntouch \"$HOME/started\"\n", encoding="utf-8")
+    orch.chmod(0o755)
+
+    result = subprocess.run(["bash", "deploy/run-poller.sh"], cwd=ROOT,
+                            env=sandbox_env(tmp_path, PATH="/usr/bin:/bin"),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 79
+    assert f"{retired}: pc 2026-11-17T13:00Z" in result.stderr
+    assert "second line" not in result.stderr
+    assert not (tmp_path / "started").exists()
+
+
+def test_systemd_does_not_restart_a_poller_a_retired_host_refused() -> None:
+    unit = (ROOT / "deploy/orch-poll.service").read_text(encoding="utf-8")
+    assert "\nRestartPreventExitStatus=79\n" in unit
+
+
+_RUNS_ORCH_POLL = re.compile(
+    r"/orch[\"']?\s+poll(?![\w-])"
+    r"|(?:^|[;&|=]|\b(?:exec|nohup|env|command)\s)\s*orch\s+poll(?![\w-])"
+)
+
+
+def _runs_orch_poll(line: str) -> bool:
+    return not line.lstrip().startswith("#") and bool(_RUNS_ORCH_POLL.search(line))
+
+
+@pytest.mark.parametrize(
+    ("line", "runs"),
+    [
+        ('exec "${HOME}/.local/bin/orch" poll "$@"', True),
+        ("ExecStart=%h/.local/bin/orch poll", True),
+        ("nohup orch poll --once &", True),
+        ("orch poll", True),
+        ('    true && orch poll --once', True),
+        ('say "started orch poll (pid ${pid})"', False),
+        ('say "orch poll already running"', False),
+        ('"$RUNNER" --pidfile "$PIDFILE"', False),
+        ("# ExecStart=%h/.local/bin/orch poll", False),
+        ("orch polling", False),
+    ],
+)
+def test_the_orch_poll_launch_detector(line: str, runs: bool) -> None:
+    assert _runs_orch_poll(line) is runs
+
+
+def test_run_poller_is_the_only_deploy_file_that_runs_orch_poll() -> None:
+    deploy = ROOT / "deploy"
+    hits = [
+        (path.name, line.strip())
+        for path in sorted([*deploy.glob("*.sh"), *deploy.glob("*.service")])
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if _runs_orch_poll(line)
+    ]
+    assert hits == [("run-poller.sh", 'exec "${HOME}/.local/bin/orch" poll "$@"')]
 
 
 def test_ci_runs_once_per_push() -> None:

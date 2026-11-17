@@ -12,6 +12,8 @@
 #
 # `orch poll` owns the pidfile and the single-poller lock itself; this script
 # only reads the pidfile. Output goes to poller.log beside the pidfile.
+# On a host retired as the orch host (~/.config/factory/orch-retired),
+# start, restart and ensure do nothing and exit 79; stop and status still work.
 #
 # Dashboard push: when orch.yml sets dashboard.push (README "Dashboard"), the
 # poller this script runs also starts `orch dashboard push --once` after each
@@ -144,6 +146,13 @@ poll_lock_held() {
     [[ -e "$lock" ]] || return 1
     flock -n -E 75 "$lock" true 9>&- || status=$?
     ((status == 75))
+}
+
+refuse_if_retired() {
+    local retired="${CONFIG}/orch-retired"
+    [[ -e "$retired" ]] || return 0
+    echo "poller-service: refusing to $1 on a host retired as the orch host (${retired}: $(head -n 1 "$retired" 2>/dev/null || true))" >&2
+    exit 79
 }
 
 service_lock() {
@@ -440,11 +449,11 @@ remove_autostart() {
 }
 
 case "${1:-}" in
-    start) factory_host_pidns_or_refuse start && service_lock && start ;;
+    start) factory_host_pidns_or_refuse start && refuse_if_retired start && service_lock && start ;;
     stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && service_lock && restart ;;
+    restart) factory_host_pidns_or_refuse restart && refuse_if_retired restart && service_lock && restart ;;
     status) status ;;
-    ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && refuse_if_retired ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) service_lock && remove_autostart ;;
     *)
