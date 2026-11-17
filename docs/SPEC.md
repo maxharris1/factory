@@ -315,6 +315,8 @@ Recording a result: a trusted `kind=qa` (`from=grok-bot`, a `trusted_logins` log
 
 A new head: once per poll, after the comment pass, every `queued` or `running` row at a head other than the PR's current head is set to `cancelled` with reason `new-head`, and its job is cancelled while it is still queued. The queue cannot cancel a running job, so a running lane keeps running until the worker stops it, and its late report is recorded `stale`. The same pass moves a `queued` row to `running` once its job is claimed, and cancels a row whose job was cancelled (`job-cancelled`).
 
+One wake: the same pass checks every primary row reported `FAIL`. When its comment has a line starting `[blocking]` (after an optional list marker) and the same head has a trusted APPROVE, it queues one `qa-failed` job for Grok Bot (recipient `grok`, as the other wakes are), keyed on the QA comment, so it fires whether the APPROVE comes before or after the FAIL and a replay queues no second one. The detail names the first blocking line (`finding`) and the report's `Evidence:` link (`evidence_link`). A shootout row never wakes anyone. `qa-failed` is in `GROK_WAKE_REASONS` and the queue's actions.
+
 ### 4.3 Invariants, and where they live now
 
 | Rule | Where it lives |

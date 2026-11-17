@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 
 from lib.dispatch.constants import ORCHESTRATOR
-from lib.dispatch.helpers import _scope
+from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.factory_md import QaConfig
 from lib.feeder_gates import path_matches
@@ -23,6 +23,8 @@ from lib.queue import QA_RECIPIENT, Job, JobRequest, cancel_queued
 from lib.update_check import HeadDiff
 
 OPEN_STATES = ("queued", "running")
+_BLOCKING = re.compile(r"^\s*(?:[-*+]\s+)?(\[blocking\].*?)\s*$")
+_EVIDENCE = re.compile(r"^\s*(?:[-*+]\s+)?Evidence:\s*(\S+)", re.MULTILINE)
 _SCENARIO_ROW = re.compile(r"^\s*\|\s*(qa-[1-9][0-9]*)\s*\|(.*)\|\s*$")
 
 
@@ -49,7 +51,7 @@ class ScopeInput:
     touched: bool
     lines: int | None
     full_rerun_lines: int
-    unpassed: tuple[str, ...] = ()
+    unpassed: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -370,7 +372,62 @@ class QaMixin:
                     """,
                     (state, reason, now if state == "cancelled" else None, row["run_id"]),
                 )
+            failed = connection.execute(
+                """
+                SELECT head, comment_id FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND arm = 'primary' AND state = 'reported'
+                  AND result = 'FAIL' AND comment_id IS NOT NULL
+                """,
+                key,
+            ).fetchall()
             connection.commit()
+        self._wake_on_qa_fail(ticket, failed)
+
+    def _wake_on_qa_fail(self, ticket: TrackedTicket, failed: list[sqlite3.Row]) -> None:
+        """One qa-failed wake per primary FAIL report with a [blocking] line
+        at a head with a trusted APPROVE, whichever came first."""
+        comments = {comment.id: comment for comment in ticket.comments}
+        for row in failed:
+            report = comments.get(row["comment_id"])
+            if report is None:
+                continue
+            blocking = _first_blocking(report.body)
+            if blocking is None or not self._approved_head(ticket, row["head"]):
+                continue
+            evidence = _EVIDENCE.search(report.body)
+            self.wake_grok_once(
+                ticket,
+                reason="qa-failed",
+                source_comment_id=report.id,
+                detail=json.dumps(
+                    {
+                        "project_bot": ticket.grok_bot,
+                        "head": row["head"],
+                        "finding": blocking,
+                        "evidence_link": evidence.group(1) if evidence else None,
+                        "link": _comment_link(report),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                head=row["head"],
+                once_key=report.id,
+            )
+
+    def _approved_head(self, ticket: TrackedTicket, head: str) -> bool:
+        for comment in ticket.comments:
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if (
+                fields["kind"] == "verdict"
+                and fields.get("verdict") == "APPROVE"
+                and fields.get("head") == head
+                and self._trusted_reviewer(ticket, comment, fields)
+            ):
+                return True
+        return False
 
     def _qa_job_failed(self, job: Job) -> None:
         """T6 for a qa job: cancel its run, never retry, never mark stuck."""
@@ -420,3 +477,11 @@ def _scenario_rows(body: str) -> list[tuple[str, bool]]:
             cells = [cell.strip() for cell in match.group(2).split("|")]
             rows.append((match.group(1), "Verified" in cells))
     return rows
+
+
+def _first_blocking(body: str) -> str | None:
+    for line in body.splitlines():
+        match = _BLOCKING.match(line)
+        if match:
+            return match.group(1)
+    return None

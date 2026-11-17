@@ -92,6 +92,9 @@ def _replay(tmp_path: Path, qa: object, with_qa_reports: bool) -> tuple[list[tup
             if job is not None:
                 answer = answers[answers.index(comments[shown - 1].id) + 1]
                 queue.finish(job.id, owner=recipient, handoff_comment_id=answer)
+    for _ in range(11):
+        dispatcher.poll_once(source)
+        now[0] += 30
     source.merged = True
     dispatcher.poll_once(source)
     with queue.connect() as connection:
@@ -129,6 +132,8 @@ def test_the_replay_did_record_the_qa_fail_and_time_out_a_qa_job(tmp_path: Path)
     with SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 0.0).connect() as connection:
         runs = [tuple(row) for row in connection.execute("SELECT head, state, result, reason FROM qa_runs ORDER BY rowid")]
         failed = connection.execute("SELECT COUNT(*) FROM jobs WHERE action = 'qa' AND state = 'failed'").fetchone()[0]
+        wakes = connection.execute("SELECT source_comment_id FROM jobs WHERE action = 'qa-failed'").fetchall()
     assert runs[0] == (HEAD_A, "cancelled", None, "job-failed")
     assert runs[1][:3] == (HEAD_B, "reported", "FAIL")
     assert failed >= 1
+    assert [tuple(row) for row in wakes] == [("q1",)]
