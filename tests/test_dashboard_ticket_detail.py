@@ -1745,8 +1745,6 @@ def test_ended_journeys_rest_and_reduced_motion_shows_the_rested_frame(tmp_path:
         assert found["shipped", reduced]["why"] == [], reduced
 
 
-# --- #669: the stopped ticket page's hero and "Why it stopped" -------------------------------------
-
 STOPPED = RECORD["stopped"]
 STOPPED_AT = NOW - (3 * 86400 + 2 * 3600)
 REASON = "cancelled: superseded by sanctioned intake (Factory 2026-11-13)"
