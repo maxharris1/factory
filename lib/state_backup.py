@@ -49,6 +49,7 @@ LABELLED_PRUNE_EVERY = timedelta(days=1)
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _STAMP = "%Y%m%dT%H%M%SZ"
 _LABELLED_NAME = re.compile(rf"orch-(\d{{8}}T\d{{6}}Z)-({_LABEL.pattern})\.db")
+_SIBLINGS_THEN_BACKUP = ("-wal", "-shm", "")
 
 
 class BackupError(RuntimeError):
@@ -172,8 +173,7 @@ def prune_labelled(directory: Path, now: datetime) -> list[Path]:
     deleted = []
     for stamp, path in labelled[:-KEEP_LABELLED]:
         if now - stamp >= LABELLED_MIN_AGE:
-            # Siblings first: a crash after the main file would orphan them.
-            for suffix in ("-wal", "-shm", ""):
+            for suffix in _SIBLINGS_THEN_BACKUP:
                 path.with_name(path.name + suffix).unlink(missing_ok=True)
             deleted.append(path)
     return deleted
