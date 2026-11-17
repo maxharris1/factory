@@ -3,6 +3,7 @@
 # writer at a time (README "Move the orch host").
 #
 #   orch-move.sh export --to <host> [--dir <export>]
+#   orch-move.sh import <export>
 #
 # export runs on the host giving orch.db up. It refuses (exit 79) on a host
 # already retired as the orch host (~/.config/factory/orch-retired). It
@@ -27,6 +28,22 @@
 # keeps running. A failure after orch-retired is written leaves the host
 # retired and stopped and exits 1; to undo, remove orch-retired and start
 # the services. The host name is ORCH_MOVE_HOST, else hostname(1).
+#
+# import runs on the host taking orch.db over. <export> is a local path or
+# [user@]host:path. It refuses (exit 1) when orch.db, or a -wal or -journal
+# beside it, already exists here. It copies <export> to a fresh
+# ~/.local/share/factory/orch-move/import-<UTC time> (cp -R, or
+# ${ORCH_MOVE_SCP:-scp} -r for host:path) and refuses unless
+# `orch move-db check` finds the copy's sha256 matches the manifest, the copy
+# passes integrity_check and the manifest names a retired line; for
+# host:path, also unless `${ORCH_MOVE_SSH:-ssh} host test -e
+# .config/factory/orch-retired` succeeds. A refusal places nothing and
+# starts nothing. Then it copies this checkout's machines.yml beside the
+# snapshot as machines.<this host>.yml, places orch.db through orch.db.tmp
+# and mv (never `orch restore-db`, which holds queued jobs), removes this
+# host's orch-retired, and starts the poller first, then the waiter of each
+# bot with ~/.config/factory/waiter-autostart-<bot>, self-heal and the
+# installed Linear listener, each through its service script.
 # Usage errors exit 2.
 set -euo pipefail
 
@@ -50,11 +67,15 @@ say() { printf '%s orch-move: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 
 usage() {
     echo "usage: $(basename "$0") export --to <host> [--dir <export>]" >&2
+    echo "       $(basename "$0") import <export>" >&2
     exit 2
 }
 
-# The ORCH_DB the poller would get; run-poller.sh refuses on a retired host
-# or without its env files, so fall back as poller-service.sh does.
+refuse() {
+    echo "orch-move: $*" >&2
+    exit 1
+}
+
 db_path() {
     local db
     db="$("${HERE}/run-poller.sh" --print-db 2>/dev/null)" || db=""
@@ -97,6 +118,14 @@ service() {
     }
 }
 
+linear() {
+    if [[ -x "$LINEAR" ]]; then
+        service "$LINEAR" "$1"
+    else
+        say "no Linear listener installed at ${LINEAR}; skipped its $1"
+    fi
+}
+
 wait_for_drain() {
     local db="$1" deadline counts status
     deadline=$((SECONDS + DRAIN_TIMEOUT))
@@ -116,8 +145,16 @@ wait_for_drain() {
     done
 }
 
+assert_final_copy_drained() {
+    local counts
+    if ! counts="$("$ORCH" move-db drained --db "${EXPORT}/orch.db")"; then
+        echo "orch-move: the final copy is not drained (${counts}); a waiter restarted after the last probe claimed a job; wrote no manifest" >&2
+        exit 1
+    fi
+}
+
 export_db() {
-    local to="" db line bot counts
+    local to="" db line bot
     EXPORT=""
     while (($#)); do
         case "$1" in
@@ -151,21 +188,12 @@ export_db() {
         service "${HERE}/waiter-service.sh" "$bot" stop
     done
     service "${HERE}/self-heal.sh" stop
-    if [[ -x "$LINEAR" ]]; then
-        service "$LINEAR" stop
-    else
-        say "no Linear listener installed at ${LINEAR}; nothing to stop"
-    fi
+    linear stop
     ((FAILED == 0)) || exit 1
 
     "$ORCH" backup-db --db "$db" --backup "${EXPORT}/orch.db" >/dev/null
     rm -f "${EXPORT}/probe.db"
-    # A waiter self-heal restarted after the last probe may have claimed a
-    # job before orch-retired held it off.
-    if ! counts="$("$ORCH" move-db drained --db "${EXPORT}/orch.db")"; then
-        echo "orch-move: the final copy is not drained (${counts}); wrote no manifest" >&2
-        exit 1
-    fi
+    assert_final_copy_drained
     "$ORCH" move-db manifest --db "${EXPORT}/orch.db" --out "${EXPORT}/manifest.json" \
         --source-host "$HOST" --to "$to" --retired "$line" >/dev/null
     if [[ -f "$MACHINES" ]]; then
@@ -175,7 +203,50 @@ export_db() {
     printf '%s\n' "$EXPORT"
 }
 
+import_db() {
+    local source db file stage remote="" bot
+    (($# == 1)) || usage
+    source="$1"
+    [[ "$source" =~ ^[^/]+: ]] && remote="${source%%:*}"
+    db="$(db_path)"
+    for file in "$db" "${db}-wal" "${db}-journal"; do
+        [[ ! -e "$file" ]] || refuse "${file} exists; refusing to replace this host's database (move it aside first)"
+    done
+    stage="${MOVES}/import-$(date -u +%Y%m%dT%H%M%SZ)"
+    [[ ! -e "$stage" ]] || refuse "${stage} exists"
+    mkdir -p "$MOVES"
+    if [[ -n "$remote" ]]; then
+        "${ORCH_MOVE_SCP:-scp}" -r "$source" "$stage"
+    else
+        cp -R "$source" "$stage"
+    fi
+    "$ORCH" move-db check --db "${stage}/orch.db" --manifest "${stage}/manifest.json" \
+        || refuse "the export staged in ${stage} failed its check; placed nothing"
+    if [[ -n "$remote" ]] && ! "${ORCH_MOVE_SSH:-ssh}" "$remote" test -e .config/factory/orch-retired; then
+        refuse "${remote} is not retired as the orch host (no ~/.config/factory/orch-retired there); placed nothing"
+    fi
+    if [[ -f "$MACHINES" ]]; then
+        cp "$MACHINES" "${stage}/machines.${HOST}.yml"
+    fi
+
+    mkdir -p "$(dirname "$db")"
+    cp "${stage}/orch.db" "${db}.tmp"
+    mv "${db}.tmp" "$db"
+    rm -f "$RETIRED"
+    say "placed ${db} from ${stage}"
+
+    service "${HERE}/poller-service.sh" start
+    for bot in "${BOTS[@]}"; do
+        [[ -e "${CONFIG}/waiter-autostart-${bot}" ]] || continue
+        service "${HERE}/waiter-service.sh" "$bot" start
+    done
+    service "${HERE}/self-heal.sh" start
+    linear start
+    ((FAILED == 0)) || refuse "placed ${db}; start what failed above by hand"
+}
+
 case "${1:-}" in
     export) shift && export_db "$@" ;;
+    import) shift && import_db "$@" ;;
     *) usage ;;
 esac

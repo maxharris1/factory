@@ -1,6 +1,3 @@
-"""deploy/orch-move.sh moves orch.db between hosts with one writer at a time,
-and `orch move-db` checks each copy it moves."""
-
 from __future__ import annotations
 
 import hashlib
@@ -33,9 +30,6 @@ echo "$(basename "$0") $* retired=$retired" >>"$MOVE_LOG"
 
 
 class Host:
-    """A fake HOME and checkout: the real orch-move.sh and run-poller.sh
-    beside service scripts that only log each call."""
-
     def __init__(self, root: Path, name: str) -> None:
         self.name = name
         self.home = root / name / "home"
@@ -117,8 +111,6 @@ def _executable(path: Path, text: str) -> None:
 
 
 def _seed(tmp_path: Path, db: Path, *, running: bool = False) -> None:
-    """orch.db with one build job (claimed onto a device slot when running),
-    written through the real schema and the real claim."""
     _, queue = setup(tmp_path / f"seed-{len(list(tmp_path.glob('seed-*')))}")
     queue.enqueue(
         JobRequest(
@@ -307,12 +299,16 @@ def test_usage_errors_exit_2(tmp_path: Path, args: tuple[str, ...]) -> None:
     assert box.calls() == []
 
 
-def test_orch_move_starts_no_poller_of_its_own() -> None:
-    code = [line for line in SCRIPT.read_text(encoding="utf-8").splitlines()
+def test_orch_move_starts_the_poller_only_through_poller_service() -> None:
+    code = [line.strip() for line in SCRIPT.read_text(encoding="utf-8").splitlines()
             if not line.lstrip().startswith("#")]
     assert _orch_poll_launches("\n".join(code)) == []
     assert [line for line in code if "run-poller.sh" in line and "--print-db" not in line] == []
     assert [line for line in code if "restore-db" in line] == []
+    assert [line for line in code if "poller-service.sh" in line] == [
+        'service "${HERE}/poller-service.sh" stop',
+        'service "${HERE}/poller-service.sh" start',
+    ]
 
 
 def test_move_db_drained_counts_running_jobs_and_held_slots(
@@ -336,8 +332,6 @@ def test_move_db_drained_counts_running_jobs_and_held_slots(
 
 
 def _break_an_index(db: Path) -> None:
-    """Leave db readable but failing integrity_check: an index whose recorded
-    definition no longer matches its entries."""
     connection = sqlite3.connect(db)
     try:
         connection.execute("CREATE INDEX jobs_repo ON jobs(repo)")
@@ -381,3 +375,191 @@ def test_move_db_manifest_refuses_a_copy_that_fails_integrity_check(tmp_path: Pa
 
     assert _manifest(db, out) == 1
     assert not out.exists()
+
+
+
+def test_move_db_check_names_each_table_of_a_matching_copy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "export" / "orch.db"
+    _seed(tmp_path, db)
+    manifest = tmp_path / "export" / "manifest.json"
+    assert _manifest(db, manifest) == 0
+    capsys.readouterr()
+
+    assert cli.main(["move-db", "check", "--db", str(db), "--manifest", str(manifest)]) == 0
+    assert "  jobs 1\n" in capsys.readouterr().out
+
+    missing = tmp_path / "missing.json"
+    assert cli.main(["move-db", "check", "--db", str(db), "--manifest", str(missing)]) == 1
+
+
+def test_readme_documents_the_move() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Move the orch host\n", 1)[1].split("\n## ", 1)[0]
+    for text in ("orch-move.sh export", "orch-move.sh import", "machines.<source>.yml",
+                 "machines.<dest>.yml", "Rollback", "ORCH_MOVE_POLL_SEC",
+                 "ORCH_MOVE_DRAIN_TIMEOUT", "ORCH_DB_BACKUP_EVERY", "orch-retired"):
+        assert text in section, text
+    assert "same tool" in section
+
+
+FAKE_SCP = """#!/bin/sh
+[ "$1" = -r ] || exit 2
+exec cp -R "${2#*:}" "$3"
+"""
+
+FAKE_SSH = """#!/bin/sh
+shift
+cd "$FAKE_SSH_HOME" && exec "$@"
+"""
+
+
+def _remote(tmp_path: Path, remote_home: Path) -> dict[str, str]:
+    scp, ssh = tmp_path / "fake-scp", tmp_path / "fake-ssh"
+    _executable(scp, FAKE_SCP)
+    _executable(ssh, FAKE_SSH)
+    return {"ORCH_MOVE_SCP": str(scp), "ORCH_MOVE_SSH": str(ssh),
+            "FAKE_SSH_HOME": str(remote_home)}
+
+
+def _export(tmp_path: Path, host: Host, to: str) -> Path:
+    result = host.move("export", "--to", to)
+    assert result.returncode == 0, result.stderr
+    return Path(result.stdout.strip())
+
+
+def _job_states(db: Path) -> list[str]:
+    connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return [row[0] for row in connection.execute("SELECT state FROM jobs")]
+    finally:
+        connection.close()
+
+
+def _integrity(db: Path) -> str:
+    connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return connection.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        connection.close()
+
+
+def test_import_places_the_export_and_starts_the_poller_first(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    export = _export(tmp_path, box, "pc")
+    pc.retired.write_text("box 2026-11-01T00:00:00Z\n", encoding="utf-8")
+    for bot in ("claude-bot", "cursor-bot"):
+        (pc.config / f"waiter-autostart-{bot}").touch()
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 0, result.stderr
+    assert pc.db.read_bytes() == (export / "orch.db").read_bytes()
+    assert _job_states(pc.db) == ["queued"]
+    assert not pc.retired.exists()
+    assert pc.calls() == [
+        "poller-service.sh start retired=no",
+        "waiter-service.sh claude-bot start retired=no",
+        "waiter-service.sh cursor-bot start retired=no",
+        "self-heal.sh start retired=no",
+        "linear-webhook-service.sh start retired=no",
+    ]
+    [stage] = (pc.home / ".local/share/factory/orch-move").glob("import-*")
+    assert (stage / "machines.box.yml").read_text(encoding="utf-8") == "# machines of box\n"
+    assert (stage / "machines.pc.yml").read_text(encoding="utf-8") == "# machines of pc\n"
+
+
+def _flip_a_byte(export: Path) -> None:
+    db = export / "orch.db"
+    data = bytearray(db.read_bytes())
+    data[data.index(b"go-1") + 3] ^= 0x01
+    db.write_bytes(bytes(data))
+    assert _integrity(db) == "ok"
+
+
+def _break_the_copy(export: Path) -> None:
+    db = export / "orch.db"
+    _break_an_index(db)
+    assert _integrity(db) != "ok"
+    manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
+    manifest["sha256"] = hashlib.sha256(db.read_bytes()).hexdigest()
+    (export / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _unretired_manifest(export: Path) -> None:
+    manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
+    manifest["retired"] = ""
+    (export / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [_flip_a_byte, _break_the_copy, _unretired_manifest],
+    ids=["sha256-mismatch", "integrity", "no-retired-line"],
+)
+def test_import_refuses_a_bad_export_and_places_nothing(tmp_path: Path, spoil) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    export = _export(tmp_path, box, "pc")
+    spoil(export)
+    pc.retired.write_text("box 2026-11-01T00:00:00Z\n", encoding="utf-8")
+    (pc.config / "waiter-autostart-claude-bot").touch()
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 1, result.stderr
+    assert "placed nothing" in result.stderr
+    assert not pc.db.exists()
+    assert pc.retired.exists()
+    assert pc.calls() == []
+
+
+def test_import_refuses_to_replace_an_existing_database(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    export = _export(tmp_path, box, "pc")
+    _seed(tmp_path, pc.db, running=True)
+    before = pc.db.read_bytes()
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 1
+    assert "refusing to replace" in result.stderr
+    assert pc.db.read_bytes() == before
+    assert pc.calls() == []
+
+
+def test_import_from_a_host_that_is_not_retired_places_nothing(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    export = _export(tmp_path, box, "pc")
+    box.retired.unlink()
+
+    result = pc.move("import", f"box:{export}", **_remote(tmp_path, box.home))
+
+    assert result.returncode == 1
+    assert "box is not retired" in result.stderr
+    assert not pc.db.exists()
+    assert pc.calls() == []
+
+
+def test_a_cutover_and_its_rollback_round_trip_the_database(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+
+    cutover = _export(tmp_path, box, "pc")
+    first = json.loads((cutover / "manifest.json").read_text(encoding="utf-8"))
+    placed = pc.move("import", f"box:{cutover}", **_remote(tmp_path, box.home))
+    assert placed.returncode == 0, placed.stderr
+
+    rollback = _export(tmp_path, pc, "box")
+    assert pc.retired.exists()
+    box.db.rename(box.db.with_name("orch.db.pre-rollback"))
+    back = box.move("import", str(rollback))
+    assert back.returncode == 0, back.stderr
+
+    assert not box.retired.exists()
+    assert _rows(box.db) == first["tables"]
+    assert _integrity(box.db) == "ok"

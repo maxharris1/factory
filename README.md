@@ -1192,6 +1192,72 @@ they check every `ORCH_COPY_IN_POLL_SEC` (default 5) for up to
 `ORCH_COPY_IN_WAIT` seconds (default 600). An `orch.db` the copy-in brings
 back is kept; after the wait runs out the restore goes ahead.
 
+### Move the orch host
+
+`orch.db` must have one writer at a time.
+[`deploy/orch-move.sh`](deploy/orch-move.sh) moves it to another host, and
+moves it back. Run it from the factory checkout, as the bot user, on each host.
+
+Cutover from the box to the PC:
+
+```sh
+# on the box: prints the export directory
+deploy/orch-move.sh export --to pc
+# on the PC
+deploy/orch-move.sh import box:<export>
+```
+
+`export` writes `waiter-<bot>.drain` for the three bots, so no waiter claims a
+new job. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it writes back any
+drain file self-heal removed or replaced, copies `orch.db` with `orch
+backup-db` and asks `orch move-db drained` whether a job still runs or a
+device slot is still held. Once none is, it writes
+`~/.config/factory/orch-retired`. Only then does it stop the poller, the
+waiters, self-heal and the Linear listener through their service scripts.
+Each of those scripts refuses to start while `orch-retired` exists. The export
+directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
+`orch.db`, `manifest.json` (sha256, row count per table, integrity, the
+retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
+
+`import` copies the export into `~/.local/share/factory/orch-move/import-<UTC
+time>` and checks it with `orch move-db check`. It refuses when the copy's
+sha256 differs from the manifest, the copy fails `integrity_check`, or the
+manifest has no retired line. For a `host:path` export it also refuses when
+that host has no `orch-retired`. It refuses when this host already has an
+`orch.db`, or its `-wal` or `-journal`. A refusal places nothing and starts
+nothing. Otherwise it adds `machines.<dest>.yml`, this host's `machines.yml`,
+so both hosts' `machines.yml` sit beside the snapshot. It places `orch.db`
+with `cp` and `mv`. It never uses `orch restore-db`, which would cancel the
+queued jobs. It removes this host's `orch-retired`, then starts
+`poller-service.sh` first, then the waiter of each bot with
+`~/.config/factory/waiter-autostart-<bot>`, then self-heal and the Linear
+listener.
+
+On the new host, install autostart for what must survive a reboot:
+`poller-service.sh install-autostart`, `waiter-service.sh <bot>
+install-autostart`, `self-heal.sh install-autostart` and
+`~/.local/share/factory/linear-webhook-service.sh install-autostart`. On the
+retired host their autostart refuses to start anything (exit 79). Verify with
+`poller-service.sh status`, `bin/orch status --db "$ORCH_DB"` and the row
+counts `import` printed against `manifest.json`.
+
+Rollback is the same tool reversed. On the PC, run
+`deploy/orch-move.sh export --to box`. On the box, move the pre-cutover
+`orch.db` aside (`import` never replaces a database), then run
+`deploy/orch-move.sh import pc:<export>`. That removes the box's
+`orch-retired`. Then put the box checkout's pre-cutover `machines.yml` back
+from `machines.<source>.yml` in the cutover export.
+
+An export that does not drain within `ORCH_MOVE_DRAIN_TIMEOUT` seconds
+(default 9000, 150 minutes) exits 75. It removes the drain files and their
+acks and stops nothing, so the host keeps running. A failure after
+`orch-retired` is written leaves the host retired and stopped, which is the
+safe state. To undo it, remove `~/.config/factory/orch-retired` and start the
+services with `start`. `ORCH_MOVE_HOST` names this host (default
+`hostname`). `ORCH_MOVE_SCP` and `ORCH_MOVE_SSH` name the copy and remote
+commands (default `scp` and `ssh`). `ORCH_DB_BACKUP_EVERY` (see *State loss*
+above) spaces out only the cycle backup. `export` takes its own copies.
+
 ## Status
 
 ```sh

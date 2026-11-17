@@ -13,10 +13,6 @@ takes a dated snapshot, weekly/orch-<Monday>.db, the baseline that
 over Monday takes it on its first later cycle that week. Snapshots dated
 more than KEEP_WEEKS weeks before the current Monday are deleted; the
 newest is always kept.
-
-Moving the database to another host (deploy/orch-move.sh) compares DbFacts:
-the copy's sha256, integrity_check, per-table row counts, and the running
-jobs and held device slots that say whether the source has drained.
 """
 
 from __future__ import annotations
@@ -129,9 +125,6 @@ class DbFacts:
 def db_facts(db: Path) -> DbFacts:
     """Read db's DbFacts through a read-only connection; BackupError when it
     is missing or SQLite cannot read it."""
-    # device_pool imports this module through lib.queue.
-    from lib.device_pool import SLOTS_TABLE
-
     if not db.is_file():
         raise BackupError(f"database {db} does not exist")
     with open(db, "rb") as handle:
@@ -159,7 +152,7 @@ def db_facts(db: Path) -> DbFacts:
             connection.close()
     except sqlite3.DatabaseError as exc:
         raise BackupError(f"{db} is not a readable database: {exc}") from exc
-    return DbFacts(digest, integrity, tables, running, tables.get(SLOTS_TABLE, 0))
+    return DbFacts(digest, integrity, tables, running, tables.get("device_slots", 0))
 
 
 def _count(connection: sqlite3.Connection, table: str) -> int:
@@ -183,6 +176,30 @@ def write_manifest(db: Path, out: Path, *, source_host: str, to: str, retired: s
         "taken_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def check_manifest(db: Path, manifest: Path) -> DbFacts:
+    """db's DbFacts when db is the copy manifest describes, passes
+    integrity_check, and its source host was retired; BackupError otherwise."""
+    try:
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BackupError(f"cannot read manifest {manifest}: {exc}") from exc
+    if not isinstance(recorded, dict):
+        raise BackupError(f"manifest {manifest} is not a JSON object")
+    facts = db_facts(db)
+    if facts.sha256 != recorded.get("sha256"):
+        raise BackupError(
+            f"{db} is not the copy {manifest} describes "
+            f"(sha256 {facts.sha256}, manifest {recorded.get('sha256')})"
+        )
+    if facts.integrity != "ok":
+        raise BackupError(f"{db} failed integrity_check: {facts.integrity}")
+    if not str(recorded.get("retired") or "").strip():
+        raise BackupError(
+            f"manifest {manifest} names no retired line; the source host never retired"
+        )
+    return facts
 
 
 def week_monday(now: datetime) -> date:

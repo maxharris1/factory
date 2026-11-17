@@ -108,6 +108,7 @@ from lib.state_backup import (
     CycleBackup,
     backup,
     backup_every,
+    check_manifest,
     db_facts,
     default_backup_path,
     restore,
@@ -243,13 +244,16 @@ restore-db [--db PATH] [--backup PATH]
 move-db drained --db PATH
 move-db manifest --db PATH --out PATH --source-host HOST --to HOST
                  --retired LINE
+move-db check --db PATH --manifest PATH
   deploy/orch-move.sh runs these on copies taken with backup-db, each
   opened read-only. drained exits 0 when the copy has no running job and
   no held device slot, 1 (printing both counts) when it has, and 2 when
   it is missing or unreadable. manifest writes --out as JSON (the copy's
   sha256, per-table row counts, integrity, the hosts, the --retired line
   and the time) and exits 1, writing nothing, unless the copy passes
-  integrity_check.
+  integrity_check. check prints each table's row count and exits 0 when
+  the copy has the manifest's sha256, passes integrity_check, and the
+  manifest has a retired line; otherwise it exits 1 saying which failed.
 
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -2345,12 +2349,21 @@ def _move_db(argv: list[str]) -> int:
     manifest.add_argument("--source-host", required=True)
     manifest.add_argument("--to", required=True)
     manifest.add_argument("--retired", required=True)
+    check = commands.add_parser("check")
+    check.add_argument("--db", type=Path, required=True)
+    check.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "drained":
             facts = db_facts(args.db)
             print(f"running jobs {facts.running_jobs}, held device slots {facts.held_slots}")
             return 0 if facts.running_jobs == 0 and facts.held_slots == 0 else 1
+        if args.command == "check":
+            facts = check_manifest(args.db, args.manifest)
+            print(f"{args.db} matches {args.manifest}; integrity ok; row counts:")
+            for name, count in facts.tables.items():
+                print(f"  {name} {count}")
+            return 0
         write_manifest(
             args.db, args.out, source_host=args.source_host, to=args.to, retired=args.retired
         )
