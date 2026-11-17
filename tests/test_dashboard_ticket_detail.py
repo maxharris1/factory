@@ -1403,6 +1403,42 @@ def test_a_ticket_opens_once_its_records_finish_publishing_in_the_same_snapshot(
     assert _h1s(snaps[1]) == ["tracy-harris-coaching#5"]
 
 
+@needs_node
+def test_switching_to_a_ticket_whose_record_is_still_publishing_opens_it(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = RECORD["idle"]
+    earlier = copy.deepcopy(snapshot)
+    earlier["generated_at_epoch"] -= 20
+    del earlier[RECORDS][address]
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    publishing = POLLED.replace("Promise.resolve(JSON.parse(ticketsText))",
+                                f"Promise.resolve(JSON.parse(ticketFetches === 1 ? {json.dumps(tickets_json(earlier))}"
+                                " : ticketsText))").replace(
+        "    } else if (kind === 'hashchange') {",
+        "    } else if (kind === 'go') {\n"
+        "      location.hash = arg;\n"
+        "      windowListeners.hashchange.forEach(fn => fn());\n"
+        "    } else if (kind === 'hashchange') {")
+    actions = [["count"], ["go", "#t=" + _quote(address)], ["release"], ["count"]]
+    out = run_harness(tmp_path, publishing, script, snapshot, "ticket", TICKET_IDS, actions,
+                      "#t=" + _quote(LIVE["running"][0]), tickets_json(snapshot))
+    assert out["steps"] == [{"tickets": 1}, {"tickets": 2}]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, address)
+
+
+@needs_node
+@pytest.mark.parametrize("address", [RECORD["idle"], "maxharris1/cleffy#404"])
+def test_records_behind_a_status_only_push_are_fetched_once_per_snapshot(tmp_path: Path, address: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    ahead = {**_unloaded(snapshot), "generated_at_epoch": snapshot["generated_at_epoch"] + 5}
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    actions = [["poll", ahead], ["poll", ahead], ["poll", ahead], ["count"]]
+    out = run_harness(tmp_path, POLLED, script, ahead, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
+                      tickets_json(snapshot))
+    assert out["steps"] == [{"tickets": 1}]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, address)
+
+
 NO_JOB = {
     "idle": (lambda record: None, ("static", "#ff9e64"),
              [("no reading", "in waiting-max"), ("0", "revise round"), ("1 hops", "1 off-chart")]),

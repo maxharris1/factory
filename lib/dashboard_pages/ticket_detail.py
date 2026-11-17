@@ -1668,14 +1668,30 @@ _SCRIPT = r"""
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
 
-  var RECORDS = {tickets: null, epoch: null, busy: false, waiting: false};
+  var RECORDS = {tickets: null, epoch: null, asked: null, busy: false, waiting: false};
   function recordsCover(epoch) {
     return !!RECORDS.tickets && RECORDS.epoch >= epoch;
+  }
+  function trackedButUnrecorded(d) {
+    var address = hashAddress();
+    if (address === null || resolveTicket(d, address, RECORDS.tickets)) return false;
+    var cut = address.indexOf('#');
+    return cut > 0 && !!ticketRow(d, {repo: address.slice(0, cut), ticket_id: address.slice(cut + 1)});
+  }
+  function retryRecords() {
+    RECORDS.waiting = true;
+    setTimeout(function () {
+      if (document.hidden) { retryRecords(); return; }
+      RECORDS.waiting = false;
+      loadRecords();
+    }, POLL_MS);
   }
   function loadRecords() {
     var epoch = latest.generated_at_epoch;
     if (RECORDS.busy || RECORDS.waiting || recordsCover(epoch)) return;
+    if (RECORDS.asked === epoch && !trackedButUnrecorded(latest)) return;
     RECORDS.busy = true;
+    RECORDS.asked = epoch;
     fetch('tickets.json', {cache: 'no-store', credentials: 'same-origin'}).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
@@ -1688,10 +1704,7 @@ _SCRIPT = r"""
     function settle(changed) {
       RECORDS.busy = false;
       if (latest.generated_at_epoch !== epoch) loadRecords();
-      else if (!recordsCover(epoch)) {
-        RECORDS.waiting = true;
-        setTimeout(function () { RECORDS.waiting = false; loadRecords(); }, POLL_MS);
-      }
+      else if (!recordsCover(epoch) && trackedButUnrecorded(latest)) retryRecords();
       if (changed) render(latest);
     }
   }
