@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import importlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+
+from markdown_it import MarkdownIt
+from markdown_it.rules_inline import backtick, html_inline, image
+from markdown_it.rules_inline.state_inline import StateInline
 
 from lib.factory_md import (
     FactoryConfig,
@@ -42,11 +46,6 @@ JOBS = ("build", "plan")
 STOPS = ("refused", "stuck", "blocked", "capped", "abandoned")
 _ORDERED_MARKER = re.compile(r"^\d{1,9}(?=[.)])")
 _BACKTICK_FENCE = re.compile(r"^`{3,}[^`]*$")
-_BACKTICK_RUN = re.compile(r"`+")
-_LINK_TAIL = re.compile(
-    r"""\]\(\s*(?:<(?:\\.|[^<>\\\n])*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))*)"""
-    r"""(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)"""
-)
 _OPENER_CHARACTERS = frozenset("-+*_=#>~<[")
 
 RECOMMENDED_NEXT = {
@@ -854,51 +853,55 @@ def _items(title: str, items: Sequence[str]) -> str:
 def _paragraph(title: str, text: str) -> str:
     raw = [line.lstrip() for line in text.splitlines()]
     lines: list[str] = []
-    open_run = brackets = 0
+    first = 0
     for index, line in enumerate(raw):
         if not line:
-            brackets = 0
-        if open_run:
-            lines[-1] += f" {line}"
-        else:
-            line = _escape_block_opener(line)
             lines.append(line)
-        open_run, brackets = _code_span_after(line, open_run, brackets, "\n".join(raw[index + 1 :]))
+            first = len(lines)
+        elif lines and len(lines) == first:
+            lines.append(_escape_block_opener(line))
+        elif _inside_inline_markup("\n".join(lines[first:]), raw[index:]):
+            lines[-1] += f" {line}"
+        elif _BACKTICK_FENCE.match(line):
+            lines.append(f"    {line}")
+        else:
+            lines.append(_escape_block_opener(line))
     return f"**{title}**\n" + "\n".join(lines) + "\n\n"
 
 
-def _code_span_after(line: str, open_run: int, brackets: int, following: str) -> tuple[int, int]:
-    position = 0
-    while position < len(line):
-        if open_run:
-            close = _closing_run(line, position, open_run)
-            if close is None:
-                return open_run, brackets
-            position, open_run = close, 0
-        elif line[position] == "\\":
-            position += 2
-        elif brackets and (link := _LINK_TAIL.match(line, position)):
-            position, brackets = link.end(), brackets - 1
-        elif line[position] == "[":
-            brackets += 1
-            position += 1
-        elif line[position] == "]":
-            brackets = max(brackets - 1, 0)
-            position += 1
-        elif line[position] == "`":
-            run = _BACKTICK_RUN.match(line, position)
-            paragraph_rest = f"{line[run.end():]}\n{following}".split("\n\n", 1)[0]
-            if _closing_run(paragraph_rest, 0, len(run.group())) is not None:
-                open_run = len(run.group())
-            position = run.end()
-        else:
-            position += 1
-    return open_run, brackets
+def _inside_inline_markup(before: str, after: Sequence[str]) -> bool:
+    rest = "\n".join(after).split("\n\n", 1)[0]
+    env: dict[str, object] = {"base": 0, "spans": []}
+    _INLINE_SPANS.parseInline(f"{before}\n{rest}", env)
+    return any(len(before) in span for span in env["spans"])
 
 
-def _closing_run(text: str, start: int, width: int) -> int | None:
-    runs = _BACKTICK_RUN.finditer(text, start)
-    return next((run.end() for run in runs if len(run.group()) == width), None)
+def _recording(rule: Callable[[StateInline, bool], bool], kind: str) -> Callable[[StateInline, bool], bool]:
+    def record(state: StateInline, silent: bool) -> bool:
+        start, count = state.pos, len(state.tokens)
+        if not rule(state, silent):
+            return False
+        if len(state.tokens) > count and state.tokens[-1].type == kind:
+            base = state.env["base"]
+            state.env["spans"].append(range(base + start + 1, base + state.pos))
+        return True
+
+    return record
+
+
+def _offset_image_alt(state: StateInline, silent: bool) -> bool:
+    base = state.env["base"]
+    state.env["base"] = base + state.pos + 2
+    try:
+        return image(state, silent)
+    finally:
+        state.env["base"] = base
+
+
+_INLINE_SPANS = MarkdownIt("commonmark")
+_INLINE_SPANS.inline.ruler.at("backticks", _recording(backtick, "code_inline"))
+_INLINE_SPANS.inline.ruler.at("html_inline", _recording(html_inline, "html_inline"))
+_INLINE_SPANS.inline.ruler.at("image", _offset_image_alt)
 
 
 def _escape_block_opener(line: str) -> str:
