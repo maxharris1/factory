@@ -1,7 +1,13 @@
-"""Slot release and the lost check (docs/SPEC.md F2-02, #662).
+"""Slot release, the lost check and the orphan sweep (docs/SPEC.md F2-02,
+#662, #679).
 
 The dispatcher runs `DeviceMonitor.reconcile` once per poll, before T6
-looks at timeouts. It does two things with the device pool's held slots.
+looks at timeouts. First it calls `DeviceMonitor.reload`, which loads
+machines.yml again when its mtime or its machines.local.yml overlay's has
+changed since the last good load; a file that fails to load raises and
+the monitor keeps the last good config, so the next poll tries again.
+`reconcile` then does three things for each device that holds a slot or
+an orphan.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -25,10 +31,19 @@ run, or their runners still live) gets one plain SSH round trip. The
 first failed probe after a good one starts the device's offline clock; a
 good probe stops it, and a device that holds no slot is forgotten. Once a
 device has failed every probe for `lost_after` seconds (orch.yml
-job_states.unreachable_lost_minutes, 10 by default; `stranded`), each job
+job_states.unreachable_lost_minutes, 10 by default; `stranded`), or at once
+when machines.yml sets it `enabled: false` (answering or not), each job
 still running on it whose worker started is handed to `on_lost`: the
 dispatcher fails it as lost, moves its slot to device_orphans and backs the
 device off, and T6 requeues it under the link-drop budget.
+
+Orphans. After the lost step, each device_orphans row on the device is
+checked by its worker tag, so a job lost this poll is swept this poll. A
+worker still running is sent SIGTERM and its row kept; a gone worker's row
+is forgotten, as is a row whose worker no check can name. An unreachable
+device ends its sweep for the poll, so a down device costs one failed SSH
+call per poll. A requeue placed back on the same device carries a new tag
+and is never stopped by mistake.
 """
 
 from __future__ import annotations
