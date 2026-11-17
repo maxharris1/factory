@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from lib import cli
-from lib.queue import JobRequest
+from lib.queue import JobRequest, SQLiteJobQueue
 from lib.state_backup import backup
 from tests.pool_helpers import pool_claim
 from tests.procs import alive
@@ -654,6 +654,128 @@ def test_a_cutover_and_its_rollback_round_trip_the_database(tmp_path: Path) -> N
     assert not box.retired.exists()
     assert _rows(box.db) == first["tables"]
     assert _integrity(box.db) == "ok"
+
+
+PAYLOAD = {
+    "round": 2,
+    "brief_text": "Fix the flaky export.\n" * 40,
+    "plan_text": "1. copy job-detail\n2. check it",
+    "evidence": {"checks": [{"name": "pytest", "ok": False}], "head": "abc123"},
+    "instruction": "address the review",
+}
+
+
+def _queue_spilled_job(db: Path) -> str:
+    job = SQLiteJobQueue(db, clock=time.time).enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="43",
+            action="fix",
+            recipient="claude",
+            source_comment_id="go-2",
+            timeout_seconds=3600,
+            detail=json.dumps(PAYLOAD, sort_keys=True, separators=(",", ":")),
+        ),
+        dedupe_key="t43:fix",
+    )
+    assert (db.parent / "job-detail" / f"{job.id}.json").is_file()
+    return job.id
+
+
+def _detail(db: Path, job_id: str) -> dict[str, object]:
+    [job] = [job for job in SQLiteJobQueue(db, clock=time.time).outstanding() if job.id == job_id]
+    return json.loads(job.request.detail)
+
+
+def test_a_cutover_and_its_rollback_carry_a_queued_jobs_spilled_detail(
+    tmp_path: Path,
+) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    job_id = _queue_spilled_job(box.db)
+
+    cutover = _export(tmp_path, box, "pc")
+    first = json.loads((cutover / "manifest.json").read_text(encoding="utf-8"))
+    placed = pc.move("import", f"box:{cutover}", **_remote(tmp_path, box.home))
+    assert placed.returncode == 0, placed.stderr
+    assert _detail(pc.db, job_id) == PAYLOAD
+    assert _rows(pc.db) == first["tables"]
+    assert _integrity(pc.db) == "ok"
+
+    rollback = _export(tmp_path, pc, "box")
+    for path in box.state.glob("orch.db*"):
+        path.rename(path.with_name(path.name.replace("orch.db", "pre-rollback.db")))
+    back = box.move("import", str(rollback))
+    assert back.returncode == 0, back.stderr
+
+    assert _detail(box.db, job_id) == PAYLOAD
+    assert _rows(box.db) == first["tables"]
+    assert _integrity(box.db) == "ok"
+
+
+def _change_a_detail_file(export: Path) -> None:
+    [path] = (export / "job-detail").glob("*.json")
+    path.write_text(json.dumps({"brief_text": "tampered"}), encoding="utf-8")
+
+
+def _delete_a_detail_file(export: Path) -> None:
+    [path] = (export / "job-detail").glob("*.json")
+    path.unlink()
+
+
+@pytest.mark.parametrize(
+    "spoil", [_change_a_detail_file, _delete_a_detail_file], ids=["changed", "missing"]
+)
+def test_import_refuses_an_export_whose_job_detail_is_not_the_manifests(
+    tmp_path: Path, spoil
+) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    _queue_spilled_job(box.db)
+    export = _export(tmp_path, box, "pc")
+    spoil(export)
+    pc.retired.write_text("box 2026-11-01T00:00:00Z\n", encoding="utf-8")
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 1, result.stderr
+    assert "placed nothing" in result.stderr
+    assert not pc.db.exists()
+    assert not (pc.state / "job-detail").exists()
+    assert pc.calls() == []
+
+
+def test_import_refuses_to_overwrite_a_different_job_detail_file(tmp_path: Path) -> None:
+    box, pc = Host(tmp_path, "box"), Host(tmp_path, "pc")
+    _seed(tmp_path, box.db)
+    job_id = _queue_spilled_job(box.db)
+    export = _export(tmp_path, box, "pc")
+    pc.retired.write_text("box 2026-11-01T00:00:00Z\n", encoding="utf-8")
+    existing = pc.state / "job-detail" / f"{job_id}.json"
+    existing.parent.mkdir()
+    existing.write_text('{"brief_text":"other"}', encoding="utf-8")
+
+    result = pc.move("import", str(export))
+
+    assert result.returncode == 1, result.stderr
+    assert "placed nothing" in result.stderr
+    assert existing.read_text(encoding="utf-8") == '{"brief_text":"other"}'
+    assert not pc.db.exists()
+    assert pc.calls() == []
+
+
+def test_move_db_manifest_refuses_a_copy_whose_spilled_job_has_no_file(
+    tmp_path: Path,
+) -> None:
+    live = tmp_path / "live" / "orch.db"
+    _seed(tmp_path, live)
+    _queue_spilled_job(live)
+    db = tmp_path / "export" / "orch.db"
+    backup(live, db)
+    out = tmp_path / "export" / "manifest.json"
+
+    assert _manifest(db, out) == 1
+    assert not out.exists()
 
 
 def _custom_db(host: Host) -> Path:

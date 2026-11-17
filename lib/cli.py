@@ -255,11 +255,14 @@ move-db unlocked --db PATH
   opened read-only. drained exits 0 when the copy has no running job and
   no held device slot, 1 (printing both counts) when it has, and 2 when
   it is missing or unreadable. manifest writes --out as JSON (the copy's
-  sha256, per-table row counts, integrity, the hosts, the --retired line
-  and the time) and exits 1, writing nothing, unless the copy passes
-  integrity_check. check prints each table's row count and exits 0 when
-  the copy has the manifest's sha256, passes integrity_check, and the
-  manifest has a retired line; otherwise it exits 1 saying which failed.
+  sha256, per-table row counts, integrity, the hosts, the --retired line,
+  the time and the sha256 of each file in the job-detail/ beside the copy)
+  and exits 1, writing nothing, unless the copy passes integrity_check and
+  every spilled job row has its job-detail file. check prints each table's
+  row count and exits 0 when the copy has the manifest's sha256, passes
+  integrity_check, the manifest has a retired line, each job-detail file
+  the manifest names is beside the copy with its sha256, and every spilled
+  job row has its file; otherwise it exits 1 saying which failed.
   unlocked reads the live database's poll lock, never the database: it
   exits 0 when no poller holds PATH.lock (or there is none), 1 when one
   does.

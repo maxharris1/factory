@@ -24,8 +24,10 @@
 # orch-poll.service's is) by the poll lock it holds open. Export then exits
 # 1, leaving the host retired and stopped, unless `orch move-db unlocked`
 # can take orch.db.lock (the lock beside orch.db). Then it copies orch.db to
-# <export>/orch.db, checks that copy is still drained, writes
-# <export>/manifest.json (`orch move-db manifest`), copies the checkout's
+# <export>/orch.db and the job-detail/ beside it to <export>/job-detail,
+# checks that copy is still drained, writes <export>/manifest.json (`orch
+# move-db manifest`, which records each job-detail file's sha256 and refuses
+# a spilled job row whose file is missing), copies the checkout's
 # machines.yml to <export>/machines.<this host>.yml and prints <export>.
 # <export> defaults to ~/.local/share/factory/orch-move/<UTC time>, outside
 # the state directory, and must not exist yet.
@@ -48,11 +50,14 @@
 # ~/.local/share/factory/orch-move/import-<UTC time> (cp -R, or
 # ${ORCH_MOVE_SCP:-scp} -r for host:path) and refuses unless
 # `orch move-db check` finds the copy's sha256 matches the manifest, the copy
-# passes integrity_check and the manifest names a retired line; for
+# passes integrity_check, the manifest names a retired line, every job-detail
+# file it names is staged unchanged and no spilled job row lacks its file; for
 # host:path, also unless `${ORCH_MOVE_SSH:-ssh} host test -e
 # .config/factory/orch-retired` succeeds. A refusal places nothing and
 # starts nothing. Then it copies this checkout's machines.yml beside the
-# snapshot as machines.<this host>.yml, places orch.db through orch.db.tmp
+# snapshot as machines.<this host>.yml, merges the staged job-detail/ into
+# the one beside orch.db (refusing, placing nothing, when a file there of
+# the same name differs), places orch.db through orch.db.tmp
 # and mv (never `orch restore-db`, which holds queued jobs), removes this
 # host's orch-retired, and starts the poller first, then the waiter of each
 # bot with ~/.config/factory/waiter-autostart-<bot>, self-heal and the
@@ -208,6 +213,9 @@ export_db() {
     "$ORCH" move-db unlocked --db "$db" || refuse "a poller still holds ${db}.lock after the stops; wrote no export"
 
     "$ORCH" backup-db --db "$db" --backup "${EXPORT}/orch.db" >/dev/null
+    if [[ -d "$(dirname "$db")/job-detail" ]]; then
+        cp -R "$(dirname "$db")/job-detail" "${EXPORT}/job-detail"
+    fi
     rm -f "${EXPORT}/probe.db"
     assert_final_copy_drained
     "$ORCH" move-db manifest --db "${EXPORT}/orch.db" --out "${EXPORT}/manifest.json" \
@@ -217,6 +225,18 @@ export_db() {
     fi
     say "exported orch.db for ${to}"
     printf '%s\n' "$EXPORT"
+}
+
+merge_job_detail() {
+    local from="$1" to="$2" file
+    [[ -d "$from" ]] || return 0
+    for file in "$from"/*.json; do
+        [[ -e "$file" && -e "${to}/${file##*/}" ]] || continue
+        cmp -s "$file" "${to}/${file##*/}" \
+            || refuse "${to}/${file##*/} differs from the export's copy; placed nothing"
+    done
+    mkdir -p "$to"
+    cp -R "${from}/." "${to}/"
 }
 
 import_db() {
@@ -245,6 +265,7 @@ import_db() {
         cp "$MACHINES" "${stage}/machines.${HOST}.yml"
     fi
 
+    merge_job_detail "${stage}/job-detail" "$(dirname "$db")/job-detail"
     mkdir -p "$(dirname "$db")"
     cp "${stage}/orch.db" "${db}.tmp"
     mv "${db}.tmp" "$db"

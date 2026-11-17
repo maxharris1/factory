@@ -30,7 +30,7 @@ def root(connection: sqlite3.Connection) -> Path | None:
 
 
 def split(detail: str | None) -> tuple[str | None, dict[str, object] | None]:
-    data = _object(detail)
+    data = as_object(detail)
     if data is None:
         return detail, None
     marked = data.pop(MARKER, None) is not None
@@ -58,7 +58,7 @@ def write(directory: Path | None, job_id: str, spill: dict[str, object]) -> None
 
 
 def load(directory: Path | None, job_id: str, detail: str | None) -> str | None:
-    data = _object(detail)
+    data = as_object(detail)
     if data is None or MARKER not in data:
         return detail
     if directory is None:
@@ -89,7 +89,7 @@ def spill_existing(connection: sqlite3.Connection) -> int:
         ).fetchall()
         for rowid, job_id, detail in rows:
             last = rowid
-            data = _object(detail)
+            data = as_object(detail)
             if data is None or MARKER in data:
                 continue
             slim, spill = split(detail)
@@ -103,7 +103,7 @@ def spill_existing(connection: sqlite3.Connection) -> int:
             return moved
 
 
-def _object(detail: str | None) -> dict[str, object] | None:
+def as_object(detail: str | None) -> dict[str, object] | None:
     if not detail:
         return None
     try:

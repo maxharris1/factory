@@ -37,6 +37,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from lib import job_detail
+
 BACKUP_ENV = "ORCH_DB_BACKUP"
 BACKUP_EVERY_ENV = "ORCH_DB_BACKUP_EVERY"
 # The job_events detail of a step restore() holds; the dispatcher's first
@@ -191,8 +193,10 @@ def write_manifest(db: Path, out: Path, *, source_host: str, to: str, retired: s
     facts = db_facts(db)
     if facts.integrity != "ok":
         raise BackupError(f"{db} failed integrity_check: {facts.integrity}")
+    _refuse_spilled_without_file(db)
     manifest = {
         "sha256": facts.sha256,
+        "job_detail": _job_detail_files(db),
         "tables": facts.tables,
         "integrity": facts.integrity,
         "source_host": source_host,
@@ -224,7 +228,57 @@ def check_manifest(db: Path, manifest: Path) -> DbFacts:
         raise BackupError(
             f"manifest {manifest} names no retired line; the source host never retired"
         )
+    present = _job_detail_files(db)
+    changed = sorted(
+        name
+        for name, digest in (recorded.get("job_detail") or {}).items()
+        if present.get(name) != digest
+    )
+    if changed:
+        raise BackupError(
+            f"{len(changed)} job-detail files beside {db} are missing or differ from "
+            f"{manifest} (first: {', '.join(changed[:3])})"
+        )
+    _refuse_spilled_without_file(db)
     return facts
+
+
+def _job_detail_files(db: Path) -> dict[str, str]:
+    directory = db.parent / job_detail.DIRECTORY
+    if not directory.is_dir():
+        return {}
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(directory.glob("*.json"))
+    }
+
+
+def _refuse_spilled_without_file(db: Path) -> None:
+    connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone() is None:
+            return
+        rows = connection.execute("SELECT id, detail FROM jobs ORDER BY rowid").fetchall()
+    finally:
+        connection.close()
+    lacking = []
+    for job_id, detail in rows:
+        data = job_detail.as_object(detail)
+        if data is None or job_detail.MARKER not in data:
+            continue
+        try:
+            merged = json.loads(job_detail.load(db.parent, str(job_id), detail))
+        except ValueError:
+            merged = {}
+        if not set(data[job_detail.MARKER]) <= merged.keys():
+            lacking.append(str(job_id))
+    if lacking:
+        raise BackupError(
+            f"{len(lacking)} spilled job rows in {db} have no complete job-detail file "
+            f"beside it (first: {', '.join(lacking[:3])})"
+        )
 
 
 def week_monday(now: datetime) -> date:
