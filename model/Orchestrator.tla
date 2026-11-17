@@ -7,15 +7,15 @@ EXTENDS Integers
 
 CONSTANTS AllowPostMerge, Omit
 
-VARIABLES state, paused, cap, configOk, flags, counts
+VARIABLES state, paused, cap, configOk, flags, counts, external
 
-vars == <<state, paused, cap, configOk, flags, counts>>
+vars == <<state, paused, cap, configOk, flags, counts, external>>
 
 States == {
   "intake", "refused", "questions", "waiting-max", "planning", "plan-check",
   "building", "review", "fixing", "stuck", "capped", "blocked", "ship",
   "merged", "handed-off", "merge-queue", "updating", "waiting-external",
-  "awaiting-ok", "post-merge", "done", "abandoned"
+  "awaiting-ok", "post-merge", "done", "abandoned", "handed-off-externally"
 }
 
 \* handed-off is not terminal (#108): the poll still watches it, for a merge
@@ -40,7 +40,7 @@ JobStates == {"planning", "building", "review", "fixing"}
 AfterGo == {
   "planning", "plan-check", "building", "review", "fixing", "capped", "blocked",
   "ship", "merged", "handed-off", "merge-queue", "updating", "waiting-external",
-  "awaiting-ok", "post-merge", "done", "stuck"
+  "awaiting-ok", "post-merge", "done", "stuck", "handed-off-externally"
 }
 
 ReviewAndAfter == {
@@ -56,7 +56,22 @@ Covered == {
   "post-merge", "done"
 }
 
-Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
+Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "TL"}
+
+\* #749. States a Linear handoff name (orch.yml linear_handoff_states) parks
+\* in handed-off-externally. orch.db keeps stuck as a flag on one of the
+\* others; here it is a state. In ship, handed-off, merge-queue, updating and
+\* waiting-external that name is the factory's own move and changes nothing.
+HandoffFrom == {
+  "planning", "plan-check", "building", "review", "fixing", "capped",
+  "blocked", "waiting-max", "awaiting-ok", "stuck"
+}
+
+\* Past go and not finished: the tickets Linear Done or Canceled settles.
+LinearFrom == HandoffFrom \cup {
+  "ship", "handed-off", "merge-queue", "updating", "waiting-external",
+  "handed-off-externally"
+}
 
 \* A fixture may also drop T4ShipMerge's covered guard.
 Guards == {"ShipGuard"}
@@ -72,6 +87,7 @@ TypeOK ==
   /\ flags \in [
        covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN, byHand: BOOLEAN
      ]
+  /\ external \in {"none"} \cup HandoffFrom
   /\ counts \in [
        round: 0..4,
        acUnmet: 0..2,
@@ -97,6 +113,7 @@ Init ==
        planGaps |-> 0, deaths |-> 0, declines |-> 0,
        extra |-> 0, updates |-> 0
      ]
+  /\ external = "none"
 
 \* Valid config: brief posted, questions step starts. Invalid config: refused.
 IntakeBrief ==
@@ -104,6 +121,7 @@ IntakeBrief ==
   /\ configOk
   /\ state' = "questions"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -116,6 +134,7 @@ IntakeRefused ==
   /\ ~configOk
   /\ state' = "refused"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -127,6 +146,7 @@ T5Ask ==
   /\ state \in {"questions", "building", "fixing"}
   /\ state' = "waiting-max"
   /\ paused' = state
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -138,6 +158,7 @@ T5Answer ==
   /\ state = "waiting-max"
   /\ state' = paused
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -148,6 +169,7 @@ T5Abandon ==
   /\ state = "waiting-max"
   /\ state' = "abandoned"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -159,6 +181,7 @@ T1KindGoPlan ==
   /\ state = "questions"
   /\ state' = "planning"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.questionsDone = TRUE]
@@ -170,6 +193,7 @@ T1KindGoBuild ==
   /\ state = "questions"
   /\ state' = "building"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.questionsDone = TRUE]
@@ -180,6 +204,7 @@ T1PPlanPosted ==
   /\ state = "planning"
   /\ state' = "plan-check"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -191,6 +216,7 @@ T1PPlanGapOnce ==
   /\ counts.planGaps = 0
   /\ state' = "planning"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -202,6 +228,7 @@ T1PPlanGapStuck ==
   /\ counts.planGaps = 1
   /\ state' = "stuck"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -212,6 +239,7 @@ T1PPlanMapped ==
   /\ state = "plan-check"
   /\ state' = "building"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.planOk = TRUE]
@@ -224,12 +252,14 @@ T1PPlanOverSize ==
   /\ state = "plan-check"
   /\ state' = "waiting-max"
   /\ paused' = "building"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.planOk = TRUE]
   /\ counts' = [counts EXCEPT !.deaths = 0]
 
-keep == cap' = cap /\ configOk' = configOk /\ paused' = "none"
+keep ==
+  cap' = cap /\ configOk' = configOk /\ paused' = "none" /\ external' = external
 
 \* T2. ready head=<sha>, then CI on that SHA.
 T2ReadyGreen ==
@@ -237,6 +267,7 @@ T2ReadyGreen ==
   /\ state \in {"building", "fixing"}
   /\ state' = "review"
   /\ paused' = "none"
+  /\ external' = external
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0]
@@ -284,6 +315,7 @@ T6JobRetry ==
   /\ counts.deaths = 0
   /\ state' = state
   /\ paused' = paused
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
@@ -329,6 +361,7 @@ T3Unsat ==
   /\ state \in {"review", "awaiting-ok"}
   /\ state' = "waiting-max"
   /\ paused' = "review"
+  /\ external' = external
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.covered = FALSE]
@@ -641,6 +674,7 @@ GoFresh ==
   /\ "T1" \notin Omit
   /\ state = "merge-queue"
   /\ paused' = "none"
+  /\ external' = external
   /\ cap' = 0
   /\ configOk' = configOk
   /\ flags' = [flags EXCEPT !.covered = FALSE, !.planOk = FALSE]
@@ -694,7 +728,55 @@ End ==
   /\ state \in Terminal
   /\ UNCHANGED vars
 
-Next ==
+\* #749. TL: the poll's linear-moves phase applies Max's Linear moves. Before
+\* go (questions, or waiting-max on a product question) Linear is not read.
+PastGo == state # "waiting-max" \/ paused # "questions"
+
+\* A handoff name parks the ticket. Nothing else changes: round, counters,
+\* cap and the paused step stay as they were, for the resume.
+LinearHandoff ==
+  /\ "TL" \notin Omit
+  /\ state \in HandoffFrom
+  /\ PastGo
+  /\ state' = "handed-off-externally"
+  /\ external' = state
+  /\ UNCHANGED <<paused, cap, configOk, flags, counts>>
+
+\* A started state that is not a handoff name (In Progress) resumes the
+\* recorded state, stuck included.
+LinearResume ==
+  /\ "TL" \notin Omit
+  /\ state = "handed-off-externally"
+  /\ state' = external
+  /\ external' = "none"
+  /\ UNCHANGED <<paused, cap, configOk, flags, counts>>
+
+\* Linear Done or Canceled settles a ticket past go, parked or not. Like a
+\* merge (TM) it clears stuck and the paused step.
+LinearSettle ==
+  /\ "TL" \notin Omit
+  /\ state \in LinearFrom
+  /\ PastGo
+  /\ paused' = "none"
+  /\ cap' = cap
+  /\ configOk' = configOk
+  /\ external' = "none"
+  /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
+       !.planGaps = 0, !.updates = 0]
+
+\* Linear Done: one fresh PR read, merged if the PR merged, else done.
+LinearDone ==
+  /\ LinearSettle
+  /\ state' \in {"merged", "done"}
+  /\ flags' = [flags EXCEPT !.byHand = TRUE]
+
+LinearCanceled ==
+  /\ LinearSettle
+  /\ state' = "abandoned"
+  /\ flags' = flags
+
+\* Every step but Linear's leaves a parked ticket alone.
+Factory ==
   \/ IntakeBrief \/ IntakeRefused
   \/ T5Ask \/ T5Answer \/ T5Abandon
   \/ T1KindGoPlan \/ T1KindGoBuild
@@ -717,14 +799,21 @@ Next ==
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
   \/ End
 
+Next ==
+  \/ Factory
+  \/ LinearHandoff \/ LinearResume \/ LinearDone \/ LinearCanceled
+
 Spec == Init /\ [][Next]_vars
+
+\* The state a parked ticket keeps for its resume; any other ticket's own.
+Prior == IF state = "handed-off-externally" THEN external ELSE state
 
 QuestionsBeforeBuilding ==
   state \in AfterGo => flags.questionsDone
 
 QuestionResumes ==
-  /\ state = "waiting-max" => paused \in {"questions", "building", "fixing", "review"}
-  /\ state # "waiting-max" => paused = "none"
+  /\ Prior = "waiting-max" => paused \in {"questions", "building", "fixing", "review"}
+  /\ Prior # "waiting-max" => paused = "none"
   /\ paused = "questions" => ~flags.questionsDone /\ cap = 0
   /\ paused = "building" => flags.questionsDone /\ cap = 0
   /\ paused = "fixing" => flags.questionsDone /\ cap \in {1, 3}
@@ -737,12 +826,12 @@ MappedBeforeBuilding ==
 CountersBounded ==
   /\ cap = 0 => counts.round = 0 /\ counts.extra = 0
   /\ cap \in {1, 3} => counts.round <= cap + counts.extra
-  /\ counts.gate = 3 => state = "stuck"
-  /\ counts.declines = 3 => state = "stuck"
-  /\ counts.planGaps = 2 => state = "stuck"
-  /\ counts.deaths = 2 => state = "stuck"
-  /\ counts.updates = 2 => state = "stuck"
-  /\ counts.updates = 1 => state = "updating"
+  /\ counts.gate = 3 => Prior = "stuck"
+  /\ counts.declines = 3 => Prior = "stuck"
+  /\ counts.planGaps = 2 => Prior = "stuck"
+  /\ counts.deaths = 2 => Prior = "stuck"
+  /\ counts.updates = 2 => Prior = "stuck"
+  /\ counts.updates = 1 => Prior = "updating"
   /\ counts.acUnmet <= 2
 
 ContradictoryConfigNeverRuns ==
@@ -753,9 +842,9 @@ ShipPinnedToCoveredHead ==
   state \in Covered => flags.covered \/ flags.byHand
 
 CapAtReview ==
-  /\ state \in {"intake", "refused", "questions", "planning", "plan-check", "building"}
+  /\ Prior \in {"intake", "refused", "questions", "planning", "plan-check", "building"}
        => cap = 0
-  /\ state \in ReviewAndAfter /\ ~flags.byHand => cap \in {1, 3}
+  /\ Prior \in ReviewAndAfter /\ ~flags.byHand => cap \in {1, 3}
 
 Phase1T9Off ==
   ~AllowPostMerge => state # "post-merge"
@@ -841,6 +930,28 @@ T9Decided ==
   /\ state = "merged" => ENABLED MergedDone
   /\ state = "post-merge" => ENABLED T9Pass /\ ENABLED T9Fail
 
+\* #749. A parked ticket remembers the state it left, and only Linear moves
+\* it: no read, claim, retry, round or wake acts on it meanwhile.
+ExternalKeepsPrior ==
+  /\ state = "handed-off-externally" => external \in HandoffFrom
+  /\ state # "handed-off-externally" => external = "none"
+  /\ state = "handed-off-externally" => ~ENABLED Factory
+
+HandedOffExternallyDecided ==
+  /\ state \in HandoffFrom /\ PastGo => ENABLED LinearHandoff
+  /\ state \in LinearFrom /\ PastGo => ENABLED LinearDone /\ ENABLED LinearCanceled
+  /\ state = "handed-off-externally" => ENABLED LinearResume
+
+\* #749. Parking and resuming leaves the ticket as the hand-off found it:
+\* the same state, round, counters, cap and paused step.
+ResumeRestores ==
+  [][ /\ state' = "handed-off-externally"
+           => UNCHANGED <<paused, cap, configOk, flags, counts>>
+      /\ state = "handed-off-externally"
+         /\ state' \notin {"handed-off-externally", "merged", "done", "abandoned"}
+           => /\ state' = external
+              /\ UNCHANGED <<paused, cap, configOk, flags, counts>> ]_vars
+
 ChartEdges ==
   /\ state = "intake" /\ configOk => ENABLED IntakeBrief
   /\ state = "planning" => ENABLED T1PPlanPosted
@@ -867,5 +978,17 @@ ChartSlice ==
         /\ counts.declines = 0
         /\ counts.gate = 0
         /\ counts.deaths = 0
+
+\* Drawing bound for Linear's hand-off (TL). The chart draws the incident
+\* shapes: a capped or stuck ticket parked and resumed. Section 4.1 states the
+\* rule for every other state in prose. Only a ticket with no decline, and a
+\* stuck one stuck in its first round, is parked here, to stay under
+\* statechart's 500-state drawing limit. This names states, not actions: a
+\* constraint on LinearDone would also drop the merge steps it shares.
+ChartLinear ==
+  state' = "handed-off-externally" /\ state # "handed-off-externally" =>
+    /\ state \in {"capped", "stuck"}
+    /\ counts.declines = 0
+    /\ state = "capped" \/ counts.round = 0
 
 ====

@@ -99,5 +99,15 @@ export const step = (action, from, to) => {
   if (action === "UpdateNonTrivial") return "non-trivial update, cross-family re-review";
   if (action === "UpdateRetry") return "update fails, one more update";
   if (action === "UpdateStuck") return "two failed updates (update-failed-2)";
+  if (action === "LinearHandoff") return "Max moves the Linear issue to a handoff state";
+  if (action === "LinearResume") return "Linear back to a started state, the prior state resumes";
+  // Linear Done or Canceled settles any ticket past go (#749); the chart draws
+  // only the handed-off-externally ones, and section 4.1 says the rest in prose.
+  if (from.state !== "handed-off-externally" && (action === "LinearDone" || action === "LinearCanceled")) {
+    return null;
+  }
+  if (action === "LinearDone" && to.state === "merged") return "Linear Done, PR merged";
+  if (action === "LinearDone") return "Linear Done, PR not merged";
+  if (action === "LinearCanceled") return "Linear Canceled";
   return action;
 };
