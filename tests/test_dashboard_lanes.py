@@ -785,6 +785,43 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     assert not broken, f"round pips and their n/m label must both show on one row: {broken}"
 
 
+def _long_intake_reasons(tmp_path: Path) -> dict:
+    from lib.feeder_gates import Holds, github_ref, parse_gate_lines
+
+    lines = parse_gate_lines("Touches: tests/test_factory_dashboard_preserves_existing_intake_navigation_anchors.py",
+                             "o/factory")
+    holds = Holds()
+    holds.take(github_ref("o/factory", 4), (), lines)
+    reason = holds.collision(github_ref("o/factory", 2), lines).reason
+    snapshot = _tiles(tmp_path)
+    for item in snapshot["feeder"]["items"]:
+        if item["issue"] in ("1", "2", "6", "9", "10"):
+            item["reason"] = reason
+    return snapshot
+
+
+@needs_chrome
+@pytest.mark.parametrize("render", ["script", "server"])
+def test_long_intake_reasons_wrap_on_a_phone(tmp_path: Path, browser: Browser, render: str) -> None:
+    snapshot = _long_intake_reasons(tmp_path)
+    if render == "script":
+        browser.open(_page_with_status_stub(snapshot, "index.html"), 375)
+    else:
+        page = Path(browser.tmp.name) / "page.html"
+        page.write_text(_no_script(render_pages(snapshot)["index.html"]), encoding="utf-8")
+        browser.call("Emulation.setDeviceMetricsOverride", width=375, height=FOLD, deviceScaleFactor=1, mobile=False)
+        browser.call("Page.navigate", url=page.as_uri())
+        browser.eval("""new Promise(function (done) { (function wait() {
+          if (document.readyState === 'complete' && document.getElementById('intake')) done(true);
+          else setTimeout(wait, 50); })(); })""")
+    browser.eval("[].forEach.call(document.querySelectorAll('#intake details'), function (d) { d.open = true; })")
+    shown = browser.eval("""[].filter.call(document.querySelectorAll('#intake .what'),
+      function (e) { return e.textContent.indexOf('test_factory_dashboard') >= 0 && e.getClientRects().length; }).length""")
+    assert shown == 5, f"expected the long reason on five visible Intake rows, saw {shown}"
+    width = browser.eval("document.documentElement.scrollWidth")
+    assert width <= 375, f"phone page scrolls sideways: scrollWidth={width}"
+
+
 def write_screenshots(out: Path) -> list[Path]:
     html = _page_with_status_stub(_held_for_ci(fifteen_slot_snapshot(Path(tempfile.mkdtemp()))), "index.html")
     chrome = Browser()

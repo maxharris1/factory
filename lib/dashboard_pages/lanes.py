@@ -90,7 +90,7 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--muted)}
 .itext{font-size:12px;color:var(--text-2)}
 .imeter{display:block;width:176px}.imeter .px{height:8px}
 #intake .intake+.feed{margin-top:10px}
-#intake .what.bad{color:var(--bad)}
+#intake .what{min-width:0;overflow-wrap:anywhere}#intake .what.bad{color:var(--bad)}
 .igroup{margin:14px 0 2px;font:11px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 #intake details{margin-top:4px}
 .fed-more{margin:4px 0 0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
