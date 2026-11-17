@@ -600,6 +600,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "handoff_savings",
         "relay",
         "ci_runs",
+        "ci_pool",
         "attention",
         "health",  # component heartbeats (#92)
         "feeder",

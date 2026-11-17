@@ -1189,6 +1189,7 @@ def _runtime(
         ci_logs=source.github.failed_run_logs,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
+        ci_pool=source.github.list_runners,
         hold_carry=_hold_carry,
         qa_diff=_qa_diff,
     )
