@@ -9,20 +9,20 @@ from tests.golden.pages import page_digests, page_name, record, snapshots, subst
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "tickets.CSS": "866aac1a613e948a74f41e2445f640cadf894cc587daae6d32cdffedd26d46f5",
-    "tickets.SCRIPT_TICKETS": "f9c707bd393a1f393022bfe596126b22419ecf473db502dd1eabdc5523ee034c",
-    "ticket_detail.CSS": "91dc87f051e6af291713f3f281bfc9743ea917b7cfcd1904d69c620ce2adb90c",
-    "ticket_detail.SCRIPT": "abe80d37c3f2be8ef5752d74f973fb3657a38423bbb606d0aeaaa40183b4d7f9",
-    "__BOARD__": "a95cdf573c85b101daa3f685be6323ee93936c5c9a779bcc75c3c11dcade93c6",
+    "tickets.CSS": "12f7d2d337fa207a7bb5dd6fb35e21812f7c9974a18e16d5d3a5db75bfa82681",
+    "tickets.SCRIPT_TICKETS": "eb54e9128115f6b54d5516b4846e9f1bad4f666998a9e3eced607911ada702d1",
+    "ticket_detail.CSS": "56c45c078486c0057297398c7a2940289bcac3d63a0a2c47850ce1899b78e89f",
+    "ticket_detail.SCRIPT": "09cf20c3efa2d860648fb098a7bd73404a67da820dd1b8fd42b4e3a95604d9e3",
+    "__BOARD__": "18a1bde89c615029c0c982725eb644dfe4e133f8b67095e03d82460e2d90c255",
     "__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
     "seeded/__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
     "hostile/__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
     "empty/__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
-    "seeded/main": "effffce2f01de03dc08df64013474975776567e0273f5b79697db9803f958b60",
+    "seeded/main": "9f9e8b8c34ebe24fb105cd32ae7383ea7e871e2b397bf6e7ca152023033af120",
     "seeded/chrome": "f7fbdb4b81985537d0b9b806d2a07da4b102fe1755f187c40e31a8066858318f",
-    "hostile/main": "effffce2f01de03dc08df64013474975776567e0273f5b79697db9803f958b60",
+    "hostile/main": "9f9e8b8c34ebe24fb105cd32ae7383ea7e871e2b397bf6e7ca152023033af120",
     "hostile/chrome": "9d4afdf83cd1a61d6c1dfe9d932176bc1f16b189b825af695a60942964822a81",
-    "empty/main": "50a844b4adb7317dc9322ce9c6e1ad4119983e5e7adf81307e9dc6817f0e5105",
+    "empty/main": "00590b9b12a8345707b133f14e0fbfb92cc79a6aabf4e4db9799f7051b87fb8d",
     "empty/chrome": "2e576ea7d76b1582b5aed1b9bc4e6792f74a8379f9d21f33ec84ddca545478a4",
 }
 

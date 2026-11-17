@@ -16,6 +16,22 @@ from lib.dashboard_pages.common import (
 
 CSS = """\
 .tk-filter{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-family:var(--mono)}
+.tk-tools{display:flex;flex:1 1 auto;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+.tk-find{position:relative;display:flex;align-items:center;gap:8px;margin-left:8px;min-width:0}
+.tk-find label{font-size:12px;color:var(--muted);white-space:nowrap}
+.tk-find input{box-sizing:border-box;width:180px;height:44px;margin:0;padding:0 12px;font-family:inherit;font-size:12px;
+background:var(--field);color:var(--text);border:1px solid var(--line-hi)}
+.tk-find input:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.tk-open{display:inline-flex;align-items:center;box-sizing:border-box;height:44px;padding:0 14px;font-size:12px;
+border:1px solid var(--line-hi);background:var(--panel)}
+.tk-open[aria-disabled=true]{color:var(--muted)}
+.tk-matches{position:absolute;top:100%;left:0;right:0;z-index:5;max-width:100%;margin:4px 0 0;padding:0;list-style:none;
+background:var(--panel-hi);border:1px solid var(--line-hi);box-shadow:var(--elev)}
+.tk-matches a{display:block;padding:12px;font-size:12px;overflow-wrap:anywhere;color:var(--text);text-decoration:none}
+.tk-matches a:hover,.tk-matches [aria-selected=true] a{background:var(--sel);color:var(--ok)}
+@media (max-width:640px){.tk-find{flex:1 1 100%;flex-wrap:wrap;align-items:flex-end;gap:4px 6px;margin-left:0}
+.tk-find label{flex:1 1 100%;font-size:11px;line-height:1.3;letter-spacing:0.08em;text-transform:uppercase}
+.tk-find input{flex:1 1 0;width:auto;min-width:0;padding:0 10px;font-size:16px}.tk-open{padding:0 10px}}
 .tk-group{display:flex;flex-wrap:wrap;gap:8px}
 .tk-view{flex-wrap:nowrap}
 .tk-grow{flex-grow:1}
@@ -88,6 +104,7 @@ SCRIPT_TICKETS = r"""
   var tkProject = tkLoad('tk-project') || '';
   var tkView = tkLoad('tk-view') === 'table' ? 'table' : 'board';
   var tkShelfShown = BOARD.shelf_page;
+  var tkFind = {query: '', active: null, open: false, rows: [], found: []};
 
   function tkLoad(key) {
     try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
@@ -349,18 +366,21 @@ SCRIPT_TICKETS = r"""
 
     var filter = byId('ticket-filter');
     if (filter) {
-      filter.replaceChildren();
-      var group = tkGroup(filter, 'tk-group', 'Project');
+      var tools = el('div', 'tk-tools');
+      filter.replaceChildren(tools, tkFind.box || tkFindBox());
+      var group = tkGroup(tools, 'tk-group', 'Project');
       tkButton(group, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; tkSave('tk-project', ''); });
       b.projects.forEach(function (p) {
         tkButton(group, p.short + ' ' + p.count, 'data-project', p.repo, tkProject === p.repo,
                  function () { tkProject = p.repo; tkSave('tk-project', p.repo); });
       });
-      add(filter, el('span', 'tk-grow'));
-      var view = tkGroup(filter, 'tk-group tk-view', 'View');
+      add(tools, el('span', 'tk-grow'));
+      var view = tkGroup(tools, 'tk-group tk-view', 'View');
       ['board', 'table'].forEach(function (name) {
         tkButton(view, name, 'data-view', name, tkView === name, function () { tkView = name; tkSave('tk-view', name); });
       });
+      tkFind.rows = d.tickets || [];
+      tkFindDraw();
     }
 
     var pipeline = panel('pipeline', 'Pipeline',
@@ -393,6 +413,113 @@ SCRIPT_TICKETS = r"""
     more.setAttribute('type', 'button');
     more.addEventListener('click', function () { tkShelfShown += BOARD.shelf_page; if (latest) render(latest); });
     add(page, el('span', 'tk-note', left + ' older not shown · newest first'));
+  }
+
+  function tkMatches(rows, query) {
+    var q = query.trim().toLowerCase();
+    if (!q) return [];
+    var found = [];
+    rows.forEach(function (r, i) {
+      var names = [String(r.ticket_id), ticketOf(r), ticketKey(r)].map(function (n) { return n.toLowerCase(); });
+      var rank = names.indexOf(q) >= 0 ? 0
+        : names.some(function (n) { return n.indexOf(q) === 0; }) ? 1
+        : names.some(function (n) { return n.indexOf(q) > 0; }) ? 2 : -1;
+      if (rank >= 0) found.push({rank: rank, at: i, key: ticketKey(r), label: ticketOf(r), href: ticketPageHref(r)});
+    });
+    found.sort(function (a, b) { return a.rank - b.rank || a.at - b.at; });
+    return found.slice(0, BOARD.find_max);
+  }
+
+  function tkFindAt() {
+    for (var i = 0; i < tkFind.found.length; i++) if (tkFind.found[i].key === tkFind.active) return i;
+    return -1;
+  }
+
+  function tkFindDraw() {
+    var f = tkFind;
+    f.found = tkMatches(f.rows, f.query);
+    var at = tkFindAt();
+    if (at < 0) f.active = null;
+    f.list.replaceChildren();
+    f.found.forEach(function (m, n) {
+      var li = add(f.list, el('li'));
+      li.setAttribute('role', 'option');
+      li.setAttribute('id', 'find-ticket-' + n);
+      li.setAttribute('aria-selected', n === at ? 'true' : 'false');
+      var a = add(li, link(null, m.href));
+      a.setAttribute('tabindex', '-1');
+      a.textContent = m.label;
+    });
+    var shown = f.open && f.found.length > 0;
+    f.list.hidden = !shown;
+    f.input.setAttribute('aria-expanded', shown ? 'true' : 'false');
+    if (shown && at >= 0) f.input.setAttribute('aria-activedescendant', 'find-ticket-' + at);
+    else f.input.removeAttribute('aria-activedescendant');
+    var target = f.found[Math.max(at, 0)];
+    if (target) {
+      f.link.removeAttribute('aria-disabled');
+      f.link.setAttribute('href', target.href);
+    } else {
+      f.link.removeAttribute('href');
+      f.link.setAttribute('aria-disabled', 'true');
+    }
+  }
+
+  function tkFindKey(ev) {
+    var f = tkFind, n = f.found.length, at = tkFindAt();
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      if (!n) return;
+      f.open = true;
+      f.active = f.found[ev.key === 'ArrowDown' ? (at + 1) % n : at <= 0 ? n - 1 : at - 1].key;
+      tkFindDraw();
+    } else if (ev.key === 'Enter') {
+      var target = f.found[Math.max(at, 0)];
+      if (!target) return;
+      ev.preventDefault();
+      location.href = target.href;
+    } else if (ev.key === 'Escape' && f.open) {
+      ev.preventDefault();
+      f.open = false;
+      f.active = null;
+      tkFindDraw();
+    }
+  }
+
+  function tkFindBox() {
+    var before = byId('find-ticket');
+    var box = el('div', 'tk-find');
+    box.setAttribute('role', 'search');
+    add(box, el('label', null, 'Find a ticket')).setAttribute('for', 'find-ticket');
+    var input = add(box, el('input'));
+    [['id', 'find-ticket'], ['type', 'text'], ['name', 'ticket'], ['placeholder', 'factory#470'],
+     ['autocomplete', 'off'], ['spellcheck', 'false'], ['role', 'combobox'], ['aria-autocomplete', 'list'],
+     ['aria-controls', 'find-ticket-list'], ['aria-expanded', 'false']].forEach(function (a) {
+      input.setAttribute(a[0], a[1]);
+    });
+    var open = add(box, el('a', 'tk-open', 'open'));
+    open.setAttribute('aria-disabled', 'true');
+    var list = add(box, el('ul', 'tk-matches'));
+    list.setAttribute('id', 'find-ticket-list');
+    list.setAttribute('role', 'listbox');
+    list.setAttribute('aria-label', 'Matching tickets');
+    list.hidden = true;
+    input.addEventListener('input', function () {
+      tkFind.query = input.value;
+      tkFind.open = true;
+      tkFind.active = null;
+      tkFindDraw();
+    });
+    input.addEventListener('keydown', tkFindKey);
+    if (before && before.value) {
+      input.value = tkFind.query = before.value;
+      tkFind.open = before === document.activeElement;
+    }
+    tkFind.box = box;
+    tkFind.input = input;
+    tkFind.link = open;
+    tkFind.list = list;
+    return box;
   }
 
   function tkTiles(parent, cards) {
@@ -453,6 +580,14 @@ CARD_KINDS = {
 CAP = 6
 SHELF_NEWEST = 10
 SHELF_PAGE = 50
+FIND_MAX = 8
+FIND = (
+    '<div class="tk-find" role="search"><label for="find-ticket">Find a ticket</label>'
+    '<input id="find-ticket" type="text" name="ticket" placeholder="factory#470" autocomplete="off" spellcheck="false" '
+    'role="combobox" aria-autocomplete="list" aria-controls="find-ticket-list" aria-expanded="false">'
+    '<a class="tk-open" aria-disabled="true">open</a>'
+    '<ul class="tk-matches" id="find-ticket-list" role="listbox" aria-label="Matching tickets" hidden></ul></div>'
+)
 JOB_CHIPS = {
     **{name: TILE_STATE[name]["chip"] for name in ("claimed", "stale", "dead")},
     "overdue": ["overdue", "bad"],
@@ -472,6 +607,7 @@ def board_constants() -> dict:
     return {
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
         "chips": JOB_CHIPS, "kinds": CARD_KINDS, "cap": CAP, "shelf_newest": SHELF_NEWEST, "shelf_page": SHELF_PAGE,
+        "find_max": FIND_MAX,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -749,9 +885,9 @@ def _board(snapshot: dict) -> str:
     unavailable = '<p class="empty">statechart unavailable</p>'
     columns = "".join(_column(col) for col in found["columns"])
     return (
-        '<div class="tk-filter" id="ticket-filter">'
+        '<div class="tk-filter" id="ticket-filter"><div class="tk-tools">'
         f'<div class="tk-group" role="group" aria-label="Project">{buttons}</div><span class="tk-grow"></span>'
-        f'<div class="tk-group tk-view" role="group" aria-label="View">{views}</div></div>'
+        f'<div class="tk-group tk-view" role="group" aria-label="View">{views}</div></div>{FIND}</div>'
         + _panel(
             "pipeline", "Pipeline",
             f'<div class="tk-board">{columns}</div>' if found["available"] else unavailable,
