@@ -125,7 +125,7 @@ breaks() {{
 }}
 case $cfg in
   Orchestrator.cfg)
-    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ShipNeedsCoveredQa\\n' > "$out/report.md" ;;
+    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off, HandoffCountsApprovedRound, ShipNeedsCoveredQa, QaResultFromRun\\n' > "$out/report.md" ;;
   OrchestratorAll.cfg)
     printf '## Rules that hold\\nT9Decided\\n' > "$out/report.md" ;;
   chart.cfg) grep -v ': post-merge$' "$chart" > "$out/chart.mmd" ;;

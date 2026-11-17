@@ -874,6 +874,10 @@ ContradictoryConfigNeverRuns ==
 ShipPinnedToCoveredHead ==
   state \in Covered => flags.covered \/ flags.byHand
 
+QaResultFromRun ==
+  [][/\ qa'.run = "pass" /\ qa.run # "pass" => qa.run = "running"
+     /\ qa'.run = "not-required" /\ qa.run # "not-required" => qa.run = "none"]_vars
+
 ShipNeedsCoveredQa ==
   qa.gate /\ state \in Covered /\ ~flags.byHand => qa.run \in {"pass", "not-required"}
 
