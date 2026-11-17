@@ -1855,6 +1855,16 @@ def test_a_shell_read_that_fails_on_a_later_operand_keeps_the_file_it_printed(tm
     assert json.loads(summary.row()["skill_reads"]) == ["factory/factory-builder/SKILL.md"]
 
 
+BSD_SED = """sed() {
+    local args=() arg
+    for arg; do
+        case $arg in -l) ;; -nl) args+=(-n) ;; *) args+=("$arg") ;; esac
+    done
+    command sed "${args[@]}"
+}
+"""
+
+
 @pytest.mark.parametrize("harness", ["claude", "codex"])
 @pytest.mark.parametrize(
     "script, returncode, expected",
@@ -1867,10 +1877,16 @@ def test_a_shell_read_that_fails_on_a_later_operand_keeps_the_file_it_printed(tm
         ("sed -n 3p {guide} && cat {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
         ("head -n 3 {missing} && cat {skill}", 1, []),
         ("head -n 3 {missing} || cat {skill}", 0, ["factory/factory-builder/SKILL.md"]),
+        ("sed -nl '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("sed -n -l '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("sed -n -l 80 '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("sed -nl80 '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("sed -n --line-length 80 '1,3p' {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
     ],
     ids=[
         "and-after-failure", "and-before-failure", "semicolon", "or-after-failure", "option-value-in-output",
-        "sed-program-in-output", "head-failure", "or-after-head-failure",
+        "sed-program-in-output", "head-failure", "or-after-head-failure", "bsd-sed-joined-l", "bsd-sed-spaced-l",
+        "gnu-sed-spaced-l", "gnu-sed-joined-l", "gnu-sed-line-length",
     ],
 )
 def test_a_shell_read_counts_only_if_its_place_in_the_chain_ran(
@@ -1885,7 +1901,7 @@ def test_a_shell_read_counts_only_if_its_place_in_the_chain_ran(
     command = script.format(
         skill=shlex.quote(str(router)), missing=shlex.quote(str(tmp_path / "missing.md")), guide=shlex.quote(str(guide))
     )
-    run = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=False)
+    run = subprocess.run(["bash", "-c", BSD_SED + command], capture_output=True, text=True, check=False)
     assert run.returncode == returncode
     if harness == "claude":
         events = [_use("t1", "Bash", {"command": command}), _result("t1", run.stdout + run.stderr, error=returncode != 0)]

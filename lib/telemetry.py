@@ -1019,6 +1019,7 @@ _PROGRAM_OPTIONS = {
     "sed": frozenset({"-e", "-f", "--expression", "--file"}),
     "awk": frozenset({"-f", "--file"}),
 }
+_NUMBER_OPTIONS = {"sed": frozenset({"-l"})}
 _SHELL_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "}", "!"})
 _OPERATORS = ";&|()<>\n"
 _NOT_A_PATH = re.compile(r"[$*?\[`~]")
@@ -1048,12 +1049,15 @@ def _simple_commands(script: str) -> list[tuple[str, list[str]]]:
 
 def _read_operands(verb: str, args: list[str]) -> list[str]:
     valued, program = _VALUED_OPTIONS[verb], _PROGRAM_OPTIONS.get(verb, frozenset())
+    numbered = _NUMBER_OPTIONS.get(verb, frozenset())
     operands: list[str] = []
     programmed = False
-    words = iter(args)
-    for arg in words:
+    at_word = 0
+    while at_word < len(args):
+        arg, at_word = args[at_word], at_word + 1
         if arg == "--":
-            operands.extend(words)
+            operands.extend(args[at_word:])
+            break
         elif not arg.startswith("-"):
             operands.append(arg)
         else:
@@ -1065,8 +1069,9 @@ def _read_operands(verb: str, args: list[str]) -> list[str]:
                 at = next((index for index, option in enumerate(options) if option in valued), len(options))
                 options, takes_next = options[: at + 1], at == len(options) - 1
             programmed |= any(option in program for option in options)
-            if takes_next:
-                next(words, None)
+            value = "".join(args[at_word : at_word + 1])
+            if takes_next and (options[-1] not in numbered or value.isdigit()):
+                at_word += 1
     return operands[1:] if program and not programmed else operands
 
 
