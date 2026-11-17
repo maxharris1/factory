@@ -272,6 +272,77 @@ def test_an_unreachable_device_gets_the_token_on_a_later_pass_without_a_new_mint
     assert broker.read_token(device_file).token == f"{SENTINEL}_1"
 
 
+BOTS = ("claude-bot", "codex-bot", "cursor-bot")
+
+
+def _as_job_of(bot: str | None, home: Path, *argv: str, stdin: str = "") -> str:
+    env = {"HOME": str(home), "PATH": os.environ["PATH"]}
+    if bot is not None:
+        env["ORCH_JOB_BOT"] = bot
+    done = subprocess.run(
+        [sys.executable, "-I", str(ROOT / "lib/github_app_token.py"), *argv],
+        input=stdin, capture_output=True, text=True, env=env, check=True,
+    )
+    return done.stdout
+
+
+def test_bots_sharing_one_device_login_each_keep_their_own_app_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ssh = Ssh(tmp_path, monkeypatch)
+    for bot in BOTS:
+        (ssh.hosts / f"box-{bot}").write_text("box", encoding="utf-8")
+    remotes = {bot: [Remote("box", "box", f"box-{bot}", bot)] for bot in BOTS}
+    mint = FakeMint()
+    status = broker.refresh(
+        [app(bot) for bot in BOTS], tmp_path / "box-state", now=Clock(datetime.now(timezone.utc)),
+        mint=mint, holders={}, remotes=remotes, out=io.StringIO(),
+    )
+    assert status == 0
+    assert [call["user"] for call in ssh.calls()] == ["box"] * 3
+    minted = {bot: f"{SENTINEL}_{index + 1}" for index, (bot, _, _) in enumerate(mint.calls)}
+    assert sorted(minted) == sorted(BOTS)
+
+    tokens = ssh.home / ".config/factory/app-tokens"
+    fake_gh = tmp_path / "gh"
+    seen = tmp_path / "seen"
+    fake_gh.write_text(f'#!/bin/sh\nprintf %s "$GH_TOKEN" >{seen}\n', encoding="utf-8")
+    fake_gh.chmod(0o755)
+    request = "protocol=https\nhost=github.com\npath=maxharris1/demo\n\n"
+    for bot in BOTS:
+        answer = _as_job_of(bot, ssh.home, "credential", "--dir", str(tokens), "get", stdin=request)
+        assert answer == f"username=x-access-token\npassword={minted[bot]}\n", bot
+        _as_job_of(bot, ssh.home, "gh", "--dir", str(tokens), "--gh", str(fake_gh), "--",
+                   "api", "repos/maxharris1/demo")
+        assert seen.read_text() == minted[bot], bot
+    assert _as_job_of(None, ssh.home, "credential", "--dir", str(tokens), "get", stdin=request) == "", (
+        "a job that names no bot gets no bot's token"
+    )
+
+
+def test_a_device_whose_login_changes_gets_the_current_token_without_a_new_mint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ssh = Ssh(tmp_path, monkeypatch)
+    host = ssh.hosts / "box-claude-bot"
+    host.write_text("claude-bot", encoding="utf-8")
+    mint, clock = FakeMint(), Clock()
+    args = dict(now=clock, mint=mint, holders={}, out=io.StringIO())
+    box = tmp_path / "box-state"
+    unshared = Remote("box", "claude-bot", "box-claude-bot")
+    assert broker.refresh([app()], box, remotes={"claude-bot": [unshared]}, **args) == 0
+
+    host.write_text("box", encoding="utf-8")
+    clock.now = NOW + timedelta(minutes=5)
+    shared = Remote("box", "box", "box-claude-bot", "claude-bot")
+    assert broker.refresh([app()], box, remotes={"claude-bot": [shared]}, **args) == 0
+    assert len(mint.calls) == 1
+    assert [call["user"] for call in ssh.calls()] == ["claude-bot", "box"]
+    device_file = ssh.home / ".config/factory/app-tokens/claude-bot/maxharris1.json"
+    assert broker.read_token(device_file).token == f"{SENTINEL}_1"
+    assert stat.S_IMODE(device_file.parent.stat().st_mode) == 0o700
+
+
 def test_the_git_credential_helper_answers_with_the_owners_token(tmp_path: Path) -> None:
     broker.write_token(broker.token_path(tmp_path, "maxharris1"), issued(10, f"{SENTINEL}_MAX"), None)
     broker.write_token(broker.token_path(tmp_path, "aut0-code"), issued(10, f"{SENTINEL}_AUT0"), None)
@@ -550,6 +621,18 @@ def test_an_owner_that_is_not_a_login_never_becomes_a_path_or_script() -> None:
             broker.token_path(Path("/tmp"), owner)
 
 
+def test_a_bot_name_that_is_not_plain_never_becomes_a_path_or_script(tmp_path: Path) -> None:
+    for bot in ("../etc", "a b", "x';rm -rf ~;'", "", "Claude-bot"):
+        with pytest.raises(broker.BrokerError):
+            broker.push_script("maxharris1", bot)
+    tokens = tmp_path / "tokens"
+    (tokens / "claude-bot").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    assert broker.bot_directory(tokens, {"ORCH_JOB_BOT": "../elsewhere"}) == tokens
+    assert broker.bot_directory(tokens, {"ORCH_JOB_BOT": "codex-bot"}) == tokens, "no such bot directory"
+    assert broker.bot_directory(tokens, {"ORCH_JOB_BOT": "claude-bot"}) == tokens / "claude-bot"
+
+
 # --- the refresh command, the timer installer and the harness installer ------
 
 SERVICE = ROOT / "deploy" / "app-token-service.sh"
@@ -593,6 +676,29 @@ def test_refresh_reads_orch_and_machines_and_sends_to_enabled_remote_devices(
     printed = capsys.readouterr().out
     assert "claude-bot maxharris1: minted" in printed
     assert SENTINEL not in printed
+
+
+def test_refresh_sends_to_a_shared_device_login_with_each_bots_own_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.pool_helpers import write_target_machines
+    from tests.test_github_apps_config import orch_text
+
+    orch = tmp_path / "orch.yml"
+    orch.write_text(orch_text(enabled=False), encoding="utf-8")
+    machines = write_target_machines(tmp_path)
+    pushes: list[Remote] = []
+    monkeypatch.setattr(broker, "github_mint", FakeMint())
+    monkeypatch.setattr(broker, "ssh_push", lambda remote, owner, payload: pushes.append(remote) or True)
+
+    status = broker.main(["refresh", "--orch", str(orch), "--machines", str(machines),
+                          "--token-root", str(tmp_path / "tokens")])
+
+    assert status == 0
+    assert set(pushes) == {
+        *(Remote("box", "box", f"box-{bot}", bot) for bot in BOTS),
+        *(Remote("pc", bot, f"pc-wsl-{bot}") for bot in BOTS),
+    }
 
 
 def test_refresh_reads_an_inventory_whose_disabled_devices_hold_placeholders(

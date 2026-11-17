@@ -117,7 +117,7 @@ def remote_target(
         return RemoteTarget(
             device=device.name,
             alias=alias,
-            user=device.harnesses[placement_harness],
+            user=device.login_for(placement_harness),
             workdir_root=workdir,
             job_id=job_id,
             tag=tag,

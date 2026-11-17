@@ -559,6 +559,10 @@ def test_f1_an_html_goal_still_reads_as_written():
         "`keep\n# marker` must remain.",
         "`keep\n```\n` stays as code.",
         "Code `a\n- b\n1. c` and `d\n> e`.",
+        "Keep ](url`)\n# value` intact.",
+        "Label [a `b\n# c` d](u) stays.",
+        "Keep\n```x\ny``` as code.",
+        "Keep\n```  \n`` literal.",
     ],
 )
 def test_f2_an_inline_code_goal_renders_as_written(goal):
@@ -575,6 +579,29 @@ def test_f2_an_inline_code_goal_renders_as_written(goal):
     assert [(c.id, c.text) for c in bundle.criteria] == [("ac-1", "Comments survive.")]
 
 
+def test_f2_a_code_span_in_image_alt_text_gets_no_backslash():
+    body = brief_comment(
+        risk="low",
+        goal="Alt ![a `b\n# c` d](x.png) stays.",
+        acceptance_criteria=["Comments survive."],
+        likely_files=[],
+        done_evidence="Tests pass.",
+    )
+    assert "Alt ![a `b # c` d](x.png) stays." in body
+
+
+def test_f1_a_line_inside_an_html_tag_keeps_the_tag():
+    body = brief_comment(
+        risk="low",
+        goal='Keep <b title="a\n# b">bold</b> now.',
+        acceptance_criteria=["Comments survive."],
+        likely_files=[],
+        done_evidence="Tests pass.",
+    )
+    rendered = MarkdownIt("commonmark").render(body)
+    assert '<p><strong>Goal</strong>\nKeep <b title="a # b">bold</b> now.</p>' in rendered
+
+
 @pytest.mark.parametrize(
     "goal",
     [
@@ -582,6 +609,7 @@ def test_f2_an_inline_code_goal_renders_as_written(goal):
         "See ![x](a.png \"t`\")  \nnext `word`",
         "See [x](<https://example.com/`>)\\\n# next `word`",
         "See [x](https://example.com/(`))\\\nnext `word`",
+        'See [<b title="]">x</b>](url`)\\\n# next `word`',
     ],
 )
 def test_f2_a_backtick_in_a_link_destination_keeps_the_hard_break(goal):

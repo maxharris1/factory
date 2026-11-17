@@ -56,7 +56,7 @@ from fractions import Fraction
 
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.device_sync import blocked as sync_blocked
-from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
+from lib.machines_yml import Device, MachinesConfig, orch_host, shared_tailscale_names
 from lib.queue import (
     SLOTS_TABLE,
     Job,
@@ -790,15 +790,6 @@ def _float(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def box_device(config: MachinesConfig | None) -> str:
-    """The box: the `local: true` device in machines.yml (else "box")."""
-    if config is not None:
-        for device in config.devices:
-            if device.local:
-                return device.name
-    return "box"
-
-
 def back_off(connection: sqlite3.Connection, device: str, *, until: float, reason: str) -> None:
     """Keep new placements off device until `until`, in the caller's transaction (#460)."""
     connection.execute(
@@ -945,10 +936,10 @@ def _used(
     config: MachinesConfig | None = None,
 ) -> dict[str, int]:
     """Held slots per device, plus every running harness job that has no
-    placement (a claim made without a device, issue #90) on the box.
+    placement (a claim made without a device, issue #90) on the orch host.
 
-    Such a job runs on the box all the same, so it takes a box slot: the box
-    never runs more than its slot_max, however the job was claimed.
+    Such a job runs on the orch host all the same, so it takes a slot there:
+    the host never runs more than its slot_max, however the job was claimed.
     """
     has_slots = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -975,6 +966,6 @@ def _used(
         ).fetchone()[0]
     )
     if unplaced:
-        box = box_device(config)
-        used[box] = used.get(box, 0) + unplaced
+        host = orch_host(config)
+        used[host] = used.get(host, 0) + unplaced
     return used

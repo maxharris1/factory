@@ -1068,6 +1068,7 @@ def _runtime(
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
+    source.github.warning_sink = source.warning_sink
     source.deferral_sink = dispatcher.record_poll_deferral
     source.terminal_sink = dispatcher.record_terminal
     if config.linear_webhook is not None:

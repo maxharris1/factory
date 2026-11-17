@@ -11,6 +11,7 @@ ExecStart=%h/factory/deploy/run-poller.sh
 TimeoutStopSec=300
 Restart=on-failure
 RestartSec=60
+RestartPreventExitStatus=79
 
 [Install]
 WantedBy=default.target

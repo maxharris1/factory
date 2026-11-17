@@ -44,8 +44,9 @@ TICKET_KINDS = {
                 "tiles": ("elapsed", "heartbeat", "round", "hops"), "sections": SECTION_ORDER},
     "queued": {"started": False, "still": True, "tail": "queued", "strip": {},
                "tiles": ("waiting", "not_started", "round", "hops"), "sections": SECTION_ORDER},
-    "stopped": {"started": False, "still": True, "tail": "", "strip": {"state": "stuck"},
-                "tiles": ("stopped_for", "record_round", "hops"), "sections": _ENDED},
+    "stopped": {"started": False, "still": True, "tail": "", "line": "stopped",
+                "strip": {"effect": "static", "tint": "#f7768e", "seed": 5},
+                "tiles": ("stopped_for", "hops_before", "stop_round"), "lead": ("why",), "sections": _ENDED},
     "shipped": {"started": False, "still": True, "tail": "", "line": "shipped",
                 "strip": {"effect": "off", "done": True, "tint": "#9ece6a"},
                 "tiles": ("total", "rounds_done", "hops", "cost"), "sections": ("summary", "journey", "ended", "chart")},
@@ -53,6 +54,10 @@ TICKET_KINDS = {
              "tiles": ("in_state", "record_round", "hops"), "sections": ("journey", "next", "chart")},
 }
 HOW = {"merged": ("merged", "merge"), "handed-off": ("handed off", "hand-off")}
+END_PHASES = ("Stop", "Shipped")
+READ_ONLY = ("This page is read-only.", "This page is read-only; it is not done from here.",
+             "This page is read-only; neither is done from here.",
+             "This page is read-only; none of these is done from here.")
 PANELS = {
     "none": ("No ticket chosen", ""),
     "loading": ("Loading ticket", "Loading ticket {}… "),
@@ -74,9 +79,9 @@ CSS = """\
 .jd-hero .device,.jd-hero .tracker{font:12px var(--mono);color:var(--muted)}
 .jd-hero .line{margin:0;font-size:15px;line-height:1.5;color:var(--text-2)}
 .jd-hero .line b{font-family:var(--mono);font-weight:600;color:var(--accent)}
-.jd-hero .line b.ok{color:var(--ok)}
+.jd-hero .line b.ok{color:var(--ok)}.jd-hero .line b.bad{color:var(--bad)}
 .jd-when{display:flex;align-items:center;gap:8px;font:12px/1.5 var(--mono);color:var(--muted)}
-.jd-when .mark{width:8px;height:8px;background:var(--ok)}
+.jd-when .mark{width:8px;height:8px;background:var(--ok)}.jd-when.stop .mark{background:var(--bad)}
 .jd-gh{display:flex;flex-direction:column;gap:8px;font:12px/1.5 var(--mono);color:var(--text-2)}
 .jd-gh .gh-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .jd-gh button,.jd-gh select,.jd-gh textarea{font:12px var(--mono);color:var(--text);background:var(--field);border:1px solid var(--line-hi)}
@@ -93,7 +98,7 @@ CSS = """\
 .jd-tiles{flex:1 1 420px;min-width:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr));gap:8px}
 .jd-tile{padding:8px 10px;background:var(--bg);box-shadow:var(--elev)}
 .jd-tile b{display:flex;align-items:center;gap:8px;font:600 18px/1.25 var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
-.jd-tile b.ok{color:var(--ok)}.jd-tile b.warn{color:var(--warn)}.jd-tile b.bad{color:var(--bad)}
+.jd-tile b.ok{color:var(--ok)}.jd-tile b.warn{color:var(--warn)}.jd-tile b.bad{color:var(--bad)}.jd-tile b.soft{color:var(--text-2)}
 .jd-tile>span{font-size:12px;color:var(--muted)}
 .jd-pips{display:flex;gap:2px}.jd-pips span{width:6px;height:6px;background:var(--line-hi)}
 .jd-pips span.done{background:var(--text)}.jd-pips span.now{background:var(--accent)}
@@ -148,6 +153,8 @@ CSS = """\
 .jd-ctl .key{display:flex;align-items:center;gap:6px}
 .jd-ctl .key i{width:12px;height:8px;background:var(--m)}
 .jd-ctl .key i.off{width:4px;height:12px;background:repeating-linear-gradient(180deg,var(--m) 0 4px,transparent 4px 8px)}
+.jd-ctl .endnote{display:none;font-weight:600;color:var(--m)}
+.jd-panel .count .tap{display:none}
 .jd-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-legend span{display:flex;align-items:center;gap:6px}
 .jd-legend i{width:10px;height:10px;background:var(--m)}
@@ -163,6 +170,17 @@ CSS = """\
 .jd-next .human .to{color:#ff9e64}.jd-next .stop .to{color:var(--bad)}
 .jd-next .tag{font-size:11px;color:var(--muted)}
 .jd-next .why{font-size:13px;color:var(--text-2)}
+.jd-why h2 .t::before{background:var(--bad)}
+.why-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px 32px}
+.why-col{flex:1 1 420px;min-width:0;display:flex;flex-direction:column;gap:8px}
+.why-col .label{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.why-reason{padding:10px 12px;background:var(--field);box-shadow:var(--elev);font:13px/1.5 var(--mono);color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.why-facts{width:100%;border-collapse:collapse;font-size:13px}
+.why-facts th{width:96px;padding:6px 12px 6px 0;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-family:var(--mono);font-size:12px;font-weight:500;color:var(--muted)}
+.why-facts td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top;color:var(--text-2);overflow-wrap:anywhere}
+.why-col .jd-next .head{flex-wrap:wrap;gap:2px 8px}
+.jd-next .card.end{border-color:var(--bad)}.jd-next .end .to{color:var(--bad)}
+.why-ro{margin:0;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-chart{min-width:0;padding:10px 16px 14px;background:var(--panel);box-shadow:var(--elev)}
 .jd-chart summary{cursor:pointer;font:600 13px/1.8 var(--mono);color:var(--text)}
 .jd-chart summary .count{font-weight:400;font-size:12px;color:var(--muted)}
@@ -232,6 +250,15 @@ PHONE_CSS = """\
 .ticketpage .runlog .visit{min-height:44px;padding:8px 6px}
 .ticketpage .jd-foot{margin:10px 0 0}
 .ticketpage .jd-next .head{flex-wrap:wrap;gap:2px 8px}
+.ticketpage canvas.jd-journey{width:auto;max-width:100%}
+.ticketpage .journey{width:auto}
+.ticketpage .jd-cap{padding:8px 12px}
+.ticketpage .jd-cap .idx,.ticketpage .jd-cap .note,.ticketpage .jd-cap .end{display:none}
+.ticketpage .jd-ctl{gap:6px 10px;padding:0 12px 8px}
+.ticketpage .jd-ctl .axis,.ticketpage .jd-ctl .gap,.ticketpage .jd-ctl .key.stop,.ticketpage .jd-ctl .key.hop,.ticketpage .jd-ctl .endnote~.key{display:none}
+.ticketpage .jd-ctl .endnote{display:inline}
+.ticketpage .count .desk{display:none}
+.ticketpage .count .tap{display:inline}
 .ticketpage .jd-chart{padding:0 12px}
 .ticketpage .jd-chart summary{padding:12px 0;line-height:1.5}
 .ticketpage .jd-chart .jd-box{margin-top:0}
@@ -278,19 +305,25 @@ def _detail_model(row: dict, chart: dict | None) -> dict:
         ({"to": e["to"], "label": e["label"], "kind": kind(e["to"]), "count": seen.get(e["to"], 0)} for e in edges),
         key=lambda n: NEXT_ORDER[n["kind"]],
     )
+    end = flow[ended] if ended else None
+    ways_out = [
+        {"to": w["to"], "label": w["label"], "end": phases.get(w["to"]) in END_PHASES}
+        for w in (end or {}).get("ways_out", [])
+    ]
     return {
         "visits": visits,
         "selected": current[0] if current else len(visits) - 1,
         "state": state,
         "terminal": bool(flow.get("terminal")),
         "next": nexts,
+        "ways_out": ways_out,
         "hops": max(0, len(visits) - 1),
         "off_chart_count": sum(1 for v in visits if v["off_chart"]),
         "hops_to_shipped": flow.get("hops_to_shipped"),
         "all_durations_known": bool(flow.get("all_durations_known")),
         "state_age_seconds": flow.get("state_age_seconds"),
         "ended": ended,
-        "end": flow[ended] if ended else None,
+        "end": end,
     }
 
 
@@ -323,6 +356,26 @@ def _intake_at(model: dict) -> float | None:
 def _et_clock(epoch: float) -> str:
     at = datetime.fromtimestamp(epoch, ET)
     return f"{at.hour % 12 or 12}:{at.minute:02d} {'AM' if at.hour < 12 else 'PM'} ET"
+
+
+def _et_day(epoch: float) -> str:
+    at = datetime.fromtimestamp(epoch, ET)
+    return f"{at:%a %b} {at.day}, {_et_clock(epoch)}"
+
+
+def _stop_age(model: dict) -> float | None:
+    at = model["end"]["at"]
+    return None if at is None else model["now"] - at
+
+
+def _stop_facts(model: dict) -> dict:
+    states = [v["state"] for v in model["visits"]]
+    path = states[:-1] if states and states[-1] == model["end"]["state"] else states
+    return {"hops_before": max(0, len(path) - 1), "path": path}
+
+
+def _hops(n: int) -> str:
+    return f"{n} hop{'' if n == 1 else 's'}"
 
 
 def _how(model: dict) -> tuple[str, str]:
@@ -384,11 +437,29 @@ def _when(model: dict) -> str:
     return f'<div class="jd-when"><span class="mark" aria-hidden="true"></span>{_span(None, text)}</div>'
 
 
+def _stopped_clock(model: dict) -> str | None:
+    at = model["end"]["at"]
+    return None if at is None else f"stopped {_et_day(at)}"
+
+
+def _stopped_line(model: dict) -> str:
+    end, age = model["end"], _stop_age(model)
+    where = f" in {_e(end['stopped_in'])}" if end.get("stopped_in") else ""
+    took = "" if age is None else f" for <span>{duration(age)}</span>"
+    text = " · ".join(p for p in ("no job running", _stopped_clock(model)) if p)
+    return (
+        f'<p class="line"><b class="bad">{_e(end["state"])}</b>{where}{took}</p>'
+        f'<div class="jd-when stop"><span class="mark" aria-hidden="true"></span>{_span(None, text)}</div>'
+    )
+
+
 HERO_LINES = {
     "state": {"crumb": _started, "chip": lambda model: "",
               "body": lambda row, model, motion: _hero_line(row, model) + _verb(row, motion)},
     "shipped": {"crumb": _ended_clock, "chip": lambda model: _chip(_how(model)[0], "ok"),
                 "body": lambda row, model, motion: _shipped_line(model) + _when(model)},
+    "stopped": {"crumb": _stopped_clock, "chip": lambda model: _chip(model["end"]["state"], "bad"),
+                "body": lambda row, model, motion: _stopped_line(model)},
 }
 
 
@@ -433,8 +504,15 @@ def _cost_tile(row: dict, model: dict) -> str:
 
 
 def _stopped_for(row: dict, model: dict) -> str:
-    at = row["flow"]["stopped"]["at"]
-    return _age_tile(None if at is None else model["now"] - at, "stopped")
+    age = _stop_age(model)
+    return _tile("no reading", "time stopped") if age is None else _tile(duration(age), "time stopped", "bad")
+
+
+def _stop_round(row: dict, model: dict) -> str:
+    rnd = row["flow"]["round"]
+    if rnd is None:
+        return _tile("no round", "revise round")
+    return _tile(str(rnd), "revise round") if rnd else _tile("none", "revise round", "soft")
 
 
 def _elapsed_label(row: dict) -> str:
@@ -450,6 +528,8 @@ TILES = {
     "record_round": lambda row, model: _tile("no round" if row["flow"]["round"] is None else str(row["flow"]["round"]), "revise round"),
     "in_state": lambda row, model: _age_tile(model["state_age_seconds"], f"in {model['state']}"),
     "stopped_for": _stopped_for,
+    "hops_before": lambda row, model: _tile(_hops(_stop_facts(model)["hops_before"]), "before it stopped"),
+    "stop_round": _stop_round,
     "hops": lambda row, model: _tile(f"{model['hops']} hops", f"{model['off_chart_count']} off-chart"),
     "total": lambda row, model: _age_tile(model["end"]["intake_to_ship_seconds"], f"total, intake to {_how(model)[1]}"),
     "rounds_done": _rounds_done,
@@ -792,6 +872,35 @@ def _ended(model: dict) -> str:
     )
 
 
+def _why(model: dict) -> str:
+    end, facts, age = model["end"], _stop_facts(model), _stop_age(model)
+    where = f"in {end['stopped_in']}" if end.get("stopped_in") else ""
+    sub = " · ".join(p for p in ("" if age is None else f"stopped {duration(age)} ago", where) if p)
+    path = f"{_hops(facts['hops_before'])} in ({' → '.join(facts['path'])})" if facts["path"] else ""
+    rows = (
+        ("when", "no reading" if age is None else f"{_et_day(end['at'])} · {duration(age)} ago"),
+        ("where", ", ".join(p for p in (where, path) if p) or "no reading"),
+        ("job", "none running"),
+    )
+    table = "".join(f'<tr><th scope="row">{name}</th><td>{_e(text)}</td></tr>' for name, text in rows)
+    ways = model["ways_out"]
+    cards = "".join(
+        f'<div class="card{" end" if w["end"] else ""}"><div class="head">{_span("to", w["to"])}'
+        + (_span("tag", "end state") if w["end"] else "")
+        + f'</div>{_span("why", w["label"])}</div>'
+        for w in ways
+    )
+    out = f'<div class="jd-next">{cards}</div>' if ways else '<p class="empty">no way out on the chart</p>'
+    return (
+        f'<section class="jd-panel jd-why"><h2>{_span("t", "Why it stopped")}{_span("count", sub)}</h2>'
+        f'<div class="why-body"><div class="why-col">{_span("label", "Reason")}'
+        f'<div class="why-reason">{_e(end.get("reason") or "no reason recorded")}</div>'
+        f'<table class="why-facts"><tbody>{table}</tbody></table></div>'
+        f'<div class="why-col">{_span("label", f"Ways out · {len(ways)}, from the chart")}{out}'
+        f'<p class="why-ro">{READ_ONLY[min(len(ways), len(READ_ONLY) - 1)]}</p></div></div></section>'
+    )
+
+
 def _journey_label(model: dict) -> str:
     path = " → ".join(v["state"] for v in model["visits"]) or "no visits"
     if model["ended"]:
@@ -854,6 +963,8 @@ def _caption(model: dict) -> str:
 
 
 REPLAY = '<button type="button" data-replay="1">replay</button>'
+JOURNEY_SUB = "this ticket through time · pick a step for its reason"
+JOURNEY_TAP = "tap a step for its reason"
 
 
 def _journey(row: dict, model: dict) -> str:
@@ -869,16 +980,19 @@ def _journey(row: dict, model: dict) -> str:
         else ""
     )
     legend = "".join(f'<span class="key"><i style="--m:{TINT[w]}"></i>{w}</span>' for w in _legend_who(model))
-    legend += f'<span class="key"><i style="--m:{STOP_TINT}"></i>stopped</span>'
-    legend += f'<span class="key"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
+    legend += f'<span class="key stop"><i style="--m:{STOP_TINT}"></i>stopped</span>'
+    legend += f'<span class="key hop"><i class="off" style="--m:{HOP_TINT}"></i>off-chart hop</span>'
+    endnote = (
+        f'<span class="endnote" style="--m:{END_TINT[model["ended"]]}">{_e(_end_text(model))}</span>' if model["ended"] else ""
+    )
     return (
         f'<section class="jd-panel" data-sec="journey"><h2>{_span("t", "Journey")}'
-        f'{_span("count", "this ticket through time · pick a step for its reason")}</h2>'
+        f'<span class="count">{_span("desk", JOURNEY_SUB)}{_span("tap", JOURNEY_TAP)}</span></h2>'
         f'<div class="jd-box"><canvas class="jd-journey" width="1000" height="336" role="img" '
         f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>{_caption(model)}'
         '<div class="jd-ctl"><div class="axis" role="group" aria-label="Time axis">'
         '<button type="button" data-scale="even" aria-pressed="true">even steps</button>'
-        f'{scale}</div>{"" if model["ended"] == "stopped" else REPLAY}<span class="gap"></span>{legend}</div></section>'
+        f'{scale}</div>{"" if model["ended"] == "stopped" else REPLAY}{endnote}<span class="gap"></span>{legend}</div></section>'
     )
 
 
@@ -943,6 +1057,7 @@ SECTIONS = {
     "chart": lambda part: _chart(part["key"], part["model"], part["chart"]),
     "summary": lambda part: _summary(part["model"]),
     "ended": lambda part: _ended(part["model"]),
+    "why": lambda part: _why(part["model"]),
 }
 
 
@@ -969,6 +1084,8 @@ def record_row(record: dict, ticket: dict | None) -> dict:
 
 def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) -> dict | None:
     repo, _, ticket_id = address.partition("#")
+    record = records.get(address) if records else None
+    own = {(job["job"], ticket_address(job)) for job in record["jobs"]} if record else set()
 
     def exact(row: dict) -> bool:
         return ticket_address(row) == address
@@ -976,12 +1093,16 @@ def resolve_ticket(snapshot: dict, address: str, records: dict | None = None) ->
     def any_case(row: dict) -> bool:
         return str(row["repo"]).lower() == repo.lower() and str(row["ticket_id"]) == ticket_id
 
-    for rule in (exact, any_case):
+    def own_job(row: dict) -> bool:
+        return (row["job"], ticket_address(row)) in own
+
+    for rule in (exact, any_case, own_job):
         for kind in LIVE_KINDS:
             rows = [row for row in snapshot[kind] if rule(row)]
             if rows:
                 row = _PICK[kind](rows)
-                return {"kind": kind, "address": ticket_address(row), "row": row, "ticket": _ticket_of(snapshot, row)}
+                shown = ticket_address(row) if rule is any_case else address
+                return {"kind": kind, "address": shown, "row": row, "ticket": _ticket_of(snapshot, row)}
     if not records:
         return None
     key = address if address in records else next((k for k in sorted(records) if any_case(records[k])), None)
@@ -1003,6 +1124,7 @@ def _ticket_article(found: dict, snapshot: dict) -> str:
         f'<article class="jobpage ticketpage" data-ticket="{_e(address)}">'
         + _crumb(_tile_label(row), HERO_LINES[spec.get("line", "state")]["crumb"](model))
         + _ticket_hero(found, model, spec)
+        + "".join(SECTIONS[name](part) for name in spec.get("lead", ()))
         + _cols(part, spec["sections"])
         + "</article>"
     )
@@ -1038,11 +1160,16 @@ _SCRIPT = r"""
                 first: 'ticket arrives', stop: '#f7768e', hop: '#c0caf5', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__, trackers: __TRACKERS__,
                 kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
-                panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__, how: __HOW__};
+                panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__, how: __HOW__,
+                endPhases: __ENDPHASES__, readOnly: __READONLY__,
+                phone: __PHONE__, journeySub: __JOURNEYSUB__, journeyTap: __JOURNEYTAP__};
   var SEL = {};
   var chartScroll = {};
   var journeys = [];
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  var phoneQuery = window.matchMedia ? window.matchMedia(DETAIL.phone) : null;
+  var journeyResize = typeof ResizeObserver === 'function' ? new ResizeObserver(fitJourneys) : null;
+  if (phoneQuery && phoneQuery.addEventListener) phoneQuery.addEventListener('change', fitJourneys);
 
   function whoTint(w) { return JOURNEY.tint[w] || JOURNEY.tint.script; }
   function detailModel(r, chart) {
@@ -1064,9 +1191,12 @@ _SCRIPT = r"""
     var nexts = ((chart && chart.edges) || []).filter(function (e) { return state !== null && e.from === state; })
       .map(function (e, i) { return {to: e.to, label: e.label, kind: kind(e.to), count: seen[e.to] || 0, i: i}; });
     nexts.sort(function (a, b) { return (DETAIL.order[a.kind] - DETAIL.order[b.kind]) || (a.i - b.i); });
+    var waysOut = ((ended && flow[ended].ways_out) || []).map(function (w) {
+      return {to: w.to, label: w.label, end: DETAIL.endPhases.indexOf(phases[w.to]) >= 0};
+    });
     return {
       visits: visits, selected: current.length ? current[0].index : visits.length - 1, state: state,
-      terminal: !!flow.terminal, next: nexts, hops: Math.max(0, visits.length - 1),
+      terminal: !!flow.terminal, next: nexts, ways_out: waysOut, hops: Math.max(0, visits.length - 1),
       off_chart_count: visits.filter(function (v) { return v.off_chart; }).length,
       hops_to_shipped: flow.hops_to_shipped === undefined ? null : flow.hops_to_shipped,
       all_durations_known: !!flow.all_durations_known,
@@ -1125,6 +1255,20 @@ _SCRIPT = r"""
     ET.formatToParts(new Date(epoch * 1000)).forEach(function (part) { p[part.type] = part.value; });
     return p.hour + ':' + p.minute + ' ' + p.dayPeriod + ' ET';
   }
+  var ETDAY = null;
+  function etDay(epoch) {
+    ETDAY = ETDAY || new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric'});
+    var p = {};
+    ETDAY.formatToParts(new Date(epoch * 1000)).forEach(function (part) { p[part.type] = part.value; });
+    return p.weekday + ' ' + p.month + ' ' + p.day + ', ' + etClock(epoch);
+  }
+  function stopAge(m) { return known(m.end.at) ? m.now - m.end.at : null; }
+  function stopFacts(m) {
+    var states = m.visits.map(function (v) { return v.state; });
+    var path = states.length && states[states.length - 1] === m.end.state ? states.slice(0, -1) : states;
+    return {hops_before: Math.max(0, path.length - 1), path: path};
+  }
+  function hopsText(n) { return n + (n === 1 ? ' hop' : ' hops'); }
   function known(x) { return x !== null && x !== undefined; }
   function reading(x, fmt) { return known(x) ? fmt(x) : 'no reading'; }
   function howOf(m) { return DETAIL.how[m.end.how]; }
@@ -1160,8 +1304,16 @@ _SCRIPT = r"""
     record_round: function (box, r) { tile(box, r.flow.round === null ? 'no round' : String(r.flow.round), 'revise round'); },
     in_state: function (box, r, m) { ageTile(box, m.state_age_seconds, 'in ' + m.state); },
     stopped_for: function (box, r, m) {
-      var at = r.flow.stopped.at;
-      ageTile(box, at === null || at === undefined ? null : m.now - at, 'stopped');
+      var age = stopAge(m);
+      if (age === null) tile(box, 'no reading', 'time stopped');
+      else ticking(tile(box, '', 'time stopped', 'bad'), age);
+    },
+    hops_before: function (box, r, m) { tile(box, hopsText(stopFacts(m).hops_before), 'before it stopped'); },
+    stop_round: function (box, r) {
+      var n = r.flow.round;
+      if (!known(n)) tile(box, 'no round', 'revise round');
+      else if (n) tile(box, String(n), 'revise round');
+      else tile(box, 'none', 'revise round', 'soft');
     },
     hops: function (box, r, m) { tile(box, m.hops + ' hops', m.off_chart_count + ' off-chart'); },
     total: function (box, r, m) { tile(box, reading(m.end.intake_to_ship_seconds, dur), 'total, intake to ' + howOf(m)[1]); },
@@ -1242,9 +1394,24 @@ _SCRIPT = r"""
     var start = intakeAt(m);
     span(when, null, [start === null ? '' : 'intake ' + etClock(start), endedClock(m)].filter(Boolean).join(' · '));
   }
+  function stoppedClock(m) { return known(m.end.at) ? 'stopped ' + etDay(m.end.at) : null; }
+  function stoppedLine(who, r, m) {
+    var end = m.end, age = stopAge(m);
+    var line = add(who, el('p', 'line'));
+    add(line, el('b', 'bad', end.state));
+    if (end.stopped_in) line.appendChild(document.createTextNode(' in ' + end.stopped_in));
+    if (age !== null) {
+      line.appendChild(document.createTextNode(' for '));
+      ticking(add(line, el('span')), age);
+    }
+    var when = add(who, el('div', 'jd-when stop'));
+    span(when, 'mark').setAttribute('aria-hidden', 'true');
+    span(when, null, ['no job running', stoppedClock(m)].filter(Boolean).join(' · '));
+  }
   var LINES = {
     state: {crumb: startedClock, chip: function () {}, body: stateLine},
-    shipped: {crumb: endedClock, chip: function (title, m) { add(title, chip(howOf(m)[0], 'ok')); }, body: shippedLine}
+    shipped: {crumb: endedClock, chip: function (title, m) { add(title, chip(howOf(m)[0], 'ok')); }, body: shippedLine},
+    stopped: {crumb: stoppedClock, chip: function (title, m) { add(title, chip(m.end.state, 'bad')); }, body: stoppedLine}
   };
   function hero(c, strip, label, tags, ticket, tiles, line) {
     var r = c.r, m = c.m;
@@ -1671,6 +1838,47 @@ _SCRIPT = r"""
     ticking(span(row, 'ago'), m.now - at, '', ' ago');
     return sec;
   }
+  function whyPanel(m) {
+    var end = m.end, facts = stopFacts(m), age = stopAge(m);
+    var where = end.stopped_in ? 'in ' + end.stopped_in : '';
+    var sec = el('section', 'jd-panel jd-why');
+    var h = add(sec, el('h2'));
+    span(h, 't', 'Why it stopped');
+    var count = span(h, 'count', where);
+    if (age !== null) ticking(count, age, 'stopped ', ' ago' + (where ? ' · ' + where : ''));
+    var body = add(sec, el('div', 'why-body'));
+    var left = add(body, el('div', 'why-col'));
+    span(left, 'label', 'Reason');
+    add(left, el('div', 'why-reason', end.reason || 'no reason recorded'));
+    var tbody = add(add(left, el('table', 'why-facts')), el('tbody'));
+    function fact(name) {
+      var tr = add(tbody, el('tr'));
+      add(tr, el('th', null, name)).setAttribute('scope', 'row');
+      return add(tr, el('td'));
+    }
+    var when = fact('when');
+    if (age === null) when.textContent = 'no reading';
+    else ticking(when, age, etDay(end.at) + ' · ', ' ago');
+    var path = facts.path.length ? hopsText(facts.hops_before) + ' in (' + facts.path.join(' → ') + ')' : '';
+    fact('where').textContent = [where, path].filter(Boolean).join(', ') || 'no reading';
+    fact('job').textContent = 'none running';
+    var right = add(body, el('div', 'why-col'));
+    var ways = m.ways_out;
+    span(right, 'label', 'Ways out · ' + ways.length + ', from the chart');
+    if (!ways.length) add(right, el('p', 'empty', 'no way out on the chart'));
+    else {
+      var grid = add(right, el('div', 'jd-next'));
+      ways.forEach(function (w) {
+        var card = add(grid, el('div', w.end ? 'card end' : 'card'));
+        var head = add(card, el('div', 'head'));
+        span(head, 'to', w.to);
+        if (w.end) span(head, 'tag', 'end state');
+        span(card, 'why', w.label);
+      });
+    }
+    add(right, el('p', 'why-ro', DETAIL.readOnly[Math.min(ways.length, DETAIL.readOnly.length - 1)]));
+    return sec;
+  }
   function legendItem(parent, cls, tint, text, bg) {
     var s = span(parent, null);
     var i = add(s, el('i', cls || null));
@@ -1717,7 +1925,10 @@ _SCRIPT = r"""
     span(cap, 'note', reasonOf(v));
   }
   function journeyPanel(r, m, hits, scales, scale) {
-    var sec = jdPanel(null, 'journey', 'Journey', 'this ticket through time · pick a step for its reason');
+    var sec = jdPanel(null, 'journey', 'Journey', '');
+    var count = sec.children[0].children[1];
+    span(count, 'desk', DETAIL.journeySub);
+    span(count, 'tap', DETAIL.journeyTap);
     var box = add(sec, el('div', 'jd-box'));
     var canvas = add(box, el('canvas', 'jd-journey'));
     canvas.setAttribute('width', '1000');
@@ -1754,11 +1965,12 @@ _SCRIPT = r"""
     ctlButton(axis, 'even steps', 'data-scale', 'even', scale === 'even');
     if (m.all_durations_known) ctlButton(axis, 'to scale', 'data-scale', 'scale', scale === 'scale');
     if (m.ended !== 'stopped') ctlButton(ctl, 'replay', 'data-replay', '1', null);
+    if (m.ended) span(ctl, 'endnote', endText(m)).setAttribute('style', '--m:' + DETAIL.endTint[m.ended]);
     span(ctl, 'gap');
     legendWho(m).forEach(function (w) { legendItem(ctl, null, JOURNEY.tint[w], w).className = 'key'; });
-    legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key';
-    legendItem(ctl, 'off', DETAIL.hop, 'off-chart hop').className = 'key';
-    return {sec: sec, canvas: canvas, cap: cap};
+    legendItem(ctl, null, DETAIL.stop, 'stopped').className = 'key stop';
+    legendItem(ctl, 'off', DETAIL.hop, 'off-chart hop').className = 'key hop';
+    return {sec: sec, box: box, canvas: canvas, cap: cap};
   }
   function nextPanel(m) {
     var sub = m.terminal || !m.state ? 'no way out' : m.next.length + ' ways out of ' + m.state;
@@ -1848,14 +2060,26 @@ _SCRIPT = r"""
       buttons.forEach(function (b) {
         var on = Number(b.getAttribute('data-visit')) === i;
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
-        if (on && fromChart && buttons === j.logButtons && b.scrollIntoView) b.scrollIntoView({block: 'nearest'});
+        if (on && fromChart && !j.g.compact && buttons === j.logButtons && b.scrollIntoView) b.scrollIntoView({block: 'nearest'});
       });
     });
     fillCaption(j.cap, j.m, i);
     drawOne(j, Date.now());
   }
+  function fitJourney(j) {
+    var g = phoneQuery && phoneQuery.matches ? JOURNEY_GEOM.compact((j.box.clientWidth || 327) / 4) : JOURNEY_GEOM.wide;
+    if (g === j.g) return;
+    j.g = g;
+    j.canvas.width = g.w * 4;
+    j.canvas.height = g.h * 4;
+    placeHits(j);
+    drawOne(j, Date.now());
+  }
+  function fitJourneys() {
+    journeys.forEach(function (j) { if (j.canvas.isConnected) fitJourney(j); });
+  }
   function placeHits(j) {
-    var bars = journeyBars(j.m, SEL[j.key].scale);
+    var bars = journeyBars(j.m, SEL[j.key].scale, j.g);
     var buttons = j.hitButtons;
     for (var k = 0; k < buttons.length && k < bars.length; k++) {
       var b = bars[k], st = buttons[k].style;
@@ -1869,7 +2093,7 @@ _SCRIPT = r"""
       if (ctx) {
         var flash = s.flashAt === null || reducedMotion ? 0 : Math.max(0, 1 - (now - s.flashAt) / 260);
         var beat = s.beatStart === null || reducedMotion ? -1 : (now - s.beatStart) / 1000;
-        drawJourney(ctx, j.m, {t: reducedMotion ? 1e6 : (now - s.tPlay) / 1000, scale: s.scale, selected: s.selected,
+        drawJourney(ctx, j.m, {g: j.g, t: reducedMotion ? 1e6 : (now - s.tPlay) / 1000, scale: s.scale, selected: s.selected,
           flash: flash, beat: beat >= 0 && beat <= 1 ? beat : -1, reduced: reducedMotion, still: j.still,
           startClock: j.startClock, nowClock: j.nowClock, endClock: j.endClock});
       }
@@ -1881,7 +2105,10 @@ _SCRIPT = r"""
     }
   }
   function journeyFrame() {
-    journeys = journeys.filter(function (j) { return j.canvas.isConnected; });
+    journeys = journeys.filter(function (j) {
+      if (!j.canvas.isConnected && journeyResize) journeyResize.unobserve(j.box);
+      return j.canvas.isConnected;
+    });
     if (!journeys.length) return false;
     var now = Date.now();
     journeys.forEach(function (j) { drawOne(j, now); });
@@ -1894,7 +2121,8 @@ _SCRIPT = r"""
     next: function (c) { return nextPanel(c.m); },
     chart: function (c) { c.cp = chartPanel(c.key, c.m, c.chart); return c.cp.sec; },
     summary: function (c) { return summaryPanel(c.m); },
-    ended: function (c) { return endedPanel(c.m); }
+    ended: function (c) { return endedPanel(c.m); },
+    why: function (c) { return whyPanel(c.m); }
   };
   function detailContext(key, r, d, started) {
     var chart = d.statechart || null;
@@ -1913,7 +2141,7 @@ _SCRIPT = r"""
     var jp = c.jp, cp = c.cp, start = firstStart(c.m);
     var endAt = c.m.end ? c.m.end.at : null;
     var j = {key: c.key, r: c.r, m: c.m, still: !c.m.ended && (!!c.still || holdsStill(c.motion)), logButtons: c.logButtons,
-             hitButtons: hitButtons, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
+             hitButtons: hitButtons, box: jp.box, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: start === null ? '' : journeyClock(start), nowClock: journeyClock(c.generated),
              endClock: endAt === null || endAt === undefined ? '' : journeyClock(endAt)};
     art.addEventListener('click', function (ev) {
@@ -1930,8 +2158,9 @@ _SCRIPT = r"""
       drawOne(j, Date.now());
     });
     if (cp.canvas) cp.sec.addEventListener('toggle', function () { drawOne(j, Date.now()); });
-    placeHits(j);
+    fitJourney(j);
     journeys.push(j);
+    if (journeyResize) journeyResize.observe(j.box);
     PX.onFrame(journeyFrame);
   }
 
@@ -1953,18 +2182,22 @@ _SCRIPT = r"""
     return function (r) { return String(r.repo).toLowerCase() === repo && String(r.ticket_id) === id; };
   }
   function resolveTicket(d, address, records) {
-    var rules = [function (r) { return ticketAddress(r) === address; }, sameTicket(address)];
+    var keyed = records && Object.prototype.hasOwnProperty.call(records, address);
+    var own = keyed ? records[address].jobs : [];
+    var rules = [function (r) { return ticketAddress(r) === address; }, sameTicket(address), function (r) {
+      return own.some(function (j) { return j.job === r.job && ticketAddress(j) === ticketAddress(r); });
+    }];
     for (var i = 0; i < rules.length; i++) {
       for (var k = 0; k < DETAIL.liveKinds.length; k++) {
         var kind = DETAIL.liveKinds[k];
         var rows = (d[kind] || []).filter(rules[i]);
         if (!rows.length) continue;
         var row = PICK[kind](rows);
-        return {kind: kind, address: ticketAddress(row), row: row, ticket: ticketRow(d, row)};
+        return {kind: kind, address: i === 1 ? ticketAddress(row) : address, row: row, ticket: ticketRow(d, row)};
       }
     }
     if (!records) return null;
-    var key = Object.prototype.hasOwnProperty.call(records, address) ? address
+    var key = keyed ? address
       : Object.keys(records).sort().filter(function (k) { return rules[1](records[k]); })[0];
     if (key === undefined) return null;
     var rec = records[key], t = ticketRow(d, rec);
@@ -1987,6 +2220,7 @@ _SCRIPT = r"""
       trackerSpan(title, r, spec.tail);
       troubleChips(title, r);
     }, found.ticket, spec.tiles, line));
+    (spec.lead || []).forEach(function (name) { add(art, SECTIONS[name](c)); });
     detailCols(art, c, spec.sections);
     return art;
   }
@@ -2045,6 +2279,7 @@ _SCRIPT = r"""
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,
            "KINDS": TICKET_KINDS, "LIVEKINDS": LIVE_KINDS,
            "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS,
-           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT, "HOW": HOW}
+           "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT, "HOW": HOW, "ENDPHASES": END_PHASES, "READONLY": READ_ONLY,
+           "PHONE": PHONE, "JOURNEYSUB": JOURNEY_SUB, "JOURNEYTAP": JOURNEY_TAP}
 _SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

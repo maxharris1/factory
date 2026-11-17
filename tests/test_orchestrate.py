@@ -612,6 +612,9 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "lib.handoff",
         "lib.load",
         "lib.schema",
+        "markdown_it",
+        "markdown_it.rules_inline",
+        "markdown_it.rules_inline.state_inline",
     }
 
 

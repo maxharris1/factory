@@ -28,7 +28,7 @@ from lib.dashboard_pages.journey_canvas import TINT
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
-from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
+from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
 from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
@@ -565,7 +565,7 @@ def test_the_no_script_control_strip_holds_the_axis_replay_and_legend_in_one_row
     strip = re.search(r'<div class="jd-ctl">(.*)</div></section>$', journey, re.S).group(1)
     assert re.search(r'<div class="axis" role="group" aria-label="Time axis">.*data-scale="even".*data-scale="scale".*</div>'
                      r'<button type="button" data-replay="1">replay</button><span class="gap"></span>', strip, re.S)
-    assert re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', strip) == PATH_KEYS
+    assert re.findall(r'<span class="key[^"]*"><i[^>]*></i>([^<]+)</span>', strip) == PATH_KEYS
     assert "jd-legend" not in journey
 
 
@@ -767,7 +767,7 @@ def test_the_script_says_a_queued_job_has_not_started_yet(tmp_path: Path) -> Non
 
 
 def _keys(markup: str) -> list[str]:
-    return re.findall(r'<span class="key"><i[^>]*></i>([^<]+)</span>', markup)
+    return re.findall(r'<span class="key[^"]*"><i[^>]*></i>([^<]+)</span>', markup)
 
 
 def _chart_keys(markup: str) -> list[str]:
@@ -1137,6 +1137,8 @@ def test_a_redraw_keeps_focus_and_scroll_on_the_ticket_page(tmp_path: Path) -> N
 def test_the_ticket_page_never_scrolls_sideways_on_a_phone(tmp_path: Path, kind: str) -> None:
     snapshot = _with_shipped(_snapshot(tmp_path))
     _row(snapshot, "g-grok-c").update(source="#5310", pr="5770", round="2/3")
+    if kind == "stopped":
+        _stopped(snapshot, reason="superseded-by-sanctioned-intake/" * 30)
     address = {**{k: a for k, (a, _) in LIVE.items()}, **RECORD}[kind]
     server = _serve(tmp_path, {"fixture": snapshot})
     chrome = _Chrome(tmp_path / "profile")
@@ -1156,7 +1158,7 @@ SHIPPED = "maxharris1/cleffy#88"
 RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/aut0#AUT-7", "shipped": SHIPPED}
 NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
                    "shipped": ["Run log", "Run summary", "Journey", "Ended", "Full state chart"],
-                   "stopped": ["Run log", "Journey", "Full state chart"]}
+                   "stopped": ["Why it stopped", "Run log", "Journey", "Full state chart"]}
 OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": SECTIONS, "maxharris1/cleffy#40": SECTIONS,
          **{address: NO_JOB_SECTIONS[kind] for kind, address in RECORD.items()}}
 POLLED = POLLING.replace(
@@ -1264,6 +1266,26 @@ def test_a_record_opens_by_its_own_key_and_a_shared_address_by_the_first_key(tmp
         assert views["script"] == views["server"], address
         assert f'data-ticket="{key}"' in views["server"], address
         assert _sections(views["server"]) == NO_JOB_SECTIONS[kind], address
+
+
+@needs_node
+def test_a_running_ticket_opened_by_its_record_key_stays_live_when_its_repo_is_cut_short(tmp_path: Path) -> None:
+    import sqlite3
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import add_job, add_ticket, seeded
+    db, log = seeded(tmp_path / "db")
+    repo = "owner/" + "a" * 95
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, repo, "7")
+        add_job(connection, "r-long", state="running", repo=repo, ticket_id="7")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    key = f"{repo}#7"
+    assert key in snapshot[RECORDS] and _row(snapshot, "r-long")["repo"] != repo
+    views = _both(tmp_path, snapshot, key)
+    assert views["script"] == views["server"]
+    assert ticket_detail.resolve_ticket(snapshot, key, snapshot[RECORDS])["kind"] == "running"
+    assert views["server"].startswith(f'<article class="jobpage ticketpage" data-ticket="{key}">')
+    assert _sections(views["server"]) == SECTIONS
 
 
 @needs_node
@@ -1381,14 +1403,14 @@ ENDED = {
     "shipped": (lambda record: None, {"data-px": "off", "data-done": "true", "data-tint": "#9ece6a"},
                 [("1h 30m", "total, intake to merge"), ("2", "revise rounds"), ("2 hops", "0 off-chart")],
                 ["ticket arrives", "plan approved", "PR merged"]),
-    "stopped": (lambda record: None, {"data-px": PX_STATE["stuck"]["effect"], "data-tint": PX_STATE["stuck"]["tint"]},
-                [("no reading", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
+    "stopped": (lambda record: None, {"data-px": "static", "data-tint": "#f7768e"},
+                [("no reading", "time stopped"), ("0 hops", "before it stopped"), ("none", "revise round")],
                 ["ticket arrives", "no direct transition on the chart"]),
     "stopped at a known time": (lambda record: record["stopped"].update(at=NOW - 5400), {},
-                                [("1h 30m", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
+                                [("1h 30m", "time stopped"), ("0 hops", "before it stopped"), ("none", "revise round")],
                                 ["ticket arrives", "no direct transition on the chart"]),
     "stopped with no round": (lambda record: record.update(round=None), {},
-                              [("no reading", "stopped"), ("no round", "revise round"), ("1 hops", "1 off-chart")],
+                              [("no reading", "time stopped"), ("0 hops", "before it stopped"), ("no round", "revise round")],
                               ["ticket arrives", "no direct transition on the chart"]),
 }
 
@@ -1708,7 +1730,10 @@ ENDED_STILL = r"""
     .map(c => c.toDataURL());
   const a = shot();
   await sleep(600);
-  return {frames: a, still: a.length === 3 && a.every((x, i) => x === shot()[i])};
+  const strip = document.querySelector('.jd-hero canvas.px');
+  return {frames: a, still: a.length === 3 && a.every((x, i) => x === shot()[i]),
+          strip: [strip.dataset.px, strip.dataset.tint],
+          why: [...document.querySelectorAll('section.jd-why .why-reason')].map(n => n.textContent)};
 })()"""
 
 
@@ -1734,6 +1759,160 @@ def test_ended_journeys_rest_and_reduced_motion_shows_the_rested_frame(tmp_path:
     for kind in ("stopped", "shipped"):
         assert found[kind, False]["still"] and found[kind, True]["still"], kind
         assert found[kind, False]["frames"] == found[kind, True]["frames"], kind
+    for reduced in (False, True):
+        assert found["stopped", reduced]["strip"] == ["static", "#f7768e"], reduced
+        assert found["stopped", reduced]["why"] == ["job-timeout"], reduced
+        assert found["shipped", reduced]["why"] == [], reduced
+
+
+STOPPED = RECORD["stopped"]
+STOPPED_AT = NOW - (3 * 86400 + 2 * 3600)
+REASON = "cancelled: superseded by sanctioned intake (Factory 2026-11-13)"
+WAYS = [{"to": "planning", "label": "by an authorized unstick"}, {"to": "abandoned", "label": "ends the ticket"},
+        {"to": "questions", "label": "Max answers"}, {"to": "building", "label": "answer, same step resumes"}]
+
+
+def _stopped(snapshot: dict, stuck_flag: bool = False, **stopped) -> dict:
+    record = snapshot[RECORDS][STOPPED]
+    visits = [_visit("intake", "script", STOPPED_AT - 617, 25, None),
+              _visit("questions", "claude", STOPPED_AT - 592, 192, "brief posted"),
+              _visit("planning", "claude", STOPPED_AT - 400, None if stuck_flag else 400, REASON, current=stuck_flag)]
+    if not stuck_flag:
+        visits.append(_visit("stuck", "script", STOPPED_AT, None, "job-timeout", current=True))
+    record.update(state="planning" if stuck_flag else "stuck", visits=visits, round=0, hops=len(visits) - 1,
+                  off_chart_count=0)
+    record["stopped"] = {"state": "stuck", "at": STOPPED_AT, "stopped_in": "planning", "reason": REASON,
+                         "ways_out": WAYS[:2], **stopped}
+    return record
+
+
+def _hero_of(markup: str) -> str:
+    return re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).group(0)
+
+
+def _facts(why: str) -> list[tuple[str, str]]:
+    return [(th, _text(td)) for th, td in re.findall(r'<tr><th scope="row">([^<]*)</th><td>(.*?)</td></tr>', why, re.S)]
+
+
+def _ways(why: str) -> list[tuple[str, str, str, bool]]:
+    cards = re.findall(r'<div class="card( end)?"><div class="head"><span class="to">([^<]*)</span>'
+                       r'(?:<span class="tag">([^<]*)</span>)?</div><span class="why">([^<]*)</span></div>', why)
+    return [(to, tag, label, bool(end)) for end, to, tag, label in cards]
+
+
+def _read_only(why: str) -> str:
+    return re.search(r'<p class="why-ro">([^<]*)</p>', why).group(1)
+
+
+STOP_HERO = {
+    "on a stop state": ({}, "3d 2h", "Tue Jan 12, 1:00 AM ET"),
+    "by a stuck flag": ({"stuck_flag": True, "at": 1783969500}, "185d 12h", "Mon Jul 13, 3:05 PM ET"),
+}
+
+
+@needs_node
+@pytest.mark.parametrize("case", STOP_HERO)
+def test_a_stopped_ticket_s_hero_is_static_red_with_its_line_and_tiles(tmp_path: Path, case: str) -> None:
+    seed, age, day = STOP_HERO[case]
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, **seed)
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        hero = _hero_of(markup)
+        assert _chips(_title(hero)) == ["stuck"] and '</h1><span class="chip bad">stuck</span>' in hero, render
+        line = re.search(r'<p class="line">(.*?)</p>', hero, re.S).group(1)
+        assert line == f'<b class="bad">stuck</b> in planning for <span>{age}</span>', render
+        when = re.search(r'<div class="jd-when stop"><span class="mark" aria-hidden="true"></span>(.*?)</div>', hero, re.S)
+        assert _text(when.group(1)) == f"no job running · stopped {day}", render
+        assert 'class="jd-verb"' not in hero, render
+        assert _ticket_tiles(markup) == [(age, "time stopped"), ("2 hops", "before it stopped"), ("none", "revise round")]
+        assert f'<b class="bad">{age}</b><span>time stopped</span>' in hero, render
+        assert f'<span class="job">stopped {day}</span></nav>' in markup, render
+        px = _hero_px(markup)
+        assert (px["data-px"], px["data-tint"], px["data-still"]) == ("static", "#f7768e", "true"), render
+
+
+@needs_node
+@pytest.mark.parametrize("reason", [None, ""])
+def test_a_stopped_ticket_with_no_clock_round_place_or_reason_says_so(tmp_path: Path, reason: str | None) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, at=None, stopped_in=None, reason=reason)["round"] = None
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        hero = _hero_of(markup)
+        assert re.search(r'<p class="line">(.*?)</p>', hero, re.S).group(1) == '<b class="bad">stuck</b>', render
+        assert _text(re.search(r'<div class="jd-when stop">(.*?)</div>', hero, re.S).group(1)) == "no job running"
+        assert _ticket_tiles(markup) == [("no reading", "time stopped"), ("2 hops", "before it stopped"),
+                                         ("no round", "revise round")], render
+        assert 'class="job"' not in re.search(r'<nav class="jd-crumb".*?</nav>', markup, re.S).group(0), render
+        why = _panel(markup, "Why it stopped")
+        assert _count(why) == "", render
+        assert _text(re.search(r'<div class="why-reason">(.*?)</div>', why, re.S).group(1)) == "no reason recorded"
+        assert _facts(why) == [("when", "no reading"), ("where", "2 hops in (intake → questions → planning)"),
+                               ("job", "none running")], render
+
+
+@needs_node
+def test_a_stopped_ticket_says_why_it_stopped_under_the_hero(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot)
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        after_hero = markup[re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).end():]
+        assert after_hero.startswith('<section class="jd-panel jd-why"><h2><span class="t">Why it stopped</span>'), render
+        why = _panel(markup, "Why it stopped")
+        assert _count(why) == "stopped 3d 2h ago · in planning", render
+        assert _text(re.search(r'<div class="why-reason">(.*?)</div>', why, re.S).group(1)) == REASON, render
+        assert _facts(why) == [("when", "Tue Jan 12, 1:00 AM ET · 3d 2h ago"),
+                               ("where", "in planning, 2 hops in (intake → questions → planning)"),
+                               ("job", "none running")], render
+        assert '<span class="label">Ways out · 2, from the chart</span>' in why, render
+        assert _ways(why) == [("planning", "", "by an authorized unstick", False),
+                              ("abandoned", "end state", "ends the ticket", True)], render
+        assert _read_only(why) == "This page is read-only; neither is done from here.", render
+
+
+READ_ONLY = {0: "This page is read-only.", 1: "This page is read-only; it is not done from here.",
+             2: "This page is read-only; neither is done from here.",
+             3: "This page is read-only; none of these is done from here.",
+             4: "This page is read-only; none of these is done from here."}
+
+
+@needs_node
+@pytest.mark.parametrize("n", READ_ONLY)
+def test_the_read_only_line_reads_right_for_any_count_of_ways_out(tmp_path: Path, n: int) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, ways_out=WAYS[:n])
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        why = _panel(markup, "Why it stopped")
+        assert f'<span class="label">Ways out · {n}, from the chart</span>' in why, render
+        assert [to for to, _, _, _ in _ways(why)] == [w["to"] for w in WAYS[:n]], render
+        assert ('<p class="empty">no way out on the chart</p>' in why) is (n == 0), render
+        assert _read_only(why) == READ_ONLY[n], render
+
+
+@needs_node
+def test_a_hostile_stop_reason_place_and_state_are_escaped_in_both_renders(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _stopped(snapshot, state='"><script>x()</script>', stopped_in="<b>planning</b>", reason="<img src=x onerror=y>",
+             ways_out=[{"to": "<i>out</i>", "label": "<u>why</u>"}])
+    views = _both(tmp_path, snapshot, STOPPED)
+    assert views["script"] == views["server"]
+    for render, markup in views.items():
+        for raw in ("<img src=x", "<script>x()", "<b>planning", "<i>out", "<u>why"):
+            assert raw not in markup, (render, raw)
+        hero = _hero_of(markup)
+        assert '<span class="chip bad">&quot;&gt;&lt;script&gt;x()&lt;/script&gt;</span>' in hero, render
+        assert '<b class="bad">&quot;&gt;&lt;script&gt;x()&lt;/script&gt;</b> in &lt;b&gt;planning&lt;/b&gt;' in hero, render
+        why = _panel(markup, "Why it stopped")
+        for escaped in ("&lt;img src=x onerror=y&gt;", "&lt;b&gt;planning&lt;/b&gt;", "&lt;i&gt;out&lt;/i&gt;",
+                        "&lt;u&gt;why&lt;/u&gt;"):
+            assert escaped in why, (render, escaped)
 
 
 PHONE_ORDER = ["hero", "liverun", "journey", "runlog", "next", "chart"]
@@ -1890,3 +2069,264 @@ def test_on_a_phone_live_run_stacks_task_plan_sub_agents_then_tiles_two_by_two(t
     for width, lr in found.items():
         assert lr["head"] < lr["plan"] < lr["agents"] < lr["tiles"], (width, lr)
         assert (lr["xs"], lr["ys"]) == (2, 2), (width, lr)
+
+
+def _fit(box_width: int) -> int:
+    return min(max(box_width // 4, 56), 250) * 4
+
+
+REPLAY = '<button type="button" data-replay="1">replay</button>'
+
+
+def _ctl(markup: str) -> str:
+    return re.search(r'<div class="jd-ctl">.*</div></section>$', _journey(markup), re.S).group(0)
+
+
+def _end_span(markup: str) -> tuple[str, str] | None:
+    match = re.search(r'<div class="jd-cap[^"]*"[^>]*><span class="end" style="--m:([^"]*)">([^<]*)</span>', markup)
+    return match and match.groups()
+
+
+@needs_node
+@pytest.mark.parametrize("kind", ["running", "shipped", "stopped"])
+def test_both_renders_hold_the_same_journey_controls_with_an_end_note_for_ended_tickets(tmp_path: Path, kind: str) -> None:
+    views = _both(tmp_path, _with_shipped(_snapshot(tmp_path)), ADDRESS[kind])
+    ctls = {render: _ctl(markup) for render, markup in views.items()}
+    assert ctls["server"] == ctls["script"], ctls
+    for render, markup in views.items():
+        notes = re.findall(r'<span class="endnote" style="--m:([^"]*)">([^<]*)</span>', ctls[render])
+        end = _end_span(markup)
+        if kind in LIVE:
+            assert end is None and notes == [], (render, notes)
+        else:
+            assert notes == [end], (render, notes, end)
+            after = REPLAY if kind == "shipped" else "</div>"
+            assert after + '<span class="endnote"' in ctls[render], (render, ctls[render])
+        assert "tap a step for its reason" in _journey(markup), render
+
+
+def _media_harness(phone: bool) -> str:
+    """The page harness with the phone query answered, a laid-out box, and scrollIntoView counted per click."""
+    swaps = {
+        "global.window = global;": (
+            "global.window = global;\n"
+            f"global.matchMedia = q => ({{matches: {json.dumps(phone)} && q === {json.dumps(ticket_detail.PHONE)}, media: q,"
+            " addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}});\n"
+            "global.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };\n"
+            "global.scrolledIntoView = 0;"),
+        "  scrollIntoView() {}": (
+            "  scrollIntoView() { global.scrolledIntoView += 1; }\n"
+            "  get clientWidth() { return 327; }\n"
+            "  getBoundingClientRect() { return {x: 0, y: 0, left: 0, top: 0, right: 327, bottom: 240, width: 327, height: 240}; }"),
+        "const node = pick(arg);": "const node = pick(arg); const scrolled = global.scrolledIntoView;",
+        "prevented: fire(node, 'click').defaultPrevented});":
+            "prevented: fire(node, 'click').defaultPrevented, scrolls: global.scrolledIntoView - scrolled});",
+    }
+    harness = HARNESS
+    for old, new in swaps.items():
+        assert harness.count(old) == 1, old
+        harness = harness.replace(old, new)
+    return harness
+
+
+@needs_node
+def test_on_a_phone_picking_a_bar_selects_it_and_leaves_the_run_log_where_it_is(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = LIVE["running"][0]
+    visit = _review(snapshot)["flow"]["visits"][2]
+    label = html.unescape(re.search(r'<ol class="journey">.*?data-visit="2"[^>]*aria-label="([^"]*)"',
+                                    _ticket_server(snapshot, address), re.S).group(1))
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    found = {}
+    for phone in (False, True):
+        found[phone] = run_harness(tmp_path / ("phone" if phone else "desktop"), _media_harness(phone), script, snapshot,
+                                   "ticket", TICKET_IDS, [["click", {"attr": {"data-visit": "2", "aria-label": label}}]],
+                                   "#t=" + _quote(address), tickets_json(snapshot))
+    view = found[True]["html"]["ticketview"]
+    for cls in ("runlog", "journey"):
+        assert [i for i, _, p in _rows(view, cls) if p == "true"] == ["2"], cls
+    caption = _caption(view)
+    assert f"|{visit['state']}|" in caption and f"|{visit['who']}|" in caption, caption
+    assert f"|took {duration(visit['duration_seconds'])}|" in caption, caption
+    scrolls = {phone: out["steps"][0]["scrolls"] for phone, out in found.items()}
+    assert scrolls[False] > 0, "a desktop bar pick scrolls its log row into view"
+    assert scrolls[True] == 0, "a phone bar pick leaves the run log where it is"
+
+
+JOURNEY_FIT = r"""
+(async () => {
+  await new Promise(r => setTimeout(r, 300));
+  const sec = document.querySelector('article.ticketpage [data-sec=journey]');
+  const canvas = sec.querySelector('.jd-box canvas.jd-journey');
+  const box = canvas.closest('.jd-box');
+  const ctl = sec.querySelector('.jd-ctl');
+  const shown = n => n.offsetParent !== null;
+  const end = sec.querySelector('.jd-cap .end');
+  const note = ctl.querySelector('.endnote');
+  return {canvas: [canvas.width, canvas.height], css: canvas.getBoundingClientRect().width,
+          box: box.clientWidth, boxScroll: box.scrollWidth,
+          axis: [...ctl.querySelectorAll('.axis')].some(shown),
+          hits: [...new Set([...sec.querySelectorAll('ol.journey button[data-visit]')].map(b => b.offsetHeight))],
+          endnote: note && {shown: shown(note), text: note.textContent, style: note.getAttribute('style')},
+          end: end && {shown: true, text: end.textContent, style: end.getAttribute('style')},
+          capShown: [...sec.querySelectorAll('.jd-cap .idx, .jd-cap .note, .jd-cap .end')]
+            .filter(n => getComputedStyle(n).display !== 'none').map(n => n.className),
+          subtitle: sec.querySelector('h2').innerText, page: document.documentElement.scrollWidth};
+})()"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_on_a_phone_the_journey_fits_its_box_with_no_axis_and_an_end_note(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    found = {}
+    try:
+        for kind in ("running", "shipped", "stopped"):
+            for width in (375, 320, 1440):
+                _ticket_at(chrome, base, ADDRESS[kind], width)
+                _wait(chrome, _journey_drawn("article.ticketpage"))
+                found[kind, width] = chrome.run(JOURNEY_FIT)
+    finally:
+        chrome.close()
+        server.shutdown()
+    for (kind, width), fit in found.items():
+        at = (kind, width, fit)
+        if width < 700:
+            assert fit["canvas"] == [_fit(fit["box"]), 240], at
+            assert fit["css"] <= fit["box"] == fit["boxScroll"], at
+            assert not fit["axis"], at
+            assert fit["hits"] == [220], at
+            assert fit["capShown"] == [], at
+            assert "tap a step for its reason" in fit["subtitle"] and "pick a step" not in fit["subtitle"], at
+            assert fit["page"] == width, at
+        else:
+            assert fit["canvas"] == [1000, 336] and fit["axis"], at
+            assert "pick a step for its reason" in fit["subtitle"] and "tap a step" not in fit["subtitle"], at
+        if kind in LIVE:
+            assert fit["endnote"] is None, at
+        else:
+            assert fit["endnote"] == {**fit["end"], "shown": width < 700}, at
+
+
+TAP_AT = r"""
+(i => {
+  const b = document.querySelector(`article.ticketpage ol.journey button[data-visit="${i}"]`);
+  b.closest('.jd-box').scrollIntoView({block: 'center'});
+  window.oldTicket = document.querySelector('article.ticketpage');
+  const r = b.getBoundingClientRect();
+  return {x: r.x + r.width / 2, y: r.y + r.height / 2, scrollY: window.scrollY};
+})"""
+
+TAPPED = r"""
+(async () => {
+  await new Promise(r => setTimeout(r, 300));
+  const art = document.querySelector('article.ticketpage');
+  const sec = art.querySelector('[data-sec=journey]');
+  const canvas = sec.querySelector('canvas.jd-journey');
+  const text = s => (n => n && n.textContent)(sec.querySelector('.jd-cap ' + s));
+  return {caption: {st: text('.st'), who: text('.who'), dur: text('.dur')},
+          log: [...art.querySelectorAll('.runlog [aria-pressed=true]')].map(b => b.dataset.visit),
+          bars: [...art.querySelectorAll('ol.journey [aria-pressed=true]')].map(b => b.dataset.visit),
+          buttons: [...sec.querySelectorAll('.jd-ctl button')].filter(b => b.offsetParent !== null).map(b => b.textContent),
+          canvas: [canvas.width, canvas.height], box: canvas.closest('.jd-box').clientWidth, scrollY: window.scrollY};
+})()"""
+
+TAPS = {"running": ["1", "2"], "shipped": ["1"], "stopped": ["0"]}
+
+
+def _tap(chrome: _Chrome, visit: str) -> float:
+    at = chrome.run(f"{TAP_AT}({json.dumps(visit)})")
+    chrome.send("Input.dispatchTouchEvent", chrome.session, type="touchStart", touchPoints=[{"x": at["x"], "y": at["y"]}])
+    chrome.send("Input.dispatchTouchEvent", chrome.session, type="touchEnd", touchPoints=[])
+    return at["scrollY"]
+
+
+def _picked(visit: dict) -> dict:
+    took = visit["duration_seconds"]
+    return {"st": visit["state"], "who": visit["who"], "dur": "—" if took is None else f"took {duration(took)}"}
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+@pytest.mark.parametrize("kind", TAPS)
+def test_on_a_phone_a_tap_picks_a_step_in_place_before_and_after_a_rebuild(tmp_path: Path, kind: str) -> None:
+    snapshot = _with_shipped(_snapshot(tmp_path))
+    visits = (_review(snapshot)["flow"] if kind in LIVE else snapshot[RECORDS][ADDRESS[kind]])["visits"]
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    taps = []
+    try:
+        chrome.send("Emulation.setTouchEmulationEnabled", chrome.session, enabled=True, maxTouchPoints=1)
+        if kind not in LIVE:
+            records.set()
+        _ticket_at(chrome, base, ADDRESS[kind], 375)
+        _wait(chrome, _journey_drawn("article.ticketpage"))
+        for n, visit in enumerate(TAPS[kind]):
+            if n:
+                records.set()
+                chrome.wait_for("!window.oldTicket.isConnected", "the records rebuild")
+                _wait(chrome, _journey_drawn("article.ticketpage"))
+            before = _tap(chrome, visit)
+            taps.append((visit, before, chrome.run(TAPPED)))
+    finally:
+        records.set()
+        chrome.close()
+        server.shutdown()
+    assert len(taps) == len(TAPS[kind])
+    replay = [] if kind == "stopped" else ["replay"]
+    for when, (visit, before, tapped) in zip(("first render", "rebuilt"), taps):
+        at = (kind, when, visit, tapped)
+        assert tapped["caption"] == _picked(visits[int(visit)]), at
+        assert tapped["log"] == tapped["bars"] == [visit], at
+        assert tapped["scrollY"] == before, ("the tap leaves the page where it was", at)
+        assert tapped["buttons"] == replay, at
+        assert tapped["canvas"] == [_fit(tapped["box"]), 240], at
+
+
+REFIT = r"""
+(async phone => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const read = () => {
+    const c = document.querySelector('article.ticketpage canvas.jd-journey');
+    const box = c.closest('.jd-box').clientWidth;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let drawn = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] && (d[i] !== 14 || d[i + 1] !== 14 || d[i + 2] !== 20)) drawn++;
+    return {canvas: [c.width, c.height], box, drawn};
+  };
+  const fits = g => g.drawn > 0 && g.canvas[0] === (phone ? Math.min(Math.max(Math.floor(g.box / 4), 56), 250) * 4 : 1000);
+  await sleep(100);
+  let got = read();
+  for (let t = 0; t < 60 && !fits(got); t++) { await sleep(50); got = read(); }
+  return got;
+})"""
+
+RESIZES = [(320, 800, True), (667, 375, True), (1280, 800, False)]
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_under_reduced_motion_a_resize_refits_and_repaints_the_journey(tmp_path: Path) -> None:
+    server = _serve(tmp_path, {"fixture": _with_shipped(_snapshot(tmp_path))})
+    base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
+    chrome = _Chrome(tmp_path / "profile")
+    found = {}
+    try:
+        chrome.send("Emulation.setEmulatedMedia", chrome.session,
+                    features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
+        for kind in ("running", "shipped", "stopped"):
+            _ticket_at(chrome, base, ADDRESS[kind], 375)
+            _wait(chrome, _journey_drawn("article.ticketpage"))
+            found[kind, 375, 800] = chrome.run(f"{REFIT}(true)")
+            for width, height, mobile in RESIZES:
+                chrome.send("Emulation.setDeviceMetricsOverride", chrome.session, width=width, height=height,
+                            deviceScaleFactor=1, mobile=mobile)
+                found[kind, width, height] = chrome.run(f"{REFIT}({json.dumps(width < 700)})")
+    finally:
+        chrome.close()
+        server.shutdown()
+    for (kind, width, height), got in found.items():
+        want = [_fit(got["box"]), 240] if width < 700 else [1000, 336]
+        assert got["canvas"] == want, (kind, width, height, got)
+        assert got["drawn"] > 0, ("the refit canvas is painted", kind, width, height, got)

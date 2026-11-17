@@ -274,3 +274,11 @@ def test_the_new_routing_names_no_project() -> None:
     texts = [steps(review_brief("1/3"))[0], *(make() for make in NOT_YET_TASKS.values())]
     for text in texts:
         assert "aut0" not in text.lower()
+
+
+def test_verify_unavailable_waives_only_the_skill_factory_md_names_now() -> None:
+    moved_on = NOT_YET_MD.replace("  verify: verify-cleffy\n", "  verify: verify-next\n")
+    text = task(brief_from(moved_on, "1/3"))
+    assert "`verify-cleffy`" in text
+    assert UNREADABLE_BLOCKS in text
+    assert "review.verify_unavailable" not in text

@@ -770,7 +770,7 @@ def test_slots_without_machines_yml(tmp_path: Path) -> None:
     slots = snapshot_for(tmp_path, machines_path=tmp_path / "machines.yml")["slots"]
     assert slots == {
         "machines_yml": "absent",
-        "box": {"running": 2, "slot_max": None},
+        "box": {"name": "box", "running": 2, "slot_max": None},
         "devices": [],
     }
 
@@ -810,7 +810,7 @@ devices:
     # r-codex-review holds a box slot; r-cursor-fix-overdue runs with no
     # placement, so it runs on the box too. One count for the box (#90):
     # both are box jobs, and both are in its held slots.
-    assert slots["box"] == {"running": 2, "slot_max": 3}
+    assert slots["box"] == {"name": "box", "running": 2, "slot_max": 3}
     assert slots["devices"] == [
         {
             "name": "box",

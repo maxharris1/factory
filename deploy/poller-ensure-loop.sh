@@ -8,8 +8,10 @@
 # flock(1) on poller-ensure-loop.lock for its whole life and exits 0 at once
 # when another loop holds it, so starting it again (from any PID namespace)
 # is harmless. Started by `poller-service.sh ensure` (ORCH_POLL_AUTOSTART_LOOP=1),
-# it exits once ~/.config/factory/poller-autostart is removed. The pidfile, poller-ensure-loop.pid, is written only after
-# the lock is taken and is for people only.
+# it exits once ~/.config/factory/poller-autostart is removed. It also exits
+# when ensure exits 79 (a host retired as the orch host). The pidfile,
+# poller-ensure-loop.pid, is written only after the lock is taken and is for
+# people only.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,7 +47,7 @@ trap 'exit 143' TERM INT HUP
 while :; do
     status=0
     "${HERE}/poller-service.sh" ensure 8>&- || status=$?
-    ((status != 76)) || exit 0
+    ((status != 76 && status != 79)) || exit 0
     ((status == 0)) || say "poller-service.sh ensure exited ${status}"
     sleep "$INTERVAL" 8>&- &
     SLEEPER=$!

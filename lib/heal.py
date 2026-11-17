@@ -88,6 +88,7 @@ from typing import TextIO
 from lib import health
 from lib.grok_delivery import GrokDeliveryError, WebhookResult, authorization, send_webhook
 from lib.linear_webhook import REQUEST_DEADLINE_SECONDS
+from lib.machines_yml import orch_host
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -644,7 +645,7 @@ def main(argv: list[str], *, stdin: TextIO | None = None,
         return 1
     now = clock()
     db = os.environ.get("ORCH_DB")
-    device = args.device or health.local_device(health.load_machines(args.machines))
+    device = args.device or orch_host(health.load_machines(args.machines))
     db_path = Path(db) if db else None
     heal(
         report,

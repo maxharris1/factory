@@ -21,13 +21,14 @@ from pathlib import Path
 import pytest
 
 from lib import device_monitor, remote
-from lib.device_monitor import DeviceMonitor, stranded
+from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
 from lib.worktrees import pid_alive, process_start
+from tests.pool_helpers import TARGET_MACHINES_YML, write_target_machines
 from tests.test_dispatcher import (
     GO,
     TRUSTED_LOGINS,
@@ -183,7 +184,7 @@ def _remote_yaml(**fields: str) -> str:
         "factory_root": "/home/{bot}/factory",
         **fields,
     }
-    lines = ["devices:", "  - name: pc"]
+    lines = ["orch_host: pc", "devices:", "  - name: pc"]
     lines.extend(f"    {key}: {value}" for key, value in values.items() if value != "-")
     return "\n".join(lines) + "\n"
 
@@ -266,6 +267,53 @@ def test_ssh_argv_logs_in_as_the_bot_through_its_alias_and_names_no_key() -> Non
     for forbidden in ("-i", "IdentityFile", ".ssh", "@", "-F"):
         assert forbidden not in argv and forbidden not in joined.split()
     assert ".ssh" not in joined and "IdentityFile" not in joined
+
+
+def test_target_shape_box_logs_in_as_box_and_pc_as_its_bot(tmp_path: Path) -> None:
+    config = config_of(write_target_machines(tmp_path))
+    box = remote_target(config.device("box"), "claude", "job1")
+    pc = remote_target(config.device("pc"), "claude", "job1")
+
+    assert remote.ssh_argv(box, "true")[-5:] == ["-l", "box", "--", "box-claude-bot", "true"]
+    assert remote.ssh_argv(pc, "true")[-5:] == [
+        "-l", "claude-bot", "--", "pc-wsl-claude-bot", "true",
+    ]
+
+
+def test_a_box_job_for_claude_bot_starts_over_the_box_login(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        TARGET_MACHINES_YML.replace("box-{bot}", "fakebox-{bot}").replace(
+            "/home/box/factory-work", f"{tmp_path}/boxwork"
+        ),
+        encoding="utf-8",
+    )
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    pool = DevicePool(queue, config_of(machines))
+    with queue.connect() as connection:
+        connection.executemany(
+            "INSERT INTO device_slots (job_id, device, harness, os_user, placed_at) "
+            "VALUES (?, 'pc', 'claude', 'claude-bot', 1)",
+            [(f"pc-{n}",) for n in range(10)],
+        )
+    job_id = enqueue(queue, "claude", "1")
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    assert (claimed[1].device, claimed[1].os_user) == ("box", "claude-bot")
+    ssh = Ssh(tmp_path)
+    (ssh.hosts / "fakebox-claude-bot").write_text("box", encoding="utf-8")
+
+    proc = orch(
+        "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", "true",
+        env=ssh.env(),
+    )
+    _, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, err
+    calls = ssh.calls()
+    assert calls
+    assert {(call["user"], call["alias"]) for call in calls} == {("box", "fakebox-claude-bot")}
 
 
 @pytest.mark.parametrize(

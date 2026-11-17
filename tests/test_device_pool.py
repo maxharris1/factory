@@ -1,3 +1,4 @@
+import io
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,8 @@ from lib import device_pool, device_sync
 from lib.device_pool import DevicePool, Orphan, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
+from lib.wait import wait_for_job
+from tests.pool_helpers import write_target_machines
 from tests.test_dispatcher import GO, comment, setup, ticket
 
 
@@ -635,3 +638,82 @@ def test_an_orphan_keeps_its_runner_and_worker_pids_and_a_legacy_table_gains_the
     assert (lost.runner_pid, lost.runner_start, lost.worker_pid, lost.worker_start) == (
         11, "r", 12, "w",
     )
+
+
+def target_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue]:
+    config, findings = load_machines_yml(write_target_machines(tmp_path))
+    assert config is not None, findings
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    return DevicePool(queue, config), queue
+
+
+def hold(queue: SQLiteJobQueue, device_name: str, count: int) -> None:
+    with queue.connect() as connection:
+        connection.executemany(
+            f"INSERT INTO {device_pool.SLOTS_TABLE} "
+            "(job_id, device, harness, os_user, placed_at) "
+            "VALUES (?, ?, 'claude', 'claude-bot', 1)",
+            [(f"{device_name}-held-{n}", device_name) for n in range(count)],
+        )
+
+
+def test_with_the_orch_host_full_a_claim_lands_on_box(tmp_path: Path) -> None:
+    pool, queue = target_pool(tmp_path)
+    hold(queue, "pc", 10)
+    enqueue(queue, "claude", "1")
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None
+    assert (claimed[1].device, claimed[1].os_user) == ("box", "claude-bot")
+
+
+def test_the_disabled_mac_is_never_chosen_even_with_pc_and_box_full(tmp_path: Path) -> None:
+    pool, queue = target_pool(tmp_path)
+    hold(queue, "pc", 10)
+    hold(queue, "box", 6)
+    enqueue(queue, "claude", "1")
+
+    assert pool.claim("claude") is None
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+    assert pool.used() == {"pc": 10, "box": 6}
+
+
+def test_a_utilization_tie_goes_to_pc_first_in_file_order(tmp_path: Path) -> None:
+    pool, queue = target_pool(tmp_path)
+    hold(queue, "pc", 5)
+    hold(queue, "box", 3)
+    enqueue(queue, "codex", "1")
+
+    claimed = pool.claim("codex")
+
+    assert claimed is not None and claimed[1].device == "pc"
+
+
+def test_waiting_polling_and_an_unclaimed_autostart_hold_no_slot(tmp_path: Path) -> None:
+    now = [0.0]
+    dispatcher, queue = setup(tmp_path, now)
+    config, _ = load_machines_yml(write_target_machines(tmp_path))
+    pool = DevicePool(queue, config)
+
+    class Waited(Exception):
+        pass
+
+    def sleep(_seconds: float) -> None:
+        assert slot_rows(queue) == []
+        raise Waited
+
+    with pytest.raises(Waited):
+        wait_for_job(queue, "claude", io.StringIO(), sleep=sleep, pool=pool)
+    assert pool.claim("claude", autostart=(4242, "start")) is None
+    assert slot_rows(queue) == []
+
+    dispatcher.process(ticket(comment("go-1", GO.format(state="building"), author="grok-login")))
+    dispatcher.reconcile_jobs()
+    (job,) = queue.outstanding()
+    assert job.state == "queued"
+    assert slot_rows(queue) == []
+
+    claimed = pool.claim("claude", autostart=(4242, "start"))
+    assert claimed is not None
+    assert slot_rows(queue) == [(job.id, "pc")]

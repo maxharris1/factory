@@ -1011,13 +1011,15 @@ def test_script_draws_a_base_without_ci_like_the_server(tmp_path: Path) -> None:
 STALE = ("maxharris1/cleffy", "131")
 LIVE = {("maxharris1/factory", "474"): ("fixing", 665), ("maxharris1/factory", "478"): ("building", 372)}
 QUEUED_FOR = ("maxharris1/factory", "472")
+QUEUED_LATER = ("maxharris1/factory", "476")
 IDLE_AGES = {("maxharris1/factory", "471"): 840, ("maxharris1/factory", "470"): 300}
 HELD = ("maxharris1/factory", "490")
 STOPPED = ("maxharris1/cleffy", "103")
 STOPPED_AGE = 3 * 86400 + 2 * 3600
 ASK_AGES = dict(zip((f"{n}" for n in range(479, 487)), (180, 840, 540, None, 1320, 60, 1800, 300)))
 BUILD_ORDER = ["maxharris1/cleffy#131", "maxharris1/factory#474", "maxharris1/factory#478",
-               "maxharris1/factory#472", "maxharris1/factory#471", "maxharris1/factory#470"]
+               "maxharris1/factory#472", "maxharris1/factory#476", "maxharris1/factory#471",
+               "maxharris1/factory#470"]
 ASK_ORDER = [f"maxharris1/factory#{n}" for n in (485, 483, 480, 481, 486, 479, 484, 482)]
 
 
@@ -1037,6 +1039,9 @@ def order_snapshot(tmp_path: Path) -> dict:
         ticket(*QUEUED_FOR, "building", 60)
         add_job(connection, "j-queued", recipient="codex", repo=QUEUED_FOR[0], ticket_id=QUEUED_FOR[1],
                 created_at=NOW - 90)
+        ticket(*QUEUED_LATER, "building", 30)
+        add_job(connection, "j-queued-later", recipient="codex", repo=QUEUED_LATER[0], ticket_id=QUEUED_LATER[1],
+                created_at=NOW - 15)
         for (repo, ticket_id), (state, elapsed) in LIVE.items():
             ticket(repo, ticket_id, state, None, review_round=1)
             add_job(connection, f"j-{ticket_id}", state="running", repo=repo, ticket_id=ticket_id,
@@ -1155,7 +1160,9 @@ def _check_cap(markup: str) -> None:
     assert _placed_in(more) == ASK_ORDER[6:]
     assert _text(_one(ask, _cls("tk-count"))) == "8"
     build = _column(markup, "Build")
-    assert not _all(build, lambda n: n["tag"] == "details") and len(_all(build, _cls("tk-card"))) == 6
+    (fold,) = [kid for kid in build["kids"] if isinstance(kid, dict) and kid["tag"] == "details"]
+    assert _placed_in(fold) == BUILD_ORDER[6:]
+    assert not _all(_column(markup, "Stop"), lambda n: n["tag"] == "details")
 
 
 def test_a_column_shows_six_cards_and_folds_the_rest(ordered: dict) -> None:

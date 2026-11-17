@@ -107,6 +107,7 @@ from lib.heal import (
     stamp,
 )
 from lib.grok_delivery import send_webhook
+from lib.machines_yml import DEFAULT_ORCH_HOST, orch_host
 from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -467,7 +468,7 @@ def run_pass(
     clock: Callable[[], float] = time.monotonic,
     dry_run: bool = False,
     queue: SQLiteJobQueue | None = None,
-    device: str = "box",
+    device: str = DEFAULT_ORCH_HOST,
     homes: Sequence[Path] = (),
 ) -> tuple[Outcome, dict]:
     """Decide and do one deploy pass; the outcome and what to log about it."""
@@ -839,7 +840,7 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time) -> int:
     if not owns(checkout):
         return 0
     webhook = _webhook(args.orch if args.orch is not None else checkout / "orch.yml")
-    device = args.device or health.local_device(health.load_machines(args.machines))
+    device = args.device or orch_host(health.load_machines(args.machines))
     deploy(checkout, state_dir, device=device, environ=os.environ, webhook=webhook,
            now=clock(), dry_run=args.dry_run)
     return 0
