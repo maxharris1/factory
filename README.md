@@ -1516,8 +1516,16 @@ The rules for each component:
   the marker its own stop wrote, so the next pass retries and, after 3
   failures, escalates.
 - A component restarted less than a minute ago is left to come up.
-- A component gets at most 3 restarts in 30 minutes. After that it is
-  skipped until the oldest restart leaves the window.
+- A restart that moves a running component onto a new checkout commit is a
+  version update. It succeeds when the restart command exits 0, and it
+  does not count toward the restart budget, so components keep up with
+  any merge rate. A component that was waiting (draining, busy, settling)
+  restarts once onto the current checkout, not onto each commit it missed.
+- The restart budget is 3 restarts in 30 minutes. It counts down
+  restarts, failed restart commands, and a second restart toward a
+  commit the component did not reach. Once the budget is spent, the
+  component is skipped until the oldest counted restart leaves the
+  window.
 - Self-heal escalates once per component per 30 minutes: when that backoff
   trips, when the restart command fails 3 times, or when the component
   flaps (3 process changes in the window that self-heal did not cause).
