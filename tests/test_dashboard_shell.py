@@ -23,6 +23,7 @@ import pytest
 import lib.dashboard_page as page
 from lib.attention import ensure_table
 from lib.dashboard import collect_snapshot, render_pages
+from lib.dashboard_pages.common import ticket_page_href
 from lib.health import CODE_COMPONENTS
 from tests.test_dashboard import NOW, add_ticket, make_db, seeded
 from tests import test_dashboard_activity as activity
@@ -1162,7 +1163,7 @@ def test_a_run_log_row_keeps_focus_when_it_stops_being_current(tmp_path: Path) -
 @needs_node
 def test_a_ticket_link_keeps_focus_when_its_card_moves_to_another_column(tmp_path: Path) -> None:
     snapshot = _job(tmp_path)
-    href = "job.html#job-h-review"
+    href = ticket_page_href(next(t for t in snapshot["tickets"] if t["ticket_id"] == "40"))
 
     def advance(later: dict) -> None:
         next(t for t in later["tickets"] if t["ticket_id"] == "40")["state"] = "ship"

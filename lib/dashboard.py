@@ -73,7 +73,7 @@ redaction alone makes equal take a `~<n>` suffix.
 when it first reached a Shipped state, and `how` is "handed-off" when that
 state was handed-off. Its totals cover every job the ticket ever had; tokens
 and cost are null when no job reported them. `stopped` is set when the board
-puts the ticket in its Stopped group; a stuck flag on a state that is not a
+puts the ticket in its Stopped column; a stuck flag on a state that is not a
 stop reads as stopped in "stuck". A record is shaped so the ticket page's
 `_detail_model({"flow": record}, chart)` reads it as it reads a job row. A
 job whose ticket is not tracked has no record.
