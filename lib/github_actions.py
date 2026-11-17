@@ -741,10 +741,14 @@ class GitHubReviewActions:
 
     def job_log(self, repo: str, job_id: str) -> str:
         """One job's whole log in one request; GitHub answers with a redirect
-        to the log blob, which is not an API request."""
+        to the log blob, which is not an API request. pytest colours its
+        output, and gh 2.97+ exits 1 on a body with escape sequences unless
+        allowed; the log is parsed, never shown on a terminal."""
         if not job_id.isdigit():
             raise GitHubAdapterError("Actions job id is not a number")
-        return self._call(f"{_repo_path(repo)}/actions/jobs/{job_id}/logs")
+        return self._call(
+            f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
+        )
 
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False

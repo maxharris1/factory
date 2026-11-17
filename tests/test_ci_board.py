@@ -541,7 +541,7 @@ class RecordingGh:
 
     def __call__(self, argv: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
-        endpoint = argv[-1]
+        endpoint = _endpoint(argv)
         runs = re.search(r"/actions/runs/([0-9]+)/jobs", endpoint)
         if runs:
             job = {
@@ -556,8 +556,18 @@ class RecordingGh:
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps({"total_count": 1, "jobs": [job]}), "")
         if re.search(r"/actions/jobs/[0-9]+/logs$", endpoint):
-            return subprocess.CompletedProcess(argv, 0, "FAILED tests/test_x.py::test_y - boom\n", "")
+            if "--allow-escape-sequences" not in argv:
+                return subprocess.CompletedProcess(
+                    argv, 1, "", "the response contains terminal escape sequences"
+                )
+            return subprocess.CompletedProcess(
+                argv, 0, "\x1b[31mFAILED\x1b[0m tests/test_x.py::test_y - boom\n", ""
+            )
         return subprocess.CompletedProcess(argv, 1, "", "unexpected gh call")
+
+
+def _endpoint(argv: Sequence[str]) -> str:
+    return next(arg for arg in argv if arg.startswith("repos/"))
 
 
 def test_the_board_spends_at_most_four_single_gh_api_requests_a_cycle(tmp_path: Path) -> None:
@@ -580,7 +590,7 @@ def test_the_board_spends_at_most_four_single_gh_api_requests_a_cycle(tmp_path: 
         rest = argv[argv.index("gh") + 1 :]
         assert rest[0] == "api" and "--paginate" not in rest, argv
         assert "view" not in rest, argv
-    assert sorted(argv[-1] for argv in gh.calls) == [
+    assert sorted(map(_endpoint, gh.calls)) == [
         "repos/owner/repo/actions/jobs/14/logs",
         "repos/owner/repo/actions/runs/901/jobs?per_page=100",
         "repos/owner/repo/actions/runs/902/jobs?per_page=100",

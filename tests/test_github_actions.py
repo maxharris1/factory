@@ -1562,16 +1562,15 @@ def test_run_jobs_refuses_a_page_without_a_jobs_list() -> None:
         actions.run_jobs("owner/repo", "123456")
 
 
-JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs",)
+JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs", "--allow-escape-sequences")
 
 
-def test_job_log_reads_one_jobs_log_in_one_api_request() -> None:
+def test_job_log_reads_one_coloured_jobs_log_in_one_api_request() -> None:
     actions, gh = adapter()
-    gh.route(JOB_LOG, GhResult(0, "2026-11-10T19:50:02Z FAILED tests/test_a.py::test_b\n", ""))
+    text = "2026-11-10T19:50:02Z \x1b[31mFAILED\x1b[0m tests/test_a.py::test_b\n"
+    gh.route(JOB_LOG, GhResult(0, text, ""))
 
-    assert actions.job_log("owner/repo", "31000000004") == (
-        "2026-11-10T19:50:02Z FAILED tests/test_a.py::test_b\n"
-    )
+    assert actions.job_log("owner/repo", "31000000004") == text
     assert gh.calls == [[*GH, "api", *JOB_LOG]]
 
 
