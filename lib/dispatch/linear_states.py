@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from collections.abc import Callable, Container
 from typing import Literal
 
 from lib.dispatch.constants import HANDED_OFF_EXTERNALLY, SETTLE_CLEARS, TERMINAL_STATES
@@ -145,8 +146,10 @@ class LinearStatesMixin:
             for row in rows
         )
 
-    def _apply_linear_moves(self) -> None:
+    def _apply_linear_moves(self, only: Container[tuple[str, str]] | None = None) -> None:
         for (repo, ticket_id), linear in sorted(self._linear_fresh.items()):
+            if only is not None and (repo, ticket_id) not in only:
+                continue
             with self._connect() as connection:
                 row = connection.execute(
                     """
@@ -179,9 +182,11 @@ class LinearStatesMixin:
         self, repo: str, ticket_id: str, state: str, stuck: bool
     ) -> bool:
         now = self.queue.now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            if not write_workflow_state(
+        return self._settle(
+            repo,
+            ticket_id,
+            HANDED_OFF_EXTERNALLY,
+            lambda connection: write_workflow_state(
                 connection,
                 repo,
                 ticket_id,
@@ -196,16 +201,8 @@ class LinearStatesMixin:
                 },
                 guard="workflow_state = ? AND stuck = ?",
                 guard_args=(state, int(stuck)),
-            ):
-                connection.rollback()
-                return False
-            connection.execute(
-                "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ?",
-                (repo, ticket_id),
-            )
-            self._cancel_queued(connection, repo, ticket_id, HANDED_OFF_EXTERNALLY)
-            connection.commit()
-        return True
+            ),
+        )
 
     def _resume_external(
         self, repo: str, ticket_id: str, state: str, stuck: bool
@@ -255,36 +252,60 @@ class LinearStatesMixin:
                 entered = self._enter_merged(connection, repo, ticket_id, "linear-done")
                 connection.commit()
             return entered
-        return self._settle(repo, ticket_id, state, "done", "linear-done")
-
-    def _linear_canceled(
-        self, repo: str, ticket_id: str, state: str, stuck: bool
-    ) -> bool:
-        return self._settle(repo, ticket_id, state, "abandoned", "linear-canceled")
-
-    def _settle(
-        self, repo: str, ticket_id: str, state: str, to: str, source: str
-    ) -> bool:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            if not write_workflow_state(
+        return self._settle(
+            repo,
+            ticket_id,
+            "linear-done",
+            lambda connection: write_workflow_state(
                 connection,
                 repo,
                 ticket_id,
-                to,
-                source=source,
+                "done",
+                source="linear-done",
                 at=self.queue.now(),
                 also=SETTLE_CLEARS,
                 guard="workflow_state = ?",
                 guard_args=(state,),
-            ):
+            ),
+        )
+
+    def _linear_canceled(
+        self, repo: str, ticket_id: str, state: str, stuck: bool
+    ) -> bool:
+        return self._settle(
+            repo,
+            ticket_id,
+            "linear-canceled",
+            lambda connection: write_workflow_state(
+                connection,
+                repo,
+                ticket_id,
+                "abandoned",
+                source="linear-canceled",
+                at=self.queue.now(),
+                also=SETTLE_CLEARS,
+                guard="workflow_state = ?",
+                guard_args=(state,),
+            ),
+        )
+
+    def _settle(
+        self,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+        write: Callable[[sqlite3.Connection], bool],
+    ) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not write(connection):
                 connection.rollback()
                 return False
             connection.execute(
                 "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ?",
                 (repo, ticket_id),
             )
-            self._cancel_queued(connection, repo, ticket_id, source)
+            self._cancel_queued(connection, repo, ticket_id, reason)
             connection.commit()
         return True
 

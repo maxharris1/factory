@@ -728,7 +728,7 @@ End ==
   /\ state \in Terminal
   /\ UNCHANGED vars
 
-\* #749. TL: the poll's linear-moves phase applies Max's Linear moves. Before
+\* #749. TL: the poll applies Max's Linear moves, before and after process. Before
 \* go (questions, or waiting-max on a product question) Linear is not read.
 PastGo == state # "waiting-max" \/ paused # "questions"
 

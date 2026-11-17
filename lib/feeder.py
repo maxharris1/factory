@@ -1032,6 +1032,9 @@ class Feeder:
         with self.queue.connect() as connection:
             if not _has_table(connection, "ticket_state"):
                 return set()
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+            if not {"repo", "ticket_id", "workflow_state"} <= columns:
+                return set()
             return {
                 (str(repo).lower(), str(ticket_id))
                 for repo, ticket_id in connection.execute(

@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
@@ -519,6 +519,7 @@ class LivePollSource:
         self._linear_complexity = 0
         self._linear_candidate_cursor: tuple[str, str] | None = None
         self._linear_tracked_cursor: tuple[str, str] | None = None
+        self._linear_states_cursor: tuple[str, int] | None = None
         self._cycle_errors: list[tuple[str, str, str]] = []
         self._cycle_deferrals: dict[str, int] = {}
         self._budget_deadline: float | None = None
@@ -1019,7 +1020,7 @@ class LivePollSource:
             for project in self.config.projects
             if project.linear_project_ids
         }
-        teams: dict[str, dict[int, TicketRef]] = {}
+        numbered: dict[tuple[str, int], TicketRef] = {}
         errors: dict[str, str] = {}
         for ref in refs:
             parsed = _team_number(ref.ticket_id)
@@ -1028,52 +1029,65 @@ class LivePollSource:
             if parsed is None:
                 errors[ref.ticket_id] = "not a Linear identifier"
                 continue
-            teams.setdefault(parsed[0], {})[parsed[1]] = ref
+            numbered[parsed] = ref
+        keys = sorted(numbered)
+        start = (
+            bisect_left(keys, self._linear_states_cursor)
+            if self._linear_states_cursor is not None
+            else 0
+        )
+        pages: list[list[tuple[str, int]]] = []
+        for key in keys[start:] + keys[:start]:
+            if pages and pages[-1][0][0] == key[0] and len(pages[-1]) < LINEAR_STATES_PAGE:
+                pages[-1].append(key)
+            else:
+                pages.append([key])
+        reserve = min(len(refs), LINEAR_TRACKED_RESERVE) + LINEAR_PROCESS_HEADROOM
         states: dict[str, LinearState] = {}
-        for team, numbered in sorted(teams.items()):
-            ordered = sorted(numbered)
-            for start in range(0, len(ordered), LINEAR_STATES_PAGE):
-                page = ordered[start : start + LINEAR_STATES_PAGE]
-                if not self._linear_request_available(LINEAR_STATES_QUERY):
-                    self._defer("Linear poll budget deferred state reads")
-                    return LinearStateRead(states, errors)
-                try:
-                    document = self._linear_request(
-                        {
-                            "query": LINEAR_STATES_QUERY,
-                            "variables": {
-                                "team": team,
-                                "numbers": page,
-                                "first": len(page),
-                            },
-                        }
-                    )
-                    nodes = _object(
-                        _object(document.get("data"), "Linear data").get("issues"),
-                        "Linear issues",
-                    ).get("nodes")
-                    if not isinstance(nodes, list):
-                        raise PollSourceError("Linear issues has no nodes")
-                except Exception as exc:
-                    reason = _safe_reason(exc)
-                    errors.update({numbered[number].ticket_id: reason for number in page})
+        self._linear_states_cursor = None
+        for page in pages:
+            team = page[0][0]
+            if not self._linear_request_available(LINEAR_STATES_QUERY, reserve=reserve):
+                self._linear_states_cursor = page[0]
+                self._defer("Linear poll budget deferred state reads")
+                return LinearStateRead(states, errors)
+            try:
+                document = self._linear_request(
+                    {
+                        "query": LINEAR_STATES_QUERY,
+                        "variables": {
+                            "team": team,
+                            "numbers": [number for _, number in page],
+                            "first": len(page),
+                        },
+                    }
+                )
+                nodes = _object(
+                    _object(document.get("data"), "Linear data").get("issues"),
+                    "Linear issues",
+                ).get("nodes")
+                if not isinstance(nodes, list):
+                    raise PollSourceError("Linear issues has no nodes")
+            except Exception as exc:
+                reason = _safe_reason(exc)
+                errors.update({numbered[key].ticket_id: reason for key in page})
+                continue
+            for node in nodes:
+                identifier = node.get("identifier") if isinstance(node, dict) else None
+                state = node.get("state") if isinstance(node, dict) else None
+                parsed = _team_number(identifier) if isinstance(identifier, str) else None
+                ref = numbered.get(parsed) if parsed and parsed[0] == team else None
+                if ref is None or not isinstance(state, dict):
                     continue
-                for node in nodes:
-                    identifier = node.get("identifier") if isinstance(node, dict) else None
-                    state = node.get("state") if isinstance(node, dict) else None
-                    parsed = _team_number(identifier) if isinstance(identifier, str) else None
-                    ref = numbered.get(parsed[1]) if parsed and parsed[0] == team else None
-                    if ref is None or not isinstance(state, dict):
-                        continue
-                    name, kind = state.get("name"), state.get("type")
-                    if isinstance(name, str) and isinstance(kind, str):
-                        states[ref.ticket_id] = LinearState(
-                            name, kind, name in handoff[ref.repo.lower()]
-                        )
-                for number in page:
-                    identifier = numbered[number].ticket_id
-                    if identifier not in states:
-                        errors[identifier] = "Linear returned no state"
+                name, kind = state.get("name"), state.get("type")
+                if isinstance(name, str) and isinstance(kind, str):
+                    states[ref.ticket_id] = LinearState(
+                        name, kind, name in handoff[ref.repo.lower()]
+                    )
+            for key in page:
+                identifier = numbered[key].ticket_id
+                if identifier not in states:
+                    errors[identifier] = "Linear returned no state"
         return LinearStateRead(states, errors)
 
     def _require_budget(self, reserve: float = 0.0) -> float:

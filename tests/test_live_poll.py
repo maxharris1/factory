@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import math
 import subprocess
 import time
 from collections import Counter
@@ -3115,6 +3116,49 @@ def test_a_fresh_linear_read_of_a_merged_pr_says_merged() -> None:
     )
     ticket = source.fresh_ticket(TicketRef("acme/widgets", "AUT-42", "linear"))
     assert ticket is not None and ticket.merged is True and ticket.closed is False
+
+
+def states_source(requests: list[dict]) -> LivePollSource:
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        requests.append(request)
+        return linear_states_page(request["variables"])
+
+    return LivePollSource(
+        config(linear=True), environ={"LINEAR_KEY": "key"}, linear_transport=transport
+    )
+
+
+def linear_refs(count: int) -> tuple[TicketRef, ...]:
+    return tuple(
+        TicketRef("acme/widgets", f"AUT-{index:04d}", "linear") for index in range(count)
+    )
+
+
+def test_state_reads_cut_by_the_budget_reach_every_ticket_in_later_cycles() -> None:
+    requests: list[dict] = []
+    source = states_source(requests)
+    refs = linear_refs(2_100)
+    read: set[str] = set()
+    per_cycle = cycles = 0
+    while not per_cycle or cycles < math.ceil(21 / per_cycle):
+        source.begin_cycle()
+        read |= set(source.linear_states(refs).states)
+        source.end_cycle()
+        per_cycle = per_cycle or len(requests)
+        cycles += 1
+    assert per_cycle < 21
+    assert read == {ref.ticket_id for ref in refs}
+
+
+def test_state_reads_leave_a_tracked_linear_read_available() -> None:
+    source = states_source([])
+    source.begin_cycle()
+    source.linear_states(linear_refs(1_801))
+    assert source._linear_request_available(
+        LINEAR_ISSUE_QUERY, reserve=LINEAR_PROCESS_HEADROOM
+    )
 
 
 def test_one_factory_states_request_reads_every_open_ticket(tmp_path: Path) -> None:

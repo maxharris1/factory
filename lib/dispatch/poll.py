@@ -55,6 +55,7 @@ class PollMixin:
         read_from = self.queue.now()
         with self._phase("linear-states"):
             self._read_linear_states(source)
+            self._apply_linear_moves()
         with self._phase("feed"):
             self._feed(source)
         with self._phase("github-candidates"):
@@ -118,7 +119,7 @@ class PollMixin:
                 except Exception as exc:
                     self._record_poll_error(ticket, exc)
         with self._phase("linear-moves"):
-            self._apply_linear_moves()
+            self._apply_linear_moves(only=self._polled)
         with self._phase("merge-queue"):
             self._advance_merge_queues()
         with self._phase("verify-handoffs"):
@@ -153,7 +154,15 @@ class PollMixin:
         ticket that left the poll loop (shipped, abandoned) is read here,
         newest job first, only while it has a job to verify.
         """
-        tickets = dict(self._polled)
+        with self._connect() as connection:
+            parked = {
+                (str(row["repo"]), str(row["ticket_id"]))
+                for row in connection.execute(
+                    "SELECT repo, ticket_id FROM ticket_state WHERE workflow_state = ?",
+                    (HANDED_OFF_EXTERNALLY,),
+                )
+            }
+        tickets = {key: ticket for key, ticket in self._polled.items() if key not in parked}
         unread = self._unpolled_handoff_refs(read_from)
         if unread:
             try:

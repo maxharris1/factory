@@ -9,7 +9,7 @@ import pytest
 from lib.dispatch.linear_states import linear_move
 from lib.dispatch.types import LinearState, LinearStateRead, TicketRef
 from lib.queue import JobRequest
-from tests.test_dispatcher import FakeSource, setup, ticket
+from tests.test_dispatcher import VERDICT, CIResult, FakeSource, comment, setup, ticket
 
 REPO = "owner/repo"
 RFR = LinearState("Ready for Review", "started", True)
@@ -504,3 +504,76 @@ def test_canceled_stuck_ticket_is_abandoned_and_unstuck(tmp_path: Path, start: s
     now[0] += 60
     dispatcher.poll_once(source)
     assert len(source.state_reads) == 1
+
+
+def reviewed(tmp_path: Path, verdict: str, linear: LinearState):
+    dispatcher, queue = setup(tmp_path, [1000.0])
+    head = "a" * 40
+    seed(queue, "AUT-9", "review", review_round=0)
+    build = enqueue(queue, "AUT-9", "build", "claude", "build-9")
+    review = enqueue(queue, "AUT-9", "review", "codex", "review-9")
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE jobs SET state = 'done', finished_at = 999 WHERE id = ?", (build.id,)
+        )
+        connection.execute(
+            """
+            UPDATE jobs SET state = 'done', finished_at = 999, head = ?,
+                handoff_comment_id = 'verdict-9'
+            WHERE id = ?
+            """,
+            (head, review.id),
+        )
+    body = VERDICT.format(round=1, head=head, verdict=verdict, risk="high")
+    source = LinearSource(
+        ticket(
+            comment("verdict-9", body, author="codex-login"),
+            tickets="linear",
+            ticket_id="AUT-9",
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    source.states = {"AUT-9": linear}
+    dispatcher.poll_once(source)
+    return dispatcher, queue
+
+
+def test_canceled_in_linear_beats_a_pending_approve(tmp_path: Path) -> None:
+    dispatcher, queue = reviewed(tmp_path, "APPROVE", CANCELED)
+    assert state_of(queue, "AUT-9")["workflow_state"] == "abandoned"
+    assert dispatcher.review_actions.merges == []
+
+
+def test_rfr_in_linear_parks_before_a_pending_revise_starts_a_round(tmp_path: Path) -> None:
+    dispatcher, queue = reviewed(tmp_path, "REVISE", RFR)
+    row = state_of(queue, "AUT-9")
+    assert (row["workflow_state"], row["review_round"], row["external_from_state"]) == (
+        "handed-off-externally",
+        0,
+        "review",
+    )
+    assert job_states(queue, "AUT-9") == {"build-9": "done", "review-9": "done"}
+
+
+def test_building_moved_after_process_skips_handoff_verification(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path, [1000.0])
+    seed(queue, "AUT-9", "building")
+    build = enqueue(queue, "AUT-9", "build", "claude", "build-9")
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            UPDATE jobs SET state = 'done', finished_at = 900,
+                handoff_comment_id = 'missing'
+            WHERE id = ?
+            """,
+            (build.id,),
+        )
+    source = LinearSource(ticket(tickets="linear", ticket_id="AUT-9"))
+    source.states = {"AUT-9": RFR}
+    dispatcher.poll_once(source)
+
+    assert transitions(queue, "AUT-9") == [
+        ("building", "handed-off-externally", "linear-handoff")
+    ]
+    assert attention(queue, "AUT-9") == []
