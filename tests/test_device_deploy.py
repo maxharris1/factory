@@ -20,11 +20,12 @@ import pytest
 from lib import device_deploy, device_sync, job_token, skill_preflight
 from lib.device_pool import DevicePool
 from lib.heal import Webhook
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
 from lib.waiter import Waiter
+from tests.pool_helpers import write_target_machines
 
 ORCH_SCRIPT = (
     "import os, sys\n"
@@ -162,6 +163,19 @@ def test_targets_are_every_enabled_remote_bot_checkout_never_the_box(fleet) -> N
     _origin, _transport, config, _queue, _home = fleet
     assert [(t.device, t.bot) for t in device_deploy.targets(config)] == [
         ("pc", "claude-bot"), ("pc", "codex-bot"), ("mac", "claude-bot"), ("lab", "claude-bot"),
+    ]
+
+
+def test_the_boxs_shared_checkout_is_one_target_logged_in_as_box(tmp_path: Path) -> None:
+    config, _ = load_machines_yml(write_target_machines(tmp_path))
+
+    found = [(t.device, t.checkout, t.remote.user) for t in device_deploy.targets(config)]
+
+    assert found == [
+        ("pc", "/home/claude-bot/factory", "claude-bot"),
+        ("pc", "/home/codex-bot/factory", "codex-bot"),
+        ("pc", "/home/cursor-bot/factory", "cursor-bot"),
+        ("box", "/home/box/factory", "box"),
     ]
 
 

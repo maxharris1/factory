@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Literal
 
 from lib.codex_sandbox import for_device
+from lib.device_monitor import remote_target
 from lib.harness_env import harness_env
 from lib.machines_yml import BOT_USERS, MachinesConfig, load_machines_yml
 from lib.remote import LOGIN_SHELL, RemoteError, RemoteTarget, new_tag, ssh_argv, start_script
@@ -457,11 +458,9 @@ def plan_launches(
                            str(Path(local_root, job_id)), path)
                 )
                 continue
-            alias = device.ssh_alias_for(harness)
-            workdir = device.workdir_for(harness)
-            if alias is None or workdir is None:
+            target = remote_target(device, harness, job_id, new_tag())
+            if target is None:
                 continue
-            target = RemoteTarget(device.name, alias, bot, workdir, job_id, new_tag())
             neutral = for_device(command)
             launches.append(
                 Launch(device.name, harness, spec.style, neutral.argv, env, target.job_dir,

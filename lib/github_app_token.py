@@ -483,7 +483,7 @@ def _command_refresh(args: argparse.Namespace) -> int:
             alias = device.ssh_alias_for(harness)
             if device.eligible(harness) and alias is not None:
                 remotes.setdefault(bot, []).append(
-                    Remote(device.name, device.harnesses[harness], alias)
+                    Remote(device.name, device.login_for(harness), alias)
                 )
     apps = list(config.github_app.apps.values())
     holders = box_holders((app.bot for app in apps), users)

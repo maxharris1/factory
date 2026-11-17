@@ -661,8 +661,9 @@ def prepare(
                 f"device {device.name} has no usable ssh_alias or workdir_root "
                 f"for {placement.harness}"
             )
-        if target.user != bot:
-            raise PlacementError(f"device {device.name} maps {owner} to {target.user}, not {bot}")
+        mapped = device.harnesses.get(placement.harness)
+        if mapped != bot:
+            raise PlacementError(f"device {device.name} maps {owner} to {mapped}, not {bot}")
     runner = os.getpid() if pid is None else pid
     try:
         placement = retry_locked(
