@@ -472,7 +472,17 @@ def test_target_shape_names_pc_as_orch_host_and_box_logs_in_as_box(tmp_path: Pat
     assert config is not None
     assert orch_host(config) == "pc"
     assert not any(device.local for device in config.devices)
-    box, pc = config.device("box"), config.device("pc")
+    assert [device.name for device in config.devices] == ["pc", "box", "mac"]
+    box, pc, mac = config.device("box"), config.device("pc"), config.device("mac")
+    assert (pc.enabled, pc.slot_max) == (True, 10)
+    assert (box.enabled, box.slot_max) == (True, 6)
+    assert not mac.enabled
+    assert box.tailscale_name
+    assert (box.ssh_alias, box.workdir_root, box.factory_root) == (
+        "box-{bot}",
+        "/home/box/factory-work",
+        "/home/box/factory",
+    )
     assert (box.ssh_user, pc.ssh_user) == ("box", None)
     assert box.login_for("claude") == "box"
     assert pc.login_for("codex") == "codex-bot"
