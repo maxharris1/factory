@@ -779,24 +779,12 @@ def _orphan(row: sqlite3.Row) -> Orphan:
         worker_pid=_int(row["worker_pid"]) if "worker_pid" in keys else None,
         worker_start=_text(row["worker_start"]) if "worker_start" in keys else None,
         run_tag=_text(row["run_tag"]) if "run_tag" in keys else None,
-        members=_members(row["members"]) if "members" in keys else {},
+        members={
+            int(pid): start for pid, start in json.loads(row["members"] or "{}").items()
+        }
+        if "members" in keys
+        else {},
     )
-
-
-def _members(value: object) -> dict[int, str]:
-    if not isinstance(value, str):
-        return {}
-    try:
-        loaded = json.loads(value)
-    except ValueError:
-        return {}
-    if not isinstance(loaded, dict):
-        return {}
-    return {
-        int(pid): start
-        for pid, start in loaded.items()
-        if isinstance(pid, str) and pid.isdigit() and isinstance(start, str)
-    }
 
 
 def _placement(row: sqlite3.Row) -> Placement:
