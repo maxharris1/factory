@@ -19,16 +19,21 @@ CSS = """\
 .at-go,.rl-tk{color:var(--text);text-decoration:none}
 .at-go:hover,.rl-tk:hover{color:var(--ok)}
 .at-go{margin-left:auto;font-family:var(--mono);font-size:12px;white-space:nowrap}
-.rl-filter{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
-@media (scripting:none){#relay .rl-filter,#relay .rl-more{display:none}#relay .rl-early{display:contents}}
-.rl-btn{height:44px;padding:0 16px;font-family:var(--mono);font-size:12px;cursor:pointer;
+.rl-filter{display:inline-flex;margin:0 0 12px}
+@media (scripting:none){#relay .rl-filter,#relay .rl-more{display:none}#relay .rl-early,#relay .rl-early-phone{display:contents}}
+.rl-btn{height:28px;padding:0 14px;font-family:var(--mono);font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;
 border:1px solid var(--line-hi);background:var(--panel);color:var(--text)}
-.rl-btn[aria-pressed=true]{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent);color:var(--ok)}
+.rl-btn+.rl-btn{margin-left:-1px}
+.rl-btn[aria-pressed=true]{position:relative;z-index:1;border-color:var(--ok);
+background:color-mix(in srgb,var(--ok) 9%,transparent);color:var(--ok)}
 .rl-btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 .rl-rows{display:flex;flex-direction:column;font-family:var(--mono);font-size:12px}
 .rl-row{display:grid;grid-template-columns:104px minmax(0,1fr);align-items:baseline;gap:8px;padding:9px 6px;
 border-bottom:1px solid var(--line)}
 .rl-tk{font-size:13px;font-weight:600}
+.rl-id{display:contents}
+.rl-early-phone{display:contents}
+.rl-more-phone{display:none}
 .rl-steps{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;min-width:0}
 .rl-step{--h:var(--muted);display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;padding:1px 8px;
 border:1px solid color-mix(in srgb,var(--h) 40%,transparent);background:color-mix(in srgb,var(--h) 9%,transparent);white-space:nowrap}
@@ -57,7 +62,23 @@ color:var(--muted)}
 .rl-sw{display:inline-block;width:28px;height:14px;border:1px solid color-mix(in srgb,var(--muted) 60%,transparent);
 background:color-mix(in srgb,var(--muted) 9%,transparent)}
 .rl-sw.b2b{border:1px dashed color-mix(in srgb,var(--grok) 60%,transparent);background:color-mix(in srgb,var(--grok) 9%,transparent)}
+.rl-sw.now{border:1px solid var(--muted)}
+.rl-find{margin-left:auto;white-space:nowrap}
 .rl-note{margin:8px 0 0;font-size:12px;line-height:1.5;color:var(--muted)}
+@media (max-width:699.98px){
+.rl-filter{display:flex}
+.rl-btn{flex:1 1 auto;padding:0 6px}
+.rl-row{display:flex;flex-direction:column;align-items:stretch;gap:6px;padding:10px 0}
+.rl-id{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px}
+.rl-steps>.rl-more,.rl-early-phone{display:none}
+.rl-more-phone{display:inline-block;height:28px}
+.rl-steps{gap:0 6px}
+.rl-sep{flex:0 0 100%;height:4px;overflow:hidden;visibility:hidden}
+.rl-now.live{flex:1 1 auto}
+.rl-now.live .rl-px{flex:1 1 24px;min-width:24px;width:auto}
+.rl-legend{gap:6px 16px}
+.rl-find{margin-left:0}
+}
 """
 
 
@@ -70,9 +91,11 @@ SCRIPT = r"""
                  blocked: 'bad', waiting: 'warn', unstuck: 'accent', other: 'muted'};
   var TONE_TINT = {warn: '#ff9e64', bad: '#f7768e', muted: '#8b93b8'};
   var DONE_TINT = '#9ece6a';
-  var RELAY_FILTERS = [['all', 'all'], ['scripted', 'scripted'], ['wakes', 'grok wakes'], ['shipped', 'shipped']];
+  var RELAY_FILTERS = [['all', 'all'], ['needs', 'needs me'], ['shipped', 'shipped'], ['wakes', 'grok wakes']];
   var RELAY_NOTE = 'The relay shows the 12 tickets that moved most recently. A stopped ticket stays listed until it moves again.';
   var RELAY_WINDOW = 6;
+  var RELAY_PHONE_WINDOW = 4;
+  var NEEDS_ME = {waiting: true, stopped: true, stale: true};
   var rlFilter = 'all';
   var rlOpen = {};
 
@@ -164,13 +187,13 @@ SCRIPT = r"""
   function rests(at) { return at.now ? at.now.kind : null; }
 
   var ENDINGS = [
-    [function (at) { return liveState(at) === 'running'; }, nowRunning],
-    [function (at) { return liveState(at) === 'stale' || liveState(at) === 'dead'; }, nowStale],
-    [function (at) { return !!at.queued; }, nowQueued],
-    [function (at) { return rests(at) === 'stopped'; }, nowStopped],
-    [function (at) { return rests(at) === 'shipped' && !at.said; }, nowShipped],
-    [function (at) { return rests(at) === 'idle' && !!at.now.waiting_on; }, nowWaiting],
-    [function (at) { return rests(at) === 'idle'; }, nowIdle]
+    ['running', function (at) { return liveState(at) === 'running'; }, nowRunning],
+    ['stale', function (at) { return liveState(at) === 'stale' || liveState(at) === 'dead'; }, nowStale],
+    ['queued', function (at) { return !!at.queued; }, nowQueued],
+    ['stopped', function (at) { return rests(at) === 'stopped'; }, nowStopped],
+    ['shipped', function (at) { return rests(at) === 'shipped' && !at.said; }, nowShipped],
+    ['waiting', function (at) { return rests(at) === 'idle' && !!at.now.waiting_on; }, nowWaiting],
+    ['idle', function (at) { return rests(at) === 'idle'; }, nowIdle]
   ];
 
   function relayThreads(d) {
@@ -189,12 +212,13 @@ SCRIPT = r"""
       var last = ordered[ordered.length - 1];
       var at = {running: live.running[key] || null, queued: live.queued[key] || null, now: t.now || null,
                 said: !!last && last.type === 'verdict' && last.row.kind === 'shipped'};
-      var rule = ENDINGS.filter(function (e) { return e[0](at); })[0];
+      var rule = ENDINGS.filter(function (e) { return e[1](at); })[0];
       return {
-        key: key, ref: t, steps: ordered, at: at, ending: rule ? rule[1] : null,
-        scripted: ordered.some(function (s) { return s.type === 'handoff' && s.row.kind === 'scripted'; }),
+        key: key, ref: t, steps: ordered, at: at, ending: rule ? rule[2] : null,
+        needs: !!rule && !!NEEDS_ME[rule[0]],
         wakes: ordered.some(function (s) { return s.type === 'handoff' && s.row.kind === 'bot_to_bot'; }),
-        shipped: ordered.some(function (s) { return s.type === 'verdict' && s.row.kind === 'shipped'; })
+        shipped: !!rule && rule[0] === 'shipped' ||
+          ordered.some(function (s) { return s.type === 'verdict' && s.row.kind === 'shipped'; })
       };
     });
   }
@@ -225,8 +249,9 @@ SCRIPT = r"""
     if (r.kind === 'failed') add(row, chip('failed', 'bad'));
   }
 
-  function relayMore(steps, t, hidden) {
-    var b = add(steps, el('button', 'rl-more', '+' + hidden + ' earlier'));
+  function relayMore(parent, cls, t, hidden) {
+    if (hidden <= 0) return;
+    var b = add(parent, el('button', cls, '+' + hidden + ' earlier'));
     b.setAttribute('type', 'button');
     b.setAttribute('aria-expanded', rlOpen[t.key] ? 'true' : 'false');
     b.setAttribute('data-more', t.key);
@@ -261,7 +286,7 @@ SCRIPT = r"""
     var hrefs = jobHrefs(d);
     var bar = add(root, el('div', 'rl-filter'));
     bar.setAttribute('role', 'group');
-    bar.setAttribute('aria-label', 'Filter');
+    bar.setAttribute('aria-label', 'Filter the relay');
     RELAY_FILTERS.forEach(function (f) {
       var b = add(bar, el('button', 'rl-btn', f[1]));
       b.setAttribute('type', 'button');
@@ -277,16 +302,18 @@ SCRIPT = r"""
       shown.forEach(function (t) {
         var row = add(rows, el('div', 'rl-row'));
         row.setAttribute('data-thread', t.key);
-        add(row, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
-        var steps = add(row, el('span', 'rl-steps'));
+        var id = add(row, el('span', 'rl-id'));
+        add(id, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
         var items = t.steps.map(function (s) { return function (p) { relayStep(p, s); }; });
         if (t.ending) items.push(function (p) { t.ending(p, t.at); });
+        relayMore(id, 'rl-more rl-more-phone', t, items.length - RELAY_PHONE_WINDOW);
+        var steps = add(row, el('span', 'rl-steps'));
         var hidden = items.length - RELAY_WINDOW;
-        if (hidden > 0) relayMore(steps, t, hidden);
-        var shut = hidden > 0 && !rlOpen[t.key] ? hidden : 0;
+        relayMore(steps, 'rl-more', t, hidden);
+        var shut = rlOpen[t.key] ? 0 : Math.max(items.length - RELAY_PHONE_WINDOW, 0);
         items.forEach(function (draw, i) {
           if (i < shut) {
-            var early = add(steps, el('span', 'rl-early'));
+            var early = add(steps, el('span', i < hidden ? 'rl-early' : 'rl-early-phone'));
             draw(early);
             relaySep(early);
             return;
@@ -306,12 +333,15 @@ SCRIPT = r"""
     legendKey(legend, el('span', 'rl-sw b2b'), 'bot-to-bot (grok wake)');
     legendKey(legend, chip('routed', 'accent'), 'verdict');
     legendKey(legend, chip('failed', 'bad'), 'failed handoff');
+    legendKey(legend, el('span', 'rl-sw now'), NOW_TITLE);
+    add(legend, link('rl-find', 'job.html')).textContent = 'find any of the ' + d.relay.tracked + ' tickets';
     add(root, el('p', 'rl-note', RELAY_NOTE));
   }
 
   function renderAttention(d) {
-    var items = attentionItems(d);
-    var root = panel('attention', 'Needs attention', items.length + (items.length === 1 ? ' item' : ' items'));
+    var items = attentionItems(d).sort(function (a, b) { return toneRank(a.kind) - toneRank(b.kind); });
+    var root = panel('attention', 'Needs attention',
+                     items.length + (items.length === 1 ? ' item' : ' items') + (items.length ? ' · worst first' : ''));
     if (!root) return;
     if (!items.length) { add(root, el('p', 'empty', 'all clear')); return; }
     var hrefs = jobHrefs(d);
@@ -350,8 +380,10 @@ _VERDICT = {"routed": "accent", "shipped": "ok", "stale": "muted", "rejected": "
 
 
 _TONE_TINT = {"warn": "#ff9e64", "bad": "#f7768e", "muted": "#8b93b8"}
-_RELAY_FILTERS = (("all", "all"), ("scripted", "scripted"), ("wakes", "grok wakes"), ("shipped", "shipped"))
+_RELAY_FILTERS = (("all", "all"), ("needs", "needs me"), ("shipped", "shipped"), ("wakes", "grok wakes"))
 RELAY_WINDOW = 6
+RELAY_PHONE_WINDOW = 4
+_NEEDS_ME = {"waiting", "stopped", "stale"}
 _RELAY_NOTE = "The relay shows the 12 tickets that moved most recently. A stopped ticket stays listed until it moves again."
 
 
@@ -463,13 +495,13 @@ def _rests(at: dict) -> object:
 
 
 _ENDINGS = (
-    (lambda at: _live_state(at) == "running", _now_running),
-    (lambda at: _live_state(at) in ("stale", "dead"), _now_stale),
-    (lambda at: at["queued"] is not None, _now_queued),
-    (lambda at: _rests(at) == "stopped", _now_stopped),
-    (lambda at: _rests(at) == "shipped" and not at["said"], _now_shipped),
-    (lambda at: _rests(at) == "idle" and bool(at["now"]["waiting_on"]), _now_waiting),
-    (lambda at: _rests(at) == "idle", _now_idle),
+    ("running", lambda at: _live_state(at) == "running", _now_running),
+    ("stale", lambda at: _live_state(at) in ("stale", "dead"), _now_stale),
+    ("queued", lambda at: at["queued"] is not None, _now_queued),
+    ("stopped", lambda at: _rests(at) == "stopped", _now_stopped),
+    ("shipped", lambda at: _rests(at) == "shipped" and not at["said"], _now_shipped),
+    ("waiting", lambda at: _rests(at) == "idle" and bool(at["now"]["waiting_on"]), _now_waiting),
+    ("idle", lambda at: _rests(at) == "idle", _now_idle),
 )
 
 
@@ -502,12 +534,12 @@ def relay_threads(snapshot: dict) -> list[dict]:
         key = _thread_key(item)
         at = {"running": running.get(key), "queued": queued.get(key), "now": item.get("now"),
               "said": bool(ordered) and (ordered[-1]["type"], ordered[-1]["row"]["kind"]) == ("verdict", "shipped")}
+        name, ending = next(((name, draw) for name, when, draw in _ENDINGS if when(at)), (None, None))
         found.append({
-            "key": key, "ref": item, "steps": ordered, "at": at,
-            "ending": next((draw for when, draw in _ENDINGS if when(at)), None),
-            "scripted": ("handoff", "scripted") in kinds,
+            "key": key, "ref": item, "steps": ordered, "at": at, "ending": ending,
+            "needs": name in _NEEDS_ME,
             "wakes": ("handoff", "bot_to_bot") in kinds,
-            "shipped": ("verdict", "shipped") in kinds,
+            "shipped": name == "shipped" or ("verdict", "shipped") in kinds,
         })
     return found
 
@@ -540,16 +572,32 @@ def _items(thread: dict) -> list[str]:
     return [*(_relay_step(step) for step in thread["steps"]), *ending]
 
 
-def _windowed(key: str, items: list[str]) -> str:
-    hidden = len(items) - RELAY_WINDOW
+def _more(cls: str, key: str, hidden: int) -> str:
     if hidden <= 0:
-        return _SEP.join(items)
-    more = (
-        f'<button class="rl-more" type="button" aria-expanded="false" data-more="{_e(key)}" '
+        return ""
+    return (
+        f'<button class="{cls}" type="button" aria-expanded="false" data-more="{_e(key)}" '
         f'title="show {hidden} earlier step{"" if hidden == 1 else "s"}">+{hidden} earlier</button>'
     )
+
+
+def _windowed(key: str, items: list[str]) -> str:
+    hidden = max(len(items) - RELAY_WINDOW, 0)
+    phone = max(len(items) - RELAY_PHONE_WINDOW, 0)
     early = "".join(f'<span class="rl-early">{item}{_SEP}</span>' for item in items[:hidden])
-    return more + early + _SEP.join(items[hidden:])
+    early_phone = "".join(f'<span class="rl-early-phone">{item}{_SEP}</span>' for item in items[hidden:phone])
+    return _more("rl-more", key, hidden) + early + early_phone + _SEP.join(items[phone:])
+
+
+def _relay_row(thread: dict, live: bool) -> str:
+    items = _items(thread)
+    href = ticket_page_href(thread["ref"]) if live else "job.html"
+    return (
+        f'<div class="rl-row" data-thread="{_e(thread["key"])}"><span class="rl-id">'
+        f'<a class="rl-tk" href="{_e(href)}">{_e(_ticket(thread["ref"]))}</a>'
+        f'{_more("rl-more rl-more-phone", thread["key"], len(items) - RELAY_PHONE_WINDOW)}</span>'
+        f'<span class="rl-steps">{_windowed(thread["key"], items)}</span></div>'
+    )
 
 
 def _relay(snapshot: dict) -> str:
@@ -560,24 +608,21 @@ def _relay(snapshot: dict) -> str:
         f'data-relay="{key}">{text}</button>'
         for key, text in _RELAY_FILTERS
     )
-    rows = "".join(
-        f'<div class="rl-row" data-thread="{_e(t["key"])}">'
-        f'<a class="rl-tk" href="{_e(ticket_page_href(t["ref"]) if t["key"] in hrefs else "job.html")}">{_e(_ticket(t["ref"]))}</a>'
-        f'<span class="rl-steps">{_windowed(t["key"], _items(t))}</span></div>'
-        for t in threads
-    )
+    rows = "".join(_relay_row(t, t["key"] in hrefs) for t in threads)
     body = f'<div class="rl-rows">{rows}</div>' if rows else '<p class="empty">no handoffs or verdicts yet</p>'
     legend = (
         '<div class="rl-legend">'
         '<span class="rl-key"><span class="rl-sw" aria-hidden="true"></span><span>handoff</span></span>'
         '<span class="rl-key"><span class="rl-sw b2b" aria-hidden="true"></span><span>bot-to-bot (grok wake)</span></span>'
         '<span class="rl-key"><span class="chip accent" aria-hidden="true">routed</span><span>verdict</span></span>'
-        '<span class="rl-key"><span class="chip bad" aria-hidden="true">failed</span><span>failed handoff</span></span></div>'
+        '<span class="rl-key"><span class="chip bad" aria-hidden="true">failed</span><span>failed handoff</span></span>'
+        '<span class="rl-key"><span class="rl-sw now" aria-hidden="true"></span><span>where the ticket is now</span></span>'
+        f'<a class="rl-find" href="job.html">find any of the {_e(snapshot["relay"]["tracked"])} tickets</a></div>'
         f'<p class="rl-note">{_RELAY_NOTE}</p>'
     )
     return _panel(
         "relay", "Relay",
-        f'<div class="rl-filter" role="group" aria-label="Filter">{buttons}</div>{body}{legend}',
+        f'<div class="rl-filter" role="group" aria-label="Filter the relay">{buttons}</div>{body}{legend}',
         count=f'{len(threads)} of {snapshot["relay"]["tracked"]} tickets · newest activity first',
     )
 
@@ -612,9 +657,10 @@ def _attention(snapshot: dict) -> str:
             + "</div>"
         )
 
-    items = attention["items"]
+    items = sorted(attention["items"], key=lambda row: _px()._tone_rank(row["kind"]))
     count = attention["count"]
     inner = f'<div class="at-rows">{"".join(draw(row) for row in items)}</div>' if items else (
         '<p class="empty">all clear</p>'
     )
-    return _panel("attention", "Needs attention", inner, count=f"{count} item" + ("" if count == 1 else "s"))
+    label = f"{count} item" + ("" if count == 1 else "s") + (" · worst first" if items else "")
+    return _panel("attention", "Needs attention", inner, count=label)
