@@ -79,8 +79,8 @@ def codex_home(tmp_path: Path, rollout: bytes = ROLLOUT, thread: str = THREAD) -
 
 def test_the_get_usage_reply_gives_both_windows_as_fractions() -> None:
     assert parse_get_usage(GET_USAGE, CAPTURED) == [
-        Reading("five_hour", 0.125, FIVE_HOUR_RESET, CAPTURED),
-        Reading("seven_day", 0.345, SEVEN_DAY_RESET, CAPTURED),
+        Reading("five_hour", 0.125, FIVE_HOUR_RESET, CAPTURED, 0, CAPTURED),
+        Reading("seven_day", 0.345, SEVEN_DAY_RESET, CAPTURED, 0, CAPTURED),
     ]
 
 
@@ -89,7 +89,8 @@ def test_the_get_usage_reply_gives_both_windows_as_fractions() -> None:
                                available="true")])
 def test_a_login_without_limits_gives_no_reading(out: bytes) -> None:
     assert parse_get_usage(out, CAPTURED) == [
-        Reading("five_hour", None, None, CAPTURED), Reading("seven_day", None, None, CAPTURED)]
+        Reading("five_hour", None, None, CAPTURED, 0, CAPTURED),
+        Reading("seven_day", None, None, CAPTURED, 0, CAPTURED)]
 
 
 @pytest.mark.parametrize(("five_hour", "absent"), [(None, 1), ("missing", 1), ({"utilization": 3}, 0)])
@@ -98,7 +99,8 @@ def test_a_null_or_missing_window_is_no_reading_never_zero(five_hour: object, ab
     if five_hour != "missing":
         limits["five_hour"] = five_hour
     assert parse_get_usage(reply(limits), CAPTURED) == [
-        Reading("five_hour", None, None, CAPTURED, absent), Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED)]
+        Reading("five_hour", None, None, CAPTURED, absent, CAPTURED),
+        Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED, 0, CAPTURED)]
 
 
 @pytest.mark.parametrize(
@@ -124,7 +126,7 @@ def test_an_invalid_utilization_is_kept_as_unknown(utilization: object) -> None:
 @pytest.mark.parametrize("resets_at", ["2026-11-14T19:25:32", "soon", "2027-06-01T00:00:00+00:00", 1794684332, None])
 def test_a_bad_reset_is_no_reading(resets_at: object) -> None:
     out = reply({"five_hour": {"utilization": 10, "resets_at": resets_at}})
-    assert parse_get_usage(out, CAPTURED)[0] == Reading("five_hour", None, None, CAPTURED)
+    assert parse_get_usage(out, CAPTURED)[0] == Reading("five_hour", None, None, CAPTURED, 0, CAPTURED)
 
 
 # --- Codex: the session rollout ----------------------------------------------------------
@@ -145,14 +147,15 @@ def test_the_rollout_reader_returns_only_the_last_rate_limit_numbers(tmp_path: P
 def test_codex_windows_are_mapped_by_minutes_and_reset_in_seconds_counts_from_the_event(tmp_path: Path) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path)), THREAD)
     assert parse_codex(found, CAPTURED) == [
-        Reading("five_hour", 0.125, FIVE_HOUR_RESET, EMITTED),
-        Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED),
+        Reading("five_hour", 0.125, FIVE_HOUR_RESET, EMITTED, 0, EMITTED),
+        Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED, 0, EMITTED),
     ]
     swapped = {"rate_limits": {"primary": {"used_percent": 34.5, "window_minutes": 10080, "resets_at": SEVEN_DAY_RESET},
                                "secondary": {"used_percent": 1, "window_minutes": 60, "resets_at": FIVE_HOUR_RESET}},
                "timestamp": "2026-11-14T16:25:30Z"}
     assert parse_codex(swapped, CAPTURED) == [
-        Reading("five_hour", None, None, EMITTED, 1), Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED)]
+        Reading("five_hour", None, None, EMITTED, 1, EMITTED),
+        Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED, 0, EMITTED)]
 
 
 @pytest.mark.parametrize("stamp", [None, "soon", "2026-11-14T16:25:30", "2026-11-14T16:40:00Z"])
@@ -181,7 +184,7 @@ def test_a_last_token_count_without_rate_limits_is_no_reading_not_an_older_one(t
     found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + last)), THREAD)
     assert found == {"rate_limits": None, "timestamp": "2026-11-14T16:26:00.000Z"}
     assert parse_codex(found, CAPTURED + 60) == [
-        Reading("five_hour", None, None, LATER), Reading("seven_day", None, None, LATER)]
+        Reading("five_hour", None, None, LATER, 0, LATER), Reading("seven_day", None, None, LATER, 0, LATER)]
 
 
 def test_the_reader_opens_only_the_jobs_own_regular_rollout(tmp_path: Path) -> None:
@@ -643,12 +646,16 @@ def _seven_day_only(at: float) -> dict:
                             "secondary": None}, "timestamp": _iso(at)}
 
 
-def _codex_reads(db: Path, events: list[dict], now: float) -> dict:
+def _codex_polls(db: Path, polls: list[tuple[str, dict, float]], now: float) -> dict:
     with sqlite3.connect(db) as connection:
-        for event in events:
-            usage_readings.store(connection, harness="codex", bot="codex-bot", device="box", job_id="j",
-                                 readings=parse_codex(event, now))
+        for device, event, parsed_at in polls:
+            usage_readings.store(connection, harness="codex", bot="codex-bot", device=device, job_id="j",
+                                 readings=parse_codex(event, parsed_at))
         return _accounts(read_usage(connection, now, BOX))["codex"]
+
+
+def _codex_reads(db: Path, events: list[dict], now: float) -> dict:
+    return _codex_polls(db, [("box", event, now) for event in events], now)
 
 
 THREE_READINGS = [_seven_day_only(CAPTURED + offset) for offset in (0, 600, 1200)]
@@ -687,6 +694,56 @@ def test_readings_without_rate_limits_never_say_not_on_the_plan(tmp_path: Path) 
     events = [{"rate_limits": None, "timestamp": _iso(CAPTURED + offset)} for offset in (0, 600, 1200)]
     codex = _codex_reads(tmp_path / "orch.db", events, CAPTURED + 1260)
     assert codex["five_hour"]["state"] == codex["seven_day"]["state"] == "no reading"
+
+
+def _both_windows(at: float) -> dict:
+    return {"rate_limits": {"primary": {"used_percent": 10, "window_minutes": 300, "resets_at": FIVE_HOUR_RESET},
+                            "secondary": {"used_percent": 68, "window_minutes": 10080, "resets_at": SEVEN_DAY_RESET}},
+            "timestamp": _iso(at)}
+
+
+def _polled_at_its_time(polls: list[tuple[str, dict, float]]) -> list[tuple[str, dict, float]]:
+    return [(device, event(CAPTURED + offset), CAPTURED + offset) for device, event, offset in polls]
+
+
+def test_three_account_omissions_on_two_devices_are_not_on_the_plan(tmp_path: Path) -> None:
+    polls = _polled_at_its_time([("box", _seven_day_only, 0), ("laptop", _seven_day_only, 60),
+                                 ("box", _seven_day_only, 120)])
+    codex = _codex_polls(tmp_path / "orch.db", polls, CAPTURED + 180)
+    assert codex["five_hour"]["state"] == "not on plan"
+
+
+def test_a_window_reported_on_another_device_interrupts_the_account_streak(tmp_path: Path) -> None:
+    polls = _polled_at_its_time([("box", _seven_day_only, 0), ("box", _seven_day_only, 60),
+                                 ("laptop", _both_windows, 120), ("box", _seven_day_only, 180)])
+    codex = _codex_polls(tmp_path / "orch.db", polls, CAPTURED + 240)
+    assert codex["five_hour"]["state"] == "no reading"
+
+
+def test_a_late_reading_that_reports_the_window_interrupts_newer_omissions(tmp_path: Path) -> None:
+    polls = _polled_at_its_time([("box", _seven_day_only, 0), ("box", _seven_day_only, 60),
+                                 ("box", _seven_day_only, 120)])
+    db = tmp_path / "orch.db"
+    assert _codex_polls(db, polls, CAPTURED + 130)["five_hour"]["state"] == "not on plan"
+    codex = _codex_polls(db, [("laptop", _both_windows(CAPTURED + 90), CAPTURED + 130)], CAPTURED + 130)
+    assert codex["five_hour"]["state"] == "no reading"
+
+
+def test_an_omission_older_than_the_accounts_latest_reading_does_not_extend_the_streak(tmp_path: Path) -> None:
+    polls = [*_polled_at_its_time([("box", _seven_day_only, 0), ("box", _seven_day_only, 60),
+                                   ("laptop", _both_windows, 100)]),
+             ("laptop", _seven_day_only(CAPTURED + 200), CAPTURED + 110),
+             ("box", _seven_day_only(CAPTURED + 150), CAPTURED + 150)]
+    codex = _codex_polls(tmp_path / "orch.db", polls, CAPTURED + 160)
+    assert codex["five_hour"]["state"] == "no reading"
+
+
+def test_one_future_stamped_event_polled_three_times_is_one_omission(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    event = _seven_day_only(CAPTURED + 120)
+    for parsed_at in (CAPTURED, CAPTURED + 15, CAPTURED + 30):
+        codex = _codex_polls(db, [("box", event, parsed_at)], parsed_at)
+        assert codex["five_hour"]["state"] == "no reading", parsed_at
 
 
 def test_a_claude_window_null_in_three_replies_is_not_on_the_plan(tmp_path: Path) -> None:

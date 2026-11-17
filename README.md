@@ -1689,8 +1689,9 @@ CLI's own output, captured by `orch job run` for every job and stored in
   window out, reads that window as `no reading`.
 
 A window that a reply with other limits leaves null or out, in 3 fresh
-readings in a row (none more than 24 hours after the one before), reads
-`not on plan`, shown as "not on this plan": that plan has no such limit, as
+readings in a row for the account on any of its devices (none more than 24
+hours after the one before, and a Codex event read twice counting once),
+reads `not on plan`, shown as "not on this plan": that plan has no such limit, as
 with a Codex plan that reports only its 7-day window. Its `used` stays null,
 and the other window alone is then the account's headroom.
 

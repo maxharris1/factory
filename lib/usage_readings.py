@@ -20,12 +20,14 @@ without a window (a null or missing window, a login without limits, a
 RESET_HORIZON_SECONDS of now) gives that window an explicit no-reading
 (`used` and `resets_at` None), which replaces any older numbers. A Codex
 reading is observed at its event's own time, so rereading the same event
-never makes it fresher. A window left out of NOT_ON_PLAN_READINGS
-fresh readings in a row that report other limits (a null or missing window
-in a reply with limits) is `not on plan`: the plan has no such limit.
-`Session._write`
-(lib/telemetry.py) stores them in `usage_readings` in the same transaction
-as the job's telemetry row, on the existing heartbeat flush. A reading is
+never makes it fresher. A window the account's readings, on any of its
+devices, leave out of NOT_ON_PLAN_READINGS distinct source observations in
+a row (fresh readings that report other limits: a null or missing window in
+a reply with limits) is `not on plan`: the plan has no such limit. A Codex
+event read again is the same observation, and any reading that reports the
+window ends the streak. `Session._write` (lib/telemetry.py) stores them in
+`usage_readings` in the same transaction as the job's telemetry row, on the
+existing heartbeat flush. A reading is
 keyed by harness, bot (the account's OS user) and device, and an older
 reading never replaces a newer one. Cursor is not tracked.
 
@@ -74,24 +76,35 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     observed_at REAL NOT NULL,
     job_id TEXT NOT NULL,
     absent INTEGER NOT NULL DEFAULT 0,
+    source_at REAL,
     PRIMARY KEY (harness, bot, device, window)
 )
 """
 
+ADDED_COLUMNS = {"absent": "INTEGER NOT NULL DEFAULT 0", "source_at": "REAL"}
+
 _UPSERT = f"""
-INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id, absent)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id, absent, source_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (harness, bot, device, window) DO UPDATE SET
     used = excluded.used,
     resets_at = excluded.resets_at,
     observed_at = excluded.observed_at,
     job_id = excluded.job_id,
-    absent = CASE
-        WHEN excluded.absent > 0 AND excluded.observed_at - {TABLE}.observed_at <= {STALE_SECONDS}
-        THEN {TABLE}.absent + 1
-        ELSE excluded.absent
-    END
+    absent = excluded.absent,
+    source_at = excluded.source_at
 WHERE excluded.observed_at > {TABLE}.observed_at
+"""
+
+_LATEST = f"""
+SELECT COALESCE(source_at, observed_at) AS source, absent FROM {TABLE}
+WHERE harness = ? AND bot = ? AND window = ?
+ORDER BY source DESC LIMIT 1
+"""
+
+_INTERRUPT = f"""
+UPDATE {TABLE} SET absent = 1
+WHERE harness = ? AND bot = ? AND window = ? AND COALESCE(source_at, observed_at) > ? AND absent > 1
 """
 
 
@@ -102,22 +115,25 @@ class Reading:
     resets_at: int | None
     observed_at: float
     absent: int = 0
+    source_at: float | None = None
 
 
-def missing(window: str, observed_at: float, absent: int = 0) -> Reading:
-    return Reading(window, None, None, observed_at, absent)
+def missing(window: str, observed_at: float, absent: int = 0, source_at: float | None = None) -> Reading:
+    return Reading(window, None, None, observed_at, absent, source_at)
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
-    """Create the table, or add `absent` to an older one."""
+    """Create the table, or add the columns an older one lacks."""
     connection.execute(DDL)
-    if "absent" in {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}:
-        return
-    try:
-        connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN absent INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc):
-            raise
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+    for name, kind in ADDED_COLUMNS.items():
+        if name in columns:
+            continue
+        try:
+            connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {kind}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
 
 def _number(value: object) -> float | None:
@@ -174,19 +190,19 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
             return []
         limits = reply.get("rate_limits")
         if reply.get("rate_limits_available") is not True or not isinstance(limits, dict):
-            return [missing(window, now) for window in WINDOWS]
+            return [missing(window, now, 0, now) for window in WINDOWS]
         found = []
         for window in WINDOWS:
             info = limits.get(window)
             if info is None:
-                found.append(missing(window, now, 1))
+                found.append(missing(window, now, 1, now))
                 continue
             resets = iso_time(info.get("resets_at")) if isinstance(info, dict) else None
             resets_at = reset_time(int(resets), now) if resets is not None else None
             if resets_at is None:
-                found.append(missing(window, now))
+                found.append(missing(window, now, 0, now))
             else:
-                found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now))
+                found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now, 0, now))
         return found
     return []
 
@@ -223,11 +239,13 @@ def parse_codex(found: object, now: float) -> list[Reading]:
         if resets_at is None and seconds is not None and seconds >= 0:
             resets_at = reset_time(round(emitted + seconds), now)
         readings[window] = (
-            missing(window, observed)
+            missing(window, observed, 0, emitted)
             if resets_at is None
-            else Reading(window, used_percent(info.get("used_percent")), resets_at, observed)
+            else Reading(window, used_percent(info.get("used_percent")), resets_at, observed, 0, emitted)
         )
-    return [readings.get(window) or missing(window, observed, 1 if readings else 0) for window in WINDOWS]
+    return [
+        readings.get(window) or missing(window, observed, 1 if readings else 0, emitted) for window in WINDOWS
+    ]
 
 
 def store(
@@ -242,14 +260,35 @@ def store(
     if not readings:
         return
     ensure_table(connection)
-    connection.executemany(
-        _UPSERT,
-        [
-            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, r.absent)
-            for r in readings
-        ],
-    )
+    for r in readings:
+        source = r.observed_at if r.source_at is None else r.source_at
+        if r.absent:
+            streak = _streak(source, connection.execute(_LATEST, (harness, bot, r.window)).fetchone())
+        else:
+            streak = 0
+            connection.execute(_INTERRUPT, (harness, bot, r.window, source))
+        connection.execute(
+            _UPSERT,
+            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, streak, source),
+        )
     lane_limit.reevaluate(connection, harness, bot, readings)
+
+
+def _streak(source_at: float, latest: tuple | None) -> int:
+    """The omission streak ending at `source_at`, given the account's row with
+    the latest source time for that window.
+
+    Ordered by source time, not observed time: a Codex event stamped ahead of
+    now is observed at each poll's now, so another event could land between
+    its polls and make it count twice. A reading older than the latest
+    restarts at 1, since each device keeps only its newest row and the
+    reading that interrupted the streak may be gone."""
+    if latest is None:
+        return 1
+    latest_at, streak = latest
+    if not streak or latest_at > source_at or source_at - latest_at > STALE_SECONDS:
+        return 1
+    return streak if latest_at == source_at else streak + 1
 
 
 def from_row(
