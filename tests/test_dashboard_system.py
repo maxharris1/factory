@@ -978,7 +978,10 @@ PHONE_LAYOUT = r"""
     blocks: [...document.querySelectorAll('#components .sys-dev')].filter(shown).length,
     head: shown(document.querySelector('#broken thead')),
     rows: [...document.querySelectorAll('#broken tbody tr')].map(tr => getComputedStyle(tr).display),
-    overflow: document.documentElement.scrollWidth - innerWidth,
+    width: innerWidth,
+    scroll: document.documentElement.scrollWidth,
+    names: Math.max(...[...document.querySelectorAll('#components .sys-dev-head')]
+      .map(head => head.scrollWidth - head.clientWidth)),
     log: log.scrollWidth - log.clientWidth,
   };
 })()
@@ -990,8 +993,11 @@ PHONE_LAYOUT = r"""
 def test_a_phone_shows_device_blocks_and_stacked_broken_rows(tmp_path: Path, script: bool) -> None:
     snapshot = _down(tmp_path)
     snapshot["poller"]["log"]["tail"].append("x" * 400)
+    for row in snapshot["health"]["components"]:
+        if row["device"] == "mac":
+            row["device"] = "build-runner-" + "a" * 42
     with _browse(tmp_path, snapshot, phone=True, script=script) as chrome:
         layout = chrome.run(PHONE_LAYOUT)
     assert (layout.pop("live") == "LIVE") == script, layout
     assert layout == {"matrix": False, "devices": True, "blocks": 3, "head": False,
-                      "rows": ["block"] * 3, "overflow": 0, "log": 0}
+                      "rows": ["block"] * 3, "width": 375, "scroll": 375, "names": 0, "log": 0}
