@@ -1,6 +1,3 @@
-"""#749: orch.db follows each Linear ticket's state, and a move made in Linear
-outside the factory's path parks, resumes or settles the ticket."""
-
 from __future__ import annotations
 
 import sqlite3
@@ -137,9 +134,7 @@ def attention(queue, ticket_id: str) -> list[str]:
         ]
 
 
-def incident(tmp_path: Path):
-    """AUT-2282 capped at round 6 with a queued Grok capped wake, and AUT-2283
-    stuck in review after the reviewer refused twice."""
+def capped_and_stuck_review(tmp_path: Path):
     now = [1000.0]
     dispatcher, queue = setup(tmp_path, now)
     seed(queue, "AUT-2282", "capped", review_round=6, cap_extra=1)
@@ -278,7 +273,7 @@ def test_failed_read_keeps_last_state_and_logs_once(
 def test_aut2282_capped_round6_moved_to_rfr_is_handed_off_externally(
     tmp_path: Path,
 ) -> None:
-    dispatcher, queue, source, now = incident(tmp_path)
+    dispatcher, queue, source, now = capped_and_stuck_review(tmp_path)
     source.states["AUT-2282"] = RFR
     dispatcher.poll_once(source)
 
@@ -310,7 +305,7 @@ def test_aut2282_capped_round6_moved_to_rfr_is_handed_off_externally(
 def test_aut2283_stuck_review_moved_to_rfr_is_handed_off_externally(
     tmp_path: Path,
 ) -> None:
-    dispatcher, queue, source, now = incident(tmp_path)
+    dispatcher, queue, source, now = capped_and_stuck_review(tmp_path)
     source.states["AUT-2283"] = RFR
     dispatcher.poll_once(source)
 
@@ -338,7 +333,7 @@ def test_factory_handoff_is_not_external(tmp_path: Path) -> None:
 
 
 def test_handed_off_ticket_jobs_are_not_claimed(tmp_path: Path) -> None:
-    dispatcher, queue, source, now = incident(tmp_path)
+    dispatcher, queue, source, now = capped_and_stuck_review(tmp_path)
     source.states["AUT-2282"] = RFR
     dispatcher.poll_once(source)
     with queue.connect() as connection:
@@ -370,7 +365,7 @@ def test_handed_off_ticket_jobs_are_not_claimed(tmp_path: Path) -> None:
 def test_resume_restores_the_recorded_state_and_round(
     tmp_path: Path, ticket_id: str, shape: dict
 ) -> None:
-    dispatcher, queue, source, now = incident(tmp_path)
+    dispatcher, queue, source, now = capped_and_stuck_review(tmp_path)
     source.states[ticket_id] = RFR
     dispatcher.poll_once(source)
     with queue.connect() as connection:

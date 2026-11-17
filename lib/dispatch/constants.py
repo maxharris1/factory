@@ -21,11 +21,7 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # #108 (#42 N4): states where no bot is working and no person is waiting on
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
-# #749: tickets nothing reads, claims, retries or wakes. abandoned is final;
-# handed-off-externally waits for Linear to move the ticket again.
-PARKED_STATES = ("abandoned", "handed-off-externally")
 HANDED_OFF_EXTERNALLY = "handed-off-externally"
-# What settling a ticket clears: nothing keeps it on a person's screen.
 SETTLE_CLEARS = {
     "stuck": 0,
     "stuck_reason": None,

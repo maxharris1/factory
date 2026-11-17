@@ -1,6 +1,3 @@
-"""#749: store each tracked Linear ticket's workflow state, and follow moves
-made in Linear outside the factory's path (docs/SPEC.md section 4.2, TL)."""
-
 from __future__ import annotations
 
 import sqlite3

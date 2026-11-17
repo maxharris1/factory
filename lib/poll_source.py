@@ -1012,11 +1012,6 @@ class LivePollSource:
         return tuple(found)
 
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
-        """Each ref's Linear workflow state, one FactoryStates request per team page.
-
-        None between Linear cycles. A budget cutoff defers the rest unread; any
-        other failure is an error for each ticket that request covered.
-        """
         if not self._linear_due:
             return None
         handoff = {
