@@ -99,8 +99,12 @@ def _strip_fragments(html: str) -> list[str]:
 
 def test_every_health_attention_link_lands_on_its_row(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    html = render_pages(snapshot)["health.html"]
-    fragments = set(_strip_fragments(html))
+    pages = render_pages(snapshot)
+    html = pages["health.html"]
+    # #526: the strip links the worst two items; the Activity panel links every item.
+    assert set(_strip_fragments(_section(_no_script(html), "attention-strip"))) == {
+        "health-linear-listener--box", "components"}
+    fragments = set(_strip_fragments(html)) | set(_strip_fragments(_section(pages["activity.html"], "attention")))
     assert {"health-linear-listener--box", "components", "health-no-waiter-codex"} <= fragments
     ids = _ids(html)
     for fragment in fragments:
@@ -116,7 +120,7 @@ def test_script_keeps_the_rows_the_attention_links_name(tmp_path: Path) -> None:
     drawn = "".join(out["html"][panel] for panel in PANELS)
     ids = _ids(drawn) | set(PANELS)
     fragments = set(_strip_fragments(out["html"]["attention-strip"]))
-    assert {"health-linear-listener--box", "components", "health-no-waiter-codex"} <= fragments
+    assert fragments == {"health-linear-listener--box", "components"}
     for fragment in fragments:
         assert fragment in ids, fragment
 
@@ -595,7 +599,7 @@ def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path
     assert isinstance(landed, list)
     hrefs = {row["href"] for row in landed}
     assert {"health.html#health-linear-listener--box", "#health-linear-listener--box",
-            "health.html#health-no-waiter-codex", "health.html#components"} <= hrefs, hrefs
+            "health.html#components"} <= hrefs, hrefs
     for row in landed:
         if row["href"] == "#hud":
             assert (row["hash"], row["focus"]) == ("", "hud"), row

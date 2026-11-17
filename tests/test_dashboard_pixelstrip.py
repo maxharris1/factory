@@ -636,14 +636,17 @@ def _pages(tmp_path: Path) -> dict[str, str]:
 def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
     for name, html in _pages(tmp_path).items():
         keys = re.findall(r'<canvas class="px"[^>]*data-px-key="([^"]+)"', html)
-        assert keys[:3] == ["caret", "band", "attention"], name
+        # #526: the strip's phone line has its own block, except on Activity.
+        shell = ["caret", "band", "attention"] + ([] if name == "activity.html" else ["attention-phone"])
+        assert keys[: len(shell)] == shell, name
+        own = keys[len(shell):]
         if name == "index.html":
-            # #140: the Lanes page adds its own strips after the shell's three.
-            assert {"queue", "meter-box"} <= set(keys[3:]), keys
+            # #140: the Lanes page adds its own strips after the shell's.
+            assert {"queue", "meter-box"} <= set(own), keys
             continue
-        board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
-        rows = [key for key in keys[3:] if key.startswith("attention-")]
-        assert keys[3:] == {"job.html": board, "activity.html": rows}.get(name, []), name
+        board = [key for key in own if key.startswith(("phase-", "job-", "ticket-"))]
+        rows = [key for key in own if key.startswith("attention-")]
+        assert own == {"job.html": board, "activity.html": rows}.get(name, []), name
         assert len(rows) == (html.count('class="at-row"') if name == "activity.html" else 0), name
         assert 'class="px-held"' not in html, name
 

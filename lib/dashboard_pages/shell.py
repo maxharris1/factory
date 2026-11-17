@@ -6,6 +6,7 @@ strip on the page under one animation loop."""
 from __future__ import annotations
 
 import json
+import math
 import re
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -41,16 +42,27 @@ CSS = """\
 #fresh-text{color:var(--text-2)}
 .topbar .meta{margin-left:auto;color:var(--muted);font:12px/1.3 var(--mono)}
 .topbar .meta span{color:var(--text-2)}
-.attn{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;min-height:36px;padding:6px 24px;
-background:color-mix(in srgb,var(--bad) 9%,transparent);border-bottom:1px solid color-mix(in srgb,var(--bad) 45%,transparent);
-font:12px/1.5 var(--mono)}
-.attn-head{display:flex;align-items:center;gap:8px}
-.attn-blk{display:block;width:12px}
+.attn{font:12px/1.5 var(--mono)}
+.attn-row,.attn-here,.attn-phone{display:flex;align-items:center;height:36px;box-sizing:border-box;padding:0 24px;overflow:hidden;white-space:nowrap;
+background:color-mix(in srgb,var(--bad) 9%,transparent);border-bottom:1px solid color-mix(in srgb,var(--bad) 45%,transparent)}
+.attn-row{gap:16px}.attn-here{gap:12px}
+.attn-phone{display:none;gap:10px;padding:0 12px;text-decoration:none}
+.attn-head{flex:none;display:flex;align-items:center;gap:8px}
+.attn-blk{display:block;flex:none;width:12px}
 .attn-count{font-weight:700;color:var(--bad);text-decoration:none}
-.attn-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
-.attn-who{font-weight:600;color:var(--text);text-decoration:none}
-.attn-what{color:var(--text-2)}
+.attn-tally{flex:0 1 auto;min-width:0;overflow:hidden;display:flex;align-items:baseline;gap:6px;color:var(--muted)}
+.attn-rule{flex:none;width:1px;height:16px;background:color-mix(in srgb,var(--bad) 45%,transparent)}
+.attn-item{flex:0 1 auto;min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
+.attn-item .chip{flex:none}
+.attn-who{flex:none;font-weight:600;color:var(--text);text-decoration:none}
+.attn-what{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
+.attn-more{flex:none;margin-left:auto;font-weight:600;color:var(--bad);text-decoration:none}
+.attn-below{color:var(--muted)}
+.attn-phone b{font-weight:700;color:var(--bad)}
+.attn-short{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--bad)}
+.attn-go{margin-left:auto;font-weight:700;color:var(--bad)}
 .attn a:hover{text-decoration:underline}
+@media (width<700px){.attn-row{display:none}.attn-phone{display:flex}.attn-here{padding:0 12px}}
 .statusline{position:sticky;bottom:0;z-index:2;display:flex;flex-wrap:nowrap;align-items:stretch;width:100%;overflow:auto hidden;scrollbar-width:none;min-height:32px;
 background:var(--dim);border-top:1px solid var(--line);font:12px/1.3 var(--mono);color:var(--text-2)}
 .statusline>*{white-space:nowrap}
@@ -166,7 +178,43 @@ SCRIPT = r"""
   }
   function attentionKey(x) { return x.kind + ':' + (x.component || x.repo + '#' + x.ticket_id); }
 
-  // The attention strip (#139): every item the count covers, hidden when clear.
+  var TONE_RANK = {bad: 0, warn: 1};
+  function toneRank(kind) {
+    var rank = TONE_RANK[ATTENTION[kind]];
+    return rank === undefined ? 2 : rank;
+  }
+  // Mirrors strip_model.
+  function stripModel(items) {
+    var count = items.length;
+    var need = count === 1 ? ' needs attention' : ' need attention';
+    var tally = [];
+    var at = {};
+    items.forEach(function (x) {
+      if (!Object.prototype.hasOwnProperty.call(at, x.kind)) {
+        at[x.kind] = tally.length;
+        tally.push([x.kind, 0, ATTENTION[x.kind] || 'muted', tally.length]);
+      }
+      tally[at[x.kind]][1] += 1;
+    });
+    tally.sort(function (a, b) { return toneRank(a[0]) - toneRank(b[0]) || b[1] - a[1] || a[3] - b[3]; });
+    tally = tally.map(function (t) { return t.slice(0, 3); });
+    var worst = items.map(function (x, i) {
+      var age = x.age_seconds;
+      return {x: x, i: i, age: typeof age === 'number' && isFinite(age) ? age : null};
+    }).sort(function (a, b) {
+      return toneRank(a.x.kind) - toneRank(b.x.kind) || (a.age === null) - (b.age === null) ||
+        (b.age || 0) - (a.age || 0) || a.i - b.i;
+    }).slice(0, 2).map(function (p) { return p.x; });
+    var named = tally.map(function (t) { return t[1] + ' ' + t[0]; });
+    var head = tally.slice(0, 2);
+    var rest = count - head.reduce(function (sum, t) { return sum + t[1]; }, 0);
+    return {count: count, need: need, tally: tally, worst: worst, more: count - worst.length,
+            short: named.slice(0, 2).concat(rest ? ['+' + rest] : []).join(' · '),
+            label: count + need + ': ' + named.join(', ') + '. Open Activity.'};
+  }
+
+  // The attention strip (#526): one row with the count, a tally per kind and
+  // the worst two items; the count alone on Activity; hidden when clear.
   function renderAttentionStrip(d) {
     var root = byId('attention-strip');
     if (!root) return;
@@ -174,22 +222,50 @@ SCRIPT = r"""
     root.replaceChildren();
     root.hidden = !items.length;
     if (!items.length) return;
+    var model = stripModel(items);
+    function blk(parent, key) {
+      var span = add(parent, el('span', 'attn-blk'));
+      span.setAttribute('aria-hidden', 'true');
+      add(span, PX.strip(key, {state: 'attention', height: 16}));
+    }
+    function count(parent, href) {
+      var a = add(parent, link('attn-count', href));
+      add(a, el('b', null, model.count)).setAttribute('id', 'attention-count');
+      add(a, el('span', null, model.need));
+    }
+    if (PAGE === 'activity') {
+      var here = add(root, el('div', 'attn-here'));
+      blk(here, 'attention');
+      count(here, '#attention');
+      add(here, el('span', 'attn-below', 'listed below'));
+      return;
+    }
     var hrefs = jobHrefs(d);
-    var head = add(root, el('div', 'attn-head'));
-    var blk = add(head, el('span', 'attn-blk'));
-    blk.setAttribute('aria-hidden', 'true');
-    add(blk, PX.strip('attention', {state: 'attention', height: 16}));
-    var count = add(head, link('attn-count', 'activity.html#attention'));
-    add(count, el('b', null, items.length)).setAttribute('id', 'attention-count');
-    add(count, el('span', null, items.length === 1 ? ' needs attention' : ' need attention'));
-    items.forEach(function (x) {
-      var row = add(root, el('div', 'attn-item'));
-      row.setAttribute('data-attn', attentionKey(x));
-      add(row, chip(x.kind, ATTENTION[x.kind] || 'muted'));
-      add(row, link('attn-who', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
-        x.component ? x.component : ticketOf(x);
-      add(row, el('span', 'attn-what', x.detail));
+    var row = add(root, el('div', 'attn-row'));
+    var head = add(row, el('div', 'attn-head'));
+    blk(head, 'attention');
+    count(head, 'activity.html#attention');
+    var tally = add(row, el('div', 'attn-tally'));
+    model.tally.forEach(function (t, i) {
+      if (i) add(tally, el('span', null, '·')).setAttribute('aria-hidden', 'true');
+      add(tally, el('span', 'attn-n ' + t[2], t[1] + ' ' + t[0]));
     });
+    add(row, el('span', 'attn-rule')).setAttribute('aria-hidden', 'true');
+    model.worst.forEach(function (x) {
+      var item = add(row, el('div', 'attn-item'));
+      item.setAttribute('data-attn', attentionKey(x));
+      add(item, chip(x.kind, ATTENTION[x.kind] || 'muted'));
+      add(item, link('attn-who', x.component ? healthLink(x.link) : ticketHref(hrefs, x))).textContent =
+        x.component ? x.component : ticketOf(x);
+      add(item, el('span', 'attn-what', x.detail));
+    });
+    if (model.more) add(row, link('attn-more', 'activity.html#attention')).textContent = '+' + model.more + ' more →';
+    var phone = add(root, link('attn-phone', 'activity.html#attention'));
+    phone.setAttribute('aria-label', model.label);
+    blk(phone, 'attention-phone');
+    add(phone, el('b', null, model.count + model.need));
+    add(phone, el('span', 'attn-short', model.short));
+    add(phone, el('span', 'attn-go', '→')).setAttribute('aria-hidden', 'true');
   }
 
   // "behind": configured code components not on the checkout's version
@@ -1118,7 +1194,7 @@ def _topbar(snapshot: dict, page: str) -> str:
         '<div class="fresh-bar" id="fresh-bar" hidden><span class="fresh-blk" aria-hidden="true"></span>'
         '<b id="fresh-head" aria-hidden="true"></b><span id="fresh-text" aria-hidden="true"></span>'
         '<span class="vh" id="fresh-say" role="alert"></span></div>'
-        f"{_attention_strip(snapshot)}"
+        f"{_attention_strip(snapshot, page)}"
         "</header>"
     )
 
@@ -1139,13 +1215,69 @@ def _band(snapshot: dict) -> str:
     return px_strip("band", state="band", load=header_load(snapshot), height=24)
 
 
-def _attention_strip(snapshot: dict) -> str:
-    """Every item behind the attention count, inline with its chip and link;
-    empty and hidden when there is none."""
+_TONE_RANK = {"bad": 0, "warn": 1}
+
+
+def _tone_rank(kind: str) -> int:
+    return _TONE_RANK.get(_ATTENTION.get(kind), 2)
+
+
+def strip_model(items: list[dict]) -> dict:
+    """What the attention strip says about its items: the count, a tally per
+    kind (bad before warn, then the larger count, then first seen), the worst
+    two items (bad first, oldest first when aged, else snapshot order), and
+    the phone line's short tally and spoken label. Script twin: stripModel."""
+    count = len(items)
+    need = " needs attention" if count == 1 else " need attention"
+    counts: dict[str, int] = {}
+    for row in items:
+        counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+    tally = sorted(
+        ((kind, n, _ATTENTION.get(kind, "muted")) for kind, n in counts.items()),
+        key=lambda entry: (_tone_rank(entry[0]), -entry[1]),
+    )
+
+    def worse(pair: tuple[int, dict]) -> tuple:
+        index, row = pair
+        age = row.get("age_seconds")
+        aged = isinstance(age, (int, float)) and not isinstance(age, bool) and math.isfinite(age)
+        return (_tone_rank(row["kind"]), 0 if aged else 1, -age if aged else 0, index)
+
+    worst = [row for _, row in sorted(enumerate(items), key=worse)[:2]]
+    named = [f"{n} {kind}" for kind, n, _ in tally]
+    rest = count - sum(n for _, n, _ in tally[:2])
+    return {
+        "count": count,
+        "need": need,
+        "tally": tally,
+        "worst": worst,
+        "more": count - len(worst),
+        "short": " · ".join(named[:2] + ([f"+{rest}"] if rest else [])),
+        "label": f"{count}{need}: " + ", ".join(named) + ". Open Activity.",
+    }
+
+
+def _attention_strip(snapshot: dict, page: str) -> str:
+    """One 36px row: the count, a tally per kind and the worst two items,
+    with a one-link phone form; on Activity the count alone. Empty and
+    hidden when there is nothing."""
     items = (snapshot.get("attention") or {}).get("items") or []
     root = '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention"'
     if not items:
         return f"{root} hidden></div>"
+    model = strip_model(items)
+
+    def blk(key: str) -> str:
+        return (f'<span class="attn-blk" aria-hidden="true">'
+                f'{px_strip(key, state="attention", height=16)}</span>')
+
+    def count(href: str) -> str:
+        return (f'<a class="attn-count" href="{href}">'
+                f'<b id="attention-count">{model["count"]}</b>{_span(None, model["need"])}</a>')
+
+    if page == "activity.html":
+        return (f'{root}><div class="attn-here">{blk("attention")}{count("#attention")}'
+                f'{_span("attn-below", "listed below")}</div></div>')
     hrefs = _job_hrefs(snapshot)
 
     def item(row: dict) -> str:
@@ -1161,15 +1293,19 @@ def _attention_strip(snapshot: dict) -> str:
             + "</div>"
         )
 
-    need = " needs attention" if len(items) == 1 else " need attention"
+    tally = '<span aria-hidden="true">·</span>'.join(
+        _span(f"attn-n {tone}", f"{n} {kind}") for kind, n, tone in model["tally"])
+    more = (f'<a class="attn-more" href="activity.html#attention">+{model["more"]} more →</a>'
+            if model["more"] else "")
     return (
-        f"{root}>"
-        '<div class="attn-head"><span class="attn-blk" aria-hidden="true">'
-        f'{px_strip("attention", state="attention", height=16)}</span>'
-        '<a class="attn-count" href="activity.html#attention">'
-        f'<b id="attention-count">{len(items)}</b>{_span(None, need)}</a></div>'
-        + "".join(item(row) for row in items)
-        + "</div>"
+        f'{root}><div class="attn-row"><div class="attn-head">{blk("attention")}'
+        f'{count("activity.html#attention")}</div>'
+        f'<div class="attn-tally">{tally}</div><span class="attn-rule" aria-hidden="true"></span>'
+        + "".join(item(row) for row in model["worst"])
+        + f'{more}</div>'
+        f'<a class="attn-phone" href="activity.html#attention" aria-label="{_e(model["label"])}">'
+        f'{blk("attention-phone")}<b>{_e(str(model["count"]) + model["need"])}</b>'
+        f'{_span("attn-short", model["short"])}<span class="attn-go" aria-hidden="true">→</span></a></div>'
     )
 
 

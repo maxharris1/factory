@@ -71,34 +71,213 @@ def _segments(snapshot: dict) -> dict[str, dict]:
 # --- 1. the attention strip ------------------------------------------------------------
 
 
-def test_the_strip_lists_exactly_the_badge_items_on_every_page(base: dict) -> None:
-    items = base["attention"]["items"]
-    assert base["attention"]["count"] == len(items) == 3
-    for name, html in render_pages(base).items():
-        strip = _section(_no_script(html), "attention-strip")
-        assert " hidden" not in strip[: strip.index(">")], name
-        assert re.search(r'<b id="attention-count">3</b><span> need attention</span>', strip), name
-        assert 'href="activity.html#attention"' in strip
-        rows = re.findall(
-            r'<div class="attn-item" data-attn="[^"]+"><span class="chip ([a-z]+)">([^<]+)</span>'
-            r'<a class="attn-who" href="([^"]+)">([^<]+)</a><span class="attn-what">([^<]*)</span></div>',
-            strip,
-        )
-        assert [(kind, who, what) for _, kind, _, who, what in rows] == [
-            ("stuck", "aut0#AUT-7", "stuck: job-timeout"),
-            ("overdue", "cleffy#14", "cursor fix running, no heartbeat for 2h 00m"),
-            ("paused", "tracy-harris-coaching#5", "waiting-max (clarify)"),
-        ]
-        assert [href for _, _, href, _, _ in rows] == ["job.html", "job.html#job-r-cursor", "job.html"]
-        assert [cls for cls, *_ in rows] == ["bad", "bad", "warn"]
+SYNTHETIC = ["stale", "down", "stale", "no-waiter", "down", "paused", "dead", "stale", "down", "stale", "health",
+             "needs-attention", "stale"]
+COMPONENT_KINDS = {"down", "no-waiter", "health"}
 
 
-def test_one_item_reads_needs(base: dict) -> None:
-    one = copy.deepcopy(base)
-    one["attention"] = {"count": 1, "items": base["attention"]["items"][:1]}
-    strip = _section(render_pages(one)["index.html"], "attention-strip")
-    assert "<b id=\"attention-count\">1</b><span> needs attention</span>" in strip
+def _synthetic(kind: str, i: int) -> dict:
+    if kind in COMPONENT_KINDS:
+        return {"kind": kind, "repo": "", "ticket_id": "", "component": f"poller @ dev{i}",
+                "link": "health.html#health-poller-box", "detail": f"{kind} for {i}m"}
+    return {"kind": kind, "repo": "maxharris1/cleffy", "ticket_id": str(100 + i), "detail": f"{kind} {i}"}
 
+
+def _items(base: dict, count: int) -> list[dict]:
+    seeded_items = copy.deepcopy(base["attention"]["items"])
+    extra = [_synthetic(SYNTHETIC[i % len(SYNTHETIC)], i) for i in range(max(0, count - len(seeded_items)))]
+    return (seeded_items + extra)[:count]
+
+
+def _with(base: dict, items: list[dict]) -> dict:
+    out = copy.deepcopy(base)
+    out["attention"] = {"count": len(items), "items": items}
+    return out
+
+
+WORST = [("stuck", "aut0#AUT-7", "job.html"), ("overdue", "cleffy#14", "job.html#job-r-cursor")]
+# count: (tally in order as (text, tone), the "+M more" text or None, short tally)
+STRIPS = {
+    1: ([("1 stuck", "bad")], None, "1 stuck"),
+    2: ([("1 stuck", "bad"), ("1 overdue", "bad")], None, "1 stuck · 1 overdue"),
+    3: ([("1 stuck", "bad"), ("1 overdue", "bad"), ("1 paused", "warn")], "+1 more →", "1 stuck · 1 overdue · +1"),
+    16: ([("3 down", "bad"), ("1 stuck", "bad"), ("1 overdue", "bad"), ("1 no-waiter", "bad"), ("1 dead", "bad"),
+          ("1 health", "bad"), ("1 needs-attention", "bad"), ("5 stale", "warn"), ("2 paused", "warn")],
+         "+14 more →", "3 down · 1 stuck · +12"),
+}
+ITEM = re.compile(
+    r'<div class="attn-item" data-attn="[^"]+"><span class="chip ([a-z-]+)">([^<]+)</span>'
+    r'<a class="attn-who" href="([^"]+)">([^<]+)</a><span class="attn-what">[^<]*</span></div>')
+
+
+@pytest.mark.parametrize("name", PAGES)
+@pytest.mark.parametrize("count", sorted(STRIPS))
+def test_the_strip_is_one_row_with_a_tally_and_the_worst_two(base: dict, count: int, name: str) -> None:
+    snapshot = _with(base, _items(base, count))
+    html = render_pages(snapshot)[name]
+    strip = _section(_no_script(html), "attention-strip")
+    head, inner = strip[: strip.index(">") + 1], _inner(html, "attention-strip")
+    assert head == '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention">'
+    need = "needs" if count == 1 else "need"
+    tally, more, short = STRIPS[count]
+    if name == "activity.html":
+        assert inner == (
+            f'<div class="attn-here"><span class="attn-blk" aria-hidden="true">'
+            f'{page.px_strip("attention", state="attention", height=16)}</span>'
+            f'<a class="attn-count" href="#attention"><b id="attention-count">{count}</b><span> {need} attention</span></a>'
+            '<span class="attn-below">listed below</span></div>')
+    else:
+        row, phone = re.fullmatch(r'(<div class="attn-row">.*</div>)(<a class="attn-phone".*</a>)', inner).groups()
+        assert row.startswith(
+            '<div class="attn-row"><div class="attn-head"><span class="attn-blk" aria-hidden="true">'
+            f'{page.px_strip("attention", state="attention", height=16)}</span>'
+            f'<a class="attn-count" href="activity.html#attention"><b id="attention-count">{count}</b>'
+            f'<span> {need} attention</span></a></div><div class="attn-tally">')
+        spans = '<span aria-hidden="true">·</span>'.join(
+            f'<span class="attn-n {tone}">{text}</span>' for text, tone in tally)
+        assert f'<div class="attn-tally">{spans}</div><span class="attn-rule" aria-hidden="true"></span>' in row
+        assert [(kind, who, href) for _, kind, href, who in ITEM.findall(row)] == WORST[:count]
+        assert [tone for tone, *_ in ITEM.findall(row)] == ["bad"] * min(2, count)
+        if more is None:
+            assert "attn-more" not in row
+            assert row.endswith("</div></div>")
+        else:
+            assert row.endswith(f'<a class="attn-more" href="activity.html#attention">{more}</a></div>')
+        assert f'<b>{count} {need} attention</b><span class="attn-short">{short}</span>' in phone
+
+
+@needs_node
+@pytest.mark.parametrize("name", PAGES)
+@pytest.mark.parametrize("count", sorted(STRIPS))
+def test_the_script_strip_is_the_server_strip_at_every_count(tmp_path: Path, base: dict, count: int, name: str) -> None:
+    snapshot = _with(base, _items(base, count))
+    out = _script(tmp_path, snapshot, name)
+    assert out["html"]["attention-strip"] == _inner(render_pages(snapshot)[name], "attention-strip")
+    assert out["hidden"]["attention-strip"] is False
+
+
+def test_the_seeded_lanes_strip_shows_the_two_bad_items_before_the_warn(base: dict) -> None:
+    strip = _inner(render_pages(base)["index.html"], "attention-strip")
+    assert [(kind, who, href) for _, kind, href, who in ITEM.findall(strip)] == WORST
+    assert "tracy-harris-coaching#5" not in strip
+    assert '<a class="attn-more" href="activity.html#attention">+1 more →</a>' in strip
+
+
+def _kinds(*kinds: str, ages: list | None = None) -> list[dict]:
+    rows = [{"kind": kind, "repo": "o/r", "ticket_id": str(i), "detail": ""} for i, kind in enumerate(kinds)]
+    for row, age in zip(rows, ages or []):
+        if age is not None:
+            row["age_seconds"] = age
+    return rows
+
+
+def _ids_of(rows: list[dict]) -> list[str]:
+    return [row["ticket_id"] for row in rows]
+
+
+def test_the_tally_puts_bad_before_warn_then_the_larger_count_first() -> None:
+    model = page.strip_model(_kinds("stale", "stale", "stale", "stuck", "down", "down"))
+    assert model["tally"] == [("down", 2, "bad"), ("stuck", 1, "bad"), ("stale", 3, "warn")]
+    assert (model["count"], model["need"], model["more"]) == (6, " need attention", 4)
+
+
+def test_a_warn_item_listed_first_loses_to_a_later_bad_item() -> None:
+    assert _ids_of(page.strip_model(_kinds("paused", "stale", "stuck"))["worst"]) == ["2", "0"]
+
+
+def test_aged_items_order_oldest_first_within_a_tone() -> None:
+    rows = _kinds("stuck", "stuck", "stuck", "paused", ages=[60, None, 600, 9000])
+    assert _ids_of(page.strip_model(rows)["worst"]) == ["2", "0"]
+    rows = _kinds("stuck", "stuck", "stuck", ages=[True, float("nan"), 5])
+    assert _ids_of(page.strip_model(rows)["worst"]) == ["2", "0"]
+
+
+def test_without_ages_the_worst_keep_snapshot_order() -> None:
+    assert _ids_of(page.strip_model(_kinds("stale", "down", "dead", "stuck"))["worst"]) == ["1", "2"]
+    assert page.strip_model(_kinds("stale"))["need"] == " needs attention"
+
+
+def test_short_and_label_read_the_artboard_mix() -> None:
+    model = page.strip_model(_kinds("down", "stuck", "no-waiter", "stale", "down"))
+    assert model["short"] == "2 down · 1 stuck · +2"
+    assert model["label"] == "5 need attention: 2 down, 1 stuck, 1 no-waiter, 1 stale. Open Activity."
+    one = page.strip_model(_kinds("stale", "stale"))
+    assert (one["short"], one["label"]) == ("2 stale", "2 need attention: 2 stale. Open Activity.")
+
+
+def test_activity_shows_the_count_only_and_holds_the_anchor(base: dict) -> None:
+    html = _no_script(render_pages(_with(base, _items(base, 16)))["activity.html"])
+    strip = _section(html, "attention-strip")
+    assert '<a class="attn-count" href="#attention">' in strip
+    assert "listed below" in strip
+    assert 'data-px-key="attention"' in strip
+    for gone in ("attn-n", "attn-item", "attn-more", "attn-phone", "attn-row"):
+        assert gone not in strip, gone
+    assert 'id="attention"' in html
+
+
+def test_the_phone_line_is_one_link_to_activity(base: dict) -> None:
+    html = render_pages(_with(base, _items(base, 3)))["index.html"]
+    phone = re.search(r'<a class="attn-phone".*?</a>', _inner(html, "attention-strip")).group(0)
+    assert phone == (
+        '<a class="attn-phone" href="activity.html#attention" '
+        'aria-label="3 need attention: 1 stuck, 1 overdue, 1 paused. Open Activity.">'
+        f'<span class="attn-blk" aria-hidden="true">{page.px_strip("attention-phone", state="attention", height=16)}'
+        '</span><b>3 need attention</b><span class="attn-short">1 stuck · 1 overdue · +1</span>'
+        '<span class="attn-go" aria-hidden="true">→</span></a>')
+
+
+STRIP = """(function () {
+  var strip = document.getElementById('attention-strip');
+  function shown(sel) { var n = strip.querySelector(sel); return n && getComputedStyle(n).display !== 'none' ? n : null; }
+  function box(n) { return n ? n.getBoundingClientRect() : null; }
+  var row = shown('.attn-row'), what = row && row.querySelector('.attn-what'), more = row && row.querySelector('.attn-more');
+  return {strip: box(strip).height,
+          row: row && {fits: row.scrollHeight === row.clientHeight,
+                       centers: new Set([].map.call(row.children, function (n) {
+                         var b = n.getBoundingClientRect(); return Math.round(b.top + b.bottom); })).size},
+          more: more && box(more).right,
+          ellipsis: what && [what.scrollWidth > what.clientWidth, getComputedStyle(what).textOverflow],
+          phone: shown('.attn-phone') && box(shown('.attn-phone')).height,
+          here: shown('.attn-here') && box(shown('.attn-here')).height,
+          sideways: document.documentElement.scrollWidth > innerWidth,
+          moving: document.getAnimations().filter(function (a) {
+            return a.effect && a.effect.target && strip.contains(a.effect.target); }).length};
+})()"""
+
+
+@needs_chrome
+def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: dict) -> None:
+    browser = Browser()
+    try:
+        for count in (1, 2, 3, 16, 50):
+            snapshot = _with(base, _items(base, count))
+            snapshot["attention"]["items"][0]["detail"] = "a detail far too long for one row " * 12
+            html = _page_with_status_stub(_now(snapshot), "index.html")
+            for width in (700, 1100, 1440):
+                browser.open(html, width)
+                got = browser.eval(STRIP)
+                where = (count, width)
+                assert got["strip"] == 36, where
+                assert got["row"] == {"fits": True, "centers": 1}, where
+                assert got["phone"] is None and got["here"] is None, where
+                assert got["ellipsis"] == [True, "ellipsis"], where
+                if count > 2:
+                    assert got["more"] <= width, where
+                assert (got["sideways"], got["moving"]) == (False, 0), where
+            for width in (375, 699):
+                browser.open(html, width)
+                got = browser.eval(STRIP)
+                assert (got["row"], got["phone"], got["strip"]) == (None, 36, 36), (count, width)
+                assert (got["sideways"], got["moving"]) == (False, 0), (count, width)
+        html = _page_with_status_stub(_now(_with(base, _items(base, 16))), "activity.html")
+        for width in (375, 1440):
+            browser.open(html, width)
+            got = browser.eval(STRIP)
+            assert (got["here"], got["strip"], got["row"], got["phone"]) == (36, 36, None, None), width
+            assert got["moving"] == 0, width
+    finally:
+        browser.close()
 
 def _clear(snapshot: dict) -> dict:
     clear = copy.deepcopy(snapshot)
@@ -144,7 +323,7 @@ def _row() -> dict:
 
 @needs_node
 def test_the_script_strip_adds_what_an_overdue_snapshot_ages(tmp_path: Path, base: dict) -> None:
-    """The strip lists the badge's items plus agedHealth's: the writer that
+    """The strip counts the badge's items plus agedHealth's: the writer that
     went down, or the one overdue-snapshot item when no writer can alert."""
     writer = copy.deepcopy(base)
     writer["health"] = _health_rows(
@@ -152,18 +331,19 @@ def test_the_script_strip_adds_what_an_overdue_snapshot_ages(tmp_path: Path, bas
     out = _script(tmp_path / "writer", writer, "activity.html", actions=[["advance", 8 * 15 + 1]],
                   ids=BAR + ["attention"])
     assert out["text"]["attention-count"] == "4"
-    strip = out["html"]["attention-strip"]
-    assert strip.count('class="attn-item"') == 4
-    assert ('<span class="chip bad">down</span><a class="attn-who" href="health.html#health-dashboard-box">'
-            "dashboard @ box</a>") in strip
     assert "dashboard @ box" in out["text"]["attention"]
+    out = _script(tmp_path / "writer-lanes", writer, "index.html", actions=[["advance", 8 * 15 + 1]])
+    strip = out["html"]["attention-strip"]
+    assert out["text"]["attention-count"] == "4"
+    assert '<span class="attn-n bad">1 down</span>' in strip
+    assert strip.count('class="attn-item"') == 2
+    assert '<a class="attn-more" href="activity.html#attention">+2 more →</a>' in strip
 
     lone = copy.deepcopy(base)
     lone["health"] = _health_rows({}, publish=None)
     out = _script(tmp_path / "lone", lone, "index.html", actions=[["advance", 3 * 15 + 1]])
     assert out["text"]["attention-count"] == "4"
-    assert ('<span class="chip bad">health</span><a class="attn-who" href="health.html#components">'
-            "health snapshot</a>") in out["html"]["attention-strip"]
+    assert '<span class="attn-n bad">1 health</span>' in out["html"]["attention-strip"]
 
 
 @needs_node
@@ -1019,6 +1199,8 @@ def _ticket_items(snapshot: dict) -> dict:
 
 
 TICKET_HREFS = ["job.html#job-r-codex-", "job.html#job-g-grok-c", "job.html"]
+# The strip shows the worst two: the stuck item, then the first warn item.
+STRIP_HREFS = TICKET_HREFS[:2]
 
 
 def _strip_hrefs(markup: str) -> list[str]:
@@ -1034,14 +1216,17 @@ def test_strip_ticket_links_follow_the_activity_panel_rule(base: dict) -> None:
     pages = render_pages(snapshot)
     assert _panel_hrefs(_section(pages["activity.html"], "attention")) == TICKET_HREFS
     for name, html in pages.items():
-        assert _strip_hrefs(_section(_no_script(html), "attention-strip")) == TICKET_HREFS, name
+        want = [] if name == "activity.html" else STRIP_HREFS
+        assert _strip_hrefs(_section(_no_script(html), "attention-strip")) == want, name
 
 
 @needs_node
 def test_script_strip_ticket_links_follow_the_activity_panel_rule(tmp_path: Path, base: dict) -> None:
-    out = _script(tmp_path, _ticket_items(base), "activity.html", ids=BAR + ["attention"])
-    assert _strip_hrefs(out["html"]["attention-strip"]) == TICKET_HREFS
+    out = _script(tmp_path / "activity", _ticket_items(base), "activity.html", ids=BAR + ["attention"])
+    assert _strip_hrefs(out["html"]["attention-strip"]) == []
     assert _panel_hrefs(out["html"]["attention"]) == TICKET_HREFS
+    out = _script(tmp_path / "lanes", _ticket_items(base), "index.html")
+    assert _strip_hrefs(out["html"]["attention-strip"]) == STRIP_HREFS
 
 
 FOCUSABLE = re.compile(r'<(a\s[^>]*href=|button\b|input\b|select\b|textarea\b|summary\b|[a-z]+\s[^>]*tabindex="(?!-1)")')
@@ -1100,7 +1285,7 @@ def test_a_redraw_keeps_the_strip_and_status_line_labels(tmp_path: Path, base: d
     later["generated_at_epoch"] += 5
     out = _link_run(tmp_path, base, [["label"], ["poll", later], ["labels"]])
     assert out["steps"][-1]["labels"] == ["Needs attention", "Status line"]
-    assert _strip_hrefs(out["html"]["attention-strip"]) == TICKET_HREFS
+    assert _strip_hrefs(out["html"]["attention-strip"]) == STRIP_HREFS
 
 
 def _visible(markup: str) -> str:
