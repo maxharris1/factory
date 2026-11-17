@@ -512,6 +512,52 @@ def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: P
     assert _runner_reads(env) == []
 
 
+STALLING_SYNC_GH = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GH_LOG"
+if [[ "$*" == *"$STALL"* && ! -e "$STALLED" ]]; then touch "$STALLED"; exec sleep 30; fi
+case "$*" in
+  *actions/runners*) touch "$HOME/.config/factory/runner-pool-sync-hold"; echo '4 1' ;;
+  *"--jq .value") echo '["self-hosted","Linux","X64","factory-linux"]' ;;
+esac
+"""
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+@pytest.mark.parametrize("stall", ["actions/runners", "--jq .value"], ids=["runner-list", "variable-read"])
+def test_a_loop_killed_during_a_stalled_request_frees_the_lock_and_ensure_restarts_it(
+    tmp_path: Path, stall: str
+) -> None:
+    env = _sync_env(tmp_path, POOL_VALUE, [])
+    (tmp_path / "bin/gh").write_text(STALLING_SYNC_GH, encoding="utf-8")
+    stalled = tmp_path / "stalled"
+    env |= {"STALL": stall, "STALLED": str(stalled)}
+    lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
+    loop = subprocess.Popen(
+        ["bash", str(SYNC_SCRIPT), "loop"], env=env, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not stalled.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert stalled.exists(), "the loop never made the stalling request"
+        reads_before = len(_runner_reads(env))
+        loop.kill()
+        loop.wait()
+        time.sleep(0.1)
+        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0, "a request child kept the lock"
+        _ensure(env)
+        deadline = time.monotonic() + 5
+        while len(_runner_reads(env)) <= reads_before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(_runner_reads(env)) > reads_before, "ensure left the overflow loop stopped"
+    finally:
+        try:
+            os.killpg(loop.pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 @pytest.mark.parametrize(
     "doc", ["docs/F2-03-RUNNER-CHECKLIST.md", "docs/decisions/711-self-hosted-runners.md"]
 )

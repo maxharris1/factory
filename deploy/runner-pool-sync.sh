@@ -29,19 +29,19 @@ set_var() {
     gh_ api -X POST "repos/$REPO/actions/variables" -f name="$VAR" -f value="$1" >/dev/null
   fi
 }
-cur=$(gh_ api "repos/$REPO/actions/variables/$VAR" --jq .value 2>/dev/null || echo "")
+cur=$(exec 9>&-; gh_ api "repos/$REPO/actions/variables/$VAR" --jq .value 2>/dev/null || echo "")
 full=0
 while :; do
   [ -e "$HOME/.config/factory/runner-pool-sync-hold" ] && exit 0
-  if counts=$(gh_ api "repos/$REPO/actions/runners?per_page=100" --jq '[.runners[] | select(any(.labels[]; .name=="factory-linux")) | select(.status=="online")] | "\(length) \(map(select(.busy|not))|length)"' 2>/dev/null); then
+  if counts=$(exec 9>&-; gh_ api "repos/$REPO/actions/runners?per_page=100" --jq '[.runners[] | select(any(.labels[]; .name=="factory-linux")) | select(.status=="online")] | "\(length) \(map(select(.busy|not))|length)"' 2>/dev/null); then
     read -r online idle <<<"$counts"
     if [ "$idle" -gt 0 ]; then full=0; want=$POOL; else full=$((full+1)); want=$cur; [ $full -ge 2 ] && want=$HOSTED; fi
     [ -z "$want" ] && want=$POOL
     if [ "$want" != "$cur" ]; then
-      set_var "$want" && { echo "$(date -Is) online=$online idle=$idle -> $want"; cur=$want; }
+      set_var "$want" && { printf '%(%FT%T%z)T online=%s idle=%s -> %s\n' -1 "$online" "$idle" "$want"; cur=$want; }
     fi
   else
-    echo "$(date -Is) runner list failed; leaving $VAR=$cur"
+    printf '%(%FT%T%z)T runner list failed; leaving %s=%s\n' -1 "$VAR" "$cur"
   fi
   sleep "$EVERY" 9>&-
 done
