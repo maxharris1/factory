@@ -8,7 +8,7 @@ import pytest
 from lib.dispatch.constants import GROK_WAKE_REASONS, GROK_WAKE_SKIP
 from lib.dispatcher import Dispatcher, TrackedTicket
 from lib.hook_t7 import T7Hook
-from lib.queue import SQLiteJobQueue
+from lib.queue import ACTIONS, SQLiteJobQueue
 from tests.test_approver_credential import AppFlow
 from tests.test_dispatcher import ticket as routed_ticket
 from tests.test_hooks import (
@@ -277,3 +277,7 @@ def test_a_pending_notice_posts_when_comment_processing_raises(
     assert _status(queue) == "posted"
     assert len(notices(dispatcher)) == 1
     assert FakeBot(queue, "grok").drain() == []
+
+
+def test_every_wake_reason_is_a_queue_action():
+    assert set(GROK_WAKE_REASONS) <= set(ACTIONS)

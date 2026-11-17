@@ -34,7 +34,7 @@ def serve(store: Path, path: str, answer: dict) -> None:
 
 def fitting_fields(job: Job, bot: str, head: str = HEAD) -> dict[str, str]:
     expected = expected_for(job, bot)
-    fields = {"kind": expected.kind, "from": bot, "role": expected.role}
+    fields = {"kind": expected.kind, "from": expected.bot, "role": expected.role}
     if expected.round is not None:
         fields["round"] = expected.round
     if expected.kind == "plan":
@@ -45,6 +45,10 @@ def fitting_fields(job: Job, bot: str, head: str = HEAD) -> dict[str, str]:
         fields["head"] = expected.head or head
         fields["verdict"] = "APPROVE"
         fields["ac"] = "met"
+    if expected.kind == "qa":
+        fields.update(
+            head=expected.head or head, result="PASS", scope="full", runner="claude-cloud", arm="primary"
+        )
     return fields
 
 

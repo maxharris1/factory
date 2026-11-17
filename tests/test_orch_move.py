@@ -372,6 +372,46 @@ def test_export_stops_a_service_poller_whose_pidfile_is_beside_a_custom_orch_db(
     assert box.calls() == STOPS[1:]
 
 
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_export_stops_a_service_poller_whose_orch_db_is_a_symlink(tmp_path: Path) -> None:
+    box = Host(tmp_path, "box")
+    _real_poller_service(box)
+    real = tmp_path / "real" / "orch.db"
+    real.parent.mkdir()
+    _seed(tmp_path, real)
+    alias = tmp_path / "alias" / "orch.db"
+    alias.parent.mkdir()
+    alias.symlink_to(real)
+    poller = _service_poller(box, tmp_path, alias)
+    export = tmp_path / "export"
+    try:
+        result = box.move("export", "--to", "pc", "--dir", str(export))
+
+        assert result.returncode == 0, result.stderr
+        assert not alive(poller), "export left the source poller running"
+    finally:
+        if alive(poller):
+            os.kill(poller, signal.SIGKILL)
+    assert (export / "manifest.json").exists()
+
+
+def test_move_db_unlocked_sees_the_poll_lock_through_a_symlinked_db(tmp_path: Path) -> None:
+    real = tmp_path / "real" / "orch.db"
+    real.parent.mkdir()
+    _seed(tmp_path, real)
+    alias = tmp_path / "alias" / "orch.db"
+    alias.parent.mkdir()
+    alias.symlink_to(real)
+    with (real.parent / "orch.db.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "bin/orch"), "move-db", "unlocked", "--db", str(alias)],
+            capture_output=True, text=True, timeout=60,
+        )
+    assert result.returncode == 1
+    assert f"a poller still holds {real.parent / 'orch.db.lock'}" in result.stderr
+
+
 def test_export_fails_while_any_process_still_holds_the_poll_lock(tmp_path: Path) -> None:
     box = Host(tmp_path, "box")
     _seed(tmp_path, box.db)

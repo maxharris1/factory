@@ -101,6 +101,10 @@ class CommentsMixin:
             self._drain_auto_extra(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
+            self._qa_follow(self._polled.get(key, ticket))
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
 
     def _remember_no_ci_base(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -139,7 +143,7 @@ class CommentsMixin:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
                 fields = None
-            if self._after_finish(ticket, comment):
+            if self._after_finish(ticket, comment, fields):
                 continue
             if (
                 fields is not None
@@ -178,6 +182,10 @@ class CommentsMixin:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)
+                continue
+            if kind == "qa":
+                if ticket.factory.qa is not None:
+                    self._mark_handled(ticket, comment.id, self._qa_record(ticket, comment, fields))
                 continue
             if kind not in (
                 "go",
@@ -303,13 +311,13 @@ class CommentsMixin:
         )
         return "slash-go-no-target" if resumed is None else resumed[1]
 
-    def _after_finish(self, ticket: TrackedTicket, comment: Comment) -> bool:
-        """merged and done are absorbing (#108): on a finished ticket only a
-        ship intent's replay acts; any other comment, a hook's included, is
-        handled with no job, ship, state write or wake."""
+    def _after_finish(
+        self, ticket: TrackedTicket, comment: Comment, fields: Mapping[str, str] | None
+    ) -> bool:
         if (
             self._review_context(ticket)[0] not in FINISHED_STATES
             or self._ship_intent(ticket, comment.id) is not None
+            or (fields is not None and fields["kind"] == "qa" and ticket.factory.qa is not None)
         ):
             return False
         self._mark_handled(ticket, comment.id, "after-merge")

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote_to_bytes, urlsplit
 
 import pytest
 
@@ -58,7 +58,8 @@ def _expected_get_signature(url: str, secret: str) -> str:
     params = dict(parse_qsl(parts.query))
     params.pop("X-Amz-Signature")
     query = "&".join(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}" for k, v in sorted(params.items()))
-    canonical = f"GET\n{parts.path}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+    path = quote(unquote_to_bytes(parts.path), safe="/-._~")
+    canonical = f"GET\n{path}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD"
     _, date, region, _, _ = params["X-Amz-Credential"].split("/")
     to_sign = (f"AWS4-HMAC-SHA256\n{params['X-Amz-Date']}\n{date}/{region}/s3/aws4_request\n"
                f"{hashlib.sha256(canonical.encode()).hexdigest()}")
@@ -175,6 +176,23 @@ def test_sign_download_is_path_style_and_verifies(endpoint, prefix):
     assert params["X-Amz-Date"] == "20261117T123005Z"
     assert params["X-Amz-Credential"] == f"{AWS_ACCESS}/20261117/us-east-1/s3/aws4_request"
     assert _signature(link.url) == _expected_get_signature(link.url, AWS_SECRET)
+
+
+@pytest.mark.parametrize("endpoint, bucket_path", [
+    ("https://store.invalid/proxy", "/proxy/qa-bucket"),
+    ("https://store.invalid/s3%20proxy", "/s3%20proxy/qa-bucket"),
+    ("http://127.0.0.1:9000/a%2Fb/", "/a%2Fb/qa-bucket"),
+    ("https://store.invalid/proxy+prefix", "/proxy+prefix/qa-bucket"),
+    ("https://store.invalid/a%7Eb", "/a%7Eb/qa-bucket"),
+])
+def test_upload_and_download_address_the_same_bucket_path(endpoint, bucket_path):
+    storage = _storage(endpoint=endpoint)
+    upload = storage.sign_upload(KEY, RESULT_CAP, 60)
+    download = storage.sign_download(KEY, 60)
+
+    assert urlsplit(upload.url).path == bucket_path
+    assert urlsplit(download.url).path == f"{bucket_path}/{KEY}"
+    assert _signature(download.url) == _expected_get_signature(download.url, AWS_SECRET)
 
 
 def test_sign_upload_policy_pins_bucket_key_size_and_expiry():

@@ -37,6 +37,7 @@ from lib import (
 )
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dispatch.constants import HARNESS_WORK
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
 from lib.dispatch.poll import sleep_on_either_clock
@@ -120,9 +121,11 @@ from lib.state_backup import (
 )
 from lib.status import main as status_main
 from lib.update_check import (
+    HeadDiff,
     RebaseScope,
     UpdateClass,
     classify as classify_update,
+    head_diff,
     merge_update,
     rebase_scope,
 )
@@ -1202,6 +1205,7 @@ def _runtime(
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
         hold_carry=_hold_carry,
+        qa_diff=_qa_diff,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1233,6 +1237,14 @@ def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | N
         worktrees.work_root(None), repo, (last, head), worktrees.url_template(None)
     )
     return rebase_scope(clone, last, head, f"refs/remotes/origin/{base}")
+
+
+def _qa_diff(repo: str, base: str, since: str | None, head: str) -> HeadDiff:
+    heads = (head,) if since is None else (since, head)
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, heads, worktrees.url_template(None)
+    )
+    return head_diff(clone, since, head, f"refs/remotes/origin/{base}")
 
 
 def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
@@ -1315,7 +1327,7 @@ def _retired() -> str | None:
 
 
 def _lock_path(database: Path) -> Path:
-    return database.with_name(database.name + ".lock")
+    return Path(f"{database.resolve()}.lock")
 
 
 def _held_locks(database: Path) -> list[Path]:
@@ -1349,7 +1361,7 @@ def _poll_lock(path: Path, pidfile: Path | None = None):
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
-    lock_path = Path(f"{path.resolve()}.lock")
+    lock_path = _lock_path(path)
     handle = lock_path.open("a+", encoding="utf-8")
     written = False
     try:
@@ -1719,7 +1731,7 @@ def _retry_refusal(
                 connection.execute(
                     "SELECT id, action, recipient, state FROM jobs "
                     "WHERE lower(repo) = ? AND ticket_id = ? "
-                    "AND state IN ('queued', 'running') AND recipient != 'grok' "
+                    f"AND state IN ('queued', 'running') AND {HARNESS_WORK} "
                     "ORDER BY created_at LIMIT 1",
                     (repo.lower(), str(number)),
                 ).fetchone()
@@ -1730,7 +1742,7 @@ def _retry_refusal(
                 connection.execute(
                     "SELECT 1 FROM jobs JOIN job_events ON job_events.job_id = jobs.id "
                     "WHERE jobs.id = (SELECT id FROM jobs "
-                    "WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok' "
+                    f"WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK} "
                     "AND action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1) "
                     "AND jobs.action = 'plan' AND jobs.state = 'done' "
@@ -1747,7 +1759,7 @@ def _retry_refusal(
                     "JOIN device_slots AS slots ON slots.job_id = jobs.id "
                     "LEFT JOIN device_health AS health ON health.device = slots.device "
                     "WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? "
-                    "AND jobs.recipient != 'grok' AND jobs.state = 'running' "
+                    f"AND jobs.{HARNESS_WORK} AND jobs.state = 'running' "
                     "AND jobs.action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
                     "ORDER BY jobs.created_at LIMIT 1",
                     (repo.lower(), str(number)),
@@ -2067,17 +2079,24 @@ def _job_run_command(argv: list[str]) -> int:
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
-    if session is not None:
+    usage_read = None
+    if session is None:
+        log("usage probe: skipped (telemetry off)")
+    else:
         sessions.append(session)
-        command = session.argv
-        target, binary = placed.target, usage_probe.claude_binary(command)
-        if binary is not None:  # #151: the account's usage, once per job
-            usage_probe.start_claude(
+        command = session.flags.argv
+        binary = usage_probe.claude_binary(session.flags)
+        if binary is None:
+            log(f"usage probe: skipped ({session.flags.reason})")
+        else:
+            target, probe_env = placed.target, dict(environment)
+            usage_read = usage_probe.start_claude(
                 session.add_usage,
                 session.clock,
                 (lambda: usage_probe.claude_remote(placed.transport, target))
                 if target is not None
-                else (lambda: usage_probe.claude_local(binary, dict(environment))),
+                else (lambda: usage_probe.claude_local(binary, probe_env)),
+                log,
             )
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
@@ -2232,6 +2251,8 @@ def _job_run_command(argv: list[str]) -> int:
             _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
+        if usage_read is not None:
+            usage_read.join(usage_probe.TIMEOUT_SECONDS)
         if session is not None:
             if placed.target is not None:  # #151: a remote Codex job's rollout rate limits
                 session.add_usage(usage_probe.remote_codex(
