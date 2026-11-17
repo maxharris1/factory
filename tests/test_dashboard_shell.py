@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import lib.dashboard_page as page
+from lib.attention import ensure_table
 from lib.dashboard import collect_snapshot, render_pages
 from lib.health import CODE_COMPONENTS
 from tests.test_dashboard import NOW, add_ticket, make_db, seeded
@@ -313,20 +314,29 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
 
 
 COLLECTED = {
-    "two waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, 0) for t in ("5", "6")],
-    "three waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, 0) for t in ("5", "6", "7")],
-    "fifty with two stuck": [("maxharris1/a-repository-name-longer-than-most", t, 1) for t in ("1201", "1202")]
-                            + [("maxharris1/tracy-harris-coaching", str(t), 0) for t in range(100, 148)],
+    "two waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, "paused") for t in ("5", "6")],
+    "three waiting-max tickets": [("maxharris1/tracy-harris-coaching", t, "paused") for t in ("5", "6", "7")],
+    "fifty with two stuck": [("maxharris1/a-repository-name-longer-than-most", t, "stuck") for t in ("1201", "1202")]
+                            + [("maxharris1/tracy-harris-coaching", str(t), "paused") for t in range(100, 148)],
+    "three ship-failed tickets": [("maxharris1/tracy-harris-coaching", t, "ship-failed") for t in ("5", "6", "7")],
+    "fifty ship-failed tickets": [("maxharris1/a-repository-name-longer-than-most", str(t), "ship-failed")
+                                  for t in range(1200, 1250)],
 }
 
 
-def _collected(tmp_path: Path, tickets: list[tuple[str, str, int]]) -> dict:
+def _collected(tmp_path: Path, tickets: list[tuple[str, str, str]]) -> dict:
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
-        for repo, ticket, stuck in tickets:
-            add_ticket(connection, repo, ticket, state="waiting-max", paused_action="clarify",
-                       stuck=stuck, stuck_reason="review loop" if stuck else None)
+        ensure_table(connection)
+        for repo, ticket, how in tickets:
+            if how == "ship-failed":
+                add_ticket(connection, repo, ticket)
+                connection.execute("INSERT INTO needs_attention VALUES (?, ?, ?, ?, ?)",
+                                   (repo, ticket, "ship-failed", "merge failed", NOW))
+            else:
+                add_ticket(connection, repo, ticket, state="waiting-max", paused_action="clarify",
+                           stuck=int(how == "stuck"), stuck_reason="review loop" if how == "stuck" else None)
     return _now(collect_snapshot(db, tmp_path / "poller.log", now=NOW))
 
 
@@ -347,8 +357,8 @@ def test_both_worst_items_stay_inside_the_row_with_long_collected_subjects(tmp_p
             shown = [{k: v for k, v in item.items() if k != "whole"} for item in got["items"]]
             drawn = {"chip": True, "who": True, "clickable": True, "detail": True}
             assert shown == [drawn, drawn], f"both items keep chip, subject end and detail inside the row: {where}"
-            if got["more"] is not None:
-                assert got["more"] <= width, where
+            if len(COLLECTED[case]) > 2:
+                assert got["more"] is not None and got["more"] <= width, f"the +N more link stays inside the row: {where}"
             if not all(item["whole"] for item in got["items"]):
                 assert (got["tally"], max(got["details"]) <= 40) == (False, True), f"subjects are cut last: {where}"
             if width >= 1440:
