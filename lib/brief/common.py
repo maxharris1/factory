@@ -140,6 +140,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         ),
         "update": _update_scope(detail) if job.request.action == "review" else None,
         "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
+        "qa": context is not None and context.config.qa is not None,
     }
 
 
@@ -373,6 +374,37 @@ def code_span(text: str) -> str:
     longest = max((len(run) for run in re.findall(r"`+", flat)), default=0)
     ticks = "`" * (longest + 1)
     return f"{ticks} {flat} {ticks}" if longest else f"{ticks}{flat}{ticks}"
+
+
+LIVE_EXAMPLE = """## Verify, live
+- qa-1 (ac-1): As a practice user, upload the file from pack case-happy-01 on a draft case.
+  Pass: the table shows the three lines the pack expects. Saves: after screenshot, video.
+- qa-2 (ac-2): As an admin, open the case and accept the proposed values.
+  Pass: the case's status reads "pending review". Saves: after screenshot.
+- Regression lane: qa-1 on base.
+- Not live: ac-3 (unit only). ac-4 (needs a human: sends a real email)."""
+
+_LIVE_ASK = {
+    "plan": "End the plan with a `## Verify, live` section",
+    "ready": "This ticket had no plan step, so end the ready comment with a `## Verify, live` section",
+}
+
+
+def live_lines(where: str) -> list[str]:
+    return [
+        f"{_LIVE_ASK[where]}: the live scenarios a QA agent will run against the real UI, each with "
+        "its pass test written now, before the code exists. Its shape, with placeholder names:",
+        fenced(LIVE_EXAMPLE),
+        "- `qa-<n> (ac-<n>):` a scenario id, unique in the section, and the criterion it proves, "
+        "then the persona and the steps. Name `pack <id>` when a step loads a fixture pack.",
+        "- `Pass:` the observable result that proves the scenario, fixed before the build. "
+        "A scenario without one makes the whole section invalid.",
+        "- `Saves:` the evidence to keep, as a comma list. `Pass:` and `Saves:` go on the "
+        "scenario's line or on an indented line under it.",
+        "- `Regression lane:` the scenario ids to rerun on the base branch, or `none`.",
+        "- `Not live:` each criterion no live scenario proves, as `ac-<n> (reason)`.",
+        "Every bullet in the section is one of these entries.",
+    ]
 
 
 def answers_lines(detail: dict[str, object]) -> list[str]:

@@ -55,6 +55,21 @@ The reviewer runs `verify-cleffy`.
 - Never apply migrations on a hosted Supabase project from an agent session.
 """
 
+QA_FACTORY_MD = FACTORY_MD.replace(
+    "ship: merge\n",
+    """ship: merge
+qa:
+  enabled: true
+  runners: [claude-cloud]
+  profile: none
+  claude_cloud:
+    environment: qa-env
+  lane:
+    boot: bash boot.sh
+    base_url: http://127.0.0.1:8080
+""",
+)
+
 CI_LOG = "FAILED tests/test_pricing.py::test_start_free - AssertionError\n```\ntraceback\n```"
 
 RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
@@ -200,6 +215,7 @@ def evidence_bundle(current_round: int) -> dict[str, object]:
 # kind: (action, recipient, attempt, head, detail extras)
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
+    "plan-qa": ("plan", "claude", 1, None, {}),
     "plan-round-2": ("plan", "claude", 1, None, {
         "plan_round": 2,
         "instruction": "round=2/2; previous plan https://github.com/owner/repo/pull/42#issuecomment-5",
@@ -217,6 +233,7 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
         "gitBranchName": "factory/issue-42",
         "instruction": "https://github.com/owner/repo/pull/42#issuecomment-5",
     }),
+    "build-qa": ("build", "claude", 1, None, {"gitBranchName": "factory/issue-42"}),
     "resume": ("build", "claude", 1, HEAD, {
         "gitBranchName": "factory/issue-42",
         "instruction": ANSWERS_URL,
@@ -285,6 +302,8 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
 PRE_READY = "review:\n  pre_ready:\n    command: pytest -q tests/fast\n    timeout_seconds: 300\n"
 
 FACTORY_MDS = {
+    "plan-qa": QA_FACTORY_MD,
+    "build-qa": QA_FACTORY_MD,
     "review-before-ci": FACTORY_MD.replace("  verify: verify-cleffy\n", "  verify: verify-cleffy\n  start_before_ci: true\n"),
     "review-followups": FACTORY_MD.replace("review:\n", "review:\n  followup_from_round: 2\n"),
     "build-pre-ready": FACTORY_MD.replace("review:\n", PRE_READY),

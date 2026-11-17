@@ -361,6 +361,21 @@ A `plan` may add `lines=<n>`, the changed lines the plan expects (a non-negative
 
 A `verdict=APPROVE` with `ac=unmet` does not parse (issue #187). It is a refused verdict (T7, `rejected-approve-ac-unmet`), never a ship. An APPROVE with no `ac` still parses, so readers of accepted verdicts see them as before, but `orch job done` and T4 refuse it (issue #508). `orch job done` also refuses an APPROVE with an open `[blocking]` list item and names what to change; T4 applies both rules only to comments posted at or after the `approve_rule_floor` time.
 A `plan` uses `ac=met|unmet` and `round=<n>/2`: `n=1` for the first plan and `n=2` after one gap. The round is checked against the persisted plan-gap count. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
+
+A plan may end with a `Verify, live` section (issue #761). It lists the live scenarios QA will run, each with its pass test fixed before the code exists. When the ticket had no plan step, the section goes at the end of the ready. Only briefs for a project whose factory.md has `qa.enabled: true` ask for it. The shape:
+
+```
+## Verify, live
+- qa-1 (ac-1): As a practice user, upload the file from pack case-happy-01 on a draft case.
+  Pass: the table shows the three lines the pack expects. Saves: after screenshot, video.
+- qa-2 (ac-2): As an admin, open the case and accept the proposed values.
+  Pass: the case's status reads "pending review". Saves: after screenshot.
+- Regression lane: qa-1 on base.
+- Not live: ac-3 (unit only). ac-4 (needs a human: sends a real email).
+```
+
+`lib/evidence/scenarios.py` reads it. The section runs from that heading to the next level 1 or 2 heading, and a heading inside a code fence does not count. Each `qa-<n>` id is unique, and every scenario needs `Pass:`. `Saves:` is optional. A line or bullet that is not one of the three entry shapes makes the whole section invalid, and the reader names that line. The latest plan's section wins over a later ready. A ready's section counts only when no plan has one.
+
 A `go` may name `builder=<harness>` and `reviewer=<harness>` (issue #206). T1 queues the step to that builder and records the pair in the job detail as `routing`; later steps of the ticket use the pair of its newest plan, build or fix step (a T6 retry repeats an older step and does not change the pair). T2 accepts a ready only from that pair's builder, so an obsolete retry under the old pair cannot start a review. A side it leaves out is factory.md's. A pair whose families are the same, or whose family cannot be resolved (the section 6 rule, with factory.md's model hint only for a side whose harness matches factory.md's), is refused with no job. A go on a capped ticket is routed the same way before its extra round's fix is queued. When a later poll restores the pair and it no longer passes that rule (factory.md's model hint changed), the ticket is marked stuck (`route-same-family`), its queued jobs are cancelled and Grok wakes, before any review or ship. A watched PR that closed unmerged is abandoned first.
 
 A `qa` reports a QA run (issue #758): an agent drove the project's real UI at the PR head and checked each criterion. The orchestrator posts it, as it posts `brief` and `go`. Its `from` is the label the orchestrator's own comments already use, and it is trusted by the same `trusted_logins` rule; there is no QA identity. On a Linear-ticket repo it uses the visible header form, as a `verdict` does. Nothing queues, reads or acts on it yet, and `orch job done` refuses it as the handoff of every job kind.
