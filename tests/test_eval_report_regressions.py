@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timezone
 from dataclasses import replace
 
+import pytest
+
 from lib import feeder
 from lib.dispatcher import CIResult
 from lib.eval_report import Unrecorded, build_metrics
@@ -360,3 +362,37 @@ def test_a_hold_from_before_the_acceptance_table_keeps_its_acceptance(tmp_path):
     board.approve(pr, comment_id="new-head-approve")
     board.poll()
     assert _accepted_head_count(board.queue.path, posted) == 1
+
+
+class _CutAfterAcceptanceTable(sqlite3.Connection):
+    def execute(self, sql, *args):
+        cursor = super().execute(sql, *args)
+        if "CREATE TABLE IF NOT EXISTS verdict_acceptances" in sql:
+            raise RuntimeError("interrupted after the acceptance table was created")
+        return cursor
+
+
+def test_an_upgrade_cut_after_the_acceptance_table_still_backfills_the_hold(tmp_path, monkeypatch):
+    board = held_board(tmp_path)
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("src/view/Button.tsx",)
+    board.build_and_approve(pr)
+    with board.queue.connect() as db:
+        held = db.execute("SELECT approve_comment_id, held_at FROM ship_holds").fetchone()
+        db.execute("DROP TABLE verdict_acceptances")
+
+    def cut_connect():
+        connection = sqlite3.connect(board.queue.path, factory=_CutAfterAcceptanceTable)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    monkeypatch.setattr(board.dispatcher, "_connect", cut_connect)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        board.dispatcher._initialize()
+    monkeypatch.undo()
+    board.dispatcher._initialize()
+
+    with board.queue.connect() as db:
+        assert [
+            tuple(row) for row in db.execute("SELECT comment_id, accepted_at FROM verdict_acceptances")
+        ] == [tuple(held)]
