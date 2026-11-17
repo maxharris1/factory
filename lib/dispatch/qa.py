@@ -400,6 +400,54 @@ class QaMixin:
                 return True
         return False
 
+    def _held_qa(self, ticket: TrackedTicket, head: str) -> dict[str, object] | None:
+        qa = ticket.factory.qa
+        assert qa is not None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, scope, state, result, reason, comment_id, started_at
+                FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+        if row is None:
+            return {"result": None, "reason": "no-qa-run", "summary": "No QA run: no-qa-run."}
+        if row["scope"] == "none":
+            return {
+                "result": row["result"],
+                "reason": row["reason"],
+                "summary": f"No QA run: {row['reason']}.",
+            }
+        if row["state"] in OPEN_STATES and self.queue.now() < (
+            row["started_at"] + qa.timeout_minutes * 60
+        ):
+            return None
+        link = f"/qa/runs/{row['run_id']}"
+        if row["state"] == "reported":
+            bodies = {comment.id: comment.body for comment in ticket.comments}
+            rows = _scenario_rows(bodies.get(row["comment_id"], ""))
+            passed = sum(verified for _qa_id, verified in rows)
+            return {
+                "result": row["result"],
+                "passed": passed,
+                "total": len(rows),
+                "evidence_link": link,
+                "summary": (
+                    f"QA {row['result']}: {passed} of {len(rows)} scenarios passed. "
+                    f"Evidence: {link}"
+                ),
+            }
+        reason = row["reason"] if row["state"] == "cancelled" and row["reason"] else "timeout"
+        return {
+            "result": None,
+            "reason": reason,
+            "evidence_link": link,
+            "summary": f"QA did not finish ({reason}). Evidence: {link}",
+        }
+
     def _qa_job_failed(self, job: Job) -> None:
         now = self.queue.now()
         with self._connect() as connection:
