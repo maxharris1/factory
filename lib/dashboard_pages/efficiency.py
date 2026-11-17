@@ -360,7 +360,6 @@ def _tone(room: float) -> str:
 
 
 def _view(entry: dict, now: float) -> dict:
-    """One account's window and reset cells, headroom number, tag and meter."""
     state = entry["state"]
     fresh = [w for w in WINDOWS if entry[w]["state"] == "ok"]
     if state == "no telemetry":

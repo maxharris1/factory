@@ -5,14 +5,12 @@ lib/usage_readings.py) inside the dashboard's read-only transaction. Only
 allowlisted columns are read and every value is checked again. The snapshot
 is then walked by lib/dashboard.py's `_scrub`.
 
-There is one entry per account, a harness and its bot user: a subscription
-is shared by every device that runs it. Accounts come from the enabled
-machines.yml devices (`devices` keeps their machines.yml order), then any
-account that has stored readings with the devices its rows name. Rows are
-stored per device; each window keeps the newest reading across the
-account's devices. Each window is `ok`, `stale` (the window has reset or
-the reading is older than STALE_SECONDS, and `used` is then null) or
-`no reading`. An account is `not tracked` (Cursor), `no reading` (no chosen
+There is one entry per account, a harness and its bot user. Accounts come
+from the enabled machines.yml devices (`devices` keeps their machines.yml
+order), then any account that has stored readings with the devices its rows
+name. Each window holds the newest reading across the account's devices and
+is `ok`, `stale` (the window has reset or the reading is older than
+STALE_SECONDS, and `used` is then null) or `no reading`. An account is `not tracked` (Cursor), `no reading` (no chosen
 source, or no row yet), `no telemetry` (no table: an older database, or
 telemetry never on), `stale` or `ok`. No value is guessed: a missing
 utilization stays null.
@@ -22,6 +20,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from typing import NamedTuple
 
 from lib import lane_limit
 from lib.machines_yml import MachinesConfig
@@ -40,7 +39,9 @@ HARNESSES = ("claude", "codex", "cursor")
 ROW_LIMIT = 500
 _NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
-Account = tuple[str, str]  # (harness, bot)
+class Account(NamedTuple):
+    harness: str
+    bot: str
 
 
 def _accounts(machines: MachinesConfig | None) -> dict[Account, list[str]]:
@@ -51,12 +52,11 @@ def _accounts(machines: MachinesConfig | None) -> dict[Account, list[str]]:
         for harness in HARNESSES:
             bot = device.harnesses.get(harness)
             if isinstance(bot, str) and _NAME.fullmatch(bot):
-                found.setdefault((harness, bot), []).append(device.name)
+                found.setdefault(Account(harness, bot), []).append(device.name)
     return found
 
 
 def _rows(connection: sqlite3.Connection) -> dict[Account, tuple[list[str], dict[str, Reading]]] | None:
-    """Each account's devices with stored rows, and its newest reading per window."""
     try:
         rows = connection.execute(
             f"SELECT device, harness, bot, window, used, resets_at, observed_at"
@@ -73,7 +73,7 @@ def _rows(connection: sqlite3.Connection) -> dict[Account, tuple[list[str], dict
         reading = from_row(*values)
         if reading is None:
             continue
-        devices, windows = stored.setdefault((harness, bot), ([], {}))
+        devices, windows = stored.setdefault(Account(harness, bot), ([], {}))
         if device not in devices:
             devices.append(device)
         kept = windows.get(reading.window)
