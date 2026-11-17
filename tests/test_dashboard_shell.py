@@ -951,10 +951,10 @@ def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) ->
         const main = document.querySelector('main'), box = main.getBoundingClientRect();
         const width = sel => document.querySelector(sel).getBoundingClientRect().width;
         return {left: box.left, width: box.width, topbar: width('.topbar'), statusline: width('#statusline'),
-                padding: getComputedStyle(main).padding, lane: width('.lane')};
+                padding: getComputedStyle(main).padding, lane: width('.lane'), tile: width('.tiles > .tile')};
     })()"""
     browser = Browser()
-    lanes = {}
+    lanes, tiles = {}, {}
     try:
         for width in (375, 699, 1440, 1600, 1700, 1920, 2560, 3840):
             browser.open(html, width)
@@ -964,10 +964,11 @@ def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) ->
             assert round(got["left"]) == round((width - got["width"]) / 2), (width, got)
             assert (got["topbar"], got["statusline"]) == (width, width), (width, got)
             assert got["padding"] == ("14px 12px 24px" if width < 641 else "20px 24px 32px"), (width, got)
-            lanes[width] = got["lane"]
+            lanes[width], tiles[width] = got["lane"], got["tile"]
     finally:
         browser.close()
     assert lanes[2560] > lanes[1600], lanes
+    assert tiles[2560] > tiles[1600] and tiles[1920] > tiles[1600], tiles
 
 
 def test_topbar_markup_follows_the_artboard(base: dict) -> None:
