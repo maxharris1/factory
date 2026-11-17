@@ -62,6 +62,7 @@ TOOLS_SHOWN = 8
 ROW_LIMIT = 2000
 TEXT_LIMIT = 160
 NO_DATA = "no data"
+NO_COST = "no cost reported"
 HARNESSES = ("claude", "codex", "cursor")
 STEP_KINDS = ("tool", "command", "error")
 STEP_STATUSES = ("running", "ok", "error")
@@ -412,7 +413,6 @@ def _usd(value: object) -> str:
 
 
 TOKEN_UNITS = ((10**9, "B"), (10**6, "M"), (10**3, "K"))
-TOKEN_TILES = (("tokens_in", "tokens in"), ("tokens_cached", "of them cached"), ("tokens_out", "tokens out"))
 
 
 def _compact(value: int) -> str:
@@ -435,7 +435,7 @@ def _span(cls: str | None, text: object) -> str:
     return f"<span{attr}>{_e(text)}</span>"
 
 
-def _table(rows: list[dict], first: str) -> str:
+def _table(rows: list[dict], first: str, chips: bool = False) -> str:
     if not rows:
         return '<p class="empty">no jobs with telemetry</p>'
     head = "".join(
@@ -444,62 +444,49 @@ def _table(rows: list[dict], first: str) -> str:
     )
     body = "".join(
         "<tr>"
-        f"<td>{_e(row['name'])}</td>"
+        f"<td>{_span('bot ' + row['name'], row['name']) if chips else _e(row['name'])}</td>"
         f'<td class="num">{_num(row["jobs"])}</td>'
         f'<td class="num">{_num(row["tokens_in"])}</td>'
         f'<td class="num">{_num(row["tokens_cached"])}</td>'
         f'<td class="num">{_num(row["tokens_out"])}</td>'
-        f'<td class="num">{_usd(row["cost_usd"]) if row["priced_jobs"] else "—"}</td>'
-        "</tr>"
-        for row in rows
-    )
-    return f'<div class="ef-scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
-
-
-def _recent_table(rows: list[dict]) -> str:
-    if not rows:
-        return '<p class="empty">no finished jobs with telemetry</p>'
-    head = "".join(
-        f"<th>{name}</th>"
-        for name in ("job", "repo", "harness", "tokens in", "tokens out", "cost", "exit")
-    )
-    body = "".join(
-        "<tr>"
-        f"<td>{_e(row['job'])}</td>"
-        f"<td>{_e(row['repo'])}</td>"
-        f"<td>{_e(row['harness'])}</td>"
-        + (
-            f'<td class="num">{_num(row["tokens_in"])}</td><td class="num">{_num(row["tokens_out"])}</td>'
-            if row.get("tokens_known", True)
-            else f'<td class="num muted">{NO_DATA}</td><td class="num muted">{NO_DATA}</td>'
-        )
-        + f'<td class="num">{_usd(row["cost_usd"])}</td>'
-        + ('<td class="bad">' if row["exit_code"] not in (0, None) else "<td>")
-        + f"{_e(row['exit_reason'])}</td>"
+        + (f'<td class="num">{_usd(row["cost_usd"])}</td>' if row["priced_jobs"]
+           else f'<td class="num muted">{NO_COST}</td>')
         + "</tr>"
         for row in rows
     )
     return f'<div class="ef-scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
+def _cached(totals: dict) -> str:
+    tokens_in, cached = totals["tokens_in"], totals["tokens_cached"]
+    if not tokens_in:
+        return ""
+    share = (200 * cached + tokens_in) // (2 * tokens_in)
+    return (
+        f'<div class="cached" title="{_compact(cached)} of {_compact(tokens_in)} tokens in were cached">'
+        f"{share}% cached</div>"
+    )
+
+
 def rollup_panel(snapshot: dict) -> str:
-    """Efficiency: tokens and cost per job, per harness and per repo."""
+    """Efficiency: cost and token tiles, then per harness, then per repo folded away."""
     rollup = snapshot.get("telemetry") or _empty_rollup("none")
     totals = rollup["totals"]
     heading = f"Cost, last {rollup['window_days']} days"
     if not totals["jobs"]:
         inner = '<p class="empty">no telemetry</p>'
     else:
+        tiles = (
+            (_usd(totals["cost_usd"]) if totals["priced_jobs"] else None, "cost", "", ""),
+            (_num(totals["jobs"]), "jobs", "", ""),
+            (_compact(totals["tokens_in"]), "tokens in", f' title="{_num(totals["tokens_in"])}"', _cached(totals)),
+            (_compact(totals["tokens_out"]), "tokens out", f' title="{_num(totals["tokens_out"])}"', ""),
+        )
         stats = "".join(
-            f'<div class="stat"{title}><b>{value}</b>{_span(None, label)}</div>'
-            for value, label, title in (
-                (_num(totals["jobs"]), "jobs", ""),
-                *(
-                    (_compact(totals[name]), label, f' title="{_num(totals[name])}"')
-                    for name, label in TOKEN_TILES
-                ),
-                (_usd(totals["cost_usd"]), "cost reported", ""),
-            )
+            f'<div class="stat"{title}>'
+            + (f'<b class="none">{NO_COST}</b>' if value is None else f"<b>{value}</b>")
+            + f"{_span(None, label)}{sub}</div>"
+            for value, label, title, sub in tiles
         )
         unpriced = sorted(
             ((row["jobs"] - row["priced_jobs"], row["name"]) for row in rollup["by_harness"]
@@ -516,10 +503,10 @@ def rollup_panel(snapshot: dict) -> str:
             note += f'<p class="muted">{totals["unmetered_jobs"]} jobs report no token usage ({NO_DATA})</p>'
 
         inner = (
-            f'<div class="stats">{stats}</div>{note}'
-            '<h3 class="tele-head">per harness</h3>' + _table(rollup["by_harness"], "harness")
-            + '<h3 class="tele-head">per repo</h3>' + _table(rollup["by_repo"], "repo")
-            + '<h3 class="tele-head">recent jobs</h3>' + _recent_table(rollup["recent"])
+            f'<div class="stats">{stats}</div>'
+            '<h3 class="tele-head">per harness</h3>' + _table(rollup["by_harness"], "harness", chips=True)
+            + note
+            + "<details><summary>per repo</summary>" + _table(rollup["by_repo"], "repo") + "</details>"
         )
     return (
         f'<section class="panel" id="tokens" aria-label="{_e(heading)}">'
@@ -531,9 +518,14 @@ TELEMETRY_CSS = (
     ".tele-head{margin:14px 0 6px;font:500 11px/1.4 var(--mono);color:var(--muted);"
     "text-transform:uppercase;letter-spacing:.08em}"
     "#tokens .stats{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 12px}"
-    "#tokens .stat{flex:1 1 140px;padding:10px 14px 12px}"
-    "#tokens .stat b{font:600 30px/1.15 var(--mono);letter-spacing:-.03em}"
+    "#tokens .stat{flex:1 1 200px;min-width:0;padding:10px 14px 12px}"
+    "#tokens .stat b{font:600 30px/1.15 var(--mono);letter-spacing:-.03em;font-variant-numeric:tabular-nums}"
+    "#tokens .stat b.none{font-size:13px;font-weight:500;letter-spacing:0;color:var(--muted)}"
     "#tokens .stat span{font:500 12px/1.3 var(--mono)}"
+    "#tokens .cached{margin-top:3px;font:11px/1.3 var(--mono);font-variant-numeric:tabular-nums;color:var(--text-2)}"
+    "#tokens>p.muted{margin:10px 0 8px;font-size:12px}"
+    "@media (max-width:699.98px){#tokens .stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}"
+    "#tokens .stat{padding:8px 12px 10px}#tokens .stat b{font-size:24px}}"
 )
 
 
@@ -561,49 +553,48 @@ TELEMETRY_SCRIPT = r"""
     var cut = digits.length - places;
     return (digits.slice(0, cut) + '.' + digits.slice(cut)).replace(/0+$/, '').replace(/\.$/, '') + unit[1];
   }
-  function teleTable(root, rows, first, recent) {
-    if (!rows.length) { add(root, el('p', 'empty', recent ? 'no finished jobs with telemetry' : 'no jobs with telemetry')); return; }
+  function teleTable(root, rows, first, chips) {
+    if (!rows.length) { add(root, el('p', 'empty', 'no jobs with telemetry')); return; }
     var table = add(add(root, el('div', 'ef-scroll')), el('table'));
     var head = add(add(table, el('thead')), el('tr'));
-    (recent ? ['job', 'repo', 'harness', 'tokens in', 'tokens out', 'cost', 'exit']
-            : [first, 'jobs', 'tokens in', 'cached', 'tokens out', 'cost']).forEach(function (h) { add(head, el('th', null, h)); });
+    [first, 'jobs', 'tokens in', 'cached', 'tokens out', 'cost'].forEach(function (h) { add(head, el('th', null, h)); });
     var tbody = add(table, el('tbody'));
     rows.forEach(function (r) {
       var tr = add(tbody, el('tr'));
-      if (recent) {
-        add(tr, el('td', null, r.job));
-        add(tr, el('td', null, r.repo));
-        add(tr, el('td', null, r.harness));
-        var known = r.tokens_known !== false;
-        add(tr, el('td', known ? 'num' : 'num muted', known ? num(r.tokens_in) : 'no data'));
-        add(tr, el('td', known ? 'num' : 'num muted', known ? num(r.tokens_out) : 'no data'));
-        add(tr, el('td', 'num', usd(r.cost_usd)));
-        add(tr, el('td', (r.exit_code === 0 || r.exit_code === null || r.exit_code === undefined) ? null : 'bad', r.exit_reason || '—'));
-      } else {
-        add(tr, el('td', null, r.name));
-        add(tr, el('td', 'num', num(r.jobs)));
-        add(tr, el('td', 'num', num(r.tokens_in)));
-        add(tr, el('td', 'num', num(r.tokens_cached)));
-        add(tr, el('td', 'num', num(r.tokens_out)));
-        add(tr, el('td', 'num', r.priced_jobs ? usd(r.cost_usd) : '—'));
-      }
+      if (chips) add(add(tr, el('td')), el('span', 'bot ' + r.name, r.name));
+      else add(tr, el('td', null, r.name));
+      add(tr, el('td', 'num', num(r.jobs)));
+      add(tr, el('td', 'num', num(r.tokens_in)));
+      add(tr, el('td', 'num', num(r.tokens_cached)));
+      add(tr, el('td', 'num', num(r.tokens_out)));
+      add(tr, el('td', r.priced_jobs ? 'num' : 'num muted', r.priced_jobs ? usd(r.cost_usd) : 'no cost reported'));
     });
   }
+  function cachedLine(box, t) {
+    if (!t.tokens_in) return;
+    var line = add(box, el('div', 'cached',
+      Math.floor((200 * t.tokens_cached + t.tokens_in) / (2 * t.tokens_in)) + '% cached'));
+    line.setAttribute('title', compactCount(t.tokens_cached) + ' of ' + compactCount(t.tokens_in) + ' tokens in were cached');
+  }
   function renderTokens(d) {
-    var r = d.telemetry || {window_days: 7, totals: {jobs: 0}, by_harness: [], by_repo: [], recent: []};
+    var r = d.telemetry || {window_days: 7, totals: {jobs: 0}, by_harness: [], by_repo: []};
     var root = panel('tokens', 'Cost, last ' + r.window_days + ' days', 'as reported by each harness');
     if (!root) return;
     var t = r.totals || {jobs: 0};
     if (!t.jobs) { add(root, el('p', 'empty', 'no telemetry')); return; }
     var stats = add(root, el('div', 'stats'));
-    [[num(t.jobs), 'jobs', null], [compactCount(t.tokens_in), 'tokens in', num(t.tokens_in)],
-     [compactCount(t.tokens_cached), 'of them cached', num(t.tokens_cached)],
-     [compactCount(t.tokens_out), 'tokens out', num(t.tokens_out)], [usd(t.cost_usd), 'cost reported', null]].forEach(function (s) {
+    [[t.priced_jobs ? usd(t.cost_usd) : null, 'cost', null, null],
+     [num(t.jobs), 'jobs', null, null],
+     [compactCount(t.tokens_in), 'tokens in', num(t.tokens_in), cachedLine],
+     [compactCount(t.tokens_out), 'tokens out', num(t.tokens_out), null]].forEach(function (s) {
       var box = add(stats, el('div', 'stat'));
       if (s[2] !== null) box.setAttribute('title', s[2]);
-      add(box, el('b', null, s[0]));
+      add(box, s[0] === null ? el('b', 'none', 'no cost reported') : el('b', null, s[0]));
       add(box, el('span', null, s[1]));
+      if (s[3]) s[3](box, t);
     });
+    add(root, el('h3', 'tele-head', 'per harness'));
+    teleTable(root, r.by_harness || [], 'harness', true);
     var unpriced = (r.by_harness || []).filter(function (h) { return h.jobs > h.priced_jobs; })
       .map(function (h) { return [h.jobs - h.priced_jobs, h.name]; })
       .sort(function (a, b) { return b[0] - a[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0); });
@@ -612,11 +603,6 @@ TELEMETRY_SCRIPT = r"""
         unpriced.map(function (u) { return u[1] + ' ' + u[0]; }).join(', ')));
     }
     if (t.unmetered_jobs) add(root, el('p', 'muted', t.unmetered_jobs + ' jobs report no token usage (no data)'));
-    add(root, el('h3', 'tele-head', 'per harness'));
-    teleTable(root, r.by_harness || [], 'harness', false);
-    add(root, el('h3', 'tele-head', 'per repo'));
-    teleTable(root, r.by_repo || [], 'repo', false);
-    add(root, el('h3', 'tele-head', 'recent jobs'));
-    teleTable(root, r.recent || [], null, true);
+    teleTable(details(root, 'tokens-repo', 'per repo'), r.by_repo || [], 'repo', false);
   }
 """

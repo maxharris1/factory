@@ -284,9 +284,9 @@ def test_who_is_working_is_gone(tmp_path: Path, render: str) -> None:
 
 
 @needs_node
-@pytest.mark.parametrize("readings", [True, False])
-def test_script_twins_match_the_server_render(tmp_path: Path, readings: bool) -> None:
-    snapshot = _snapshot(tmp_path, readings=readings)
+@pytest.mark.parametrize(("readings", "telemetry"), [(True, ()), (False, ()), (True, "WIDE")])
+def test_script_twins_match_the_server_render(tmp_path: Path, readings: bool, telemetry: object) -> None:
+    snapshot = _snapshot(tmp_path, readings=readings, telemetry=WIDE if telemetry else ())
     page = _page(snapshot)
     out = _run_page(tmp_path, snapshot, "efficiency", PANELS)
     for ident in PANELS:
@@ -330,7 +330,7 @@ def test_efficiency_has_no_page_scroll_at_375_in_a_browser(tmp_path: Path) -> No
     try:
         for script in (False, True):
             _load(browser, snapshot, 375, script)
-            assert browser.eval("document.querySelectorAll('#tokens .ef-scroll > table').length") == 3, script
+            assert browser.eval("document.querySelectorAll('#tokens .ef-scroll > table').length") == 2, script
             assert browser.eval(WIDER_THAN_THE_PAGE) == [], script
             assert browser.eval("document.documentElement.scrollWidth") <= browser.eval("innerWidth"), script
             lefts = browser.eval(
@@ -339,6 +339,118 @@ def test_efficiency_has_no_page_scroll_at_375_in_a_browser(tmp_path: Path) -> No
             )
             assert [ident for ident, _ in lefts] == PANELS, script
             assert len({left for _, left in lefts}) == 1, (script, lefts)
+    finally:
+        browser.close()
+
+
+COST_ROWS = (
+    {"harness": "claude", "repo": "maxharris1/cleffy", "tokens_in": 2_000_000_000,
+     "tokens_cached": 1_900_000_000, "tokens_out": 30_000_000, "cost_usd": 1057.64},
+    {"harness": "codex", "repo": "maxharris1/factory", "tokens_in": 635_600_591,
+     "tokens_cached": 510_000_000, "tokens_out": 1_800_000},
+)
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_cost_panel_has_four_tiles_in_order(tmp_path: Path, render: str) -> None:
+    panel = _render(tmp_path, _snapshot(tmp_path, telemetry=COST_ROWS), render, "tokens")
+    stats = re.search(r'<div class="stats">(.*?)</div><h3', panel)
+    assert stats, panel
+    assert stats.group(1) == (
+        '<div class="stat"><b>$1,057.64</b><span>cost</span></div>'
+        '<div class="stat"><b>2</b><span>jobs</span></div>'
+        '<div class="stat" title="2,635,600,591"><b>2.636B</b><span>tokens in</span>'
+        '<div class="cached" title="2.41B of 2.636B tokens in were cached">91% cached</div></div>'
+        '<div class="stat" title="31,800,000"><b>31.8M</b><span>tokens out</span></div>'
+    )
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+@pytest.mark.parametrize(("tokens_in", "cached", "line"), [
+    (200, 101, "51% cached"), (200, 99, "50% cached"), (3, 2, "67% cached"), (5, 0, "0% cached"), (0, 0, None),
+])
+def test_cached_share_rounds_half_up_and_is_absent_without_tokens_in(
+    tmp_path: Path, render: str, tokens_in: int, cached: int, line: str | None
+) -> None:
+    snapshot = _snapshot(tmp_path, telemetry=({"harness": "claude", "tokens_in": tokens_in,
+                                               "tokens_cached": cached, "tokens_out": 7},))
+    panel = _render(tmp_path, snapshot, render, "tokens")
+    found = re.findall(r'<div class="cached" title="[^"]*">(.*?)</div>', panel)
+    assert found == ([line] if line else []), panel
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_a_harness_without_cost_says_no_cost_reported(tmp_path: Path, render: str) -> None:
+    panel = _render(tmp_path, _snapshot(tmp_path, telemetry=COST_ROWS), render, "tokens")
+    harness = panel[panel.index("per harness</h3>"):panel.index("</table>")]
+    assert ('<tr><td><span class="bot codex">codex</span></td><td class="num">1</td><td class="num">635,600,591</td>'
+            '<td class="num">510,000,000</td><td class="num">1,800,000</td>'
+            '<td class="num muted">no cost reported</td></tr>') in harness, harness
+    assert '<td class="num">$1,057.64</td>' in harness
+    repo = _rows(panel[panel.index("<details>"):])
+    assert repo["maxharris1/factory"][-1] == "no cost reported" and repo["maxharris1/cleffy"][-1] == "$1,057.64"
+    assert '<td class="num muted">no cost reported</td>' in panel[panel.index("<details>"):]
+
+    (tmp_path / "unpriced").mkdir()
+    unpriced = _snapshot(tmp_path / "unpriced", telemetry=({"harness": "codex"}, {"harness": "cursor"}))
+    panel = _render(tmp_path, unpriced, render, "tokens")
+    assert '<div class="stat"><b class="none">no cost reported</b><span>cost</span></div>' in panel, panel
+    assert "$0.00" not in panel
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_per_repo_sits_in_a_closed_details(tmp_path: Path, render: str) -> None:
+    panel = _render(tmp_path, _snapshot(tmp_path, telemetry=COST_ROWS), render, "tokens")
+    assert re.findall(r"<details[^>]*>", panel) == ["<details>"], panel
+    assert panel.index("per harness</h3>") < panel.index("<table>") < panel.index("<details>")
+    assert panel.count("<table>") == 2
+    repo = re.search(r"<details><summary>per repo</summary>(.*?)</details>", panel)
+    assert repo, panel
+    assert "<table>" in repo.group(1) and "<th>repo</th>" in repo.group(1)
+    assert set(_rows(repo.group(1))) == {"maxharris1/cleffy", "maxharris1/factory"}
+    assert "per repo</h3>" not in panel
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_recent_jobs_table_is_gone(tmp_path: Path, render: str) -> None:
+    snapshot = _snapshot(tmp_path, telemetry=COST_ROWS)
+    assert [row["job"] for row in snapshot["telemetry"]["recent"]] == ["d-job-00", "d-job-00"]
+    panel = _render(tmp_path, snapshot, render, "tokens")
+    assert "recent jobs" not in _text(panel)
+    assert "success; exit 0" not in panel and "d-job-00" not in panel
+    assert "<th>job</th>" not in panel and "<th>exit</th>" not in panel
+
+
+COST_TILES_AND_TABLES = """(function () {
+  var tiles = [].map.call(document.querySelectorAll('#tokens .stat'), function (n) {
+    var r = n.getBoundingClientRect(); return [n.querySelector('span').textContent, r.left, r.top];
+  });
+  document.querySelector('#tokens details').open = true;
+  var panel = document.getElementById('tokens').getBoundingClientRect();
+  var tables = [].map.call(document.querySelectorAll('#tokens table'), function (t) {
+    var box = t.parentElement, r = box.getBoundingClientRect();
+    return [box.className, getComputedStyle(box).overflowX, t.getBoundingClientRect().height > 0,
+            r.left >= panel.left - 0.5 && r.right <= panel.right + 0.5];
+  });
+  return {tiles: tiles, tables: tables, scroll: document.documentElement.scrollWidth, width: innerWidth};
+})()"""
+
+
+@needs_chrome
+def test_cost_tiles_are_two_by_two_at_375_in_a_browser(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, telemetry=WIDE)
+    browser = Browser()
+    try:
+        for script in (False, True):
+            _load(browser, snapshot, 375, script)
+            out = browser.eval(COST_TILES_AND_TABLES)
+            assert [label for label, _, _ in out["tiles"]] == ["cost", "jobs", "tokens in", "tokens out"], script
+            lefts = [round(left, 1) for _, left, _ in out["tiles"]]
+            tops = [round(top, 1) for _, _, top in out["tiles"]]
+            assert lefts[0] == lefts[2] < lefts[1] == lefts[3], (script, lefts)
+            assert tops[0] == tops[1] < tops[2] == tops[3], (script, tops)
+            assert out["tables"] == [["ef-scroll", "auto", True, True]] * 2, (script, out["tables"])
+            assert out["scroll"] <= out["width"], (script, out)
     finally:
         browser.close()
 
