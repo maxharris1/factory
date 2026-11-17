@@ -19,7 +19,7 @@ from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote_to_bytes, urlsplit
 from urllib.request import urlopen
 
 RESULT_NAME = "result.json"
@@ -114,7 +114,7 @@ def _check_expires(expires_s: object) -> int:
     return expires_s
 
 
-def _uri_encode(text: str, *, keep_slash: bool) -> str:
+def _uri_encode(text: str | bytes, *, keep_slash: bool) -> str:
     return quote(text, safe="-_.~/" if keep_slash else "-_.~")
 
 
@@ -231,7 +231,9 @@ class S3Storage:
         _check_key(key)
         _check_expires(expires_s)
         path = f"{self._encoded_bucket_path}/{_uri_encode(key, keep_slash=True)}"
-        query = _presign_query(host=self._host, encoded_path=path, region=self.region,
+        query = _presign_query(host=self._host,
+                               encoded_path=_uri_encode(unquote_to_bytes(path), keep_slash=True),
+                               region=self.region,
                                access_key=self._access_key_id, secret_key=self._secret_key,
                                when=self._now().astimezone(timezone.utc), expires_s=expires_s)
         url = f"{self._origin}{path}?{query}"
