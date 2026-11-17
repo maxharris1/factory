@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from lib.machines_yml import load_machines_yml
+from lib.machines_yml import DEFAULT_ORCH_HOST, load_machines_yml, orch_host
+from tests.pool_helpers import write_target_machines
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -138,7 +139,7 @@ def test_workdir_root_bot_token_resolves_to_each_harness_bot(tmp_path: Path) -> 
     config, findings = load_machines_yml(
         write(
             tmp_path,
-            "devices:\n"
+            "orch_host: pc\ndevices:\n"
             + remote(
                 harnesses="{claude: claude-bot, codex: codex-bot}",
                 workdir_root="/home/{bot}/factory-work",
@@ -156,7 +157,7 @@ def test_workdir_root_bot_token_resolves_to_each_harness_bot(tmp_path: Path) -> 
 
 
 def test_workdir_root_without_token_is_shared_by_every_harness(tmp_path: Path) -> None:
-    config, _ = load_machines_yml(write(tmp_path, "devices:\n" + remote()))
+    config, _ = load_machines_yml(write(tmp_path, "orch_host: pc\ndevices:\n" + remote()))
     assert config is not None
     assert config.devices[0].workdir_for("codex") == "/home/work"
 
@@ -219,7 +220,7 @@ def test_example_passes_strict_check() -> None:
 
 
 def test_enabled_defaults_true_and_remote_device_schedules(tmp_path: Path) -> None:
-    config, findings = load_machines_yml(write(tmp_path, "devices:\n" + remote()))
+    config, findings = load_machines_yml(write(tmp_path, "orch_host: pc\ndevices:\n" + remote()))
 
     assert findings == []
     assert config is not None
@@ -232,7 +233,7 @@ def test_enabled_defaults_true_and_remote_device_schedules(tmp_path: Path) -> No
 
 def test_disabled_device_is_reported_and_never_eligible(tmp_path: Path) -> None:
     config, findings = load_machines_yml(
-        write(tmp_path, "devices:\n" + remote(enabled="false"))
+        write(tmp_path, "orch_host: pc\ndevices:\n" + remote(enabled="false"))
     )
 
     assert config is not None
@@ -257,7 +258,7 @@ def test_placeholder_is_refused_unless_allowed_and_then_never_eligible(
     field: str,
     value: str,
 ) -> None:
-    path = write(tmp_path, "devices:\n" + remote(**{field: value}))
+    path = write(tmp_path, "orch_host: pc\ndevices:\n" + remote(**{field: value}))
 
     strict, strict_findings = load_machines_yml(path)
     assert strict is None
@@ -376,7 +377,7 @@ def test_workdir_root_stays_off_mounted_windows_drives(
 
 def test_workdir_root_allows_a_linux_home_path(tmp_path: Path) -> None:
     config, findings = load_machines_yml(
-        write(tmp_path, "devices:\n" + remote(workdir_root="/home/mnt-work"))
+        write(tmp_path, "orch_host: pc\ndevices:\n" + remote(workdir_root="/home/mnt-work"))
     )
 
     assert findings == []
@@ -428,7 +429,7 @@ def test_a_disabled_duplicate_tailscale_name_is_also_refused(tmp_path: Path) -> 
 
 
 def test_distinct_tailscale_names_are_accepted(tmp_path: Path) -> None:
-    text = "devices:\n" + remote(name="pc-a") + remote(
+    text = "orch_host: pc-a\ndevices:\n" + remote(name="pc-a") + remote(
         name="pc-b", tailscale_name="pc-b.example.ts.net"
     )
 
@@ -462,3 +463,60 @@ def test_workdir_root_rejects_nul_and_control_characters(
         item.startswith("devices[0].workdir_root ") and "control character" in item
         for item in errors(findings)
     ), findings
+
+
+def test_target_shape_names_pc_as_orch_host_and_box_logs_in_as_box(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(write_target_machines(tmp_path))
+
+    assert errors(findings) == [], findings
+    assert config is not None
+    assert orch_host(config) == "pc"
+    assert not any(device.local for device in config.devices)
+    box, pc = config.device("box"), config.device("pc")
+    assert (box.ssh_user, pc.ssh_user) == ("box", None)
+    assert box.login_for("claude") == "box"
+    assert pc.login_for("codex") == "codex-bot"
+
+
+def test_shipped_machines_yml_derives_orch_host_from_its_local_device() -> None:
+    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+
+    assert config is not None
+    assert orch_host(config) == "box"
+
+
+def test_orch_host_is_derived_from_the_one_local_device(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(write(tmp_path, "devices:\n" + BOX + remote()))
+
+    assert errors(findings) == []
+    assert orch_host(config) == "box"
+
+
+def test_orch_host_falls_back_to_box_only_without_a_config() -> None:
+    assert orch_host(None) == DEFAULT_ORCH_HOST == "box"
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("orch_host: lab\ndevices:\n" + remote(), "orch_host 'lab' is not a listed device"),
+        ("orch_host: pc\ndevices:\n" + BOX + remote(), "local device 'box' must be orch_host"),
+        ("devices:\n" + remote(), "orch_host is required when no device is local"),
+        ("orch_host: [pc]\ndevices:\n" + remote(), "orch_host must be a device name"),
+        ("orch_host: 3\ndevices:\n" + remote(), "orch_host must be a device name"),
+        (
+            "devices:\n" + BOX + "    ssh_user: box\n",
+            "devices[0].ssh_user must be omitted on the local device",
+        ),
+        ("orch_host: pc\ndevices:\n" + remote(ssh_user="Box"), "devices[0].ssh_user must be"),
+        ("orch_host: pc\ndevices:\n" + remote(ssh_user="box@pc"), "devices[0].ssh_user must be"),
+        ("orch_host: pc\ndevices:\n" + remote(ssh_user="-oProxy"), "devices[0].ssh_user must be"),
+        ("orch_host: pc\ndevices:\n" + remote(ssh_user="a" * 33), "devices[0].ssh_user must be"),
+        ("orch_host: pc\ndevices:\n" + remote(ssh_user="7"), "devices[0].ssh_user must be"),
+    ],
+)
+def test_orch_host_and_ssh_user_errors(tmp_path: Path, text: str, message: str) -> None:
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is None
+    assert any(message in item for item in errors(findings)), findings

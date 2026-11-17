@@ -180,7 +180,7 @@ def _remote_yaml(**fields: str) -> str:
         "factory_root": "/home/{bot}/factory",
         **fields,
     }
-    lines = ["devices:", "  - name: pc"]
+    lines = ["orch_host: pc", "devices:", "  - name: pc"]
     lines.extend(f"    {key}: {value}" for key, value in values.items() if value != "-")
     return "\n".join(lines) + "\n"
 

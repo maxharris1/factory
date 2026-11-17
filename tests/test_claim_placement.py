@@ -218,7 +218,7 @@ class _CheckTransport:
 def _pc_machines(tmp_path: Path) -> MachinesConfig:
     path = tmp_path / "machines-pc.yml"
     path.write_text(
-        "devices:\n"
+        "orch_host: pc\ndevices:\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 1\n"
         "    harnesses: {codex: codex-bot}\n"
         f"    workdir_root: {tmp_path}/work\n    ssh_alias: pc-{{bot}}\n"
