@@ -207,7 +207,9 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 _REPO_ROUTE = re.compile(r"repos/([^/?]+/[^/?]+)")
+_TICKET_ROUTE = re.compile(r"repos/[^/?]+/[^/?]+/(?:issues|pulls)/([0-9]+)")
 _GH_READ_SUBCOMMANDS = (("run", "view"),)
+_REVIEW_ACTIONS = tuple(name for name in vars(ReviewActions) if not name.startswith("_"))
 
 
 class _Cutoff:
@@ -455,6 +457,7 @@ class LivePollSource:
         self._factory_warned: dict[str, str] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self.cycle_clock: CycleClock | None = None
+        self._write_ticket: str | None = None
         self._head_reads: dict[tuple[str, str, str], tuple[tuple[str, str, str], Any]] = {}
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
@@ -510,7 +513,7 @@ class LivePollSource:
         for project in self.config.projects:
             if not project.linear_project_ids:
                 action: ReviewActions = GitHubReviewActions(
-                    runner=self.gh_runner,
+                    runner=self._write_runner,
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
                 )
@@ -519,12 +522,28 @@ class LivePollSource:
                     move_ready_for_review=project.linear_ready_for_review,
                     linear_ready=self._move_linear_ready,
                     fresh_ticket=self.fresh_ticket,
-                    runner=self.gh_runner,
+                    runner=self._write_runner,
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
                 )
-            actions[project.repo.lower()] = action
+            actions[project.repo.lower()] = self._ticket_scoped(action)
         return actions
+
+    def _ticket_scoped(self, actions: ReviewActions) -> ReviewActions:
+        for name in _REVIEW_ACTIONS:
+            setattr(actions, name, self._in_ticket(getattr(actions, name)))
+        return actions
+
+    def _in_ticket(self, method: Callable[..., Any]) -> Callable[..., Any]:
+        def call(ticket: TrackedTicket, *args: Any, **kwargs: Any) -> Any:
+            outer = self._write_ticket
+            self._write_ticket = f"{ticket.repo.lower()}#{ticket.ticket_id}"
+            try:
+                return method(ticket, *args, **kwargs)
+            finally:
+                self._write_ticket = outer
+
+        return call
 
     def begin_cycle(self) -> None:
         self._factory_cache.clear()
@@ -2018,8 +2037,20 @@ class LivePollSource:
         call = list(argv)
         if _is_gh_read(call[call.index("gh") + 1 :] if "gh" in call else []):
             return self._run_gh_read(call)
-        with self._timed(_gh_source(call)):
-            return self.gh_runner(call, self.timeout_seconds)
+        return self._write_runner(call, self.timeout_seconds)
+
+    def _write_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
+        call = list(argv)
+        name = _gh_source(call)
+        began = self.clock()
+        try:
+            return self.gh_runner(call, timeout)
+        except subprocess.TimeoutExpired:
+            name = self._write_ticket or _gh_ticket(call)
+            raise
+        finally:
+            if self.cycle_clock is not None:
+                self.cycle_clock.add_source(name, self.clock() - began)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         self._check_hangs("github")
@@ -2141,6 +2172,15 @@ def _gh_source(argv: Sequence[str]) -> str:
         if part == "--repo" and index + 1 < len(argv):
             return argv[index + 1].lower()
     return "github"
+
+
+def _gh_ticket(argv: Sequence[str]) -> str:
+    source = _gh_source(argv)
+    for part in argv:
+        match = _TICKET_ROUTE.match(part)
+        if match:
+            return f"{source}#{match.group(1)}"
+    return source
 
 
 def _json(text: str, source: str) -> object:
