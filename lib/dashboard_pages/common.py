@@ -447,8 +447,8 @@ SCRIPT_TAIL = r"""
     return publish > 0 ? ((h.thresholds || {}).stale_beats || 3) * publish : STALE_SECONDS;
   }
   function freshness() {
-    if (!everOk && !failures) return 'boot';
     if (resuming) return 'paused';
+    if (!everOk && !failures) return 'boot';
     if (Date.now() - Math.max(lastOk, shownAt) > LINK_LOST_MS) return 'lost';
     if (!everOk) return 'boot';
     return since() > staleSeconds() ? 'stale' : 'live';
@@ -581,7 +581,7 @@ SCRIPT_TAIL = r"""
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
     shownAt = Date.now();
-    resuming = everOk;
+    resuming = true;
     updateLink();
     if (timer === null && !inflight) poll();
   });

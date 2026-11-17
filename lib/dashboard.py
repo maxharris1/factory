@@ -39,6 +39,13 @@ Projects (#152): `projects` is each orch.yml project's tracker, ship mode
 and round caps as the poller last read its factory.md (lib/project_rules.py).
 An unreadable or not-yet-read factory.md is `unknown` with the reason.
 
+Relay (#535): `relay` is {tracked, threads} for the Activity page. Threads
+are the RELAY_TICKETS tickets that moved most recently, newest first, with
+stopped tickets kept until they move again. Each is the ticket's reference
+with its newest RELAY_STEPS `handoffs` (rows as in handoff_savings.recent)
+and `verdicts` (rows as in poller.verdicts, plus `chip` and `words`, None
+when the outcome has no plain words).
+
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
 or not the ticket has a job. The snapshot carries them under RECORDS, so
@@ -141,6 +148,8 @@ RECENT_ERRORS = 20
 RECENT_DEFERRALS = 10
 RECENT_HANDOFFS = 12
 RECENT_VERDICTS = 12
+RELAY_TICKETS = 12
+RELAY_STEPS = 40
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
@@ -828,6 +837,7 @@ def collect_snapshot(
             "verdicts": db["verdicts"],
         },
         "handoff_savings": db["handoff_savings"],
+        "relay": db["relay"],
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
             report,
@@ -1079,6 +1089,150 @@ def _handoff_kind(recipient: str, state: str, has_handoff: bool) -> str:
     return "done"
 
 
+_VERDICT_WORDS = {
+    "queued-review": ("routed", "sent to review"),
+    "queued-plan": ("routed", "sent to plan"),
+    "queued-plan-build": ("routed", "plan accepted, sent to build"),
+    "merge-queue": ("routed", "approved, queued to merge"),
+    "resumed-fix": ("routed", "resumed the fix"),
+    "handed-off": ("shipped", "handed off"),
+    "merged": ("shipped", "merged"),
+    "waiting-max-repeat": ("waiting", "still waiting on Max"),
+    "approve-ci-red": ("blocked", "approved, CI red"),
+}
+_UNSTUCK_PREFIX = "authorized-unstick-"
+_UNSTUCK_WORDS = ("unstuck", "Max unstuck it")
+
+
+def _verdict_words(outcome: str) -> tuple[str | None, str | None]:
+    if outcome.startswith(_UNSTUCK_PREFIX):
+        return _UNSTUCK_WORDS
+    return _VERDICT_WORDS.get(outcome, (None, None))
+
+
+_HANDOFF_COLUMNS = (
+    "id, repo, ticket_id, action, recipient, state, finished_at, "
+    "handoff_comment_id IS NOT NULL AS has_handoff"
+)
+_HANDOFF_DONE = "state IN ('done', 'failed') AND finished_at IS NOT NULL"
+
+
+def _handoff_row(sources: dict, row: sqlite3.Row, now: float) -> dict:
+    recipient = _enum(row["recipient"], RECIPIENTS)
+    state = _enum(row["state"], STATES)
+    return {
+        "job": _clean(str(row["id"])[:8], 8),
+        **_ticket_ref(sources, row["repo"], row["ticket_id"]),
+        "action": _enum(row["action"], ACTIONS),
+        "recipient": recipient,
+        "state": state,
+        "kind": _handoff_kind(recipient, state, bool(row["has_handoff"])),
+        "age_seconds": _age(now, row["finished_at"]),
+    }
+
+
+def _handled(connection: sqlite3.Connection, tables: set[str]) -> list[sqlite3.Row]:
+    """Every handled comment, newest first, with the first time recorded for it
+    (_VERDICT_TIMES) or NULL. Joins on grouped tables, not a subquery per
+    comment: lower(repo) leaves the subqueries no index (seconds on a live
+    database)."""
+    joins, times = [], []
+    for index, (table, when, column, comment) in enumerate(_VERDICT_TIMES):
+        if table in tables and {column, comment} <= {
+            str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")
+        }:
+            joins.append(
+                f"LEFT JOIN (SELECT lower(repo) AS repo, ticket_id, {comment} AS comment, {when}({column}) AS at "
+                f"FROM {table} GROUP BY lower(repo), ticket_id, {comment}) AS t{index} "
+                f"ON t{index}.repo = lower(h.repo) AND t{index}.ticket_id = h.ticket_id "
+                f"AND t{index}.comment = h.comment_id"
+            )
+            times.append(f"t{index}.at")
+    recorded = f"COALESCE({', '.join(times)}, NULL)" if times else "NULL"
+    return connection.execute(
+        f"SELECT h.rowid AS seq, h.repo, h.ticket_id, h.outcome, {recorded} AS recorded_at "
+        f"FROM handled_comments AS h {' '.join(joins)} ORDER BY h.rowid DESC"
+    ).fetchall()
+
+
+def _verdict_row(sources: dict, row: sqlite3.Row, now: float) -> dict:
+    outcome = str(row["outcome"])
+    if _OUTCOME.fullmatch(outcome) is None:
+        outcome = "other"
+    return {
+        **_ticket_ref(sources, row["repo"], row["ticket_id"]),
+        "outcome": _clean(outcome, 48),
+        "kind": _verdict_kind(outcome),
+        "seq": int(row["seq"]),
+        "age_seconds": _age(now, row["recorded_at"]),
+    }
+
+
+def _relay(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    sources: dict,
+    handled: list[sqlite3.Row],
+    records: dict[tuple[str, str], dict],
+    tracked: int,
+    now: float,
+) -> dict:
+    seen: list[Iterable] = []
+    if "tracked_tickets" in tables:
+        seen.append(connection.execute("SELECT repo, ticket_id, NULL AS at FROM tracked_tickets"))
+    if "jobs" in tables:
+        seen.append(connection.execute(
+            "SELECT repo, ticket_id, MAX(COALESCE(finished_at, last_activity_at, created_at)) AS at "
+            "FROM jobs GROUP BY repo, ticket_id"))
+    if "ticket_transitions" in tables:
+        seen.append(connection.execute(
+            "SELECT repo, ticket_id, MAX(at) FROM ticket_transitions GROUP BY repo, ticket_id"))
+    seen.append((row["repo"], row["ticket_id"], row["recorded_at"]) for row in handled)
+    stored: dict[tuple[str, str], tuple[str, str]] = {}
+    moved: dict[tuple[str, str], float] = {}
+    for rows in seen:
+        for repo, ticket_id, at in rows:
+            key = (str(repo).casefold(), str(ticket_id))
+            stored.setdefault(key, (str(repo), str(ticket_id)))
+            if at is not None:
+                moved[key] = max(moved.get(key, float(at)), float(at))
+
+    def newest(key: tuple[str, str]) -> tuple:
+        return key not in moved, -moved.get(key, 0.0), key
+
+    def stopped_at(key: tuple[str, str]) -> tuple:
+        at = records[key]["stopped"]["at"]
+        return at is None, -(at or 0.0), key
+
+    stopped = sorted((key for key in stored if key in records and records[key]["stopped"]), key=stopped_at)
+    stopped = stopped[:RELAY_TICKETS]
+    movers = sorted(stored.keys() - set(stopped), key=newest)
+    chosen = sorted([*stopped, *movers[: RELAY_TICKETS - len(stopped)]], key=newest)
+    if not chosen:
+        return {"tracked": tracked, "threads": []}
+    threads = {
+        key: {**_ticket_ref(sources, *stored[key]), "handoffs": [], "verdicts": []} for key in chosen
+    }
+    if "jobs" in tables:
+        wanted = ", ".join("(lower(?), ?)" for _ in chosen)
+        for row in connection.execute(
+            f"SELECT * FROM (SELECT {_HANDOFF_COLUMNS}, ROW_NUMBER() OVER ("
+            "PARTITION BY lower(repo), ticket_id ORDER BY finished_at DESC, id DESC) AS n "
+            f"FROM jobs WHERE {_HANDOFF_DONE} AND (lower(repo), ticket_id) IN (VALUES {wanted})) "
+            "WHERE n <= ? ORDER BY finished_at DESC, id DESC",
+            (*(name for key in chosen for name in stored[key]), RELAY_STEPS),
+        ):
+            threads[(str(row["repo"]).casefold(), str(row["ticket_id"]))]["handoffs"].append(
+                _handoff_row(sources, row, now))
+    for row in handled:
+        thread = threads.get((str(row["repo"]).casefold(), str(row["ticket_id"])))
+        if thread is not None and len(thread["verdicts"]) < RELAY_STEPS:
+            verdict = _verdict_row(sources, row, now)
+            chip, words = _verdict_words(verdict["outcome"])
+            thread["verdicts"].append({**verdict, "chip": chip, "words": words})
+    return {"tracked": tracked, "threads": list(threads.values())}
+
+
 def _detail_round(detail: object) -> str | None:
     """A job's review round ("2/3") from its detail JSON, or None."""
     if not isinstance(detail, str):
@@ -1251,17 +1405,25 @@ def _read_db(
         approvers = _hold_approvers(connection)
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
         no_ci_bases = _no_ci_bases(connection) if "no_ci_bases" in tables else {}
+        state_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(ticket_state)")}
+        stuck_at = ", ".join([
+            *(["state.stuck_since"] if "stuck_since" in state_columns else []),
+            *(["wake.created_at"] if jobs else []),
+            "NULL",
+        ])
         for row in connection.execute(
-            """
+            f"""
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                    COALESCE(state.workflow_state, 'intake') AS workflow_state,
                    COALESCE(state.review_round, 0) AS review_round,
                    COALESCE(state.gate_count, 0) AS gate_count,
                    COALESCE(state.stuck, 0) AS stuck,
-                   state.stuck_reason, state.paused_action
+                   state.stuck_reason, state.paused_action,
+                   COALESCE({stuck_at}, NULL) AS stuck_at
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
+            {"LEFT JOIN jobs AS wake ON wake.id = state.stuck_wake_job_id" if jobs else ""}
             """
         ):
             ref = _ticket_ref(sources, row["repo"], row["ticket_id"])
@@ -1289,6 +1451,7 @@ def _read_db(
                 _enum(row["tracker"], TRACKERS), stuck, state,
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
                 f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
+                row["stuck_at"],
             )
             tickets.append(
                 {
@@ -1462,61 +1625,20 @@ def _read_db(
 
     recent_handoffs: list[dict] = []
     if jobs:
-        for row in connection.execute(
-            """
-            SELECT id, repo, ticket_id, action, recipient, state, finished_at,
-                   handoff_comment_id IS NOT NULL AS has_handoff
-            FROM jobs
-            WHERE state IN ('done', 'failed') AND finished_at IS NOT NULL
-            ORDER BY finished_at DESC, id DESC
-            LIMIT ?
-            """,
-            (RECENT_HANDOFFS,),
-        ):
-            recipient = _enum(row["recipient"], RECIPIENTS)
-            state = _enum(row["state"], STATES)
-            recent_handoffs.append(
-                {
-                    "job": _clean(str(row["id"])[:8], 8),
-                    **_ticket_ref(sources, row["repo"], row["ticket_id"]),
-                    "action": _enum(row["action"], ACTIONS),
-                    "recipient": recipient,
-                    "state": state,
-                    "kind": _handoff_kind(recipient, state, bool(row["has_handoff"])),
-                    "age_seconds": _age(now, row["finished_at"]),
-                }
+        recent_handoffs = [
+            _handoff_row(sources, row, now)
+            for row in connection.execute(
+                f"SELECT {_HANDOFF_COLUMNS} FROM jobs WHERE {_HANDOFF_DONE} "
+                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (RECENT_HANDOFFS,),
             )
+        ]
 
     verdicts = None
+    handled: list[sqlite3.Row] = []
     if "handled_comments" in tables:
-        verdicts = []
-        same_ticket = "lower(t.repo) = lower(h.repo) AND t.ticket_id = h.ticket_id"
-        times = [
-            f"SELECT {when}(t.{column}) FROM {table} AS t "
-            f"WHERE {same_ticket} AND t.{comment} = h.comment_id"
-            for table, when, column, comment in _VERDICT_TIMES
-            if table in tables
-            and {column, comment}
-            <= {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
-        ]
-        recorded = f"COALESCE({', '.join(f'({q})' for q in times)}, NULL)" if times else "NULL"
-        for row in connection.execute(
-            f"SELECT h.rowid AS seq, h.repo, h.ticket_id, h.outcome, {recorded} AS recorded_at "
-            "FROM handled_comments AS h ORDER BY h.rowid DESC LIMIT ?",
-            (RECENT_VERDICTS,),
-        ):
-            outcome = str(row["outcome"])
-            if _OUTCOME.fullmatch(outcome) is None:
-                outcome = "other"
-            verdicts.append(
-                {
-                    **_ticket_ref(sources, row["repo"], row["ticket_id"]),
-                    "outcome": _clean(outcome, 48),
-                    "kind": _verdict_kind(outcome),
-                    "seq": int(row["seq"]),
-                    "age_seconds": _age(now, row["recorded_at"]),
-                }
-            )
+        handled = _handled(connection, tables)
+        verdicts = [_verdict_row(sources, row, now) for row in handled[:RECENT_VERDICTS]]
 
     budget = {"deferrals": 0, "exhausted": 0, "rate_limited": 0}
     if "poll_deferrals" in tables:
@@ -1596,6 +1718,7 @@ def _read_db(
         "attention_flags": attention_flags,
         "held": held,
         "verdicts": verdicts,
+        "relay": _relay(connection, tables, sources, handled, ticket_records, len(tickets), now),
         "linear_budget": {
             "state": budget_state,
             "deferrals_last_hour": budget["deferrals"],
@@ -1627,6 +1750,7 @@ class TicketInfo(NamedTuple):
     round: int = 0
     reason: str | None = None
     key: str = ""
+    stuck_at: float | None = None
 
 
 def _record_keys(ticket_info: dict[tuple[str, str], TicketInfo]) -> dict[tuple[str, str], str]:
@@ -1674,6 +1798,8 @@ def _ticket_record(
     stopped = stop_facts(chart, flow, str(info.state), info.stuck)
     if stopped is not None:
         stopped["reason"] = info.reason
+        if info.stuck and stopped["at"] is None:
+            stopped["at"] = info.stuck_at
     return {
         "repo": info.repo,
         "ticket_id": info.ticket_id,

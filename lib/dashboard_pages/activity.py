@@ -4,6 +4,7 @@ import re
 
 from lib.dashboard_pages.common import (
     _BOTS, _chip, _e, github_links, _job_hrefs, _panel, _span, _thread_key, _ticket, duration, ticket_href,
+    ticket_page_href,
 )
 
 
@@ -44,6 +45,7 @@ color:var(--muted)}
 .rl-sw{display:inline-block;width:28px;height:14px;border:1px solid color-mix(in srgb,var(--muted) 60%,transparent);
 background:color-mix(in srgb,var(--muted) 9%,transparent)}
 .rl-sw.b2b{border:1px dashed color-mix(in srgb,var(--grok) 60%,transparent);background:color-mix(in srgb,var(--grok) 9%,transparent)}
+.rl-note{margin:8px 0 0;font-size:12px;line-height:1.5;color:var(--muted)}
 """
 
 
@@ -53,10 +55,11 @@ SCRIPT = r"""
   var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', 'needs-attention': 'bad', stale: 'warn', paused: 'warn',
                    down: 'bad', 'no-waiter': 'bad', health: 'bad'};
   var VERDICT = {routed: 'accent', shipped: 'ok', stale: 'muted', rejected: 'warn', stuck: 'bad',
-                 blocked: 'bad', waiting: 'warn', other: 'muted'};
+                 blocked: 'bad', waiting: 'warn', unstuck: 'accent', other: 'muted'};
   var TONE_TINT = {warn: '#ff9e64', bad: '#f7768e', muted: '#8b93b8'};
   var DONE_TINT = '#9ece6a';
   var RELAY_FILTERS = [['all', 'all'], ['scripted', 'scripted'], ['wakes', 'grok wakes'], ['shipped', 'shipped']];
+  var RELAY_NOTE = 'The relay shows the 12 tickets that moved most recently. A stopped ticket stays listed until it moves again.';
   var rlFilter = 'all';
 
   function cmpStep(a, b) {
@@ -64,48 +67,26 @@ SCRIPT = r"""
   }
 
   function relayThreads(d) {
-    var byKey = new Map();
-    function thread(r) {
-      var key = threadKey(r);
-      if (!byKey.has(key)) byKey.set(key, {key: key, ref: r, steps: []});
-      return byKey.get(key);
-    }
-    (d.handoff_savings.recent || []).forEach(function (r, i) {
-      thread(r).steps.push({type: 'handoff', row: r, at: r.age_seconds, tie: -i});
-    });
-    (d.poller.verdicts || []).forEach(function (r) {
-      var at = r.age_seconds === null || r.age_seconds === undefined ? null : r.age_seconds;
-      thread(r).steps.push({type: 'verdict', row: r, at: at, tie: r.seq});
-    });
-    var threads = [];
-    byKey.forEach(function (t) {
-      var ordered = t.steps.filter(function (s) { return s.at !== null; }).sort(cmpStep);
-      var verdicts = t.steps.filter(function (s) { return s.type === 'verdict'; })
-        .sort(function (a, b) { return a.row.seq - b.row.seq; });
+    return d.relay.threads.map(function (t) {
+      var steps = t.handoffs.map(function (r, i) { return {type: 'handoff', row: r, at: r.age_seconds, tie: -i}; });
+      var verdicts = t.verdicts.map(function (r) {
+        var at = r.age_seconds === null || r.age_seconds === undefined ? null : r.age_seconds;
+        return {type: 'verdict', row: r, at: at, tie: r.seq};
+      }).sort(function (a, b) { return a.row.seq - b.row.seq; });
+      var ordered = steps.concat(verdicts).filter(function (s) { return s.at !== null; }).sort(cmpStep);
       verdicts.forEach(function (v, i) {
         if (v.at === null) ordered.splice(i ? ordered.indexOf(verdicts[i - 1]) + 1 : 0, 0, v);
       });
-      var timed = ordered.filter(function (s) { return s.at !== null; }).map(function (s) { return s.at; });
-      threads.push({
-        key: t.key, ref: t.ref, steps: ordered,
-        newest: timed.length ? Math.min.apply(null, timed) : null,
-        oldest: timed.length ? Math.max.apply(null, timed) : null,
-        top: verdicts.length ? verdicts[verdicts.length - 1].row.seq : -1,
+      return {
+        key: threadKey(t), ref: t, steps: ordered,
         scripted: ordered.some(function (s) { return s.type === 'handoff' && s.row.kind === 'scripted'; }),
         wakes: ordered.some(function (s) { return s.type === 'handoff' && s.row.kind === 'bot_to_bot'; }),
         shipped: ordered.some(function (s) { return s.type === 'verdict' && s.row.kind === 'shipped'; })
-      });
-    });
-    return threads.sort(function (a, b) {
-      return (a.newest === null) - (b.newest === null) || (a.newest || 0) - (b.newest || 0) || b.top - a.top ||
-        (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+      };
     });
   }
 
-  function relayCount(threads) {
-    var oldest = threads.reduce(function (m, t) { return t.oldest === null ? m : Math.max(m, t.oldest); }, -1);
-    return threads.length + (threads.length === 1 ? ' ticket' : ' tickets') + (oldest < 0 ? '' : ' · last ' + dur(oldest));
-  }
+  function relayCount(shown, tracked) { return shown + ' of ' + tracked + ' tickets · newest activity first'; }
 
   function stillMotion() {
     return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -115,8 +96,9 @@ SCRIPT = r"""
     var r = s.row;
     if (s.type === 'verdict') {
       var said = add(row, el('span', 'rl-verdict'));
-      add(said, chip(r.kind, VERDICT[r.kind] || 'muted'));
-      add(said, el('span', 'rl-out', r.outcome));
+      said.setAttribute('title', r.outcome);
+      add(said, r.chip ? chip(r.chip, VERDICT[r.chip] || 'muted') : chip(r.kind, 'muted'));
+      add(said, el('span', 'rl-out', r.words || r.outcome));
       if (r.age_seconds !== null && r.age_seconds !== undefined) {
         ticking(add(said, el('span', 'rl-when')), r.age_seconds, '', ' ago');
       }
@@ -150,8 +132,9 @@ SCRIPT = r"""
       });
     });
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
-    var root = panel('relay', 'Relay', relayCount(shown));
+    var root = panel('relay', 'Relay', relayCount(shown.length, d.relay.tracked));
     if (!root) return;
+    var hrefs = jobHrefs(d);
     var bar = add(root, el('div', 'rl-filter'));
     bar.setAttribute('role', 'group');
     bar.setAttribute('aria-label', 'Filter');
@@ -165,13 +148,12 @@ SCRIPT = r"""
     if (!all.length) add(root, el('p', 'empty', 'no handoffs or verdicts yet'));
     else if (!shown.length) add(root, el('p', 'empty', 'no ticket matches this filter'));
     else {
-      var hrefs = jobHrefs(d);
       var still = stillMotion();
       var rows = add(root, el('div', 'rl-rows'));
       shown.forEach(function (t) {
         var row = add(rows, el('div', 'rl-row'));
         row.setAttribute('data-thread', t.key);
-        add(row, link('rl-tk', hrefs[t.key] || 'job.html')).textContent = ticketOf(t.ref);
+        add(row, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
         var steps = add(row, el('span', 'rl-steps'));
         t.steps.forEach(function (s, i) {
           if (i) add(steps, el('span', 'rl-sep', '→')).setAttribute('aria-hidden', 'true');
@@ -189,6 +171,7 @@ SCRIPT = r"""
     legendKey(legend, el('span', 'rl-sw b2b'), 'bot-to-bot (grok wake)');
     legendKey(legend, chip('routed', 'accent'), 'verdict');
     legendKey(legend, chip('failed', 'bad'), 'failed handoff');
+    add(root, el('p', 'rl-note', RELAY_NOTE));
   }
 
   function renderAttention(d) {
@@ -228,11 +211,12 @@ _ATTENTION = {
 
 
 _VERDICT = {"routed": "accent", "shipped": "ok", "stale": "muted", "rejected": "warn",
-            "stuck": "bad", "blocked": "bad", "waiting": "warn", "other": "muted"}
+            "stuck": "bad", "blocked": "bad", "waiting": "warn", "unstuck": "accent", "other": "muted"}
 
 
 _TONE_TINT = {"warn": "#ff9e64", "bad": "#f7768e", "muted": "#8b93b8"}
 _RELAY_FILTERS = (("all", "all"), ("scripted", "scripted"), ("wakes", "grok wakes"), ("shipped", "shipped"))
+_RELAY_NOTE = "The relay shows the 12 tickets that moved most recently. A stopped ticket stays listed until it moves again."
 
 
 _HEALTH_LINK = re.compile(r"health\.html#[A-Za-z0-9_-]+")
@@ -253,52 +237,35 @@ def _place_untimed(ordered: list[dict], verdicts: list[dict]) -> None:
 
 
 def relay_threads(snapshot: dict) -> list[dict]:
-    threads: dict[str, dict] = {}
-
-    def thread(row: dict) -> dict:
-        return threads.setdefault(_thread_key(row), {"key": _thread_key(row), "ref": row, "steps": []})
-
-    for index, row in enumerate(snapshot["handoff_savings"]["recent"]):
-        thread(row)["steps"].append({"type": "handoff", "row": row, "at": row["age_seconds"], "tie": -index})
-    for row in snapshot["poller"].get("verdicts") or ():
-        thread(row)["steps"].append({"type": "verdict", "row": row, "at": row.get("age_seconds"), "tie": row["seq"]})
-
     found = []
-    for item in threads.values():
+    for item in snapshot["relay"]["threads"]:
+        handoffs = [{"type": "handoff", "row": row, "at": row["age_seconds"], "tie": -index}
+                    for index, row in enumerate(item["handoffs"])]
+        verdicts = sorted(({"type": "verdict", "row": row, "at": row.get("age_seconds"), "tie": row["seq"]}
+                           for row in item["verdicts"]), key=lambda s: s["row"]["seq"])
         ordered = sorted(
-            (step for step in item["steps"] if step["at"] is not None),
+            (step for step in [*handoffs, *verdicts] if step["at"] is not None),
             key=lambda step: (-step["at"], step["type"] == "verdict", step["tie"]),
         )
-        verdicts = sorted((step for step in item["steps"] if step["type"] == "verdict"), key=lambda s: s["row"]["seq"])
         _place_untimed(ordered, verdicts)
-        timed = [step["at"] for step in ordered if step["at"] is not None]
         kinds = {(step["type"], step["row"]["kind"]) for step in ordered}
         found.append({
-            "key": item["key"], "ref": item["ref"], "steps": ordered,
-            "newest": min(timed) if timed else None, "oldest": max(timed) if timed else None,
-            "top": verdicts[-1]["row"]["seq"] if verdicts else -1,
+            "key": _thread_key(item), "ref": item, "steps": ordered,
             "scripted": ("handoff", "scripted") in kinds,
             "wakes": ("handoff", "bot_to_bot") in kinds,
             "shipped": ("verdict", "shipped") in kinds,
         })
-    return sorted(
-        found, key=lambda t: (t["newest"] is None, t["newest"] or 0, -t["top"], t["key"])
-    )
-
-
-def _relay_count(threads: list[dict]) -> str:
-    oldest = max((t["oldest"] for t in threads if t["oldest"] is not None), default=None)
-    count = f"{len(threads)} ticket" + ("" if len(threads) == 1 else "s")
-    return count if oldest is None else f"{count} · last {duration(oldest)}"
+    return found
 
 
 def _relay_step(step: dict) -> str:
     row = step["row"]
     if step["type"] == "verdict":
         age = row.get("age_seconds")
+        chip = _chip(row["chip"], _VERDICT.get(row["chip"], "muted")) if row["chip"] else _chip(row["kind"])
         return (
-            f'<span class="rl-verdict">{_chip(row["kind"], _VERDICT.get(row["kind"], "muted"))}'
-            f'{_span("rl-out", row["outcome"])}'
+            f'<span class="rl-verdict" title="{_e(row["outcome"])}">{chip}'
+            f'{_span("rl-out", row["words"] or row["outcome"])}'
             + ("" if age is None else _span("rl-when", duration(age) + " ago"))
             + "</span>"
         )
@@ -322,7 +289,7 @@ def _relay(snapshot: dict) -> str:
     sep = '<span class="rl-sep" aria-hidden="true">→</span>'
     rows = "".join(
         f'<div class="rl-row" data-thread="{_e(t["key"])}">'
-        f'<a class="rl-tk" href="{_e(hrefs.get(t["key"], "job.html"))}">{_e(_ticket(t["ref"]))}</a>'
+        f'<a class="rl-tk" href="{_e(ticket_page_href(t["ref"]) if t["key"] in hrefs else "job.html")}">{_e(_ticket(t["ref"]))}</a>'
         f'<span class="rl-steps">{sep.join(_relay_step(step) for step in t["steps"])}</span></div>'
         for t in threads
     )
@@ -333,11 +300,12 @@ def _relay(snapshot: dict) -> str:
         '<span class="rl-key"><span class="rl-sw b2b" aria-hidden="true"></span><span>bot-to-bot (grok wake)</span></span>'
         '<span class="rl-key"><span class="chip accent" aria-hidden="true">routed</span><span>verdict</span></span>'
         '<span class="rl-key"><span class="chip bad" aria-hidden="true">failed</span><span>failed handoff</span></span></div>'
+        f'<p class="rl-note">{_RELAY_NOTE}</p>'
     )
     return _panel(
         "relay", "Relay",
         f'<div class="rl-filter" role="group" aria-label="Filter">{buttons}</div>{body}{legend}',
-        count=_relay_count(threads),
+        count=f'{len(threads)} of {snapshot["relay"]["tracked"]} tickets · newest activity first',
     )
 
 
