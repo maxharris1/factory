@@ -8,6 +8,7 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from lib import job_detail
+from lib.attention import DEDUPE_DROPPED
 from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
@@ -287,12 +288,12 @@ class DetailMixin:
 
     def _flag_dropped(self, ticket: TrackedTicket, request: JobRequest, job: Job) -> None:
         if job.request.source_comment_id == request.source_comment_id:
-            self.clear_attention(ticket.repo, ticket.ticket_id, "dedupe-dropped")
+            self.clear_attention(ticket.repo, ticket.ticket_id, DEDUPE_DROPPED)
         elif job.state not in ("queued", "running"):
             self.flag_attention(
                 ticket.repo,
                 ticket.ticket_id,
-                "dedupe-dropped",
+                DEDUPE_DROPPED,
                 f"{request.action} for comment {request.source_comment_id} matched "
                 f"finished job {job.id} ({job.state}); nothing was queued",
             )
