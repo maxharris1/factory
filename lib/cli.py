@@ -746,6 +746,12 @@ def _wait(argv: list[str]) -> int:
     except (waiter.WaiterError, OSError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
+    if (retired := _retired()) is not None:
+        print(
+            f"orch wait: this host is retired as the orch host ({retired}); not waiting",
+            file=sys.stderr,
+        )
+        return 79
     # Heartbeats (#92): one waiter row per device this waiter claims on.
     # An autostart waiter marks its rows stopped on exit; a plain wait,
     # which exits by design once it claims, removes them.
@@ -848,6 +854,12 @@ def _poll(argv: list[str]) -> int:
         path = _db_path(args.db)
         signal.signal(signal.SIGTERM, _exit_on_term)
         with _poll_lock(path, _pidfile_path(args.pidfile, path)):
+            if (retired := _retired()) is not None:
+                print(
+                    f"orch poll: this host is retired as the orch host ({retired}); not polling",
+                    file=sys.stderr,
+                )
+                return 79
             dispatcher, source = _runtime(
                 path,
                 args.orch,
@@ -1278,6 +1290,15 @@ def _pidfile_path(explicit: Path | None, database: Path) -> Path:
     if configured:
         return Path(configured)
     return database.with_name("poller.pid")
+
+
+def _retired() -> str | None:
+    path = Path.home() / ".config/factory/orch-retired"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    return f"{path}: {lines[0] if lines else ''}"
 
 
 def _lock_path(database: Path) -> Path:
