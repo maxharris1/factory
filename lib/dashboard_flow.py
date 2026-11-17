@@ -331,23 +331,23 @@ def shipped_facts(chart: dict | None, flow: dict) -> dict | None:
     }
 
 
-def stop_facts(chart: dict | None, flow: dict, state: str, stuck: bool) -> dict | None:
+def stop_facts(chart: dict | None, flow: dict, stored_state: str, stuck: bool) -> dict | None:
     """{state, at, stopped_in, ways_out} when the board puts the ticket in its
-    Stopped group (ticket_phase). `state` is the ticket's stored state; a stuck
-    flag on a state that is not itself a stop reads as stopped in "stuck"."""
+    Stopped group (ticket_phase). A stuck flag on a stored state that is not
+    itself a stop reads as stopped in "stuck"."""
     if chart is None:
         return None
     phases = ticket_phases(chart)
-    if ticket_phase(phases, state, stuck) != "Stop":
+    if ticket_phase(phases, stored_state, stuck) != "Stop":
         return None
-    stop = state if ticket_phase(phases, state, False) == "Stop" else "stuck"
+    stop = stored_state if ticket_phase(phases, stored_state, False) == "Stop" else "stuck"
     visits = flow["visits"]
     index = next(
         (i for i, visit in enumerate(visits) if visit["current"] and visit["state"] == stop),
         None,
     )
-    if stop != state:
-        stopped_in: str | None = state
+    if stop != stored_state:
+        stopped_in: str | None = stored_state
     else:
         stopped_in = visits[index - 1]["state"] if index else None
     return {

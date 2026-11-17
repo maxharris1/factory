@@ -90,7 +90,7 @@ def test_serves_status_json(get) -> None:
 
 
 def test_serves_tickets_json_with_the_locked_down_headers(site: Path, get) -> None:
-    assert get("/tickets.json")[0] == 404  # not written yet
+    assert get("/tickets.json")[0] == 404
     tickets = '{"generated_at_epoch":1.0,"schema":1,"tickets":{}}\n'
     (site / "tickets.json").write_text(tickets, encoding="utf-8")
     status, headers, body = get("/tickets.json")

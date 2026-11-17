@@ -25,6 +25,7 @@ from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1_800_000_000.0
+TRACKED_AT = NOW - 3600
 
 # Fake secrets, built at runtime so no literal token shape sits in the repo.
 WEBHOOK_SECRET = "Zx9Qp" * 6
@@ -228,7 +229,7 @@ def add_ticket(
     connection.execute(
         "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
         "VALUES (?, ?, ?, ?)",
-        (repo, ticket_id, tracker, NOW - 3600),
+        (repo, ticket_id, tracker, TRACKED_AT),
     )
     connection.execute(
         """
@@ -604,7 +605,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "projects",  # per-project ship mode and round caps (#152)
         "rules",
         "usage",  # subscription headroom per bot account (#151)
-        "ticket_records",  # published as tickets.json, not in status.json (#530)
+        "ticket_records",
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)

@@ -127,8 +127,6 @@ from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
-# The snapshot key that carries the ticket records. The writer publishes it as
-# tickets.json and keeps it out of status.json and the pages.
 RECORDS = "ticket_records"
 TICKETS_SCHEMA = 1
 LOG_TAIL_LINES = 50
@@ -1349,7 +1347,6 @@ def _read_db(
         key: _ticket_record(info, flows[key], tracked_at.get(key), spent.get(key), chart)
         for key, info in ticket_info.items()
     }
-    # Each tracked ticket's live jobs: running newest first, then queued oldest first.
     ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
     ticket_jobs: dict[tuple[str, str], list[dict]] = {}
     for item in [*sorted(running, key=lambda item: item["elapsed_seconds"]), *queued]:

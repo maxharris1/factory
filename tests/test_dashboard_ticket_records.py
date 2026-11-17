@@ -22,7 +22,7 @@ from lib.dashboard import collect_snapshot, redact, write_snapshot_pages
 from lib.dashboard_flow import load_chart
 from lib.dashboard_pages.ticket_detail import _detail_model
 from lib.dashboard_push import SshTransport
-from tests.test_dashboard import NOW, _fail_replacing, add_job, add_ticket, make_db, seeded
+from tests.test_dashboard import NOW, TRACKED_AT, _fail_replacing, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_telemetry import add_telemetry
 
 PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
@@ -101,7 +101,6 @@ def ways_out(state: str) -> list[dict]:
     return [{"to": e["to"], "label": e["label"]} for e in chart["edges"] if e["from"] == state]
 
 
-# --- ac-1: every tracked ticket has a record ------------------------------------------
 
 
 def _mixed(tmp_path: Path) -> tuple[Path, Path]:
@@ -139,9 +138,8 @@ def test_a_shipped_ticket_with_no_job_has_its_state_and_visits(tmp_path: Path) -
     assert [visit["state"] for visit in record["visits"]] == [
         "intake", "questions", "building", "review", "ship", "merged",
     ]
-    # Intake opens when the ticket was tracked (add_ticket: NOW - 3600).
     assert [visit["started_at"] for visit in record["visits"]] == [
-        NOW - 3600, NOW - 2900, NOW - 2800, NOW - 2700, NOW - 2600, NOW - 2500,
+        TRACKED_AT, NOW - 2900, NOW - 2800, NOW - 2700, NOW - 2600, NOW - 2500,
     ]
     assert [visit["duration_seconds"] for visit in record["visits"]] == [
         700, 100, 100, 100, 100, 2500,
@@ -182,7 +180,6 @@ def test_hops_and_off_chart_count_follow_the_visits(tmp_path: Path) -> None:
     assert record["visits"][1]["off_chart"] is True
 
 
-# --- ac-2: shipped facts -----------------------------------------------------------------
 
 
 def _shipped(tmp_path: Path) -> tuple[Path, Path]:
@@ -216,8 +213,7 @@ def test_a_merged_tickets_record_says_when_and_how_it_shipped(tmp_path: Path) ->
     assert record["shipped"] == {
         "at": NOW - 2400,
         "how": "merged",
-        # tracked_at is NOW - 3600 (add_ticket): intake to ship is 1200 s.
-        "intake_to_ship_seconds": 1200,
+        "intake_to_ship_seconds": int(NOW - 2400 - TRACKED_AT),
         "revise_rounds": 2,
         "jobs": 3,
         "tokens_in": 600,
@@ -265,7 +261,6 @@ def test_live_and_stopped_tickets_have_no_shipped_facts(tmp_path: Path) -> None:
     assert tickets["aut0-code/aut0#AUT-7"]["shipped"] is None
 
 
-# --- ac-3: stopped facts -----------------------------------------------------------------
 
 
 def test_a_stuck_ticket_says_where_it_stopped_and_why(tmp_path: Path) -> None:
@@ -343,7 +338,6 @@ def test_the_stuck_reason_is_capped_like_the_snapshots(tmp_path: Path) -> None:
     assert len(row["reason"]) == 200
 
 
-# --- ac-4: running and queued jobs ----------------------------------------------------------
 
 
 def test_a_tickets_live_jobs_are_attached_running_newest_first(tmp_path: Path) -> None:
@@ -374,7 +368,6 @@ def test_an_untracked_tickets_job_gets_no_record(tmp_path: Path) -> None:
     assert not any(record["ticket_id"] == "14" for record in tickets.values())
 
 
-# --- ac-5: published in the same all-or-nothing set ------------------------------------------
 
 
 def test_the_writer_publishes_tickets_json_after_status_and_the_pages(tmp_path: Path) -> None:
@@ -413,7 +406,6 @@ def test_the_push_renames_tickets_json_with_the_rest_in_one_step(tmp_path: Path)
     assert len(commands) == len(names) + 1
 
 
-# --- ac-6: size and shape ------------------------------------------------------------------
 
 
 def test_records_carry_only_the_named_fields(tmp_path: Path) -> None:
@@ -458,7 +450,6 @@ def test_status_json_is_unchanged_by_the_records(tmp_path: Path) -> None:
     assert "ticket_records" in snapshot
 
 
-# --- ac-7: redaction ------------------------------------------------------------------------
 
 
 def _hostile(tmp_path: Path) -> tuple[Path, Path]:
@@ -505,7 +496,6 @@ def test_tickets_json_escapes_markup_characters(tmp_path: Path) -> None:
     assert any(MARKUP in value for value in strings(published))
 
 
-# --- ac-8: thin and empty databases --------------------------------------------------------
 
 
 def test_a_database_without_transitions_or_telemetry_still_has_records(tmp_path: Path) -> None:
@@ -559,7 +549,6 @@ def test_a_database_with_only_ticket_tables_still_has_records(tmp_path: Path) ->
     }
 
 
-# --- size ------------------------------------------------------------------------------------
 
 PATH = ["intake", "planning", "plan-check", "building", "review", "fixing", "review", "fixing",
         "review", "ship", "merged", "done"]
