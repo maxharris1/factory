@@ -27,7 +27,7 @@ import pytest
 from lib import health
 from lib.cli import main as cli_main
 from lib.dashboard import collect_snapshot
-from lib.dashboard_page import PAGES, render_pages
+from lib.dashboard_page import NAV_PAGES, render_pages
 from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
@@ -537,7 +537,7 @@ def snapshot(tmp_path: Path, db: Path, now: float = NOW, *, machines: str = MACH
 
 
 def test_health_is_the_tab_after_efficiency(tmp_path: Path) -> None:
-    assert PAGES[-2:] == ("efficiency.html", "health.html")
+    assert NAV_PAGES[-2:] == ("efficiency.html", "health.html")
     db, _ = make_db(tmp_path)
     html = render_pages(snapshot(tmp_path, db))["index.html"]
     nav = html[html.index('id="nav"'):html.index("</nav>")]

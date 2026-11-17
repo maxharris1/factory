@@ -9,15 +9,15 @@ from tests.golden.pages import page_digests, page_name, record, substitutions
 NAME = page_name(__file__)
 
 GOLDEN = {
-    "efficiency.CSS": "9e2e31c6aab2391a38eb2aeb92ef99e3afea2b3847dd0e19491d6c9984b14c2f",
-    "efficiency.SCRIPT": "5df478157cece5b5e4e54b8e15f5f66b44117274b2503037a8ad6357e73ac9d0",
-    "TELEMETRY_CSS": "d411c22b93b0b403263b7f5c47b79cb083a294188188359631aea4758055e523",
-    "__TELEMETRY__": "8033c22e84cd4c33eb101893f48a8fe741741672be24b635a986631ae8f1b087",
-    "seeded/main": "b29c05e8b880a7226972f7f6744eb6873a77e133490ec2056f79d8fd48330269",
+    "efficiency.CSS": "ce4eed82f3e1d4c1d1839c86272555cec9c592d9838d862e96d134a8ede4b900",
+    "efficiency.SCRIPT": "bb252f4bbd2429cc1c092ac3ee356db4196d9262d98039f2b07204fea1aa13d3",
+    "TELEMETRY_CSS": "649dcbbee7a9591b4dac5c5d49a14247192fb5baffe024921698d935b8437071",
+    "__TELEMETRY__": "a36660b73d6a3ff62efe3db3e1e644deb2aa93f51ddf1021c50b9c150f96e114",
+    "seeded/main": "25f0a842b84a4bdcc2bb96b8d6690129d8f83be794752722792e6968cea4af1d",
     "seeded/chrome": "7a3bcff265d9a1ca720fa41f0f7637468ae825f0ae4ff3c39a745b59fd8d93fc",
-    "hostile/main": "b29c05e8b880a7226972f7f6744eb6873a77e133490ec2056f79d8fd48330269",
+    "hostile/main": "25f0a842b84a4bdcc2bb96b8d6690129d8f83be794752722792e6968cea4af1d",
     "hostile/chrome": "90a3ea12157efa86e5fa07f39110c45c7bbeedf96a8853e62ff685491ae999f3",
-    "empty/main": "85e430ff37e5954f167eab295530626f0fb9e6762367e5886d5d92dfe7f23cb8",
+    "empty/main": "1d7925930a63c3dfee60f517b44c37ab998e9e0bb7b005972c6e2f19ad4cfc33",
     "empty/chrome": "e29f9c314b03a8c630f24395b16e4af5d15a509e3d390dca018466426827f73b",
 }
 
