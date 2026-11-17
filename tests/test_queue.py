@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lib import job_detail
+from lib import cli, job_detail
 from lib.dispatcher import Dispatcher
 from lib import queue as queue_module
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -619,3 +619,52 @@ def test_a_spilled_detail_without_a_database_directory_fails_closed() -> None:
         job_detail.load(None, "job-1", slim)
     assert job_detail.load(None, "job-1", '{"round": "1/3"}') == '{"round": "1/3"}'
 
+
+def _inline_jobs(path: Path, count: int, size: int) -> dict[str, str]:
+    queue = make_queue(path, [10.0])
+    details: dict[str, str] = {}
+    for index in range(count):
+        job = queue.enqueue(request(), dedupe_key=f"job-{index}")
+        details[job.id] = _bulky_detail(size)
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            "UPDATE jobs SET detail = ? WHERE id = ?",
+            [(detail, job_id) for job_id, detail in details.items()],
+        )
+    return details
+
+
+def test_db_spill_detail_moves_inline_detail_out_and_vacuums(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "orch.db"
+    details = _inline_jobs(path, 300, 80_000)
+    assert path.stat().st_size > 20_000_000
+
+    assert cli.main(["db-spill-detail", "--db", str(path), "--vacuum"]) == 0
+    out = capsys.readouterr().out
+    assert "moved the detail of 300 jobs" in out
+    assert "vacuumed" in out
+    assert path.stat().st_size < 2_000_000
+    queue = make_queue(path, [10.0])
+    with queue.connect() as connection:
+        loaded = {
+            str(row["id"]): job_detail.load_row(connection, row["id"], row["detail"])
+            for row in connection.execute("SELECT id, detail FROM jobs")
+        }
+    assert loaded == details
+    assert {job.id: job.request.detail for job in queue.outstanding()} == details
+
+    assert cli.main(["db-spill-detail", "--db", str(path)]) == 0
+    assert "moved the detail of 0 jobs" in capsys.readouterr().out
+
+
+def test_db_spill_detail_refuses_while_a_poller_holds_the_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "orch.db"
+    details = _inline_jobs(path, 1, 10)
+    with cli._poll_lock(path):
+        assert cli.main(["db-spill-detail", "--db", str(path), "--vacuum"]) == 1
+    assert "another orch poll owns" in capsys.readouterr().err
+    assert _raw_detail(path, next(iter(details))) == next(iter(details.values()))

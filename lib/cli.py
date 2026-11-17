@@ -24,6 +24,7 @@ from typing import Any
 from lib import (
     codex_sandbox,
     health,
+    job_detail,
     job_run,
     job_token,
     linear_webhook,
@@ -90,6 +91,7 @@ from lib.handoff_check import (
 from lib.pre_ready import ContextUnavailable, PreReadyResult, check_environ, spec_for
 from lib.pre_ready import run as run_pre_ready
 from lib.queue import (
+    BUSY_TIMEOUT_SECONDS,
     MAX_INVALID_HANDOFFS,
     PRE_READY_FAILED,
     SLOTS_TABLE,
@@ -144,6 +146,7 @@ commands:
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
   restore-db       restore a missing dispatcher database from its backup
+  db-spill-detail  move bulky job detail out of the database (#653)
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
@@ -226,6 +229,14 @@ restore-db [--db PATH] [--backup PATH]
   integrity check: exit 0 restored, 3 no backup, 1 when the database
   already exists or the backup is bad. deploy/poller-service.sh start and
   ensure run it when the database is missing.
+
+db-spill-detail [--db PATH] [--vacuum]
+  One-time migration (#653): move the bulky keys of every older job's
+  detail (lib/job_detail.py SPILLED) to job-detail/<id>.json beside the
+  database. A rerun moves nothing new. --vacuum then runs VACUUM and prints
+  the database size before and after. Holds the poller's lock, so it
+  refuses to run while `orch poll` does; stop the waiters too before
+  --vacuum, which needs the database to itself.
 
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -457,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_backup_db, argv[1:])
     if argv[0] == "restore-db":
         return _call(_restore_db, argv[1:])
+    if argv[0] == "db-spill-detail":
+        return _call(_db_spill_detail, argv[1:])
     if argv[0] == "wait":
         return _call(_wait, argv[1:])
     if argv[0] == "job":
@@ -986,6 +999,31 @@ def _restore_db(argv: list[str]) -> int:
         print(f"orch restore-db: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
     print(f"restored {path} from {source} (backup taken {taken:%Y-%m-%d %H:%M:%S} UTC)")
+    return 0
+
+
+def _db_spill_detail(argv: list[str]) -> int:
+    parser = _Parser(prog="orch db-spill-detail", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--vacuum", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        with _poll_lock(path):
+            before = path.stat().st_size
+            connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+            try:
+                moved = job_detail.spill_existing(connection)
+                print(f"moved the detail of {moved} jobs to {path.parent / job_detail.DIRECTORY}")
+                if args.vacuum:
+                    connection.execute("VACUUM")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    print(f"vacuumed {path}: {before} -> {path.stat().st_size} bytes")
+            finally:
+                connection.close()
+    except (ValueError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch db-spill-detail: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
     return 0
 
 

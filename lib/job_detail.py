@@ -15,6 +15,7 @@ from pathlib import Path
 SPILLED = ("answers", "brief_text", "evidence", "instruction", "plan_text", "unmapped")
 MARKER = "spilled"
 DIRECTORY = "job-detail"
+BATCH = 200
 
 
 class JobDetailError(ValueError):
@@ -74,6 +75,32 @@ def load(directory: Path | None, job_id: str, detail: str | None) -> str | None:
 
 def load_row(connection: sqlite3.Connection, job_id: str, detail: str | None) -> str | None:
     return load(root(connection), job_id, detail)
+
+
+def spill_existing(connection: sqlite3.Connection) -> int:
+    directory = root(connection)
+    moved = 0
+    last = 0
+    while True:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            "SELECT rowid, id, detail FROM jobs WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            (last, BATCH),
+        ).fetchall()
+        for rowid, job_id, detail in rows:
+            last = rowid
+            data = _object(detail)
+            if data is None or MARKER in data:
+                continue
+            slim, spill = split(detail)
+            if spill is None:
+                continue
+            write(directory, str(job_id), spill)
+            connection.execute("UPDATE jobs SET detail = ? WHERE rowid = ?", (slim, rowid))
+            moved += 1
+        connection.commit()
+        if len(rows) < BATCH:
+            return moved
 
 
 def _object(detail: str | None) -> dict[str, object] | None:
