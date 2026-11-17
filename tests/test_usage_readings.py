@@ -147,9 +147,6 @@ def test_a_bad_reset_is_no_reading(resets_at: object) -> None:
     assert parse_get_usage(out, CAPTURED)[0] == Reading("five_hour", None, None, CAPTURED, 0, CAPTURED)
 
 
-# --- Claude: the stream's rate_limit_event -------------------------------------------------
-
-
 def rate_limit_event(windows: object) -> dict:
     return {"type": "rate_limit_event", "uuid": "u", "session_id": "s", "rate_limit_info": {
         "status": "allowed", "resetsAt": SEVEN_DAY_RESET, "rateLimitType": "seven_day", "utilization": 0.82,
@@ -178,6 +175,8 @@ def test_a_rate_limit_event_gives_its_unified_windows_as_fractions() -> None:
         {"utilization": 0.5, "resetsAt": "2026-11-14T19:25:32+00:00"},
         {"utilization": 0.5, "resetsAt": FIVE_HOUR_RESET + 0.5},
         {"utilization": 0.5},
+        {"utilization": 10**400, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": 0.5, "resetsAt": 10**400},
         None,
     ],
 )
@@ -485,7 +484,7 @@ def test_the_remote_probe_runs_claude_under_the_bots_login_shell() -> None:
     with pytest.raises(usage_probe.ProbeFailed, match=r"^ssh exit 255$"):
         usage_probe.claude_remote(FakeTransport(Exchanged(255, GET_USAGE, "down")), TARGET)
     with pytest.raises(usage_probe.ProbeFailed, match=r"^no byte transport$"):
-        usage_probe.claude_remote(object(), TARGET)  # type: ignore[arg-type]
+        usage_probe.claude_remote(object(), TARGET)
 
 
 def test_a_remote_codex_read_sends_the_reader_and_parses_its_line(tmp_path: Path) -> None:
@@ -584,8 +583,6 @@ def test_a_reply_without_numbers_logs_why(out: bytes, line: str) -> None:
     assert lines == [line]
 
 
-# --- the probe in `orch job run` -----------------------------------------------------------
-
 PROBE_CLAUDE = """#!{python}
 import datetime, json, os, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
@@ -624,7 +621,6 @@ print("ORCH-HANDOFF: done")
 
 
 def _probe_bin(directory: Path, mode: str) -> Path:
-    """A fake `claude` that answers the probe per `mode`, and claude-bot's `claude-harness` wrapper."""
     directory.mkdir(parents=True, exist_ok=True)
     claude = directory / "claude"
     fixture = ROOT / "tests" / "fixtures" / "telemetry" / "claude_stream.jsonl"

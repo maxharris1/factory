@@ -1665,10 +1665,7 @@ class Session:
                 if self._limit is not None:
                     self.flush()
             if self.harness == "claude":
-                try:
-                    self.add_usage(parse_rate_limit_event(event, self.clock()))
-                except Exception as exc:  # a malformed event never stops the tee
-                    self._warn("usage", f"telemetry: skipped a rate limit event ({type(exc).__name__})")
+                self.add_usage(parse_rate_limit_event(event, self.clock()))
             try:
                 message = final_message(event)
             except Exception:

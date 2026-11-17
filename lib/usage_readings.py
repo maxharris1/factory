@@ -176,7 +176,11 @@ def ensure_table(connection: sqlite3.Connection) -> None:
 def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def used_fraction(value: object) -> float | None:
@@ -245,8 +249,6 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
 
 
 def parse_rate_limit_event(event: object, now: float) -> list[Reading]:
-    """The windows a Claude stream-json `rate_limit_event` reports with a used
-    fraction and a reset; none for any other event."""
     if not isinstance(event, dict) or event.get("type") != "rate_limit_event":
         return []
     info = event.get("rate_limit_info")

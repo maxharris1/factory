@@ -2060,7 +2060,7 @@ def _job_run_command(argv: list[str]) -> int:
         command = session.flags.argv
         if session.flags.harness != "claude":
             log(f"usage probe: skipped ({session.flags.reason})")
-        else:  # #151: the account's usage, once per job
+        else:
             target, binary, probe_env = placed.target, command[0], dict(environment)
             usage_read = usage_probe.start_claude(
                 session.add_usage,

@@ -62,8 +62,7 @@ Run = Callable[..., subprocess.CompletedProcess]
 
 
 class ProbeFailed(Exception):
-    """A probe that gave no reply. Its reason is a fixed form that never holds
-    the probe's output, its environment, the proof or the worker tag."""
+    pass
 
 
 def claude_local(
@@ -139,10 +138,7 @@ def start_claude(
     probe: Callable[[], bytes],
     log: Callable[[str], None],
 ) -> threading.Thread:
-    """Run `probe` on a daemon thread, hand its readings to `add`, and log
-    one line when it gives no numbers.
-
-    The readings are observed when the probe was asked, so a
+    """The readings are observed when the probe was asked, so a
     `rate_limit_event` the job streams meanwhile stays the newer reading."""
 
     def work() -> None:
@@ -152,7 +148,7 @@ def start_claude(
         except ProbeFailed as failed:
             log(f"usage probe: failed ({failed})")
             return
-        except Exception as exc:  # a usage read never touches the job
+        except Exception as exc:
             log(f"usage probe: failed ({type(exc).__name__})")
             return
         readings = parse_get_usage(out, asked)
