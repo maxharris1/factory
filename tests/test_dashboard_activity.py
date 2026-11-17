@@ -258,6 +258,29 @@ def test_past_twelve_stuck_wakes_the_most_recently_stuck_stay(tmp_path: Path) ->
     assert _relay_ids(snapshot) == list(range(15, 3, -1))
 
 
+def test_a_retried_stuck_wake_keeps_its_ticket_stop_time(tmp_path: Path) -> None:
+    clock = [NOW - 100]
+    dispatcher, queue = setup(tmp_path, now=clock)
+    with queue.connect() as connection:
+        for n in range(1, 16):
+            add_ticket(connection, "owner/repo", str(n))
+    for n in range(1, 16):
+        clock[0] = NOW - 100 + n
+        dispatcher._mark_stuck_and_wake(repo="owner/repo", ticket_id=str(n), source_comment_id=f"s-{n}",
+                                         timeout_seconds=600, reason="job-timeout", detail="job-timeout")
+    with queue.connect() as connection:
+        wake = connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state WHERE ticket_id = '1'").fetchone()[0]
+        connection.execute("UPDATE jobs SET state = 'failed' WHERE id = ?", (wake,))
+    clock[0] = NOW - 1
+    dispatcher._ensure_all_stuck_wakes()
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state WHERE ticket_id = '1'").fetchone()[0] != wake
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poller.log", now=NOW)
+    assert _relay_ids(snapshot) == list(range(15, 3, -1))
+
+
 def test_a_merge_with_no_job_moves_its_ticket_to_the_top(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path, now=[NOW - 1])
     with queue.connect() as connection:

@@ -1405,6 +1405,12 @@ def _read_db(
         approvers = _hold_approvers(connection)
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
         no_ci_bases = _no_ci_bases(connection) if "no_ci_bases" in tables else {}
+        state_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(ticket_state)")}
+        stuck_at = ", ".join([
+            *(["state.stuck_since"] if "stuck_since" in state_columns else []),
+            *(["wake.created_at"] if jobs else []),
+            "NULL",
+        ])
         for row in connection.execute(
             f"""
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -1413,7 +1419,7 @@ def _read_db(
                    COALESCE(state.gate_count, 0) AS gate_count,
                    COALESCE(state.stuck, 0) AS stuck,
                    state.stuck_reason, state.paused_action,
-                   {"wake.created_at" if jobs else "NULL"} AS stuck_at
+                   COALESCE({stuck_at}, NULL) AS stuck_at
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id

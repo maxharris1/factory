@@ -1507,7 +1507,8 @@ class JobsMixin:
         state = connection.execute(
             """
             SELECT stuck, stuck_reason, stuck_source_comment_id,
-                   timeout_seconds, generation, stuck_wake_job_id, workflow_state
+                   timeout_seconds, generation, stuck_wake_job_id, stuck_since,
+                   workflow_state
             FROM ticket_state
             WHERE repo = ? AND ticket_id = ?
             """,
@@ -1521,13 +1522,17 @@ class JobsMixin:
             return
         wake_job_id = state["stuck_wake_job_id"]
         previous_detail: str | None = None
+        stuck_since: float | None = None
         if wake_job_id is not None:
             wake = connection.execute(
-                "SELECT state, detail FROM jobs WHERE id = ?",
+                "SELECT state, detail, created_at FROM jobs WHERE id = ?",
                 (wake_job_id,),
             ).fetchone()
             if wake is not None and str(wake["state"]) != "failed":
                 return
+            stuck_since = state["stuck_since"]
+            if stuck_since is None and wake is not None:
+                stuck_since = wake["created_at"]
             if wake is not None and isinstance(wake["detail"], str):
                 previous_detail = str(wake["detail"])
             failed = connection.execute(
@@ -1578,8 +1583,14 @@ class JobsMixin:
         connection.execute(
             """
             UPDATE ticket_state
-            SET generation = ?, stuck_wake_job_id = ?
+            SET generation = ?, stuck_wake_job_id = ?, stuck_since = ?
             WHERE repo = ? AND ticket_id = ?
             """,
-            (generation, queued.id, repo.lower(), ticket_id),
+            (
+                generation,
+                queued.id,
+                queued.created_at if stuck_since is None else stuck_since,
+                repo.lower(),
+                ticket_id,
+            ),
         )
