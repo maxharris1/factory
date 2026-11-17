@@ -36,10 +36,13 @@ HANDOFF_SOURCES = frozenset(
 def linear_move(
     workflow_state: str | None,
     stuck: bool,
+    paused_action: str | None,
     linear: LinearState,
     processed: bool,
 ) -> LinearMove | None:
     if workflow_state in NOT_STARTED or workflow_state in TERMINAL_STATES:
+        return None
+    if workflow_state == "waiting-max" and paused_action is None:
         return None
     if linear.type == "canceled":
         return "canceled"
@@ -147,7 +150,7 @@ class LinearStatesMixin:
             with self._connect() as connection:
                 row = connection.execute(
                     """
-                    SELECT workflow_state, stuck FROM ticket_state
+                    SELECT workflow_state, stuck, paused_action FROM ticket_state
                     WHERE repo = ? AND ticket_id = ?
                     """,
                     (repo, ticket_id),
@@ -155,7 +158,13 @@ class LinearStatesMixin:
             if row is None:
                 continue
             state, stuck = row["workflow_state"], bool(row["stuck"])
-            move = linear_move(state, stuck, linear, (repo, ticket_id) in self._polled)
+            move = linear_move(
+                state,
+                stuck,
+                row["paused_action"],
+                linear,
+                (repo, ticket_id) in self._polled,
+            )
             if move is None:
                 continue
             try:

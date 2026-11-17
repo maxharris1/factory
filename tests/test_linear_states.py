@@ -160,38 +160,39 @@ def capped_and_stuck_review(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("state", "stuck", "linear", "processed", "move"),
+    ("state", "stuck", "paused", "linear", "processed", "move"),
     [
-        (None, False, RFR, True, None),
-        ("intake", False, RFR, True, None),
-        ("questions", False, CANCELED, True, None),
-        ("capped", False, RFR, True, "hand-off"),
-        ("review", True, IN_REVIEW, True, "hand-off"),
-        ("waiting-max", False, RFR, True, "hand-off"),
-        ("capped", False, LinearState("QA Review", "started", True), True, "hand-off"),
-        ("capped", False, LinearState("Ready for Review", "started", False), True, None),
-        ("building", False, RFR, False, None),
-        ("building", False, RFR, True, "hand-off"),
-        ("building", True, RFR, False, "hand-off"),
-        ("handed-off", False, RFR, True, None),
-        ("ship", False, RFR, True, None),
-        ("merge-queue", False, RFR, True, None),
-        ("waiting-external", False, IN_REVIEW, True, None),
-        ("capped", False, IN_PROGRESS, True, None),
-        ("capped", False, DONE, True, "done"),
-        ("handed-off", False, DONE, True, "done"),
-        ("review", True, CANCELED, True, "canceled"),
-        ("handed-off-externally", False, IN_PROGRESS, True, "resume"),
-        ("handed-off-externally", False, RFR, True, None),
-        ("handed-off-externally", False, TODO, True, None),
-        ("handed-off-externally", False, DONE, True, "done"),
-        ("handed-off-externally", False, CANCELED, True, "canceled"),
-        ("merged", False, IN_PROGRESS, True, None),
-        ("abandoned", False, IN_PROGRESS, True, None),
+        (None, False, None, RFR, True, None),
+        ("intake", False, None, RFR, True, None),
+        ("questions", False, None, CANCELED, True, None),
+        ("capped", False, None, RFR, True, "hand-off"),
+        ("review", True, None, IN_REVIEW, True, "hand-off"),
+        ("waiting-max", False, "build", RFR, True, "hand-off"),
+        ("waiting-max", False, None, RFR, True, None),
+        ("capped", False, None, LinearState("QA Review", "started", True), True, "hand-off"),
+        ("capped", False, None, LinearState("Ready for Review", "started", False), True, None),
+        ("building", False, None, RFR, False, None),
+        ("building", False, None, RFR, True, "hand-off"),
+        ("building", True, None, RFR, False, "hand-off"),
+        ("handed-off", False, None, RFR, True, None),
+        ("ship", False, None, RFR, True, None),
+        ("merge-queue", False, None, RFR, True, None),
+        ("waiting-external", False, None, IN_REVIEW, True, None),
+        ("capped", False, None, IN_PROGRESS, True, None),
+        ("capped", False, None, DONE, True, "done"),
+        ("handed-off", False, None, DONE, True, "done"),
+        ("review", True, None, CANCELED, True, "canceled"),
+        ("handed-off-externally", False, None, IN_PROGRESS, True, "resume"),
+        ("handed-off-externally", False, None, RFR, True, None),
+        ("handed-off-externally", False, None, TODO, True, None),
+        ("handed-off-externally", False, None, DONE, True, "done"),
+        ("handed-off-externally", False, None, CANCELED, True, "canceled"),
+        ("merged", False, None, IN_PROGRESS, True, None),
+        ("abandoned", False, None, IN_PROGRESS, True, None),
     ],
 )
-def test_linear_move(state, stuck, linear, processed, move) -> None:
-    assert linear_move(state, stuck, linear, processed) == move
+def test_linear_move(state, stuck, paused, linear, processed, move) -> None:
+    assert linear_move(state, stuck, paused, linear, processed) == move
 
 
 def test_each_poll_stores_every_open_linear_tickets_state(tmp_path: Path) -> None:
