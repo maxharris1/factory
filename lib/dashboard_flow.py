@@ -69,8 +69,9 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
 )
 # A transition that only an approval won in another state can take: fixing ->
 # ship ships the APPROVE a review left on red CI (T2ReadyCovered), so a path
-# that skips review never takes it.
-EARNED_IN = {("fixing", "ship"): "review"}
+# that skips review never takes it. waiting-max -> ship reruns QA at a head
+# that already reached ship, so it too needs that approval.
+EARNED_IN = {("fixing", "ship"): "review", ("waiting-max", "ship"): "review"}
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
 GLOSS = {
@@ -301,16 +302,24 @@ def hops_to_shipped(chart: dict | None, state: str | None) -> int | None:
     adjacency = _adjacency(chart)
     if state not in adjacency:
         return None
-    hops = {state: 0}
-    queue = deque([state])
+    earners = frozenset(EARNED_IN.values())
+    start = (state, earners & {state})
+    hops = {start: 0}
+    queue = deque([start])
     while queue:
-        name = queue.popleft()
+        node = queue.popleft()
+        name, passed = node
         if name in SHIPPED:
-            return hops[name]
+            return hops[node]
+        at_origin = hops[node] == 0
         for nxt in adjacency[name]:
-            if nxt not in hops:
-                hops[nxt] = hops[name] + 1
-                queue.append(nxt)
+            need = EARNED_IN.get((name, nxt))
+            if need is not None and not at_origin and need not in passed:
+                continue
+            ahead = (nxt, passed | (earners & {nxt}))
+            if ahead not in hops:
+                hops[ahead] = hops[node] + 1
+                queue.append(ahead)
     return None
 
 
