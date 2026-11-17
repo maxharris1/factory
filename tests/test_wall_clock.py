@@ -126,7 +126,6 @@ def test_a_remote_run_past_its_budget_has_its_control_stopped() -> None:
 
 
 def test_a_remote_run_its_device_stopped_past_its_budget_still_expires_it() -> None:
-    """#776: the device's own deadline can end the run before the local timer runs."""
     now = [0.0]
     budget = Budget(60, clock=lambda: now[0])
     lines: list[str] = []
@@ -666,3 +665,39 @@ def test_stops_that_reach_a_run_while_it_finishes_still_leave_its_exit_status(
         time.sleep(0.1)
     assert subprocess.run(check).returncode == 0
     assert (rundir / "exit").read_text().strip() == "3"
+
+
+def test_a_remote_deadline_never_stops_the_run_before_its_budget(tmp_path: Path) -> None:
+    import subprocess
+
+    from lib import remote
+
+    clock, stopped = tmp_path / "clock", tmp_path / "stopped"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "date").write_text(f"#!/bin/sh\ncat {clock}\n")
+    (bin_dir / "date").chmod(0o755)
+    clock.write_text("100\n")
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    deadline = subprocess.Popen(
+        [
+            "sh", "-c", remote._DEADLINE, "orch-deadline", str(worker.pid), "1", "30",
+            f"touch {stopped}; kill {worker.pid}", "true", "exit 0",
+        ],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    try:
+        time.sleep(0.3)
+        clock.write_text("101\n")
+        time.sleep(1.5)
+        assert not stopped.exists(), "stopped within the second its budget started in"
+        clock.write_text("102\n")
+        waited = time.monotonic() + 10
+        while not stopped.exists() and time.monotonic() < waited:
+            time.sleep(0.1)
+        assert stopped.exists(), "not stopped once its budget passed"
+    finally:
+        worker.kill()
+        worker.wait()
+        deadline.kill()
+        deadline.wait()
