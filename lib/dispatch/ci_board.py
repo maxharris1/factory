@@ -192,7 +192,7 @@ def _read_failures(
             text = job_log(repo, job_id)
         except Exception as exc:
             _say(log, f"ci board: {repo} job {job_id} log unavailable: {type(exc).__name__}")
-            continue
+            text = ""
         with connect() as connection:
             connection.execute(
                 """

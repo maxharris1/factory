@@ -272,6 +272,30 @@ def test_each_failed_job_costs_one_log_read_once(tmp_path: Path) -> None:
     assert board.row("1", "build")["failing_tests"] is None
 
 
+def test_a_log_that_cannot_be_read_never_starves_the_older_failures(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    failed = pr(
+        "1",
+        HEAD,
+        check("pytest", "completed", "failure", job="1"),
+        check("lint", "completed", "cancelled", job="2", started=None),
+    )
+    board.github.logs["1"] = "FAILED tests/test_a.py::test_b"
+    board.github.logs["2"] = RuntimeError("HTTP 404")
+
+    reads = []
+    for _ in range(3):
+        board.cycle(failed)
+        reads.append(list(board.github.log_reads))
+        board.github.spent()
+
+    assert sorted(sum(reads, [])) == ["1", "2"]
+    assert any("job 2" in line and "RuntimeError" in line for line in board.lines)
+    assert json.loads(str(board.row("1", "pytest")["failing_tests"])) == ["tests/test_a.py::test_b"]
+    assert json.loads(str(board.row("1", "lint")["failing_tests"])) == []
+
+
 def test_a_failed_jobs_log_is_read_while_the_rest_of_its_run_still_runs(tmp_path: Path) -> None:
     board = Board(tmp_path)
     board.track("1")
