@@ -744,6 +744,22 @@ hour. Ten active tickets with any reasonable number of stopped ones stay
 under the limit. Comment and CI reads retry with backoff, and a rate-limit
 403 or 429 backs every GitHub read off.
 
+The dashboard's CI board (`lib/dispatch/ci_board.py`, issue #717) adds at
+most 4 requests a cycle, each a single `gh api` request with no
+`--paginate`. Its rows come from the check runs `ci_status` already read,
+at no cost, one per check per workflow at the ticket's head. Runner names
+and queue times take at most 3 `actions/runs/{id}/jobs` reads a cycle,
+each run read until every started job's runner is saved. Failing tests
+take at most 1 `actions/jobs/{id}/logs` read a cycle, once per failed job
+attempt, as soon as that job completes. GitHub answers it with a redirect
+to the log blob, which is not an API request. It passes
+`--allow-escape-sequences` (gh 2.97 or later), since gh refuses a coloured
+pytest log without it. A read that fails is not retried, so the job shows
+its log link without test names. At about 20 runs an hour that is
+about 60 to 80 requests an hour; the worst case is 480 an hour at
+`poll_seconds: 30`. Recent failures are listed for 24 hours from the time
+the job completed.
+
 **State backup (issue #108, #66).** After every cycle `orch poll` backs
 `orch.db` up with SQLite's online backup API to `$ORCH_DB_BACKUP`, default
 `~/.local/share/factory/backup/orch.db` (beside the venv, outside the state

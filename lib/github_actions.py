@@ -74,6 +74,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatch.helpers import _base_mismatch
+from lib.dispatch.types import CHECK_FAILED, CheckRow, CIJobStatus, RunJob, RunnerKind
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -128,14 +129,6 @@ MARK_READY_QUERY = (
 )
 
 _CHECK_NOT_RUN = ("neutral", "skipped")
-_CHECK_FAILED = (
-    "failure",
-    "cancelled",
-    "timed_out",
-    "action_required",
-    "startup_failure",
-    "stale",
-)
 
 
 LINEAR_NO_READY_STATE_NOTE = "linear-not-moved: team has no Ready for Review state"
@@ -668,6 +661,7 @@ class GitHubReviewActions:
         if not runs and not total:
             return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
+        checks = tuple(map(_check_row, runs))
         failed: list[FailedCheck] = []
         pending: list[str] = []
         passed = False
@@ -680,7 +674,7 @@ class GitHubReviewActions:
                 continue
             if status != "completed":
                 self._warn_contradiction(repo, head, run, name, status, conclusion)
-            if conclusion in _CHECK_FAILED:
+            if conclusion in CHECK_FAILED:
                 failed.append(_failed_check(name, run.get("details_url")))
             elif conclusion == "success":
                 passed = True
@@ -701,8 +695,13 @@ class GitHubReviewActions:
                 "failure",
                 "failed: " + ", ".join(check.name for check in failed),
                 failed=tuple(failed),
+                checks=checks,
             )
-        return CIResult("success" if passed and not pending else "pending", pending=tuple(pending))
+        return CIResult(
+            "success" if passed and not pending else "pending",
+            pending=tuple(pending),
+            checks=checks,
+        )
 
     def _warn_contradiction(
         self, repo: str, head: str, run: dict[str, Any], name: str, status: Any, conclusion: Any
@@ -729,6 +728,25 @@ class GitHubReviewActions:
             _, _, entry = rest.partition("\t")
             logs.setdefault(job, []).append(entry)
         return {job: "\n".join(lines) for job, lines in logs.items()}
+
+    def run_jobs(self, repo: str, run_id: str) -> tuple[RunJob, ...]:
+        """The jobs of the run's latest attempt, one page of 100."""
+        if not run_id.isdigit():
+            raise GitHubAdapterError("Actions run id is not a number")
+        page = _object(self._json(f"{_repo_path(repo)}/actions/runs/{run_id}/jobs?per_page=100"))
+        jobs = page.get("jobs")
+        if not isinstance(jobs, list):
+            raise GitHubAdapterError("run jobs page has no jobs list")
+        return tuple(_run_job(_object(job)) for job in jobs)
+
+    def job_log(self, repo: str, job_id: str) -> str:
+        """gh 2.97+ exits 1 on a body with escape sequences unless allowed,
+        and pytest's output is coloured."""
+        if not job_id.isdigit():
+            raise GitHubAdapterError("Actions job id is not a number")
+        return self._call(
+            f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
+        )
 
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
@@ -962,6 +980,62 @@ def _failed_check(name: str, details: object) -> FailedCheck:
     if match is None:
         return FailedCheck(name)
     return FailedCheck(name, run_id=match.group(2), job_id=match.group(3), run_url=match.group(1))
+
+
+def _check_row(run: dict[str, Any]) -> CheckRow:
+    conclusion = run.get("conclusion")
+    status = _board_status(run.get("status"), conclusion)
+    details = run.get("details_url")
+    job = _ACTIONS_JOB.match(details) if isinstance(details, str) else None
+    return CheckRow(
+        name=str(run.get("name")),
+        status=status,
+        conclusion=conclusion if isinstance(conclusion, str) else None,
+        started_at=None if status == "queued" else _display_time(run.get("started_at")),
+        completed_at=_display_time(run.get("completed_at")) if status == "completed" else None,
+        log_url=None if job is None else details,
+        run_id=None if job is None else job.group(2),
+        job_id=None if job is None else job.group(3),
+        workflow=_workflow_identity(run),
+    )
+
+
+def _run_job(job: dict[str, Any]) -> RunJob:
+    job_id = job.get("id")
+    if isinstance(job_id, bool) or not isinstance(job_id, int):
+        raise GitHubAdapterError("run job has no numeric id")
+    status = _board_status(job.get("status"), job.get("conclusion"))
+    runner = job.get("runner_name")
+    runner = runner if isinstance(runner, str) and runner else None
+    kind: RunnerKind | None
+    if runner is not None:
+        hosted = job.get("runner_group_name") == "GitHub Actions"
+        kind = "github-hosted" if hosted else "self-hosted"
+    else:
+        kind = "none" if status == "completed" else None
+    return RunJob(
+        job_id=str(job_id),
+        name=str(job.get("name")),
+        status=status,
+        created_at=_display_time(job.get("created_at")),
+        started_at=None if status == "queued" else _display_time(job.get("started_at")),
+        completed_at=_display_time(job.get("completed_at")) if status == "completed" else None,
+        runner_name=runner,
+        runner_kind=kind,
+    )
+
+
+def _board_status(status: object, conclusion: object) -> CIJobStatus:
+    if conclusion is not None:
+        return "completed"
+    return "in_progress" if status == "in_progress" else "queued"
+
+
+def _display_time(value: object) -> float | None:
+    try:
+        return _created_at(value)
+    except GitHubAdapterError:
+        return None
 
 
 def _workflow_identity(run: dict[str, Any]) -> str:

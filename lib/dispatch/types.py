@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from lib.factory_md import FactoryConfig
 from lib.hold import LabelEvent, MergeUpdate
@@ -47,6 +47,45 @@ class FailedCheck:
     run_url: str | None = None
 
 
+CHECK_FAILED = (
+    "failure",
+    "cancelled",
+    "timed_out",
+    "action_required",
+    "startup_failure",
+    "stale",
+)
+
+
+CIJobStatus = Literal["queued", "in_progress", "completed"]
+RunnerKind = Literal["self-hosted", "github-hosted", "none"]
+
+
+@dataclass(frozen=True)
+class CheckRow:
+    name: str
+    status: CIJobStatus
+    conclusion: str | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    log_url: str | None = None
+    run_id: str | None = None
+    job_id: str | None = None
+    workflow: str = ""
+
+
+@dataclass(frozen=True)
+class RunJob:
+    job_id: str
+    name: str
+    status: CIJobStatus
+    created_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    runner_name: str | None = None
+    runner_kind: RunnerKind | None = None
+
+
 @dataclass(frozen=True)
 class CIResult:
     status: str
@@ -56,6 +95,7 @@ class CIResult:
     reported: bool = True
     failed: tuple[FailedCheck, ...] = ()
     pending: tuple[str, ...] = ()
+    checks: tuple[CheckRow, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in CI_STATUSES:

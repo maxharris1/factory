@@ -17,6 +17,7 @@ PHASES = (
     "tracked-read",
     "process",
     "linear-moves",
+    "ci-board",
     "merge-queue",
     "verify-handoffs",
     "reconcile-jobs",
