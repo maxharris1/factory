@@ -658,11 +658,26 @@ def test_the_token_rule_catches_a_launcher_systemd_runs(tmp_path: Path, unit: st
     assert _orch_poll_tokens("probe.service", unit)
 
 
+def _shipped_deploy_files(root: Path) -> list[Path]:
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "deploy"],
+                            capture_output=True, text=True, check=True, timeout=30)
+    return sorted(root / name for name in listed.stdout.split("\0") if name)
+
+
+def test_the_fence_scans_only_the_files_git_ships(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=30)
+    (tmp_path / "deploy/__pycache__").mkdir(parents=True)
+    (tmp_path / "deploy/__pycache__/x.cpython-312.pyc").write_bytes(b"\x00orch poll")
+    (tmp_path / "deploy/run-poller.sh").write_text("true\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "deploy/run-poller.sh"], check=True, timeout=30)
+    assert _shipped_deploy_files(tmp_path) == [tmp_path / "deploy/run-poller.sh"]
+
+
 @needs_pretty_print
 def test_run_poller_is_the_only_deploy_file_that_runs_orch_poll() -> None:
     hits = [
         (path.name, line)
-        for path in sorted((ROOT / "deploy").iterdir())
+        for path in _shipped_deploy_files(ROOT)
         for line in _orch_poll_tokens(path.name, path.read_text(encoding="utf-8"))
     ]
     assert sorted(hits) == sorted([ORCH_POLL_LAUNCHER, *ORCH_POLL_MENTIONS])
