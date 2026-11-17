@@ -74,6 +74,7 @@ class SchemaMixin:
                     paused_head TEXT,
                     paused_generation INTEGER,
                     paused_question_id TEXT,
+                    paused_plan_text TEXT,
                     stuck_reason TEXT,
                     stuck_source_comment_id TEXT,
                     stuck_wake_job_id TEXT,
@@ -170,6 +171,7 @@ class SchemaMixin:
                     "paused_head": "TEXT",
                     "paused_generation": "INTEGER",
                     "paused_question_id": "TEXT",
+                    "paused_plan_text": "TEXT",
                     "cap_extra": "INTEGER NOT NULL DEFAULT 0",
                     "approved_head": "TEXT",
                     "approved_at": "REAL",
@@ -249,6 +251,7 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
             verdict_acceptances_existed = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_acceptances'"
             ).fetchone()
@@ -270,7 +273,7 @@ class SchemaMixin:
                     SELECT repo, ticket_id, approve_comment_id, held_at FROM ship_holds
                     """
                 )
-                connection.commit()
+            connection.commit()
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_intents (

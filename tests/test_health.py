@@ -442,11 +442,13 @@ def test_the_poller_beats_on_the_orch_host(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
     with health.poller_beats(db, write_target_machines(tmp_path), transport=FakeTransport({}),
                              interval=3600.0, log=lambda line: None):
+        def poller_devices() -> list[str]:
+            return [r.device for r in health.read_heartbeats(db) or () if r.component == "poller"]
+
         deadline = time.monotonic() + 5
-        while not health.read_heartbeats(db) and time.monotonic() < deadline:
+        while not poller_devices() and time.monotonic() < deadline:
             time.sleep(0.01)
-        rows = health.read_heartbeats(db) or ()
-    assert [r.device for r in rows if r.component == "poller"] == ["pc"]
+        assert poller_devices() == ["pc"]
 
 
 def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path) -> None:

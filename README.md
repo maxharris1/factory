@@ -505,6 +505,11 @@ launching (`RESTORED orch.db from backup`), or, with no backup, create an empty
 one with `orch init-db` and log a `WARNING`. On an empty or stale database the
 dispatcher still queues no job for a step the thread already answered: a later
 trusted `orch:v1` reply records the job as cancelled (`answered-<action>`).
+Before any manual write to `orch.db`, run `orch db-backup <label>` (#654). It
+writes `manual/orch-<UTC stamp>-<label>.db` beside the cycle backup, then keeps
+the newest 5 labelled backups plus any under 48 hours old and deletes the rest,
+with their `-wal` and `-shm` files. It prunes on each `db-backup`, and `orch
+poll` prunes once a day.
 
 *Poll interval.* `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. The sleep ends when either the wall clock or the monotonic clock reaches `poll_seconds`, so a box VM pause in the sleep does not add the pause on top (issue #470). When the time from one `cycle end` to the next `cycle start` runs more than 10 seconds past `poll_seconds`, poller.log gets an `orch poll: between cycles` line before `cycle start` that gives the sleep's wall and monotonic seconds and any clock jump. The `cycle end` line breaks `after-poll` into `backup`, `dashboard-push` and `self-deploy`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. GitHub is read
 every cycle. Linear keeps its own 60-second cadence and budget: the

@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatcher import TrackedTicket
 from lib.queue import Job
 from lib.update_check import UpdateClass
-from tests.merge_queue_support import PR, Board, sha
+from tests.merge_queue_support import PR, Board, BoardActions, sha
 from tests.test_merge_queue_gate import after_board
 
 OK = "<!-- orch:v1 kind=ok from=tracy-site role=approver head={head} -->"
@@ -231,3 +232,66 @@ def test_closing_an_update_paused_on_a_question_ends_the_watch(tmp_path: Path) -
 
     assert_abandoned(board)
     assert board.actions.states[-1] == "abandoned"
+
+
+BASE = sha(90)
+BRANCH = "factory/issue-42"
+
+
+class EmptiedBranch(BoardActions):
+    def __init__(self, board: Board, pr: PR):
+        super().__init__(board)
+        self.pr = pr
+        self.tip = BASE
+        self.reopened: list[str] = []
+        pr.head, pr.closed = BASE, True
+        snapshot = board.snapshot
+        board.snapshot = lambda pr, *, fresh=False: replace(
+            snapshot(pr, fresh=fresh),
+            git_branch_name=BRANCH,
+            pr_base="main",
+            pr_commits=0 if pr.head == BASE else 1,
+        )
+        board.actions = board.dispatcher.review_actions = self
+
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        return self.tip
+
+    def commits_ahead(self, ticket: TrackedTicket, *, base: str, head: str) -> int:
+        return 0 if head == BASE else 1
+
+    def reopen(self, ticket: TrackedTicket) -> None:
+        self.reopened.append(ticket.ticket_id)
+        self.pr.closed = False
+        self.pr.head = self.tip
+
+
+def test_a_branch_emptied_by_a_running_update_is_reopened_once_rebuilt(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    an_update_builder_running(board, pr)
+    actions = EmptiedBranch(board, pr)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "updating"
+
+    actions.tip = sha(2)
+    board.poll()
+
+    assert actions.reopened == ["42"]
+    assert board.state("42")["workflow_state"] == "updating"
+    assert "42" in [ref.ticket_id for ref in board.last_refs]
+
+
+def test_a_branch_left_empty_after_the_update_ends_is_abandoned(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    update = an_update_builder_running(board, pr)
+    actions = EmptiedBranch(board, pr)
+    board.poll()
+    board.queue.finish(update.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+
+    assert actions.reopened == []
+    assert_abandoned(board)
