@@ -423,10 +423,9 @@ class PollMixin:
             )
 
     def _reopen_emptied_pull(self, ticket: TrackedTicket) -> bool:
-        """#705: GitHub closes a PR whose branch holds nothing beyond base
-        (commits 0) and keeps its head frozen after the branch moves on, so
-        a rebuilt branch's ready can never be read. Reopen it once the branch
-        is ahead of base again. True when this call reopened the PR."""
+        """GitHub auto-closes a PR whose branch has no commits beyond base and
+        freezes its head, so a rebuilt branch's ready is never read until the
+        PR is reopened (#705)."""
         if not (
             ticket.closed
             and ticket.pr_commits == 0

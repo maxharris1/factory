@@ -47,9 +47,6 @@ class ReadyMixin:
         return handled, outcome
 
     def _ready_at_base(self, ticket: TrackedTicket, comment: Comment) -> None:
-        """#705: the ready names the base itself (the PR has no commits), so
-        its job built nothing. Rerun the job once at the same attempt; a
-        second such ready stops the ticket for Max."""
         with self._connect() as connection:
             poster = connection.execute(
                 "SELECT * FROM jobs WHERE lower(repo) = ? AND ticket_id = ? AND handoff_comment_id = ?",

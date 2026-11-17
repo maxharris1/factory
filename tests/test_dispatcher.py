@@ -8096,8 +8096,6 @@ BRANCH_705 = "factory/issue-42"
 
 
 class BranchActions705(FakeReviewActions):
-    """GitHub's view of the PR branch: its tip and how far it is ahead of base."""
-
     def __init__(self, tip: str, ahead: int) -> None:
         super().__init__()
         self.tip = tip
@@ -8165,9 +8163,6 @@ def _stuck_705(queue: SQLiteJobQueue) -> tuple[int, str | None]:
 def test_705_ac1_poller_reopens_an_emptied_pr_whose_branch_is_ahead_again(
     tmp_path: Path,
 ) -> None:
-    """#705 ac-1: GitHub closed the PR when its branch hit main (0 commits).
-    Once the branch is ahead of main again the poller reopens the PR, and the
-    build's ready at the new head is accepted."""
     actions = BranchActions705(REBUILT_705, ahead=9)
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     build = _running_build_705(queue)
@@ -8210,8 +8205,6 @@ def test_705_ac1_poller_leaves_other_closed_prs_closed(
 def test_705_ac2_ready_at_the_base_is_rejected_and_the_build_requeued_at_the_same_attempt(
     tmp_path: Path, closed: bool
 ) -> None:
-    """#705 ac-2: a ready naming a head equal to the base gets a named
-    outcome. The build runs again at the same attempt: no attempt is spent."""
     actions = BranchActions705(BASE_705, ahead=0)
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     build = _running_build_705(queue)
@@ -8230,9 +8223,6 @@ def test_705_ac2_ready_at_the_base_is_rejected_and_the_build_requeued_at_the_sam
 def test_705_ac2_a_failed_build_whose_ready_was_at_the_base_spends_no_attempt(
     tmp_path: Path,
 ) -> None:
-    """The job failed after posting its ready at the base: T6 settles it done
-    from that ready instead of retrying it as attempt 2, and the requeued
-    build keeps attempt 1."""
     actions = BranchActions705(BASE_705, ahead=0)
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     build = _running_build_705(queue)
@@ -8253,8 +8243,6 @@ def test_705_ac2_a_failed_build_whose_ready_was_at_the_base_spends_no_attempt(
 
 @pytest.mark.job_bound
 def test_705_ac2_a_second_ready_at_the_base_marks_the_ticket_stuck(tmp_path: Path) -> None:
-    """The free rebuild happens once per ticket; a requeued build that posts
-    at the base again stops the ticket for a person instead of looping."""
     actions = BranchActions705(BASE_705, ahead=0)
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     first = _running_build_705(queue)
