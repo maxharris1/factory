@@ -55,6 +55,7 @@ from lib.factory_md import (
 from lib.evidence.criteria import canonical_brief
 from lib.github_actions import (
     GhResult,
+    GitHubAdapterError,
     GitHubReviewActions,
     PULL_FILES_LIMIT,
     LinearReviewActions,
@@ -947,8 +948,6 @@ class LivePollSource:
                 continue
             repo = ref.repo.lower()
             if spent.get(repo, 0.0) >= self.tracked_read_budget_seconds:
-                # Like the Linear budget deferral: unread and unacked, so a
-                # dirty Linear row is read on the next cycle.
                 self._defer(f"tracked-read budget deferred {project.repo}")
                 continue
             started = self.clock()
@@ -2355,12 +2354,10 @@ def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
 def _safe_reason(exc: Exception) -> str:
     """The poll_errors text for a source error. A PollSourceError's message
     is built here from safe parts; any other error keeps its kind and gets
-    its message scrubbed. A GitHub adapter error's safe_detail names the
-    failing route, so it stands in for the message."""
+    its message scrubbed."""
     if isinstance(exc, PollSourceError):
         return f"PollSourceError:{str(exc)}"
-    safe = getattr(exc, "safe_detail", None)
-    text = safe if isinstance(safe, str) and safe else str(exc)
+    text = exc.safe_detail if isinstance(exc, GitHubAdapterError) else str(exc)
     status = _status_code(text)
     kind = type(exc).__name__ if status is None else f"{type(exc).__name__}:HTTP-{status}"
     detail = scrub_detail(text)
