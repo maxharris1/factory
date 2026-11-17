@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from lib.cli import main as cli_main
+from lib.handoff_check import expected_for, gh_reader, problems
 from lib.queue import (
     MAX_INVALID_HANDOFFS,
     PRE_READY_FAILED,
@@ -28,7 +29,7 @@ from lib.queue import (
 )
 from lib.job_token import PROOF_ENV
 from lib.handoff import format_header
-from tests.handoff_store import HEAD, fitting_fields, serve_handoff
+from tests.handoff_store import HEAD, LOGIN, fitting_fields, serve_handoff
 from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
 
 REPO = "owner/repo"
@@ -45,7 +46,7 @@ def detail(**extra: object) -> str:
 def running_job(tmp_path: Path, *, action: str = "build", recipient: str = "claude", **extra):
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
-    head = REVIEW_HEAD if action == "review" else None
+    head = REVIEW_HEAD if action in ("review", "qa") else None
     job = queue.enqueue(
         JobRequest(
             repo=REPO,
@@ -579,3 +580,100 @@ def test_a_questions_handoff_skips_pre_ready(
 
     assert done_with(db, job, orch, "1102") == 0
     assert row(db, job.id)["state"] == "done"
+
+
+QA_TRUSTED = {LOGIN: frozenset({"claude-bot", "codex-bot", "grok-bot"})}
+
+
+def qa_header(**changes: str | None) -> str:
+    fields = {
+        "kind": "qa",
+        "from": "grok-bot",
+        "role": "qa",
+        "head": REVIEW_HEAD,
+        "result": "PASS",
+        "scope": "full",
+        "runner": "claude-cloud",
+        "arm": "primary",
+    }
+    fields.update(changes)
+    return format_header({key: value for key, value in fields.items() if value is not None}) + "\nprose\n"
+
+
+def handoff_problems(job, comment_id: str, bot: str = "grok-bot") -> list[str]:
+    return problems(expected_for(job, bot), comment_id, gh_reader(), QA_TRUSTED)
+
+
+def test_763_a_qa_job_expects_a_qa_handoff_from_grok_bot_at_its_head(tmp_path: Path) -> None:
+    _, _, job = running_job(tmp_path, action="qa", recipient="qa")
+
+    expected = expected_for(job, "claude-bot")
+
+    assert (expected.kind, expected.role, expected.bot, expected.head, expected.round) == (
+        "qa",
+        "qa",
+        "grok-bot",
+        REVIEW_HEAD,
+        None,
+    )
+
+
+@pytest.mark.parametrize("role", ["qa", None])
+def test_763_a_qa_handoff_at_the_jobs_head_fits_with_or_without_a_role(
+    tmp_path: Path, store: Path, role: str | None
+) -> None:
+    _, _, job = running_job(tmp_path, action="qa", recipient="qa")
+    serve_handoff(store, job, "1201", role=role)
+
+    assert handoff_problems(job, "1201") == []
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (qa_header(head=OTHER_HEAD), f"head={OTHER_HEAD} is not the job's head {REVIEW_HEAD}"),
+        (
+            qa_header(
+                kind="verdict",
+                role="reviewer",
+                verdict="APPROVE",
+                ac="met",
+                round="1/3",
+                result=None,
+                scope=None,
+                runner=None,
+                arm=None,
+            ),
+            "kind=verdict is not qa",
+        ),
+        (
+            qa_header(kind="questions", head=None, result=None, scope=None, runner=None, arm=None),
+            "kind=questions is not qa",
+        ),
+        (qa_header(**{"from": "codex-bot"}), "from=codex-bot is not grok-bot"),
+    ],
+    ids=["other-head", "verdict", "questions", "other-bot"],
+)
+def test_763_a_qa_job_refuses_another_head_a_verdict_questions_or_another_bot(
+    tmp_path: Path, store: Path, body: str, message: str
+) -> None:
+    _, _, job = running_job(tmp_path, action="qa", recipient="qa")
+    serve_handoff(store, job, "1202", body=body)
+
+    assert message in handoff_problems(job, "1202")
+
+
+@pytest.mark.parametrize(
+    ("action", "recipient", "bot", "message"),
+    [
+        ("build", "claude", "claude-bot", "kind=qa is not ready (or questions)"),
+        ("review", "codex", "codex-bot", "kind=qa is not verdict (or questions)"),
+    ],
+)
+def test_763_a_qa_handoff_does_not_fit_any_other_job(
+    tmp_path: Path, store: Path, action: str, recipient: str, bot: str, message: str
+) -> None:
+    _, _, job = running_job(tmp_path, action=action, recipient=recipient)
+    serve_handoff(store, job, "1203", body=qa_header(**{"from": bot}))
+
+    assert message in handoff_problems(job, "1203", bot)

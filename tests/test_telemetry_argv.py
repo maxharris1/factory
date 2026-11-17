@@ -96,7 +96,7 @@ def test_the_session_runs_the_flagged_wrapper_and_logs_one_line(tmp_path: Path, 
         device="pc" if worker_env else "box",
     )
     assert session is not None
-    assert session.argv == ["claude-harness", *CLAUDE_FLAGS, *CLAUDE_BOT]
+    assert session.flags.argv == ["claude-harness", *CLAUDE_FLAGS, *CLAUDE_BOT]
     assert session.harness == "claude"
     assert messages == ["telemetry: stream flags added (claude wrapper)"]
 

@@ -1244,6 +1244,7 @@ class Exchanged:
     code: int
     stdout: bytes
     stderr: str
+    timed_out: bool = False
 
 
 @runtime_checkable
@@ -1292,7 +1293,7 @@ class SshTransport:
         try:
             completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
-            return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
+            return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds", timed_out=True)
         except OSError as exc:
             return Exchanged(SSH_UNREACHABLE, b"", type(exc).__name__)
         return Exchanged(

@@ -10,13 +10,15 @@ invalid one fails the job for T6.
 
 The expectations come from the same job facts the brief was rendered from
 (lib/brief/common.py facts_of), so the check asks for exactly the header
-the brief showed. A `questions` handoff is accepted from any job, with its
-role, and carries no head or round.
+the brief showed. A `questions` handoff is accepted from any job but a qa
+job, with its role, and carries no head or round.
 
 A ready names the PR's current head; a verdict names the job's head, when
-the job has one. With no PR number on the job (a Linear ticket before its
-PR is known) the PR is the comment's own: every handoff kind, questions
-included, must be on a PR, and on the job's branch when the job names one.
+the job has one. A qa job's handoff is a `kind=qa` from grok-bot at exactly
+the job's 40-character head (#763). With no PR number on the job (a Linear
+ticket before its PR is known) the PR is the comment's own: every handoff
+kind, questions included, must be on a PR, and on the job's branch when the
+job names one.
 """
 
 from __future__ import annotations
@@ -79,7 +81,9 @@ def expected_for(job: Job, bot: str) -> Expected:
     except BriefError:
         kind = "implement"
     branch = detail.get("gitBranchName")
-    if kind == "review":
+    if job.request.action == "qa":
+        bot, role, handoff, round_text = "grok-bot", "qa", "qa", None
+    elif kind == "review":
         role, handoff, round_text = "reviewer", "verdict", facts["round"]
     elif job.request.action == "plan":
         role, handoff, round_text = "builder", "plan", f"{facts['plan_round']}/2"
@@ -92,7 +96,7 @@ def expected_for(job: Job, bot: str) -> Expected:
         bot=bot,
         role=role,
         kind=handoff,
-        head=facts["head"] if handoff == "verdict" else None,
+        head=facts["head"] if handoff in ("verdict", "qa") else None,
         round=round_text,
     )
 
@@ -201,14 +205,16 @@ def problems(
         return [*found, f"comment {comment_id} has no valid orch:v1 header ({exc})"]
     fields = handoff.as_dict()
     kind = fields.get("kind")
+    role = fields.get("role", "qa" if kind == "qa" else None)
     if fields.get("from") != expected.bot:
         found.append(f"from={fields.get('from')} is not {expected.bot}")
-    if fields.get("role") != expected.role:
-        found.append(f"role={fields.get('role')} is not {expected.role}")
-    if kind == "questions":
+    if role != expected.role:
+        found.append(f"role={role} is not {expected.role}")
+    if kind == "questions" and expected.kind != "qa":
         return found
     if kind != expected.kind:
-        return [*found, f"kind={kind} is not {expected.kind} (or questions)"]
+        allowed = "" if expected.kind == "qa" else " (or questions)"
+        return [*found, f"kind={kind} is not {expected.kind}{allowed}"]
     if expected.round is not None and fields.get("round") != expected.round:
         found.append(f"round={fields.get('round')} is not {expected.round}")
     if kind == "verdict" and expected.head is not None:
@@ -217,6 +223,8 @@ def problems(
             found.append(f"no head; the reviewed head is {expected.head}")
         elif not _same_head(reported, expected.head):
             found.append(f"head={reported} is not the reviewed head {expected.head}")
+    if kind == "qa" and fields["head"] != expected.head:
+        found.append(f"head={fields['head']} is not the job's head {expected.head}")
     refusal = approve_refusal(fields, handoff.body)
     if refusal is not None:
         found.append(refusal.message)

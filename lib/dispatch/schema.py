@@ -578,6 +578,40 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS qa_runs (
+                    run_id TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    patch_id TEXT,
+                    round INTEGER NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    scope TEXT NOT NULL
+                        CHECK (scope IN ('full', 'targeted', 'smoke', 'none')),
+                    runner TEXT NOT NULL,
+                    arm TEXT NOT NULL CHECK (arm IN ('primary', 'shootout')),
+                    job_id TEXT,
+                    state TEXT NOT NULL CHECK (
+                        state IN ('queued', 'running', 'reported', 'cancelled', 'stale')
+                    ),
+                    result TEXT CHECK (result IS NULL OR result IN ('PASS', 'FAIL', 'BLOCKED')),
+                    reason TEXT,
+                    comment_id TEXT,
+                    started_at REAL NOT NULL,
+                    finished_at REAL,
+                    CHECK ((scope = 'none') = (job_id IS NULL))
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS qa_runs_live
+                ON qa_runs (repo, ticket_id, head, runner, arm)
+                WHERE state IN ('queued', 'running', 'reported')
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS eval_log_cursor (
                     source TEXT PRIMARY KEY,
                     last INTEGER NOT NULL

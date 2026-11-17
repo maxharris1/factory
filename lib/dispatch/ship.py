@@ -6,6 +6,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 from lib.dispatch.constants import (
+    HARNESS_WORK,
     MERGED_BEFORE_HANDOFF,
     SETTLE_FAILURES_TO_WAKE,
     WATCHED_STATES,
@@ -530,9 +531,9 @@ class ShipMixin:
         scope = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT 1 FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+                WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK}
                   AND (
                     state IN ('queued', 'running')
                     OR (state = 'failed' AND failure_handled = 0)

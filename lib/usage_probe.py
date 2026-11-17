@@ -4,12 +4,16 @@
   control request `get_usage` alone on stdin to
   `claude -p --input-format stream-json --output-format stream-json --verbose`,
   as the job's own bot on the job's own device (the box, with the job
-  command's own `claude` binary, or the remote device, with `claude` from
-  the bot's login PATH over its SSH alias). A job whose command is not
-  `claude` itself is not probed. The CLI answers
-  and exits at the end of stdin: no prompt, no model turn. It runs on a
-  background thread, so it never delays or fails the job, and its readings
-  are written by the session's next flush.
+  command's own first word, `claude` or claude-bot's `claude-harness`
+  wrapper, or the remote device, with `claude` from the bot's login PATH
+  over its SSH alias). Only a job whose stream flags name Claude
+  (`telemetry.stream_flags`) is probed; any other job logs why not. The
+  CLI answers and exits at the end of stdin: no prompt, no model turn. It
+  runs on a background thread, so it never delays or fails the job; the
+  run waits for it (at most TIMEOUT_SECONDS) before its last flush. A
+  probe without numbers logs one fixed line: its exit, a timeout, no
+  reply, or a login without rate limits. The job's own `rate_limit_event`
+  lines fill in the numbers when `get_usage` has none (lib/usage_readings.py).
 * Codex on a remote device: when the run ends, lib/codex_rollout.py's own
   source runs there under `python3 -I -S -c` for the job's thread id and
   prints that rollout's rate limits. On the box the session reads it in
@@ -23,14 +27,13 @@ token and worker tag are never passed to the probe.
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from lib import codex_rollout
+from lib import codex_rollout, telemetry
 from lib.job_token import PROOF_ENV
 from lib.remote import LOGIN_SHELL, TAG_ENV, ByteTransport, RemoteTarget, Transport, ssh_argv
 from lib.usage_readings import (
@@ -58,9 +61,12 @@ LOGIN_NAME = "orch-usage"
 Run = Callable[..., subprocess.CompletedProcess]
 
 
-def claude_binary(command: Sequence[str]) -> str | None:
-    """The job command's own `claude`, or None when the command is not Claude Code."""
-    return command[0] if command and os.path.basename(command[0]) == "claude" else None
+def claude_binary(flags: telemetry.StreamFlags) -> str | None:
+    return flags.argv[0] if flags.harness == "claude" else None
+
+
+class ProbeFailed(Exception):
+    pass
 
 
 def claude_local(
@@ -81,8 +87,12 @@ def claude_local(
             cwd=str(Path.home()),
             check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
-        return b""
+    except subprocess.TimeoutExpired:
+        raise ProbeFailed(f"timed out after {timeout:g}s") from None
+    except OSError as exc:
+        raise ProbeFailed(f"could not start ({type(exc).__name__})") from None
+    if completed.returncode != 0:
+        raise ProbeFailed(f"exit {completed.returncode}")
     return completed.stdout[:MAX_REPLY_BYTES]
 
 
@@ -102,9 +112,13 @@ def codex_remote_script(thread_id: str) -> str:
 
 def _exchange(transport: Transport, argv: list[str], data: bytes, timeout: float) -> bytes:
     if not isinstance(transport, ByteTransport):
-        return b""
+        raise ProbeFailed("no byte transport")
     result = transport.exchange(argv, timeout=timeout, input=data)
-    return result.stdout[:MAX_REPLY_BYTES] if result.code == 0 else b""
+    if result.timed_out:
+        raise ProbeFailed(f"timed out after {timeout:g}s")
+    if result.code != 0:
+        raise ProbeFailed(f"ssh exit {result.code}")
+    return result.stdout[:MAX_REPLY_BYTES]
 
 
 def claude_remote(transport: Transport, target: RemoteTarget, *, timeout: float = TIMEOUT_SECONDS) -> bytes:
@@ -128,15 +142,27 @@ def start_claude(
     add: Callable[[list[Reading]], None],
     clock: Callable[[], float],
     probe: Callable[[], bytes],
+    log: Callable[[str], None],
 ) -> threading.Thread:
-    """Run `probe` on a daemon thread and hand its readings to `add`."""
+    """The readings are observed when the probe was asked, so a
+    `rate_limit_event` the job streams meanwhile stays the newer reading."""
 
     def work() -> None:
+        asked = clock()
         try:
             out = probe()
-        except Exception:  # a usage read never touches the job
+        except ProbeFailed as failed:
+            log(f"usage probe: failed ({failed})")
             return
-        add(parse_get_usage(out, clock()))
+        except Exception as exc:
+            log(f"usage probe: failed ({type(exc).__name__})")
+            return
+        readings = parse_get_usage(out, asked)
+        if not readings:
+            log("usage probe: no reply")
+        elif all(r.used is None and r.resets_at is None for r in readings):
+            log("usage probe: no rate limits for this login")
+        add(readings)
 
     thread = threading.Thread(target=work, name="orch-usage", daemon=True)
     thread.start()

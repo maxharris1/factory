@@ -688,7 +688,7 @@ def test_no_command_or_argument_text_reaches_the_row_status_json_or_the_job_moda
     db, log = seeded(tmp_path)
     session = telemetry.Session(
         connect=lambda: sqlite3.connect(db), job_id="r-codex-review", bot="codex-bot",
-        repo="maxharris1/cleffy", harness=harness, argv=[harness], raw_log=None,
+        repo="maxharris1/cleffy", harness=harness, flags=telemetry.stream_flags([harness]), raw_log=None,
         scrub=telemetry.Scrubber({name: secret}), log=lambda _: None,
         stdout=io.BytesIO(), clock=lambda: NOW - 5,
     )

@@ -296,6 +296,37 @@ the Linear GraphQL API. Grok jobs are delivered to the owning bot through its
 existing routine webhook, with the queue's stable logical key as the delivery
 deduplication key.
 
+### 4.2.1 QA runs (issue #763)
+
+Only a project whose `factory.md` has `qa.enabled: true` gets QA runs. With QA absent or off, nothing here reads or writes anything. QA uses `gate: report` only: a result is recorded and shown, and no review, fix, round or ship waits on it.
+
+The queue has the action `qa` and the recipient `qa`, the factory's own QA worker, which a later ticket builds. Until then nothing claims a `qa` job. A `qa` job's `detail` carries `head`, `scope`, `runner`, `arm`, `scenarios` (the scenario ids to run), `run_id` and `pr_number`. Its dedupe key is `qa:<ticket scope>:<scope>:<head>:<runner>:<arm>`, and its timeout is `qa.timeout_minutes`.
+
+The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at` and `finished_at`. A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) is its only writer. QA adds no workflow state.
+
+Wherever the dispatcher queues a review for a head (T2, the patch review, the merge-queue re-review, and an approver's go on a BLOCKED ticket), it also decides QA for that head, once. A head with a `qa_runs` row is never decided again, so a T6 retry or a resume at the same head queues no second run. The live scenario ids come from `lib/evidence/scenarios.py`, read over the trusted builder's `plan` and `ready` comments. The scope is decided by `decide_scope`, a pure function of facts the dispatcher gathers; the first match wins:
+
+| # | Situation | Scope |
+|---|---|---|
+| 1 | The head's `git patch-id --stable` equals that of a head whose primary run recorded `PASS` | none: recorded `carried:<run_id>` with result `PASS` |
+| 2 | There is a baseline, and the diff since it touches nothing under `qa.paths` | none: recorded `carried:<run_id>` with the baseline's result |
+| 3 | The plan or ready has no live scenario, or its section is invalid | `smoke` when the diff touches `qa.paths`, otherwise none, recorded `qa-not-required` |
+| 4 | There is no baseline: the ticket's first ready | `full`, with every live id |
+| 5 | More than `qa.full_rerun_lines` lines changed under `qa.paths` since the baseline | `full` |
+| 6 | Otherwise: a ready after a fix | `targeted`, with the live ids, in plan order, whose newest primary report did not mark them passed |
+
+A scenario passes when a report's `| qa-<n> | ac-<n> | Result | Evidence |` row for it has a `Verified` cell. Each id is judged by the newest reported primary run whose comment has a row for it, and an id never reported has not passed. When every live id last passed, a targeted run carries them all. The baseline is the newest primary row at another head that recorded `PASS` or `FAIL`; a `BLOCKED` or cancelled run verified nothing, so the first full run is still owed after one. The diff is from the baseline to the head, or from the merge-base without a baseline. An empty `qa.paths` counts every file. A no-run decision is one primary row with scope `none` and state `reported`. The git facts come from the injected `qa_diff` (`lib/update_check.py`): the head's patch id and each changed path with its added and deleted lines. When it is missing or raises, the facts are unknown and the decision runs more QA, never less: no row carries, every diff counts as touching `qa.paths`, and a fix runs `full`.
+
+Runners: `qa.runners[0]` is the primary and gets `arm=primary`. With `shootout: true` every other runner gets its own row and job at the same head with `arm=shootout`. Without it, only the primary runs.
+
+A `qa` job is not harness work. It holds no device slot and counts against no builder's or reviewer's slots, and it never blocks a retry (`_harness_job_active`), a handoff ship (`_has_open_factory_work`), the emptied-PR check or the handoff check: those read `recipient NOT IN ('grok', 'qa')`. Merge, close, rebind and route cancels still cancel it with the rest. A failed or timed-out `qa` job is never retried and never marks the ticket stuck: T6 records `qa-no-retry`, marks the failure handled and cancels its row with reason `job-failed`.
+
+Recording a result: a trusted `kind=qa` (`from=grok-bot`, a `trusted_logins` login for `grok-bot`, `role` absent or `qa`) whose `head` is the PR's current head sets the open row for its `runner` and `arm` to `reported` with its `result` and comment id (`qa-reported`). One that matches no open row changes nothing (`qa-unmatched`). One whose head is no longer current marks that head's row for its runner and arm `stale` and changes nothing else (`qa-stale`). An untrusted one is `qa-untrusted`. None of these outcomes wakes anyone.
+
+A new head: once per poll, after the comment pass, every `queued` or `running` row at a head other than the PR's current head is set to `cancelled` with reason `new-head`, and its job is cancelled while it is still queued. The queue cannot cancel a running job, so a running lane keeps running until the worker stops it, and its late report is recorded `stale`. The same pass moves a `queued` row to `running` once its job is claimed, and cancels a row whose job was cancelled (`job-cancelled`).
+
+One wake: the same pass checks every primary row reported `FAIL`. When its comment has a line starting `[blocking]` (after an optional list marker) and the same head has a trusted APPROVE, it queues one `qa-failed` job for Grok Bot (recipient `grok`, as the other wakes are), keyed on the QA comment, so it fires whether the APPROVE comes before or after the FAIL and a replay queues no second one. The detail names the first blocking line (`finding`) and the report's `Evidence:` link (`evidence_link`). A shootout row never wakes anyone. `qa-failed` is in `GROK_WAKE_REASONS` and the queue's actions.
+
 ### 4.3 Invariants, and where they live now
 
 | Rule | Where it lives |
@@ -393,7 +424,7 @@ A plan may end with a `Verify, live` section (issue #761). It lists the live sce
 
 A `go` may name `builder=<harness>` and `reviewer=<harness>` (issue #206). T1 queues the step to that builder and records the pair in the job detail as `routing`; later steps of the ticket use the pair of its newest plan, build or fix step (a T6 retry repeats an older step and does not change the pair). T2 accepts a ready only from that pair's builder, so an obsolete retry under the old pair cannot start a review. A side it leaves out is factory.md's. A pair whose families are the same, or whose family cannot be resolved (the section 6 rule, with factory.md's model hint only for a side whose harness matches factory.md's), is refused with no job. A go on a capped ticket is routed the same way before its extra round's fix is queued. When a later poll restores the pair and it no longer passes that rule (factory.md's model hint changed), the ticket is marked stuck (`route-same-family`), its queued jobs are cancelled and Grok wakes, before any review or ship. A watched PR that closed unmerged is abandoned first.
 
-A `qa` reports a QA run (issue #758): an agent drove the project's real UI at the PR head and checked each criterion. The orchestrator posts it, as it posts `brief` and `go`. Its `from` is the label the orchestrator's own comments already use, and it is trusted by the same `trusted_logins` rule; there is no QA identity. On a Linear-ticket repo it uses the visible header form, as a `verdict` does. Nothing queues, reads or acts on it yet, and `orch job done` refuses it as the handoff of every job kind.
+A `qa` reports a QA run (issue #758): an agent drove the project's real UI at the PR head and checked each criterion. The orchestrator posts it, as it posts `brief` and `go`. Its `from` is the label the orchestrator's own comments already use, and it is trusted by the same `trusted_logins` rule; there is no QA identity. On a Linear-ticket repo it uses the visible header form, as a `verdict` does. With QA on, the dispatcher records it on its `qa_runs` row (section 4.2.1); it changes no review, fix, round or ship. With QA off it stays unhandled. `orch job done` accepts a `kind=qa` only as the handoff of a `qa` job, from `grok-bot` with role `qa` (or no role) at exactly the job's head, and refuses a `verdict` or `questions` for a `qa` job.
 
 ```
 <!-- orch:v1 kind=qa from=grok-bot role=qa round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=met result=PASS scope=full lanes=3 env=full-stack runner=cursor-cloud arm=primary attempt=1 -->
@@ -456,7 +487,7 @@ Optional:
 - `ci` — an optional mapping (issue #615). `branches` is a non-empty list of the base branches CI runs on for a pull request; `local_checks` is a list of short labels for the checks a builder runs by hand, default none. A head with no check run and no commit status on a PR whose base is not in `branches` is CI `not-run`: T2, T3, T4 and TQ do not wait on it and never record it as green, the dashboard shows `no CI on this base`, the build and fix briefs ask the builder to run the `local_checks` and paste each command and result in the ready, and the review brief makes a missing paste a `[blocking]` finding. `check-config` refuses a `ci` that is not a mapping, an empty or non-list `branches`, a bad branch name, a bad `local_checks` and an unknown key. `ci` is a trust section (T4H). Absent, every base is a CI base. This repo sets none.
 - `shared_paths` — a list of repo-relative paths or globs (issue #261), for shared docs that many tickets add a few lines to. Globs follow `hold.paths`: `*` and `?` stay inside one directory and `**` spans directories. A trailing `/` names a directory and everything under it. Default none. A `Touches:` path that matches never causes a feeder collision wait (a `Conflicts with` edge still holds). In a matching file, an update from base whose conflict hunk is resolved to both sides, ours then theirs or theirs then ours, byte for byte with nothing added, still counts as trivial and keeps the approval. Absent, the feeder and the update check behave exactly as before. `check-config` refuses a value that is not a list and any item that is not a repo-relative path or glob. This repo sets `shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]`.
 - `feeder` — an optional mapping (issue #269). `max_holders_per_path` is how many tickets in flight may hold one `Touches:` path at once, an integer of at least 1, default 2. `exclusive_paths` is a list of paths or globs, matched like `shared_paths`, that keep one holder; default none. A path in `shared_paths` never collides, even when `exclusive_paths` lists it too. `check-config` refuses a `feeder` that is not a mapping, an unknown key under it, a `max_holders_per_path` that is not an integer of at least 1 and an `exclusive_paths` item that is not a repo-relative path or glob. The poller, feeder and waiter read a bad `max_holders_per_path` as a warning and use 1. This repo sets `max_holders_per_path: 4` (issue #405) and `exclusive_paths: [model/]`, so the statechart keeps one writer.
-- `qa` is an optional mapping (issue #759). It says what a project's QA lane must run: which cloud runners drive the real UI, what the lane loads, and how to boot it. Nothing reads it yet. A later ticket queues the `qa` job from it. Absent, or with `enabled: false`, a project behaves exactly as without it.
+- `qa` is an optional mapping (issue #759). It says what a project's QA lane must run: which cloud runners drive the real UI, what the lane loads, and how to boot it. The dispatcher queues `qa` jobs from it (section 4.2.1). Absent, or with `enabled: false`, a project behaves exactly as without it.
 
   | Key | Type | Default | Meaning |
   |---|---|---|---|
@@ -520,7 +551,7 @@ ship: merge
 # ci:  # optional; the bases CI runs on. A PR into another base gets no CI wait, and briefs ask for local results
 #   branches: [main]
 #   local_checks: [pytest]
-# qa:  # optional; what the QA lane must run. Nothing reads it yet
+# qa:  # optional; what the QA lane must run. The dispatcher queues qa jobs from it (section 4.2.1)
 #   enabled: true
 #   gate: report  # report posts the result; block gates the ship
 #   runners: [claude-cloud, cursor-cloud]  # one or two; the first is the primary
@@ -1070,6 +1101,65 @@ Any other failure while unpacking, checking or scrubbing becomes an
 exception, so lane data never reaches error text. Intake
 deletes only the staging folder it made. It does not judge whether a
 result is acceptable, delete old evidence, or serve it to people.
+
+### QA receipts audit
+
+A QA lane reports on its own work, so no claim it makes is trusted until a
+fixed program has checked its evidence (issue #788). `lib/qa_audit.py`,
+`audit(lanes, asked, *, start_commit, current_head)`, does that check before
+the factory posts a verdict. Each lane is a `LaneEvidence`: the lane number,
+the commit and method its brief named, its parsed `result.json`, and its
+`manifest.json` from intake. `asked` lists one `AskedScenario` per scenario
+the job asked for: its id and the lane-folder paths of its after
+screenshot, its pass test's recorded output, and its video when it asked
+for one. The audit returns `"clean"`, or a tuple of gaps in check order.
+Each gap has a kind, the scenario and lane it concerns (either may be
+none), and a short detail.
+
+1. Every lane's result names the commit and the method its brief named.
+2. Every asked scenario appears in some lane's result as `verified`,
+   `failed`, `inconclusive` or `needs-human`.
+3. Every scenario a lane marks `verified` has its after screenshot, its
+   pass test output and, when it asked for one, its video in that lane's
+   manifest.
+4. No manifest lists a mismatch for an artifact a verified scenario relies
+   on: its required files and every artifact its own entry lists. A
+   mismatch on an artifact of a scenario that is not verified, or on a file
+   no verified scenario relies on, is not a gap.
+5. The pull request's current head is still the commit the run started
+   with.
+
+| Kind | Check | Concerns | Meaning |
+| --- | --- | --- | --- |
+| `lane-commit` | 1 | lane | The result's commit is absent or is not the brief's commit. |
+| `lane-method` | 1 | lane | The result's method is absent or is not the brief's method. |
+| `scenario-missing` | 2 | scenario | No lane reports the scenario with one of the four results. |
+| `artifact-missing` | 3 | scenario and lane | A required file of a verified scenario is not in the manifest. |
+| `artifact-mismatch` | 4 | scenario and lane | The manifest lists a mismatch for a file a verified scenario relies on. |
+| `evidence-malformed` | 4 | lane, or scenario and lane | The manifest's mismatch list, or a verified scenario's artifact list, is missing or not a list of entries that each name a path. Or the result's scenario list is missing or not a list of entries that each name an id and one of the four results. |
+| `head-moved` | 5 | neither | The head moved after the run started. |
+
+A file that is both missing and listed as a `missing` mismatch yields one
+`artifact-missing` gap, and a run yields at most one gap of each kind per
+lane, scenario and file. `head-moved` has its own kind because the caller
+treats it differently: the evidence may be sound, but it covers an old
+head.
+
+The result and manifest are untrusted. Some malformed fields can only add
+gaps when skipped. These are the commit, the method and the manifest's file
+list, and the audit skips them. Skipping a malformed mismatch list, a
+malformed scenario list or entry, or a verified scenario's malformed
+artifact list, could hide a gap instead, for example when another lane
+reports the same scenario. Each of these yields an `evidence-malformed`
+gap, and the audit still checks any entry and path it can read in them. A
+scenario entry is malformed when it is not a mapping, its id is not a
+string, or its result is not one of the four. A manifest that is not a
+mapping, or has no mismatch list, counts as a malformed mismatch list. A
+lane yields one lane-wide `evidence-malformed` gap however many of its
+lists are malformed. So no malformed input yields a false `"clean"`. The audit does no I/O, imports nothing that does, and never
+changes a result. It checks that evidence exists and matches, not what a
+screenshot shows. Nothing calls it yet. A later ticket wires it into the
+program that runs lanes.
 
 ## 8. Review and merge rules
 

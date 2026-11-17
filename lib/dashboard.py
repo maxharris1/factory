@@ -702,6 +702,7 @@ _VERDICT_TIMES = (
     ("verdict_heads", "MAX", "posted_at", "comment_id"),
     ("handled_times", "MAX", "handled_at", "comment_id"),
     ("verdict_acceptances", "MAX", "accepted_at", "comment_id"),
+    ("qa_runs", "MAX", "finished_at", "comment_id"),
 )
 
 

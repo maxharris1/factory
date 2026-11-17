@@ -261,7 +261,7 @@ def test_an_unreachable_device_is_still_255_with_one_master_attempt(
     with pytest.raises(remote.CheckoutError, match="unreachable"):
         remote.preflight(transport, t, "sh")
     exchanged = transport.exchange(remote.ssh_argv(t, "true"), timeout=30)
-    assert exchanged.code == remote.SSH_UNREACHABLE
+    assert exchanged.code == remote.SSH_UNREACHABLE and not exchanged.timed_out
     assert len(ssh.calls()) == 4  # one data call each, never retried
     assert [op for op, _ in ops(ssh)].count("master") == 4
 
@@ -274,7 +274,7 @@ def test_a_drop_under_a_live_master_is_255_and_resets_the_master(
     assert remote.probe_device(transport, t)
     ssh.fault(ALIAS, "drop-after", 0.5)
     exchanged = transport.exchange(remote.ssh_argv(t, "sleep 3"), timeout=30)
-    assert exchanged.code == remote.SSH_UNREACHABLE
+    assert exchanged.code == remote.SSH_UNREACHABLE and not exchanged.timed_out
     assert vias(ssh) == ["master", "master"]  # the one call, not retried
     assert ops(ssh)[-3:] == [("check", 0), ("probe", 0), ("stop", 0)]
     assert not socket_of().exists()
@@ -290,7 +290,7 @@ def test_a_timeout_through_a_master_is_unreachable_and_resets_it(
     transport = remote.SshTransport()
     assert remote.probe_device(transport, t)
     exchanged = transport.exchange(remote.ssh_argv(t, "sleep 2"), timeout=1)
-    assert exchanged.code == remote.SSH_UNREACHABLE
+    assert exchanged.code == remote.SSH_UNREACHABLE and exchanged.timed_out
     assert ops(ssh)[-1] == ("stop", 0)
 
 
