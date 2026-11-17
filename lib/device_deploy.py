@@ -61,17 +61,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, health
-from lib.device_pool import box_device
+from lib.device_monitor import remote_target
 from lib.device_sync import Observed
 from lib.grok_delivery import send_webhook
 from lib.heal import ESCALATE, LOG_NAME, Action, Poster, Webhook, _webhook, escalate, stamp
-from lib.machines_yml import MachinesConfig
+from lib.machines_yml import MachinesConfig, orch_host
 from lib.queue import SQLiteJobQueue
 from lib.remote import (
     CHECKOUT_TIMEOUT_SECONDS,
     SSH_UNREACHABLE,
     CaptureTransport,
-    RemoteError,
     RemoteTarget,
     SshTransport,
     _login,
@@ -160,26 +159,16 @@ class Target:
 
 
 def targets(config: MachinesConfig | None) -> list[Target]:
-    """Every remote checkout the fleet keeps in sync; never the local box."""
+    """Every remote bot checkout the fleet keeps in sync; never the local box."""
     found: list[Target] = []
     for device in config.devices if config is not None else ():
         if device.local or not device.schedulable:
             continue
-        for harness, user in device.harnesses.items():
+        for harness in device.harnesses:
             bot = _HARNESS_BOT.get(harness)
             checkout = device.factory_root_for(harness)
-            alias = device.ssh_alias_for(harness)
-            if bot is None or not checkout or not alias:
-                continue
-            try:
-                remote = RemoteTarget(
-                    device=device.name,
-                    alias=alias,
-                    user=user,
-                    workdir_root=device.workdir_for(harness) or checkout,
-                    job_id=PROBE_JOB,
-                )
-            except RemoteError:
+            remote = remote_target(device, harness, PROBE_JOB)
+            if bot is None or not checkout or remote is None:
                 continue
             found.append(Target(device.name, harness, bot, checkout, remote))
     return found
@@ -251,7 +240,7 @@ def _why_not_synced(observed: Observed, sha: str) -> str:
     return "pinned skills do not match after the deploy"
 
 
-def _each(work: Callable[[Target], object], items: Sequence[Target]) -> list:
+def _each(work: Callable, items: Sequence) -> list:
     if not items:
         return []
     with ThreadPoolExecutor(max_workers=len(items)) as pool:
@@ -284,7 +273,7 @@ def run_pass(
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         device_sync.ensure(connection)
-        device_sync.forget_except(connection, seen, (box_device(config),))
+        device_sync.forget_except(connection, seen, (orch_host(config),))
         when = now()
         for target in found:
             observed = seen[target.key]
@@ -315,8 +304,12 @@ def run_pass(
             return Result(target, device_sync.SYNCED, "", after.sha)
         return Result(target, device_sync.REFUSED, refused or _why_not_synced(after, sha), after.sha)
 
-    for result in _each(finish, deploying):
-        results[result.target.key] = result
+    by_checkout: dict[tuple[str, str], list[Target]] = {}
+    for target in deploying:
+        by_checkout.setdefault((target.device, target.checkout), []).append(target)
+    for group in _each(lambda group: [finish(t) for t in group], list(by_checkout.values())):
+        for result in group:
+            results[result.target.key] = result
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         when = now()
@@ -421,7 +414,7 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
         if db.is_file():
             with SQLiteJobQueue(db, clock=clock).connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                device_sync.forget_except(connection, (), (box_device(machines),))
+                device_sync.forget_except(connection, (), (orch_host(machines),))
                 connection.commit()
         return 0
     with open(state_dir / LOCK_NAME, "a") as lock:
@@ -448,6 +441,6 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
             now=clock,
             dry_run=args.dry_run,
         )
-        report(results, state_dir, sha=sha, device=health.local_device(machines),
+        report(results, state_dir, sha=sha, device=orch_host(machines),
                webhook=webhook, environ=environ, now=clock(), dry_run=args.dry_run)
     return 0

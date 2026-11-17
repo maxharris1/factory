@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -20,11 +21,12 @@ import pytest
 from lib import device_deploy, device_sync, job_token, skill_preflight
 from lib.device_pool import DevicePool
 from lib.heal import Webhook
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
 from lib.waiter import Waiter
+from tests.pool_helpers import write_target_machines
 
 ORCH_SCRIPT = (
     "import os, sys\n"
@@ -163,6 +165,149 @@ def test_targets_are_every_enabled_remote_bot_checkout_never_the_box(fleet) -> N
     assert [(t.device, t.bot) for t in device_deploy.targets(config)] == [
         ("pc", "claude-bot"), ("pc", "codex-bot"), ("mac", "claude-bot"), ("lab", "claude-bot"),
     ]
+
+
+def test_every_bot_on_the_shared_box_checkout_is_its_own_target_logged_in_as_box(
+    tmp_path: Path,
+) -> None:
+    config, _ = load_machines_yml(write_target_machines(tmp_path))
+
+    found = [(t.device, t.bot, t.checkout, t.remote.user) for t in device_deploy.targets(config)]
+
+    assert found == [
+        ("pc", "claude-bot", "/home/claude-bot/factory", "claude-bot"),
+        ("pc", "codex-bot", "/home/codex-bot/factory", "codex-bot"),
+        ("pc", "cursor-bot", "/home/cursor-bot/factory", "cursor-bot"),
+        ("box", "claude-bot", "/home/box/factory", "box"),
+        ("box", "codex-bot", "/home/box/factory", "box"),
+        ("box", "cursor-bot", "/home/box/factory", "box"),
+    ]
+
+
+def shared_login_device(tmp_path: Path, name: str, *harnesses: str) -> Device:
+    return Device(
+        name=name,
+        slot_max=2,
+        harnesses=MappingProxyType({h: f"{h}-bot" for h in harnesses}),
+        tailscale_name=f"{name}.example.ts.net",
+        workdir_root=f"{tmp_path}/{name}/work",
+        ssh_alias=f"{name}-{{bot}}",
+        factory_root=f"{tmp_path}/{name}/factory",
+        ssh_user="box",
+    )
+
+
+def test_a_dirty_shared_checkout_refuses_and_blocks_every_harness_on_it(tmp_path: Path) -> None:
+    origin = Origin(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    config = MachinesConfig(devices=(
+        device(tmp_path, "box", "claude", local=True),
+        shared_login_device(tmp_path, "remote", "claude", "codex"),
+    ))
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    pool = DevicePool(queue, config)
+    path = tmp_path / "remote" / "factory"
+    clone_at(origin, path, origin.old, detach=False)
+    (path / "README").write_text("local work\n", encoding="utf-8")
+
+    results = run(origin, LocalTransport(home), config, queue)
+
+    assert {(r.target.harness, r.state) for r in results} == {
+        ("claude", "refused"), ("codex", "refused")}
+    assert (path / "README").read_text() == "local work\n"
+    with queue.connect() as connection:
+        gate = device_sync.blocked(connection)
+    assert gate.blocks("remote", "claude") and gate.blocks("remote", "codex")
+    queue.enqueue(JobRequest(repo="o/r", ticket_id="1", action="build", recipient="codex",
+                             source_comment_id="c1", timeout_seconds=60), dedupe_key="1")
+    assert pool.claim("codex") is None
+
+
+INSTALL_ALL_SKILLS = (
+    "import os\n"
+    "for d in ('.claude/skills', '.agents/skills', '.cursor/skills'):\n"
+    "    path = os.path.expanduser(f'~/{d}/how/SKILL.md')\n"
+    "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+    "    with open(path, 'w') as f:\n"
+    "        f.write('how\\n')\n"
+)
+
+
+def test_one_harness_missing_its_skills_on_a_shared_checkout_gets_them_back(
+    tmp_path: Path,
+) -> None:
+    origin = Origin(tmp_path)
+    sha = origin.commit("bin/orch", INSTALL_ALL_SKILLS)
+    home = tmp_path / "home"
+    claude_skill = home / ".claude" / "skills" / "how" / "SKILL.md"
+    codex_skill = home / ".agents" / "skills" / "how" / "SKILL.md"
+    claude_skill.parent.mkdir(parents=True)
+    claude_skill.write_text("how\n", encoding="utf-8")
+    config = MachinesConfig(devices=(
+        device(tmp_path, "box", "claude", local=True),
+        shared_login_device(tmp_path, "remote", "claude", "codex"),
+    ))
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    DevicePool(queue, config)
+    clone_at(origin, tmp_path / "remote" / "factory", sha, detach=False)
+    pinned = Pinned("x", {"how/SKILL.md": hashlib.sha256(b"how\n").hexdigest()}, {})
+
+    results = device_deploy.run_pass(queue, config, sha=sha, url=origin.url, pinned=pinned,
+                                     transport=LocalTransport(home))
+
+    assert codex_skill.read_text() == "how\n"
+    assert {(r.target.harness, r.state) for r in results} == {
+        ("claude", "synced"), ("codex", "synced")}
+
+
+def test_deploys_to_one_checkout_never_overlap_while_other_checkouts_deploy_alongside(
+    tmp_path: Path,
+) -> None:
+    origin = Origin(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    config = MachinesConfig(devices=(
+        shared_login_device(tmp_path, "remote", "claude", "codex"),
+        device(tmp_path, "pc", "claude"),
+    ))
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    DevicePool(queue, config)
+    shared_checkout = str(tmp_path / "remote" / "factory")
+    where = {"remote-claude-bot": shared_checkout, "remote-codex-bot": shared_checkout,
+             "pc-claude-bot": str(checkout(tmp_path, "pc"))}
+
+    class CountingTransport(LocalTransport):
+        def __init__(self, home: Path):
+            super().__init__(home)
+            self.lock = threading.Lock()
+            self.flying: Counter[str] = Counter()
+            self.most: Counter[str] = Counter()
+            self.together = threading.Event()
+
+        def call(self, argv, **kwargs):
+            if "orch-sync" not in argv[-1]:
+                return super().call(argv, **kwargs)
+            path = where[argv[-2]]
+            with self.lock:
+                self.flying[path] += 1
+                self.most[path] = max(self.most[path], self.flying[path])
+                if len(+self.flying) == 2:
+                    self.together.set()
+            self.together.wait(5)
+            try:
+                return super().call(argv, **kwargs)
+            finally:
+                with self.lock:
+                    self.flying[path] -= 1
+
+    transport = CountingTransport(home)
+
+    results = run(origin, transport, config, queue)
+
+    assert {r.state for r in results} == {"synced"} and len(results) == 3
+    assert transport.together.is_set(), "two checkouts deployed at once"
+    assert transport.most == {shared_checkout: 1, where["pc-claude-bot"]: 1}
 
 
 def test_a_box_only_fleet_makes_no_ssh_call_and_writes_no_row(tmp_path: Path, fleet) -> None:

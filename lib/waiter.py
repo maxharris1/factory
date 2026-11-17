@@ -135,10 +135,10 @@ from typing import Protocol
 import yaml
 
 from lib.brief import BriefError, render_brief
-from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement, box_device
+from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, orch_host
 from lib import device_deploy, job_token
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
@@ -656,7 +656,7 @@ class Waiter:
         if self.home is None:
             return
         device = next((d for d in self.pool.config.devices if d.local), None)
-        name = device.name if device is not None else "box"
+        name = orch_host(self.pool.config)
         checkout = self._factory_root(device)
         if checkout is None:
             return
@@ -794,7 +794,7 @@ class Waiter:
     def _box_held(self) -> device_sync.Row | None:
         try:
             with self.queue.connect() as connection:
-                return device_sync.held(connection, box_device(self.pool.config))
+                return device_sync.held(connection, orch_host(self.pool.config))
         except (QueueError, sqlite3.Error, OSError):
             return None
 
@@ -812,7 +812,7 @@ class Waiter:
         try:
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
-                checkout=factory_root, held=self._box_held(),
+                checkout=factory_root, held=self._box_held(), host=orch_host(self.pool.config),
             )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
@@ -898,7 +898,7 @@ class Waiter:
         claimer, _ = self._claimer
         lagging = placement.device
         if exc.box_behind_origin:
-            lagging = box_device(self.pool.config)
+            lagging = orch_host(self.pool.config)
             if placement.device != lagging:
                 checkout = str(skill_preflight.ROOT.resolve())
 

@@ -1,0 +1,20 @@
+{
+  "total_count": 1,
+  "check_runs": [
+    {
+      "id": 134030378013,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "node_id": "CR_kwDOKfac0s8AAAAfNbJ3HQ",
+      "external_id": "",
+      "url": "https://api.github.com/repos/owner/repo/check-runs/134030378013",
+      "html_url": "https://github.com/owner/repo/actions/runs/44080749819/job/134030378013",
+      "details_url": "https://github.com/owner/repo/actions/runs/44080749819/job/134030378013",
+      "status": "in_progress",
+      "conclusion": "success",
+      "started_at": "2026-11-17T12:31:02Z",
+      "completed_at": "2026-11-17T12:33:40Z",
+      "name": "Service Account Key Scan",
+      "app": {"slug": "github-actions"}
+    }
+  ]
+}

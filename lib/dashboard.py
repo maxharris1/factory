@@ -140,6 +140,7 @@ from lib.job_state import (
 )
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
+from lib.machines_yml import DEFAULT_ORCH_HOST
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.pr_title import SOURCE, read_sources
 from lib.project_rules import read_rows as read_project_rules
@@ -739,6 +740,7 @@ def collect_snapshot(
     machines = (
         component_health.load_machines(machines_path) if machines_path is not None else None
     )
+    machines_state, machine_items, host = _machines_yaml(machines_path)
     connection = open_readonly(db_path)
     try:
         connection.execute("BEGIN")
@@ -748,6 +750,7 @@ def collect_snapshot(
             chart,
             job_states if job_states is not None else JobStateConfig(),
             alive,
+            host,
         )
         telemetry = read_telemetry(connection, now)  # issue #93
         rules = read_project_rules(connection)  # issue #152
@@ -771,12 +774,10 @@ def collect_snapshot(
         if value is not None
     ]
     # One slot count per device (#90): a running harness job with no
-    # placement runs on the box, so it counts in the box's held slots, and
-    # slots.box.running is every running job on the box, placed or not.
-    machines_state, devices, box_max, box_name = _machines(
-        machines_path, db["held"], unplaced=db["box_running"]
-    )
-    box_running = db["box_running"] + db["running_on"].get(box_name, 0)
+    # placement runs on the orch host, so it counts in that host's held slots,
+    # and slots.box.running is every running job on the host, placed or not.
+    devices, box_max = _machines(machine_items, host, db["held"], unplaced=db["box_running"])
+    box_running = db["box_running"] + db["running_on"].get(host, 0)
     attach_telemetry([*db["running"], *db["queued"]], telemetry, now)
     report = component_health.load_report(
         db_path,
@@ -814,7 +815,7 @@ def collect_snapshot(
         "queued": db["queued"],
         "slots": {
             "machines_yml": machines_state,
-            "box": {"running": box_running, "slot_max": box_max},
+            "box": {"name": _clean(host, 40), "running": box_running, "slot_max": box_max},
             "devices": devices,
         },
         "stuck": {
@@ -1281,6 +1282,7 @@ def _read_db(
     chart: dict | None = None,
     job_states: JobStateConfig = JobStateConfig(),
     alive: Alive | None = pid_alive,
+    host: str = DEFAULT_ORCH_HOST,
 ) -> dict:
     tables = _tables(connection)
     jobs = "jobs" in tables
@@ -1366,7 +1368,7 @@ def _read_db(
                     started = placement[1]
                     elapsed_from = "placed"
                 else:
-                    device = None if row["recipient"] == "grok" else "box"
+                    device = None if row["recipient"] == "grok" else _clean(host, 40)
                     started = None
                     elapsed_from = "queued"
                 if started is None:
@@ -1943,36 +1945,44 @@ def _has_placeholder(value: object) -> bool:
     return False
 
 
-def _machines(
-    path: Path | None,
-    held: dict[str, int],
-    *,
-    unplaced: int = 0,
-) -> tuple[str, list[dict], int | None, str]:
-    """Optional F2-01 inventory. Absent or invalid degrades to no device rows.
+def _machines_yaml(path: Path | None) -> tuple[str, list[dict], str]:
+    """Optional F2-01 inventory: its state, device items and orch host.
 
-    Also returns the box's name (the `local: true` device, else "box"); the
-    `unplaced` running jobs are counted in its held slots (#90).
+    Absent or invalid degrades to no items. The host is the raw orch_host,
+    else the `local: true` device, else DEFAULT_ORCH_HOST.
     """
     if path is None or not path.is_file():
-        return "absent", [], None, "box"
+        return "absent", [], DEFAULT_ORCH_HOST
     try:
         if path.stat().st_size > MACHINES_MAX_BYTES:
-            return "invalid", [], None, "box"
+            return "invalid", [], DEFAULT_ORCH_HOST
         data = load_yaml(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return "invalid", [], None, "box"
+        return "invalid", [], DEFAULT_ORCH_HOST
     if isinstance(data, dict):
         data = apply_overlay(path, data)[0]
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
-        return "invalid", [], None, "box"
+        return "invalid", [], DEFAULT_ORCH_HOST
     items = data["devices"]
     if any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in items):
-        return "invalid", [], None, "box"
-    box_name = next(
-        (item["name"] for item in items if item.get("local") is True),
-        "box",
-    )
+        return "invalid", [], DEFAULT_ORCH_HOST
+    host = data.get("orch_host")
+    if not isinstance(host, str):
+        host = next(
+            (item["name"] for item in items if item.get("local") is True), DEFAULT_ORCH_HOST
+        )
+    return "present", items, host
+
+
+def _machines(
+    items: list[dict],
+    host: str,
+    held: dict[str, int],
+    *,
+    unplaced: int = 0,
+) -> tuple[list[dict], int | None]:
+    """Device rows and the orch host's slot_max; the `unplaced` running jobs
+    are counted in the host's held slots (#90)."""
     devices: list[dict] = []
     box_max = None
     for item in items:
@@ -1992,7 +2002,7 @@ def _machines(
                 "name": _clean(item["name"], 40),
                 "slot_max": slot_max,
                 "held": held.get(item["name"], 0)
-                + (unplaced if item["name"] == box_name else 0),
+                + (unplaced if item["name"] == host else 0),
                 "enabled": enabled is True,
                 "placeholder": _has_placeholder(item),
                 "harnesses": sorted(
@@ -2000,9 +2010,9 @@ def _machines(
                 ),
             }
         )
-        if item["name"] == box_name:
+        if item["name"] == host:
             box_max = slot_max if box_max is None else box_max
-    return "present", devices, box_max, box_name
+    return devices, box_max
 
 
 # --- writing --------------------------------------------------------------------

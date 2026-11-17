@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import signal
 import socket
@@ -444,6 +445,194 @@ def test_run_poller_refuses_to_start_without_its_env(tmp_path: Path, missing: st
     assert result.stderr == f"run-poller: missing ~/.config/factory/{missing}\n"
     assert "webhook.test" not in result.stderr + result.stdout
     assert not (tmp_path / "started").exists()
+
+
+def test_a_retired_host_refuses_to_run_the_poller(tmp_path: Path) -> None:
+    config = tmp_path / ".config/factory"
+    config.mkdir(parents=True)
+    for name in ("webhook.env", "orch-poll.env"):
+        (config / name).write_text("", encoding="utf-8")
+    retired = config / "orch-retired"
+    retired.write_text("pc 2026-11-17T13:00Z\nsecond line\n", encoding="utf-8")
+    orch = tmp_path / ".local/bin/orch"
+    orch.parent.mkdir(parents=True)
+    orch.write_text("#!/bin/sh\ntouch \"$HOME/started\"\n", encoding="utf-8")
+    orch.chmod(0o755)
+
+    result = subprocess.run(["bash", "deploy/run-poller.sh"], cwd=ROOT,
+                            env=sandbox_env(tmp_path, PATH="/usr/bin:/bin"),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 79
+    assert f"{retired}: pc 2026-11-17T13:00Z" in result.stderr
+    assert "second line" not in result.stderr
+    assert not (tmp_path / "started").exists()
+
+
+def test_systemd_does_not_restart_a_poller_a_retired_host_refused() -> None:
+    unit = (ROOT / "deploy/orch-poll.service").read_text(encoding="utf-8")
+    assert "\nRestartPreventExitStatus=79\n" in unit
+
+
+def _shell_commands(text: str, i: int = 0, close: str = "") -> tuple[list[tuple[int, list[str]]], int]:
+    commands: list[tuple[int, list[str]]] = []
+    words: list[str] = []
+    word: str | None = None
+    start = i
+    depth = 0
+
+    def begin_word() -> None:
+        nonlocal word, start
+        if word is None:
+            if not words:
+                start = i
+            word = ""
+
+    def end_word() -> None:
+        nonlocal word
+        if word is not None:
+            words.append(word)
+            word = None
+
+    def end_command() -> None:
+        nonlocal words
+        end_word()
+        if words:
+            commands.append((start, words))
+        words = []
+
+    def substitution(begin: int, closer: str) -> int:
+        inner, after = _shell_commands(text, begin, closer)
+        commands.extend(inner)
+        return after
+
+    while i < len(text):
+        c = text[i]
+        if c == close and (close == "`" or depth == 0):
+            end_command()
+            return commands, i + 1
+        if c == "\\":
+            if text[i + 1:i + 2] != "\n":
+                begin_word()
+                word += text[i + 1:i + 2]
+            i += 2
+        elif c == "#" and word is None:
+            newline = text.find("\n", i)
+            i = len(text) if newline < 0 else newline
+        elif c == "'":
+            begin_word()
+            quote_end = text.find("'", i + 1)
+            quote_end = len(text) if quote_end < 0 else quote_end
+            word += text[i + 1:quote_end]
+            i = quote_end + 1
+        elif c == '"':
+            begin_word()
+            i += 1
+            while i < len(text) and text[i] != '"':
+                if text[i] == "\\":
+                    escaped = text[i + 1:i + 2]
+                    word += escaped if escaped in '"\\$`' else "" if escaped == "\n" else "\\" + escaped
+                    i += 2
+                elif text.startswith("$(", i):
+                    i = substitution(i + 2, ")")
+                elif text[i] == "`":
+                    i = substitution(i + 1, "`")
+                else:
+                    word += text[i]
+                    i += 1
+            i += 1
+        elif text.startswith("$(", i):
+            end_command()
+            i = substitution(i + 2, ")")
+        elif c == "`":
+            end_command()
+            i = substitution(i + 1, "`")
+        elif c in ";&|()\n":
+            depth += {"(": 1, ")": -1}.get(c, 0)
+            end_command()
+            i += 1
+        elif c in " \t":
+            end_word()
+            i += 1
+        else:
+            begin_word()
+            word += c
+            i += 1
+    end_command()
+    return commands, i
+
+
+def _runs_orch_poll(command: list[str]) -> bool:
+    for i, word in enumerate(command):
+        if word == "-c" and i + 1 < len(command) and _orch_poll_launches(command[i + 1]):
+            return True
+        if re.split(r"[/=]", word)[-1] == "orch" and "poll" in command[i + 1:]:
+            return True
+    return False
+
+
+def _orch_poll_launches(text: str) -> list[str]:
+    commands, _ = _shell_commands(text)
+    starts = sorted({text.rfind("\n", 0, start) + 1 for start, words in commands if _runs_orch_poll(words)})
+    return [text[start:].split("\n", 1)[0].strip() for start in starts]
+
+
+@pytest.mark.parametrize(
+    ("text", "runs"),
+    [
+        ('exec "${HOME}/.local/bin/orch" poll "$@"', True),
+        ("ExecStart=%h/.local/bin/orch poll", True),
+        ("ExecStart=/usr/bin/env orch poll", True),
+        ("nohup orch poll --once &", True),
+        ("orch poll", True),
+        ('    true && orch poll --once', True),
+        ("env PYTHONUNBUFFERED=1 orch poll --once", True),
+        ("nohup -- orch poll --once", True),
+        ("nohup orch \\\n    poll --once", True),
+        ('bash -c "orch poll --once"', True),
+        ("sh -c 'exec nohup orch poll' &", True),
+        ("orch --some-flag poll", True),
+        ("python3 bin/orch poll", True),
+        ("a; orch poll", True),
+        ("x | orch poll", True),
+        ("pid=$(orch poll --once)", True),
+        ("pid=`orch poll --once`", True),
+        ('say "started orch poll (pid ${pid})"', False),
+        ('say "orch poll already running"', False),
+        ('echo "run-poller: retired ($(head -n 1 "$R")); not starting orch poll" >&2', False),
+        ('"$RUNNER" --pidfile "$PIDFILE"', False),
+        ("# ExecStart=%h/.local/bin/orch poll", False),
+        ("# nohup orch \\\norch dashboard push --once", False),
+        ("true  # orch poll", False),
+        ("orch polling", False),
+        ("orch dashboard push --once; poll", False),
+        ("echo '# starting poller'; orch poll --once", True),
+        ('echo "# starting poller"; orch poll --once', True),
+        ("echo \\# starting poller; orch poll --once", True),
+        ("echo a#b; orch poll --once", True),
+        ('echo "starting\n# poller"; orch poll --once', True),
+        ("echo 'starting\n# poller' && orch poll --once", True),
+        ("true # comment \\\norch poll --once", True),
+        ('pid="$(orch poll --once)"', True),
+        ('echo "pid `orch poll --once`"', True),
+        ("echo $((1 + 2)); orch poll --once", True),
+        ("x=1;# orch poll", False),
+        ("echo 'orch poll'; orch dashboard push", False),
+        ('echo "\\$(orch poll)"', False),
+    ],
+)
+def test_the_orch_poll_launch_detector(text: str, runs: bool) -> None:
+    assert bool(_orch_poll_launches(text)) is runs
+
+
+def test_run_poller_is_the_only_deploy_file_that_runs_orch_poll() -> None:
+    deploy = ROOT / "deploy"
+    hits = [
+        (path.name, line)
+        for path in sorted([*deploy.glob("*.sh"), *deploy.glob("*.service")])
+        for line in _orch_poll_launches(path.read_text(encoding="utf-8"))
+    ]
+    assert hits == [("run-poller.sh", 'exec "${HOME}/.local/bin/orch" poll "$@"')]
 
 
 def test_ci_runs_once_per_push() -> None:
