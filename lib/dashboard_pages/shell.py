@@ -52,7 +52,7 @@ background:color-mix(in srgb,var(--bad) 9%,transparent);border-bottom:1px solid 
 .attn-count{font-weight:700;color:var(--bad);text-decoration:none}
 .attn-tally{flex:0 1 auto;min-width:0;overflow:hidden;display:flex;align-items:baseline;gap:6px;color:var(--muted)}
 .attn-rule{flex:none;width:1px;height:16px;background:color-mix(in srgb,var(--bad) 45%,transparent)}
-.attn-item{flex:0 1 auto;min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
+.attn-item{flex:0 1000 auto;min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
 .attn-item .chip{flex:none}
 .attn-who{flex:none;font-weight:600;color:var(--text);text-decoration:none}
 .attn-what{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}

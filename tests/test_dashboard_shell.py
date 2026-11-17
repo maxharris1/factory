@@ -237,6 +237,7 @@ STRIP = """(function () {
                        centers: new Set([].map.call(row.children, function (n) {
                          var b = n.getBoundingClientRect(); return Math.round(b.top + b.bottom); })).size},
           more: more && box(more).right,
+          tally: row && [].map.call(row.querySelectorAll('.attn-tally'), function (n) { return n.scrollWidth <= n.clientWidth; })[0],
           ellipsis: what && [what.scrollWidth > what.clientWidth, getComputedStyle(what).textOverflow],
           phone: shown('.attn-phone') && box(shown('.attn-phone')).height,
           here: shown('.attn-here') && box(shown('.attn-here')).height,
@@ -264,6 +265,8 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
                 assert got["ellipsis"] == [True, "ellipsis"], where
                 if count > 2:
                     assert got["more"] <= width, where
+                if width >= 1100 and count <= 16:
+                    assert got["tally"] is True, f"a long detail must not squeeze the tally: {where}"
                 assert (got["sideways"], got["moving"]) == (False, 0), where
             for width in (375, 699):
                 browser.open(html, width)
@@ -278,6 +281,7 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
             assert got["moving"] == 0, width
     finally:
         browser.close()
+
 
 def _clear(snapshot: dict) -> dict:
     clear = copy.deepcopy(snapshot)
