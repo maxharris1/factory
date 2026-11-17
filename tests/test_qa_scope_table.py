@@ -91,16 +91,23 @@ class FakeDiff:
         return self.diffs[(since, head)]
 
 
-def _fixed(run: Harness, first_result: str, *, live: str = scenarios("qa-1", "qa-2")) -> None:
+def _fixed(
+    run: Harness,
+    first_result: str,
+    *,
+    live: str = scenarios("qa-1", "qa-2"),
+    fixed_live: str | None = None,
+    report: str = "",
+) -> None:
     run.post("r1", ready(HEAD_A, body=live), head=HEAD_A)
     run.poll()
-    run.post("q1", qa_report(HEAD_A, first_result))
+    run.post("q1", qa_report(HEAD_A, first_result, body=report))
     run.poll()
     run.finish("codex", "v1")
     run.post("v1", verdict(HEAD_A, "REVISE"))
     run.poll()
     run.finish("claude", "r2")
-    run.post("r2", ready(HEAD_B, "2/3", body=live), head=HEAD_B)
+    run.post("r2", ready(HEAD_B, "2/3", body=live if fixed_live is None else fixed_live), head=HEAD_B)
     run.poll()
 
 
@@ -174,3 +181,33 @@ def test_when_git_cannot_tell_a_fix_runs_full_and_carries_nothing(tmp_path: Path
     _fixed(run, "PASS")
 
     assert _at_b(run)[0] == [("full", ["qa-1", "qa-2"])]
+
+
+def _small_fix() -> FakeDiff:
+    return FakeDiff({(None, HEAD_A): HeadDiff("p1", SRC), (HEAD_A, HEAD_B): HeadDiff("p2", (("src/app.py", 20),))})
+
+TABLE = "| Flow | Proves | Result | Evidence |\n|---|---|---|---|\n"
+
+
+def test_a_ready_after_a_fix_runs_targeted_on_the_scenarios_that_did_not_pass(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config(paths=("src/",)), qa_diff=_small_fix())
+    report = TABLE + "| qa-1 | ac-1 | Verified | video |\n| qa-2 | ac-2 | Failed | video |\n"
+    _fixed(run, "FAIL", report=report)
+
+    assert _at_b(run)[0] == [("targeted", ["qa-2"])]
+
+
+def test_a_scenario_never_reported_counts_as_not_passed(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config(paths=("src/",)), qa_diff=_small_fix())
+    report = TABLE + "| qa-1 | ac-1 | Verified | video |\n| qa-2 | ac-2 | Failed | video |\n"
+    _fixed(run, "FAIL", fixed_live=scenarios("qa-1", "qa-2", "qa-3"), report=report)
+
+    assert _at_b(run)[0] == [("targeted", ["qa-2", "qa-3"])]
+
+
+def test_a_targeted_run_after_every_scenario_passed_carries_every_live_id(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config(paths=("src/",)), qa_diff=_small_fix())
+    report = TABLE + "| qa-1 | ac-1 | Verified | video |\n| qa-2 | ac-2 | Verified | video |\n"
+    _fixed(run, "PASS", report=report)
+
+    assert _at_b(run)[0] == [("targeted", ["qa-1", "qa-2"])]

@@ -8,6 +8,7 @@ behaves as before. decide_scope is pure: the caller gathers the facts.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from lib.queue import QA_RECIPIENT, Job, JobRequest, cancel_queued
 from lib.update_check import HeadDiff
 
 OPEN_STATES = ("queued", "running")
+_SCENARIO_ROW = re.compile(r"^\s*\|\s*(qa-[1-9][0-9]*)\s*\|(.*)\|\s*$")
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,8 @@ class ScopeInput:
     """live_ids is None when no live scenario exists or the section is
     invalid. touched and lines are about qa.paths in the diff since the
     baseline, or since the merge-base without one; unknown git facts are
-    touched=True and lines=None."""
+    touched=True and lines=None. unpassed are the live ids whose newest
+    primary report did not mark them Verified."""
 
     live_ids: tuple[str, ...] | None
     baseline: Prior | None
@@ -46,6 +49,7 @@ class ScopeInput:
     touched: bool
     lines: int | None
     full_rerun_lines: int
+    unpassed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,7 +74,7 @@ def decide_scope(facts: ScopeInput) -> Run | NoRun:
         return Run("smoke", ()) if facts.touched else NoRun("qa-not-required")
     if facts.baseline is None or facts.lines is None or facts.lines > facts.full_rerun_lines:
         return Run("full", facts.live_ids)
-    return Run("full", facts.live_ids)
+    return Run("targeted", facts.unpassed or facts.live_ids)
 
 
 def _arms(qa: QaConfig) -> tuple[tuple[str, str], ...]:
@@ -137,14 +141,16 @@ class QaMixin:
                     (*key, head, patch_id),
                 )
         touched, lines = _under_paths(qa, diff)
+        live_ids = self._qa_live_ids(ticket)
         decision = decide_scope(
             ScopeInput(
-                live_ids=self._qa_live_ids(ticket),
+                live_ids=live_ids,
                 baseline=baseline,
                 same_patch_pass=same_patch_pass,
                 touched=touched,
                 lines=lines,
                 full_rerun_lines=qa.full_rerun_lines,
+                unpassed=self._qa_unpassed(ticket, live_ids or ()),
             )
         )
         generation = self._generation(ticket.repo, ticket.ticket_id)
@@ -235,6 +241,27 @@ class QaMixin:
                 run.scope, runner, arm, job.id, self.queue.now(),
             ),
         )
+
+    def _qa_unpassed(self, ticket: TrackedTicket, live_ids: tuple[str, ...]) -> tuple[str, ...]:
+        with self._connect() as connection:
+            reported = [
+                row["comment_id"]
+                for row in connection.execute(
+                    """
+                    SELECT comment_id FROM qa_runs
+                    WHERE repo = ? AND ticket_id = ? AND arm = 'primary'
+                      AND state = 'reported' AND comment_id IS NOT NULL
+                    ORDER BY finished_at DESC, rowid DESC
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            ]
+        bodies = {comment.id: comment.body for comment in ticket.comments}
+        latest: dict[str, bool] = {}
+        for comment_id in reported:
+            for qa_id, passed in _scenario_rows(bodies.get(comment_id, "")):
+                latest.setdefault(qa_id, passed)
+        return tuple(qa_id for qa_id in live_ids if not latest.get(qa_id, False))
 
     def _qa_live_ids(self, ticket: TrackedTicket) -> tuple[str, ...] | None:
         # Imported here: lib.evidence imports lib.dispatcher at module level.
@@ -382,3 +409,14 @@ def _prior(connection: sqlite3.Connection, where: str, args: tuple) -> Prior | N
         args,
     ).fetchone()
     return None if row is None else Prior(row["run_id"], row["head"], row["result"])
+
+
+def _scenario_rows(body: str) -> list[tuple[str, bool]]:
+    """A report's `| qa-n | ac-n | Result | ... |` rows; a Verified cell passes."""
+    rows = []
+    for line in body.splitlines():
+        match = _SCENARIO_ROW.match(line)
+        if match:
+            cells = [cell.strip() for cell in match.group(2).split("|")]
+            rows.append((match.group(1), "Verified" in cells))
+    return rows
