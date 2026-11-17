@@ -3,12 +3,18 @@
 
 The dispatcher runs `DeviceMonitor.reconcile` once per poll, before T6
 looks at timeouts. First it calls `DeviceMonitor.reload`, which loads
-machines.yml again when its mtime or its machines.local.yml overlay's has
-changed since the last good load; a file that fails to load raises and
-the monitor keeps the last good config, so the next poll tries again.
-`reconcile` then walks each device that holds a slot or an orphan. A
-local device only has its slots released; a remote one gets all three
-steps below.
+machines.yml again on the first poll (the config the monitor was built
+with was read before it could stamp the file) and then whenever its
+mtime or its machines.local.yml overlay's has changed since the last good
+load; a file that fails to load raises and the monitor keeps the last
+good config, so the next poll tries again. `reconcile` then walks each
+device that holds a slot or an orphan. A remote device gets all three
+steps below. On the box (a local device) a finished job's slot is
+released as below; when machines.yml sets it `enabled: false`, each
+running job whose worker started is sent SIGTERM through its `orch job
+run` (which stops the command and every process it started), or through
+its worker when that runner is gone, and handed to `on_lost` as below.
+A box orphan names no worker tag, so its row is forgotten at once.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -20,7 +26,9 @@ whose job is no longer running (done, failed or timed out) and whose
   released;
 * on the box, the slot is released once the recorded command pid is gone;
 * on a remote device, the device is asked over SSH, by the start's worker
-  tag (lib/remote.py). Gone releases the slot. A worker still running
+  tag (lib/remote.py). The check first fences the tag's launch, so one
+  still in transit from a runner since lost can never start after it.
+  Gone releases the slot. A worker still running
   there with no runner on the box is an orphan: it is sent SIGTERM and the
   slot is kept until a later poll finds it gone. An unreachable device, a
   check that cannot tell, or a remote start with no recorded tag keeps
@@ -49,6 +57,8 @@ mistake.
 
 from __future__ import annotations
 
+import os
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,19 +152,16 @@ class DeviceMonitor:
         transport: Transport,
         *,
         alive: Alive = pid_alive,
+        kill: Callable[[int, int], None] = os.kill,
         machines_path: Path | None = None,
     ):
         self.pool = pool
         self.config = config
         self.transport = transport
         self.alive = alive
+        self.kill = kill
         self.machines_path = machines_path
         self._stamp: Stamp | None = None
-        if machines_path is not None:
-            try:
-                self._stamp = _stamp(machines_path)
-            except OSError:
-                pass
 
     def reload(self) -> None:
         """Load machines.yml again if it or its overlay changed since the last good load."""
@@ -190,9 +197,7 @@ class DeviceMonitor:
             if device is None:
                 continue  # renamed or removed: keep the slot, status shows it
             if device.local:
-                for slot in slots:
-                    if self._local_gone(slot):
-                        self._release(slot, released)
+                self._local(device, slots, on_lost, released, lost, forgotten)
                 continue
             self._remote(device, slots, now, lost_after, on_lost, released, stopped, lost)
             self._sweep_orphans(device, stopped, forgotten)
@@ -218,6 +223,44 @@ class DeviceMonitor:
         if status == RUNNING:
             return False
         return None
+
+    def _local(
+        self,
+        device: Device,
+        slots: list[HeldSlot],
+        on_lost: OnLost,
+        released: list[str],
+        lost: list[str],
+        forgotten: list[str],
+    ) -> None:
+        for slot in slots:
+            if self._local_gone(slot):
+                self._release(slot, released)
+            elif (
+                not device.enabled
+                and slot.job_state == "running"
+                and not never_started(slot.placement)
+            ):
+                self._stop_local(slot.placement)
+                on_lost(slot.placement.job_id, device.name, "disabled")
+                lost.append(slot.placement.job_id)
+        for orphan in self.pool.orphans():
+            if orphan.device == device.name:
+                self.pool.forget_orphan(orphan.job_id)
+                forgotten.append(orphan.job_id)
+
+    def _stop_local(self, placement: Placement) -> None:
+        """SIGTERM the job's `orch job run`, which stops its whole tree; else its worker."""
+        for pid, start in (
+            (placement.runner_pid, placement.runner_start),
+            (placement.worker_pid, placement.worker_start),
+        ):
+            if pid is not None and self.alive(pid, start):
+                try:
+                    self.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+                return
 
     def _local_gone(self, slot: HeldSlot) -> bool:
         if slot.job_state == "running":

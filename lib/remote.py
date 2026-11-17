@@ -61,7 +61,9 @@ the bot's login shell is (bash on Linux, zsh on macOS).
 keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
 it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
 they find the detached start by its tag or record as before; the stop of
-a cancelled run escalates to SIGKILL.
+a cancelled run escalates to SIGKILL. #679: the box's check
+(`check_worker`) first makes the tag's run directory itself, so a launch
+that reaches the device after it starts nothing (`fenced_check_script`).
 
 On a device whose `uname -s` is Darwin (macOS: no /proc, and no way to read
 another process's environment) the same contract holds through the record,
@@ -587,6 +589,24 @@ def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
         '[ "$3" = "$p" ] && exit 3; '
         "done; "
         "exit 0"
+    )
+
+
+def fenced_check_script(target: RemoteTarget) -> str:
+    """check_script, after barring this tag's launch from ever starting.
+
+    A launch still in transit (sent by a runner since lost) makes the tag's
+    run directory with mkdir. The fence makes it first, with an exit file,
+    so such a launch answers `already` and starts nothing; a launch that
+    got there first is tagged from its first step, so the check sees it.
+    Where the run directory cannot be made, no launch can make it either.
+    """
+    tag = target.require_tag()
+    return _sh(
+        f"t={tag}; R={shlex.quote(run_dir(target))}; "
+        'if mkdir -p -- "$R" 2>/dev/null && (umask 077 && mkdir -- "$R/$t") 2>/dev/null; then '
+        f'echo {START_REFUSED} > "$R/$t/exit" 2>/dev/null || :; fi; '
+        f"{_check_body(target)}"
     )
 
 
@@ -1209,9 +1229,13 @@ def check_worker(transport: Transport, target: RemoteTarget) -> str:
     """GONE (0), RUNNING (1), UNREACHABLE (ssh's 255) or UNKNOWN (anything else).
 
     Only GONE lets a slot go. UNKNOWN still proves the device answered.
-    The target must carry the start's worker tag.
+    The target must carry the start's worker tag. Every caller is done with
+    the start, so the check fences its launch (fenced_check_script): GONE
+    then holds for good.
     """
-    code = transport.run(ssh_argv(target, check_script(target)), timeout=PROBE_TIMEOUT_SECONDS)
+    code = transport.run(
+        ssh_argv(target, fenced_check_script(target)), timeout=PROBE_TIMEOUT_SECONDS
+    )
     if code == 0:
         return GONE
     if code == 1:

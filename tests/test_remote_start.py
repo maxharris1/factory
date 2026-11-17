@@ -860,6 +860,75 @@ def test_disabling_an_unreachable_device_loses_its_job_long_before_the_offline_l
     assert_lost(queue, pool, job.id, "disabled")
 
 
+def box_job_setup(tmp_path: Path, *, alive: dict[int, bool]):
+    now = [0.0]
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
+    machines = machines_file(tmp_path, pc=False)
+    config = config_of(machines)
+    pool = DevicePool(queue, config)
+    kills: list[tuple[int, int]] = []
+    monitor = DeviceMonitor(
+        pool,
+        config,
+        FakeTransport(),
+        alive=lambda pid, _start: alive.get(pid, False),
+        kill=lambda pid, sig: kills.append((pid, sig)),
+        machines_path=machines,
+    )
+    dispatcher = Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=monitor,
+    )
+    dispatcher.process(
+        ticket(comment("go-1", GO.format(state="building"), author="grok-login"), timeout=60)
+    )
+    job, placement = pool.claim("claude")
+    assert placement.device == "box"
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", pid=12, start="w")
+    return now, queue, pool, dispatcher, job, kills
+
+
+def disable_box(tmp_path: Path) -> None:
+    stamp(machines_file(tmp_path, box_enabled=False, pc=False), 10**18)
+
+
+@pytest.mark.parametrize(
+    ("alive", "signalled"),
+    [({11: True, 12: True}, 11), ({12: True}, 12)],
+    ids=["runner-alive", "runner-gone"],
+)
+def test_disabling_the_box_loses_its_running_job_and_stops_it_within_one_poll(
+    tmp_path: Path, alive: dict[int, bool], signalled: int
+) -> None:
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive=alive)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "running"
+    assert pool.used() == {"box": 1}
+
+    disable_box(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert state(queue, job.id) == "failed"
+    assert ("device-lost", "box: disabled") in job_events(queue, job.id)
+    assert pool.used() == {}
+    assert orphans(queue) == []
+    assert kills == [(signalled, signal.SIGTERM)]
+
+
+def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True})
+    for at in (0.0, 60.0, 120.0):
+        poll_at(now, dispatcher, at)
+    assert state(queue, job.id) == "running"
+    assert pool.used() == {"box": 1}
+    assert kills == []
+
+
 def test_a_disabled_device_is_stranded_with_no_offline_clock(tmp_path: Path) -> None:
     disabled = config_of(machines_file(tmp_path, pc=False)).device("pc")
     enabled = config_of(machines_file(tmp_path, pc=True)).device("pc")
@@ -905,12 +974,12 @@ def test_an_unchanged_machines_yml_is_not_loaded_again(
     monkeypatch.setattr(device_monitor, "load_machines_yml", counted)
     for at in (0.0, 60.0, 120.0):
         poll_at(now, dispatcher, at)
-    assert loads == []
+    assert loads == [tmp_path / "machines.yml"]
 
     disable_pc(tmp_path)
     for at in (180.0, 240.0, 300.0):
         poll_at(now, dispatcher, at)
-    assert loads == [tmp_path / "machines.yml"]
+    assert loads == [tmp_path / "machines.yml"] * 2
 
 
 def test_a_broken_machines_yml_keeps_the_last_good_config_and_is_reported_until_fixed(
@@ -998,6 +1067,92 @@ def test_disabling_an_answering_device_stops_the_lost_worker_in_the_same_poll(
     assert state(queue, job.id) == "failed"
     assert transport.calls[-1] == STOP
     assert orphans(queue) == [(job.id, "pc", TAG)]
+
+
+class LocalShell:
+    """The pc's scripts run in a local shell: the real check, stop and launch."""
+
+    def run(self, argv, *, timeout: float) -> int:
+        return subprocess.run(["sh", "-c", argv[-1]], timeout=timeout).returncode
+
+
+def test_a_launch_still_in_transit_when_its_device_is_disabled_never_starts(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True)
+    monitor = dispatcher.devices
+    monitor.transport = LocalShell()
+    monitor.alive = lambda *_: False
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, TAG)
+    assert target is not None
+    marker = tmp_path / "late-worker.pid"
+    worker = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=30, grace=1
+    )
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "failed"
+    assert pool.used() == {}
+    assert orphans(queue) == []
+
+    late = subprocess.run(
+        ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30
+    )
+    try:
+        assert late.stdout.decode().strip() == f"{remote.LAUNCH_MARK} already"
+        assert not marker.exists()
+        assert remote.check_worker(monitor.transport, target) == remote.GONE
+    finally:
+        remote.stop_worker(monitor.transport, target, kill=True)
+
+
+def test_a_launch_that_got_there_first_keeps_its_orphan_until_it_is_stopped(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True)
+    monitor = dispatcher.devices
+    monitor.transport = LocalShell()
+    monitor.alive = lambda *_: False
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, TAG)
+    assert target is not None
+    marker = tmp_path / "early-worker.pid"
+    worker = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=30, grace=1
+    )
+    try:
+        early = subprocess.run(
+            ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30
+        )
+        assert early.stdout.decode().strip() == f"{remote.LAUNCH_MARK} started"
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+        disable_pc(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert state(queue, job.id) == "failed"
+        assert orphans(queue) == [(job.id, "pc", TAG)]
+
+        deadline = time.monotonic() + 10
+        while remote.check_worker(monitor.transport, target) != remote.GONE:
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+        poll_at(now, dispatcher, 60.0)
+        assert orphans(queue) == []
+    finally:
+        remote.stop_worker(monitor.transport, target, kill=True)
 
 
 def test_an_unreachable_device_keeps_its_orphans_for_one_check_a_poll(tmp_path: Path) -> None:

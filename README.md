@@ -357,12 +357,17 @@ free at once) and the device is backed off for 5 minutes. T6 requeues a lost
 job as it does a link drop, under the same budget, so it lands on another
 device when one has room. A lost `update-from-main` job is not requeued; it
 counts one update failure and the merge queue settles any head it pushed.
-The poller reloads `machines.yml` when it or `machines.local.yml` changes, so
-`enabled: false` takes effect with no restart; a file that fails to load keeps
-the last good config and is recorded as a `machines.yml:` poll error each poll
-until it is fixed. Each poll also checks every `device_orphans` row by its
-worker tag (issue #679): a lost job's worker still running is sent SIGTERM, a
-gone one's row is deleted, and an unreachable device gets one check per poll.
+The poller loads `machines.yml` again on its first poll and whenever it or
+`machines.local.yml` changes, so `enabled: false` takes effect with no restart;
+a file that fails to load keeps the last good config and is recorded as a
+`machines.yml:` poll error each poll until it is fixed. The box is covered too:
+a job running there when it is disabled is lost the same way, and its `orch job
+run` (or its worker, if that is gone) is sent SIGTERM. Each poll also checks
+every `device_orphans` row by its worker tag (issue #679): a lost job's worker
+still running is sent SIGTERM, a gone one's row is deleted, and an unreachable
+device gets one check per poll. Every check that lets a remote worker go first
+makes that start's run directory on the device, so a launch still in transit
+from a lost runner answers `already` and starts nothing.
 An unreachable device counts against its offline clock; an error raised while
 checking (the database, say) is recorded as a `devices` poll error and never
 stops the poll.
