@@ -44,7 +44,7 @@ from lib.dispatcher import (
 from lib.dispatch.types import ci_on_base, no_ci_base
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
-from lib.dispatch.errors_text import plain_fragment
+from lib.dispatch.errors_text import kept_name, redacted_fragment
 from lib.dispatch.cycle_clock import CycleClock
 from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
@@ -169,7 +169,27 @@ class FactoryParseError(PollSourceError):
 
 
 class PollCycleError(PollSourceError):
-    pass
+    scrubbed_message: str | None = None
+
+    @classmethod
+    def of(cls, errors: list[tuple[str, str, str]]) -> PollCycleError:
+        counts = Counter(repo for repo, _, _ in errors)
+        sources = ", ".join(
+            f"{kept_name(source)} x{count}" for source, count in sorted(counts.items())
+        )
+        details = [
+            _cycle_error_detail(repo, ticket_id, reason)
+            for repo, ticket_id, reason in errors[:CYCLE_ERROR_DETAILS]
+        ]
+        more = len(errors) - CYCLE_ERROR_DETAILS
+        if more > 0:
+            details.append(f"and {more} more")
+        error = cls(
+            f"poll cycle recorded {len(errors)} source error(s): "
+            f"{sources}; " + "; ".join(details)
+        )
+        error.scrubbed_message = str(error)
+        return error
 
 
 class GhHttpError(PollSourceError):
@@ -669,21 +689,7 @@ class LivePollSource:
             )
         self._cycle_deferrals = {}
         if self._cycle_errors:
-            counts = Counter(repo for repo, _, _ in self._cycle_errors)
-            sources = ", ".join(f"{source} x{count}" for source, count in sorted(counts.items()))
-            details = [
-                plain_fragment(
-                    f"{repo} {reason}" if ticket_id == "-" else f"{repo} ticket {ticket_id} {reason}"
-                )
-                for repo, ticket_id, reason in self._cycle_errors[:CYCLE_ERROR_DETAILS]
-            ]
-            more = len(self._cycle_errors) - CYCLE_ERROR_DETAILS
-            if more > 0:
-                details.append(f"and {more} more")
-            raise PollCycleError(
-                f"poll cycle recorded {len(self._cycle_errors)} source error(s): "
-                f"{sources}; " + "; ".join(details)
-            )
+            raise PollCycleError.of(self._cycle_errors)
 
     def github_candidates(
         self,
@@ -2396,6 +2402,13 @@ def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
     ) is not None
 
 
+def _cycle_error_detail(repo: str, ticket_id: str, reason: str) -> str:
+    where = (
+        kept_name(repo) if ticket_id == "-" else f"{kept_name(repo)} ticket {kept_name(ticket_id)}"
+    )
+    return f"{where} {redacted_fragment(reason)}".rstrip()
+
+
 def _safe_reason(exc: Exception) -> str:
     """The poll_errors text for a source error. A PollSourceError's message
     is built here from safe parts; any other error keeps its kind and gets
@@ -2474,6 +2487,7 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
         "draft": pull["draft"] if isinstance(pull.get("draft"), bool) else None,
         "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
         "pr_base": _pr_base(pull),
+        "pr_commits": pull["commits"] if type(pull.get("commits")) is int else None,
     }
 
 

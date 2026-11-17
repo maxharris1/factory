@@ -30,6 +30,7 @@ _SECRET_NAME = (
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?i)(?<!<)(?:\b{_SECRET_NAME}\b\s*[:=]?\s*[\"']?)+\S+"
 )
+_NAME = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?")
 _PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
 _REDACTED_MARKS = {"\ue000": "<url>", "\ue001": "<host>", "\ue002": "<secret>"}
 _PLAIN_REDACTED = re.compile(r"[A-Za-z0-9_ .,:;()'/=+\ue000-\ue002-]*")
@@ -83,6 +84,30 @@ def plain_fragment(text: str) -> str:
     return plain.rstrip()
 
 
+def redacted_fragment(text: str) -> str:
+    """`text` cut as plain_fragment cuts it, with URLs, host paths, token
+    shapes and dashboard-redacted spans replaced."""
+    from lib.dashboard import redact
+
+    return redact(_redact(plain_fragment(text)))
+
+
+def kept_name(name: str) -> str:
+    """A repo or ticket name as written when it is a plain identifier with
+    nothing a redactor replaces but a credential-like word; otherwise the
+    name as redacted_fragment cuts it."""
+    from lib.dashboard import redact
+
+    if _NAME.fullmatch(name) and redact(name) == name and _redact_spans(name) == name:
+        return name
+    return redacted_fragment(name)
+
+
+def _scrubbed_message(exc: BaseException) -> str | None:
+    scrubbed = getattr(exc, "scrubbed_message", None)
+    return scrubbed if isinstance(scrubbed, str) and scrubbed else None
+
+
 def poll_error_detail(exc: BaseException) -> str:
     """The exception chain's messages and newest frames, redacted and capped.
 
@@ -93,19 +118,27 @@ def poll_error_detail(exc: BaseException) -> str:
     consume a key and leave its value. Stored in poll_errors.detail
     beside the bare class name; the tail is kept when the cap cuts, so the
     raising frame and message survive.
+
+    An exception's scrubbed_message, already built from kept names and
+    redacted fragments, stands in for its message and skips the
+    redactors, which would cut a name such as acme/token-service.
     """
     from lib.dashboard import redact
 
-    blocks: list[str] = []
+    blocks: list[str | tuple[str]] = []
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None:
         seen.add(id(current))
         frames = "".join(traceback.format_tb(current.__traceback__, limit=-POLL_ERROR_FRAMES))
-        if frames:
-            blocks.append(f"Traceback (most recent call last):\n{frames}{_without_body(current)}")
+        scrubbed = _scrubbed_message(current)
+        if scrubbed is None:
+            message: list[str | tuple[str]] = [_without_body(current)]
         else:
-            blocks.append(_without_body(current))
+            message = [type(current).__name__ + ": ", (scrubbed,), "\n"]
+        if frames:
+            message.insert(0, f"Traceback (most recent call last):\n{frames}")
+        blocks.extend(reversed(message))
         if current.__cause__ is not None:
             link, current = _POLL_ERROR_CAUSE, current.__cause__
         elif not current.__suppress_context__:
@@ -115,7 +148,15 @@ def poll_error_detail(exc: BaseException) -> str:
         if current is None or id(current) in seen:
             break
         blocks.append(link)
-    text = _redact(redact("".join(reversed(blocks)).rstrip()))
+    text = ""
+    untrusted = ""
+    for block in reversed(blocks):
+        if isinstance(block, tuple):
+            text += _redact(redact(untrusted)) + block[0]
+            untrusted = ""
+        else:
+            untrusted += block
+    text = (text + _redact(redact(untrusted.rstrip()))).rstrip()
     if len(text) > POLL_ERROR_DETAIL_LIMIT:
         text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
     return text
