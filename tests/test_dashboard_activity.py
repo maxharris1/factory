@@ -18,6 +18,7 @@ from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
+from tests.test_dashboard_ticket_records import walk
 from tests.test_dispatcher import retry, seed_state, setup, ticket
 
 IDS = layout.BAR + ["hud", "attention", "relay"]
@@ -292,6 +293,31 @@ def test_a_merge_with_no_job_moves_its_ticket_to_the_top(tmp_path: Path) -> None
     dispatcher.record_terminal("owner/repo", "15", "merged")
     snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poller.log", now=NOW)
     assert _relay_ids(snapshot) == [15, *range(1, 12)]
+
+
+def test_each_thread_says_where_its_ticket_stopped_shipped_or_waits(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "90", state="stuck", stuck=1, stuck_reason="gaps-twice")
+        walk(connection, "90", ["intake", "planning", "stuck"], NOW - 266600)
+        add_ticket(connection, "maxharris1/cleffy", "70", state="merged")
+        walk(connection, "70", ["intake", "building", "review", "ship", "merged"], NOW - 3000)
+        add_ticket(connection, "maxharris1/cleffy", "71", state="handed-off")
+        walk(connection, "71", ["intake", "building", "ship", "handed-off"], NOW - 1000)
+        add_ticket(connection, "maxharris1/cleffy", "72", state="awaiting-ok")
+        walk(connection, "72", ["intake", "building", "awaiting-ok"], NOW - 3800)
+        connection.execute(
+            "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, held_at) "
+            "VALUES ('maxharris1/cleffy', '72', 'h', 'max', 'r', 'a-72', ?)", (NOW - 3600,))
+    threads = {t["ticket_id"]: t for t in collect_snapshot(db, log, now=NOW)["relay"]["threads"]}
+    assert threads["90"]["now"] == {"kind": "stopped", "state": "stuck", "stopped_in": "planning",
+                                    "age_seconds": 266400}
+    assert threads["70"]["now"] == {"kind": "shipped", "how": "merged", "age_seconds": 2600}
+    assert threads["71"]["now"] == {"kind": "shipped", "how": "handed-off", "age_seconds": 700}
+    assert threads["72"]["now"] == {"kind": "idle", "state": "awaiting-ok", "age_seconds": 3600,
+                                    "waiting_on": "max"}
+    assert threads["13"]["now"]["waiting_on"] is None
+    assert threads["14"]["now"] is None
 
 
 def _relay_links(relay: str) -> dict[str, str]:
