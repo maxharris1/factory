@@ -12,6 +12,7 @@ import pytest
 from lib.config_overlay import merge, overlay_keys, overlay_path
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -136,6 +137,7 @@ def test_overlay_fills_a_placeholder(overlay_on: None, shipped: tuple[Path, Path
 
 def test_machines_overlay_enables_a_device(overlay_on: None, shipped: tuple[Path, Path]) -> None:
     _, machines = shipped
+    shutil.copy(LOCAL_BOX_MACHINES, machines)
     overlay_path(machines).write_text(
         "devices:\n  - name: pc\n    enabled: true\n    slot_max: 1\n", encoding="utf-8")
     config, findings = load_machines_yml(machines, allow_placeholders=True)
@@ -282,6 +284,7 @@ def test_the_dashboard_reads_machines_yml_through_its_overlay(
     from lib.queue import SQLiteJobQueue
 
     _, machines = shipped
+    shutil.copy(LOCAL_BOX_MACHINES, machines)
     overlay_path(machines).write_text("devices:\n  - name: box\n    slot_max: 7\n",
                                       encoding="utf-8")
     SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000.0)

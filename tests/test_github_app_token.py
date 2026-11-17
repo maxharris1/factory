@@ -22,6 +22,7 @@ from lib import github_app_token as broker
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.github_app_token import Holder, Remote, Stored
 from lib.orch_yml import GitHubApp
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 
 ROOT = Path(__file__).resolve().parent.parent
 FAKE_SSH = ROOT / "tests" / "fake_ssh.py"
@@ -708,11 +709,11 @@ def test_refresh_reads_an_inventory_whose_disabled_devices_hold_placeholders(
 
     orch = tmp_path / "orch.yml"
     orch.write_text(orch_text(enabled=False), encoding="utf-8")
-    shipped = (ROOT / "machines.yml").read_text(encoding="utf-8")
-    assert "REPLACE_WITH_" in shipped
+    inventory = LOCAL_BOX_MACHINES.read_text(encoding="utf-8")
+    assert "REPLACE_WITH_" in inventory
     machines = tmp_path / "machines.yml"
     machines.write_text(
-        shipped.replace("name: pc\n    enabled: false", "name: pc\n    enabled: true")
+        inventory.replace("name: pc\n    enabled: false", "name: pc\n    enabled: true")
         + "  - name: half\n    tailscale_name: REPLACE_WITH_HALF_TAILSCALE\n    slot_max: 1\n"
         "    harnesses: {claude: claude-bot}\n    workdir_root: /home/{bot}/w\n"
         "    ssh_alias: half-{bot}\n    factory_root: /home/{bot}/factory\n",

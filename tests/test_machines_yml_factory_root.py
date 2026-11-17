@@ -209,10 +209,8 @@ def test_example_documents_factory_root_apart_from_workdir_root():
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip().startswith("#")
     ]
-    factory_lines = [line for line in comments if "factory_root" in line]
-    assert factory_lines
-    assert any("not" in line for line in factory_lines)
-    assert any(line == "# workdir_root, and may not sit inside it." for line in comments)
+    assert "# factory_root is the deployed factory checkout (skills/, bin/orch), not" in comments
+    assert "# workdir_root, and may not sit inside it." in comments
 
 
 def test_a_factory_root_with_a_backtick_is_refused(tmp_path):

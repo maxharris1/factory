@@ -1,0 +1,28 @@
+devices:
+  - name: box
+    local: true
+    slot_max: 3
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+    factory_root: /home/box/factory
+  - name: pc
+    enabled: false
+    tailscale_name: pc-wsl-bots.tail68624b.ts.net
+    slot_max: 3
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+    workdir_root: /home/{bot}/factory-work
+    ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
+  - name: mac
+    enabled: false
+    tailscale_name: maxs-macbook-pro.tail68624b.ts.net
+    slot_max: 2
+    harnesses: {}
+    workdir_root: REPLACE_WITH_MAC_WORKDIR_ROOT
+    ssh_alias: REPLACE_WITH_MAC_SSH_ALIAS
+    factory_root: /Users/{bot}/factory

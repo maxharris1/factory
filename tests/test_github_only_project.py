@@ -35,6 +35,7 @@ from tests.test_dispatcher import (
     ticket,
 )
 from tests.test_live_poll import FACTORY, FakeGh, GhResult, config
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
@@ -688,7 +689,7 @@ def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
             world.path,
             log,
             now=160.0,
-            machines_path=ROOT / "machines.yml",
+            machines_path=LOCAL_BOX_MACHINES,
         )
 
     world.poll()

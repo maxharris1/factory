@@ -37,7 +37,7 @@ from lib.telemetry import (
     last_seen,
     start_session,
 )
-from tests.pool_helpers import pool_claim
+from tests.pool_helpers import LOCAL_BOX_MACHINES, pool_claim
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -895,7 +895,7 @@ def test_cli_job_run_streams_claude_telemetry_into_the_table(tmp_path: Path) -> 
     claude = _fake_claude(tmp_path)
     state = tmp_path / "waiter-job"
     done = _orch(
-        "job", "run", "claude-bot", job.id, "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
         "--", str(claude), "-p", "--dangerously-skip-permissions",
         env={"ORCH_JOB_STATE_DIR": str(state)},
     )
@@ -926,7 +926,7 @@ def test_cli_job_run_with_telemetry_off_runs_the_command_as_given(tmp_path: Path
     _, job = _running_job(tmp_path)
     script = "import sys; print(' '.join(sys.argv[1:]))"
     done = _orch(
-        "job", "run", "claude-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--", sys.executable, "-c", script, "-p",
         env={"ORCH_TELEMETRY": "off"},
     )
@@ -941,7 +941,7 @@ def test_cli_job_run_with_telemetry_off_runs_the_command_as_given(tmp_path: Path
 def test_cli_job_run_with_a_plain_command_records_no_events_and_its_exit(tmp_path: Path) -> None:
     _, job = _running_job(tmp_path)
     done = _orch(
-        "job", "run", "claude-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"),
         "--", sys.executable, "-c", "print('hello'); raise SystemExit(4)",
     )
     assert done.returncode == 4
@@ -1664,7 +1664,7 @@ def test_cli_job_run_writes_the_live_run_and_counters_only_writes_none(tmp_path:
             connection.execute(OLD_DDL)  # an orch.db an older runner made
         claude = _fake_claude(root, "claude_subagents_stream.jsonl")
         done = _orch(
-            "job", "run", "claude-bot", job.id, "--db", str(root / "orch.db"), "--interval", "0.2",
+            "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(root / "orch.db"), "--interval", "0.2",
             "--", str(claude), "-p", "--dangerously-skip-permissions",
             env={"ORCH_JOB_STATE_DIR": str(root / "state"), "ORCH_TELEMETRY": mode},
         )

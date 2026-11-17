@@ -47,6 +47,7 @@ from lib.waiter import (
 )
 from tests import fake_runner
 from tests.child_reaper import descendants
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 from tests.procs import alive
 from tests.test_brief import FACTORY_MD, detail
 from tests.test_wait import GO, dispatcher_for, tracked
@@ -56,12 +57,10 @@ ORCH = ROOT / "bin" / "orch"
 HARNESS_BINARIES = ("claude", "codex", "cursor-agent")
 
 
-def _machines_with_this_checkout() -> Path:
-    """machines.yml with the box's factory_root at this checkout, which a waiter
-    run as its own process preflights (the real box path is not here)."""
-    text = (ROOT / "machines.yml").read_text(encoding="utf-8")
+def _local_box_with_factory_root_here() -> Path:
+    text = LOCAL_BOX_MACHINES.read_text(encoding="utf-8")
     box_root = "    factory_root: /home/box/factory\n"
-    assert text.count(box_root) == 1, "machines.yml box factory_root moved"
+    assert text.count(box_root) == 1
     directory = Path(tempfile.mkdtemp(prefix="orch-test-machines-"))
     atexit.register(shutil.rmtree, directory, True)
     path = directory / "machines.yml"
@@ -69,7 +68,7 @@ def _machines_with_this_checkout() -> Path:
     return path
 
 
-MACHINES = _machines_with_this_checkout()
+MACHINES = _local_box_with_factory_root_here()
 
 
 # --- the harness command comes from the bot's own fixed config -------------

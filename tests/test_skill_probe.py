@@ -16,6 +16,7 @@ import pytest
 from lib import skill_probe as sp
 from lib.harness_env import harness_env
 from lib.machines_yml import load_machines_yml
+from tests.pool_helpers import LOCAL_BOX_MACHINES
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures" / "skill_probe"
@@ -268,9 +269,9 @@ def test_plan_launches_covers_local_and_remote_devices(tmp_path):
 def test_disabled_or_placeholder_device_is_skipped(tmp_path):
     devices = {l.device for l in plan(tmp_path)}
     assert "pc" not in devices and "spare" not in devices
-    shipped, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    local_box, _ = load_machines_yml(LOCAL_BOX_MACHINES, allow_placeholders=True)
     launches = sp.plan_launches(
-        shipped, "claude-bot", CLAUDE_CMD, run_id="skill-probe-0000",
+        local_box, "claude-bot", CLAUDE_CMD, run_id="skill-probe-0000",
         local_root=str(tmp_path), homes={},
     )
     assert {l.device for l in launches} == {"box"}
@@ -624,9 +625,9 @@ def test_probe_run_requires_out_and_an_enabled_device(tmp_path, capsys):
     assert "no enabled device" in capsys.readouterr().err
     assert sp.main([*base, "--dry-run", "--skill-md", "relative/SKILL.md"]) == 1
     capsys.readouterr()
-    shipped = ["run", "--bot", "claude-bot", "--machines", str(ROOT / "machines.yml"),
-               "--config", str(config), "--dry-run"]
-    assert sp.main(shipped) == 0
+    local_box = ["run", "--bot", "claude-bot", "--machines", str(LOCAL_BOX_MACHINES),
+                 "--config", str(config), "--dry-run"]
+    assert sp.main(local_box) == 0
     headers = [line.split()[1] for line in capsys.readouterr().out.splitlines() if line.startswith("# ")]
     assert headers == ["box-claude-run-as", "box-claude-read-path", "box-claude-slash"]
 

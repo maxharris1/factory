@@ -10,13 +10,13 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import Job, SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_BOX_MACHINES = ROOT / "tests" / "fixtures" / "machines_local_box.yml"
 CLAIM_PROOF = "test-claim-proof"
 CLAIM_HASH = job_token.digest(CLAIM_PROOF)
 
 
 def pool_claim(queue: SQLiteJobQueue, recipient: str, machines: Path | None = None) -> Job:
-    """Claim the oldest queued job for recipient with a slot from machines.yml."""
-    config, _ = load_machines_yml(machines or ROOT / "machines.yml", allow_placeholders=True)
+    config, _ = load_machines_yml(machines or LOCAL_BOX_MACHINES, allow_placeholders=True)
     assert config is not None
     claimed = DevicePool(queue, config).claim(recipient)
     assert claimed is not None

@@ -19,7 +19,7 @@ from lib.status import (
     render,
 )
 from lib.status import main as status_main
-from tests.pool_helpers import write_target_machines
+from tests.pool_helpers import LOCAL_BOX_MACHINES, write_target_machines
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -216,7 +216,8 @@ def test_status_command_counts_held_device_slots(tmp_path: Path) -> None:
     before = directory_snapshot(tmp_path)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path)],
+        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path),
+         "--machines", str(LOCAL_BOX_MACHINES)],
         text=True,
         capture_output=True,
         check=False,
@@ -330,7 +331,8 @@ def test_status_command_counts_a_pc_job_once(tmp_path: Path) -> None:
         )
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path)],
+        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path),
+         "--machines", str(LOCAL_BOX_MACHINES)],
         text=True,
         capture_output=True,
         check=False,
@@ -423,7 +425,8 @@ def test_status_command_writes_nothing_anywhere(tmp_path: Path, journal: str) ->
     before = directory_snapshot(state)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path)],
+        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path),
+         "--machines", str(LOCAL_BOX_MACHINES)],
         text=True,
         capture_output=True,
         env=env,
@@ -680,7 +683,7 @@ def test_status_on_a_queue_only_db_shows_the_empty_state(tmp_path: Path) -> None
     stdout = io.StringIO()
 
     code = status_main(
-        ["--db", str(path), "--machines", str(ROOT / "machines.yml")],
+        ["--db", str(path), "--machines", str(LOCAL_BOX_MACHINES)],
         stdout=stdout,
         clock=lambda: 0,
     )
@@ -751,6 +754,6 @@ def test_cli_routes_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     path = tmp_path / "queue.sqlite3"
     create_database(path)
 
-    assert cli_main(["status", "--db", str(path)]) == 0
+    assert cli_main(["status", "--db", str(path), "--machines", str(LOCAL_BOX_MACHINES)]) == 0
     assert "Queue (1)" in capsys.readouterr().out
     assert "status_main" not in (ROOT / "bin" / "orch").read_text(encoding="utf-8")
