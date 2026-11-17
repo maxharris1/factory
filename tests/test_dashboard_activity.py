@@ -19,6 +19,7 @@ from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
+from tests.test_dashboard_pixelstrip import _node as _px_node
 from tests.test_dashboard_ticket_records import walk
 from tests.test_dispatcher import retry, seed_state, setup, ticket
 
@@ -820,6 +821,108 @@ def test_the_earlier_steps_fold_only_with_script_in_a_browser(snapshot: dict) ->
         browser.close()
 
 
+def _job(job: str, ticket: str, action: str = "build", recipient: str = "claude", **row: object) -> dict:
+    return {"job": job, "repo": "maxharris1/factory", "ticket_id": ticket, "action": action, "recipient": recipient,
+            "source": None, "pr": None, "round": None, "timeout_seconds": 5400, "overdue": False, "stuck": False,
+            "tracker": "github", "device": "box", "elapsed_from": "queued", "heartbeat_at": None, "tier": None,
+            "telemetry": None, **row}
+
+
+def _endings(snapshot: dict) -> dict:
+    stopped = {"kind": "stopped", "state": "stuck", "stopped_in": "planning", "age_seconds": 266400}
+    shipped = {"kind": "shipped", "how": "merged", "age_seconds": 7200}
+    rests = {"206": stopped, "207": shipped, "208": shipped,
+             "209": {"kind": "idle", "state": "review", "age_seconds": 3600, "waiting_on": None},
+             "210": {"kind": "idle", "state": "awaiting-ok", "age_seconds": 3600, "waiting_on": "max"},
+             "201": stopped, "205": {"kind": "idle", "state": "review", "age_seconds": 50, "waiting_on": None}}
+    snap = _only(snapshot, [_handoff(f"j-{n}", str(n), 400) for n in range(201, 212)],
+                 [_verdict(1, "207", "merged", 300, "shipped")])
+    for thread in snap["relay"]["threads"]:
+        thread["now"] = rests.get(thread["ticket_id"])
+    snap["running"] = [
+        _job("old-201", "201", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=600),
+        _job("run-201", "201", job_state="running", elapsed_seconds=372, heartbeat_age_seconds=5),
+        _job("run-202", "202", "review", "codex", job_state="running", elapsed_seconds=220, heartbeat_age_seconds=5),
+        _job("run-203", "203", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=250),
+        _job("run-204", "204", "fix", "cursor", job_state="dead", elapsed_seconds=900, heartbeat_age_seconds=900),
+    ]
+    snap["queued"] = [_job("q-205", "205", "review", "codex", age_seconds=90),
+                      _job("q-205b", "205", age_seconds=30)]
+    return snap
+
+
+def _now(relay: str, ticket: str) -> str:
+    row = _row(relay, ticket)
+    return row[row.index('<span class="rl-now'):] if "rl-now" in row else ""
+
+
+NOW_TITLE = 'title="where the ticket is now"'
+ENDINGS = {
+    "201": ['class="rl-now rl-claude live" ' + NOW_TITLE, 'data-px="fill"', 'data-px-key="relay-now-run-201"',
+            '<span class="rl-px" aria-hidden="true"><canvas', '<span class="rl-run">running 6m 12s</span>'],
+    "202": ['class="rl-now rl-codex live" ' + NOW_TITLE, 'data-px="scan"', '<span class="rl-run">running 3m 40s</span>'],
+    "203": ['class="rl-now stale" ' + NOW_TITLE, '<span class="rl-blk rl-claude">', 'data-px="decay"',
+            'data-still="true"', '<span class="chip warn">stale</span>',
+            '<span class="rl-late">no heartbeat for 4m 10s</span>'],
+    "204": ['<span class="rl-blk rl-cursor">', 'data-px="decay"', 'data-still="true"', '<span class="chip bad">dead</span>',
+            '<span class="rl-late">no heartbeat for 15m 00s</span>'],
+    "205": ['class="rl-now queued rl-codex" ' + NOW_TITLE, '<span class="rl-bot">codex</span><span class="rl-what">review</span>',
+            '<span class="rl-wait">queued 1m 30s</span>'],
+    "206": [NOW_TITLE + '><span class="chip bad">stuck</span><span class="rl-say">in planning for 3d 2h</span></span>'],
+    "208": [NOW_TITLE + '><span class="chip ok">shipped</span><span class="rl-out">merged</span>'
+            '<span class="rl-when">2h 00m ago</span></span>'],
+    "209": [NOW_TITLE + '><span class="rl-when">in review for 1h 00m</span></span>'],
+    "210": [NOW_TITLE + '><span class="chip warn">waiting</span><span class="rl-say">on max for 1h 00m</span></span>'],
+}
+
+
+@layout.needs_node
+def test_each_thread_ends_on_where_its_ticket_is_now_in_both_renders(tmp_path: Path, snapshot: dict) -> None:
+    snap = _endings(snapshot)
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path, snap)["html"]["relay"] == relay
+    for ticket, parts in ENDINGS.items():
+        ending = _now(relay, ticket)
+        assert _row(relay, ticket).endswith('<span class="rl-sep" aria-hidden="true">→</span>' + ending), ticket
+        for part in parts:
+            assert part in ending, (ticket, part)
+        assert ending.count("rl-now") == 1 and ending.count("<canvas") == (1 if ticket < "205" else 0), ticket
+        if ticket in ("201", "202"):
+            assert "data-still" not in ending
+        else:
+            assert re.findall(r"<canvas [^>]*>", ending) == re.findall(r'<canvas [^>]*data-still="true"[^>]*>', ending)
+    assert "rl-now" not in _row(relay, "207")
+    assert _row(relay, "207").endswith('<span class="rl-out">merged</span><span class="rl-when">5m 00s ago</span></span></span>')
+    assert "rl-now" not in _row(relay, "211")
+
+
+@layout.needs_node
+def test_the_ending_counts_toward_the_six(tmp_path: Path, snapshot: dict) -> None:
+    for steps, button in ((5, None), (6, "+1 earlier")):
+        snap = _only(snapshot, _steps(steps))
+        snap["queued"] = [_job("q-1", "1", age_seconds=90)]
+        relay = _server(snap)["relay"]
+        assert _script(tmp_path / str(steps), snap)["html"]["relay"] == relay
+        row = _row(relay)
+        assert row.endswith('<span class="rl-wait">queued 1m 30s</span></span></span>')
+        assert re.findall(r">(\+\d+ earlier)</button>", row) == ([button] if button else [])
+
+
+@layout.needs_node
+def test_the_running_ending_is_a_pixelstrip_that_holds_still_under_reduced_motion(
+    tmp_path: Path, snapshot: dict,
+) -> None:
+    snap = _endings(snapshot)
+    relay = _server(snap)["relay"]
+    assert _script(tmp_path / "still", snap, harness=STILL)["html"]["relay"] == relay
+    (canvas,) = re.findall(r"<canvas ([^>]*)>", _now(relay, "201"))
+    attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', canvas))
+    scenario = (f"const el = canvas({json.dumps(attrs)}, 40, 10); found = [el]; PX.bind();"
+                "for (let t = 50; t <= 3000; t += 50) frame(t); out.draws = draws(el);")
+    assert _px_node(tmp_path, scenario, reduced=False)["draws"] > 1
+    assert _px_node(tmp_path, scenario, reduced=True)["draws"] == 1
+
+
 def _long(snapshot: dict) -> dict:
     return _rich(snapshot, [
         _handoff("j-l1", "131", 3000), _handoff("j-l2", "131", 2800, recipient="codex", action="review"),
@@ -899,5 +1002,21 @@ def test_the_relay_filter_shows_only_with_script_in_a_browser(snapshot: dict) ->
         threads = browser.eval("""(document.querySelector('[data-relay="wakes"]').click(),
           [].map.call(document.querySelectorAll('#relay .rl-row'), function (r) { return r.getAttribute('data-thread'); }))""")
         assert threads == ["maxharris1/factory#124"]
+    finally:
+        browser.close()
+
+
+@needs_chrome
+def test_every_ending_stays_inside_its_row_in_a_browser(snapshot: dict) -> None:
+    snap = _endings(snapshot)
+    browser = Browser()
+    try:
+        for script in (True, False):
+            for width in (1440, 375):
+                _load(browser, snap, width, script)
+                rows = browser.eval(RELAY_ROWS)
+                assert len(rows) == 11, (script, width)
+                for row in rows:
+                    assert not row["outside"], (script, width, row)
     finally:
         browser.close()

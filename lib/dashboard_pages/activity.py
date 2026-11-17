@@ -34,6 +34,7 @@ border-bottom:1px solid var(--line)}
 border:1px solid color-mix(in srgb,var(--h) 40%,transparent);background:color-mix(in srgb,var(--h) 9%,transparent);white-space:nowrap}
 .rl-step.b2b{border-style:dashed}
 .rl-claude{--h:var(--claude)}.rl-codex{--h:var(--codex)}.rl-cursor{--h:var(--cursor)}.rl-grok{--h:var(--grok)}
+.rl-other{--h:var(--muted)}
 .rl-bot{color:var(--h)}.rl-what{color:var(--text)}.rl-when{color:var(--muted)}
 .rl-sep{color:var(--muted)}
 .rl-early{display:none}
@@ -43,6 +44,13 @@ border:1px solid var(--line-hi);background:var(--bg);color:var(--text-2);white-s
 .rl-verdict{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;white-space:nowrap}
 .rl-out{color:var(--text-2)}
 .rl-done{display:block;flex:1 0 100%}
+.rl-now{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;white-space:nowrap}
+.rl-now.live,.rl-blk{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border:1px solid var(--h);
+background:color-mix(in srgb,var(--h) 9%,transparent);white-space:nowrap}
+.rl-now.stale{align-items:center;gap:4px 6px}
+.rl-now.queued{padding:1px 8px;border:1px solid var(--line-hi);background:var(--bg)}
+.rl-px{display:block;flex:0 0 40px;width:40px}
+.rl-run{color:var(--text)}.rl-wait,.rl-say{color:var(--text-2)}.rl-late{color:var(--warn)}
 .rl-legend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 20px;margin:12px 0 0;font-family:var(--mono);font-size:12px;
 color:var(--muted)}
 .rl-key{display:inline-flex;align-items:center;gap:8px}
@@ -72,7 +80,101 @@ SCRIPT = r"""
     return b.at - a.at || (a.type === 'verdict') - (b.type === 'verdict') || a.tie - b.tie;
   }
 
+  function liveRows(d) {
+    var running = {}, queued = {};
+    (d.running || []).forEach(function (r) {
+      var key = threadKey(r);
+      if (!running[key] || (r.elapsed_seconds || 0) < (running[key].elapsed_seconds || 0)) running[key] = r;
+    });
+    (d.queued || []).forEach(function (r) { if (!queued[threadKey(r)]) queued[threadKey(r)] = r; });
+    return {running: running, queued: queued};
+  }
+
+  var NOW_TITLE = 'where the ticket is now';
+
+  function nowBox(parent, cls) {
+    var box = add(parent, el('span', 'rl-now' + (cls ? ' ' + cls : '')));
+    box.setAttribute('title', NOW_TITLE);
+    return box;
+  }
+
+  function botClass(name) { return 'rl-' + (BOTS[name] ? name : 'other'); }
+
+  function nowJob(box, r, strip) {
+    add(box, el('span', 'rl-bot', r.recipient));
+    add(box, el('span', 'rl-what', r.action));
+    var px = add(box, el('span', 'rl-px'));
+    px.setAttribute('aria-hidden', 'true');
+    add(px, strip);
+  }
+
+  function lasting(parent, cls, lead, age) {
+    if (age === null || age === undefined) { if (lead) add(parent, el('span', cls, lead)); return; }
+    ticking(add(parent, el('span', cls)), age, (lead ? lead + ' ' : '') + 'for ', '');
+  }
+
+  function nowRunning(parent, at) {
+    var r = at.running;
+    var box = nowBox(parent, botClass(r.recipient) + ' live');
+    nowJob(box, r, PX.strip('relay-now-' + r.job, {state: PX.state(r), bot: r.recipient, cell: 2, height: 10}));
+    ticking(add(box, el('span', 'rl-run')), r.elapsed_seconds, 'running ', '');
+  }
+
+  function nowStale(parent, at) {
+    var r = at.running;
+    var box = nowBox(parent, 'stale');
+    nowJob(add(box, el('span', 'rl-blk ' + botClass(r.recipient))), r,
+           PX.strip('relay-now-' + r.job, {state: 'stale', bot: r.recipient, still: true, cell: 2, height: 10}));
+    add(box, chip(r.job_state, r.job_state === 'stale' ? 'warn' : 'bad'));
+    ticking(add(box, el('span', 'rl-late')), r.heartbeat_age_seconds, 'no heartbeat for ', '');
+  }
+
+  function nowQueued(parent, at) {
+    var r = at.queued;
+    var box = nowBox(parent, 'queued ' + botClass(r.recipient));
+    add(box, el('span', 'rl-bot', r.recipient));
+    add(box, el('span', 'rl-what', r.action));
+    ticking(add(box, el('span', 'rl-wait')), r.age_seconds, 'queued ', '');
+  }
+
+  function nowStopped(parent, at) {
+    var box = nowBox(parent);
+    add(box, chip(at.now.state, 'bad'));
+    lasting(box, 'rl-say', at.now.stopped_in ? 'in ' + at.now.stopped_in : '', at.now.age_seconds);
+  }
+
+  function nowShipped(parent, at) {
+    var box = nowBox(parent);
+    add(box, chip('shipped', 'ok'));
+    add(box, el('span', 'rl-out', at.now.how === 'handed-off' ? 'handed off' : 'merged'));
+    if (at.now.age_seconds !== null && at.now.age_seconds !== undefined) {
+      ticking(add(box, el('span', 'rl-when')), at.now.age_seconds, '', ' ago');
+    }
+  }
+
+  function nowWaiting(parent, at) {
+    var box = nowBox(parent);
+    add(box, chip('waiting', 'warn'));
+    lasting(box, 'rl-say', 'on ' + at.now.waiting_on, at.now.age_seconds);
+  }
+
+  function nowIdle(parent, at) { lasting(nowBox(parent), 'rl-when', 'in ' + at.now.state, at.now.age_seconds); }
+
+  function liveState(at) { return at.running ? at.running.job_state : null; }
+  function rests(at) { return at.now ? at.now.kind : null; }
+
+  var ENDINGS = [
+    [function (at) { return liveState(at) === 'running'; }, nowRunning],
+    [function (at) { return liveState(at) === 'stale' || liveState(at) === 'dead'; }, nowStale],
+    [function (at) { return !!at.queued; }, nowQueued],
+    [function (at) { return rests(at) === 'stopped'; }, nowStopped],
+    [function (at) { return rests(at) === 'shipped' && !at.said; }, nowShipped],
+    [function (at) { return rests(at) === 'idle' && !!at.now.waiting_on; }, nowWaiting],
+    [function (at) { return rests(at) === 'idle'; }, nowIdle]
+  ];
+
   function relayThreads(d) {
+    var live = liveRows(d);
     return d.relay.threads.map(function (t) {
       var steps = t.handoffs.map(function (r, i) { return {type: 'handoff', row: r, at: r.age_seconds, tie: -i}; });
       var verdicts = t.verdicts.map(function (r) {
@@ -83,8 +185,13 @@ SCRIPT = r"""
       verdicts.forEach(function (v, i) {
         if (v.at === null) ordered.splice(i ? ordered.indexOf(verdicts[i - 1]) + 1 : 0, 0, v);
       });
+      var key = threadKey(t);
+      var last = ordered[ordered.length - 1];
+      var at = {running: live.running[key] || null, queued: live.queued[key] || null, now: t.now || null,
+                said: !!last && last.type === 'verdict' && last.row.kind === 'shipped'};
+      var rule = ENDINGS.filter(function (e) { return e[0](at); })[0];
       return {
-        key: threadKey(t), ref: t, steps: ordered,
+        key: key, ref: t, steps: ordered, at: at, ending: rule ? rule[1] : null,
         scripted: ordered.some(function (s) { return s.type === 'handoff' && s.row.kind === 'scripted'; }),
         wakes: ordered.some(function (s) { return s.type === 'handoff' && s.row.kind === 'bot_to_bot'; }),
         shipped: ordered.some(function (s) { return s.type === 'verdict' && s.row.kind === 'shipped'; })
@@ -172,18 +279,20 @@ SCRIPT = r"""
         row.setAttribute('data-thread', t.key);
         add(row, link('rl-tk', hrefs[t.key] ? ticketPageHref(t.ref) : 'job.html')).textContent = ticketOf(t.ref);
         var steps = add(row, el('span', 'rl-steps'));
-        var hidden = t.steps.length - RELAY_WINDOW;
+        var items = t.steps.map(function (s) { return function (p) { relayStep(p, s); }; });
+        if (t.ending) items.push(function (p) { t.ending(p, t.at); });
+        var hidden = items.length - RELAY_WINDOW;
         if (hidden > 0) relayMore(steps, t, hidden);
         var shut = hidden > 0 && !rlOpen[t.key] ? hidden : 0;
-        t.steps.forEach(function (s, i) {
+        items.forEach(function (draw, i) {
           if (i < shut) {
             var early = add(steps, el('span', 'rl-early'));
-            relayStep(early, s);
+            draw(early);
             relaySep(early);
             return;
           }
           if (i > shut) relaySep(steps);
-          relayStep(steps, s);
+          draw(steps);
         });
         if (played[t.key] && !still) {
           var box = add(steps, el('span', 'rl-done'));
@@ -263,7 +372,121 @@ def _place_untimed(ordered: list[dict], verdicts: list[dict]) -> None:
         ordered.insert(at, step)
 
 
+_NOW_TITLE = ' title="where the ticket is now"'
+
+
+def _bot_class(name: object) -> str:
+    return f"rl-{name if name in _BOTS else 'other'}"
+
+
+def _now_job(row: dict, strip: str) -> str:
+    return (
+        _span("rl-bot", row["recipient"]) + _span("rl-what", row["action"])
+        + f'<span class="rl-px" aria-hidden="true">{strip}</span>'
+    )
+
+
+def _lasting(cls: str, lead: str, age: object) -> str:
+    if age is None:
+        return _span(cls, lead) if lead else ""
+    return _span(cls, (f"{lead} " if lead else "") + "for " + duration(age))
+
+
+def _now_running(at: dict) -> str:
+    row = at["running"]
+    px = _px()
+    strip = px.px_strip(f"relay-now-{row['job']}", state=px.px_state(row), bot=row["recipient"], cell=2, height=10)
+    return (
+        f'<span class="rl-now {_bot_class(row["recipient"])} live"{_NOW_TITLE}>{_now_job(row, strip)}'
+        f'{_span("rl-run", "running " + duration(row["elapsed_seconds"]))}</span>'
+    )
+
+
+def _now_stale(at: dict) -> str:
+    row = at["running"]
+    strip = _px().px_strip(f"relay-now-{row['job']}", state="stale", bot=row["recipient"], still=True, cell=2,
+                           height=10)
+    return (
+        f'<span class="rl-now stale"{_NOW_TITLE}><span class="rl-blk {_bot_class(row["recipient"])}">'
+        f'{_now_job(row, strip)}</span>'
+        + _chip(row["job_state"], "warn" if row["job_state"] == "stale" else "bad")
+        + _span("rl-late", "no heartbeat for " + duration(row["heartbeat_age_seconds"]))
+        + "</span>"
+    )
+
+
+def _now_queued(at: dict) -> str:
+    row = at["queued"]
+    return (
+        f'<span class="rl-now queued {_bot_class(row["recipient"])}"{_NOW_TITLE}>'
+        f'{_span("rl-bot", row["recipient"])}{_span("rl-what", row["action"])}'
+        f'{_span("rl-wait", "queued " + duration(row["age_seconds"]))}</span>'
+    )
+
+
+def _now_stopped(at: dict) -> str:
+    now = at["now"]
+    lead = f"in {now['stopped_in']}" if now["stopped_in"] else ""
+    return f'<span class="rl-now"{_NOW_TITLE}>{_chip(now["state"], "bad")}{_lasting("rl-say", lead, now["age_seconds"])}</span>'
+
+
+def _now_shipped(at: dict) -> str:
+    now = at["now"]
+    age = now["age_seconds"]
+    return (
+        f'<span class="rl-now"{_NOW_TITLE}>{_chip("shipped", "ok")}'
+        + _span("rl-out", "handed off" if now["how"] == "handed-off" else "merged")
+        + ("" if age is None else _span("rl-when", duration(age) + " ago"))
+        + "</span>"
+    )
+
+
+def _now_waiting(at: dict) -> str:
+    now = at["now"]
+    return (
+        f'<span class="rl-now"{_NOW_TITLE}>{_chip("waiting", "warn")}'
+        + _lasting("rl-say", f"on {now['waiting_on']}", now["age_seconds"]) + "</span>"
+    )
+
+
+def _now_idle(at: dict) -> str:
+    now = at["now"]
+    return f'<span class="rl-now"{_NOW_TITLE}>' + _lasting("rl-when", f"in {now['state']}", now["age_seconds"]) + "</span>"
+
+
+def _live_state(at: dict) -> object:
+    return at["running"]["job_state"] if at["running"] else None
+
+
+def _rests(at: dict) -> object:
+    return at["now"]["kind"] if at["now"] else None
+
+
+_ENDINGS = (
+    (lambda at: _live_state(at) == "running", _now_running),
+    (lambda at: _live_state(at) in ("stale", "dead"), _now_stale),
+    (lambda at: at["queued"] is not None, _now_queued),
+    (lambda at: _rests(at) == "stopped", _now_stopped),
+    (lambda at: _rests(at) == "shipped" and not at["said"], _now_shipped),
+    (lambda at: _rests(at) == "idle" and bool(at["now"]["waiting_on"]), _now_waiting),
+    (lambda at: _rests(at) == "idle", _now_idle),
+)
+
+
+def _live_rows(snapshot: dict) -> tuple[dict[str, dict], dict[str, dict]]:
+    running: dict[str, dict] = {}
+    for row in snapshot.get("running", []):
+        key = _thread_key(row)
+        if key not in running or (row.get("elapsed_seconds") or 0) < (running[key].get("elapsed_seconds") or 0):
+            running[key] = row
+    queued: dict[str, dict] = {}
+    for row in snapshot.get("queued", []):
+        queued.setdefault(_thread_key(row), row)
+    return running, queued
+
+
 def relay_threads(snapshot: dict) -> list[dict]:
+    running, queued = _live_rows(snapshot)
     found = []
     for item in snapshot["relay"]["threads"]:
         handoffs = [{"type": "handoff", "row": row, "at": row["age_seconds"], "tie": -index}
@@ -276,8 +499,12 @@ def relay_threads(snapshot: dict) -> list[dict]:
         )
         _place_untimed(ordered, verdicts)
         kinds = {(step["type"], step["row"]["kind"]) for step in ordered}
+        key = _thread_key(item)
+        at = {"running": running.get(key), "queued": queued.get(key), "now": item.get("now"),
+              "said": bool(ordered) and (ordered[-1]["type"], ordered[-1]["row"]["kind"]) == ("verdict", "shipped")}
         found.append({
-            "key": _thread_key(item), "ref": item, "steps": ordered,
+            "key": key, "ref": item, "steps": ordered, "at": at,
+            "ending": next((draw for when, draw in _ENDINGS if when(at)), None),
             "scripted": ("handoff", "scripted") in kinds,
             "wakes": ("handoff", "bot_to_bot") in kinds,
             "shipped": ("verdict", "shipped") in kinds,
@@ -308,6 +535,11 @@ def _relay_step(step: dict) -> str:
 _SEP = '<span class="rl-sep" aria-hidden="true">→</span>'
 
 
+def _items(thread: dict) -> list[str]:
+    ending = [thread["ending"](thread["at"])] if thread["ending"] else []
+    return [*(_relay_step(step) for step in thread["steps"]), *ending]
+
+
 def _windowed(key: str, items: list[str]) -> str:
     """The RELAY_WINDOW newest items; each older one sits, with the arrow
     after it, in an rl-early box that only script hides."""
@@ -333,7 +565,7 @@ def _relay(snapshot: dict) -> str:
     rows = "".join(
         f'<div class="rl-row" data-thread="{_e(t["key"])}">'
         f'<a class="rl-tk" href="{_e(ticket_page_href(t["ref"]) if t["key"] in hrefs else "job.html")}">{_e(_ticket(t["ref"]))}</a>'
-        f'<span class="rl-steps">{_windowed(t["key"], [_relay_step(step) for step in t["steps"]])}</span></div>'
+        f'<span class="rl-steps">{_windowed(t["key"], _items(t))}</span></div>'
         for t in threads
     )
     body = f'<div class="rl-rows">{rows}</div>' if rows else '<p class="empty">no handoffs or verdicts yet</p>'
