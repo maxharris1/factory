@@ -559,6 +559,7 @@ def test_f1_an_html_goal_still_reads_as_written():
         "`keep\n# marker` must remain.",
         "`keep\n```\n` stays as code.",
         "Code `a\n- b\n1. c` and `d\n> e`.",
+        "Keep ](url`)\n# value` intact.",
     ],
 )
 def test_f2_an_inline_code_goal_renders_as_written(goal):

@@ -854,29 +854,37 @@ def _items(title: str, items: Sequence[str]) -> str:
 def _paragraph(title: str, text: str) -> str:
     raw = [line.lstrip() for line in text.splitlines()]
     lines: list[str] = []
-    open_run = 0
+    open_run = brackets = 0
     for index, line in enumerate(raw):
+        if not line:
+            brackets = 0
         if open_run:
             lines[-1] += f" {line}"
         else:
             line = _escape_block_opener(line)
             lines.append(line)
-        open_run = _code_span_after(line, open_run, "\n".join(raw[index + 1 :]))
+        open_run, brackets = _code_span_after(line, open_run, brackets, "\n".join(raw[index + 1 :]))
     return f"**{title}**\n" + "\n".join(lines) + "\n\n"
 
 
-def _code_span_after(line: str, open_run: int, following: str) -> int:
+def _code_span_after(line: str, open_run: int, brackets: int, following: str) -> tuple[int, int]:
     position = 0
     while position < len(line):
         if open_run:
             close = _closing_run(line, position, open_run)
             if close is None:
-                return open_run
+                return open_run, brackets
             position, open_run = close, 0
         elif line[position] == "\\":
             position += 2
-        elif link := _LINK_TAIL.match(line, position):
-            position = link.end()
+        elif brackets and (link := _LINK_TAIL.match(line, position)):
+            position, brackets = link.end(), brackets - 1
+        elif line[position] == "[":
+            brackets += 1
+            position += 1
+        elif line[position] == "]":
+            brackets = max(brackets - 1, 0)
+            position += 1
         elif line[position] == "`":
             run = _BACKTICK_RUN.match(line, position)
             paragraph_rest = f"{line[run.end():]}\n{following}".split("\n\n", 1)[0]
@@ -885,7 +893,7 @@ def _code_span_after(line: str, open_run: int, following: str) -> int:
             position = run.end()
         else:
             position += 1
-    return open_run
+    return open_run, brackets
 
 
 def _closing_run(text: str, start: int, width: int) -> int | None:
