@@ -884,6 +884,7 @@ def test_eval_report_imports_and_does_not_touch_network(
         "typing",
         "lib.factory_md",
         "lib.handoff",
+        "lib.job_detail",
         "lib.load",
         "lib.orch_yml",
         "lib.schema",

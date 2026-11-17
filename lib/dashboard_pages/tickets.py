@@ -90,6 +90,31 @@ font-family:var(--mono)}
 .tk-page{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
 .tk-note{font-size:12px;color:var(--muted)}
 .tk-scroll{overflow-x:auto}
+.tk-phases{display:none}
+.tk-ph{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-width:0;height:48px;
+padding:0;font-family:inherit;cursor:pointer;border:1px solid var(--line-hi);background:var(--panel-hi);
+color:var(--text-2)}
+.tk-ph[aria-pressed=true]{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent);color:var(--ok)}
+.tk-ph:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.tk-phn{font-size:11px;line-height:1.3}
+.tk-phc{font-size:13px;line-height:1.2;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
+.tk-phc.tk-none{color:var(--muted)}
+.tk-phc.tk-stopped{color:var(--bad)}
+@media (min-width:700px){.tk-narrow{display:none}}
+@media (max-width:699.98px){
+.tk-live .tk-phases{display:grid;gap:4px;margin-bottom:12px;
+grid-template-columns:minmax(0,4fr) minmax(0,4fr) minmax(0,5fr) minmax(0,6fr) minmax(0,4fr) minmax(0,7fr)}
+.tk-board{grid-template-columns:minmax(0,1fr)}
+.tk-live .tk-col:not(.tk-picked){display:none}
+.tk-wide{display:none}
+.tk-tiles{flex-direction:column;gap:6px}
+.tk-tile{display:flex;box-sizing:border-box;min-height:44px;padding:0 10px;gap:8px}
+.tk-tn{font-size:13px}
+.tk-ago{margin-left:auto;font-size:12px}
+.tk-shelf>.tk-tiles>.tk-tile:nth-child(n+6){display:none}
+.tk-drawer{gap:6px}
+.tk-earlier>summary{box-sizing:border-box;min-height:44px;padding:10px;border:1px dashed var(--line-hi)}
+}
 @media (scripting:none){#tickets[hidden]{display:block !important}#ticket-filter{display:none}}
 @media (scripting:none){.tk-earlier .tk-btn{display:none}}
 """
@@ -103,6 +128,8 @@ SCRIPT_TICKETS = r"""
   var BOARD_EMPTY = {Ask: 'nothing waiting on questions', Stop: 'nothing stopped'};
   var tkProject = tkLoad('tk-project') || '';
   var tkView = tkLoad('tk-view') === 'table' ? 'table' : 'board';
+  var tkPhase = tkLoad('tk-phase');
+  if (BOARD.columns.indexOf(tkPhase) < 0) tkPhase = null;
   var tkShelfShown = BOARD.shelf_page;
   var tkFind = {query: '', active: null, open: false, moving: false, rows: [], found: []};
 
@@ -198,6 +225,10 @@ SCRIPT_TICKETS = r"""
       return !known(x) - !known(y) || (known(y) ? y : 0) - (known(x) ? x : 0) ||
         cmp(ticketKey(a.ticket), ticketKey(b.ticket));
     }
+    var busy = columns.filter(function (col) {
+      return col.cards.some(function (c) { return c.kind === 'live' || c.kind === 'stale'; });
+    });
+    var filled = columns.filter(function (col) { return col.cards.length; });
     var tiles = cards.filter(function (c) { return c.phase === 'Shipped'; }).sort(byShip);
     var handed = tiles.filter(function (c) { return c.ticket.shipped_how === 'handed-off'; }).length;
     return {
@@ -205,6 +236,7 @@ SCRIPT_TICKETS = r"""
       open: columns.reduce(function (n, col) { return n + col.cards.length; }, 0),
       shipped: tiles.length,
       columns: columns,
+      start: busy.concat(filled).map(function (col) { return col.phase; }).concat(BOARD.columns)[0],
       shelf: {merged: tiles.length - handed, handed: handed, tiles: tiles,
               newest: tiles.slice(0, BOARD.shelf_newest), earlier: tiles.slice(BOARD.shelf_newest)}
     };
@@ -335,8 +367,27 @@ SCRIPT_TICKETS = r"""
     return card;
   }
 
+  function tkPhases(root, columns) {
+    var bar = tkGroup(root, 'tk-phases', 'Phase');
+    columns.forEach(function (col) {
+      var n = col.cards.length;
+      var b = add(bar, el('button', 'tk-ph'));
+      b.setAttribute('type', 'button');
+      b.setAttribute('data-pick', col.phase);
+      b.setAttribute('aria-pressed', col.phase === tkPhase ? 'true' : 'false');
+      b.setAttribute('aria-label', col.name + ', ' + n + (n === 1 ? ' ticket' : ' tickets'));
+      add(b, el('span', 'tk-phn', col.name));
+      add(b, el('span', !n ? 'tk-phc tk-none' : col.phase === 'Stop' ? 'tk-phc tk-stopped' : 'tk-phc', n));
+      b.addEventListener('click', function () {
+        tkPhase = col.phase;
+        tkSave('tk-phase', col.phase);
+        if (latest) render(latest);
+      });
+    });
+  }
+
   function tkColumn(col) {
-    var box = el('div', 'tk-col');
+    var box = el('div', col.phase === tkPhase ? 'tk-col tk-picked' : 'tk-col');
     box.setAttribute('data-phase', col.phase);
     var head = add(box, el('div', 'tk-head'));
     var row = add(head, el('div', 'tk-headrow'));
@@ -363,6 +414,7 @@ SCRIPT_TICKETS = r"""
       tkSave('tk-project', '');
     }
     var b = boardOf(d, tkProject);
+    if (!tkPhase && b.available) tkPhase = b.start;
 
     var filter = byId('ticket-filter');
     if (filter) {
@@ -389,8 +441,10 @@ SCRIPT_TICKETS = r"""
                          b.tracked + ' tracked' + (b.available ? ' · ' + b.open + ' open · ' + b.shipped + ' shipped' : ''));
     if (pipeline) {
       pipeline.hidden = tkView !== 'board';
+      pipeline.classList.toggle('tk-live', b.available);
       if (!b.available) add(pipeline, el('p', 'empty', 'statechart unavailable'));
       else {
+        tkPhases(pipeline, b.columns);
         var grid = add(pipeline, el('div', 'tk-board'));
         b.columns.forEach(function (col) { add(grid, tkColumn(col)); });
       }
@@ -405,8 +459,14 @@ SCRIPT_TICKETS = r"""
     add(shipped, el('p', 'tk-sub', s.merged + ' merged · ' + s.handed + ' handed off'));
     var shelf = add(shipped, el('div', 'tk-shelf'));
     tkTiles(shelf, s.newest);
+    var again = s.newest.slice(BOARD.shelf_phone);
+    if (!again.length) return;
+    var box = details(shelf, 'tk-earlier', null, s.earlier.length ? 'tk-earlier' : 'tk-earlier tk-narrow');
+    add(box.children[0], el('span', 'tk-wide', s.earlier.length + ' earlier'));
+    add(box.children[0], el('span', 'tk-narrow', s.earlier.length + again.length + ' earlier'));
+    var drawer = add(box, el('div', 'tk-drawer'));
+    tkTiles(add(drawer, el('div', 'tk-narrow')), again);
     if (!s.earlier.length) return;
-    var drawer = add(details(shelf, 'tk-earlier', s.earlier.length + ' earlier', 'tk-earlier'), el('div', 'tk-drawer'));
     tkTiles(drawer, s.earlier.slice(0, tkShelfShown));
     var left = s.earlier.length - tkShelfShown;
     if (left <= 0) return;
@@ -599,6 +659,7 @@ CARD_KINDS = {
 }
 CAP = 6
 SHELF_NEWEST = 10
+SHELF_PHONE = 5
 SHELF_PAGE = 50
 FIND_MAX = 8
 FIND = (
@@ -627,7 +688,7 @@ def board_constants() -> dict:
     return {
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
         "chips": JOB_CHIPS, "kinds": CARD_KINDS, "cap": CAP, "shelf_newest": SHELF_NEWEST, "shelf_page": SHELF_PAGE,
-        "find_max": FIND_MAX,
+        "shelf_phone": SHELF_PHONE, "find_max": FIND_MAX,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -713,6 +774,8 @@ def board(snapshot: dict, project: str | None = None) -> dict:
     for col in table["columns"]:
         ranked = sorted((c for c in cards if c["phase"] == col["phase"]), key=_rank)
         columns.append({**col, "cards": ranked, "shown": ranked[:CAP], "more": ranked[CAP:]})
+    busy = [col["phase"] for col in columns if any(c["kind"] in ("live", "stale") for c in col["cards"])]
+    filled = [col["phase"] for col in columns if col["cards"]]
     tiles = sorted((c for c in cards if c["phase"] == "Shipped"), key=_ship_rank)
     handed = sum(c["ticket"].get("shipped_how") == "handed-off" for c in tiles)
     return {
@@ -723,6 +786,7 @@ def board(snapshot: dict, project: str | None = None) -> dict:
         "open": sum(len(col["cards"]) for col in columns),
         "shipped": len(tiles),
         "columns": columns,
+        "start": (busy + filled + [COLUMNS[0]])[0],
         "shelf": {
             "merged": len(tiles) - handed, "handed": handed, "tiles": tiles,
             "newest": tiles[:SHELF_NEWEST], "earlier": tiles[SHELF_NEWEST:],
@@ -836,7 +900,21 @@ def _card(card: dict) -> str:
     )
 
 
-def _column(col: dict) -> str:
+def _phases(columns: list[dict], picked: str) -> str:
+    buttons = ""
+    for col in columns:
+        n = len(col["cards"])
+        count = "tk-phc tk-none" if not n else "tk-phc tk-stopped" if col["phase"] == "Stop" else "tk-phc"
+        label = f"{col['name']}, {n} ticket" + ("" if n == 1 else "s")
+        buttons += (
+            f'<button class="tk-ph" type="button" data-pick="{_e(col["phase"])}" '
+            f'aria-pressed="{"true" if col["phase"] == picked else "false"}" aria-label="{_e(label)}">'
+            f'{_span("tk-phn", col["name"])}{_span(count, n)}</button>'
+        )
+    return f'<div class="tk-phases" role="group" aria-label="Phase">{buttons}</div>'
+
+
+def _column(col: dict, picked: bool) -> str:
     phase = col["phase"]
     cards = "".join(_card(card) for card in col["shown"]) or (
         f'<div class="tk-empty">{_e(_EMPTY.get(phase, f"nothing in {phase.lower()}"))}</div>'
@@ -848,7 +926,8 @@ def _column(col: dict) -> str:
         )
     count = "tk-count tk-stopped" if phase == "Stop" and col["cards"] else "tk-count"
     return (
-        f'<div class="tk-col" data-phase="{_e(phase)}"><div class="tk-head"><div class="tk-headrow">'
+        f'<div class="{"tk-col tk-picked" if picked else "tk-col"}" data-phase="{_e(phase)}"><div class="tk-head">'
+        '<div class="tk-headrow">'
         f'{_glyph(f"phase-{phase}", col["glyph"])}{_span("tk-name", col["name"])}{_span(count, len(col["cards"]))}'
         f'</div>{_span("tk-states", " · ".join(col["states"]))}</div>{cards}</div>'
     )
@@ -881,16 +960,18 @@ def _tiles(cards: list[dict]) -> str:
 def _shelf(shelf: dict) -> str:
     if not shelf["tiles"]:
         return '<p class="empty">nothing shipped</p>'
-    earlier, drawer = shelf["earlier"], ""
-    if earlier:
+    earlier, again, drawer = shelf["earlier"], shelf["newest"][SHELF_PHONE:], ""
+    if again:
         left = len(earlier) - SHELF_PAGE
         page = (
             f'<div class="tk-page"><button class="tk-btn" type="button">show {SHELF_PAGE} more</button>'
             f'{_span("tk-note", f"{left} older not shown · newest first")}</div>'
         ) if left > 0 else ""
         drawer = (
-            f'<details class="tk-earlier"><summary>{len(earlier)} earlier</summary>'
-            f'<div class="tk-drawer">{_tiles(earlier[:SHELF_PAGE])}{page}</div></details>'
+            f'<details class="{"tk-earlier" if earlier else "tk-earlier tk-narrow"}"><summary>'
+            f'{_span("tk-wide", f"{len(earlier)} earlier")}{_span("tk-narrow", f"{len(earlier) + len(again)} earlier")}'
+            f'</summary><div class="tk-drawer"><div class="tk-narrow">{_tiles(again)}</div>'
+            f'{_tiles(earlier[:SHELF_PAGE]) if earlier else ""}{page}</div></details>'
         )
     sub = _e(f"{shelf['merged']} merged · {shelf['handed']} handed off")
     return f'<p class="tk-sub">{sub}</p><div class="tk-shelf">{_tiles(shelf["newest"])}{drawer}</div>'
@@ -903,14 +984,15 @@ def _board(snapshot: dict) -> str:
     )
     views = _button("board", "data-view", "board", True) + _button("table", "data-view", "table", False)
     unavailable = '<p class="empty">statechart unavailable</p>'
-    columns = "".join(_column(col) for col in found["columns"])
+    columns = "".join(_column(col, col["phase"] == found["start"]) for col in found["columns"])
     return (
         '<div class="tk-filter" id="ticket-filter"><div class="tk-tools">'
         f'<div class="tk-group" role="group" aria-label="Project">{buttons}</div><span class="tk-grow"></span>'
         f'<div class="tk-group tk-view" role="group" aria-label="View">{views}</div></div>{FIND}</div>'
         + _panel(
             "pipeline", "Pipeline",
-            f'<div class="tk-board">{columns}</div>' if found["available"] else unavailable,
+            _phases(found["columns"], found["start"]) + f'<div class="tk-board">{columns}</div>'
+            if found["available"] else unavailable,
             count=f"{found['tracked']} tracked"
             + (f" · {found['open']} open · {found['shipped']} shipped" if found["available"] else ""),
         )

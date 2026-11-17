@@ -69,7 +69,10 @@ directory: build_metrics opens a backup (lib.state_backup) read-only, so
 it writes nothing to it or beside it, and render_metrics prints each
 metric beside O4's baseline snapshot. A metric whose source is not in a
 snapshot prints as unrecorded(<reason>). A ratio with nothing to divide
-prints as -. --since and --until (inclusive, UTC) filter the rows that
+prints as -. Job detail keys moved out of the database (lib/job_detail.py,
+#653) are read from job-detail/ beside the snapshot; a snapshot copied
+without that directory reads those keys as absent. --since and --until
+(inclusive, UTC) filter the rows that
 carry a time, for the metrics named in WINDOWED_METRICS and the follow-up
 list. The rest are lifetime counts:
 
@@ -149,6 +152,7 @@ from typing import Literal, assert_never
 
 from lib.factory_md import FactoryConfig, load_factory_md
 from lib.handoff import STATES, HandoffError, matching_head, parse_comment
+from lib.job_detail import load as load_job_detail
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
 from lib.schema import AUT0_REPO
@@ -1149,6 +1153,13 @@ def build_metrics(db: Path, *, since: str | None = None, until: str | None = Non
         raise EvalError(f"database not found: {db}")
     try:
         connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+        directory = db.resolve().parent
+        connection.create_function(
+            "job_detail",
+            2,
+            lambda job_id, detail: load_job_detail(directory, str(job_id), detail),
+            deterministic=True,
+        )
     except sqlite3.Error as exc:
         raise EvalError(f"{db}: {exc}") from exc
     try:
@@ -1418,7 +1429,8 @@ def _stop_metrics(
                 SELECT 1 FROM jobs j
                 WHERE lower(j.repo) = lower(s.repo) AND j.ticket_id = s.ticket_id
                   AND j.source_comment_id = s.comment_id AND json_valid(j.detail)
-                  AND json_extract(j.detail, '$.evidence.instructions.cause') IN (?, ?)
+                  AND json_extract(job_detail(j.id, j.detail), '$.evidence.instructions.cause')
+                      IN (?, ?)
             )))
             AND s.comment_id NOT IN
                 (SELECT go_comment_id FROM feeder_items WHERE go_comment_id IS NOT NULL)
@@ -1644,8 +1656,11 @@ def _ci_fixes_without_log(connection: sqlite3.Connection, window: MetricWindow) 
     clause, bounds = window.sql("created_at")
     return connection.execute(
         f"""
-        SELECT COUNT(*) FROM jobs WHERE action = 'fix' AND {clause}
-          AND CASE WHEN json_valid(detail) THEN
+        SELECT COUNT(*) FROM (
+            SELECT head, job_detail(id, detail) AS detail FROM jobs
+            WHERE action = 'fix' AND {clause}
+        )
+        WHERE CASE WHEN json_valid(detail) THEN
               (json_extract(detail, '$.instruction') = 'CI failed on ' || head
                OR json_extract(detail, '$.instruction') LIKE 'failed: %')
               AND COALESCE(json_extract(detail, '$.evidence.ci.log_tail'), '') = ''

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from lib import job_detail
 from lib.brief import render_brief
 from lib.brief.inline import BRIEF_TEXT_LIMIT, PLAN_TEXT_LIMIT, quoted_section
 from lib.brief_comment import before_factory_md
@@ -145,8 +146,8 @@ def test_a_met_plan_queues_a_build_that_carries_the_plan_text(tmp_path) -> None:
     dispatcher.process(ticket(go))
     dispatcher.process(ticket(go, plan))
     with queue.connect() as connection:
-        (raw,) = connection.execute("SELECT detail FROM jobs WHERE action = 'build'").fetchone()
-    detail = json.loads(raw)
+        job_id, raw = connection.execute("SELECT id, detail FROM jobs WHERE action = 'build'").fetchone()
+        detail = json.loads(job_detail.load_row(connection, job_id, raw))
     assert detail["plan_text"] == "Plan."
     assert detail["instruction"] == PLAN_URL
 

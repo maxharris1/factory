@@ -50,7 +50,7 @@ def test_a_conflicting_queue_head_gets_one_update_job(tmp_path: Path) -> None:
     detail = json.loads(job["detail"])
     assert detail["round"] == "1/3"
     assert detail["base_branch"] == "main"
-    assert brief_kind(_job(job)) == "merge-only"
+    assert brief_kind(_job(job, board.queue.connect())) == "merge-only"
     row = board.state("42")
     assert row["workflow_state"] == "updating"
     assert row["update_from_head"] == sha(1)

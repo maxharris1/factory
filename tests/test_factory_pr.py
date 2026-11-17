@@ -1,13 +1,17 @@
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from lib import cli
+from lib.brief import render_brief
 from lib.dashboard import collect_snapshot, render_pages
 from lib.feeder import FEEDER_TABLE, ensure_tables
 from lib.github_actions import GhResult
 from lib.pr_title import SOURCES_TABLE
 from lib.poll_source import FedPulls, LivePollSource
+from lib.queue import JobRequest
+from tests.test_dispatcher import READY, FakeSource
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue, linear_transport_for
 from tests.test_live_poll_no_webhook import _dispatcher
 
@@ -194,3 +198,121 @@ def test_the_poller_runtime_reads_the_feeders_recorded_pulls(tmp_path: Path) -> 
     record_fed_pull(database, "1462")
 
     assert source.fed_pulls.get("ACME/Widgets", "AUT-2233") == "1462"
+
+
+def test_a_queued_build_follows_the_ticket_to_its_rebound_pr(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    record_fed_pull(database, "1462")
+    ticket = poll(database, TitleSearchGh())
+    dispatcher.process(replace(ticket, pr_number="1338"))
+
+    dispatcher.process(ticket)
+
+    job = dispatcher.queue.claim("claude")
+    assert job is not None and job.request.action == "build"
+    detail = json.loads(job.request.detail or "{}")
+    assert detail["pr_number"] == "1462"
+    assert detail["post_to"].startswith("PR #1462 ")
+    brief = render_brief(job, bot="claude-bot", context=None)
+    assert "repos/acme/widgets/issues/1462/comments" in brief
+    assert "1338" not in brief
+
+
+def test_a_queued_review_of_the_old_prs_head_is_cancelled_on_rebind(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    record_fed_pull(database, "1462")
+    review = dispatcher.queue.enqueue(
+        JobRequest(
+            repo="acme/widgets",
+            ticket_id="AUT-2233",
+            action="review",
+            recipient="codex",
+            source_comment_id="ready-1338",
+            timeout_seconds=60,
+            head="a" * 40,
+            detail=json.dumps({"pr_number": "1338", "post_to": "PR #1338 issue comments"}),
+        ),
+        dedupe_key="review-1338",
+    )
+
+    dispatcher.process(poll(database, TitleSearchGh()))
+
+    assert dispatcher.queue.claim("codex") is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT event, detail FROM job_events WHERE job_id = ?", (review.id,)
+        ).fetchall() == [("cancelled", "rebound:1338->1462")]
+    replacement = dispatcher.queue.enqueue(
+        replace(
+            review.request,
+            source_comment_id="ready-1462",
+            detail=json.dumps({"pr_number": "1462", "post_to": "PR #1462 issue comments"}),
+        ),
+        dedupe_key="review-1338",
+    )
+    assert replacement.id != review.id
+    claimed = dispatcher.queue.claim("codex")
+    assert claimed is not None and claimed.id == replacement.id
+
+
+def test_a_ready_on_the_rebound_pr_queues_a_review_at_the_same_head(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    dispatcher.trusted_logins["github"] = {
+        "claude-login": frozenset({"claude-bot"}),
+        "codex-login": frozenset({"codex-bot"}),
+    }
+    record_fed_pull(database, "1338")
+    gh = TitleSearchGh()
+    with dispatcher.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES ('acme/widgets', 'AUT-2233', 'linear', 0)"
+        )
+    dispatcher.poll_once(FakeSource(poll(database, gh)))
+    build = dispatcher.queue.claim("claude")
+    assert build is not None
+    dispatcher.queue.finish(build.id, owner="claude", handoff_comment_id="500")
+
+    def ready(comment_id: str, minute: str) -> None:
+        gh.comments = [
+            {
+                "id": comment_id,
+                "body": READY.format(head=gh.head),
+                "created_at": f"2026-11-11T12:{minute}:00Z",
+                "user": {"login": "claude-login"},
+            }
+        ]
+        dispatcher.poll_once(FakeSource(poll(database, gh)))
+
+    ready("500", "01")
+    with dispatcher.queue.connect() as connection:
+        connection.execute("UPDATE feeder_items SET pr_number = '1462' WHERE issue = 'AUT-2233'")
+    ready("501", "02")
+    dispatcher.poll_once(FakeSource(poll(database, gh)))
+
+    review = dispatcher.queue.claim("codex")
+    assert review is not None
+    assert json.loads(review.request.detail or "{}")["pr_number"] == "1462"
+    assert dispatcher.queue.claim("codex") is None
+
+
+def test_the_dashboard_drops_the_pr_when_the_ticket_has_none(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            f"INSERT INTO {SOURCES_TABLE} (repo, ticket_id, source, pr_number, titled_at) "
+            "VALUES ('acme/widgets', 'AUT-2233', 'AUT-2233', '1338', 5)"
+        )
+    ticket = poll(database, TitleSearchGh())
+    assert ticket.pr_number is None
+
+    dispatcher.process(ticket)
+
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+    assert "(PR #1338)" not in render_pages(collect_snapshot(database, log, now=100.0))["index.html"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(f"SELECT pr_number FROM {SOURCES_TABLE}").fetchall() == [(None,)]

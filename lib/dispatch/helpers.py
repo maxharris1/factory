@@ -491,3 +491,9 @@ def red_checks(ticket: TrackedTicket, head: str | None) -> tuple[str, ...]:
     if result is None or result.status != "failure":
         return ()
     return tuple(check.name for check in failed_checks(result))
+
+
+def _post_to(pr_number: str | None) -> str:
+    if pr_number is None:
+        return "the linked PR issue comments (not reviews or inline comments)"
+    return f"PR #{pr_number} issue comments (not reviews or inline comments)"

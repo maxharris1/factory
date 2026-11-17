@@ -40,7 +40,7 @@ GH_TIMEOUT_SECONDS = 30.0
 RETRY_DELAYS = (2.0, 8.0)
 
 _COMMENT_ID = re.compile(r"^[1-9][0-9]{0,19}$")
-_SERVER_ERROR = re.compile(r"HTTP 5\d\d")
+SERVER_ERROR = re.compile(r"HTTP 5\d\d")
 _ISSUE_URL = re.compile(r"^https://api\.github\.com/repos/([^/]+/[^/]+)/issues/([1-9][0-9]*)$")
 
 
@@ -118,7 +118,7 @@ def gh_reader(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) 
                 raise NotFound(path)
             raise ReadError(
                 f"gh api {path}: {text[:300] or f'exit {result.returncode}'}",
-                retryable=_SERVER_ERROR.search(text) is not None,
+                retryable=SERVER_ERROR.search(text) is not None,
             )
         try:
             value = json.loads(result.stdout)
@@ -132,7 +132,11 @@ def gh_reader(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) 
 
 
 def retrying(
-    read: Read, log: Callable[[str], None], sleep: Callable[[float], None] = time.sleep
+    read: Read,
+    log: Callable[[str], None],
+    sleep: Callable[[float], None] = time.sleep,
+    *,
+    label: str = "handoff check",
 ) -> Read:
     def read_again(path: str) -> Mapping[str, object]:
         delays = RETRY_DELAYS
@@ -143,7 +147,7 @@ def retrying(
             except ReadError as exc:
                 if not exc.retryable:
                     raise
-                log(f"handoff check: {exc}; attempt {attempt} of {total}, retrying in {delay:g}s")
+                log(f"{label}: {exc}; attempt {attempt} of {total}, retrying in {delay:g}s")
             sleep(delay)
         try:
             return read(path)

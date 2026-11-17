@@ -349,13 +349,29 @@ worker checks count, and a device that needed none (its jobs still run, or their
 runners still live) gets a plain round trip. The first failed check
 after a good one starts that device's offline clock, a good one stops it, and a
 device holding no slot is forgotten. Once a device has failed every check for
-`job_states.unreachable_lost_minutes` (default 10), each job still running on
-it is lost (issue #662): in one transaction it is failed for T6 with a
+`job_states.unreachable_lost_minutes` (default 10), or in the first poll after
+it is set `enabled: false` (issue #679, whether it answers or not), each job
+still running on it is lost (issue #662): in one transaction it is failed for T6 with a
 `device-lost` job event, its slot row moves to `device_orphans` (so the slot is
 free at once) and the device is backed off for 5 minutes. T6 requeues a lost
 job as it does a link drop, under the same budget, so it lands on another
 device when one has room. A lost `update-from-main` job is not requeued; it
 counts one update failure and the merge queue settles any head it pushed.
+The poller loads `machines.yml` again on its first poll and whenever it or
+`machines.local.yml` changes, so `enabled: false` takes effect with no restart;
+a file that fails to load keeps the last good config and is recorded as a
+`machines.yml:` poll error each poll until it is fixed. The box is covered too:
+a job running there when it is disabled is lost the same way, and its `orch job
+run` (or its worker, if that is gone) is sent SIGTERM; its `device_orphans`
+row keeps both pids, a later poll sends SIGKILL to whichever still runs, and
+the row is deleted once both are gone. Each poll also checks
+every `device_orphans` row by its worker tag (issue #679): a lost job's worker
+still running is sent SIGTERM, a gone one's row is deleted, and an unreachable
+device gets one check per poll. Every check that lets a remote worker go first
+makes that start's run directory on the device, so a launch still in transit
+from a lost runner answers `already` and starts nothing. On Linux it also takes
+the start's own record, as on macOS, so a start already launched but not yet
+recorded refuses and never runs, even when the process scan missed it.
 An unreachable device counts against its offline clock; an error raised while
 checking (the database, say) is recorded as a `devices` poll error and never
 stops the poll.
@@ -485,6 +501,11 @@ launching (`RESTORED orch.db from backup`), or, with no backup, create an empty
 one with `orch init-db` and log a `WARNING`. On an empty or stale database the
 dispatcher still queues no job for a step the thread already answered: a later
 trusted `orch:v1` reply records the job as cancelled (`answered-<action>`).
+Before any manual write to `orch.db`, run `orch db-backup <label>` (#654). It
+writes `manual/orch-<UTC stamp>-<label>.db` beside the cycle backup, then keeps
+the newest 5 labelled backups plus any under 48 hours old and deletes the rest,
+with their `-wal` and `-shm` files. It prunes on each `db-backup`, and `orch
+poll` prunes once a day.
 
 *Poll interval.* `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. The sleep ends when either the wall clock or the monotonic clock reaches `poll_seconds`, so a box VM pause in the sleep does not add the pause on top (issue #470). When the time from one `cycle end` to the next `cycle start` runs more than 10 seconds past `poll_seconds`, poller.log gets an `orch poll: between cycles` line before `cycle start` that gives the sleep's wall and monotonic seconds and any clock jump. The `cycle end` line breaks `after-poll` into `backup`, `dashboard-push` and `self-deploy`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. GitHub is read
 every cycle. Linear keeps its own 60-second cadence and budget: the
@@ -1236,6 +1257,22 @@ the export if one does. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
+
+After `export` and before `import`, check the source host by hand. A
+launch that was already under way when the export began can still start a
+poller (#775). Confirm `~/.config/factory/orch-retired` exists and that no
+`orch poll` or `orch wait` process runs:
+
+```sh
+# on the source host: ls lists the file, pgrep prints nothing
+ls ~/.config/factory/orch-retired
+pgrep -fl 'orch (poll|wait)'
+```
+
+If either check fails, do not import that export. Stop what runs with
+`deploy/poller-service.sh stop` or `deploy/waiter-service.sh <bot> stop`,
+remove `orch-retired` (`export` refuses on a retired host), and run `export`
+again.
 
 `import` copies the export into `~/.local/share/factory/orch-move/import-<UTC
 time>` and checks it with `orch move-db check`. It refuses when the copy's

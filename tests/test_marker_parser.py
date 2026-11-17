@@ -37,7 +37,7 @@ def _job(db: Path, job_id: str):
     with sqlite3.connect(db) as connection:
         connection.row_factory = sqlite3.Row
         return job_from_row(
-            connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone(), connection
         )
 
 
