@@ -21,6 +21,7 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=%h/.local/bin/orch wait %i --autostart
 Restart=always
 RestartSec=5
+RestartPreventExitStatus=79
 KillMode=process
 
 [Install]

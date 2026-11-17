@@ -1245,7 +1245,8 @@ device slot is still held. Once none is, it writes
 waiters, self-heal and the Linear listener through their service scripts.
 While `orch-retired` exists, the poller, waiter, self-heal and Linear service
 scripts refuse to start (exit 79), and so does the `self-heal.sh once` pass
-the systemd timer runs. After stopping self-heal, `export` runs `self-heal.sh
+the systemd timer runs. `orch poll` and `orch wait` themselves exit 79 on a
+retired host. After stopping self-heal, `export` runs `self-heal.sh
 wait-idle`, which waits up to `ORCH_HEAL_IDLE_WAIT` seconds (default 900) for
 a self-heal pass already under way, and the device deploy it started
 detached, to finish before `export` takes its copy. A wait that runs out
@@ -1253,8 +1254,9 @@ fails the export like a failed stop. `poller-service.sh stop` finds the
 poller by the `orch.db.lock` it holds open when its pidfile is not
 `~/.local/state/factory/poller.pid`, as with `orch-poll.service`. Before the
 copy, `orch move-db unlocked` checks that no process still holds
-`orch.db.lock`, the lock every `orch poll` on that database holds, and fails
-the export if one does. The export
+`orch.db.lock`, the lock every `orch poll` on that database holds, or a
+`waiter-<bot>.lock` beside `orch.db`, the lock every `orch wait` holds, and
+fails the export if one does. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
@@ -1262,10 +1264,16 @@ It also holds `job-detail/`, the per-job detail files #653 keeps beside
 `orch.db`. The manifest records each file's sha256. `orch move-db manifest`
 refuses a copy with a spilled job row whose file is missing.
 
-After `export` and before `import`, check the source host by hand. A
-launch that was already under way when the export began can still start a
-poller (#775). Confirm `~/.config/factory/orch-retired` exists and that no
-`orch poll` or `orch wait` process runs:
+`orch poll` and `orch wait` check `orch-retired` again once they hold their
+lock, and exit 79 if it exists. `export` writes `orch-retired` before it
+checks those locks. A poller or waiter that took its lock before then still
+holds it, so `export` fails and writes no manifest. One that takes its lock
+after sees `orch-retired` and exits (#775). A successful export therefore
+leaves no `orch poll` or `orch wait` on that database able to poll or claim.
+
+Before `import`, you can confirm this on the source host by hand. Check that
+`~/.config/factory/orch-retired` exists and that no `orch poll` or `orch wait`
+process runs:
 
 ```sh
 # on the source host: ls lists the file, pgrep prints nothing
