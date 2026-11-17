@@ -1,8 +1,7 @@
 #!/bin/sh
 # /statechart check for the section 4 ticket loop.
 # Phase 1 and the T9-enabled model must pass TLC. The drawing configs must
-# match the section 4.1 state names. Omitting T1 or T1P, or T4ShipMerge's
-# covered guard or QA guard, must fail.
+# match the section 4.1 state names.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)

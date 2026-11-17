@@ -58,7 +58,6 @@ Covered == {
 
 Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
 
-\* A fixture may also drop T4ShipMerge's covered guard or its QA guard.
 Guards == {"ShipGuard", "QaGuard"}
 
 QaRuns == {"none", "running", "pass", "fail", "env-failed", "not-required"}
@@ -104,12 +103,8 @@ Init ==
 
 QaReset == [qa EXCEPT !.run = "none", !.envFails = 0]
 
-\* Every new head clears the covered flag, and with it the head's QA result.
-\* A step that keeps the covered flag keeps the result: the carried case.
 QaFollowsHead == qa' = IF flags'.covered THEN qa ELSE QaReset
 
-\* qa.gate block (issue #764): a gated ticket ships only at a head whose QA
-\* result is PASS or not required. With the gate off this always holds.
 QaCovers == ~qa.gate \/ qa.run \in {"pass", "not-required"}
 
 \* Valid config: brief posted, questions step starts. Invalid config: refused.
@@ -150,17 +145,26 @@ T5Ask ==
   /\ QaFollowsHead
 
 \* T5. Answers re-queue the same step.
-\* An answer after the QA park runs QA again at the same head.
 T5Answer ==
   /\ "T5" \notin Omit
   /\ state = "waiting-max"
+  /\ paused # "ship"
   /\ state' = paused
   /\ paused' = "none"
   /\ cap' = cap
   /\ configOk' = configOk
   /\ flags' = flags
   /\ counts' = counts
-  /\ qa' = IF paused = "ship" THEN QaReset ELSE qa
+  /\ qa' = qa
+
+QaParkAnswered ==
+  /\ "T5" \notin Omit
+  /\ state = "waiting-max"
+  /\ paused = "ship"
+  /\ state' = "ship"
+  /\ paused' = "none"
+  /\ qa' = QaReset
+  /\ UNCHANGED <<cap, configOk, flags, counts>>
 
 T5Abandon ==
   /\ "T5" \notin Omit
@@ -766,8 +770,6 @@ UpdateStuck ==
   /\ counts' = [counts EXCEPT !.updates = 2]
   /\ QaFollowsHead
 
-\* QA runs in ship on a gated ticket at the covered head. Each step but the
-\* park keeps the state.
 QaRunsHere ==
   /\ state = "ship"
   /\ qa.gate
@@ -796,7 +798,6 @@ QaEnvFail ==
   /\ qa' = [qa EXCEPT !.run = "env-failed", !.envFails = 1]
   /\ UNCHANGED <<state, paused, cap, configOk, flags, counts>>
 
-\* A second environment failure at one head parks the ticket for Max.
 QaEnvFailPark ==
   /\ QaRunsHere
   /\ qa.run = "running"
@@ -812,7 +813,7 @@ End ==
 
 Next ==
   \/ IntakeBrief \/ IntakeRefused
-  \/ T5Ask \/ T5Answer \/ T5Abandon
+  \/ T5Ask \/ T5Answer \/ QaParkAnswered \/ T5Abandon
   \/ T1KindGoPlan \/ T1KindGoBuild
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
   \/ T1PPlanOverSize
@@ -924,10 +925,12 @@ QaDecided ==
        /\ qa.run = "running" /\ qa.envFails = 0 => ENABLED QaEnvFail
        /\ qa.run = "running" /\ qa.envFails = 1 => ENABLED QaEnvFailPark
        /\ qa.run = "env-failed" => ENABLED QaStart
+  /\ state = "waiting-max" /\ paused = "ship" => ENABLED QaParkAnswered
 
 T5Decided ==
   /\ state \in {"questions", "building", "fixing"} => ENABLED T5Ask
-  /\ state = "waiting-max" => ENABLED T5Answer /\ ENABLED T5Abandon
+  /\ state = "waiting-max" /\ paused # "ship" => ENABLED T5Answer
+  /\ state = "waiting-max" => ENABLED T5Abandon
 
 T6Decided ==
   /\ state \in JobStates /\ counts.deaths = 0 => ENABLED T6JobRetry
@@ -988,16 +991,17 @@ ChartEdges ==
 \* every section 4.1 name. T1PPlanMapped is in the picture: a mapped plan may
 \* enter building. One risk cap. A CI-red streak and a job-death streak are
 \* not stacked, and the mapped plan does not replay those streaks. Max's extra
-\* round is drawn up to the fixing it starts. The gated half is drawn only on
-\* the first-round path to ship and its QA park.
+\* round is drawn up to the fixing it starts.
+GatedFirstRoundToQaPark ==
+  /\ configOk
+  /\ counts = [c \in DOMAIN counts |-> 0]
+  /\ ~flags.planOk
+  /\ state \in {"intake", "questions", "building", "review", "ship", "waiting-max"}
+  /\ state = "waiting-max" => paused = "ship"
+  /\ state = "ship" => flags.covered /\ qa.run \in {"none", "running", "env-failed"}
+
 ChartSlice ==
-  /\ \/ ~qa.gate
-     \/ /\ configOk
-        /\ counts = [c \in DOMAIN counts |-> 0]
-        /\ ~flags.planOk
-        /\ state \in {"intake", "questions", "building", "review", "ship", "waiting-max"}
-        /\ state = "waiting-max" => paused = "ship"
-        /\ state = "ship" => flags.covered /\ qa.run \in {"none", "running", "env-failed"}
+  /\ ~qa.gate \/ GatedFirstRoundToQaPark
   /\ counts.acUnmet = 0
   /\ counts.extra = 0 \/ state = "fixing"
   /\ cap \in {0, 3}

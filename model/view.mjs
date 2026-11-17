@@ -100,5 +100,6 @@ export const step = (action, from, to) => {
   if (action === "UpdateRetry") return "update fails, one more update";
   if (action === "UpdateStuck") return "two failed updates (update-failed-2)";
   if (action === "QaEnvFailPark") return "QA environment fails twice at one head";
+  if (action === "QaParkAnswered") return "answer, QA runs again at the same head";
   return action;
 };
