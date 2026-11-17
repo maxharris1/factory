@@ -13,6 +13,7 @@ import pytest
 import lib.dashboard_flow as flow
 import lib.dashboard_page as page
 from lib.dashboard_pages import tickets as tickets_page
+from lib.dashboard_pages.common import ticket_page_href
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
@@ -30,6 +31,7 @@ QUEUED = ("plan-check", "j-queue1")
 VERDICT = ("post-merge", "queued-review")
 BOARD = ["ticket-filter", "pipeline", "shipped", "tickets"]
 IDS = layout.BAR + ["hud", *BOARD, "jobview", "flow-template"]
+COLUMNS = ["Ask", "Plan", "Build", "Review", "Ship", "Stop"]
 GLYPHS = {"Ask": ("twinkle", "#a9b1d6"), "Plan": ("field", "#a9b1d6"), "Build": ("fill", "#a9b1d6"),
           "Review": ("scan", "#a9b1d6"), "Ship": ("off", "#a9b1d6"), "Stop": ("static", "#f7768e")}
 
@@ -188,6 +190,16 @@ def _job_link(node: dict) -> bool:
     return node["tag"] == "a" and node["attrs"]["href"].startswith("job.html")
 
 
+def _id_link(card: dict) -> dict:
+    first = _one(card, _cls("tk-id"))["kids"][0]
+    assert first["tag"] == "a", first
+    return first
+
+
+def _page_of(repo_ticket: tuple[str, str]) -> str:
+    return "ticket.html#t=" + "%23".join(repo_ticket).replace("/", "%2F")
+
+
 def _card(markup: str, key: str) -> dict:
     return _one(_dom(markup), lambda n: n["attrs"].get("data-ticket") == key)
 
@@ -248,7 +260,7 @@ def test_server_board_places_every_ticket_once(snapshot: dict) -> None:
     assert sorted(placed) == sorted(_key(row) for row in snapshot["tickets"])
     assert len(placed) == len(set(placed))
     stuck = "#".join(STUCK)
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
+    stopped = _one(_dom(server["pipeline"]), _attr("data-phase", "Stop"))
     build = _one(_dom(server["pipeline"]), _attr("data-phase", "Build"))
     assert stuck in _placed_in(stopped) and stuck not in _placed_in(build)
 
@@ -270,14 +282,15 @@ def test_script_board_places_every_ticket_once_and_matches_the_server(tmp_path: 
 
 def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
     pipeline, shipped = _dom(markup["pipeline"]), _dom(markup["shipped"])
-    in_flight = 0
+    opened = 0
     for column in _all(pipeline, _cls("tk-col")):
         cards = _all(column, _cls("tk-card"))
         assert _number(_text(_one(column, _cls("tk-count")))) == len(cards)
-        in_flight += len(cards)
-    count = _text(_one(pipeline, _cls("count")))
-    assert count == f"{len(rows)} tracked · {in_flight} in flight"
+        opened += len(cards)
     tiles = _all(shipped, _cls("tk-tile"))
+    assert len(rows) == opened + len(tiles)
+    count = _text(_one(pipeline, _cls("count")))
+    assert count == f"{len(rows)} tracked · {opened} open · {len(tiles)} shipped"
     assert _text(_one(shipped, _cls("count"))) == f"{len(tiles)} tickets"
     for group in _all(shipped, _cls("tk-sub")):
         shown = len(_all(group, _attr("data-ticket")))
@@ -333,9 +346,8 @@ def _canvas(node: dict) -> dict:
 def test_phase_glyphs_follow_design_tokens_section_5(snapshot: dict) -> None:
     server = _server(snapshot)
     columns = _all(_dom(server["pipeline"]), _cls("tk-col"))
-    assert [c["attrs"]["data-phase"] for c in columns] == ["Ask", "Plan", "Build", "Review", "Ship"]
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
-    for node in columns + [stopped]:
+    assert [c["attrs"]["data-phase"] for c in columns] == COLUMNS
+    for node in columns:
         effect, tint = GLYPHS[node["attrs"]["data-phase"]]
         glyph = _canvas(_one(node, _cls("tk-glyph")))
         assert (glyph["data-px"], glyph["data-tint"], glyph["data-cell"]) == (effect, tint, "2")
@@ -355,7 +367,7 @@ def test_card_strips_show_the_step_and_bot_and_never_move_when_stopped_or_waitin
     for state, (effect, bot) in steps.items():
         strip = _canvas(_card(board, "#".join(tickets[state])))
         assert (strip["data-px"], strip["data-tint"], strip["style"].endswith("height:8px")) == (effect, bot, True)
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
+    stopped = _one(_dom(server["pipeline"]), _attr("data-phase", "Stop"))
     cards = _all(stopped, _cls("tk-card"))
     assert len(cards) == len([s for s, p in flow.ticket_phases(flow.load_chart(CHART)).items() if p == "Stop"]) + 1
     for card in cards:
@@ -370,7 +382,7 @@ def test_card_strips_show_the_step_and_bot_and_never_move_when_stopped_or_waitin
     assert "cancelled: superseded by sanctioned intake" in _text(stuck)
 
 
-def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> None:
+def test_cards_show_round_bot_device_time_and_link_their_ticket_page(snapshot: dict) -> None:
     server = _server(snapshot)
     tickets = _state_tickets()
     board = server["pipeline"]
@@ -380,15 +392,17 @@ def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> 
     text = _text(fixing)
     for needle in ("fixing", "round 2/3", "claude", "@ box", "T+ 4m 06s", "github"):
         assert needle in text, needle
-    assert _one(fixing, _job_link)["attrs"]["href"] == "job.html#job-j-fix001"
+    assert _id_link(fixing)["attrs"]["href"] == _page_of(tickets["fixing"])
     assert "@ pc" in _text(_card(board, "#".join(tickets["review"])))
     planning = _card(board, "#".join(tickets["planning"]))
     assert "round —" in _text(planning) and not _all(planning, _cls("tk-pips"))
     queued = _card(board, "#".join(tickets[QUEUED[0]]))
-    assert _one(queued, _job_link)["attrs"]["href"] == f"job.html#job-{QUEUED[1]}"
+    assert _id_link(queued)["attrs"]["href"] == _page_of(tickets[QUEUED[0]])
     assert "queued" in _text(queued) and not _all(queued, lambda n: n["tag"] == "canvas")
     idle = _card(board, "#".join(tickets[VERDICT[0]]))
-    assert not _all(idle, lambda n: _job_link(n) or n["tag"] == "canvas")
+    assert not _all(idle, lambda n: n["tag"] == "canvas")
+    assert _id_link(idle)["attrs"]["href"] == _page_of(tickets[VERDICT[0]])
+    assert not _all(_dom(board), _job_link)
     assert "no job running" not in _text(idle)
     assert _text(_one(idle, _cls("chip"))) == "routed" and VERDICT[1] in _text(idle)
     assert {_text(node) for node in _all(_dom(board), _cls("tk-tag"))} == {"github", "linear"}
@@ -397,7 +411,7 @@ def test_cards_show_round_bot_device_time_and_link_their_job(snapshot: dict) -> 
 def test_shelf_tiles_carry_their_revise_rounds(snapshot: dict) -> None:
     shipped = _dom(_server(snapshot)["shipped"])
     labels = [_text(_one(g, _cls("tk-label"))) for g in _all(shipped, _cls("tk-sub"))]
-    assert labels == ["handed-off · ready for review (1)", "merged (1)", "done · shipped (1)", "stopped (6)"]
+    assert labels == ["handed-off · ready for review (1)", "merged (1)", "done · shipped (1)"]
     rounds = {row["state"]: row["round"] for row in snapshot["tickets"]}
     for tile in _all(shipped, _cls("tk-tile")):
         assert "#" in _text(_one(tile, _cls("tk-tn")))
@@ -411,13 +425,101 @@ def test_empty_columns_are_dashed_boxes_with_their_copy(tmp_path: Path) -> None:
     make_db(db)
     (tmp_path / "poller.log").write_text("", encoding="utf-8")
     snapshot = collect_snapshot(db, tmp_path / "poller.log", now=NOW, chart_path=CHART)
-    server = _server(snapshot)
-    empties = [_text(n) for n in _all(_dom(server["pipeline"]), _cls("tk-empty"))]
+    _check_empty(_server(snapshot))
+
+
+def _check_empty(markup: dict[str, str]) -> None:
+    pipeline = _dom(markup["pipeline"])
+    empties = [_text(n) for n in _all(pipeline, _cls("tk-empty"))]
     assert empties == ["nothing waiting on questions", "nothing in plan", "nothing in build",
-                       "nothing in review", "nothing in ship"]
-    stopped = _one(_dom(server["shipped"]), _attr("data-phase", "Stop"))
-    assert _text(_one(stopped, _cls("tk-none"))) == "nothing refused, stuck, abandoned, blocked or capped"
-    assert _text(_one(_dom(server["pipeline"]), _cls("count"))) == "0 tracked · 0 in flight"
+                       "nothing in review", "nothing in ship", "nothing stopped"]
+    stop = _one(pipeline, _attr("data-phase", "Stop"))
+    assert _one(stop, _cls("tk-count"))["attrs"]["class"] == "tk-count"
+    assert _text(_one(pipeline, _cls("count"))) == "0 tracked · 0 open · 0 shipped"
+    assert not _all(_dom(markup["shipped"]), _attr("data-phase"))
+
+
+@layout.needs_node
+def test_script_empty_columns_match_the_server(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    (tmp_path / "poller.log").write_text("", encoding="utf-8")
+    snapshot = collect_snapshot(db, tmp_path / "poller.log", now=NOW, chart_path=CHART)
+    out = _script(tmp_path, snapshot)
+    _check_empty(out["html"])
+    for ident in BOARD:
+        assert out["html"][ident] == _server(snapshot)[ident], ident
+
+
+def _check_stopped_column(markup: dict[str, str], rows: list[dict]) -> None:
+    pipeline = _dom(markup["pipeline"])
+    columns = _all(pipeline, _cls("tk-col"))
+    assert [c["attrs"]["data-phase"] for c in columns] == COLUMNS
+    assert [_text(_one(c, _cls("tk-name"))) for c in columns] == [*COLUMNS[:-1], "Stopped"]
+    states = {c["attrs"]["data-phase"]: _text(_one(c, _cls("tk-states"))).split(" · ") for c in columns}
+    assert states["Review"] == ["review"]
+    assert "capped" in states["Stop"]
+    stop = _one(pipeline, _attr("data-phase", "Stop"))
+    stopped = {_key(r) for r in rows if r["stuck"] or r["state"] in states["Stop"]}
+    assert {_key(r) for r in rows if r["state"] == "capped"} <= stopped
+    assert sorted(_placed_in(stop)) == sorted(stopped)
+    count = _one(stop, _cls("tk-count"))
+    assert count["attrs"]["class"].split() == (["tk-count", "tk-stopped"] if stopped else ["tk-count"])
+    for column in columns[:-1]:
+        assert _one(column, _cls("tk-count"))["attrs"]["class"] == "tk-count"
+    assert not _all(_dom(markup["shipped"]), _attr("data-phase"))
+
+
+def _check_id_links(markup: str, rows: list[dict]) -> None:
+    by_key = {_key(row): row for row in rows}
+    cards = _all(_dom(markup), _cls("tk-card"))
+    assert cards
+    for card in cards:
+        row = by_key[card["attrs"]["data-ticket"]]
+        link = _id_link(card)
+        assert link["attrs"]["href"] == ticket_page_href(row), card["attrs"]["data-ticket"]
+        assert _text(link) == f"{row['repo'].rsplit('/', 1)[-1]}#{row['ticket_id']}"
+
+
+def test_stopped_is_the_sixth_column_with_every_stuck_and_capped_ticket(snapshot: dict) -> None:
+    assert any(r["state"] == "capped" for r in snapshot["tickets"])
+    _check_stopped_column(_server(snapshot), snapshot["tickets"])
+    assert ".tk-count.tk-stopped{font-weight:600;color:var(--bad)}" in page.CSS
+
+
+@layout.needs_node
+def test_script_stopped_column_matches_the_server(tmp_path: Path, snapshot: dict) -> None:
+    out = _script(tmp_path, snapshot)
+    _check_stopped_column(out["html"], snapshot["tickets"])
+    assert out["html"]["pipeline"] == _server(snapshot)["pipeline"]
+
+
+def test_every_card_id_links_its_ticket_page(snapshot: dict) -> None:
+    _check_id_links(_server(snapshot)["pipeline"], snapshot["tickets"])
+
+
+@layout.needs_node
+def test_script_card_ids_link_their_ticket_page(tmp_path: Path, snapshot: dict) -> None:
+    _check_id_links(_script(tmp_path, snapshot)["html"]["pipeline"], snapshot["tickets"])
+
+
+def _check_tile_links(markup: str, rows: list[dict]) -> None:
+    by_key = {_key(row): row for row in rows}
+    tiles = _all(_dom(markup), _cls("tk-tile"))
+    assert tiles
+    for tile in tiles:
+        key = tile["attrs"]["data-ticket"]
+        assert tile["tag"] == "a", key
+        assert tile["attrs"]["href"] == ticket_page_href(by_key[key]), key
+
+
+def test_every_shelf_tile_links_its_ticket_page(snapshot: dict) -> None:
+    _check_tile_links(_server(snapshot)["shipped"], snapshot["tickets"])
+
+
+@layout.needs_node
+def test_script_shelf_tiles_link_their_ticket_page(tmp_path: Path, snapshot: dict) -> None:
+    _check_tile_links(_script(tmp_path, snapshot)["html"]["shipped"], snapshot["tickets"])
 
 
 def test_without_a_chart_the_board_says_so_and_the_table_lists_every_ticket(tmp_path: Path) -> None:
