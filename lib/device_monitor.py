@@ -6,8 +6,9 @@ looks at timeouts. First it calls `DeviceMonitor.reload`, which loads
 machines.yml again when its mtime or its machines.local.yml overlay's has
 changed since the last good load; a file that fails to load raises and
 the monitor keeps the last good config, so the next poll tries again.
-`reconcile` then does three things for each device that holds a slot or
-an orphan.
+`reconcile` then walks each device that holds a slot or an orphan. A
+local device only has its slots released; a remote one gets all three
+steps below.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -41,9 +42,9 @@ Orphans. After the lost step, each device_orphans row on the device is
 checked by its worker tag, so a job lost this poll is swept this poll. A
 worker still running is sent SIGTERM and its row kept; a gone worker's row
 is forgotten, as is a row whose worker no check can name. An unreachable
-device ends its sweep for the poll, so a down device costs one failed SSH
-call per poll. A requeue placed back on the same device carries a new tag
-and is never stopped by mistake.
+device ends its sweep for the poll after one failed check. A requeue
+placed back on the same device carries a new tag and is never stopped by
+mistake.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from lib.config_overlay import overlay_path
 from lib.device_pool import DevicePool, HeldSlot, Placement
@@ -72,7 +74,11 @@ from lib.worktrees import pid_alive
 Log = Callable[[str], None]
 OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
-Stamp = tuple[int, int | None]  # st_mtime_ns of machines.yml and of its overlay
+
+
+class Stamp(NamedTuple):
+    machines_ns: int
+    overlay_ns: int | None
 
 
 @dataclass(frozen=True)
@@ -125,7 +131,7 @@ def _stamp(path: Path) -> Stamp:
         overlay: int | None = overlay_path(path).stat().st_mtime_ns
     except FileNotFoundError:
         overlay = None
-    return path.stat().st_mtime_ns, overlay
+    return Stamp(path.stat().st_mtime_ns, overlay)
 
 
 class DeviceMonitor:
@@ -151,11 +157,7 @@ class DeviceMonitor:
                 pass
 
     def reload(self) -> None:
-        """Load machines.yml again if it or its overlay changed since the last good load.
-
-        A file that fails to load raises ValueError and keeps the old config
-        and stamp, so every poll retries and reports it until it is fixed.
-        """
+        """Load machines.yml again if it or its overlay changed since the last good load."""
         path = self.machines_path
         if path is None:
             return
@@ -279,20 +281,18 @@ class DeviceMonitor:
                 lost.append(slot.placement.job_id)
 
     def _sweep_orphans(self, device: Device, stopped: list[str], forgotten: list[str]) -> None:
-        """Stop each lost job's worker still running on device; forget it once gone.
-
-        Read after the lost step, so a job lost this poll is swept this poll.
-        """
+        """Stop each lost job's worker still running on device; forget it once gone."""
         for orphan in self.pool.orphans():
             if orphan.device != device.name:
                 continue
             target = remote_target(device, orphan.harness, orphan.job_id, orphan.worker_tag)
             if target is None or orphan.worker_tag is None:
-                status = GONE  # no check can ever name its worker, and it holds no slot
-            else:
-                status = check_worker(self.transport, target)
+                self.pool.forget_orphan(orphan.job_id)
+                forgotten.append(orphan.job_id)
+                continue
+            status = check_worker(self.transport, target)
             if status == UNREACHABLE:
-                return  # one failed SSH call per down device per poll
+                return
             if status == GONE:
                 self.pool.forget_orphan(orphan.job_id)
                 forgotten.append(orphan.job_id)

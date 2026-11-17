@@ -653,7 +653,6 @@ class DevicePool:
             connection.execute(f"DELETE FROM {HEALTH_TABLE} {where}", kept)
 
     def orphans(self) -> list[Orphan]:
-        """Every device_orphans row, oldest loss first."""
         with self.queue.connect() as connection:
             if not _has_table(connection, ORPHANS_TABLE):
                 return []

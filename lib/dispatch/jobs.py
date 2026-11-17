@@ -363,9 +363,8 @@ class JobsMixin:
         device unreachable for job_states.unreachable_lost_seconds.
 
         Runs before T6 looks at timeouts, so T6 sees a lost job as a link
-        drop in the same poll. #679: machines.yml is reloaded first when it
-        changed. A failure here is recorded and never stops the poll, and a
-        machines.yml that fails to load keeps the last good config.
+        drop in the same poll. #679: machines.yml is reloaded first, and a
+        failure of either step is recorded and never stops the poll.
         """
         if self.devices is None:
             return
