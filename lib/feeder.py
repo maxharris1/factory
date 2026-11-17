@@ -140,7 +140,7 @@ from lib.feeder_gates import (
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
-from lib.pr_title import prefixed
+from lib.pr_title import prefixed, read_sources
 from lib.queue import (
     JobRequest,
     SQLiteJobQueue,
@@ -432,7 +432,9 @@ class GitHubIntake(Protocol):
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
-    def commit_pulls(self, repo: str, sha: str) -> Collection[int]: ...
+    def commit_pulls(self, repo: str, sha: str) -> Mapping[int, str]: ...
+
+    def branch_has(self, repo: str, branch: str, sha: str) -> bool: ...
 
     def pull_state(self, repo: str, number: int) -> str: ...
 
@@ -1305,7 +1307,10 @@ class Feeder:
                 return None
             branch_found = True
         else:
-            number = self.github.find_pull(repo, branch)
+            tracked = row["ticket_id"] or (issue.key if issue.tracker == "linear" else None)
+            number = self._tracked_open_pull(repo, tracked)
+            if number is None:
+                number = self.github.find_pull(repo, branch)
             if number is not None:
                 wait = holds.collision(candidate.ref, candidate.lines, (github_ref(repo, number),))
                 if wait is not None:
@@ -1381,6 +1386,16 @@ class Feeder:
             go_id = post(_go(issue, state=state, risk=risk, number=number, visible=linear))
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
+
+    def _tracked_open_pull(self, repo: str, ticket_id: str | None) -> int | None:
+        if ticket_id is None:
+            return None
+        with self.queue.connect() as connection:
+            _, recorded = read_sources(connection).get((repo.casefold(), ticket_id), ("", None))
+        if recorded is None or not recorded.isdigit():
+            return None
+        number = int(recorded)
+        return number if self.github.pull_state(repo, number) == "open" else None
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None:
         number = int(ticket.pr_number) if ticket.pr_number else None

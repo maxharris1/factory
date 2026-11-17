@@ -114,6 +114,18 @@ INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent) VALUES (?, 
 ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
 """
 
+_ADOPT_PRE_SOURCE_AT_WRITES = f"""
+UPDATE {TABLE} SET source_at = observed_at, absent = 0
+WHERE harness = ? AND bot = ? AND window = ? AND observed_at > source_at
+"""
+
+_RETAINED = f"""
+INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent)
+SELECT harness, bot, window, COALESCE(source_at, observed_at), absent > 0 FROM {TABLE}
+WHERE harness = ? AND bot = ? AND window = ?
+ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
+"""
+
 _NEWEST = f"""
 SELECT source_at, absent FROM {OBSERVATIONS}
 WHERE harness = ? AND bot = ? AND window = ?
@@ -285,6 +297,8 @@ def store(
         source = r.observed_at if r.source_at is None else r.source_at
         absent = 1 if r.absent else 0
         account = (harness, bot, r.window)
+        connection.execute(_ADOPT_PRE_SOURCE_AT_WRITES, account)
+        connection.execute(_RETAINED, account)
         connection.execute(_OBSERVE, (*account, source, absent))
         newest = connection.execute(_NEWEST, account).fetchall()
         connection.execute(_PRUNE, (*account, newest[-1][0]))
