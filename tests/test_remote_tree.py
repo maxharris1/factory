@@ -32,6 +32,10 @@ from tests.test_remote_start import (
     poll_at,
 )
 
+linux_path = pytest.mark.skipif(
+    sys.platform != "linux", reason="runs the Linux path's scripts against /proc"
+)
+
 
 def wait_until(ready, what: str, seconds: float = 10.0) -> None:
     deadline = time.monotonic() + seconds
@@ -87,6 +91,7 @@ def kill_leftover(tmp_path: Path) -> None:
             pass
 
 
+@linux_path
 @pytest.mark.parametrize("clean_environment", [False, True])
 def test_a_lost_remote_orphan_is_kept_while_a_descendant_of_its_run_executes(
     tmp_path: Path, clean_environment: bool
@@ -116,6 +121,7 @@ def test_a_lost_remote_orphan_is_kept_while_a_descendant_of_its_run_executes(
         kill_leftover(tmp_path)
 
 
+@linux_path
 def test_a_kill_reaches_a_descendant_that_left_the_runs_session_and_environment(
     tmp_path: Path,
 ) -> None:
@@ -142,6 +148,7 @@ def test_a_kill_reaches_a_descendant_that_left_the_runs_session_and_environment(
         kill_leftover(tmp_path)
 
 
+@linux_path
 def test_a_run_whose_processes_all_ended_is_gone_while_its_deadline_still_waits(
     tmp_path: Path,
 ) -> None:
@@ -175,6 +182,7 @@ def test_a_run_whose_processes_all_ended_is_gone_while_its_deadline_still_waits(
         remote.stop_worker(shell, target, kill=True)
 
 
+@linux_path
 @pytest.mark.parametrize(
     ("same_boot", "same_start"), [(True, True), (True, False), (False, True)]
 )
@@ -216,6 +224,7 @@ def test_a_tree_entry_names_a_process_only_from_this_boot_with_its_start_time(
         process.wait()
 
 
+@linux_path
 def test_a_lost_remote_runs_untagged_orphan_born_before_any_check_is_killed(
     tmp_path: Path,
 ) -> None:
@@ -276,6 +285,7 @@ def stat_line(pid: int, session: int, start: int) -> str:
     return f"{pid} (sleep) S 1 {session} {session} " + "0 " * 15 + f"{start}\n"
 
 
+@linux_path
 @pytest.mark.parametrize("member_in_session", [False, True])
 def test_a_recorded_session_counts_only_while_a_proven_member_is_in_it(
     tmp_path: Path, member_in_session: bool
@@ -360,19 +370,36 @@ def command_substitutions(script: str) -> list[str]:
     return bodies
 
 
-def test_every_generated_remote_script_parses_under_the_native_sh() -> None:
-    """#722 f-4: macOS's /bin/sh (bash 3.2) ends a `$(...)` at an unquoted
-    `)` such as a case pattern's, so each body must parse cut there too."""
-    target = remote.RemoteTarget("pc", "pc", "claude-bot", "/tmp/w", "job", "a" * 32)
-    scripts = {
+def generated_scripts(target: remote.RemoteTarget) -> dict[str, str]:
+    return {
         "check": remote.check_script(target),
         "stop": remote.stop_script(target),
         "kill": remote.stop_script(target, kill=True),
         "fenced check": remote.fenced_check_script(target),
         "session record": remote._record_session_script(target),
     }
-    for name, script in scripts.items():
+
+
+def test_every_generated_remote_script_parses_under_the_native_sh() -> None:
+    """#722 f-4: macOS's /bin/sh (bash 3.2) ends a `$(...)` at an unquoted
+    `)` such as a case pattern's, so each body must parse cut there too."""
+    target = remote.RemoteTarget("pc", "pc", "claude-bot", "/tmp/w", "job", "a" * 32)
+    for name, script in generated_scripts(target).items():
         inner = shlex.split(script)[3]
         for code in [inner, *command_substitutions(inner)]:
             result = subprocess.run(["/bin/sh", "-n", "-c", code], capture_output=True, text=True)
             assert result.returncode == 0, f"{name}: {result.stderr} in {code[:80]!r}"
+
+
+def test_every_generated_remote_script_runs_under_the_native_sh(tmp_path: Path) -> None:
+    gone, unsure = 0, 3
+    target = remote.RemoteTarget("pc", "pc", "claude-bot", str(tmp_path / "work"), "job", "a" * 32)
+    for name, script in generated_scripts(target).items():
+        inner = shlex.split(script)[3]
+        result = subprocess.run(
+            ["/bin/sh", "-c", inner], capture_output=True, text=True, timeout=60
+        )
+        print(f"{name}: exit {result.returncode} {result.stderr!r}")
+        assert result.returncode in (gone, unsure), (
+            f"{name}: exit {result.returncode} {result.stderr}"
+        )

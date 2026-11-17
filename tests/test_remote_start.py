@@ -1833,7 +1833,8 @@ def test_suite_guard_shadows_any_real_ssh() -> None:
 # results, so they test what the scripts do to real processes.
 
 
-BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+def boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
 def gone(pid: int) -> bool:
@@ -2009,7 +2010,7 @@ def test_r1_f12_stale_pid_file_naming_another_live_group_leaves_it_untouched(
     other = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
         (directory / remote.PID_FILE).write_text(
-            record.format(pid=other.pid, boot=BOOT_ID), encoding="utf-8"
+            record.format(pid=other.pid, boot=boot_id()), encoding="utf-8"
         )
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
         for _ in range(2):
@@ -2074,7 +2075,7 @@ def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: str
 ) -> None:
     machines, queue, pool, job_id, ssh, directory = _finished_remote_slot(tmp_path, monkeypatch)
-    (directory / remote.PID_FILE).write_text(record.format(boot=BOOT_ID), encoding="utf-8")
+    (directory / remote.PID_FILE).write_text(record.format(boot=boot_id()), encoding="utf-8")
     transport = ChecksOnly()
     monitor = DeviceMonitor(pool, config_of(machines), transport)
     result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
