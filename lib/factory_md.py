@@ -319,7 +319,15 @@ def _trust_sections(text: str | None) -> dict[str, object] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return {key: data.get(key) for key in TRUST_KEYS}
+    return {key: _typed(data.get(key)) for key in TRUST_KEYS}
+
+
+def _typed(value: object) -> object:
+    if isinstance(value, dict):
+        return {_typed(key): _typed(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_typed(item) for item in value]
+    return (type(value), value)
 
 
 def default_finish_line(ship: str) -> str:

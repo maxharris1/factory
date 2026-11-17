@@ -1109,6 +1109,31 @@ def test_trust_change_when_only_qa_differs() -> None:
     assert trust_front_matter_changed(ROOT_FACTORY_MD, head) is True
 
 
+def test_a_qa_scalar_that_changes_only_its_type_is_a_trust_change() -> None:
+    base = qa_text(MIN_QA)
+    head = qa_text({**MIN_QA, "enabled": 1})
+    assert parse_factory_md(base, strict=False)[0].qa is not None
+    assert parse_factory_md(head, strict=False)[0].qa is None
+    assert trust_front_matter_changed(base, head) is True
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("qa:\n  enabled: true\n", "qa:\n  enabled: 1\n"),
+        ("qa:\n  lanes: 1\n", "qa:\n  lanes: 1.0\n"),
+        ("qa:\n  shootout: false\n", "qa:\n  shootout: 0\n"),
+        ("ci:\n  branches: [main]\n  local_checks: [1]\n", "ci:\n  branches: [main]\n  local_checks: [true]\n"),
+        ("qa:\n  1: x\n", "qa:\n  true: x\n"),
+    ],
+)
+def test_a_trust_scalar_that_changes_only_its_type_is_a_trust_change(before: str, after: str) -> None:
+    base = _with_root_qa(ROOT_FACTORY_MD, before)
+    head = _with_root_qa(ROOT_FACTORY_MD, after)
+    assert trust_front_matter_changed(base, head) is True
+    assert trust_front_matter_changed(base, base) is False
+
+
 def test_no_trust_change_when_qa_is_identical() -> None:
     base = _with_root_qa(ROOT_FACTORY_MD, "qa:\n  enabled: true\n")
     head = _with_root_qa(_edit("## Review\n", "## Review\nA new Review sentence.\n"), "qa:\n  enabled: true\n")
