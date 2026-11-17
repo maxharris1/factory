@@ -177,6 +177,21 @@ def test_sign_download_is_path_style_and_verifies(endpoint, prefix):
     assert _signature(link.url) == _expected_get_signature(link.url, AWS_SECRET)
 
 
+@pytest.mark.parametrize("endpoint, bucket_path", [
+    ("https://store.invalid/proxy", "/proxy/qa-bucket"),
+    ("https://store.invalid/s3%20proxy", "/s3%20proxy/qa-bucket"),
+    ("http://127.0.0.1:9000/a%2Fb/", "/a%2Fb/qa-bucket"),
+])
+def test_upload_and_download_address_the_same_bucket_path(endpoint, bucket_path):
+    storage = _storage(endpoint=endpoint)
+    upload = storage.sign_upload(KEY, RESULT_CAP, 60)
+    download = storage.sign_download(KEY, 60)
+
+    assert urlsplit(upload.url).path == bucket_path
+    assert urlsplit(download.url).path == f"{bucket_path}/{KEY}"
+    assert _signature(download.url) == _expected_get_signature(download.url, AWS_SECRET)
+
+
 def test_sign_upload_policy_pins_bucket_key_size_and_expiry():
     link = _storage().sign_upload(KEY, RESULT_CAP, 3600)
 
