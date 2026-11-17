@@ -939,8 +939,36 @@ def test_slots_open_the_ticket_page_and_shell_links_only_name_the_six_pages(base
 def test_main_keeps_the_ticket_box_model() -> None:
     rule = re.search(r"\nmain\{([^}]*)\}", page.CSS).group(1)
     # align-content:start: main grows to push the status line down, rows do not stretch.
-    for part in ("max-width:1600px", "padding:20px 24px 32px", "gap:16px", "flex:1 0 auto", "align-content:start"):
+    for part in ("max-width:clamp(1600px,90vw,2400px)", "padding:20px 24px 32px", "gap:16px", "flex:1 0 auto",
+                 "align-content:start"):
         assert part in rule
+
+
+@needs_chrome
+def test_main_grows_past_1600px_only_on_wide_screens_in_a_browser(base: dict) -> None:
+    html = _page_with_status_stub(_now(_phone_fit(base)), "index.html")
+    probe = """(() => {
+        const main = document.querySelector('main'), box = main.getBoundingClientRect();
+        const width = sel => document.querySelector(sel).getBoundingClientRect().width;
+        return {left: box.left, width: box.width, topbar: width('.topbar'), statusline: width('#statusline'),
+                padding: getComputedStyle(main).padding, lane: width('.lane'), tile: width('.tiles > .tile')};
+    })()"""
+    browser = Browser()
+    lanes, tiles = {}, {}
+    try:
+        for width in (375, 699, 1440, 1600, 1700, 1920, 2560, 3840):
+            browser.open(html, width)
+            got = browser.eval(probe)
+            expected = width if width <= 1600 else min(2400, max(1600, round(0.9 * width)))
+            assert round(got["width"]) == expected, (width, got)
+            assert round(got["left"]) == round((width - got["width"]) / 2), (width, got)
+            assert (got["topbar"], got["statusline"]) == (width, width), (width, got)
+            assert got["padding"] == ("14px 12px 24px" if width < 641 else "20px 24px 32px"), (width, got)
+            lanes[width], tiles[width] = got["lane"], got["tile"]
+    finally:
+        browser.close()
+    assert lanes[2560] > lanes[1600], lanes
+    assert tiles[2560] > tiles[1600] and tiles[1920] > tiles[1600], tiles
 
 
 def test_topbar_markup_follows_the_artboard(base: dict) -> None:
