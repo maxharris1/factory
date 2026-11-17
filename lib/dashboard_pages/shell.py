@@ -17,7 +17,7 @@ from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
 from lib.dashboard_pages.system import (
-    _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE, version_drift,
+    _BUDGET_STATE, _broken, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE, version_drift,
 )
 from lib.dashboard_pages.ticket_detail import _jobview
 from lib.dashboard_pages.tickets import _board, _tickets
@@ -286,7 +286,6 @@ SCRIPT = r"""
     var extra = [];
     var writer = false;
     var unknown = false;
-    var waiterUnknown = false;
     var rows = (h.components || []).map(function (c) {
       var isWriter = c.component === 'dashboard';
       writer = writer || (isWriter && c.configured !== false);
@@ -297,7 +296,6 @@ SCRIPT = r"""
       var state = seen > downBeats * interval ? 'down' : seen > staleBeats * interval ? 'stale' : c.state;
       if (!isWriter && (state !== 'up' || c.state !== 'up')) {
         unknown = true;
-        waiterUnknown = waiterUnknown || c.component === 'waiter';
         return Object.assign({}, c, {state: 'unknown', reason: 'no snapshot for ' + dur(age)});
       }
       if (state === c.state) return c;
@@ -312,8 +310,7 @@ SCRIPT = r"""
       extra.push({kind: 'health', repo: '', ticket_id: '', component: 'health snapshot',
                   link: 'health.html#components', detail: 'unknown: no snapshot for ' + dur(age)});
     }
-    return {rows: rows, extra: extra, waiterUnknown: waiterUnknown, age: age,
-            key: rows.map(function (c) { return c.state; }).join(',')};
+    return {rows: rows, extra: extra, key: rows.map(function (c) { return c.state; }).join(',')};
   }
 """
 
@@ -1252,7 +1249,7 @@ _PANELS = {
     "index.html": (_lanes, _just_happened_and_intake),
     "activity.html": (_attention, _relay),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel),
-    "health.html": (_components, _drift_row, _log_row, _no_waiter),
+    "health.html": (_broken, _components, _drift_row, _log_row, _no_waiter),
     "job.html": (_board, _tickets, _jobview),
 }
 

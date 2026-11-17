@@ -34,7 +34,7 @@ CSS_PANEL = """\
 .panel{grid-column:span 4;position:relative;min-width:0;padding:14px 16px 16px;
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
-#ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
+#ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#broken,#waiters{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
 .panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
@@ -273,11 +273,12 @@ SCRIPT_HEAD = r"""
     if (!firstRender && !(prevKeys[panel] || {})[key]) node.classList.add('fresh');
     return node;
   }
-  function panel(id, title, count) {
+  function panel(id, title, count, headingId) {
     var root = byId(id);
     if (!root) return null;
     root.replaceChildren();
     var head = add(root, el('h2'));
+    if (headingId) head.setAttribute('id', headingId);
     add(head, el('span', null, title));
     if (count !== undefined && count !== null) add(head, el('span', 'count', count));
     return root;
@@ -309,7 +310,7 @@ SCRIPT_TAIL = r"""
     job: [renderBoard, renderTickets, renderJobView],
     activity: [renderAttention, renderRelay],
     efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens],
-    health: [renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
+    health: [renderBroken, renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
@@ -671,15 +672,16 @@ def checks_link(ticket: dict) -> str:
 
 def _panel(
     ident: str, title: str, inner: str, *, count: object = None, count_html: str | None = None,
-    extra: str = "", hidden: bool = False,
+    extra: str = "", hidden: bool = False, heading_id: str | None = None,
 ) -> str:
     head = _span(None, title) + ("" if count is None else _span("count", count))
     if count_html is not None:
         head += f'<span class="count">{count_html}</span>'
     classes = f"panel {extra}".strip()
+    heading = f'<h2 id="{heading_id}">' if heading_id else "<h2>"
     return (
         f'<section class="{classes}" id="{ident}" aria-label="{_e(title)}"{" hidden" if hidden else ""}>'
-        f"<h2>{head}</h2>{inner}</section>"
+        f"{heading}{head}</h2>{inner}</section>"
     )
 
 

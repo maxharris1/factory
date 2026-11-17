@@ -21,10 +21,22 @@ CSS = """\
 .sys-table.wide{min-width:860px}
 .sys-table tbody tr:last-child td{border-bottom:0}
 .sys-table td.sys-kind{font-weight:600}
-.sys-cell{display:inline-flex;align-items:center;gap:8px}
-a.sys-cell{color:var(--bad);text-decoration:none}
+.sys-cell{display:inline-flex;align-items:center;gap:8px;font-variant-numeric:tabular-nums}
+a.sys-cell{text-decoration:none}
 .sys-blk{flex:none;width:10px;height:10px;background:var(--muted)}
 .sys-blk.ok{background:var(--ok)}.sys-blk.warn{background:var(--warn)}.sys-blk.bad{background:var(--bad)}
+.sys-sq{display:inline-block;width:10px;height:10px;vertical-align:-1px;background:var(--muted)}
+.sys-sq.ok{background:var(--ok)}
+#broken h2>span:first-child::before{background:var(--bad)}
+.panel h2 .count.bad{color:var(--bad)}
+.sys-table.sys-broken{min-width:820px}
+.sys-what{display:inline-flex;align-items:center;gap:10px}
+.sys-px{display:block;width:12px}
+.sys-name{font-size:13px;font-weight:600;white-space:nowrap}
+.sys-broken td.sys-for{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--bad)}
+.sys-broken td.sys-seen{white-space:nowrap;color:var(--text-2)}
+.sys-broken td.sys-why{font-family:var(--sans);font-size:13px;color:var(--text-2)}
+.sys-broken td.muted{white-space:nowrap}
 .sys-note{margin:0 0 8px;font:12px/1.5 var(--mono);color:var(--muted)}
 .sys-legend{margin:12px 0 0}
 .sys-details{margin-top:10px}
@@ -170,10 +182,78 @@ SCRIPT_COMPONENTS = r"""
 
   var HEALTH_STATE = {up: ['UP', 'ok'], stale: ['STALE', 'warn'], down: ['DOWN', 'bad'],
                       unknown: ['UNKNOWN', 'muted']};
+  var BROKEN_STATES = [['down', 'bad'], ['stale', 'warn']];
+  var BROKEN_TONE = {down: 'bad', stale: 'warn'};
+  function matrixKey(c) { return c.bot ? c.component + ' · ' + c.bot : c.component; }
+  function validAnchor(v) { return typeof v === 'string' && /^[A-Za-z0-9_-]+$/.test(v) ? v : null; }
+  function noWaiterText(n) {
+    return 'no waiter for ' + n.harness + ': ' + n.count + ' queued job' + (n.count === 1 ? '' : 's') + ' (' + n.jobs.join(', ') + ')';
+  }
+  function brokenItems(d) {
+    var rows = agedHealth(d).rows.filter(function (c) { return c.configured !== false; });
+    var items = [];
+    BROKEN_STATES.forEach(function (pair) {
+      var state = pair[0];
+      rows.forEach(function (c) {
+        if (c.state !== state) return;
+        var age = c.last_seen_age_seconds === undefined ? null : c.last_seen_age_seconds;
+        var anchor = validAnchor(c.anchor);
+        items.push({kind: state, what: matrixKey(c), device: c.device, tone: pair[1],
+                    for_seconds: age, last_seen_et: c.last_seen_et || null,
+                    reason: c.reason || (age === null ? 'never seen' : ''), anchor: anchor ? 'broken-' + anchor : null});
+      });
+    });
+    ((d.health || {}).no_waiter || []).forEach(function (n) {
+      var anchor = validAnchor(n.anchor);
+      items.push({kind: 'no-waiter', what: 'queued job · ' + n.harness, device: null, tone: 'bad',
+                  for_seconds: null, last_seen_et: null, reason: noWaiterText(n), anchor: anchor ? 'broken-' + anchor : null});
+    });
+    return items;
+  }
+  function brokenCount(d, items) {
+    var down = items.filter(function (x) { return x.kind === 'down'; }).length;
+    var stale = items.filter(function (x) { return x.kind === 'stale'; }).length;
+    var queued = ((d.health || {}).no_waiter || []).reduce(function (n, w) { return n + w.count; }, 0);
+    return [[down, down + ' component' + (down === 1 ? '' : 's') + ' down'],
+            [stale, stale + ' component' + (stale === 1 ? '' : 's') + ' stale'],
+            [queued, queued + ' queued job' + (queued === 1 ? '' : 's') + ' with no waiter']]
+      .filter(function (p) { return p[0]; }).map(function (p) { return p[1]; }).join(' · ');
+  }
+  function renderBroken(d) {
+    var root = byId('broken');
+    if (!root) return;
+    var items = brokenItems(d);
+    root.replaceChildren();
+    root.hidden = !items.length;
+    if (!items.length) return;
+    var head = add(root, el('h2'));
+    if (!((d.health || {}).no_waiter || []).length) head.setAttribute('id', 'no-waiter');
+    add(head, el('span', null, 'Broken now'));
+    add(head, el('span', 'count bad', brokenCount(d, items)));
+    var table = add(add(root, el('div', 'sys-scroll')), el('table', 'sys-table sys-broken'));
+    var hrow = add(add(table, el('thead')), el('tr'));
+    ['what', 'device', 'state', 'for', 'last seen', 'why'].forEach(function (t) { add(hrow, el('th', null, t)); });
+    var tbody = add(table, el('tbody'));
+    items.forEach(function (x) {
+      var tr = add(tbody, el('tr'));
+      if (x.anchor) tr.setAttribute('id', x.anchor);
+      var what = add(add(tr, el('td')), el('span', 'sys-what'));
+      var px = add(what, el('span', 'sys-px'));
+      px.setAttribute('aria-hidden', 'true');
+      add(px, PX.strip('broken-' + x.kind + '-' + x.what + '-' + (x.device || ''), {effect: 'static', tint: '#f7768e', cell: 4, height: 16}));
+      add(what, el('span', 'sys-name', x.what));
+      add(tr, el('td', null, x.device === null || x.device === undefined ? '—' : x.device));
+      add(add(tr, el('td')), chip(x.kind, x.tone));
+      if (x.for_seconds === null) add(tr, el('td', 'muted', '—'));
+      else ticking(add(tr, el('td', 'sys-for')), x.for_seconds, '', '');
+      add(tr, x.last_seen_et === null ? el('td', 'muted', '—') : el('td', 'sys-seen', x.last_seen_et));
+      add(tr, el('td', 'sys-why', x.reason));
+    });
+  }
   function matrixOf(d, rows) {
     var keys = [], seen = [], cells = {};
     rows.forEach(function (c) {
-      var key = c.bot ? c.component + ' · ' + c.bot : c.component;
+      var key = matrixKey(c);
       if (keys.indexOf(key) < 0) keys.push(key);
       if (seen.indexOf(c.device) < 0) seen.push(c.device);
       cells[key + '\n' + c.device] = c;
@@ -185,20 +265,33 @@ SCRIPT_COMPONENTS = r"""
   }
   function matrixCell(c) {
     var st = HEALTH_STATE[c.state] || ['OTHER', 'muted'];
-    var tone = c.configured === false ? 'muted' : st[1];
-    var box = c.state === 'down' && c.configured !== false ? link('sys-cell bad', '#' + c.anchor) : el('span', 'sys-cell');
+    var word = st[0].toLowerCase();
+    var configured = c.configured !== false;
+    var age = c.last_seen_age_seconds;
+    var never = age === null || age === undefined;
+    if (configured && c.state === 'up') {
+      var sq = el('span', 'sys-sq ok');
+      sq.setAttribute('role', 'img');
+      sq.setAttribute('aria-label', 'up');
+      sq.setAttribute('title', 'up · beat ' + (never ? '—' : dur(age + since())) + ' ago');
+      return sq;
+    }
+    var tone = configured ? st[1] : 'muted';
+    var anchor = validAnchor(c.anchor);
+    var box = configured && anchor && BROKEN_TONE[c.state] ? link('sys-cell ' + tone, '#broken-' + anchor) : el('span', 'sys-cell');
     var blk = add(box, el('span', 'sys-blk ' + tone));
     blk.setAttribute('aria-hidden', 'true');
     var text = add(box, el('span'));
-    if (c.last_seen_age_seconds === null || c.last_seen_age_seconds === undefined) text.textContent = st[0] + ' never seen';
-    else ticking(text, c.last_seen_age_seconds, st[0] + ' ', '');
+    if (never) text.textContent = word + ' · never seen';
+    else ticking(text, age, word + ' ', '');
     return box;
   }
   function renderComponents(d) {
     var h = d.health || {known: false, components: []};
     var rows = agedHealth(d).rows;
     var down = rows.filter(function (c) { return c.state === 'down' && c.configured !== false; }).length;
-    var root = panel('components', 'Components', rows.length + ' components · ' + down + ' down');
+    var root = panel('components', 'Components', rows.length + ' components · ' + down + ' down',
+                     brokenItems(d).length ? null : 'no-waiter');
     if (!root) return;
     if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
     var m = matrixOf(d, rows);
@@ -292,24 +385,25 @@ SCRIPT_COMPONENTS = r"""
   }
 
   function renderNoWaiter(d) {
-    var h = d.health || {};
-    var rows = h.no_waiter || [];
-    var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length === 1 ? '1 harness' : rows.length + ' harnesses');
+    var root = byId('waiters');
     if (!root) return;
-    if (!rows.length) {
-      var aged = agedHealth(d);
-      add(root, el('p', 'empty', !h.known ? 'unknown until a component heartbeats'
-        : aged.waiterUnknown ? 'unknown: no snapshot for ' + dur(aged.age)
-        : 'every queued job has a live waiter'));
-      return;
-    }
-    var ul = add(root, el('ul', 'feed'));
+    var rows = (d.health || {}).no_waiter || [];
+    root.replaceChildren();
+    root.hidden = !rows.length;
+    if (!rows.length) return;
+    var section = add(root, el('section', 'panel'));
+    section.setAttribute('id', 'no-waiter');
+    section.setAttribute('aria-label', 'Queued jobs with no waiter');
+    var head = add(section, el('h2'));
+    add(head, el('span', null, 'Queued jobs with no waiter'));
+    add(head, el('span', 'count', rows.length === 1 ? '1 harness' : rows.length + ' harnesses'));
+    var ul = add(section, el('ul', 'feed'));
     rows.forEach(function (n) {
       var li = add(ul, el('li'));
       li.setAttribute('id', n.anchor);
       add(li, chip('no waiter', 'bad'));
       add(li, el('span', 'ticket', 'waiter ' + n.bot));
-      add(li, el('span', 'what', 'no waiter for ' + n.harness + ': ' + n.count + ' queued job' + (n.count === 1 ? '' : 's') + ' (' + n.jobs.join(', ') + ')'));
+      add(li, el('span', 'what', noWaiterText(n)));
       mark('no-waiter', n.anchor, li);
     });
   }
@@ -469,7 +563,8 @@ def _health(snapshot: dict) -> str:
 # --- health page (#92, #141) ---------------------------------------------------------
 
 
-_HEALTH_STATE = {"up": ("UP", "ok"), "stale": ("STALE", "warn"), "down": ("DOWN", "bad")}
+_HEALTH_STATE = {"up": ("UP", "ok"), "stale": ("STALE", "warn"), "down": ("DOWN", "bad"),
+                 "unknown": ("UNKNOWN", "muted")}
 
 
 _ANCHOR = re.compile(r"[A-Za-z0-9_-]+")
@@ -479,6 +574,96 @@ def _anchor_attr(value: object) -> str:
     return f' id="{value}"' if isinstance(value, str) and _ANCHOR.fullmatch(value) else ""
 
 
+def _matrix_key(row: dict) -> str:
+    return f"{row['component']} · {row['bot']}" if row.get("bot") else row["component"]
+
+
+def _valid_anchor(value: object) -> str | None:
+    return value if isinstance(value, str) and _ANCHOR.fullmatch(value) else None
+
+
+_BROKEN_STATES = (("down", "bad"), ("stale", "warn"))
+_BROKEN_TONE = dict(_BROKEN_STATES)
+
+
+def broken_items(health: dict) -> list[dict]:
+    rows = [row for row in health.get("components") or [] if row.get("configured") is not False]
+    items = []
+    for state, tone in _BROKEN_STATES:
+        for row in rows:
+            if row["state"] != state:
+                continue
+            age = row.get("last_seen_age_seconds")
+            anchor = _valid_anchor(row.get("anchor"))
+            items.append({
+                "kind": state, "what": _matrix_key(row), "device": row["device"], "tone": tone,
+                "for_seconds": age, "last_seen_et": row.get("last_seen_et"),
+                "reason": row.get("reason") or ("never seen" if age is None else ""),
+                "anchor": f"broken-{anchor}" if anchor else None,
+            })
+    for row in health.get("no_waiter") or []:
+        anchor = _valid_anchor(row.get("anchor"))
+        items.append({
+            "kind": "no-waiter", "what": f"queued job · {row['harness']}", "device": None,
+            "tone": "bad", "for_seconds": None, "last_seen_et": None, "reason": _no_waiter_text(row),
+            "anchor": f"broken-{anchor}" if anchor else None,
+        })
+    return items
+
+
+def _broken_count(health: dict, items: list[dict]) -> str:
+    down = sum(item["kind"] == "down" for item in items)
+    stale = sum(item["kind"] == "stale" for item in items)
+    queued = sum(row["count"] for row in health.get("no_waiter") or [])
+    parts = [
+        (down, f"{down} component{'' if down == 1 else 's'} down"),
+        (stale, f"{stale} component{'' if stale == 1 else 's'} stale"),
+        (queued, f"{queued} queued job{'' if queued == 1 else 's'} with no waiter"),
+    ]
+    return " · ".join(text for n, text in parts if n)
+
+
+def _px():
+    from lib.dashboard_pages import shell
+
+    return shell
+
+
+def _broken_row(item: dict) -> str:
+    key = f"broken-{item['kind']}-{item['what']}-{item['device'] or ''}"
+    strip = _px().px_strip(key, effect="static", tint="#f7768e", cell=4, height=16)
+    seconds, seen = item["for_seconds"], item["last_seen_et"]
+    return (
+        f'<tr{_anchor_attr(item["anchor"])}>'
+        f'<td><span class="sys-what"><span class="sys-px" aria-hidden="true">{strip}</span>'
+        f'{_span("sys-name", item["what"])}</span></td>'
+        + _td(item["device"])
+        + f"<td>{_chip(item['kind'], item['tone'])}</td>"
+        + (_td(None, "muted") if seconds is None else _td(duration(seconds), "sys-for"))
+        + (_td(None, "muted") if seen is None else _td(seen, "sys-seen"))
+        + _td(item["reason"], "sys-why")
+        + "</tr>"
+    )
+
+
+def _broken(snapshot: dict) -> str:
+    health = snapshot.get("health") or {}
+    items = broken_items(health)
+    if not items:
+        return '<section class="panel" id="broken" aria-label="Broken now" hidden></section>'
+    heading_id = "" if health.get("no_waiter") else ' id="no-waiter"'
+    heads = ("what", "device", "state", "for", "last seen", "why")
+    return (
+        '<section class="panel" id="broken" aria-label="Broken now">'
+        f'<h2{heading_id}>{_span(None, "Broken now")}{_span("count bad", _broken_count(health, items))}</h2>'
+        '<div class="sys-scroll"><table class="sys-table sys-broken"><thead><tr>'
+        + "".join(f"<th>{text}</th>" for text in heads)
+        + "</tr></thead><tbody>"
+        + "".join(_broken_row(item) for item in items)
+        + "</tbody></table></div></section>"
+    )
+
+
 def _matrix(snapshot: dict, rows: list[dict]) -> tuple[list[str], list[str], dict]:
     """Rows by component kind (a waiter per bot), columns by device in lane
     order, then any device only the heartbeats name (matrixOf in the script)."""
@@ -486,7 +671,7 @@ def _matrix(snapshot: dict, rows: list[dict]) -> tuple[list[str], list[str], dic
     seen: list[str] = []
     cells: dict[tuple[str, str], dict] = {}
     for row in rows:
-        key = f"{row['component']} · {row['bot']}" if row.get("bot") else row["component"]
+        key = _matrix_key(row)
         if key not in keys:
             keys.append(key)
         if row["device"] not in seen:
@@ -499,13 +684,19 @@ def _matrix(snapshot: dict, rows: list[dict]) -> tuple[list[str], list[str], dic
 
 def _matrix_cell(row: dict) -> str:
     label, tone = _HEALTH_STATE.get(row["state"], ("OTHER", "muted"))
-    if row.get("configured") is False:
-        tone = "muted"
+    word = label.lower()
+    configured = row.get("configured") is not False
     age = row.get("last_seen_age_seconds")
-    text = f"{label} never seen" if age is None else f"{label} {duration(age)}"
+    if configured and row["state"] == "up":
+        return (f'<td><span class="sys-sq ok" role="img" aria-label="up" '
+                f'title="up · beat {duration(age)} ago"></span></td>')
+    if not configured:
+        tone = "muted"
+    text = f"{word} · never seen" if age is None else f"{word} {duration(age)}"
     inner = f'<span class="sys-blk {tone}" aria-hidden="true"></span>{_span(None, text)}'
-    if row["state"] == "down" and row.get("configured") is not False and _anchor_attr(row.get("anchor")):
-        return f'<td><a class="sys-cell bad" href="#{row["anchor"]}">{inner}</a></td>'
+    anchor = _valid_anchor(row.get("anchor"))
+    if configured and anchor and row["state"] in _BROKEN_TONE:
+        return f'<td><a class="sys-cell {tone}" href="#broken-{anchor}">{inner}</a></td>'
     return f'<td><span class="sys-cell">{inner}</span></td>'
 
 
@@ -517,9 +708,11 @@ def _components(snapshot: dict) -> str:
     health = snapshot.get("health") or {"known": False, "components": []}
     rows = health.get("components") or []
     count = f"{len(rows)} components · {health.get('down') or 0} down"
+    heading_id = None if broken_items(health) else "no-waiter"
     if not health.get("known"):
         text = f"unknown: {health['error']}" if health.get("error") else "no heartbeats recorded yet"
-        return _panel("components", "Components", f'<p class="empty">{_e(text)}</p>', count=count)
+        return _panel("components", "Components", f'<p class="empty">{_e(text)}</p>', count=count,
+                      heading_id=heading_id)
     keys, devices, cells = _matrix(snapshot, rows)
     matrix = (
         '<div class="sys-scroll"><table class="sys-table"><thead><tr>'
@@ -578,7 +771,7 @@ def _components(snapshot: dict) -> str:
         + "</tbody></table></div></details>"
     )
     inner = matrix + f'<p class="sys-note sys-legend">{_e(note)}</p>' + details
-    return _panel("components", "Components", inner, count=count)
+    return _panel("components", "Components", inner, count=count, heading_id=heading_id)
 
 
 def version_groups(health: dict) -> list[dict]:
@@ -669,29 +862,26 @@ def _log_row(snapshot: dict) -> str:
     return f'<div class="sys-row">{_log(snapshot)}{_rules(snapshot)}</div>'
 
 
+def _no_waiter_text(row: dict) -> str:
+    return (
+        f"no waiter for {row['harness']}: {row['count']} queued job"
+        + ("" if row["count"] == 1 else "s")
+        + f" ({', '.join(row['jobs'])})"
+    )
+
+
 def _no_waiter(snapshot: dict) -> str:
-    health = snapshot.get("health") or {}
-    rows = health.get("no_waiter") or []
+    rows = (snapshot.get("health") or {}).get("no_waiter") or []
     if not rows:
-        text = (
-            "every queued job has a live waiter"
-            if health.get("known")
-            else "unknown until a component heartbeats"
-        )
-        return _panel("no-waiter", "Queued jobs with no waiter", f'<p class="empty">{_e(text)}</p>',
-                      count="0 harnesses")
+        return '<div id="waiters" hidden></div>'
     items = "".join(
         f'<li{_anchor_attr(row.get("anchor"))}>'
         + _chip("no waiter", "bad")
         + _span("ticket", f"waiter {row['bot']}")
-        + _span(
-            "what",
-            f"no waiter for {row['harness']}: {row['count']} queued job"
-            + ("" if row["count"] == 1 else "s")
-            + f" ({', '.join(row['jobs'])})",
-        )
+        + _span("what", _no_waiter_text(row))
         + "</li>"
         for row in rows
     )
-    return _panel("no-waiter", "Queued jobs with no waiter", f'<ul class="feed">{items}</ul>',
-                  count="1 harness" if len(rows) == 1 else f"{len(rows)} harnesses")
+    panel = _panel("no-waiter", "Queued jobs with no waiter", f'<ul class="feed">{items}</ul>',
+                   count="1 harness" if len(rows) == 1 else f"{len(rows)} harnesses")
+    return f'<div id="waiters">{panel}</div>'

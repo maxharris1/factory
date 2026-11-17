@@ -31,7 +31,7 @@ from tests.test_project_rules import FIXTURES, fixture_world
 
 NEWEST = "aaaaaaaaaaaa"
 OLDER = "bbbbbbbbbbbb"
-PANELS = ["components", "drift", "health", "log", "rules", "no-waiter"]
+PANELS = ["broken", "components", "drift", "health", "log", "rules", "waiters"]
 
 
 def _component(component: str, device: str, *, bot: str = "", state: str = "up",
@@ -180,10 +180,10 @@ def test_script_drift_and_status_line_count_the_same_stale_code_components(tmp_p
 def test_down_component_is_a_static_red_block_linking_its_row(tmp_path: Path) -> None:
     html = _no_script(render_pages(_snapshot(tmp_path))["health.html"])
     components = _section(html, "components")
-    cell = re.search(r'<a class="sys-cell bad" href="#health-linear-listener--box">(.*?)</a>', components)
+    cell = re.search(r'<a class="sys-cell bad" href="#broken-health-linear-listener--box">(.*?)</a>', components)
     assert cell
     assert '<span class="sys-blk bad" aria-hidden="true"></span>' in cell.group(1)
-    assert "DOWN never seen" in _text(cell.group(1))
+    assert "down · never seen" in _text(cell.group(1))
     assert "canvas" not in components and "data-px" not in components
     for rule in re.findall(r"\.sys-blk[^{]*\{([^}]*)\}", CSS):
         assert "animation" not in rule and "transition" not in rule
@@ -198,7 +198,8 @@ def test_matrix_rows_by_kind_and_columns_by_device(tmp_path: Path) -> None:
     kinds = re.findall(r'<td class="sys-kind">([^<]+)</td>', matrix.group(1))
     assert kinds == ["poller", "waiter · claude-bot", "waiter · codex-bot", "linear-listener",
                      "device-probe"]
-    assert "UP 4s" in _text(matrix.group(1))
+    assert "UP" not in _text(matrix.group(1))
+    assert len(re.findall(r'class="sys-sq ok"', matrix.group(1))) == 5
     assert '<details class="sys-details"><summary>process details</summary>' in html
 
 
@@ -214,7 +215,7 @@ def test_script_draws_the_same_matrix_drift_and_log(tmp_path: Path) -> None:
     assert re.findall(r'class="sys-blk (\w+)"', drift) == re.findall(
         r'class="sys-blk (\w+)"', _section(server, "drift"))
     components = out["html"]["components"]
-    assert '<a class="sys-cell bad" href="#health-linear-listener--box">' in components
+    assert '<a class="sys-cell bad" href="#broken-health-linear-listener--box">' in components
     assert re.findall(r'<td class="sys-kind">([^<]+)</td>', components) == re.findall(
         r'<td class="sys-kind">([^<]+)</td>', _section(server, "components"))
     log_kinds = re.findall(r'<div class="(\w+)">', out["html"]["log"])
@@ -311,7 +312,7 @@ def _with_no_waiters(snapshot: dict, count: int) -> dict:
     return snapshot
 
 
-@pytest.mark.parametrize(("count", "shown"), [(0, "0 harnesses"), (1, "1 harness"), (2, "2 harnesses")])
+@pytest.mark.parametrize(("count", "shown"), [(1, "1 harness"), (2, "2 harnesses")])
 def test_no_waiter_count_names_harness_in_the_singular_for_one(
         tmp_path: Path, count: int, shown: str) -> None:
     snapshot = _with_no_waiters(_snapshot(tmp_path), count)
@@ -320,12 +321,217 @@ def test_no_waiter_count_names_harness_in_the_singular_for_one(
 
 
 @needs_node
-@pytest.mark.parametrize(("count", "shown"), [(0, "0 harnesses"), (1, "1 harness"), (2, "2 harnesses")])
+@pytest.mark.parametrize(("count", "shown"), [(1, "1 harness"), (2, "2 harnesses")])
 def test_script_no_waiter_count_names_harness_in_the_singular_for_one(
         tmp_path: Path, count: int, shown: str) -> None:
     snapshot = _with_no_waiters(_snapshot(tmp_path), count)
-    out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "no-waiter"])
-    assert f'<span class="count">{shown}</span>' in out["html"]["no-waiter"]
+    out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "waiters"])
+    assert f'<span class="count">{shown}</span>' in out["html"]["waiters"]
+
+
+def _system(tmp_path: Path, rows: list[dict], no_waiter: list[dict] | None = None) -> dict:
+    snapshot = collect_snapshot(*seeded(tmp_path), now=NOW)
+    snapshot["health"] = {
+        "known": True, "error": None, "code_version": NEWEST, "components": rows,
+        "no_waiter": no_waiter or [], "down": sum(row["state"] == "down" for row in rows),
+        "stale_code": 0, "stale": sum(row["state"] == "stale" for row in rows),
+        "thresholds": {"beat_seconds": 15.0, "probe_seconds": 60.0, "stale_beats": 3,
+                       "down_beats": 8},
+        "publish_seconds": 15.0,
+    }
+    snapshot["attention"] = {"count": 0, "items": []}
+    return snapshot
+
+
+def _up_rows() -> list[dict]:
+    return [
+        _component("poller", "box"),
+        _component("waiter", "box", bot="claude-bot"),
+        _component("waiter", "pc", bot="claude-bot"),
+    ]
+
+
+TUNNEL_AGE = 8 * 3600 + 2 * 60
+TUNNEL_REASON = "process exited (rc=1) and was not restarted"
+
+
+def _healthy(tmp_path: Path) -> dict:
+    return _system(tmp_path, _up_rows())
+
+
+def _down(tmp_path: Path) -> dict:
+    tunnel = _component("tunnel", "box", bot="cloudflared", state="down", age=TUNNEL_AGE)
+    tunnel["reason"] = TUNNEL_REASON
+    cursor = _component("waiter", "box", bot="cursor-bot", state="down", age=None, started=None)
+    cursor["reason"] = None
+    probe = _component("device-probe", "pc", state="stale", age=50)
+    spare = _component("waiter", "mac", bot="cursor-bot", state="down", age=None)
+    spare["configured"] = False
+    return _system(tmp_path, [probe, *_up_rows(), tunnel, cursor, spare])
+
+
+def _no_waiter(tmp_path: Path) -> dict:
+    return _system(tmp_path, _up_rows(), [
+        {"harness": "codex", "bot": "codex-bot", "jobs": ["j1", "j2"], "count": 2,
+         "anchor": "health-waiter-codex-bot"}])
+
+
+BROKEN_IDS = ["broken-health-tunnel-cloudflared-box", "broken-health-waiter-cursor-bot-box",
+              "broken-health-device-probe--pc"]
+
+
+def _broken_rows(markup: str) -> dict[str, list[str]]:
+    return {anchor: _cells(markup, anchor) for anchor in re.findall(r'<tr id="(broken-[^"]+)"', markup)}
+
+
+def _expected_broken(probe_for: str) -> dict[str, list[str]]:
+    return {
+        BROKEN_IDS[0]: ["tunnel · cloudflared", "box", "down", "8h 02m",
+                        component_health.et(NOW - TUNNEL_AGE), TUNNEL_REASON],
+        BROKEN_IDS[1]: ["waiter · cursor-bot", "box", "down", "—", "—", "never seen"],
+        BROKEN_IDS[2]: ["device-probe", "pc", "stale", probe_for, component_health.et(NOW - 50), ""],
+    }
+
+
+def _main_sections(html: str) -> list[str]:
+    main = html[html.index('<main id="hud"'):]
+    return re.findall(r'<section class="panel" id="([^"]+)"', main)
+
+
+def test_broken_now_is_first_and_lists_each_item(tmp_path: Path) -> None:
+    html = _no_script(render_pages(_down(tmp_path))["health.html"])
+    assert _main_sections(html)[:2] == ["broken", "components"]
+    broken = _section(html, "broken")
+    assert re.match(r'<section class="panel" id="broken" aria-label="Broken now">', broken)
+    assert "Broken now" in _text(broken)
+    assert '<span class="count bad">2 components down · 1 component stale</span>' in broken
+    assert list(_broken_rows(broken)) == BROKEN_IDS
+    assert _broken_rows(broken) == _expected_broken("50s")
+    for anchor in BROKEN_IDS:
+        row = re.search(rf'<tr id="{anchor}">(.*?)</tr>', broken, re.S).group(1)
+        assert re.search(r'<canvas class="px" data-px="static" data-tint="#f7768e"', row), anchor
+
+
+@needs_node
+def test_script_broken_now_is_first_and_lists_each_item(tmp_path: Path) -> None:
+    snapshot = _down(tmp_path)
+    out = _run_page(tmp_path, snapshot, "health", BAR + ["hud", *PANELS])
+    assert "health: [renderBroken, renderComponents," in render_pages(snapshot)["health.html"]
+    assert not out["hidden"]["broken"]
+    broken = out["html"]["broken"]
+    assert '<span class="count bad">2 components down · 1 component stale</span>' in broken
+    rows = _broken_rows(broken)
+    assert list(rows) == BROKEN_IDS
+    assert rows == _expected_broken("53s")
+    assert all(re.search(r'<canvas class="px" data-px="static" data-tint="#f7768e"',
+                         re.search(rf'<tr id="{a}">(.*?)</tr>', broken, re.S).group(1)) for a in BROKEN_IDS)
+
+
+def test_healthy_page_has_no_broken_now(tmp_path: Path) -> None:
+    html = _no_script(render_pages(_healthy(tmp_path))["health.html"])
+    assert _section(html, "broken") == '<section class="panel" id="broken" aria-label="Broken now" hidden></section>'
+    assert re.search(r'<div id="waiters"[^>]*hidden[^>]*></div>', html)
+    assert "<tr id=\"broken-" not in html
+
+
+@needs_node
+def test_script_healthy_page_has_no_broken_now(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _healthy(tmp_path), "health", BAR + ["hud", *PANELS])
+    assert out["hidden"]["broken"] and out["html"]["broken"] == ""
+    assert out["hidden"]["waiters"] and out["html"]["waiters"] == ""
+
+
+def _attrs(tag: str) -> dict[str, str]:
+    return dict(re.findall(r'([\w-]+)="([^"]*)"', tag))
+
+
+def _matrix_of(components: str) -> str:
+    return re.search(r'<table class="sys-table">(.*?)</table>', components, re.S).group(1)
+
+
+def _abnormal_cells(matrix: str) -> dict[str, tuple[str, str]]:
+    return {href: (cls, _text(inner)) for cls, href, inner in
+            re.findall(r'<a class="sys-cell (\w+)" href="#([^"]+)">(.*?)</a>', matrix, re.S)}
+
+
+def _quiet_cells(matrix: str) -> list[dict[str, str]]:
+    return [_attrs(tag) for tag in re.findall(r'<span class="sys-sq ok"[^>]*>', matrix)]
+
+
+def _assert_matrix(components: str, broken: str, probe_text: str) -> None:
+    matrix = _matrix_of(components)
+    cells = _abnormal_cells(matrix)
+    assert cells == {
+        BROKEN_IDS[2]: ("warn", probe_text),
+        BROKEN_IDS[0]: ("bad", "down 8h 02m"),
+        BROKEN_IDS[1]: ("bad", "down · never seen"),
+    }
+    assert set(cells) <= _ids(broken)
+    quiet = _quiet_cells(matrix)
+    assert len(quiet) == 3
+    for cell in quiet:
+        assert cell["role"] == "img" and cell["aria-label"] == "up"
+        assert re.fullmatch(r"up · beat \d+s ago", cell["title"]), cell
+    assert not re.findall(r'<span class="sys-sq ok"[^>]*>[^<]', matrix)
+    assert "not configured" in _text(components)
+    for anchor in BROKEN_IDS:
+        assert f'<tr id="{anchor.removeprefix("broken-")}">' in components
+
+
+def test_abnormal_cell_names_state_and_links_its_broken_row(tmp_path: Path) -> None:
+    html = _no_script(render_pages(_down(tmp_path))["health.html"])
+    _assert_matrix(_section(html, "components"), _section(html, "broken"), "stale 50s")
+
+
+@needs_node
+def test_script_abnormal_cell_names_state_and_links_its_broken_row(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _down(tmp_path), "health", BAR + ["hud", *PANELS])
+    _assert_matrix(out["html"]["components"], out["html"]["broken"], "stale 53s")
+
+
+NO_WAITER_TEXT = "no waiter for codex: 2 queued jobs (j1, j2)"
+
+
+def _no_waiter_home(markup: dict[str, str]) -> list[str]:
+    homes = []
+    for name, html in markup.items():
+        homes += [(name, tag) for tag in re.findall(r'<(\w+)[^>]*\bid="no-waiter"', html)]
+    return homes
+
+
+def test_no_waiter_panel_only_with_rows(tmp_path: Path) -> None:
+    html = _no_script(render_pages(_no_waiter(tmp_path / "rows"))["health.html"])
+    panel = _section(html, "no-waiter")
+    assert '<li id="health-waiter-codex-bot">' in panel and NO_WAITER_TEXT in _text(panel)
+    broken = _section(html, "broken")
+    assert _cells(broken, "broken-health-waiter-codex-bot") == [
+        "queued job · codex", "—", "no-waiter", "—", "—", NO_WAITER_TEXT]
+    assert '<span class="count bad">2 queued jobs with no waiter</span>' in broken
+    assert html.count('id="no-waiter"') == 1
+    for build, home in ((_down, "broken"), (_healthy, "components")):
+        html = _no_script(render_pages(build(tmp_path / build.__name__))["health.html"])
+        assert html.count('id="no-waiter"') == 1, build.__name__
+        assert "Queued jobs with no waiter" not in html
+        assert re.search(r'<h2 id="no-waiter">', _section(html, home)), build.__name__
+
+
+@needs_node
+def test_script_no_waiter_panel_only_with_rows(tmp_path: Path) -> None:
+    (tmp_path / "rows").mkdir()
+    out = _run_page(tmp_path / "rows", _no_waiter(tmp_path / "rows"), "health", BAR + ["hud", *PANELS])
+    assert not out["hidden"]["waiters"]
+    waiters = out["html"]["waiters"]
+    assert re.match(r'<section class="panel" id="no-waiter"', waiters)
+    assert '<li id="health-waiter-codex-bot">' in waiters and NO_WAITER_TEXT in _text(waiters)
+    assert _cells(out["html"]["broken"], "broken-health-waiter-codex-bot") == [
+        "queued job · codex", "—", "no-waiter", "—", "—", NO_WAITER_TEXT]
+    assert _no_waiter_home(out["html"]) == [("waiters", "section")]
+    for build, home in ((_down, "broken"), (_healthy, "components")):
+        (tmp_path / build.__name__).mkdir()
+        out = _run_page(tmp_path / build.__name__, build(tmp_path / build.__name__), "health",
+                        BAR + ["hud", *PANELS])
+        assert out["hidden"]["waiters"], build.__name__
+        assert _no_waiter_home(out["html"]) == [(home, "h2")], build.__name__
 
 
 CLASSIFIED_TAIL = [
@@ -602,7 +808,7 @@ def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path
         server.shutdown()
     assert isinstance(landed, list)
     hrefs = {row["href"] for row in landed}
-    assert {"health.html#health-linear-listener--box", "#health-linear-listener--box",
+    assert {"health.html#health-linear-listener--box", "#broken-health-linear-listener--box",
             "health.html#health-no-waiter-codex", "health.html#components"} <= hrefs, hrefs
     for row in landed:
         if row["href"] == "#hud":
