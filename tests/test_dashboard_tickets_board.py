@@ -291,10 +291,13 @@ def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
     assert len(rows) == opened + len(tiles)
     count = _text(_one(pipeline, _cls("count")))
     assert count == f"{len(rows)} tracked · {opened} open · {len(tiles)} shipped"
-    assert _text(_one(shipped, _cls("count"))) == f"{len(tiles)} tickets"
-    for group in _all(shipped, _cls("tk-sub")):
-        shown = len(_all(group, _attr("data-ticket")))
-        assert _text(_one(group, _cls("tk-label"))).endswith(f"({shown})")
+    assert _text(_one(shipped, _cls("count"))) == str(len(tiles))
+    handed = sum(row["state"] == "handed-off" and not row["stuck"] for row in rows)
+    if tiles:
+        assert _text(_one(shipped, _cls("tk-sub"))) == f"{len(tiles) - handed} merged · {handed} handed off"
+    else:
+        assert not _all(shipped, _cls("tk-sub"))
+        assert _text(_one(shipped, _cls("empty"))) == "nothing shipped"
     assert sorted(_placed(markup["pipeline"] + markup["shipped"])) == sorted(_key(r) for r in rows)
 
 
@@ -410,15 +413,12 @@ def test_cards_show_round_bot_device_time_and_link_their_ticket_page(snapshot: d
 
 
 def test_shelf_tiles_carry_their_revise_rounds(snapshot: dict) -> None:
-    shipped = _dom(_server(snapshot)["shipped"])
-    labels = [_text(_one(g, _cls("tk-label"))) for g in _all(shipped, _cls("tk-sub"))]
-    assert labels == ["handed-off · ready for review (1)", "merged (1)", "done · shipped (1)"]
-    rounds = {row["state"]: row["round"] for row in snapshot["tickets"]}
-    for tile in _all(shipped, _cls("tk-tile")):
+    rounds = {_key(row): row["round"] for row in snapshot["tickets"]}
+    tiles = _all(_dom(_server(snapshot)["shipped"]), _cls("tk-tile"))
+    assert len(tiles) == 3 and len({rounds[t["attrs"]["data-ticket"]] for t in tiles}) > 1
+    for tile in tiles:
         assert "#" in _text(_one(tile, _cls("tk-tn")))
-    states = [g["attrs"]["data-state"] for g in _all(shipped, _attr("data-state"))]
-    for state, group in zip(states, _all(shipped, _attr("data-state"))):
-        assert _text(_one(group, _cls("tk-r"))) == f"r{rounds[state]}"
+        assert _text(_one(tile, _cls("tk-r"))) == f"r{rounds[tile['attrs']['data-ticket']]}"
 
 
 def test_empty_columns_are_dashed_boxes_with_their_copy(tmp_path: Path) -> None:
@@ -437,7 +437,9 @@ def _check_empty(markup: dict[str, str]) -> None:
     stop = _one(pipeline, _attr("data-phase", "Stop"))
     assert _one(stop, _cls("tk-count"))["attrs"]["class"] == "tk-count"
     assert _text(_one(pipeline, _cls("count"))) == "0 tracked · 0 open · 0 shipped"
-    assert not _all(_dom(markup["shipped"]), _attr("data-phase"))
+    shelf = _dom(markup["shipped"])
+    assert not _all(shelf, _attr("data-phase"))
+    assert _text(_one(shelf, _cls("count"))) == "0" and _text(_one(shelf, _cls("empty"))) == "nothing shipped"
 
 
 @layout.needs_node
@@ -504,23 +506,30 @@ def test_script_card_ids_link_their_ticket_page(tmp_path: Path, snapshot: dict) 
     _check_id_links(_script(tmp_path, snapshot)["html"]["pipeline"], snapshot["tickets"])
 
 
-def _check_tile_links(markup: str, rows: list[dict]) -> None:
+def _check_tile_links(markup: str, rows: list[dict], hidden: int = 0) -> None:
     by_key = {_key(row): row for row in rows}
+    shipped = {key for key, row in by_key.items() if row["state"] in flow.SHIPPED and not row["stuck"]}
     tiles = _all(_dom(markup), _cls("tk-tile"))
     assert tiles
     for tile in tiles:
         key = tile["attrs"]["data-ticket"]
         assert tile["tag"] == "a", key
         assert tile["attrs"]["href"] == ticket_page_href(by_key[key]), key
+    keys = [tile["attrs"]["data-ticket"] for tile in tiles]
+    assert len(keys) == len(set(keys)) and set(keys) <= shipped
+    assert len(shipped) - len(keys) == hidden
 
 
-def test_every_shelf_tile_links_its_ticket_page(snapshot: dict) -> None:
+def test_every_shelf_tile_links_its_ticket_page(snapshot: dict, shelf: dict) -> None:
     _check_tile_links(_server(snapshot)["shipped"], snapshot["tickets"])
+    _check_tile_links(_server(shelf)["shipped"], shelf["tickets"], hidden=10)
 
 
 @layout.needs_node
-def test_script_shelf_tiles_link_their_ticket_page(tmp_path: Path, snapshot: dict) -> None:
+def test_script_shelf_tiles_link_their_ticket_page(tmp_path: Path, snapshot: dict, shelf: dict) -> None:
     _check_tile_links(_script(tmp_path, snapshot)["html"]["shipped"], snapshot["tickets"])
+    steps = _shelf_script(tmp_path, shelf, [["shelf", "press"], ["snap", ["shipped"]]])
+    _check_tile_links(steps[-1]["snap"]["shipped"], shelf["tickets"])
 
 
 def test_without_a_chart_the_board_says_so_and_the_table_lists_every_ticket(tmp_path: Path) -> None:
@@ -1179,3 +1188,175 @@ def test_script_more_box_stays_open_across_redraws(tmp_path: Path, ordered: dict
     assert [step for step in out["steps"] if "open" in step] == [
         {"open": False, "kept": False}, {"open": False, "kept": False}, {"open": True, "kept": True},
         {"open": True, "kept": False}]
+
+
+SHIPPED_COUNT = 70
+HANDED = {4, 18, 35, 47, 63}
+UNDATED = SHIPPED_COUNT - 1
+SHELF_OPEN = (("maxharris1/factory", "2001", "building"), ("maxharris1/factory", "2002", "intake"),
+              ("maxharris1/cleffy", "2003", "review"))
+
+
+def _shipped(i: int) -> tuple[str, str]:
+    return ("maxharris1/cleffy" if i % 3 == 0 else "maxharris1/factory"), str(1000 + i)
+
+
+def _shipped_age(i: int) -> int:
+    return 60 * (i + 1)
+
+
+def shelf_snapshot(tmp_path: Path) -> dict:
+    """Ticket i shipped i + 1 minutes before NOW (handed off when i is in HANDED,
+    merged then done a little later when i % 10 == 7); UNDATED has no recorded
+    transition."""
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        def moved(repo: str, ticket_id: str, from_state: str | None, to_state: str, at: float) -> None:
+            connection.execute(
+                "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+                "VALUES (?, ?, ?, ?, ?, 'poller')", (repo, ticket_id, from_state, to_state, at))
+
+        for i in range(SHIPPED_COUNT):
+            repo, ticket_id = _shipped(i)
+            state = "handed-off" if i in HANDED else "done" if i % 10 == 7 else "merged"
+            add_ticket(connection, repo, ticket_id, state=state, review_round=i % 4)
+            if i == UNDATED:
+                continue
+            at = NOW - _shipped_age(i)
+            if state == "done":
+                moved(repo, ticket_id, "post-merge", "merged", at)
+                moved(repo, ticket_id, "merged", "done", at + 30)
+            else:
+                moved(repo, ticket_id, "ship", state, at)
+        for repo, ticket_id, state in SHELF_OPEN:
+            add_ticket(connection, repo, ticket_id, state=state)
+            moved(repo, ticket_id, None, state, NOW - 100)
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+@pytest.fixture(scope="module")
+def shelf(tmp_path_factory) -> dict:
+    return shelf_snapshot(tmp_path_factory.mktemp("shelf"))
+
+
+SHELF_HARNESS = HARNESS.replace(
+    "    } else if (kind === 'press') {",
+    "    } else if (kind === 'shelf') {\n"
+    "      const box = find(body, n => n.className === 'tk-earlier');\n"
+    "      if (arg === 'toggle') { box.open = !box.open; fire(box, 'toggle'); }\n"
+    "      if (arg === 'press') fire(find(box, n => n.tagName === 'button'), 'click');\n"
+    "      steps.push({open: !!find(body, n => n.className === 'tk-earlier').open});\n"
+    "    } else if (kind === 'press') {",
+)
+
+
+def _shelf_script(tmp_path: Path, snapshot: dict, actions: list) -> list[dict]:
+    assert "kind === 'shelf'" in SHELF_HARNESS
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["job.html"], flags=re.S)
+    return layout.run_harness(tmp_path, SHELF_HARNESS, script, snapshot, "job", IDS, actions)["steps"]
+
+
+def _ago(seconds: int) -> str:
+    hours, minutes = divmod(seconds // 60, 60)
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {seconds % 60:02d}s"
+
+
+def _want_tile(i: int) -> dict:
+    repo, ticket_id = _shipped(i)
+    name = f"{repo.rsplit('/', 1)[-1]}#{ticket_id}"
+    rounds = "1 revise round" if i % 4 == 1 else f"{i % 4} revise rounds"
+    how = "handed off" if i in HANDED else "merged"
+    if i == UNDATED:
+        return {"key": f"{repo}#{ticket_id}", "title": f"{name} · {rounds}", "id": name, "r": f"r{i % 4}",
+                "ago": None}
+    ago = _ago(_shipped_age(i))
+    return {"key": f"{repo}#{ticket_id}", "title": f"{name} · {how} {ago} ago · {rounds}", "id": name,
+            "r": f"r{i % 4}", "ago": ("handed off " if i in HANDED else "") + f"{ago} ago"}
+
+
+def _got_tile(tile: dict) -> dict:
+    (square,) = _all(tile, _cls("tk-blk"))
+    assert square["attrs"].get("aria-hidden") == "true" and not _all(tile, lambda n: n["tag"] == "canvas")
+    ago = _all(tile, _cls("tk-ago"))
+    return {"key": tile["attrs"]["data-ticket"], "title": tile["attrs"].get("title"),
+            "id": _text(_one(tile, _cls("tk-tn"))), "r": _text(_one(tile, _cls("tk-r"))),
+            "ago": _text(ago[0]) if ago else None}
+
+
+def _check_shelf(markup: str, order: list[int], shown: int = 50) -> None:
+    shelf = _dom(markup)
+    handed = sum(i in HANDED for i in order)
+    assert _text(_one(shelf, _cls("count"))) == str(len(order))
+    assert _text(_one(shelf, _cls("tk-sub"))) == f"{len(order) - handed} merged · {handed} handed off"
+    newest = _all(shelf, _cls("tk-tiles"))[0]
+    assert [_got_tile(t) for t in _all(newest, _cls("tk-tile"))] == [_want_tile(i) for i in order[:10]]
+    rest = order[10:]
+    drawers = _all(shelf, lambda n: n["tag"] == "details")
+    if not rest:
+        assert not drawers
+        return
+    (drawer,) = drawers
+    assert "open" not in drawer["attrs"] and drawer["attrs"]["class"] == "tk-earlier"
+    assert _text(_one(drawer, lambda n: n["tag"] == "summary")) == f"{len(rest)} earlier"
+    assert [_got_tile(t) for t in _all(drawer, _cls("tk-tile"))] == [_want_tile(i) for i in rest[:shown]]
+    left = max(0, len(rest) - shown)
+    buttons = [_text(b) for b in _all(drawer, lambda n: n["tag"] == "button")]
+    notes = [_text(n) for n in _all(drawer, _cls("tk-note"))]
+    assert (buttons, notes) == ((["show 50 more"], [f"{left} older not shown · newest first"]) if left else ([], []))
+
+
+SHIP_ORDER = [i for i in range(SHIPPED_COUNT) if i != UNDATED] + [UNDATED]
+
+
+def test_a_ticket_row_carries_when_and_how_it_shipped(shelf: dict) -> None:
+    from lib.dashboard import RECORDS
+
+    rows = {_key(row): row for row in shelf["tickets"]}
+    for key, record in shelf[RECORDS].items():
+        found = record["shipped"]
+        assert (rows[key]["shipped_at"], rows[key]["shipped_how"]) == (
+            (found["at"], found["how"]) if found else (None, None)), key
+    for i in range(SHIPPED_COUNT):
+        row = rows["#".join(_shipped(i))]
+        assert row["shipped_at"] == (None if i == UNDATED else NOW - _shipped_age(i)), i
+        assert row["shipped_how"] == ("handed-off" if i in HANDED else "merged"), i
+    for repo, ticket_id, _ in SHELF_OPEN:
+        assert (rows[f"{repo}#{ticket_id}"]["shipped_at"], rows[f"{repo}#{ticket_id}"]["shipped_how"]) == (None, None)
+
+
+def test_the_shelf_shows_the_ten_newest_then_fifty_earlier_in_a_closed_drawer(shelf: dict) -> None:
+    _check_shelf(_server(shelf)["shipped"], SHIP_ORDER)
+    assert re.search(r"@media \(scripting:none\)\{[^@]*\.tk-earlier \.tk-btn\{display:none\}", page.CSS)
+
+
+@layout.needs_node
+def test_script_shelf_matches_the_server(tmp_path: Path, shelf: dict) -> None:
+    out = _script(tmp_path, shelf)
+    _check_shelf(out["html"]["shipped"], SHIP_ORDER)
+    server = _server(shelf)
+    for ident in BOARD:
+        assert out["html"][ident] == server[ident], ident
+
+
+@layout.needs_node
+def test_show_more_adds_fifty_and_survives_a_redraw_with_the_drawer_open(tmp_path: Path, shelf: dict) -> None:
+    actions = [["shelf", "look"], ["shelf", "toggle"], ["shelf", "press"], ["snap", ["shipped"]],
+               ["hashchange", None], ["shelf", "look"], ["snap", ["shipped"]]]
+    steps = _shelf_script(tmp_path, shelf, actions)
+    assert [step["open"] for step in steps if "open" in step] == [False, True, True, True]
+    for snap in (step["snap"]["shipped"] for step in steps if "snap" in step):
+        _check_shelf(snap, SHIP_ORDER, shown=100)
+
+
+@layout.needs_node
+def test_a_project_press_recomputes_the_shelf(tmp_path: Path, shelf: dict) -> None:
+    repos = ["maxharris1/cleffy", "maxharris1/factory", ""]
+    actions = [step for repo in repos for step in (["press", ["data-project", repo]], ["snap", BOARD])]
+    snaps = [step["snap"] for step in _script(tmp_path, shelf, actions)["steps"] if "snap" in step]
+    for repo, snap in zip(repos, snaps):
+        _check_shelf(snap["shipped"], [i for i in SHIP_ORDER if repo in ("", _shipped(i)[0])])
+        if repo:
+            _check_counts(snap, [row for row in shelf["tickets"] if row["repo"] == repo])
