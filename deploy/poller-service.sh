@@ -113,14 +113,7 @@ is_poller_argv() {
     return 1
 }
 
-# Print the pid of the running poller, or fail. A pidfile naming a dead
-# process, or a live process that is not `orch poll`, does not count. With
-# no /proc (macOS), ps(1) names the command; if it cannot, the pid does not
-# count either (orch poll's own lock still refuses a second poller).
-# Without a live pid in ${PIDFILE}, the poller is the `orch poll` holding
-# the poll lock open, whatever pidfile it writes: orch-poll.service runs
-# run-poller.sh without --pidfile, so that poller writes poller.pid beside
-# its ORCH_DB instead.
+# Print the pid of the running poller, or fail.
 running_pid() {
     pidfile_pid || lock_holder_pid
 }
@@ -148,6 +141,10 @@ lock_holder_pid() {
     return 1
 }
 
+# A pid naming a dead process, or a live process that is not `orch poll`,
+# does not count. With no /proc (macOS), ps(1) names the command; if it
+# cannot, the pid does not count either (orch poll's own lock still refuses
+# a second poller).
 is_poller_pid() {
     local pid="$1" command
     local -a argv=()

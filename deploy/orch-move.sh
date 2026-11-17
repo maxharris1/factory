@@ -19,10 +19,11 @@
 # After stopping self-heal it runs `self-heal.sh wait-idle`, which waits up
 # to ORCH_HEAL_IDLE_WAIT seconds (default 900) for a pass already running,
 # and the device deploy it started detached, to finish writing to orch.db;
-# on timeout that counts as a failed stop. poller-service.sh stop finds the
-# poller by the poll lock it holds open when its pidfile is elsewhere (as
-# orch-poll.service's is), and export then fails unless `orch move-db
-# unlocked` finds no process holding <orch.db>.lock. Then it copies orch.db to
+# on timeout that counts as a failed stop. Where /proc exists,
+# poller-service.sh stop also finds a poller whose pidfile is elsewhere (as
+# orch-poll.service's is) by the poll lock it holds open. Export then exits
+# 1, leaving the host retired and stopped, unless `orch move-db unlocked`
+# can take orch.db.lock (the lock beside orch.db). Then it copies orch.db to
 # <export>/orch.db, checks that copy is still drained, writes
 # <export>/manifest.json (`orch move-db manifest`), copies the checkout's
 # machines.yml to <export>/machines.<this host>.yml and prints <export>.
