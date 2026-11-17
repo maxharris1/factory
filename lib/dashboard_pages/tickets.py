@@ -37,6 +37,9 @@ font-family:var(--mono)}
 .tk-card{display:flex;flex-direction:column;min-width:0;background:var(--panel-hi);box-shadow:var(--elev)}
 .tk-card.tk-stop{border:1px solid color-mix(in srgb,var(--bad) 45%,transparent);box-shadow:none}
 .tk-card.tk-stale{border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);box-shadow:none}
+.tk-more{min-width:0}
+.tk-more>summary{padding:6px 10px;border:1px dashed var(--line-hi)}
+.tk-more-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .tk-strip{display:block}
 .tk-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px}
 .tk-id{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
@@ -165,7 +168,8 @@ SCRIPT_TICKETS = r"""
     }
     var columns = table.columns.map(function (col) {
       var ranked = cards.filter(function (c) { return c.phase === col.phase; }).sort(byRank);
-      return {phase: col.phase, name: col.name, glyph: col.glyph, states: col.states, cards: ranked};
+      return {phase: col.phase, name: col.name, glyph: col.glyph, states: col.states, cards: ranked,
+              shown: ranked.slice(0, BOARD.cap), more: ranked.slice(BOARD.cap)};
     });
     return {
       projects: projects, total: rows.length, tracked: cards.length, available: table.columns.length > 0,
@@ -316,7 +320,12 @@ SCRIPT_TICKETS = r"""
     add(head, el('span', 'tk-states', col.states.join(' · ')));
     var empty = BOARD_EMPTY[col.phase] || 'nothing in ' + col.phase.toLowerCase();
     if (!col.cards.length) add(box, el('div', 'tk-empty', empty));
-    col.cards.forEach(function (c) { add(box, tkCard(c)); });
+    col.shown.forEach(function (c) { add(box, tkCard(c)); });
+    if (col.more.length) {
+      var list = add(details(box, 'tk-more-' + col.phase, '+' + col.more.length + ' more', 'tk-more'),
+                     el('div', 'tk-more-list'));
+      col.more.forEach(function (c) { add(list, tkCard(c)); });
+    }
     return box;
   }
 
@@ -417,6 +426,7 @@ CARD_KINDS = {
     "queued": (1, "queued", "age_seconds"),
     "idle": (2, "ticket", "state_age_seconds"),
 }
+CAP = 6
 JOB_CHIPS = {
     **{name: TILE_STATE[name]["chip"] for name in ("claimed", "stale", "dead")},
     "overdue": ["overdue", "bad"],
@@ -435,7 +445,7 @@ def _phase_glyph(phase: str) -> dict:
 def board_constants() -> dict:
     return {
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
-        "shipped": SHIPPED, "gloss": GLOSS, "chips": JOB_CHIPS, "kinds": CARD_KINDS,
+        "shipped": SHIPPED, "gloss": GLOSS, "chips": JOB_CHIPS, "kinds": CARD_KINDS, "cap": CAP,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -517,7 +527,7 @@ def board(snapshot: dict, project: str | None = None) -> dict:
     columns = []
     for col in table["columns"]:
         ranked = sorted((c for c in cards if c["phase"] == col["phase"]), key=_rank)
-        columns.append({**col, "cards": ranked})
+        columns.append({**col, "cards": ranked, "shown": ranked[:CAP], "more": ranked[CAP:]})
     return {
         "projects": sorted(counts.items(), key=lambda item: (-item[1], _short(item[0]), item[0])),
         "total": len(rows),
@@ -641,9 +651,14 @@ def _card(card: dict) -> str:
 
 def _column(col: dict) -> str:
     phase = col["phase"]
-    cards = "".join(_card(card) for card in col["cards"]) or (
+    cards = "".join(_card(card) for card in col["shown"]) or (
         f'<div class="tk-empty">{_e(_EMPTY.get(phase, f"nothing in {phase.lower()}"))}</div>'
     )
+    if col["more"]:
+        cards += (
+            f'<details class="tk-more"><summary>{_e(f"+{len(col['more'])} more")}</summary>'
+            f'<div class="tk-more-list">{"".join(_card(card) for card in col["more"])}</div></details>'
+        )
     count = "tk-count tk-stopped" if phase == "Stop" and col["cards"] else "tk-count"
     return (
         f'<div class="tk-col" data-phase="{_e(phase)}"><div class="tk-head"><div class="tk-headrow">'
