@@ -74,7 +74,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatch.helpers import _base_mismatch
-from lib.dispatch.types import CheckRow, RunJob
+from lib.dispatch.types import CHECK_FAILED, CheckRow, RunJob
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -129,14 +129,6 @@ MARK_READY_QUERY = (
 )
 
 _CHECK_NOT_RUN = ("neutral", "skipped")
-_CHECK_FAILED = (
-    "failure",
-    "cancelled",
-    "timed_out",
-    "action_required",
-    "startup_failure",
-    "stale",
-)
 
 
 LINEAR_NO_READY_STATE_NOTE = "linear-not-moved: team has no Ready for Review state"
@@ -682,7 +674,7 @@ class GitHubReviewActions:
                 continue
             if status != "completed":
                 self._warn_contradiction(repo, head, run, name, status, conclusion)
-            if conclusion in _CHECK_FAILED:
+            if conclusion in CHECK_FAILED:
                 failed.append(_failed_check(name, run.get("details_url")))
             elif conclusion == "success":
                 passed = True

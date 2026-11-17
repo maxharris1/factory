@@ -47,6 +47,16 @@ class FailedCheck:
     run_url: str | None = None
 
 
+CHECK_FAILED = (
+    "failure",
+    "cancelled",
+    "timed_out",
+    "action_required",
+    "startup_failure",
+    "stale",
+)
+
+
 @dataclass(frozen=True)
 class CheckRow:
     name: str
