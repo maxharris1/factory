@@ -16,15 +16,36 @@ from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.helpers import _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.factory_md import QaConfig
+from lib.feeder_gates import path_matches
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import QA_RECIPIENT, Job, JobRequest, cancel_queued
+from lib.update_check import HeadDiff
 
 OPEN_STATES = ("queued", "running")
 
 
 @dataclass(frozen=True)
+class Prior:
+    """A primary run at another head that verified something."""
+
+    run_id: str
+    head: str
+    result: str
+
+
+@dataclass(frozen=True)
 class ScopeInput:
+    """live_ids is None when no live scenario exists or the section is
+    invalid. touched and lines are about qa.paths in the diff since the
+    baseline, or since the merge-base without one; unknown git facts are
+    touched=True and lines=None."""
+
     live_ids: tuple[str, ...] | None
+    baseline: Prior | None
+    same_patch_pass: Prior | None
+    touched: bool
+    lines: int | None
+    full_rerun_lines: int
 
 
 @dataclass(frozen=True)
@@ -40,7 +61,16 @@ class NoRun:
 
 
 def decide_scope(facts: ScopeInput) -> Run | NoRun:
-    return Run("full", facts.live_ids or ())
+    """The first match wins (docs/SPEC.md section 4.2.1)."""
+    if facts.same_patch_pass is not None:
+        return NoRun(f"carried:{facts.same_patch_pass.run_id}", "PASS")
+    if facts.baseline is not None and not facts.touched:
+        return NoRun(f"carried:{facts.baseline.run_id}", facts.baseline.result)
+    if facts.live_ids is None:
+        return Run("smoke", ()) if facts.touched else NoRun("qa-not-required")
+    if facts.baseline is None or facts.lines is None or facts.lines > facts.full_rerun_lines:
+        return Run("full", facts.live_ids)
+    return Run("full", facts.live_ids)
 
 
 def _arms(qa: QaConfig) -> tuple[tuple[str, str], ...]:
@@ -49,6 +79,13 @@ def _arms(qa: QaConfig) -> tuple[tuple[str, str], ...]:
     if qa.shootout:
         arms.extend((runner.name, "shootout") for runner in others)
     return tuple(arms)
+
+
+def _under_paths(qa: QaConfig, diff: HeadDiff | None) -> tuple[bool, int | None]:
+    if diff is None:
+        return True, None
+    changed = [lines for path, lines in diff.files if not qa.paths or path_matches(qa.paths, path)]
+    return bool(changed), sum(changed)
 
 
 class QaMixin:
@@ -79,13 +116,37 @@ class QaMixin:
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
-            decided = connection.execute(
+            if connection.execute(
                 "SELECT 1 FROM qa_runs WHERE repo = ? AND ticket_id = ? AND head = ? LIMIT 1",
                 (*key, head),
-            ).fetchone()
-        if decided is not None:
-            return
-        decision = decide_scope(ScopeInput(live_ids=self._qa_live_ids(ticket)))
+            ).fetchone():
+                return
+            baseline = _prior(
+                connection,
+                "repo = ? AND ticket_id = ? AND head != ? AND result IN ('PASS', 'FAIL')",
+                (*key, head),
+            )
+        diff = self._qa_head_diff(ticket, baseline.head if baseline else None, head)
+        patch_id = diff.patch_id if diff is not None else None
+        same_patch_pass = None
+        if patch_id is not None:
+            with self._connect() as connection:
+                same_patch_pass = _prior(
+                    connection,
+                    "repo = ? AND ticket_id = ? AND head != ? AND result = 'PASS' AND patch_id = ?",
+                    (*key, head, patch_id),
+                )
+        touched, lines = _under_paths(qa, diff)
+        decision = decide_scope(
+            ScopeInput(
+                live_ids=self._qa_live_ids(ticket),
+                baseline=baseline,
+                same_patch_pass=same_patch_pass,
+                touched=touched,
+                lines=lines,
+                full_rerun_lines=qa.full_rerun_lines,
+            )
+        )
         generation = self._generation(ticket.repo, ticket.ticket_id)
         now = self.queue.now()
         with self._connect() as connection:
@@ -94,22 +155,30 @@ class QaMixin:
                 connection.execute(
                     """
                     INSERT INTO qa_runs (
-                        run_id, repo, ticket_id, head, round, scope, runner, arm,
+                        run_id, repo, ticket_id, head, patch_id, round, scope, runner, arm,
                         state, result, reason, started_at, finished_at
-                    ) VALUES (?, ?, ?, ?, ?, 'none', ?, 'primary', 'reported', ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'none', ?, 'primary', 'reported', ?, ?, ?, ?)
                     """,
                     (
-                        uuid.uuid4().hex, *key, head, review_round, qa.runners[0].name,
+                        uuid.uuid4().hex, *key, head, patch_id, review_round, qa.runners[0].name,
                         decision.result, decision.reason, now, now,
                     ),
                 )
             else:
                 for runner, arm in _arms(qa):
                     self._queue_qa_run(
-                        connection, ticket, qa, comment, head, review_round, generation,
-                        decision, runner, arm,
+                        connection, ticket, qa, comment, head, patch_id, review_round,
+                        generation, decision, runner, arm,
                     )
             connection.commit()
+
+    def _qa_head_diff(self, ticket: TrackedTicket, since: str | None, head: str) -> HeadDiff | None:
+        if self.qa_diff is None:
+            return None
+        try:
+            return self.qa_diff(ticket.repo, ticket.factory.base_branch, since, head)
+        except Exception:
+            return None
 
     def _queue_qa_run(
         self,
@@ -118,6 +187,7 @@ class QaMixin:
         qa: QaConfig,
         comment: Comment,
         head: str,
+        patch_id: str | None,
         review_round: int,
         generation: int,
         run: Run,
@@ -156,12 +226,12 @@ class QaMixin:
         connection.execute(
             """
             INSERT INTO qa_runs (
-                run_id, repo, ticket_id, head, round, scope, runner, arm,
+                run_id, repo, ticket_id, head, patch_id, round, scope, runner, arm,
                 job_id, state, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
             """,
             (
-                run_id, ticket.repo.lower(), ticket.ticket_id, head, review_round,
+                run_id, ticket.repo.lower(), ticket.ticket_id, head, patch_id, review_round,
                 run.scope, runner, arm, job.id, self.queue.now(),
             ),
         )
@@ -300,3 +370,15 @@ def _followed(row: sqlite3.Row, current_head: str | None) -> tuple[str, str | No
     if row["job_state"] == "running":
         return "running", None
     return row["state"], None
+
+
+def _prior(connection: sqlite3.Connection, where: str, args: tuple) -> Prior | None:
+    row = connection.execute(
+        f"""
+        SELECT run_id, head, result FROM qa_runs
+        WHERE arm = 'primary' AND state = 'reported' AND {where}
+        ORDER BY finished_at DESC, rowid DESC LIMIT 1
+        """,
+        args,
+    ).fetchone()
+    return None if row is None else Prior(row["run_id"], row["head"], row["result"])

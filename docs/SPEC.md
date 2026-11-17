@@ -294,7 +294,17 @@ The queue has the action `qa` and the recipient `qa`, the factory's own QA worke
 
 The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at` and `finished_at`. A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) is its only writer. QA adds no workflow state.
 
-Wherever the dispatcher queues a review for a head (T2, the patch review, the merge-queue re-review, and an approver's go on a BLOCKED ticket), it also decides QA for that head, once. A head with a `qa_runs` row is never decided again, so a T6 retry or a resume at the same head queues no second run. The ticket's first ready gets `full`, with every live scenario id from `lib/evidence/scenarios.py` read over the trusted builder's `plan` and `ready` comments.
+Wherever the dispatcher queues a review for a head (T2, the patch review, the merge-queue re-review, and an approver's go on a BLOCKED ticket), it also decides QA for that head, once. A head with a `qa_runs` row is never decided again, so a T6 retry or a resume at the same head queues no second run. The live scenario ids come from `lib/evidence/scenarios.py`, read over the trusted builder's `plan` and `ready` comments. The scope is decided by `decide_scope`, a pure function of facts the dispatcher gathers; the first match wins:
+
+| # | Situation | Scope |
+|---|---|---|
+| 1 | The head's `git patch-id --stable` equals that of a head whose primary run recorded `PASS` | none: recorded `carried:<run_id>` with result `PASS` |
+| 2 | There is a baseline, and the diff since it touches nothing under `qa.paths` | none: recorded `carried:<run_id>` with the baseline's result |
+| 3 | The plan or ready has no live scenario, or its section is invalid | `smoke` when the diff touches `qa.paths`, otherwise none, recorded `qa-not-required` |
+| 4 | There is no baseline: the ticket's first ready | `full`, with every live id |
+| 5 | More than `qa.full_rerun_lines` lines changed under `qa.paths` since the baseline | `full` |
+
+The baseline is the newest primary row at another head that recorded `PASS` or `FAIL`; a `BLOCKED` or cancelled run verified nothing, so the first full run is still owed after one. The diff is from the baseline to the head, or from the merge-base without a baseline. An empty `qa.paths` counts every file. A no-run decision is one primary row with scope `none` and state `reported`. The git facts come from the injected `qa_diff` (`lib/update_check.py`): the head's patch id and each changed path with its added and deleted lines. When it is missing or raises, the facts are unknown and the decision runs more QA, never less: no row carries, every diff counts as touching `qa.paths`, and a fix runs `full`.
 
 Runners: `qa.runners[0]` is the primary and gets `arm=primary`. With `shootout: true` every other runner gets its own row and job at the same head with `arm=shootout`. Without it, only the primary runs.
 

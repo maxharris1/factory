@@ -119,9 +119,11 @@ from lib.state_backup import (
 )
 from lib.status import main as status_main
 from lib.update_check import (
+    HeadDiff,
     RebaseScope,
     UpdateClass,
     classify as classify_update,
+    head_diff,
     merge_update,
     rebase_scope,
 )
@@ -1180,6 +1182,7 @@ def _runtime(
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
         hold_carry=_hold_carry,
+        qa_diff=_qa_diff,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1211,6 +1214,14 @@ def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | N
         worktrees.work_root(None), repo, (last, head), worktrees.url_template(None)
     )
     return rebase_scope(clone, last, head, f"refs/remotes/origin/{base}")
+
+
+def _qa_diff(repo: str, base: str, since: str | None, head: str) -> HeadDiff:
+    heads = (head,) if since is None else (since, head)
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, heads, worktrees.url_template(None)
+    )
+    return head_diff(clone, since, head, f"refs/remotes/origin/{base}")
 
 
 def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
