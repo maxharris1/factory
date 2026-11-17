@@ -662,32 +662,43 @@ class JobsMixin:
         now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            slot = connection.execute(
-                f"SELECT worker_tag FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            if row is None or str(row["state"]) != "running" or slot is None:
-                connection.commit()
-                return
-            job = _job(row)
-            connection.execute(
-                """
-                UPDATE jobs
-                SET state = 'failed', finished_at = ?, last_activity_at = ?,
-                    failure_handled = 0
-                WHERE id = ? AND state = 'running'
-                """,
-                (now, now, job_id),
-            )
-            detail = device_lost_detail(device, reason, slot["worker_tag"])
-            self._record_job_event(connection, job, DEVICE_LOST, detail, now)
-            orphan_slot(connection, job_id, now)
-            back_off(
-                connection, device, until=now + UNREACHABLE_BACKOFF_SECONDS,
-                reason=f"{reason}; job {job_id} lost",
-            )
+            lost = self._lose_running_job(connection, job_id, device, reason, now)
             connection.commit()
-        self._log_job_event(job, DEVICE_LOST, detail)
+        if lost is not None:
+            self._log_job_event(lost[0], DEVICE_LOST, lost[1])
+
+    def _lose_running_job(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+        device: str,
+        reason: str,
+        now: float,
+    ) -> tuple[Job, str] | None:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        slot = connection.execute(
+            f"SELECT worker_tag FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None or str(row["state"]) != "running" or slot is None:
+            return None
+        job = _job(row)
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'failed', finished_at = ?, last_activity_at = ?,
+                failure_handled = 0
+            WHERE id = ? AND state = 'running'
+            """,
+            (now, now, job_id),
+        )
+        detail = device_lost_detail(device, reason, slot["worker_tag"])
+        self._record_job_event(connection, job, DEVICE_LOST, detail, now)
+        orphan_slot(connection, job_id, now)
+        back_off(
+            connection, device, until=now + UNREACHABLE_BACKOFF_SECONDS,
+            reason=f"{reason}; job {job_id} lost",
+        )
+        return job, detail
 
     def _t6(self, job: Job) -> None:
         # One dispatcher runs T6 at a time: orch poll holds the single-poller

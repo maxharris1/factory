@@ -99,6 +99,12 @@ def stranded(
     return f"unreachable {int((now - failing_since) // 60)} min"
 
 
+def retry_stranded(device: Device, failing_since: float | None, now: float) -> str | None:
+    if not device.enabled:
+        return "disabled"
+    return stranded(device, failing_since, now, limit=0.0)
+
+
 class DeviceMonitor:
     def __init__(
         self,

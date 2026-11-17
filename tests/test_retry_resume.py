@@ -5,12 +5,18 @@ from pathlib import Path
 
 import pytest
 
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.types import Comment
+from lib.hook_t7 import T7Hook
+from lib.queue import Job
 from tests.merge_queue_support import PR, REPO, Board, sha
 from tests.test_dispatcher import PLAN, RETRY, VERDICT
+from tests.test_remote_start import FakeTransport, config_of, machines_file
 
 REASON = RETRY.format(reason="Max: retry.")
+STUCK_FIXTURE = Path(__file__).parent / "fixtures" / "comments" / "stuck.txt"
 
 
 def _stuck_fix_with_unsettled_failure(b: Board, p: PR) -> None:
@@ -283,3 +289,167 @@ def test_a_stale_verdict_after_a_retried_review_is_still_refused(tmp_path: Path)
         assert b.outcome(comment_id) == "stale-revise"
     assert b.state("42")["workflow_state"] == "review"
     assert _queued_fix_heads(b) == []
+
+
+def _fix_running_on_pc(
+    tmp_path: Path, *, answers: bool, pc_enabled: bool = True
+) -> tuple[Board, PR, DevicePool, Job]:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    b.finish("claude")
+    b.ready(p, p.head)
+    b.poll()
+    b.finish("codex")
+    b.revise(p, "1/3")
+    b.poll()
+    pool = DevicePool(b.queue, config_of(machines_file(tmp_path, box_enabled=False)))
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    job = claimed[0]
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True, tag="e" * 32)
+    (tmp_path / "now").mkdir()
+    now_config = config_of(machines_file(tmp_path / "now", box_enabled=False, pc=pc_enabled))
+    b.dispatcher.devices = DeviceMonitor(
+        pool, now_config, FakeTransport(check=1 if answers else 255), alive=lambda *_: True
+    )
+    b.poll()
+    assert (job.request.action, b.jobs("fix")[0]["state"]) == ("fix", "running")
+    return b, p, pool, job
+
+
+def _events(b: Board, job_id: str) -> list[str]:
+    with b.queue.connect() as connection:
+        return [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT event FROM job_events WHERE job_id = ? ORDER BY id", (job_id,)
+            )
+        ]
+
+
+def _orphans(b: Board) -> list[tuple[str, str]]:
+    with b.queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute("SELECT job_id, device FROM device_orphans")
+        ]
+
+
+@pytest.mark.parametrize(
+    ("answers", "pc_enabled"), [(False, True), (True, False)], ids=["unreachable", "disabled"]
+)
+def test_retry_requeues_a_job_stranded_on_its_device(
+    tmp_path: Path, answers: bool, pc_enabled: bool
+) -> None:
+    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers, pc_enabled=pc_enabled)
+
+    b.post(p, "retry-1", REASON, "grok-login")
+    b.poll()
+
+    assert b.outcome("retry-1") == "queued-retry-stranded"
+    [row] = b.jobs("fix")
+    assert (row["id"], row["state"], row["attempt"], row["generation"]) == (
+        job.id, "queued", job.request.attempt, job.request.generation,
+    )
+    assert _orphans(b) == [(job.id, "pc")]
+    assert _events(b, job.id)[-2:] == ["device-lost", "requeued-link-drop"]
+    assert pool.claim("claude") is None
+    state = b.state("42")
+    assert (state["workflow_state"], state["stuck"]) == ("fixing", 0)
+
+    with b.queue.connect() as connection:
+        connection.execute("DELETE FROM handled_comments WHERE comment_id = 'retry-1'")
+    b.poll()
+
+    assert b.outcome("retry-1") == "queued-retry-stranded"
+    assert [r["state"] for r in b.jobs("fix")] == ["queued"]
+    assert _events(b, job.id).count("requeued-link-drop") == 1
+
+
+def test_retry_still_refuses_a_job_on_a_reachable_enabled_device(tmp_path: Path) -> None:
+    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=True)
+
+    b.post(p, "retry-1", REASON, "grok-login")
+    b.poll()
+
+    assert b.outcome("retry-1") == "rejected-retry-not-stuck"
+    assert [r["state"] for r in b.jobs("fix")] == ["running"]
+    placement = pool.placement(job.id)
+    assert placement is not None and placement.device == "pc"
+
+
+@pytest.mark.parametrize(
+    ("answers", "pc_enabled"), [(False, True), (True, False)], ids=["unreachable", "disabled"]
+)
+def test_retry_of_a_stranded_job_on_a_stuck_ticket_lets_the_replacement_resume_it(
+    tmp_path: Path, answers: bool, pc_enabled: bool
+) -> None:
+    b, p, pool, job = _fix_running_on_pc(tmp_path, answers=answers, pc_enabled=pc_enabled)
+    b.dispatcher.hooks = (T7Hook(),)
+    b.post(p, "stuck-report", STUCK_FIXTURE.read_text(), "grok-login")
+    b.poll()
+    assert b.state("42")["stuck"] == 1
+
+    b.post(p, "retry-1", REASON, "grok-login")
+    b.now[0] += 600
+    b.poll()
+
+    assert b.outcome("retry-1") == "queued-retry-stranded"
+    state = b.state("42")
+    assert (state["workflow_state"], state["stuck"], state["stuck_reason"]) == (
+        "fixing", 0, None,
+    )
+    [row] = b.jobs("fix")
+    assert (row["state"], row["attempt"], row["generation"]) == (
+        "queued", job.request.attempt, job.request.generation,
+    )
+    box = DevicePool(b.queue, config_of(machines_file(tmp_path / "now", box_enabled=True)))
+    claimed = box.claim("claude")
+    assert claimed is not None
+    replacement, placed = claimed
+    assert (replacement.id, placed.device) == (job.id, "box")
+    p.push(sha(2))
+    b.ready(p, p.head, "replacement-ready")
+    b.queue.finish(replacement.id, owner="claude", handoff_comment_id="replacement-ready")
+    b.now[0] += 600
+    b.poll()
+
+    assert b.outcome("replacement-ready") == "queued-review"
+    assert b.state("42")["stuck"] == 0
+
+
+@pytest.mark.job_bound
+def test_retry_of_a_stranded_job_that_posted_its_ready_settles_it_instead_of_rerunning(
+    tmp_path: Path,
+) -> None:
+    b = Board(tmp_path)
+    p = b.open("42", sha(1))
+    b.go(p, "go")
+    b.poll()
+    config = config_of(machines_file(tmp_path))
+    pool = DevicePool(b.queue, config)
+    b.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(check=255), alive=lambda *_: True
+    )
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    job, placed = claimed
+    assert placed.device == "pc"
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True, tag="e" * 32)
+    b.poll()
+    b.ready(p, p.head)
+    b.post(p, "retry-1", REASON, "grok-login")
+    b.poll()
+
+    assert b.outcome("retry-1") == "retried-stranded-posted"
+    assert pool.claim("claude") is None
+    b.poll()
+
+    [build] = b.jobs("build")
+    assert build["state"] == "done"
+    assert [r["state"] for r in b.jobs("review")] == ["queued"]
+    assert pool.claim("claude") is None
