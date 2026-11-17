@@ -137,8 +137,8 @@ list. The rest are lifetime counts:
   merged in the window, with the issue link
 
 render_qa prints the QA section (#794) after the metrics, for the current
-snapshot only, from qa_runs rows started in the window. Rows with scope
-none ran no QA and are left out. Each figure is split by runner: runs by
+snapshot only, from qa_runs rows started in the window with a scope in
+QA_SCOPES. Each figure is split by runner: runs by
 scope (any state), PASS, FAIL and BLOCKED among reported runs, the median
 minutes from started_at to finished_at, FAILs on a head with an accepted
 reviewer APPROVE (verdict_heads, matched by sha prefix), and wrong FAILs
@@ -1905,7 +1905,6 @@ def _count(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-
 class _QaRow(NamedTuple):
     repo: str
     ticket_id: str
@@ -1936,7 +1935,7 @@ def _qa(connection: sqlite3.Connection, tables: set[str], window: MetricWindow) 
             f"""
             SELECT lower(repo), ticket_id, head, runner, arm, scope, state, result, comment_id,
                    started_at, finished_at, {ruling}
-            FROM qa_runs WHERE scope != 'none' AND {clause}
+            FROM qa_runs WHERE scope IN {QA_SCOPES} AND {clause}
             ORDER BY started_at, rowid
             """,
             bounds,
