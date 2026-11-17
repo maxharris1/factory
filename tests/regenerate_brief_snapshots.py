@@ -1,4 +1,5 @@
-"""Render one brief snapshot per job kind into tests/snapshots/brief/<kind>.txt.
+"""Render one brief snapshot per job kind into tests/snapshots/brief/<kind>.txt,
+and one QA lane brief per lane case into tests/snapshots/qa/<case>.txt.
 
 Run `python tests/regenerate_brief_snapshots.py` after a deliberate brief change.
 The snapshots are regenerated, never merged by hand.
@@ -8,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.brief import render_brief  # noqa: E402
+from lib.brief.qa import LaneFacts, Scenario, Upload, render_qa_brief  # noqa: E402
 from lib.brief_comment import before_factory_md  # noqa: E402
 from lib.dispatcher import Comment  # noqa: E402
 from lib.evidence import criteria_evidence  # noqa: E402
@@ -23,10 +25,11 @@ from lib.dispatch.types import FailedCheck  # noqa: E402
 from lib.evidence.ci import ci_evidence  # noqa: E402
 from lib.evidence.criteria import canonical_brief  # noqa: E402
 from lib.evidence.findings import findings_evidence  # noqa: E402
-from lib.factory_md import parse_factory_context  # noqa: E402
+from lib.factory_md import QaEvidence, QaLane, parse_factory_context  # noqa: E402
 from lib.queue import Job, JobRequest  # noqa: E402
 
 SNAPSHOTS = ROOT / "tests" / "snapshots" / "brief"
+QA_SNAPSHOTS = ROOT / "tests" / "snapshots" / "qa"
 HEAD = "3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"
 REMOTE_DEVICE = "mac"
 BOX_FACTORY_ROOT = "/srv/orch/factory"
@@ -262,6 +265,8 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     }),
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
+    "review-qa-block": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
+    "review-qa-report": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-evidence": ("review", "codex", 1, HEAD, {"round": "1/3", "evidence": evidence_bundle(1)}),
     "review-round-2-evidence": ("review", "codex", 1, HEAD, {"round": "2/3", "evidence": evidence_bundle(2)}),
@@ -282,6 +287,24 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     }),
 }
 
+QA_BLOCK = """qa:
+  enabled: true
+  gate: {gate}
+  runners: [claude-cloud]
+  claude_cloud:
+    environment: qa-env
+  profile: full-stack
+  lane:
+    boot: bash scripts/qa/boot-lane.sh
+    doctor: [bash scripts/qa/doctor.sh]
+    base_url: http://127.0.0.1:8080
+"""
+
+
+def with_qa(gate: str) -> str:
+    return FACTORY_MD.replace("---\n\n## Review", QA_BLOCK.format(gate=gate) + "---\n\n## Review")
+
+
 PRE_READY = "review:\n  pre_ready:\n    command: pytest -q tests/fast\n    timeout_seconds: 300\n"
 
 FACTORY_MDS = {
@@ -291,6 +314,60 @@ FACTORY_MDS = {
     "fix-pre-ready": FACTORY_MD.replace("review:\n", PRE_READY),
     "review-user-impact": FACTORY_MD.replace("review:\n", "review:\n  block_on: user-impact\n"),
     "review-user-impact-round-2": FACTORY_MD.replace("review:\n", "review:\n  block_on: user-impact\n"),
+    "review-qa-block": with_qa("block"),
+    "review-qa-report": with_qa("report"),
+}
+
+BASE_COMMIT = "9b8a7c6d5e4f3021fedcba9876543210abcdef01"
+UPLOAD_ROOT = "https://uploads.example.com/qa-run-7"
+
+QA_FACTS = LaneFacts(
+    repo="acme/cleffy",
+    pr=42,
+    run_id="qa-run-7",
+    commit=HEAD,
+    base_commit=BASE_COMMIT,
+    lane=1,
+    kind="head",
+    scenarios=(
+        Scenario(
+            id="s-1",
+            criterion="ac-1",
+            steps=("Open /pricing.", "Click `Start free`."),
+            pass_test="The sign-up form shows with the free plan chosen and no card field.",
+            pack="pricing-visitor",
+            save=("start-free.png", "signup-form.png"),
+        ),
+        Scenario(
+            id="s-2",
+            criterion="ac-2",
+            steps=("Sign up with a new address.", "Open the confirmation email and follow its link."),
+            pass_test="The account page says the email address is confirmed.",
+            pack="new-visitor",
+            save=("confirmed.png",),
+        ),
+    ),
+    lane_config=QaLane(
+        boot="bash scripts/qa/boot-lane.sh",
+        base_url="http://127.0.0.1:8080",
+        doctor=("bash scripts/qa/doctor.sh", "curl --fail http://127.0.0.1:8080/health"),
+        recover="bash scripts/qa/recover.sh",
+    ),
+    verify="verify-live",
+    evidence=QaEvidence(video="multi-step", trace="on-failure"),
+    uploads=tuple(
+        Upload(path, f"{UPLOAD_ROOT}/{path}?sig=4f2a")
+        for path in ("s-1/start-free.png", "s-1/signup-form.png", "s-2/confirmed.png", "result.json")
+    ),
+)
+
+QA_CASES: dict[str, LaneFacts] = {
+    "head": QA_FACTS,
+    "head-fallback": replace(QA_FACTS, verify=None),
+    "regression": replace(QA_FACTS, kind="regression", lane=2),
+    "regression-fallback": replace(QA_FACTS, kind="regression", lane=2, verify=None),
+    "base-check": replace(QA_FACTS, kind="base-check", lane=3),
+    "base-check-fallback": replace(QA_FACTS, kind="base-check", lane=3, verify=None),
 }
 
 
@@ -354,13 +431,22 @@ def render_snapshot(kind: str) -> str:
     return f"===== box =====\n{box}===== remote ({REMOTE_DEVICE}) =====\n{remote}"
 
 
-def main() -> None:
-    SNAPSHOTS.mkdir(parents=True, exist_ok=True)
-    for stale in SNAPSHOTS.glob("*.txt"):
-        if stale.stem not in CASES:
+def render_qa_snapshot(case: str) -> str:
+    return render_qa_brief(QA_CASES[case], "claude-cloud")
+
+
+def _write(folder: Path, cases: dict, render) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    for stale in folder.glob("*.txt"):
+        if stale.stem not in cases:
             stale.unlink()
-    for kind in CASES:
-        (SNAPSHOTS / f"{kind}.txt").write_text(render_snapshot(kind), encoding="utf-8")
+    for name in cases:
+        (folder / f"{name}.txt").write_text(render(name), encoding="utf-8")
+
+
+def main() -> None:
+    _write(SNAPSHOTS, CASES, render_snapshot)
+    _write(QA_SNAPSHOTS, QA_CASES, render_qa_snapshot)
 
 
 if __name__ == "__main__":

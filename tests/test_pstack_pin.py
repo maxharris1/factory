@@ -27,17 +27,17 @@ OWNERS = {
     "claude": "claude-bot",
     "codex": "codex-bot",
 }
-ROUTERS = ("factory-builder", "factory-reviewer")
+FACTORY_SKILLS = ("factory-builder", "factory-qa", "factory-reviewer")
 KIT_SKILLS = ("deslop",)
 
 
 def skill_names() -> list[str]:
     base = ROOT / "skills" / "pstack" / "skills"
-    return sorted([path.name for path in base.iterdir() if path.is_dir()] + list(ROUTERS) + list(KIT_SKILLS))
+    return sorted([path.name for path in base.iterdir() if path.is_dir()] + list(FACTORY_SKILLS) + list(KIT_SKILLS))
 
 
 def skill_source(name: str) -> Path:
-    if name in ROUTERS:
+    if name in FACTORY_SKILLS:
         return ROOT / "skills" / "factory" / name
     if name in KIT_SKILLS:
         return ROOT / "skills" / "cursor-team-kit" / name
@@ -163,10 +163,10 @@ def test_install_vendors_each_skill_into_the_cloud_project_paths(tmp_path: Path)
     names = skill_names()
     pin = load_pin(ROOT)
     pinned = {rel: digest for rel, digest in pin.hashes().items() if rel.startswith("skills/")}
-    pinned |= {f"skills/{rel}": digest for rel, digest in pin.factory_hashes().items() if rel.split("/")[0] in ROUTERS}
+    pinned |= {f"skills/{rel}": digest for rel, digest in pin.factory_hashes().items() if rel.split("/")[0] in FACTORY_SKILLS}
     pinned |= {f"skills/{rel}": digest for rel, digest in pin.kit_hashes().items() if rel.split("/")[0] in KIT_SKILLS}
     pstack_license = pin.hashes()["LICENSE"]
-    pinned |= {f"skills/{name}/LICENSE": pstack_license for name in names if name not in ROUTERS + KIT_SKILLS}
+    pinned |= {f"skills/{name}/LICENSE": pstack_license for name in names if name not in FACTORY_SKILLS + KIT_SKILLS}
     pinned |= {f"skills/{name}/LICENSE": pin.kit_hashes()["LICENSE"] for name in KIT_SKILLS}
     for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
         installed = sorted(path.name for path in (project / rel).iterdir())
@@ -666,7 +666,7 @@ def test_legacy_marker_on_a_pinned_copy_is_owned(tmp_path: Path) -> None:
 
 def test_legacy_marker_on_a_pre_notice_copy_upgrades(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    noticed = [name for name in skill_names() if name not in ROUTERS]
+    noticed = [name for name in skill_names() if name not in FACTORY_SKILLS]
     copies = []
     for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
         for name in noticed:
