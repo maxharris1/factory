@@ -540,3 +540,58 @@ def test_a_job_environment_never_starts_a_loop_unless_forced(home: Path, command
     forced = _run(home, command, ORCH_JOB_ID="job-1", ORCH_HEAL_FORCE="1", ORCH_HEAL_SECONDS="60")
     assert forced.returncode == 0, forced.stderr
     assert _loops(home) == [_pid(home)]
+
+
+def _retire(home: Path) -> Path:
+    retired = home / ".config" / "factory" / "orch-retired"
+    retired.write_text("pc 2026-11-17T13:00:00Z\nsecond line\n", encoding="utf-8")
+    return retired
+
+
+@pytest.mark.parametrize("command", ["once", "kick", "start", "restart", "ensure"])
+def test_a_retired_host_runs_no_pass_and_starts_no_loop(home: Path, command: str) -> None:
+    retired = _retire(home)
+
+    result = _run(home, command, ORCH_HEAL_SECONDS="0.2")
+
+    assert result.returncode == 79, result.stderr
+    assert f"{retired}: pc 2026-11-17T13:00:00Z" in result.stderr
+    assert "second line" not in result.stderr
+    time.sleep(0.5)
+    assert not (home / "orch-order").exists()
+    assert _loops(home) == []
+    assert not (home / STATE / "self-heal.pid").exists()
+
+
+def test_the_loop_exits_before_its_next_pass_once_the_host_is_retired(home: Path) -> None:
+    assert _run(home, "start", ORCH_HEAL_SECONDS="0.3").returncode == 0
+    pid = _pid(home)
+    assert _wait_for(lambda: len(_calls(home)) >= 1)
+
+    _retire(home)
+
+    assert _wait_for(lambda: not alive(pid))
+    passes = len(_calls(home))
+    time.sleep(0.6)
+    assert len(_calls(home)) == passes
+    assert "this host is retired as the orch host" in _service_log(home)
+    assert not (home / STATE / "self-heal.pid").exists()
+
+
+def test_wait_idle_returns_when_idle_and_times_out_while_a_pass_holds_the_work_lock(
+    home: Path,
+) -> None:
+    _retire(home)
+    assert _run(home, "wait-idle").returncode == 0
+
+    lock = home / STATE / "self-heal-work.lock"
+    with lock.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        started = time.monotonic()
+        busy = _run(home, "wait-idle", ORCH_HEAL_IDLE_WAIT="1")
+        waited = time.monotonic() - started
+
+    assert busy.returncode == 1
+    assert "still holds" in busy.stderr
+    assert 0.9 <= waited < 10
+    assert _run(home, "wait-idle", ORCH_HEAL_IDLE_WAIT="1").returncode == 0

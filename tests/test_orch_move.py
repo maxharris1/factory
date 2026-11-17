@@ -168,6 +168,7 @@ STOPS = [
     "poller-service.sh stop retired=yes",
     *(f"waiter-service.sh {bot} stop retired=yes" for bot in BOTS),
     "self-heal.sh stop retired=yes",
+    "self-heal.sh wait-idle retired=yes",
     "linear-webhook-service.sh stop retired=yes",
 ]
 
@@ -632,3 +633,87 @@ def test_import_refuses_when_the_poller_database_path_cannot_be_read(tmp_path: P
     assert not (pc.home / ".local/share/factory/orch-move").exists()
     assert pc.retired.exists()
     assert pc.calls() == []
+
+
+FAKE_HEAL_ORCH = f"""#!{sys.executable}
+import os, sqlite3, sys, time
+from pathlib import Path
+
+home = Path(os.environ["HOME"])
+with (home / "heal-orch.log").open("a") as log:
+    log.write(" ".join(sys.argv[1:3]) + "\\n")
+if sys.argv[1:3] == ["health", "--json"]:
+    print('{{"known": true, "components": []}}')
+elif sys.argv[1:3] == ["heal", "--health-json"]:
+    sys.stdin.read()
+elif sys.argv[1:3] == ["heal", "devices"]:
+    (home / "devices-running").touch()
+    while not (home / "devices-go").exists():
+        time.sleep(0.02)
+    connection = sqlite3.connect(os.environ["ORCH_DB"])
+    with connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS device_sync (device TEXT NOT NULL, bot TEXT NOT NULL, "
+            "harness TEXT NOT NULL, checkout TEXT NOT NULL, target TEXT, sha TEXT, "
+            "state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', since REAL NOT NULL, "
+            "checked_at REAL NOT NULL, PRIMARY KEY (device, bot))")
+        connection.execute(
+            "INSERT INTO device_sync (device, bot, harness, checkout, state, since, checked_at) "
+            "VALUES ('pc', 'claude-bot', 'claude', '/factory', 'deployed', 1, 1)")
+    connection.close()
+"""
+
+
+def test_export_waits_for_a_self_heal_pass_and_its_device_deploy_before_its_copy(
+    tmp_path: Path,
+) -> None:
+    box = Host(tmp_path, "box")
+    for name in ("self-heal.sh", "host-pidns.sh"):
+        shutil.copy(ROOT / "deploy" / name, box.checkout / "deploy" / name)
+    heal_orch = tmp_path / "heal-orch"
+    _executable(heal_orch, FAKE_HEAL_ORCH)
+    heal_log = box.home / "heal-orch.log"
+    _seed(tmp_path, box.db)
+    before = _rows(box.db)
+    export = tmp_path / "export"
+
+    def self_heal_once() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(box.checkout / "deploy/self-heal.sh"), "once"],
+                              env=box.env(ORCH_BIN=str(heal_orch)), text=True,
+                              capture_output=True, timeout=60, check=False)
+
+    move = None
+    try:
+        heal = self_heal_once()
+        assert heal.returncode == 0, heal.stderr
+        _until(lambda: (box.home / "devices-running").exists(), "heal devices never started")
+
+        move = box.start_move("export", "--to", "pc", "--dir", str(export),
+                              ORCH_BIN=str(heal_orch))
+        _until(lambda: box.retired.exists() and len(box.calls()) == 4,
+               "export never stopped the poller and the waiters")
+        time.sleep(0.5)
+        assert move.poll() is None, "export went on while heal devices was still writing"
+        assert box.calls() == STOPS[:4]
+        assert not (export / "manifest.json").exists()
+
+        (box.home / "devices-go").touch()
+        _, stderr = move.communicate(timeout=30)
+        assert move.returncode == 0, stderr
+    finally:
+        (box.home / "devices-go").touch()
+        if move is not None and move.poll() is None:
+            move.kill()
+            move.communicate()
+
+    manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tables"]["device_sync"] == before.get("device_sync", 0) + 1
+    assert manifest["tables"] == _rows(box.db)
+    assert _rows(export / "orch.db") == _rows(box.db)
+    assert box.calls()[-1] == "linear-webhook-service.sh stop retired=yes"
+
+    invoked = heal_log.read_text(encoding="utf-8")
+    refused = self_heal_once()
+    assert refused.returncode == 79, refused.stderr
+    assert "retired as the orch host" in refused.stderr
+    assert heal_log.read_text(encoding="utf-8") == invoked

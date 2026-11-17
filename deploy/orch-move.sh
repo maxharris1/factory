@@ -15,12 +15,16 @@
 # Once none is, it writes orch-retired ("<host> <UTC time>"), and only then
 # stops the poller, the three waiters, self-heal and the installed Linear
 # listener through their service scripts, which refuse to start again while
-# orch-retired exists. Then it copies orch.db to <export>/orch.db, checks
-# that copy is still drained, writes <export>/manifest.json
-# (`orch move-db manifest`), copies the checkout's machines.yml to
-# <export>/machines.<this host>.yml and prints <export>. <export> defaults
-# to ~/.local/share/factory/orch-move/<UTC time>, outside the state
-# directory, and must not exist yet.
+# orch-retired exists (exit 79; for self-heal also the timer's `once` pass).
+# After stopping self-heal it runs `self-heal.sh wait-idle`, which waits up
+# to ORCH_HEAL_IDLE_WAIT seconds (default 900) for a pass already running,
+# and the device deploy it started detached, to finish writing to orch.db;
+# on timeout that counts as a failed stop. Then it copies orch.db to
+# <export>/orch.db, checks that copy is still drained, writes
+# <export>/manifest.json (`orch move-db manifest`), copies the checkout's
+# machines.yml to <export>/machines.<this host>.yml and prints <export>.
+# <export> defaults to ~/.local/share/factory/orch-move/<UTC time>, outside
+# the state directory, and must not exist yet.
 #
 # If the drain takes longer than ORCH_MOVE_DRAIN_TIMEOUT seconds (default
 # 9000), or a probe fails, export removes the drain files, their acks and
@@ -194,6 +198,7 @@ export_db() {
         service "${HERE}/waiter-service.sh" "$bot" stop
     done
     service "${HERE}/self-heal.sh" stop
+    service "${HERE}/self-heal.sh" wait-idle
     linear stop
     ((FAILED == 0)) || exit 1
 

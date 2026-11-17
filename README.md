@@ -1197,6 +1197,9 @@ back is kept; after the wait runs out the restore goes ahead.
 `orch.db` must have one writer at a time.
 [`deploy/orch-move.sh`](deploy/orch-move.sh) moves it to another host, and
 moves it back. Run it from the factory checkout, as the bot user, on each host.
+Before a move, re-run `deploy/install.sh` on both hosts, so the installed
+`~/.local/share/factory/linear-webhook-service.sh` carries the fence
+described below.
 
 Cutover from the box to the PC:
 
@@ -1214,7 +1217,13 @@ backup-db` and asks `orch move-db drained` whether a job still runs or a
 device slot is still held. Once none is, it writes
 `~/.config/factory/orch-retired`. Only then does it stop the poller, the
 waiters, self-heal and the Linear listener through their service scripts.
-Each of those scripts refuses to start while `orch-retired` exists. The export
+While `orch-retired` exists, the poller, waiter, self-heal and Linear service
+scripts refuse to start (exit 79), and so does the `self-heal.sh once` pass
+the systemd timer runs. After stopping self-heal, `export` runs `self-heal.sh
+wait-idle`, which waits up to `ORCH_HEAL_IDLE_WAIT` seconds (default 900) for
+a self-heal pass already under way, and the device deploy it started
+detached, to finish before `export` takes its copy. A wait that runs out
+fails the export like a failed stop. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
@@ -1480,9 +1489,14 @@ so the services it restarts outlive the run. Otherwise it writes
 (`self-heal.sh ensure`, every `ORCH_HEAL_SECONDS`, default 120), and adds an
 `@reboot` line and a 5-minute `ensure` watchdog tagged `# factory-self-heal`.
 `self-heal.sh` also has `start`, `stop` (held by `self-heal.stopped`),
-`restart`, `status`, `ensure` (silent while running) and
+`restart`, `status`, `ensure` (silent while running), `wait-idle` and
 `remove-autostart`. Passes never overlap: `self-heal.lock` makes a second
-pass exit at once.
+pass exit at once. Each pass and the device deploy it starts detached hold
+`self-heal-work.lock` shared. `wait-idle` waits up to `ORCH_HEAL_IDLE_WAIT`
+seconds (default 900) until none does, and exits 1 if one still does. On a
+host retired as the orch host (`~/.config/factory/orch-retired`, see *Move
+the orch host*), `once`, `kick`, `start`, `restart` and `ensure` exit 79 and
+run nothing.
 
 ### Self-deploy
 
