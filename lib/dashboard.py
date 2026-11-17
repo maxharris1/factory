@@ -149,7 +149,7 @@ RECENT_DEFERRALS = 10
 RECENT_HANDOFFS = 12
 RECENT_VERDICTS = 12
 RELAY_TICKETS = 12
-RELAY_STEPS = 40  # per ticket and list, so status.json stays bounded
+RELAY_STEPS = 40
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
@@ -1089,7 +1089,6 @@ def _handoff_kind(recipient: str, state: str, has_handoff: bool) -> str:
     return "done"
 
 
-# Each outcome's chip and plain words on the Relay (#535); see _verdict_words.
 _VERDICT_WORDS = {
     "queued-review": ("routed", "sent to review"),
     "queued-plan": ("routed", "sent to plan"),
@@ -1098,16 +1097,16 @@ _VERDICT_WORDS = {
     "resumed-fix": ("routed", "resumed the fix"),
     "handed-off": ("shipped", "handed off"),
     "merged": ("shipped", "merged"),
-    "authorized-unstick-": ("unstuck", "Max unstuck it"),
     "waiting-max-repeat": ("waiting", "still waiting on Max"),
     "approve-ci-red": ("blocked", "approved, CI red"),
 }
+_UNSTUCK_PREFIX = "authorized-unstick-"
+_UNSTUCK_WORDS = ("unstuck", "Max unstuck it")
 
 
 def _verdict_words(outcome: str) -> tuple[str | None, str | None]:
-    """(chip, words) for an outcome; every authorized-unstick-<action> reads the same."""
-    if outcome.startswith("authorized-unstick-"):
-        outcome = "authorized-unstick-"
+    if outcome.startswith(_UNSTUCK_PREFIX):
+        return _UNSTUCK_WORDS
     return _VERDICT_WORDS.get(outcome, (None, None))
 
 
@@ -1178,11 +1177,6 @@ def _relay(
     tracked: int,
     now: float,
 ) -> dict:
-    """The Relay's tickets (#535), newest activity first: stopped tickets take
-    places first (most recently stopped first), the newest movers the rest, up
-    to RELAY_TICKETS. A ticket's activity is its newest job or handled comment;
-    tickets with no known time go last. Each carries its newest RELAY_STEPS
-    handoffs and verdicts."""
     seen: list[Iterable] = []
     if "tracked_tickets" in tables:
         seen.append(connection.execute("SELECT repo, ticket_id, NULL AS at FROM tracked_tickets"))

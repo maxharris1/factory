@@ -197,9 +197,8 @@ def test_every_table_that_times_a_comment_feeds_the_verdict_time(tmp_path: Path)
     assert timed == {table for table, *_ in _VERDICT_TIMES}
 
 
-def _moved(tmp_path: Path, count: int, stopped: dict[int, int] | None = None) -> dict:
-    """Ticket n last moved n minutes ago; a ticket in `stopped` stopped that many seconds ago."""
-    stopped = stopped or {}
+def _moved(tmp_path: Path, count: int, stopped_seconds_ago: dict[int, int] | None = None) -> dict:
+    stopped = stopped_seconds_ago or {}
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
