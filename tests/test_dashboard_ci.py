@@ -27,9 +27,8 @@ def add_ci(
     connection: sqlite3.Connection, ticket: str, head: str, name: str, status: str,
     conclusion: str | None = None, **columns: object,
 ) -> None:
-    row = {"repo": REPO, "ticket_id": ticket, "head": head, "workflow": "actions-run:1", "check_name": name,
-           "status": status,
-           "conclusion": conclusion, "created_at": NOW - 600, "seen_at": NOW - 5, **columns}
+    row = {"repo": REPO, "ticket_id": ticket, "head": head, "workflow": "actions-run:1",
+           "check_name": name, "status": status, "conclusion": conclusion, "created_at": NOW - 600, "seen_at": NOW - 5, **columns}
     connection.execute(
         f"INSERT INTO ci_jobs ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})", tuple(row.values())
     )

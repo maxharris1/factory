@@ -740,10 +740,8 @@ class GitHubReviewActions:
         return tuple(_run_job(_object(job)) for job in jobs)
 
     def job_log(self, repo: str, job_id: str) -> str:
-        """One job's whole log in one request; GitHub answers with a redirect
-        to the log blob, which is not an API request. pytest colours its
-        output, and gh 2.97+ exits 1 on a body with escape sequences unless
-        allowed; the log is parsed, never shown on a terminal."""
+        """gh 2.97+ exits 1 on a body with escape sequences unless allowed,
+        and pytest's output is coloured."""
         if not job_id.isdigit():
             raise GitHubAdapterError("Actions job id is not a number")
         return self._call(

@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Sequence
 
-from lib.dispatch.types import CHECK_FAILED, RunJob, TrackedTicket
+from lib.dispatch.types import CHECK_FAILED, CheckRow, RunJob, TrackedTicket
 
 RETAIN_SECONDS = 24 * 60 * 60
 RUN_READS = 3
@@ -12,6 +12,7 @@ LOG_READS = 1
 
 _FAILED = "conclusion IN ({})".format(", ".join(f"'{conclusion}'" for conclusion in CHECK_FAILED))
 _NOT_FAILED = f"NOT COALESCE({_FAILED}, 0)"
+_NOT_SEEN_THIS_CYCLE = "seen_at < ?"
 # A rerun at the same head is a new check run (a new job id) under the same
 # name: the lookups made for the old attempt no longer hold.
 _SAME_JOB = "ci_jobs.job_id IS excluded.job_id"
@@ -80,24 +81,25 @@ def _rows(ticket: TrackedTicket, now: float) -> list[tuple[object, ...]]:
             check.status,
             check.conclusion,
             check.started_at,
-            # A completed check GitHub gave no time for ends when first seen
-            # completed; the upsert keeps that stamp for the same job.
-            now if check.status == "completed" and check.completed_at is None
-            else check.completed_at,
+            _completed_at(check, now),
             now,
         )
         for check in result.checks
     ]
 
 
+def _completed_at(check: CheckRow, now: float) -> float | None:
+    if check.status == "completed" and check.completed_at is None:
+        return now
+    return check.completed_at
+
+
 def _prune(
     connection: sqlite3.Connection, tickets: Sequence[TrackedTicket], now: float
 ) -> None:
     connection.execute("DELETE FROM ci_jobs WHERE seen_at < ?", (now - RETAIN_SECONDS,))
-    # A row this cycle wrote stays: deleted, it would come back next cycle as
-    # a new row that spends its runner and log reads again.
     connection.execute(
-        f"DELETE FROM ci_jobs WHERE {_FAILED} AND completed_at < ? AND seen_at < ?",
+        f"DELETE FROM ci_jobs WHERE {_FAILED} AND completed_at < ? AND {_NOT_SEEN_THIS_CYCLE}",
         (now - RETAIN_SECONDS, now),
     )
     connection.executemany(

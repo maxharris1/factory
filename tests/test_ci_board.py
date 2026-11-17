@@ -534,8 +534,6 @@ def test_a_broken_board_never_fails_the_poll_cycle(tmp_path: Path) -> None:
 
 
 class RecordingGh:
-    """GitHub behind the real adapter: every gh argv, answered by endpoint."""
-
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
