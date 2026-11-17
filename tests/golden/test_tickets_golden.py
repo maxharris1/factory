@@ -12,7 +12,7 @@ GOLDEN = {
     "tickets.CSS": "381084a5f2be20182876d9794216aaa9cbc407e662e2db03d5ce202d9cb8d821",
     "tickets.SCRIPT_TICKETS": "6b6280667c5dab42cbce08fd4c8c1b21e3a94a63e87e34e8afd9cea96e1ead15",
     "ticket_detail.CSS": "98304f26e3acafe1d308c528c2f0b460f08c9c942477255b191b388e5b0db282",
-    "ticket_detail.SCRIPT": "86e31d7c17958ec8e07742a1bf9cac26a14f4c36edfd1556c151e424389a3912",
+    "ticket_detail.SCRIPT": "efd3cdd454944e24fe13ee4f8a1130151861f38beb32a2bccb3b7f90a660a487",
     "__BOARD__": "cf46429059149151ee84a5d841667bf567b6bc6e51532f4f8815a23addde9fdb",
     "__FLOWMAP__": "fd22a1b48e10c2f2287f1438248fd234b1674628eefd15cfdbfa38e65d878d9c",
     "seeded/__FLOWMAP__": "fd22a1b48e10c2f2287f1438248fd234b1674628eefd15cfdbfa38e65d878d9c",
