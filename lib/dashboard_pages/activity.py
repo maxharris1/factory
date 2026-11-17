@@ -45,8 +45,8 @@ border:1px solid var(--line-hi);background:var(--bg);color:var(--text-2);white-s
 .rl-out{color:var(--text-2)}
 .rl-done{display:block;flex:1 0 100%}
 .rl-now{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;max-width:100%;white-space:nowrap}
-.rl-now.live,.rl-blk{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border:1px solid var(--h);
-background:color-mix(in srgb,var(--h) 9%,transparent);white-space:nowrap}
+.rl-now.live,.rl-blk{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;max-width:100%;padding:1px 8px;
+border:1px solid var(--h);background:color-mix(in srgb,var(--h) 9%,transparent);white-space:nowrap}
 .rl-now.stale{align-items:center;gap:4px 6px}
 .rl-now.queued{padding:1px 8px;border:1px solid var(--line-hi);background:var(--bg)}
 .rl-px{display:block;flex:0 0 40px;width:40px}

@@ -843,10 +843,10 @@ def _endings(snapshot: dict) -> dict:
         _job("old-201", "201", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=600),
         _job("run-201", "201", job_state="running", elapsed_seconds=372, heartbeat_age_seconds=5),
         _job("run-202", "202", "review", "codex", job_state="running", elapsed_seconds=220, heartbeat_age_seconds=5),
-        _job("run-203", "203", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=250),
-        _job("run-204", "204", "fix", "cursor", job_state="dead", elapsed_seconds=900, heartbeat_age_seconds=900),
+        _job("run-203", "203", "update-from-main", job_state="stale", elapsed_seconds=900, heartbeat_age_seconds=250),
+        _job("run-204", "204", "update-from-main", "cursor", job_state="dead", elapsed_seconds=900, heartbeat_age_seconds=900),
     ]
-    snap["queued"] = [_job("q-205", "205", "review", "codex", age_seconds=90),
+    snap["queued"] = [_job("q-205", "205", "update-from-main", "codex", age_seconds=90),
                       _job("q-205b", "205", age_seconds=30)]
     return snap
 
@@ -866,7 +866,7 @@ ENDINGS = {
             '<span class="rl-late">no heartbeat for 4m 10s</span>'],
     "204": ['<span class="rl-blk rl-cursor">', 'data-px="decay"', 'data-still="true"', '<span class="chip bad">dead</span>',
             '<span class="rl-late">no heartbeat for 15m 00s</span>'],
-    "205": ['class="rl-now queued rl-codex" ' + NOW_TITLE, '<span class="rl-bot">codex</span><span class="rl-what">review</span>',
+    "205": ['class="rl-now queued rl-codex" ' + NOW_TITLE, '<span class="rl-bot">codex</span><span class="rl-what">update-from-main</span>',
             '<span class="rl-wait">queued 1m 30s</span>'],
     "206": [NOW_TITLE + '><span class="chip bad">stuck</span><span class="rl-say">in planning for 3d 2h</span></span>'],
     "208": [NOW_TITLE + '><span class="chip ok">shipped</span><span class="rl-out">merged</span>'
