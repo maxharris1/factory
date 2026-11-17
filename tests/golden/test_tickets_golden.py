@@ -10,19 +10,19 @@ NAME = page_name(__file__)
 
 GOLDEN = {
     "tickets.CSS": "866aac1a613e948a74f41e2445f640cadf894cc587daae6d32cdffedd26d46f5",
-    "tickets.SCRIPT_TICKETS": "bc7837d90f7870f527e29a34d204460c92c185e6fc54a74aa63e62761ae0ed89",
-    "ticket_detail.CSS": "da37e77fbd8ab2d98c0a4bb0f507928b81a8d437688d9ef38f35a6517293d143",
-    "ticket_detail.SCRIPT": "a6b429229374219c10e8244ae524ee57ca4562ed7898c80763c982fcc992715d",
+    "tickets.SCRIPT_TICKETS": "f9c707bd393a1f393022bfe596126b22419ecf473db502dd1eabdc5523ee034c",
+    "ticket_detail.CSS": "ea570dcd13a59ac984ab271497d3cabc5239b25934b33127b9afe0b36e50f72a",
+    "ticket_detail.SCRIPT": "e5948868a590455204f814dda41c8db58d3ee369f28bae08f82dcebde1614d98",
     "__BOARD__": "a95cdf573c85b101daa3f685be6323ee93936c5c9a779bcc75c3c11dcade93c6",
     "__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
     "seeded/__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
     "hostile/__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
     "empty/__FLOWMAP__": "3a9d4dba95bf7ab5d1381d15912ac2dfc0649cdae789858e64be64deb6ba893c",
-    "seeded/main": "d0ffbee91cf1102c2d2e03dd1c9659d3189b4ca53b0b0c862cb3cf75a7483402",
-    "seeded/chrome": "25243b2b23181bb500bb0ae75b458563a3776cbf60b71dd8a22b43fc11aa09d6",
-    "hostile/main": "d0ffbee91cf1102c2d2e03dd1c9659d3189b4ca53b0b0c862cb3cf75a7483402",
-    "hostile/chrome": "6dd91374a98a4768353983eae7bf8a94e47b1cbd49b4c407ae20f48df672f03f",
-    "empty/main": "6ff12ac4ae1e291d65a71d84d65d55a0c11b290d85b40d6dbff115c655f842c9",
+    "seeded/main": "effffce2f01de03dc08df64013474975776567e0273f5b79697db9803f958b60",
+    "seeded/chrome": "f7fbdb4b81985537d0b9b806d2a07da4b102fe1755f187c40e31a8066858318f",
+    "hostile/main": "effffce2f01de03dc08df64013474975776567e0273f5b79697db9803f958b60",
+    "hostile/chrome": "9d4afdf83cd1a61d6c1dfe9d932176bc1f16b189b825af695a60942964822a81",
+    "empty/main": "50a844b4adb7317dc9322ce9c6e1ad4119983e5e7adf81307e9dc6817f0e5105",
     "empty/chrome": "2e576ea7d76b1582b5aed1b9bc4e6792f74a8379f9d21f33ec84ddca545478a4",
 }
 
