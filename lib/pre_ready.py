@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ TAIL_LINES = 40
 TAIL_CHARS = 4000
 DRAIN_SECONDS = 1
 JOB_CONTROL_VARIABLES = frozenset({PROOF_ENV, "ORCH_DB"})
+ORCH_INTERPRETER_ENV = "ORCH_PYTHON"
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,8 @@ def spec_for(source: GhContextSource, repo: str) -> PreReady | None:
 
 def check_environ(environ: Mapping[str, str], approvals: Approvals | None) -> dict[str, str]:
     env = harness_environ(environ, approvals)
-    return {name: value for name, value in env.items() if name not in JOB_CONTROL_VARIABLES}
+    kept = {name: value for name, value in env.items() if name not in JOB_CONTROL_VARIABLES}
+    return {**kept, ORCH_INTERPRETER_ENV: sys.executable}
 
 
 def cut(text: str) -> str:

@@ -81,7 +81,7 @@ def test_pytest_ini_sets_a_120s_signal_timeout_and_loads_the_reaper() -> None:
 
 
 def test_ci_installs_pytest_timeout() -> None:
-    lines = (ROOT / "requirements-dev.txt").read_text().splitlines()
+    lines = (ROOT / "requirements.txt").read_text().splitlines()
     assert any(line.startswith("pytest-timeout==") for line in lines)
     import pytest_timeout  # noqa: F401
 

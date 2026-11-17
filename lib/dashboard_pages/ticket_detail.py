@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import math
 
-from lib.dashboard_flow import FLOWMAP_SCRIPT, ticket_phases
+from lib.dashboard_flow import FLOWMAP_SCRIPT, flowmap_layout, ticket_phases
 from lib.dashboard_telemetry import NO_DATA
 from lib.dashboard_pages.common import (
     anchor, _bot, _chip, duration, _e, github_links, _job_kind, _job_label, _span, _state_chip,
@@ -576,6 +576,7 @@ def _chart(row: dict, model: dict, chart: dict | None) -> str:
     if chart is None:
         return '<details class="jd-chart"><summary>Full state chart</summary><p class="empty">statechart unavailable</p></details>'
     n = len(chart["states"])
+    grid = flowmap_layout(chart)["grid"]
     legend = "".join(f'<span><i class="line" style="background:{TINT[w]}"></i>path taken · {w}</span>' for w in _legend_who(model))
     legend += '<span><i class="line" style="background:#5386a6"></i>visited</span>'
     legend += f'<span><i class="off" style="--m:{TINT["script"]}"></i>off-chart jump</span>'
@@ -583,7 +584,7 @@ def _chart(row: dict, model: dict, chart: dict | None) -> str:
     return (
         f'<details class="jd-chart" data-key="full-chart:{_e(row["job"])}"><summary>Full state chart '
         f'{_span("count", CHART_SUB.format(n=n))}</summary>'
-        f'<div class="jd-box"><canvas class="jd-flowmap" width="1000" height="352" role="img" '
+        f'<div class="jd-box"><canvas class="jd-flowmap" width="1000" height="{grid["h"] * grid["cell"]}" role="img" '
         f'aria-label="{_e("Full state chart; path: " + " → ".join(v["state"] for v in model["visits"]))}"></canvas></div>'
         f'<div class="jd-legend">{legend}</div></details>'
     )
@@ -1189,7 +1190,7 @@ _SCRIPT = r"""
     var wrap = add(box, el('div', 'jd-box'));
     var canvas = add(wrap, el('canvas', 'jd-flowmap'));
     canvas.setAttribute('width', '1000');
-    canvas.setAttribute('height', String(FLOWMAP ? FLOWMAP.grid.h * FLOWMAP.grid.cell : 352));
+    canvas.setAttribute('height', String(FLOWMAP ? FLOWMAP.grid.h * FLOWMAP.grid.cell : 416));
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', 'Full state chart; path: ' + m.visits.map(function (v) { return v.state; }).join(' → '));
     var legend = add(box, el('div', 'jd-legend'));

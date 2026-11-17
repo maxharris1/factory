@@ -503,9 +503,9 @@ def job_flow(
 
 # --- drawing ------------------------------------------------------------------------
 
-GRID_W, GRID_H, CELL = 250, 88, 4
+GRID_W, CELL = 250, 4
 FM_NODE_W, FM_NODE_H = 34, 9
-STOP_ROW = 4
+STOP_ROW = 5
 STOP_RED = "#f7768e"
 FLOWMAP_TINT = {
     "script": "#a9b1d6",
@@ -520,10 +520,10 @@ FLOWMAP_PLACES = {
     "planning": (1, 0), "plan-check": (1, 1),
     "building": (2, 0), "fixing": (2, 1),
     "review": (3, 0), "capped": (3, 1),
-    "ship": (4, 0), "awaiting-ok": (4, 1), "waiting-external": (4, 2),
+    "ship": (4, 0), "merge-queue": (4, 1), "updating": (4, 2), "awaiting-ok": (4, 3), "waiting-external": (4, 4),
     "merged": (5, 0), "post-merge": (5, 1), "done": (5, 2), "handed-off": (5, 3),
-    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4), "blocked": (3, 4),
 }
+FLOWMAP_RAIL = ("refused", "abandoned", "stuck", "blocked")
 FLOWMAP_COLUMNS = {"Ask": 0, "Plan": 1, "Build": 2, "Review": 3, "Ship": 4, "Shipped": 5}
 FLOWMAP_HEADS = (("Ask", 0, 1), ("Plan", 1, 1), ("Build", 2, 1), ("Review", 3, 1), ("Ship", 4, 2))
 
@@ -532,34 +532,41 @@ def _col_x(column: int) -> int:
     return 3 + column * 42
 
 
-def _row_y(row: int) -> int:
-    return 76 + (row - STOP_ROW) * 16 if row >= STOP_ROW else 9 + row * 16
+def _row_y(row: int, rail: int) -> int:
+    return 9 + row * 16 + (3 if row >= rail else 0)
 
 
-def _flowmap_places(chart: dict) -> dict[str, tuple[int, int]]:
+def _channel_y(row: int, off: int, rail: int) -> int:
+    y = _row_y(row, rail) + off
+    return min(y, 9 + rail * 16 - 3) if row == rail - 1 else y
+
+
+def _flowmap_places(chart: dict) -> tuple[dict[str, tuple[int, int]], int]:
     phases = ticket_phases(chart)
     adjacency = _adjacency(chart)
     places = {name: FLOWMAP_PLACES[name] for name in phases if name in FLOWMAP_PLACES}
     taken = set(places.values())
-    columns = range(len(FLOWMAP_COLUMNS))
+    stops = []
     for name, phase in phases.items():
-        if name in places:
+        if name in places or name in FLOWMAP_RAIL:
             continue
-        exits = [nxt for nxt in adjacency[name] if nxt != name]
-        if phase == "Stop" and not exits:
-            grid = []
-        else:
-            home = FLOWMAP_COLUMNS.get(phase, FLOWMAP_COLUMNS["Review"])
-            order = [home, *(column for column in columns if column != home)]
-            grid = [(column, row) for column in order for row in range(STOP_ROW + 1)]
-        rail = ((column, row) for row in itertools.count(STOP_ROW) for column in columns)
-        place = next(spot for spot in itertools.chain(grid, rail) if spot not in taken)
+        if phase == "Stop" and all(nxt == name for nxt in adjacency[name]):
+            stops.append(name)
+            continue
+        column = FLOWMAP_COLUMNS.get(phase, FLOWMAP_COLUMNS["Review"])
+        place = next((column, row) for row in itertools.count() if (column, row) not in taken)
         places[name] = place
         taken.add(place)
-    return places
+    rail = max([STOP_ROW, *(row + 1 for _, row in places.values())])
+    places.update({name: (FLOWMAP_RAIL.index(name), rail) for name in phases if name in FLOWMAP_RAIL})
+    taken = set(places.values())
+    spots = ((column, row) for row in itertools.count(rail) for column in range(len(FLOWMAP_COLUMNS)))
+    for name in stops:
+        places[name] = next(spot for spot in spots if spot not in taken)
+    return places, rail
 
 
-def _route(a: dict, b: dict, nodes: Sequence[dict]) -> list[list[int]]:
+def _route(a: dict, b: dict, nodes: Sequence[dict], rail: int) -> list[list[int]]:
     nw, nh = FM_NODE_W, FM_NODE_H
     ax, ay0, bx, by0 = a["x"], a["y"], b["x"], b["y"]
     if a is b:
@@ -574,29 +581,29 @@ def _route(a: dict, b: dict, nodes: Sequence[dict]) -> list[list[int]]:
             return [[ax + 20, ay0 - 1], [ax + 20, by0 + nh]]
         g1 = min(GRID_W - 2, ax + 36)
         return [[ax + nw, ay0 + 2], [g1, ay0 + 2], [g1, by0 + 6], [bx + nw, by0 + 6]]
-    below = b["row"] >= a["row"] and a["row"] < STOP_ROW
+    below = b["row"] >= a["row"] and a["row"] < rail
+    channel = a["row"] if below else a["row"] - 1
     if b["col"] > a["col"]:
         ay, by, g1 = ay0 + 2, by0 + 2, ax + 36
         if b["col"] == a["col"] + 1:
             return [[ax + nw, ay], [g1, ay], [g1, by], [bx - 1, by]]
-        ch = ay0 + 11 if below else _row_y(a["row"] - 1) + 11
+        ch = _channel_y(channel, 11, rail)
         g2 = _col_x(b["col"] - 1) + 36
         return [[ax + nw, ay], [g1, ay], [g1, ch], [g2, ch], [g2, by], [bx - 1, by]]
     ay, by, g1 = ay0 + 6, by0 + 6, _col_x(a["col"] - 1) + 39
     if b["col"] == a["col"] - 1:
         return [[ax - 1, ay], [g1, ay], [g1, by], [bx + nw, by]]
-    ch = ay0 + 14 if below else _row_y(a["row"] - 1) + 14
+    ch = _channel_y(channel, 14, rail)
     g2 = _col_x(b["col"]) + 39
     return [[ax - 1, ay], [g1, ay], [g1, ch], [g2, ch], [g2, by], [bx + nw, by]]
 
 
 def flowmap_layout(chart: dict) -> dict:
-    """The full state chart on FlowMap's 250 x 88 cell grid (4 px cells,
-    1000 x 352 px): phase columns (Ship two columns wide), stop states on
-    the bottom rail (it wraps into more rows, and the grid grows, when they
-    overflow it), and a wire route for every ordered pair of states so
-    an off-chart hop has one too. `edges` lists the chart's transitions."""
-    places = _flowmap_places(chart)
+    """The full state chart on FlowMapR2's 250 x 104 cell grid (4 px cells,
+    1000 x 416 px): phase columns (Ship two columns wide), stop states on
+    the rail below them, and a wire route for every ordered pair of states
+    so an off-chart hop has one too. `edges` lists the chart's transitions."""
+    places, rail = _flowmap_places(chart)
     phases = ticket_phases(chart)
     adjacency = _adjacency(chart)
     nodes = []
@@ -610,23 +617,23 @@ def flowmap_layout(chart: dict) -> dict:
             "col": column,
             "row": row,
             "x": _col_x(column),
-            "y": _row_y(row),
-            "stop": row >= STOP_ROW and phases[name] == "Stop",
+            "y": _row_y(row, rail),
+            "stop": row >= rail and phases[name] == "Stop",
             "end": not exits,
         })
     loops = {edge["from"] for edge in chart["edges"] if edge["from"] == edge["to"]}
     routes = {
-        f'{a["name"]}>{b["name"]}': _route(a, b, nodes)
+        f'{a["name"]}>{b["name"]}': _route(a, b, nodes, rail)
         for a in nodes
         for b in nodes
         if a is not b or a["name"] in loops
     }
     edges = [f'{edge["from"]}>{edge["to"]}' for edge in chart["edges"]]
-    last = max([STOP_ROW, *(node["row"] for node in nodes)])
-    rail = {node["col"] for node in nodes if node["row"] == last}
-    free = [column for column in range(len(FLOWMAP_COLUMNS)) if column not in rail]
+    last = max([rail, *(node["row"] for node in nodes)])
+    bottom = {node["col"] for node in nodes if node["row"] == last}
+    free = [column for column in range(len(FLOWMAP_COLUMNS)) if column not in bottom]
     return {
-        "grid": {"w": GRID_W, "h": GRID_H + _row_y(last) - _row_y(STOP_ROW), "cell": CELL},
+        "grid": {"w": GRID_W, "h": _row_y(last, rail) + 12, "cell": CELL},
         "node": {"w": FM_NODE_W, "h": FM_NODE_H},
         "nodes": nodes,
         "edges": edges,
@@ -635,8 +642,8 @@ def flowmap_layout(chart: dict) -> dict:
             {"label": label, "x": _col_x(column) * CELL, "w": (span * 42 - 8) * CELL}
             for label, column, span in FLOWMAP_HEADS
         ],
-        "rail": {"y": 72, "x0": 3, "x1": 247},
-        "stop_label": {"x": _col_x(free[0]) * CELL if free else 700, "y": (_row_y(last) + 2) * CELL + 2},
+        "rail": {"y": 9 + rail * 16 - 1, "x0": 3, "x1": 247},
+        "stop_label": {"x": _col_x(free[0]) * CELL if free else 700, "y": (_row_y(last, rail) + 2) * CELL + 2},
     }
 
 
@@ -854,7 +861,7 @@ function drawFlowMap(ctx, layout, model, opts) {
     ctx.fillStyle = n.current ? '#7dcfff' : n.visits > 0 ? '#c0caf5' : n.next ? '#a9b1d6' : '#8b93b8';
     ctx.fillText(d.name, cx, d.gloss ? cy - 5.5 : cy);
     if (d.gloss) {
-      ctx.font = '400 9px ' + FM_FONT;
+      ctx.font = (d.gloss.length > 23 ? '400 8px ' : '400 9px ') + FM_FONT;
       ctx.fillStyle = '#8b93b8';
       ctx.fillText(d.gloss, cx, cy + 6.5);
     }

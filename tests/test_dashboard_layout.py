@@ -483,13 +483,13 @@ def test_the_flowmap_places_every_state_of_a_chart_that_overflows_its_rail(
     assert sorted(pages) == sorted(PAGES)
     layout = json.loads(re.search(r"var FLOWMAP = (.*);", pages["job.html"]).group(1))
     _assert_drawable(layout, names)
-    assert layout["grid"]["h"] > 88
+    assert layout["grid"]["h"] > 104
 
 
 def test_the_default_chart_keeps_its_one_row_rail() -> None:
     layout = flow.flowmap_layout(flow.load_chart(CHART))
-    assert layout["grid"] == {"w": 250, "h": 88, "cell": 4}
-    assert layout["stop_label"]["y"] == 314
+    assert layout["grid"] == {"w": 250, "h": 104, "cell": 4}
+    assert layout["stop_label"]["y"] == 378
     _assert_drawable(layout, {state["name"] for state in flow.load_chart(CHART)["states"]})
 
 
