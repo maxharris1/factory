@@ -1388,6 +1388,9 @@ ENDED = {
     "stopped at a known time": (lambda record: record["stopped"].update(at=NOW - 5400), {},
                                 [("1h 30m", "stopped"), ("0", "revise round"), ("1 hops", "1 off-chart")],
                                 ["ticket arrives", "no direct transition on the chart"]),
+    "stopped with no round": (lambda record: record.update(round=None), {},
+                              [("no reading", "stopped"), ("no round", "revise round"), ("1 hops", "1 off-chart")],
+                              ["ticket arrives", "no direct transition on the chart"]),
 }
 
 

@@ -330,7 +330,7 @@ TILES = {
     "waiting": lambda row, model: _tile(duration(row.get("age_seconds")), "waiting"),
     "not_started": lambda row, model: _tile("not started", "last heartbeat"),
     "round": _round_tile,
-    "record_round": lambda row, model: _tile(str(row["flow"]["round"]), "revise round"),
+    "record_round": lambda row, model: _tile("no round" if row["flow"]["round"] is None else str(row["flow"]["round"]), "revise round"),
     "in_state": lambda row, model: _age_tile(model["state_age_seconds"], f"in {model['state']}"),
     "stopped_for": _stopped_for,
     "hops": lambda row, model: _tile(f"{model['hops']} hops", f"{model['off_chart_count']} off-chart"),
@@ -927,7 +927,7 @@ _SCRIPT = r"""
       pips.setAttribute('aria-hidden', 'true');
       for (var i = 0; i < rnd[1]; i++) span(pips, i < rnd[0] - 1 ? 'done' : i === rnd[0] - 1 ? 'now' : null);
     },
-    record_round: function (box, r) { tile(box, String(r.flow.round), 'revise round'); },
+    record_round: function (box, r) { tile(box, r.flow.round === null ? 'no round' : String(r.flow.round), 'revise round'); },
     in_state: function (box, r, m) { ageTile(box, m.state_age_seconds, 'in ' + m.state); },
     stopped_for: function (box, r, m) {
       var at = r.flow.stopped.at;
