@@ -1479,9 +1479,10 @@ def test_html_is_self_contained(tmp_path: Path) -> None:
         assert needle not in html
     # #563: the only https:// text is a link to github.com, never an asset.
     assert set(re.findall(r"https://[^/'\"]*/", html)) <= {"https://github.com/"}
-    # The live page polls its own status.json, and otherwise calls only its own
-    # /api (tests/test_dashboard_mission_control.py checks the poll itself).
-    assert re.findall(r"fetch\(([^,)]+)", html) == ["path", "'/api/session'", "STATUS_URL"]
+    # The live page polls its own status.json, reads its own tickets.json, and
+    # otherwise calls only its own /api (tests/test_dashboard_mission_control.py
+    # checks the poll itself).
+    assert re.findall(r"fetch\(([^,)]+)", html) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"]
     assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", html))
     assert "var STATUS_URL = 'status.json';" in html
 

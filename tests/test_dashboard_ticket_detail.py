@@ -1382,6 +1382,27 @@ def test_the_ticket_page_fetches_tickets_json_once_per_snapshot(tmp_path: Path) 
     assert counts == {"polls": [1, 1, 2], "held": [1, 2]}
 
 
+@needs_node
+def test_a_ticket_opens_once_its_records_finish_publishing_in_the_same_snapshot(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = RECORD["idle"]
+    earlier = copy.deepcopy(snapshot)
+    earlier["generated_at_epoch"] -= 20
+    del earlier[RECORDS][address]
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+    publishing = POLLED.replace("Promise.resolve(JSON.parse(ticketsText))",
+                                f"Promise.resolve(JSON.parse(ticketFetches === 1 ? {json.dumps(tickets_json(earlier))}"
+                                " : ticketsText))")
+    actions = [["snap", ["ticketview"]], ["count"], ["poll", snapshot], ["snap", ["ticketview"]], ["count"]]
+    out = run_harness(tmp_path, publishing, script, snapshot, "ticket", TICKET_IDS, actions, "#t=" + _quote(address),
+                      tickets_json(snapshot))
+    snaps = [step["snap"]["ticketview"] for step in out["steps"] if "snap" in step]
+    assert _h1s(snaps[0]) == ["Ticket not found"], "status.json is published before tickets.json"
+    assert [step["tickets"] for step in out["steps"] if "tickets" in step] == [1, 2]
+    assert snaps[1] == _ticket_server(snapshot, address)
+    assert _h1s(snaps[1]) == ["tracy-harris-coaching#5"]
+
+
 NO_JOB = {
     "idle": (lambda record: None, ("static", "#ff9e64"),
              [("no reading", "in waiting-max"), ("0", "revise round"), ("1 hops", "1 off-chart")]),

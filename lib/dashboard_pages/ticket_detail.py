@@ -1668,26 +1668,36 @@ _SCRIPT = r"""
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
 
-  var RECORDS = {tickets: null, epoch: null, asked: null, busy: false};
-  function loadRecords(d) {
-    var epoch = d.generated_at_epoch;
-    if (RECORDS.busy || RECORDS.asked === epoch || (RECORDS.tickets && RECORDS.epoch >= epoch)) return;
+  var RECORDS = {tickets: null, epoch: null, busy: false, waiting: false};
+  function recordsCover(epoch) {
+    return !!RECORDS.tickets && RECORDS.epoch >= epoch;
+  }
+  function loadRecords() {
+    var epoch = latest.generated_at_epoch;
+    if (RECORDS.busy || RECORDS.waiting || recordsCover(epoch)) return;
     RECORDS.busy = true;
-    RECORDS.asked = epoch;
     fetch('tickets.json', {cache: 'no-store', credentials: 'same-origin'}).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
     }).then(function (data) {
-      RECORDS.busy = false;
-      if (!data || !data.tickets || typeof data.tickets !== 'object') return;
+      if (!data || !data.tickets || typeof data.tickets !== 'object') return false;
       RECORDS.tickets = data.tickets;
       RECORDS.epoch = data.generated_at_epoch;
-      if (latest) render(latest);
-    }, function () { RECORDS.busy = false; });
+      return true;
+    }).then(settle, function () { settle(false); });
+    function settle(changed) {
+      RECORDS.busy = false;
+      if (latest.generated_at_epoch !== epoch) loadRecords();
+      else if (!recordsCover(epoch)) {
+        RECORDS.waiting = true;
+        setTimeout(function () { RECORDS.waiting = false; loadRecords(); }, POLL_MS);
+      }
+      if (changed) render(latest);
+    }
   }
   function renderTicketView(d) {
     if (!GH.started) { GH.started = true; ghStart(); }
-    loadRecords(d);
+    loadRecords();
     byId('ticketview').replaceChildren(ticketView(d, hashAddress(), RECORDS.tickets));
   }
 """
