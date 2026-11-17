@@ -19,6 +19,7 @@ from lib.status import (
     render,
 )
 from lib.status import main as status_main
+from tests.pool_helpers import write_target_machines
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -291,6 +292,26 @@ def test_pool_placed_job_is_shown_under_its_device_not_as_box_occupancy() -> Non
         "    o/repo#1 build -> codex running 1m (beat 10s ago)\n"
         "\n"
     ) in output
+
+
+def test_an_unplaced_job_is_counted_on_the_orch_host(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path),
+         "--machines", str(write_target_machines(tmp_path))],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "  pc [claude,codex,cursor] 1/10 slots\n    owner/repo#43 review -> codex" in (
+        result.stdout
+    )
+    assert "no-placement" in result.stdout.split("  box ")[0]
+    assert "  box [claude,codex,cursor] 0/6 slots\n" in result.stdout
 
 
 def test_status_command_counts_a_pc_job_once(tmp_path: Path) -> None:

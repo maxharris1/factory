@@ -13,7 +13,6 @@ from lib.device_pool import (
     UNREACHABLE_BACKOFF_SECONDS,
     back_off,
     backed_off_through,
-    box_device,
     device_lost_detail,
     free_slots,
     orphan_slot,
@@ -79,6 +78,7 @@ from lib.job_state import (
     unstarted_too_long,
     usage_limit_end,
 )
+from lib.machines_yml import orch_host
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
     PRE_READY_FAILED,
@@ -178,7 +178,7 @@ class JobsMixin:
             rows = device_sync.read(connection)
         blocked = device_sync.blocked_by(rows)
         refused_everywhere = _harnesses_a_lagging_source_checkout_refuses_everywhere(
-            rows, box_device(config)
+            rows, orch_host(config)
         )
         return frozenset(
             harness

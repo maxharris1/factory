@@ -129,6 +129,7 @@ from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
 from lib import lane_limit
 from lib.job_state import USAGE_LIMIT, record_job_event
+from lib.machines_yml import DEFAULT_ORCH_HOST
 from lib.usage_readings import Reading, parse_codex, store
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.pstack_pin import Pin, load_pin
@@ -1553,7 +1554,7 @@ class Session:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         worker_env: bool = False,
-        device: str = "box",
+        device: str = DEFAULT_ORCH_HOST,
         rollout_home: str | None = None,
         text: bool = True,
         guard: Guard | None = None,
@@ -1816,7 +1817,7 @@ def start_session(
     stdout: IO[bytes] | None = None,
     max_log_bytes: int = MAX_LOG_BYTES,
     worker_env: bool = False,
-    device: str = "box",
+    device: str = DEFAULT_ORCH_HOST,
     guard: Guard | None = None,
     skills_root: str | None = None,
 ) -> Session | None:
