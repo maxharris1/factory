@@ -416,7 +416,8 @@ def test_check_config_refuses_shipped_machines_placeholders_without_flag() -> No
         "machines.yml: devices[2].workdir_root is an install placeholder"
     ) in result.stderr
     assert "devices[1].workdir_root" not in result.stderr
-    assert "machines.yml: warning: device 'pc' is disabled" in result.stderr
+    assert "device 'pc' is disabled" not in result.stderr
+    assert "device 'box' is disabled" not in result.stderr
 
 
 def test_check_config_reports_machines_placeholders_and_disabled_devices() -> None:
@@ -437,12 +438,11 @@ def test_check_config_reports_machines_placeholders_and_disabled_devices() -> No
     for line in (
         "machines.yml: warning: accepted placeholder devices[2].workdir_root; "
         "device 'mac' will not be scheduled",
-        "machines.yml: warning: device 'pc' is disabled (enabled: false); "
-        "it will not be scheduled",
         "machines.yml: warning: device 'mac' is disabled (enabled: false); "
         "it will not be scheduled",
     ):
         assert line in result.stderr
+    assert "device 'pc' is disabled" not in result.stderr
 
 
 def test_bare_check_config_covers_the_shipped_machines_yml() -> None:

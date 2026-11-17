@@ -6,8 +6,9 @@ The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
 F1-03, F1-04, F1-05 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
-Phase 2 has the F2-01 device pool and F2-02 remote start; the PC and Mac
-still ship `enabled: false` until Max turns them on.
+Phase 2 has the F2-01 device pool and F2-02 remote start; the shipped
+`machines.yml` runs orch on the PC with the box as a remote device, and the
+Mac ships `enabled: false` until Max turns it on.
 
 ## Contracts
 
@@ -193,15 +194,17 @@ would give one host a second `slot_max`. Release a device's held slots
 before renaming it. Unknown fields are refused, and `workdir_root` may not
 contain NUL or another control character.
 
-The shipped file lists the box (all three harnesses, 3 slots, because the box
-runs at most 3 heavy local agent sessions at once; slots are generic, so they
-are not one per bot and 3 Claude jobs can take all 3), the PC's WSL Ubuntu node
-and the Mac. The PC and Mac ship
-`enabled: false` and stay disabled until Max turns them on; the Mac also
-has no bot users and no SSH yet. The PC's `workdir_root` is
+The shipped file sets `orch_host: pc` and has no `local: true` device. It
+lists the PC's WSL Ubuntu node first (all three harnesses, 10 slots), then the
+box as a remote device (all three harnesses, 6 slots), then the Mac. Slots are
+generic, so they are not one per bot. The PC's `workdir_root` is
 `/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
-`/mnt/c`, and its `ssh_alias` is `pc-wsl-{bot}`, the box's existing aliases
-`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The Mac's
+`/mnt/c`, and its `ssh_alias` is `pc-wsl-{bot}`, the aliases
+`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The box sets
+`ssh_user: box`, so every bot logs in as `box` through its own `box-{bot}`
+alias and works in `/home/box/factory-work` from `/home/box/factory`; the bot
+user stays the job's identity. The Mac ships `enabled: false` and stays
+disabled until Max turns it on; it has no bot users and no SSH yet, and its
 `workdir_root` and `ssh_alias` are still `REPLACE_WITH_` placeholders. Nothing
 assumes a device is reachable: the poller checks it (below).
 
