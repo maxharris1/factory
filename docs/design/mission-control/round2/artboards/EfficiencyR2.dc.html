@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Efficiency R2</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#c0caf5;text-decoration:none}a:hover{color:#9ece6a}
+</style>
+</helmet>
+<div style="min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1b26; color: #c0caf5; font-family: 'Geist', ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.5">
+<dc-import name="TopBarR2" current="efficiency" hint-size="100%,116px"></dc-import>
+<main style="flex: 1 0 auto; box-sizing: border-box; width: 100%; max-width: 1600px; margin: 0 auto; padding: 20px 24px 32px; display: flex; flex-direction: column; gap: 16px">
+
+<div style="display: flex; flex-wrap: wrap; gap: 16px">
+
+<section style="flex: 3 1 560px; min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Subscription headroom</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">per account</span></h2>
+<div style="overflow-x: auto">
+<table style="width: 100%; min-width: 660px; border-collapse: collapse; margin: 0">
+<thead>
+<tr>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">account</th>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">5-hour window</th>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">7-day window</th>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">resets</th>
+<th style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">headroom</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="font-size: 12px; color: #a9b1d6">one Max account</span></div>
+<div style="margin-top: 3px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #8b93b8">used on box · pc · mac</div>
+</td>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">41% used</td>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">26% used</td>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">in 2h 05m</td>
+<td style="padding: 10px 0 10px 0; border-bottom: 1px solid #24283b; vertical-align: top">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px">
+<span style="flex: 0 0 40px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 16px; line-height: 1.25; font-weight: 600; font-variant-numeric: tabular-nums; color: #9ece6a">59%</span>
+<span role="img" aria-label="claude headroom 59 percent: 12 of 20 cells lit" style="display: grid; grid-template-columns: repeat(20, 8px); grid-auto-rows: 8px; gap: 2px; flex: none"><sc-for list="{{ claudeMeter }}" as="cell" hint-placeholder-count="20"><span style="background: {{ cell.color }}"></span></sc-for></span>
+</div>
+</td>
+</tr>
+<tr>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span><span style="font-size: 12px; color: #a9b1d6">one account</span></div>
+<div style="margin-top: 3px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #8b93b8">used on box · pc · mac</div>
+</td>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #8b93b8">no reading</td>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">26% used</td>
+<td style="padding: 10px 12px 10px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #8b93b8">no reading</td>
+<td style="padding: 10px 0 10px 0; border-bottom: 1px solid #24283b; vertical-align: top">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px">
+<span style="flex: 0 0 40px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 16px; line-height: 1.25; font-weight: 600; font-variant-numeric: tabular-nums; color: #a9b1d6">74%</span>
+<span role="img" aria-label="codex headroom 74 percent, from the 7-day window only: 15 of 20 cells lit" style="display: grid; grid-template-columns: repeat(20, 8px); grid-auto-rows: 8px; gap: 2px; flex: none"><sc-for list="{{ codexMeter }}" as="cell" hint-placeholder-count="20"><span style="background: {{ cell.color }}"></span></sc-for></span>
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #8b93b8">(7-day only)</span>
+</div>
+</td>
+</tr>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(187,154,247,0.4); background: rgba(187,154,247,0.09); color: #bb9af7; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">cursor</span></td>
+<td colspan="4" style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #8b93b8">not tracked</td>
+</tr>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(115,218,202,0.4); background: rgba(115,218,202,0.09); color: #73daca; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">grok</span></td>
+<td colspan="4" style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #8b93b8">not tracked</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p style="margin: 12px 0 0; max-width: 720px; font-size: 12px; color: #8b93b8">Headroom is what is left in the fullest window. One account is shared by every device that runs that harness, so the reading is per account, not per device.</p>
+</section>
+
+<section style="flex: 2 1 380px; min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Cost, last 7 days</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">as reported by each harness</span></h2>
+<div style="display: flex; flex-wrap: wrap; gap: 12px">
+<div style="flex: 1 1 200px; min-width: 0; padding: 10px 14px 12px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 30px; line-height: 1.15; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: #c0caf5">$1,057.64</div>
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; font-weight: 500; color: #8b93b8">cost</div>
+</div>
+<div style="flex: 1 1 200px; min-width: 0; padding: 10px 14px 12px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 30px; line-height: 1.15; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: #c0caf5">612</div>
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; font-weight: 500; color: #8b93b8">jobs</div>
+</div>
+<div style="flex: 1 1 200px; min-width: 0; padding: 10px 14px 12px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 30px; line-height: 1.15; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: #c0caf5">2.636B</div>
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; font-weight: 500; color: #8b93b8">tokens in</div>
+<div title="2.41B of 2.636B tokens in were cached" style="margin-top: 3px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; color: #a9b1d6">91% cached</div>
+</div>
+<div style="flex: 1 1 200px; min-width: 0; padding: 10px 14px 12px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 30px; line-height: 1.15; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: #c0caf5">31.8M</div>
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; font-weight: 500; color: #8b93b8">tokens out</div>
+</div>
+</div>
+<table style="width: 100%; border-collapse: collapse; margin: 14px 0 0">
+<thead>
+<tr>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">harness</th>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: right; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">jobs</th>
+<th style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; text-align: right; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span></td>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">388</td>
+<td style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">$1,057.64</td>
+</tr>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span></td>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">224</td>
+<td style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #8b93b8">no cost reported</td>
+</tr>
+</tbody>
+</table>
+<p style="margin: 10px 0 8px; font-size: 12px; color: #8b93b8">codex reports no cost, so the total is claude only.</p>
+<details>
+<summary style="cursor: pointer; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.8; font-weight: 500; color: #a9b1d6">per repo</summary>
+<table style="width: 100%; border-collapse: collapse; margin: 6px 0 0">
+<thead>
+<tr>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: left; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">repo</th>
+<th style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; text-align: right; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">jobs</th>
+<th style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; text-align: right; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.4; font-weight: 500; color: #8b93b8">cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">maxharris1/factory</td>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">498</td>
+<td style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">$861.20</td>
+</tr>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">maxharris1/cleffy</td>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">86</td>
+<td style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">$148.32</td>
+</tr>
+<tr>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">aut0-code/aut0</td>
+<td style="padding: 6px 12px 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">28</td>
+<td style="padding: 6px 0 6px 0; border-bottom: 1px solid #24283b; vertical-align: top; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #c0caf5">$48.12</td>
+</tr>
+</tbody>
+</table>
+</details>
+</section>
+
+</div>
+
+<div style="display: flex; flex-wrap: wrap; gap: 16px">
+
+<section style="flex: 3 1 560px; min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Revise rounds before ship</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">206 shipped tickets</span></h2>
+<div style="display: flex; flex-direction: column; gap: 10px">
+
+<div style="display: grid; grid-template-columns: 84px minmax(0, 1fr) 84px; align-items: center; gap: 12px">
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">0 rounds</span>
+<span aria-hidden="true" style="display: block; height: 14px"><span style="display: block; width: 100%; height: 14px; background: #9ece6a"></span></span>
+<span style="text-align: right; white-space: nowrap; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #8b93b8"><span style="font-size: 13px; font-weight: 600; color: #9ece6a">88</span> · 43%</span>
+</div>
+
+<div style="display: grid; grid-template-columns: 84px minmax(0, 1fr) 84px; align-items: center; gap: 12px">
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">1 round</span>
+<span aria-hidden="true" style="display: block; height: 14px"><span style="display: block; width: 80.7%; height: 14px; background: #a9b1d6"></span></span>
+<span style="text-align: right; white-space: nowrap; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #8b93b8"><span style="font-size: 13px; font-weight: 600; color: #c0caf5">71</span> · 34%</span>
+</div>
+
+<div style="display: grid; grid-template-columns: 84px minmax(0, 1fr) 84px; align-items: center; gap: 12px">
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">2 rounds</span>
+<span aria-hidden="true" style="display: block; height: 14px"><span style="display: block; width: 35.2%; height: 14px; background: #a9b1d6"></span></span>
+<span style="text-align: right; white-space: nowrap; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #8b93b8"><span style="font-size: 13px; font-weight: 600; color: #c0caf5">31</span> · 15%</span>
+</div>
+
+<div style="display: grid; grid-template-columns: 84px minmax(0, 1fr) 84px; align-items: center; gap: 12px">
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">3 rounds</span>
+<span aria-hidden="true" style="display: block; height: 14px"><span style="display: block; width: 13.6%; height: 14px; background: #a9b1d6"></span></span>
+<span style="text-align: right; white-space: nowrap; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #8b93b8"><span style="font-size: 13px; font-weight: 600; color: #c0caf5">12</span> · 6%</span>
+</div>
+
+<div style="display: grid; grid-template-columns: 84px minmax(0, 1fr) 84px; align-items: center; gap: 12px">
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #c0caf5">4 or more</span>
+<span aria-hidden="true" style="display: block; height: 14px"><span style="display: block; width: 4.5%; height: 14px; background: #a9b1d6"></span></span>
+<span style="text-align: right; white-space: nowrap; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: #8b93b8"><span style="font-size: 13px; font-weight: 600; color: #c0caf5">4</span> · 2%</span>
+</div>
+
+</div>
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 16px; margin: 14px 0 0">
+<p style="margin: 0; font-size: 13px; color: #a9b1d6">88 of 206 shipped with no revise round</p>
+<a href="TicketsR2.dc.html" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; text-decoration: underline; text-underline-offset: 3px">see shipped tickets</a>
+</div>
+</section>
+
+<section style="flex: 2 1 380px; min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Handoff savings</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">scripted / (scripted + grok wakes)</span></h2>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 24px">
+<div role="img" aria-label="65 of 100 squares are scripted handoffs, 35 are grok wakes" style="display: grid; grid-template-columns: repeat(10, 12px); grid-auto-rows: 12px; gap: 2px; flex: none"><sc-for list="{{ waffle }}" as="sq" hint-placeholder-count="100"><span style="background: {{ sq.color }}"></span></sc-for></div>
+<div style="display: flex; flex-direction: column; gap: 2px">
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 40px; line-height: 1.1; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: #c0caf5">65%</span>
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #8b93b8">scripted share</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+<div style="display: flex; align-items: baseline; gap: 10px">
+<span style="flex: 0 0 40px; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 18px; line-height: 1.25; font-weight: 600; font-variant-numeric: tabular-nums; color: #c0caf5">115</span>
+<span style="font-size: 12px; color: #8b93b8">scripted handoffs</span>
+</div>
+<div style="display: flex; align-items: baseline; gap: 10px">
+<span style="flex: 0 0 40px; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 18px; line-height: 1.25; font-weight: 600; font-variant-numeric: tabular-nums; color: #c0caf5">8</span>
+<span style="font-size: 12px; color: #8b93b8">scripted in flight</span>
+</div>
+<div style="display: flex; align-items: baseline; gap: 10px">
+<span style="flex: 0 0 40px; text-align: right; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 18px; line-height: 1.25; font-weight: 600; font-variant-numeric: tabular-nums; color: #73daca">62</span>
+<span style="font-size: 12px; color: #8b93b8">bot-to-bot (grok wakes)</span>
+</div>
+</div>
+</div>
+<p style="margin: 14px 0 6px; font-size: 13px; color: #a9b1d6">Scripted share is the part of handoffs a script routed straight to the next bot, scripted / (scripted + grok wakes), rather than one bot waking another.</p>
+<details>
+<summary style="cursor: pointer; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.8; font-weight: 500; color: #a9b1d6">how each count is made</summary>
+<p style="margin: 6px 0 0; font-size: 12px; color: #8b93b8">scripted = jobs for claude, codex or cursor that `orch wait` claimed and the bot finished with an orch:v1 handoff comment. scripted_in_flight = such jobs claimed and still running. bot_to_bot = jobs routed to grok: each one wakes Grok Bot to read the ticket and hand off by hand (stops, clarify, refusals, ship failures). The database does not record bot messages sent outside the factory, so grok wakes are the measurable stand-in for bot-to-bot handoffs.</p>
+</details>
+</section>
+
+</div>
+
+<section style="min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; padding: 10px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93b8">Lifetime</h2>
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-variant-numeric: tabular-nums; color: #a9b1d6"><span style="font-weight: 600; color: #9ece6a">2,002</span> jobs done</span>
+<span aria-hidden="true" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #8b93b8">·</span>
+<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-variant-numeric: tabular-nums; color: #a9b1d6"><span style="font-weight: 600; color: #f7768e">294</span> failed</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">87% of 2,296 finished jobs succeeded</span>
+</section>
+
+</main>
+<dc-import name="StatusLineR2" hint-size="100%,32px"></dc-import>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  meterCells(lit, color) {
+    /* 20 still cells: the first `lit` take the colour, the rest are empty */
+    var cells = [];
+    for (var i = 0; i < 20; i++) {
+      cells.push({ color: i < lit ? color : '#414868' });
+    }
+    return cells;
+  }
+  renderVals() {
+    /* 10 x 10 waffle: 65 scripted squares, then 35 grok wakes */
+    var waffle = [];
+    for (var i = 0; i < 100; i++) {
+      waffle.push({ color: i < 65 ? '#c0caf5' : '#73daca' });
+    }
+    /* headroom meters, 5% per cell: claude 59% is 12 cells (ok), codex 74% is 15 cells (neutral) */
+    var claudeMeter = this.meterCells(12, '#9ece6a');
+    var codexMeter = this.meterCells(15, '#a9b1d6');
+    return { waffle: waffle, claudeMeter: claudeMeter, codexMeter: codexMeter };
+  }
+}
+</script>
+</body>
+</html>

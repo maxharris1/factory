@@ -57,6 +57,7 @@ from typing import NamedTuple
 import yaml
 
 from lib import health as component_health
+from lib.config_overlay import apply_overlay
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import JobStep, Transition, job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
@@ -122,7 +123,8 @@ WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
-    "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", *FEEDER_ATTENTION_REASONS
+    "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
+    *FEEDER_ATTENTION_REASONS,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (
@@ -1669,6 +1671,8 @@ def _machines(
         data = load_yaml(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return "invalid", [], None, "box"
+    if isinstance(data, dict):
+        data = apply_overlay(path, data)[0]
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
         return "invalid", [], None, "box"
     items = data["devices"]
