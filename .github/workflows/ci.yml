@@ -77,6 +77,36 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest tests/test_process_discovery.py -p no:xdist -s -rs
 
+  macos-pickup:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 13
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PICKUP_SECONDS: 600
+          POLL_SECONDS: 15
+        run: |
+          set -euo pipefail
+          created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          while true; do
+            job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+              --jq '.jobs[] | select(.name == "macos") | "\(.status) \(.created_at)"') || job=""
+            if [[ -n "$job" ]]; then
+              read -r status created_at <<<"$job"
+              case "$status" in in_progress | completed) exit 0 ;; esac
+            fi
+            if (( $(date +%s) - $(date -d "$created_at" +%s) >= PICKUP_SECONDS )); then
+              echo "::error title=macos runner pickup::No macos-latest runner picked up the macos job within $((PICKUP_SECONDS / 60)) minutes (queued since $created_at). GitHub's hosted macOS pool is short of capacity, not a test failure. Cancelling this run. Rerun failed jobs to retry. See docs/decisions/628-macos-runner-pickup.md."
+              gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+              exit 1
+            fi
+            sleep "$POLL_SECONDS"
+          done
+
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -149,3 +151,104 @@ def test_a_pr_renaming_a_macos_path_away_runs_the_macos_job(tmp_path: Path, sour
     )
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == ["macos=true"]
+
+
+FAKE_GH = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GH_LOG"
+[[ "$1" == api ]] || exit 0
+calls=$(grep -c '^api ' "$GH_LOG")
+total=$(wc -l < "$GH_RESPONSES")
+response=$(sed -n "$(( calls < total ? calls : total ))p" "$GH_RESPONSES")
+[[ "$response" == FAIL ]] && { echo "HTTP 502" >&2; exit 1; }
+while [[ $# -gt 0 && "$1" != --jq ]]; do shift; done
+jq -r "$2" <<<"$response"
+"""
+
+
+def _pickup_step() -> dict:
+    steps = _workflow()["jobs"]["macos-pickup"]["steps"]
+    assert len(steps) == 1
+    return steps[0]
+
+
+def _jobs(macos: tuple[str, datetime] | None) -> str:
+    jobs = [{"name": "macos-pickup", "status": "in_progress", "created_at": "2020-01-01T00:00:00Z"}]
+    if macos is not None:
+        status, created = macos
+        jobs.append({"name": "macos", "status": status, "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    return json.dumps({"total_count": len(jobs), "jobs": jobs})
+
+
+def _run_pickup(tmp_path: Path, responses: list[str]) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(FAKE_GH, encoding="utf-8")
+    gh.chmod(0o755)
+    (tmp_path / "responses").write_text("\n".join(responses) + "\n", encoding="utf-8")
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    step = _pickup_step()
+    env = {
+        **os.environ,
+        **{key: str(value) for key, value in step.get("env", {}).items()},
+        "POLL_SECONDS": "0",
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "GH_LOG": str(log),
+        "GH_RESPONSES": str(tmp_path / "responses"),
+        "GITHUB_REPOSITORY": "acme/factory",
+        "GITHUB_RUN_ID": "4242",
+        "GITHUB_RUN_ATTEMPT": "2",
+    }
+    result = subprocess.run(
+        ["bash", "-c", step["run"]], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30
+    )
+    return result, log.read_text(encoding="utf-8").splitlines()
+
+
+def test_the_pickup_watchdog_passes_once_a_runner_picks_up_macos(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    result, calls = _run_pickup(
+        tmp_path, [_jobs(None), _jobs(("queued", now)), _jobs(("in_progress", now))]
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::error" not in result.stdout
+    assert len(calls) == 3
+    assert all(
+        call.startswith("api repos/acme/factory/actions/runs/4242/attempts/2/jobs?per_page=100 --jq ")
+        for call in calls
+    )
+
+
+def test_the_pickup_watchdog_cancels_the_run_when_macos_stays_queued(tmp_path: Path) -> None:
+    created = datetime.now(timezone.utc) - timedelta(seconds=601)
+    result, calls = _run_pickup(tmp_path, [_jobs(("queued", created))])
+    assert result.returncode == 1
+    error = [line for line in result.stdout.splitlines() if line.startswith("::error title=macos runner pickup::")]
+    assert len(error) == 1, result.stdout
+    assert "within 10 minutes" in error[0]
+    assert created.strftime("%Y-%m-%dT%H:%M:%SZ") in error[0]
+    assert calls[-1] == "run cancel 4242 --repo acme/factory"
+
+
+def test_the_pickup_watchdog_tolerates_a_failed_api_call(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    result, calls = _run_pickup(tmp_path, ["FAIL", _jobs(("completed", now))])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(calls) == 2
+    assert not any(call.startswith("run cancel") for call in calls)
+
+
+def test_the_pickup_watchdog_mirrors_the_macos_job_and_fires_before_its_timeout() -> None:
+    jobs = _workflow()["jobs"]
+    pickup = jobs["macos-pickup"]
+    assert pickup["needs"] == jobs["macos"]["needs"]
+    assert pickup["if"] == jobs["macos"]["if"]
+    assert pickup["runs-on"] == "ubuntu-latest"
+    assert pickup["permissions"] == {"actions": "write"}
+    step = _pickup_step()
+    pickup_seconds = int(step["env"]["PICKUP_SECONDS"])
+    assert pickup_seconds == 600
+    assert pickup_seconds / 60 < pickup["timeout-minutes"] <= 15
+    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert "${{" not in step["run"]
