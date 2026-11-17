@@ -245,6 +245,62 @@ def test_poll_lock_refuses_a_second_poller(tmp_path: Path) -> None:
                 pass
 
 
+def test_poll_reloads_the_machines_yml_it_was_started_with(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_logins:\n  grok-login: [grok-bot]\n"
+        "projects:\n  - repo: acme/widgets\n    factory_ref: main\n",
+        encoding="utf-8",
+    )
+    machines = tmp_path / "machines.yml"
+    box = "devices:\n  - name: box\n    local: true\n    slot_max: {}\n    harnesses: {{claude: claude-bot}}\n"
+    machines.write_text(box.format(1), encoding="utf-8")
+    cli._runtime(database, orch, create=True)
+    dispatcher, _ = cli._runtime(database, orch, create=False, machines_path=machines)
+    assert dispatcher.devices.config.device("box").slot_max == 1
+
+    machines.write_text(box.format(2), encoding="utf-8")
+    os.utime(machines, ns=(10**18, 10**18))
+    dispatcher.devices.reload()
+
+    assert dispatcher.devices.config.device("box").slot_max == 2
+
+
+def test_poll_sees_a_machines_yml_edit_made_while_it_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "orch.db"
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_logins:\n  grok-login: [grok-bot]\n"
+        "projects:\n  - repo: acme/widgets\n    factory_ref: main\n",
+        encoding="utf-8",
+    )
+    machines = tmp_path / "machines.yml"
+    box = "devices:\n  - name: box\n    local: true\n    slot_max: {}\n    harnesses: {{claude: claude-bot}}\n"
+    machines.write_text(box.format(1), encoding="utf-8")
+    cli._runtime(database, orch, create=True)
+    built = cli._device_pool
+
+    def edited_after_the_read(queue, config):
+        machines.write_text(box.format(2), encoding="utf-8")
+        os.utime(machines, ns=(10**18, 10**18))
+        return built(queue, config)
+
+    monkeypatch.setattr(cli, "_device_pool", edited_after_the_read)
+    dispatcher, _ = cli._runtime(database, orch, create=False, machines_path=machines)
+    assert dispatcher.devices.config.device("box").slot_max == 1
+
+    dispatcher.devices.reload()
+
+    assert dispatcher.devices.config.device("box").slot_max == 2
+
+
 def test_init_db_creates_dispatcher_schema(tmp_path: Path) -> None:
     database = tmp_path / "state" / "orch.db"
     orch = write_orch(tmp_path)

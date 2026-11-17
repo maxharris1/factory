@@ -524,6 +524,7 @@ def _run_poll(tmp_path: Path, monkeypatch, *flags: str) -> tuple[dict, list[str]
     monkeypatch.setattr(cli, "PollLoop", Loop)
     monkeypatch.setattr(LivePusher, "start", lambda self, **_: events.append("start"))
     monkeypatch.setattr(LivePusher, "stop", lambda self: events.append("stop"))
+    monkeypatch.setattr(LivePusher, "on_timer", lambda self, every: None)
     code = cli.main(["poll", "--db", str(database), "--orch", str(orch),
                      "--pidfile", str(tmp_path / "poller.pid"), *flags])
     assert code == 0

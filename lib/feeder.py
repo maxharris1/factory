@@ -81,6 +81,8 @@ exists and carries commits of another open PR is `waiting-blocked` until
 that PR merges, with one Grok `blocked` wake per set of such PRs. The branch
 is read at intake when it already exists, and again before a builder's
 ready queues review, so a branch stacked during its build waits there too.
+The branch is compared against its open PR's base, or against the recorded
+base when it has no PR.
 
 Priority order (#258, lib/queue.py rank): a ticket's tier first (the first of
 the project's `priority_labels` it carries, or its Linear priority when the
@@ -431,6 +433,8 @@ class GitHubIntake(Protocol):
 
     def pull_state(self, repo: str, number: int) -> str: ...
 
+    def pull_base(self, repo: str, number: int) -> str: ...
+
     def open_draft_pull(
         self, repo: str, *, branch: str, base: str, title: str, body: str
     ) -> int: ...
@@ -698,6 +702,7 @@ class Feeder:
         self.linear = linear
         self.factory_for = factory_for
         self.log = log or (lambda line: None)
+        self._base_notes: set[tuple[str, int, str, str, str]] = set()
         with self.queue.connect() as connection:
             ensure_tables(connection)
 
@@ -1276,6 +1281,12 @@ class Feeder:
                 if wait is not None:
                     raise _Held(wait)
             branch_found = number is not None or self.github.branch_sha(repo, branch) is not None
+        if number is not None:
+            tip = self.github.branch_sha(repo, branch) or branch
+            pull_base = self._pull_base(repo, issue.key, base, number, tip)
+            if pull_base != base:
+                base = pull_base
+                self._record(candidate, base_branch=base)
         if branch_found:
             wait = self._stack_hold(
                 repo, issue.key, base, branch, number,
@@ -1341,16 +1352,42 @@ class Feeder:
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
-    def hold_stacked_review(self, ticket: TrackedTicket, head: str) -> bool:
+    def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None:
+        number = int(ticket.pr_number) if ticket.pr_number else None
+        base = ticket.factory.base_branch
+        if number is not None:
+            key = (ticket.repo.lower(), ticket.ticket_id)
+            with self.queue.connect() as connection:
+                row = connection.execute(
+                    f"SELECT base_branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?", key
+                ).fetchone()
+            recorded = row[0] if row is not None and row[0] else base
+            base = self._pull_base(ticket.repo, ticket.ticket_id, recorded, number, head)
+            if base != recorded:
+                with self.queue.connect() as connection:
+                    connection.execute(
+                        f"UPDATE {FEEDER_TABLE} SET base_branch = ? WHERE repo = ? AND ticket_id = ?",
+                        (base, *key),
+                    )
         wait = self._stack_hold(
-            ticket.repo, ticket.ticket_id, ticket.factory.base_branch, head,
-            int(ticket.pr_number) if ticket.pr_number else None,
+            ticket.repo, ticket.ticket_id, base, head, number,
             where=f"head {head[:7]}",
             project_bot=ticket.grok_bot, ticket_url=ticket.ticket_url,
             held=f"{ticket.source_issue or '#' + ticket.ticket_id} was not sent to review",
             until="review starts",
         )
-        return wait is not None
+        return None if wait is not None else base
+
+    def _pull_base(self, repo: str, ticket_id: str, recorded: str, number: int, head: str) -> str:
+        base = self.github.pull_base(repo, number)
+        note = (repo.lower(), number, head, recorded, base)
+        if base != recorded and note not in self._base_notes:
+            self._base_notes.add(note)
+            self.log(
+                f"feeder: {repo}#{ticket_id} recorded base {recorded} differs from PR base {base};"
+                " using the PR base"
+            )
+        return base
 
     def _stack_hold(
         self,

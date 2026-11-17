@@ -65,6 +65,7 @@ from lib.dispatch.core import (
 from lib.dispatch.detail import (
     DetailMixin,
 )
+from lib.dispatch.inbox import InboxMixin
 from lib.dispatch.eval_log import (
     EvalLogMixin,
 )
@@ -241,6 +242,7 @@ class Dispatcher(
     RetryMixin,
     JobsMixin,
     DetailMixin,
+    InboxMixin,
     FollowupsMixin,
     TrackingMixin,
     PollMixin,

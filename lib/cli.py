@@ -24,6 +24,7 @@ from typing import Any
 from lib import (
     codex_sandbox,
     health,
+    job_detail,
     job_run,
     job_token,
     linear_webhook,
@@ -51,7 +52,7 @@ from lib.eval_report import (
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
-from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.grok_delivery import GrokDeliveryError, NoGrokWebhook, WebhookGrokDelivery
 from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hold import MergeUpdate
@@ -90,6 +91,7 @@ from lib.handoff_check import (
 from lib.pre_ready import ContextUnavailable, PreReadyResult, check_environ, spec_for
 from lib.pre_ready import run as run_pre_ready
 from lib.queue import (
+    BUSY_TIMEOUT_SECONDS,
     MAX_INVALID_HANDOFFS,
     PRE_READY_FAILED,
     SLOTS_TABLE,
@@ -144,6 +146,7 @@ commands:
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
   restore-db       restore a missing dispatcher database from its backup
+  db-spill-detail  move bulky job detail out of the database (#653)
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
@@ -226,6 +229,14 @@ restore-db [--db PATH] [--backup PATH]
   integrity check: exit 0 restored, 3 no backup, 1 when the database
   already exists or the backup is bad. deploy/poller-service.sh start and
   ensure run it when the database is missing.
+
+db-spill-detail [--db PATH] [--vacuum]
+  One-time migration (#653): move the bulky keys of every older job's
+  detail (lib/job_detail.py SPILLED) to job-detail/<id>.json beside the
+  database. A rerun moves nothing new. --vacuum then runs VACUUM and prints
+  the database size before and after. Holds the poller's lock, so it
+  refuses to run while `orch poll` does; stop the waiters too before
+  --vacuum, which needs the database to itself.
 
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -457,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_backup_db, argv[1:])
     if argv[0] == "restore-db":
         return _call(_restore_db, argv[1:])
+    if argv[0] == "db-spill-detail":
+        return _call(_db_spill_detail, argv[1:])
     if argv[0] == "wait":
         return _call(_wait, argv[1:])
     if argv[0] == "job":
@@ -989,6 +1002,31 @@ def _restore_db(argv: list[str]) -> int:
     return 0
 
 
+def _db_spill_detail(argv: list[str]) -> int:
+    parser = _Parser(prog="orch db-spill-detail", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--vacuum", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        with _poll_lock(path):
+            before = path.stat().st_size
+            connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+            try:
+                moved = job_detail.spill_existing(connection)
+                print(f"moved the detail of {moved} jobs to {path.parent / job_detail.DIRECTORY}")
+                if args.vacuum:
+                    connection.execute("VACUUM")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    print(f"vacuumed {path}: {before} -> {path.stat().st_size} bytes")
+            finally:
+                connection.close()
+    except (ValueError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch db-spill-detail: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _runtime(
     db_path: Path | None,
     orch_path: Path | None,
@@ -1005,7 +1043,7 @@ def _runtime(
         and not config.trusted_linear_users
     ):
         raise ValueError("trusted_linear_users is required for Linear polling")
-    if config.grok is None:
+    if config.grok is None and any(project.grok_webhook for project in config.projects):
         raise ValueError("grok webhook env names are required for polling")
     path = _db_path(db_path)
     queue = (
@@ -1019,14 +1057,17 @@ def _runtime(
     }
     if create and not any(trusted.values()):
         trusted["github"]["init-db"] = frozenset({"init-db"})
-    cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
+    cleared: list[str] = []
+    delivery: WebhookGrokDelivery | NoGrokWebhook = NoGrokWebhook()
+    if config.grok is not None:
+        cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
+        delivery = WebhookGrokDelivery(
+            url_env=config.grok.webhook_url_env,
+            key_env=config.grok.webhook_key_env,
+            auth_env=config.grok.webhook_auth_env,
+        )
     if config.linear is not None:
         cleared.append(config.linear.api_key_env)
-    delivery = WebhookGrokDelivery(
-        url_env=config.grok.webhook_url_env,
-        key_env=config.grok.webhook_key_env,
-        auth_env=config.grok.webhook_auth_env,
-    )
     t8 = T8Hook()
     source = LivePollSource(
         config,
@@ -1042,6 +1083,9 @@ def _runtime(
                 _device_pool(queue, machines),
                 machines,
                 SshTransport(),
+                machines_path=(
+                    machines_path if machines_path is not None else ROOT / "machines.yml"
+                ),
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
@@ -1052,6 +1096,7 @@ def _runtime(
         trusted_logins=trusted,
         review_actions=source.review_actions_by_repo(),
         grok_delivery=delivery,
+        projects=config.projects,
         hooks=(T7Hook(), t8),
         devices=devices,
         job_states=config.job_states,
@@ -1358,7 +1403,7 @@ def _check_handoff(
         errors = [item.message for item in findings if item.severity == "error"]
         if config is None or errors:
             raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
-        expected = expected_for(job_from_row(row), args.bot)
+        expected = expected_for(job_from_row(row, connection), args.bot)
         read = gh_reader()
         found = handoff_problems(expected, args.handoff, read, config.trusted_logins)
         event, checked = SUBMITTED_INVALID, None

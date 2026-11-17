@@ -78,7 +78,9 @@ def _remote_ready(tmp_path: Path, head: str, command: str | None):
     job_id = enqueue(queue, "a", repo=REPO)
     waiter.step()
     with queue.connect() as connection:
-        job = job_from_row(connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+        job = job_from_row(
+            connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone(), connection
+        )
     serve_handoff(env_store(), job, COMMENT, pr_head=head)
     if command is not None:
         _serve_factory_md(command)

@@ -354,13 +354,29 @@ worker checks count, and a device that needed none (its jobs still run, or their
 runners still live) gets a plain round trip. The first failed check
 after a good one starts that device's offline clock, a good one stops it, and a
 device holding no slot is forgotten. Once a device has failed every check for
-`job_states.unreachable_lost_minutes` (default 10), each job still running on
-it is lost (issue #662): in one transaction it is failed for T6 with a
+`job_states.unreachable_lost_minutes` (default 10), or in the first poll after
+it is set `enabled: false` (issue #679, whether it answers or not), each job
+still running on it is lost (issue #662): in one transaction it is failed for T6 with a
 `device-lost` job event, its slot row moves to `device_orphans` (so the slot is
 free at once) and the device is backed off for 5 minutes. T6 requeues a lost
 job as it does a link drop, under the same budget, so it lands on another
 device when one has room. A lost `update-from-main` job is not requeued; it
 counts one update failure and the merge queue settles any head it pushed.
+The poller loads `machines.yml` again on its first poll and whenever it or
+`machines.local.yml` changes, so `enabled: false` takes effect with no restart;
+a file that fails to load keeps the last good config and is recorded as a
+`machines.yml:` poll error each poll until it is fixed. The box is covered too:
+a job running there when it is disabled is lost the same way, and its `orch job
+run` (or its worker, if that is gone) is sent SIGTERM; its `device_orphans`
+row keeps both pids, a later poll sends SIGKILL to whichever still runs, and
+the row is deleted once both are gone. Each poll also checks
+every `device_orphans` row by its worker tag (issue #679): a lost job's worker
+still running is sent SIGTERM, a gone one's row is deleted, and an unreachable
+device gets one check per poll. Every check that lets a remote worker go first
+makes that start's run directory on the device, so a launch still in transit
+from a lost runner answers `already` and starts nothing. On Linux it also takes
+the start's own record, as on macOS, so a start already launched but not yet
+recorded refuses and never runs, even when the process scan missed it.
 An unreachable device counts against its offline clock; an error raised while
 checking (the database, say) is recorded as a `devices` poll error and never
 stops the poll.
@@ -2038,7 +2054,7 @@ A bot that hands work to another bot by hand, instead of through an `orch:v1` ha
 bin/orch log-message --repo maxharris1/factory --pr 443 --from grok-bot --to codex-bot
 ```
 
-That appends `TIMESTAMP repo=<owner/name> pr=<n> message from=<bot> to=<bot> kind=handoff` to `dispatcher.log` (`--log`, else beside `$ORCH_DB`). It refuses a repo that is not `owner/name`, a non-numeric pr, or an empty bot, and writes nothing. The report counts these manual messages against scripted handoffs (the `comment` rows) per repo and ISO week. No input records a per-message token count yet, so it prints no token-savings figure.
+That appends `TIMESTAMP repo=<owner/name> pr=<n> message from=<bot> to=<bot> kind=handoff` to `dispatcher.log` (`--log`, else beside `$ORCH_DB`). The line is written with a leading newline in one append, so a dispatcher line torn mid-write cannot swallow it; the report skips the blank lines this leaves. It refuses a repo that is not `owner/name`, a non-numeric pr, or an empty bot, and writes nothing. The report counts these manual messages against scripted handoffs (the `comment` rows) per repo and ISO week. No input records a per-message token count yet, so it prints no token-savings figure.
 
 ```sh
 bin/orch eval-report --db ~/.local/share/factory/backup/orch.db --baseline o4-orch.db

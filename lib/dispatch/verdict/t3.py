@@ -5,6 +5,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from lib import job_detail
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
@@ -281,7 +282,7 @@ class T3Mixin:
     ) -> str:
         rows = connection.execute(
             """
-            SELECT head, detail FROM jobs
+            SELECT id, head, detail FROM jobs
             WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
             ORDER BY coalesce(handoff_comment_id = ?, 0) DESC, created_at DESC, rowid DESC
             """,
@@ -291,7 +292,11 @@ class T3Mixin:
             (row for row in rows if _matching_head(str(row["head"] or ""), ticket.current_head)),
             None,
         )
-        detail = json.loads(review["detail"] or "{}") if review is not None else {}
+        detail = (
+            json.loads(job_detail.load_row(connection, review["id"], review["detail"]) or "{}")
+            if review is not None
+            else {}
+        )
         criteria = detail.get("evidence", {}).get("criteria", {}).get("criteria", [])
         text = next((item["text"] for item in criteria if item["id"] == criterion_id), None)
         if text is None:

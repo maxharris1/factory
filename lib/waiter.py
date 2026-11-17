@@ -1238,7 +1238,7 @@ class Waiter:
             errors = [item.message for item in findings if item.severity == "error"]
             if config is None or errors:
                 raise ValueError(f"{self.orch_yml}: {errors[0] if errors else 'invalid configuration'}")
-            expected = expected_for(job_from_row(row), self.bot)
+            expected = expected_for(job_from_row(row, connection), self.bot)
             read = retrying(gh_reader(), lambda line: self.log(f"job {job_id}: {line}"))
             found = handoff_problems(expected, comment_id, read, config.trusted_logins)
             if not found:

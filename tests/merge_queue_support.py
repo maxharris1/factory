@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lib import job_detail
 from lib.dispatcher import CIResult, Comment, Dispatcher, LabelEvent, TicketRef, TrackedTicket
 from lib.factory_md import FactoryConfig, HoldConfig
 from lib.queue import Job, SQLiteJobQueue
@@ -274,7 +275,7 @@ class Board:
             ).fetchone()
         return None if row is None else str(row["outcome"])
 
-    def jobs(self, action: str | None = None, number: str | None = None) -> list[sqlite3.Row]:
+    def jobs(self, action: str | None = None, number: str | None = None) -> list[dict]:
         query = "SELECT * FROM jobs WHERE 1 = 1"
         args: list[str] = []
         if action is not None:
@@ -284,7 +285,10 @@ class Board:
             query += " AND ticket_id = ?"
             args.append(number)
         with self.queue.connect() as connection:
-            return connection.execute(query + " ORDER BY created_at, rowid", args).fetchall()
+            return [
+                {**dict(row), "detail": job_detail.load_row(connection, row["id"], row["detail"])}
+                for row in connection.execute(query + " ORDER BY created_at, rowid", args)
+            ]
 
     def wakes(self, reason: str) -> list[dict]:
         return [

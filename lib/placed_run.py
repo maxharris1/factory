@@ -478,8 +478,10 @@ class PlacedRun:
                 self.log(f"worker pid {pid} still runs; slot held")
                 return _held(settle)
             return self._release(code, settle)
-        status = check_worker(self.transport, self.target)
-        cancelled = self.follow_end is not None and self.follow_end.kind == STOPPED
+        end = self.follow_end
+        fence = end is None or end.kind != REFUSED or end.in_transit
+        status = check_worker(self.transport, self.target, fence=fence)
+        cancelled = end is not None and end.kind == STOPPED
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
             if checks == 0:
@@ -489,7 +491,7 @@ class PlacedRun:
                 self.log(f"job {job_id} worker ignored SIGTERM on {self.device.name}; killing it")
                 stop_worker(self.transport, self.target, kill=True)
             self.sleep(STOP_PAUSE_SECONDS)
-            status = check_worker(self.transport, self.target)
+            status = check_worker(self.transport, self.target, fence=fence)
             checks += 1
         if status == GONE:
             return self._release(code, settle)

@@ -61,7 +61,7 @@ class ReadyMixin:
             ).fetchone()
         if poster is None:
             return
-        job = _job(poster)
+        job = _job(poster, connection)
         if repeated is None:
             self.queue.enqueue(
                 replace(job.request, generation=job.request.generation + 1),
@@ -216,8 +216,10 @@ class ReadyMixin:
             handled, shipped = self._ship_covered(ticket, *covering, head)
             return handled, f"approval-covers:{shipped}"
         elif result.clears and self.feeder is not None:
-            if self.feeder.hold_stacked_review(ticket, head):
+            base = self.feeder.review_base_unless_stacked(ticket, head)
+            if base is None:
                 return False, "stacked-held"
+            ticket = replace(ticket, factory=replace(ticket.factory, base_branch=base))
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
                 return True, "stale-ready"

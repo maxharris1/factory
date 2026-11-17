@@ -207,7 +207,7 @@ def test_an_update_review_keeps_its_scope_when_it_resumes_after_an_answer(
     assert detail["update_merge"] == sha(3)
     assert detail["update_commits"] == [sha(2)]
     brief = render_brief(
-        queue_job(row), bot="codex-bot", context=None, factory_root=BOX_FACTORY_ROOT
+        queue_job(row, board.queue.connect()), bot="codex-bot", context=None, factory_root=BOX_FACTORY_ROOT
     )
     assert "--remerge-diff" in brief
     assert "Read the whole diff" not in brief
@@ -249,7 +249,7 @@ def test_a_resumed_review_at_a_newer_head_does_not_inherit_an_older_update_scope
     assert "kind" not in detail
     assert "update_merge" not in detail
     brief = render_brief(
-        queue_job(row), bot="codex-bot", context=None, factory_root=BOX_FACTORY_ROOT
+        queue_job(row, board.queue.connect()), bot="codex-bot", context=None, factory_root=BOX_FACTORY_ROOT
     )
     assert "Read the whole diff" in brief
     assert "--remerge-diff" not in brief

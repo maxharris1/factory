@@ -71,9 +71,12 @@
 #     listener as the holder (kept in linear-webhook-tunnel.holder for
 #     status), and sends SIGTERM to the sshd or sshd-session whose pid this
 #     state directory's CLAIM recorded: the tunnel's own stale session (sshd
-#     there may keep a dead tunnel's forward for hours). Any other holder,
-#     another device's live tunnel included, is left alone and logged as
-#     `held by <users>`.
+#     there may keep a dead tunnel's forward for hours). When ss shows no pid
+#     (sshd's session process is hidden from the tunnel user, issue #647), a
+#     listener is that session's only while the recorded pid still runs the
+#     claim shell carrying this tunnel's id. Any other holder, another
+#     device's live tunnel included, is left alone and logged as
+#     `held by <users>` or `held by another user`.
 #   probe: `ssh -o ExitOnForwardFailure=yes -R ... HOST true`. Exit 0 removes
 #     the record and the loop starts the tunnel again; otherwise the record
 #     stays as written.
@@ -342,9 +345,19 @@ EOF
 read -r -d '' RECLAIM_ON_HOST <<'EOF' || true
 listeners=$(ss -Hltnp "sport = :@PORT@") || exit 1
 [ -n "$listeners" ] || exit 0
-mine=$(cat "$HOME/.cache/factory/linear-webhook-tunnel.@ID@" 2>/dev/null)
+claim="$HOME/.cache/factory/linear-webhook-tunnel.@ID@"
+mine=$(cat "$claim" 2>/dev/null)
 case $mine in '' | *[!0-9]*) mine=0 ;; esac
+running_since_claimed() {
+    running=$(ps -o etimes= -p "$1" 2>/dev/null) && written=$(stat -c %Y "$2") &&
+        [ $((running + 1)) -ge $(($(date +%s) - written)) ]
+}
+running_since_claimed "$mine" "$claim" || mine=0
 own="\(\"sshd(-session)?\",pid=${mine},"
+pidless='^[^(]*$'
+if [ "$mine" != 0 ] && pgrep -P "$mine" -f "linear-webhook-tunnel\.@ID@" >/dev/null; then
+    own="${own}|${pidless}"
+fi
 printf '%s\n' "$listeners" | sed 's/^/holder: /'
 printf '%s\n' "$listeners" | grep -vE "$own" |
     sed -E -e 's/.*(users:.*)/held by \1/' -e t -e 's/.*/held by another user/'

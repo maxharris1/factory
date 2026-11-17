@@ -818,7 +818,7 @@ def test_a_ticket_selected_this_poll_holds_under_its_pr_number(tmp_path: Path, r
     feeder, _, github, _ = make_feeder(tmp_path, box=3)
     number = 113 if reused else 501
     if reused:
-        github.pulls[(HOME, 113)] = {"head": "factory/issue-1", "state": "open"}
+        github.pulls[(HOME, 113)] = {"head": "factory/issue-1", "base": "main", "state": "open"}
         github.statuses = {ref(113): CLOSED_PULL}
     github.issues[HOME] = [
         issue(1, created_at=1000),

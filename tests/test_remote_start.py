@@ -6,6 +6,7 @@ the CLI, or FakeTransport in process. No test reaches a real host.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
 import os
@@ -14,17 +15,19 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
-from lib import remote
-from lib.device_monitor import DeviceMonitor, remote_target
+from lib import device_monitor, remote
+from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
+from lib.worktrees import pid_alive, process_start
 from tests.pool_helpers import TARGET_MACHINES_YML, write_target_machines
 from tests.test_dispatcher import (
     GO,
@@ -728,7 +731,7 @@ def test_monitor_releases_a_remote_slot_no_worker_was_started_for_without_ssh(
 TAG = "d" * 32
 
 
-def lost_setup(tmp_path: Path, check: int = 255):
+def lost_setup(tmp_path: Path, check: int = 255, *, reload: bool = False, tag: str = TAG):
     now = [0.0]
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
@@ -742,13 +745,19 @@ def lost_setup(tmp_path: Path, check: int = 255):
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
         grok_delivery=FakeGrokDelivery(),
-        devices=DeviceMonitor(pool, config, transport, alive=lambda *_: True),
+        devices=DeviceMonitor(
+            pool,
+            config,
+            transport,
+            alive=lambda *_: True,
+            machines_path=machines if reload else None,
+        ),
     )
     snapshot = ticket(comment("go-1", GO.format(state="building"), author="grok-login"), timeout=60)
     dispatcher.process(snapshot)
     job, placement = pool.claim("claude")
     pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
-    pool.attach_worker(job.id, owner="claude", remote=True, tag=TAG)
+    pool.attach_worker(job.id, owner="claude", remote=True, tag=tag)
     return now, queue, pool, transport, dispatcher, job
 
 
@@ -850,6 +859,553 @@ def test_a_device_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
     with queue.connect() as connection:
         rows = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
     assert [tuple(row) for row in rows] == [("devices", "OperationalError: boom")]
+
+
+# --- disabled in machines.yml: lost within one poll (#679) --------------------
+
+
+def stamp(path: Path, ns: int) -> None:
+    os.utime(path, ns=(ns, ns))
+
+
+def disable_pc(tmp_path: Path, ns: int = 10**18) -> None:
+    stamp(machines_file(tmp_path, box_enabled=False, pc=False), ns)
+
+
+def assert_lost(queue: SQLiteJobQueue, pool: DevicePool, job_id: str, reason: str) -> None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT state, failure_handled FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert (row["state"], row["failure_handled"]) == ("failed", 0)
+    assert ("device-lost", f"pc: {reason}; worker tag {TAG}") in job_events(queue, job_id)
+    assert pool.placement(job_id) is None
+    assert pool.used() == {}
+    assert orphans(queue) == [(job_id, "pc", TAG)]
+
+
+def test_disabling_an_answering_device_loses_its_running_job_within_one_poll(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "running"
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert_lost(queue, pool, job.id, "disabled")
+
+
+def test_disabling_an_unreachable_device_loses_its_job_long_before_the_offline_limit(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True)
+    poll_at(now, dispatcher, 0.0)
+    assert pool.health("pc") == (None, 0.0)
+    assert state(queue, job.id) == "running"
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert_lost(queue, pool, job.id, "disabled")
+
+
+def box_job_setup(tmp_path: Path, *, alive: dict[int, bool]):
+    now = [0.0]
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
+    machines = machines_file(tmp_path, pc=False)
+    config = config_of(machines)
+    pool = DevicePool(queue, config)
+    kills: list[tuple[int, int]] = []
+    monitor = DeviceMonitor(
+        pool,
+        config,
+        FakeTransport(),
+        alive=lambda pid, _start: alive.get(pid, False),
+        kill=lambda pid, sig: kills.append((pid, sig)),
+        machines_path=machines,
+    )
+    dispatcher = Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=monitor,
+    )
+    dispatcher.process(
+        ticket(comment("go-1", GO.format(state="building"), author="grok-login"), timeout=60)
+    )
+    job, placement = pool.claim("claude")
+    assert placement.device == "box"
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", pid=12, start="w")
+    return now, queue, pool, dispatcher, job, kills
+
+
+def disable_box(tmp_path: Path) -> None:
+    stamp(machines_file(tmp_path, box_enabled=False, pc=False), 10**18)
+
+
+@pytest.mark.parametrize(
+    ("alive", "signalled"),
+    [({11: True, 12: True}, 11), ({12: True}, 12)],
+    ids=["runner-alive", "runner-gone"],
+)
+def test_disabling_the_box_loses_its_running_job_and_stops_it_within_one_poll(
+    tmp_path: Path, alive: dict[int, bool], signalled: int
+) -> None:
+    live = dict(alive)
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive=live)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "running"
+    assert pool.used() == {"box": 1}
+
+    disable_box(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert state(queue, job.id) == "failed"
+    assert ("device-lost", "box: disabled") in job_events(queue, job.id)
+    assert pool.used() == {}
+    assert orphans(queue) == [(job.id, "box", "None")]
+    assert kills == [(signalled, signal.SIGTERM)]
+
+    poll_at(now, dispatcher, 120.0)
+    assert orphans(queue) == [(job.id, "box", "None")]
+    assert kills[1:] == [(pid, signal.SIGKILL) for pid in sorted(live)]
+
+    live.clear()
+    poll_at(now, dispatcher, 180.0)
+    assert orphans(queue) == []
+    assert len(kills) == 1 + len(alive)
+
+
+def test_a_lost_box_worker_that_ignores_sigterm_keeps_its_orphan_until_it_is_killed(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
+    worker = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; from pathlib import Path; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "Path(sys.argv[1]).touch(); time.sleep(120)",
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={})
+        monitor = dispatcher.devices
+        monitor.alive = pid_alive
+        monitor.kill = os.kill
+        runner = subprocess.Popen([sys.executable, "-c", "pass"])
+        runner_pid, runner_start = runner.pid, process_start(runner.pid)
+        runner.wait()
+        with queue.connect() as connection:
+            connection.execute(
+                "UPDATE device_slots SET runner_pid = ?, runner_start = ?, "
+                "worker_pid = ?, worker_start = ? WHERE job_id = ?",
+                (runner_pid, runner_start, worker.pid, process_start(worker.pid), job.id),
+            )
+            connection.commit()
+
+        disable_box(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert state(queue, job.id) == "failed"
+        assert pool.used() == {}
+        time.sleep(0.5)
+        assert worker.poll() is None
+        assert orphans(queue) == [(job.id, "box", "None")]
+
+        poll_at(now, dispatcher, 60.0)
+        assert worker.wait(timeout=10) == -signal.SIGKILL
+        assert orphans(queue) == [(job.id, "box", "None")]
+
+        poll_at(now, dispatcher, 120.0)
+        assert orphans(queue) == []
+    finally:
+        worker.kill()
+        worker.wait()
+
+
+def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True})
+    for at in (0.0, 60.0, 120.0):
+        poll_at(now, dispatcher, at)
+    assert state(queue, job.id) == "running"
+    assert pool.used() == {"box": 1}
+    assert kills == []
+
+
+def test_a_disabled_device_is_stranded_with_no_offline_clock(tmp_path: Path) -> None:
+    disabled = config_of(machines_file(tmp_path, pc=False)).device("pc")
+    enabled = config_of(machines_file(tmp_path, pc=True)).device("pc")
+    assert stranded(disabled, None, 0.0, 600.0) == "disabled"
+    assert stranded(enabled, None, 0.0, 600.0) is None
+
+
+# --- machines.yml reloaded on change (#679) ---------------------------------
+
+
+def poll_errors(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute("SELECT repo, error FROM poll_errors ORDER BY rowid")
+        ]
+
+
+def test_the_monitor_reloads_machines_yml_when_its_mtime_changes(tmp_path: Path) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    monitor = dispatcher.devices
+    poll_at(now, dispatcher, 0.0)
+    assert monitor.config.device("pc").enabled
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert monitor.config.device("pc").enabled is False
+    assert pool.config is monitor.config
+
+
+def test_an_unchanged_machines_yml_is_not_loaded_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    loads: list[Path] = []
+    real = device_monitor.load_machines_yml
+
+    def counted(path: Path, **kwargs):
+        loads.append(path)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(device_monitor, "load_machines_yml", counted)
+    for at in (0.0, 60.0, 120.0):
+        poll_at(now, dispatcher, at)
+    assert loads == [tmp_path / "machines.yml"]
+
+    disable_pc(tmp_path)
+    for at in (180.0, 240.0, 300.0):
+        poll_at(now, dispatcher, at)
+    assert loads == [tmp_path / "machines.yml"] * 2
+
+
+def test_a_broken_machines_yml_keeps_the_last_good_config_and_is_reported_until_fixed(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=0, reload=True)
+    monitor = dispatcher.devices
+    poll_at(now, dispatcher, 0.0)
+    good = monitor.config
+    queue.finish(job.id, owner="claude", handoff_comment_id="c1")
+    monitor.alive = lambda *_: False
+    machines = tmp_path / "machines.yml"
+    machines.write_text("devices: [\n", encoding="utf-8")
+    stamp(machines, 10**18)
+
+    poll_at(now, dispatcher, 60.0)
+
+    errors = poll_errors(queue)
+    assert [repo for repo, _ in errors] == ["devices"]
+    assert errors[0][1].startswith("machines.yml:")
+    assert monitor.config is good and pool.config is good
+    assert pool.placement(job.id) is None
+
+    poll_at(now, dispatcher, 120.0)
+    assert len(poll_errors(queue)) == 2
+
+    disable_pc(tmp_path, ns=2 * 10**18)
+    poll_at(now, dispatcher, 180.0)
+    assert monitor.config.device("pc").enabled is False
+    assert len(poll_errors(queue)) == 2
+
+
+def test_a_machines_local_yml_edit_reloads_and_disables_the_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "running"
+
+    (tmp_path / "machines.local.yml").write_text(
+        "devices:\n  - name: pc\n    enabled: false\n", encoding="utf-8"
+    )
+    poll_at(now, dispatcher, 60.0)
+
+    assert dispatcher.devices.config.device("pc").enabled is False
+    assert_lost(queue, pool, job.id, "disabled")
+
+
+# --- orphans: stopped once their device answers (#679) -----------------------
+
+
+STOP = ("stop", "claude-bot", "fakepc-claude-bot")
+
+
+def test_an_orphan_is_stopped_when_its_device_answers_and_forgotten_once_gone(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    poll_at(now, dispatcher, 600.0)
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+    assert STOP not in transport.calls
+
+    transport.check = 1
+    poll_at(now, dispatcher, 660.0)
+    assert transport.calls[-1] == STOP
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+
+    transport.check = 0
+    poll_at(now, dispatcher, 720.0)
+    assert orphans(queue) == []
+
+
+def test_disabling_an_answering_device_stops_the_lost_worker_in_the_same_poll(
+    tmp_path: Path,
+) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
+    poll_at(now, dispatcher, 0.0)
+    assert STOP not in transport.calls
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 60.0)
+
+    assert state(queue, job.id) == "failed"
+    assert transport.calls[-1] == STOP
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+
+
+class LocalShell:
+    def run(self, argv, *, timeout: float) -> int:
+        return subprocess.run(["sh", "-c", argv[-1]], timeout=timeout).returncode
+
+
+def test_a_launch_still_in_transit_when_its_device_is_disabled_never_starts(
+    tmp_path: Path,
+) -> None:
+    tag = uuid.uuid4().hex
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True, tag=tag)
+    monitor = dispatcher.devices
+    monitor.transport = LocalShell()
+    monitor.alive = lambda *_: False
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
+    assert target is not None
+    marker = tmp_path / "late-worker.pid"
+    worker = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=30, grace=1
+    )
+
+    disable_pc(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert state(queue, job.id) == "failed"
+    assert pool.used() == {}
+    assert orphans(queue) == []
+
+    late = subprocess.run(
+        ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30
+    )
+    try:
+        assert late.stdout.decode().strip() == f"{remote.LAUNCH_MARK} already"
+        assert not marker.exists()
+        assert remote.check_worker(monitor.transport, target) == remote.GONE
+    finally:
+        remote.stop_worker(monitor.transport, target, kill=True)
+
+
+def test_a_check_that_cannot_fence_the_launch_never_says_gone(tmp_path: Path) -> None:
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(
+        config.device("pc"), "claude", "job-1", uuid.uuid4().hex
+    )
+    assert target is not None
+    jobs = Path(target.job_dir).parent
+    jobs.mkdir(parents=True)
+    jobs.chmod(0o500)
+    try:
+        assert remote.check_worker(LocalShell(), target) == remote.UNKNOWN
+    finally:
+        jobs.chmod(0o700)
+    assert remote.check_worker(LocalShell(), target) == remote.GONE
+
+
+def test_a_launch_that_got_there_first_keeps_its_orphan_until_it_is_stopped(
+    tmp_path: Path,
+) -> None:
+    tag = uuid.uuid4().hex
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, reload=True, tag=tag)
+    monitor = dispatcher.devices
+    monitor.transport = LocalShell()
+    monitor.alive = lambda *_: False
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
+    assert target is not None
+    marker = tmp_path / "early-worker.pid"
+    worker = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=30, grace=1
+    )
+    try:
+        early = subprocess.run(
+            ["sh", "-c", launch], stdin=subprocess.DEVNULL, capture_output=True, timeout=30
+        )
+        assert early.stdout.decode().strip() == f"{remote.LAUNCH_MARK} started"
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+        disable_pc(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert state(queue, job.id) == "failed"
+        assert orphans(queue) == [(job.id, "pc", tag)]
+
+        deadline = time.monotonic() + 10
+        while remote.check_worker(monitor.transport, target) != remote.GONE:
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+        poll_at(now, dispatcher, 60.0)
+        assert orphans(queue) == []
+    finally:
+        remote.stop_worker(monitor.transport, target, kill=True)
+
+
+def test_a_launch_that_owns_its_tag_when_the_check_scans_never_starts_its_worker(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    bins = root / "bin"
+    bins.mkdir()
+
+    def wait_for(path: Path) -> None:
+        deadline = time.monotonic() + 15
+        while not path.exists():
+            assert time.monotonic() < deadline, f"timed out waiting for {path}"
+            time.sleep(0.01)
+
+    def helper(name: str, body: str) -> None:
+        path = bins / name
+        path.write_text(
+            f"#!{sys.executable}\nimport os, pathlib, sys, time\n"
+            f"r = pathlib.Path({str(root)!r})\n{body}"
+        )
+        path.chmod(0o755)
+
+    helper(
+        "mv",
+        "if sys.argv[-1].endswith('/current'):\n"
+        "    (r / 'launch-paused').touch()\n"
+        "    while not (r / 'allow-detach').exists(): time.sleep(.01)\n"
+        "os.execv('/usr/bin/mv', ['mv', *sys.argv[1:]])\n",
+    )
+    helper(
+        "grep",
+        "if sys.argv[1:2] == ['-lzxsF'] and not os.environ.get('ORCH_WORKER_TAG'):\n"
+        "    (r / 'scan-expanded').touch()\n"
+        "    while not (r / 'allow-scan').exists(): time.sleep(.01)\n"
+        "os.execv('/usr/bin/grep', ['grep', *sys.argv[1:]])\n",
+    )
+    helper(
+        "uname",
+        "if os.environ.get('ORCH_WORKER_TAG'):\n"
+        "    (r / 'start-paused').touch()\n"
+        "    while not (r / 'allow-start').exists(): time.sleep(.01)\n"
+        "os.execv('/usr/bin/uname', ['uname', *sys.argv[1:]])\n",
+    )
+    env = dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}")
+
+    class PausingShell:
+        def run(self, argv, *, timeout: float) -> int:
+            return subprocess.run(
+                ["sh", "-c", argv[-1]], timeout=timeout, env=env, capture_output=True
+            ).returncode
+
+    tag = uuid.uuid4().hex
+    now, queue, pool, transport, dispatcher, job = lost_setup(root, reload=True, tag=tag)
+    monitor = dispatcher.devices
+    monitor.alive = lambda *_: False
+    monitor.transport = PausingShell()
+    target = device_monitor.remote_target(monitor.config.device("pc"), "claude", job.id, tag)
+    assert target is not None
+    marker = root / "worker-started"
+    start = remote.start_script(
+        target,
+        [sys.executable, "-c", f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(30)"],
+        {},
+    )
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=30, grace=1
+    )
+    launcher = subprocess.Popen(
+        ["sh", "-c", launch],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+    pool_thread = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        wait_for(root / "launch-paused")
+        disable_pc(root)
+        checked = pool_thread.submit(dispatcher._check_devices)
+        wait_for(root / "scan-expanded")
+        (root / "allow-detach").touch()
+        wait_for(root / "start-paused")
+        out, _ = launcher.communicate(timeout=15)
+        assert out.decode().strip() == f"{remote.LAUNCH_MARK} started"
+        (root / "allow-scan").touch()
+        checked.result(timeout=15)
+        assert state(queue, job.id) == "failed"
+        assert pool.used() == {}
+
+        (root / "allow-start").touch()
+        refused = Path(remote.run_file(target, "exit"))
+        deadline = time.monotonic() + 15
+        while not marker.exists() and not refused.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert not marker.exists() or orphans(queue), "live lost worker has no cleanup row"
+        assert refused.read_text().strip() == str(remote.START_REFUSED)
+    finally:
+        for name in ("allow-start", "allow-scan", "allow-detach"):
+            (root / name).touch()
+        subprocess.run(["sh", "-c", remote.stop_script(target, kill=True)], timeout=10)
+        pool_thread.shutdown(wait=True)
+
+
+def test_an_unreachable_device_keeps_its_orphans_for_one_check_a_poll(tmp_path: Path) -> None:
+    now, queue, pool, transport, dispatcher, first = lost_setup(tmp_path)
+    dispatcher.process(
+        ticket(comment("go-2", GO.format(state="building"), author="grok-login"), ticket_id="2")
+    )
+    second, _ = pool.claim("claude")
+    pool.attach_runner(second.id, owner="claude", pid=12, start="r", alive=lambda *_: False)
+    pool.attach_worker(second.id, owner="claude", remote=True, tag="e" * 32)
+    poll_at(now, dispatcher, 0.0)
+    poll_at(now, dispatcher, 600.0)
+    assert len(orphans(queue)) == 2
+
+    for at in (660.0, 720.0):
+        seen = len(transport.calls)
+        poll_at(now, dispatcher, at)
+        assert transport.calls[seen:] == [("check", "claude-bot", "fakepc-claude-bot")]
+        assert len(orphans(queue)) == 2
 
 
 def test_suite_guard_shadows_any_real_ssh() -> None:
