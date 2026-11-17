@@ -11,6 +11,7 @@ from itertools import islice
 from typing import TYPE_CHECKING
 
 from lib import project_rules
+from lib.dispatch import ci_board
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     LINEAR_HANDOFF_QUERY,
@@ -114,6 +115,21 @@ class PollMixin:
                     self.process(self._polled.get(key, ticket))
                 except Exception as exc:
                     self._record_poll_error(ticket, exc)
+        with self._phase("ci-board"):
+            try:
+                ci_board.record(
+                    self._connect,
+                    [
+                        self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+                        for ticket in tracked
+                    ],
+                    self.queue.now(),
+                    run_jobs=self.ci_runs,
+                    job_log=self.ci_job_log,
+                    log=self.log,
+                )
+            except Exception as exc:
+                self.record_poll_exception("ci-board", "-", exc)
         with self._phase("merge-queue"):
             self._advance_merge_queues()
         with self._phase("verify-handoffs"):

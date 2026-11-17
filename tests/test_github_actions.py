@@ -22,6 +22,7 @@ from lib.dispatcher import (
     TrackedTicket,
     _comment_order,
 )
+from lib.dispatch.types import CheckRow, RunJob
 from lib.github_actions import (
     GH,
     GhResult,
@@ -1403,6 +1404,182 @@ def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
         FailedCheck("lint"),
         FailedCheck("commit status"),
     )
+
+
+def epoch(stamp: str) -> float:
+    return datetime.fromisoformat(stamp).replace(tzinfo=timezone.utc).timestamp()
+
+
+def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-failure-actions.json"))
+    gh.route(STATUS, served("status-failure.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.checks == (
+        CheckRow(
+            "pytest",
+            "completed",
+            "failure",
+            started_at=epoch("2026-11-10T19:50:00"),
+            completed_at=epoch("2026-11-10T19:55:00"),
+            log_url="https://github.com/owner/repo/actions/runs/123456/job/31000000004",
+            run_id="123456",
+            job_id="31000000004",
+            workflow="actions-run:123456",
+        ),
+        CheckRow(
+            "lint",
+            "completed",
+            "failure",
+            started_at=epoch("2026-11-10T19:50:00"),
+            completed_at=epoch("2026-11-10T19:56:00"),
+            workflow="suite:77",
+        ),
+    )
+    assert gh.keys() == [CHECKS, STATUS]
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "row_status", "started"),
+    [
+        ("in_progress", None, "in_progress", True),
+        ("queued", None, "queued", False),
+        ("waiting", None, "queued", False),
+        ("requested", None, "queued", False),
+        ("pending", None, "queued", False),
+        ("in_progress", "success", "completed", True),
+    ],
+)
+def test_ci_status_maps_each_check_run_status_onto_the_board_statuses(
+    status: str, conclusion: str | None, row_status: str, started: bool
+) -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, concluded_run(status, conclusion))
+    gh.route(STATUS, served("status-empty.json"))
+
+    (row,) = actions.ci_status("owner/repo", HEAD).checks
+
+    assert (row.status, row.conclusion) == (row_status, conclusion)
+    assert (row.started_at is not None) is started
+
+
+def test_ci_status_keeps_the_latest_attempt_check_only() -> None:
+    actions, gh = adapter()
+    gh.route(STATUS, served("status-empty.json"))
+    page = json.loads((FIXTURES / "check-runs-failure-actions.json").read_text())
+    first = dict(page["check_runs"][0])
+    rerun = dict(
+        first,
+        id=31000000009,
+        status="in_progress",
+        conclusion=None,
+        completed_at=None,
+        started_at="2026-11-10T20:10:00Z",
+        details_url="https://github.com/owner/repo/actions/runs/123456/job/31000000009",
+    )
+    gh.route(CHECKS, GhResult(0, json.dumps({"total_count": 2, "check_runs": [first, rerun]}), ""))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.status == "pending"
+    assert [(row.name, row.status, row.job_id) for row in result.checks] == [
+        ("pytest", "in_progress", "31000000009")
+    ]
+
+
+def test_ci_status_is_the_same_gate_whatever_the_check_times_hold() -> None:
+    actions, gh = adapter()
+    page = json.loads((FIXTURES / "check-runs-failure-actions.json").read_text())
+    page["check_runs"][0].update(started_at="soon", completed_at=17)
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.status == "failure"
+    assert (result.checks[0].started_at, result.checks[0].completed_at) == (None, None)
+
+
+RUN_JOBS = (f"{REPO}/actions/runs/123456/jobs?per_page=100",)
+
+
+def test_run_jobs_names_each_jobs_runner_in_one_read() -> None:
+    actions, gh = adapter()
+    gh.route(RUN_JOBS, served("run-jobs.json"))
+
+    jobs = actions.run_jobs("owner/repo", "123456")
+
+    queued = epoch("2026-11-10T19:49:30")
+    assert jobs == (
+        RunJob(
+            "31000000004",
+            "pytest",
+            "completed",
+            created_at=queued,
+            started_at=epoch("2026-11-10T19:50:00"),
+            completed_at=epoch("2026-11-10T19:55:00"),
+            runner_name="GitHub Actions 1000000123",
+            runner_kind="github-hosted",
+        ),
+        RunJob(
+            "31000000006",
+            "e2e",
+            "in_progress",
+            created_at=queued,
+            started_at=epoch("2026-11-10T19:52:10"),
+            runner_name="pc-wsl-bots-2",
+            runner_kind="self-hosted",
+        ),
+        RunJob("31000000007", "lint", "queued", created_at=queued),
+        RunJob(
+            "31000000008",
+            "deploy",
+            "completed",
+            created_at=queued,
+            started_at=queued,
+            completed_at=queued,
+            runner_kind="none",
+        ),
+    )
+    assert gh.keys() == [RUN_JOBS]
+
+
+def test_run_jobs_refuses_a_run_id_that_is_not_a_number() -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError):
+        actions.run_jobs("owner/repo", "../secrets")
+    assert gh.calls == []
+
+
+def test_run_jobs_refuses_a_page_without_a_jobs_list() -> None:
+    actions, gh = adapter()
+    gh.route(RUN_JOBS, GhResult(0, json.dumps({"total_count": 0}), ""))
+
+    with pytest.raises(GitHubAdapterError):
+        actions.run_jobs("owner/repo", "123456")
+
+
+JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs", "--allow-escape-sequences")
+
+
+def test_job_log_reads_one_coloured_jobs_log_in_one_api_request() -> None:
+    actions, gh = adapter()
+    text = "2026-11-10T19:50:02Z \x1b[31mFAILED\x1b[0m tests/test_a.py::test_b\n"
+    gh.route(JOB_LOG, GhResult(0, text, ""))
+
+    assert actions.job_log("owner/repo", "31000000004") == text
+    assert gh.calls == [[*GH, "api", *JOB_LOG]]
+
+
+def test_job_log_refuses_a_job_id_that_is_not_a_number() -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError):
+        actions.job_log("owner/repo", "../secrets")
+    assert gh.calls == []
 
 
 RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")

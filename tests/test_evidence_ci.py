@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from lib.dispatch.types import FailedCheck
-from lib.evidence.ci import LOG_LINES, CIEvidence, CIJobLog, ci_evidence
+from lib.evidence.ci import LOG_LINES, CIEvidence, CIJobLog, ci_evidence, failing_tests
 
 RUN_URL = "https://github.com/o/r/actions/runs/42"
 PYTEST = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL)
@@ -164,3 +164,48 @@ def test_an_unfinished_key_block_whose_begin_was_cut_stays_hidden():
 
     assert KEY_BODY not in tail
     assert "AAAA" not in tail
+
+
+PYTEST_SUMMARY = """\
+2026-11-10T19:54:58.1234567Z ============================= short test summary info ============================
+2026-11-10T19:54:58.1234568Z FAILED tests/test_ci_board.py::test_budget[3 runs] - AssertionError: assert 4 == 3
+2026-11-10T19:54:58.1234569Z FAILED tests/test_poll.py::test_cycle - KeyError: 'ci-board'
+2026-11-10T19:54:58.1234570Z ERROR tests/test_queue.py::test_claim - sqlite3.OperationalError: database is locked
+2026-11-10T19:54:58.1234571Z ERROR tests/test_broken.py - ImportError: cannot import name 'x'
+2026-11-10T19:54:58.1234572Z ======= 2 failed, 310 passed, 2 errors in 41.20s =======
+"""
+
+
+def test_failing_tests_reads_the_pytest_summary_lines():
+    assert failing_tests(PYTEST_SUMMARY) == [
+        "tests/test_ci_board.py::test_budget[3 runs]",
+        "tests/test_poll.py::test_cycle",
+        "tests/test_queue.py::test_claim",
+        "tests/test_broken.py",
+    ]
+
+
+def test_failing_tests_reads_raw_log_failed_lines_with_job_and_step():
+    log = (
+        "pytest\tRun tests\t2026-11-10T19:54:58.1Z FAILED tests/test_a.py::test_b - assert 1 == 2\n"
+        "pytest\tRun tests\t2026-11-10T19:54:58.2Z \x1b[31mFAILED\x1b[0m tests/test_a.py::test_c\n"
+    )
+
+    assert failing_tests(log) == ["tests/test_a.py::test_b", "tests/test_a.py::test_c"]
+
+
+def test_failing_tests_skips_lines_that_only_mention_failure():
+    log = (
+        "FAILED to fetch the cache\n"
+        "ERROR: Process completed with exit code 1.\n"
+        "tests/test_a.py::test_b FAILED                                   [ 50%]\n"
+        "E   AssertionError: FAILED tests/test_a.py::test_b\n"
+    )
+
+    assert failing_tests(log) == []
+
+
+def test_failing_tests_keeps_the_first_ten_distinct_tests():
+    lines = [f"FAILED tests/test_a.py::test_{n % 12} - boom" for n in range(30)]
+
+    assert failing_tests("\n".join(lines)) == [f"tests/test_a.py::test_{n}" for n in range(10)]

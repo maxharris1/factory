@@ -491,6 +491,31 @@ class SchemaMixin:
                 """
             )
             _add_missing_columns(connection, "ci_waits", {"next_round": "INTEGER"})
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_jobs (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    workflow TEXT NOT NULL,
+                    check_name TEXT NOT NULL,
+                    pr TEXT,
+                    run_id TEXT,
+                    job_id TEXT,
+                    log_url TEXT,
+                    status TEXT NOT NULL,
+                    conclusion TEXT,
+                    created_at REAL,
+                    started_at REAL,
+                    completed_at REAL,
+                    runner_name TEXT,
+                    runner_kind TEXT,
+                    failing_tests TEXT,
+                    seen_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, head, workflow, check_name)
+                )
+                """
+            )
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
