@@ -75,6 +75,17 @@ def _plain_prefix(message: str, plain_pattern: re.Pattern[str]) -> str:
     return plain
 
 
+def plain_fragment(text: str) -> str:
+    """The part of `text` that poll_error_detail keeps: cut at the first
+    character outside the plain set and before the first credential-like
+    word, with no marker, so text joined after it survives the same cut."""
+    plain = _PLAIN_MESSAGE.match(text).group(0)
+    credential = _CREDENTIAL_WORD.search(plain)
+    if credential is not None:
+        plain = plain[: credential.start()]
+    return plain.rstrip()
+
+
 def poll_error_detail(exc: BaseException) -> str:
     """The exception chain's messages and newest frames, redacted and capped.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import queue
 import re
@@ -43,6 +44,7 @@ from lib.dispatcher import (
 from lib.dispatch.types import ci_on_base, no_ci_base
 from lib.brief_comment import before_factory_md
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
+from lib.dispatch.errors_text import plain_fragment
 from lib.dispatch.cycle_clock import CycleClock
 from lib.feeder import FEEDER_TABLE
 from lib.factory_md import (
@@ -168,6 +170,16 @@ class FactoryParseError(PollSourceError):
 
 class PollCycleError(PollSourceError):
     pass
+
+
+class GhHttpError(PollSourceError):
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class _BudgetSpent(PollSourceError):
+    """The source's tracked-read budget ran out mid-ticket: a deferral, not an error."""
 
 
 class RetryablePollSourceError(PollSourceError, RetryableStateError):
@@ -477,6 +489,10 @@ class LivePollSource:
         self._linear_tracked_cursor: tuple[str, str] | None = None
         self._cycle_errors: list[tuple[str, str, str]] = []
         self._cycle_deferrals: dict[str, int] = {}
+        self._budget_deadline: float | None = None
+        self._budget_spent = False
+        self._tracked_turns: dict[tuple[str, str], int] = {}
+        self._tracked_turn = 0
         # Linear webhook mode (orch.yml linear_webhook). With no webhook
         # configured none of this is read and every cycle is as before.
         self.linear_dirty: DirtyQueue | None = None
@@ -656,12 +672,14 @@ class LivePollSource:
             counts = Counter(repo for repo, _, _ in self._cycle_errors)
             sources = ", ".join(f"{source} x{count}" for source, count in sorted(counts.items()))
             details = [
-                f"{repo} {reason}" if ticket_id == "-" else f"{repo}#{ticket_id} {reason}"
+                plain_fragment(
+                    f"{repo} {reason}" if ticket_id == "-" else f"{repo} ticket {ticket_id} {reason}"
+                )
                 for repo, ticket_id, reason in self._cycle_errors[:CYCLE_ERROR_DETAILS]
             ]
             more = len(self._cycle_errors) - CYCLE_ERROR_DETAILS
             if more > 0:
-                details.append(f"+{more} more")
+                details.append(f"and {more} more")
             raise PollCycleError(
                 f"poll cycle recorded {len(self._cycle_errors)} source error(s): "
                 f"{sources}; " + "; ".join(details)
@@ -936,7 +954,10 @@ class LivePollSource:
         ordered = (
             linear_refs[start:]
             + linear_refs[:start]
-            + [ref for ref in tickets if ref.tracker != "linear"]
+            + sorted(
+                (ref for ref in tickets if ref.tracker != "linear"),
+                key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
+            )
         )
         spent: dict[str, float] = {}
         for ref in ordered:
@@ -947,21 +968,42 @@ class LivePollSource:
                     self._note_unread(ref.ticket_id)
                 continue
             repo = ref.repo.lower()
-            if spent.get(repo, 0.0) >= self.tracked_read_budget_seconds:
+            left = self.tracked_read_budget_seconds - spent.get(repo, 0.0)
+            if left <= 0:
                 self._defer(f"tracked-read budget deferred {project.repo}")
                 continue
             started = self.clock()
+            self._budget_deadline = started + left
+            self._budget_spent = False
             try:
                 ticket = self._tracked_ticket(ref, project)
             except Exception as exc:
                 if not isinstance(exc, _TerminalTicket):
                     self._record(ref.repo, ref.ticket_id, exc)
             else:
-                if ticket is not None:
+                if ticket is not None and not self._budget_spent:
                     found.append(ticket)
             finally:
+                self._budget_deadline = None
                 spent[repo] = spent.get(repo, 0.0) + self.clock() - started
+            if self._budget_spent:
+                self._budget_spent = False
+                self._defer(f"tracked-read budget deferred {project.repo}")
+            else:
+                self._tracked_turn += 1
+                self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
+
+    def _budget_left(self, reserve: float = 0.0) -> float:
+        """Seconds left in the tracked-read budget of the ticket being read;
+        raises _BudgetSpent when no more than `reserve` is left."""
+        if self._budget_deadline is None:
+            return math.inf
+        left = self._budget_deadline - self.clock()
+        if left <= reserve:
+            self._budget_spent = True
+            raise _BudgetSpent("tracked-read budget spent")
+        return left
 
     def _tracked_ticket(
         self,
@@ -1240,6 +1282,7 @@ class LivePollSource:
         complexity = _linear_request_complexity(query)
         if not self._linear_request_available(query):
             raise RetryablePollSourceError("Linear poll budget is exhausted")
+        deadline = min(self.timeout_seconds, self.read_deadline_seconds, self._budget_left())
         self._linear_requests += 1
         self._linear_complexity += complexity
         payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -1247,7 +1290,6 @@ class LivePollSource:
             "Authorization": self._linear_key(),
             "Content-Type": "application/json",
         }
-        deadline = min(self.timeout_seconds, self.read_deadline_seconds)
         cutoff = deadline - min(LINEAR_CUTOFF_MARGIN_SECONDS, deadline / 4)
         try:
             with self._timed("linear"):
@@ -1258,6 +1300,7 @@ class LivePollSource:
                     ),
                 )
         except TimeoutError:
+            self._budget_left()
             self._hung("linear")
             raise RetryablePollSourceError(
                 f"Linear request timed out after {deadline:g}s"
@@ -1640,8 +1683,8 @@ class LivePollSource:
     def _factory_text_at(self, repo: str, sha: str) -> str | None:
         try:
             return self._factory_text(repo, sha)
-        except PollSourceError as exc:
-            if str(exc) == "gh returned HTTP 404":
+        except GhHttpError as exc:
+            if exc.status == 404:
                 return None
             raise
 
@@ -2026,7 +2069,7 @@ class LivePollSource:
                 self._backoff_until = now + BACKOFF_SECONDS
             route = f"gh api {_route(args)}"
             if status is not None:
-                raise PollSourceError(f"{route} returned HTTP {status}")
+                raise GhHttpError(f"{route} returned HTTP {status}", status)
             raise PollSourceError(f"{route} exited {result.returncode}")
         if not conditional:
             return result.stdout
@@ -2082,15 +2125,18 @@ class LivePollSource:
             attempt = 1
             while True:
                 left = deadline - self.clock()
+                timeout = min(self.gh_call_timeout_seconds, left, self._budget_left())
                 try:
-                    return self.gh_runner(argv, min(self.gh_call_timeout_seconds, left))
+                    return self.gh_runner(argv, timeout)
                 except subprocess.TimeoutExpired:
+                    self._budget_left()
                     pause = GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
                     if attempt >= GH_CALL_ATTEMPTS or deadline - self.clock() <= pause:
                         self._hung("github")
                         raise RetryablePollSourceError(
                             f"{route} timed out after {attempt} attempts"
                         ) from None
+                    self._budget_left(pause)
                 except OSError as exc:
                     raise PollSourceError(
                         f"{route} could not run: {type(exc).__name__}"
@@ -2121,6 +2167,8 @@ class LivePollSource:
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
+        if isinstance(exc, _BudgetSpent):
+            return
         reason = _safe_reason(exc)
         for name in _secret_env_names(self.config):
             value = self.environ.get(name)
