@@ -469,7 +469,8 @@ class HealthStore:
                     (component, bot, pid, now, DOWN_BEATS, boot, monotonic, DOWN_BEATS,
                      monotonic),
                 )
-                _forget_previous_release_checks(connection, component, device, bot, boot)
+                _forget_previous_release_checks(connection, component, device, bot, boot,
+                                                succeeded=True)
         finally:
             connection.close()
 
@@ -505,7 +506,8 @@ class HealthStore:
                     (component, device, bot, pid, _real(started_at, now), version,
                      float(interval), now, boot),
                 )
-                _forget_previous_release_checks(connection, component, device, bot, boot)
+                _forget_previous_release_checks(connection, component, device, bot, boot,
+                                                succeeded=False)
         finally:
             connection.close()
 
@@ -556,12 +558,12 @@ class HealthStore:
 
 
 def _forget_previous_release_checks(connection: sqlite3.Connection, component: str, device: str,
-                                    bot: str, boot: str | None) -> None:
+                                    bot: str, boot: str | None, *, succeeded: bool) -> None:
     if component in CHECKS and boot is not None:
         connection.execute(
             f"DELETE FROM {TABLE} WHERE component = ? AND device = ? AND bot = ? "
-            "AND seen_boot IS NULL AND checked_boot IS NULL",
-            (component, device, bot),
+            "AND seen_boot IS NULL AND checked_boot IS NULL AND (? OR last_seen IS NULL)",
+            (component, device, bot, succeeded),
         )
 
 

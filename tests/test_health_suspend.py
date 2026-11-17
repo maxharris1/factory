@@ -346,3 +346,24 @@ def test_a_previous_release_failed_check_after_a_current_format_success_stays_vi
     (item,) = [c for c in report.components if c.component == component]
     assert (item.state, item.pid) == ("stale", 202)
     assert item.reason.endswith(" 1s ago")
+
+
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_failed_check_keeps_another_process_success_without_a_boot_stamp(
+        tmp_path: Path, component: str, device: str, interval: float) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                       uptime=lambda: None).beat(component, device, pid=101, interval=interval)
+    clocks.advance(wall=1.0, monotonic=1.0)
+    health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                       uptime=clocks.uptime).checked(component, device, pid=202, interval=interval)
+    expected = health.Expected((health.Slot(component, (device,)),), frozenset({component}))
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime(), expected=expected)
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.pid) == ("stale", 202)
+    assert item.reason.endswith(" 1s ago")
+    actions = heal.decide(health.report_json(report, clocks.wall), {},
+                          heal.Facts(device, frozenset({"linear-webhook"})), clocks.wall)
+    assert actions == []
