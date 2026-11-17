@@ -333,7 +333,7 @@ Full report: <link>
 
 The review brief gives the reviewer this form and calls it exact: the criteria by `ac-<n>`, then one numbered item per finding, `[blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.`, with the tag first. The tags are `[blocking]`, `[minor]` and, while follow-ups are filed (section 8), `[follow-up]`; under `review.block_on: user-impact` `[minor]` is not used. From round 2 an item `[closed] f-<n>. <what shows it closed>.` closes an earlier finding. The dispatcher reads the tag, the id and the `Rule:` sentence to carry a finding into later rounds (`lib/evidence/findings.py`). `tests/test_handoff.py` parses every fenced handoff example in this file.
 
-Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`, `ok`, `decline`, `done`, `stuck`, `retry`.
+Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`, `ok`, `decline`, `done`, `stuck`, `retry`, `qa`.
 
 Max may also post two plain commands with no `orch:v1` header:
 
@@ -373,6 +373,27 @@ A `plan` may add `lines=<n>`, the changed lines the plan expects (a non-negative
 A `verdict=APPROVE` with `ac=unmet` does not parse (issue #187). It is a refused verdict (T7, `rejected-approve-ac-unmet`), never a ship. An APPROVE with no `ac` still parses, so readers of accepted verdicts see them as before, but `orch job done` and T4 refuse it (issue #508). `orch job done` also refuses an APPROVE with an open `[blocking]` list item and names what to change; T4 applies both rules only to comments posted at or after the `approve_rule_floor` time.
 A `plan` uses `ac=met|unmet` and `round=<n>/2`: `n=1` for the first plan and `n=2` after one gap. The round is checked against the persisted plan-gap count. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
 A `go` may name `builder=<harness>` and `reviewer=<harness>` (issue #206). T1 queues the step to that builder and records the pair in the job detail as `routing`; later steps of the ticket use the pair of its newest plan, build or fix step (a T6 retry repeats an older step and does not change the pair). T2 accepts a ready only from that pair's builder, so an obsolete retry under the old pair cannot start a review. A side it leaves out is factory.md's. A pair whose families are the same, or whose family cannot be resolved (the section 6 rule, with factory.md's model hint only for a side whose harness matches factory.md's), is refused with no job. A go on a capped ticket is routed the same way before its extra round's fix is queued. When a later poll restores the pair and it no longer passes that rule (factory.md's model hint changed), the ticket is marked stuck (`route-same-family`), its queued jobs are cancelled and Grok wakes, before any review or ship. A watched PR that closed unmerged is abandoned first.
+
+A `qa` reports a QA run (issue #758): an agent drove the project's real UI at the PR head and checked each criterion. The orchestrator posts it, as it posts `brief` and `go`. Its `from` is the label the orchestrator's own comments already use, and it is trusted by the same `trusted_logins` rule; there is no QA identity. On a Linear-ticket repo it uses the visible header form, as a `verdict` does. Nothing queues, reads or acts on it yet, and `orch job done` refuses it as the handoff of every job kind.
+
+```
+<!-- orch:v1 kind=qa from=grok-bot role=qa round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=met result=PASS scope=full lanes=3 env=full-stack runner=cursor-cloud arm=primary attempt=1 -->
+**QA round 1 of 3: PASS** (full run, 3 lanes, 14 min)
+| Flow | Proves | Result | Evidence |
+|---|---|---|---|
+| qa-1 | ac-1 | Verified | after screenshot, video |
+Evidence: <link>
+```
+
+A `qa` requires `head`, `result`, `scope`, `runner` and `arm`, and its `head` is the full 40-character sha. Its `role`, when present, is `qa`. It may carry `round` and `ac`. These keys are valid only on `kind=qa`; any other kind that carries one does not parse:
+
+- `result`: `PASS`, `FAIL` or `BLOCKED`.
+- `scope`: `full`, `targeted` or `smoke`.
+- `lanes`: an integer from 1 to 3.
+- `env`: `full-stack`, `supabase` or `none`.
+- `runner`: `claude-cloud` or `cursor-cloud`, the harness that ran the agent.
+- `arm`: `primary` or `shootout`; a shootout runs both runners on the same head.
+- `attempt`: an integer of 1 or more.
 
 ## 6. `factory.md` schema
 
