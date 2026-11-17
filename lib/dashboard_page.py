@@ -33,11 +33,11 @@ from lib.dashboard_pages.shell import (  # noqa: F401
     PX_EFFECTS, PX_FALLBACK, PX_ONESHOTS, PX_SCRIPT, PX_STATE, STATUS_ABSENT_LINK, STATUS_LINKS,
     _attention_strip, _band, _count, _fixed3, _page, _px_progress, _segment, _statusline,
     _topbar, header_load, px_frame, px_job_strip, px_script, px_state, px_strip, px_table,
-    shell_table, status_segments, version_drift,
+    shell_table, status_segments,
 )
 from lib.dashboard_pages.system import (  # noqa: F401
     _ANCHOR, _BUDGET_STATE, _HEALTH_STATE, _LOG_KINDS, _POLL_STATE, _anchor_attr, _components,
-    _drift, _drift_row, _health, _log, _log_row, _no_waiter, _rules, version_groups,
+    _drift, _drift_row, _health, _log, _log_row, _no_waiter, _rules, version_drift, version_groups,
 )
 from lib.dashboard_pages.ticket_detail import (  # noqa: F401
     _detail_model, _job_article, _jobview,

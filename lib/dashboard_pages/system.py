@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 
+from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.common import (
     _b, _chip, duration, _e, _feed, _num, _panel, _span, _td, _ticket, _when,
@@ -55,18 +56,27 @@ font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
 SCRIPT_LOG = r"""
   // --- system page (#141) ------------------------------------------------------
 
-  var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/another orch poll owns/, 'warn'], [/poller start/, 'start']];
-  function logKind(line) {
-    for (var i = 0; i < LOG_KINDS.length; i++) if (LOG_KINDS[i][0].test(line)) return LOG_KINDS[i][1];
-    return null;
+  var LOG_KINDS = [[/exit rc=(?!0\b)\d+/, 'bad'], [/Traceback/, 'bad'], [/\b\w*(?:Error|Exception):/, 'bad'],
+                   [/\b(?:ERROR|CRITICAL)\b/, 'bad'], [/\b(?:WARNING|WARN)\b/, 'warn'], [/another orch poll owns/, 'warn'],
+                   [/poller start/, 'start']];
+  function logKinds(lines) {
+    var traceback = false;
+    return lines.map(function (line) {
+      if (traceback && /^\s/.test(line)) return 'bad';
+      traceback = line.indexOf('Traceback') >= 0;
+      for (var i = 0; i < LOG_KINDS.length; i++) if (LOG_KINDS[i][0].test(line)) return LOG_KINDS[i][1];
+      return null;
+    });
   }
   function renderLog(d) {
     var log = d.poller.log;
     var root = panel('log', 'poller.log', log.present ? 'written ' + dur(log.age_seconds) + ' before the snapshot' : 'absent');
     if (!root) return;
-    add(root, el('p', 'sys-note', 'last ' + log.tail.length + ' lines, redacted'));
+    add(root, el('p', 'sys-note', 'last ' + log.tail.length + ' lines, newest first, redacted'));
     var box = add(root, el('div', 'sys-log'));
-    log.tail.forEach(function (line) { add(box, el('div', logKind(line), line)); });
+    var kinds = logKinds(log.tail);
+    log.tail.map(function (line, i) { return [line, kinds[i]]; }).reverse()
+      .forEach(function (row) { add(box, el('div', row[1], row[0])); });
   }
 
   function renderRules(d) {
@@ -209,10 +219,7 @@ SCRIPT_COMPONENTS = r"""
     add(root, el('p', 'sys-note sys-legend', 'up: a beat within ' + (t.stale_beats || 3) + ' intervals (' + (t.beat_seconds || 15) +
       ' s each; device probes every ' + (t.probe_seconds || 60) + ' s) · stale: within ' + (t.down_beats || 8) +
       ' · down: older, stopped or never seen · unknown: this snapshot is too old to tell'));
-    var box = add(root, el('details', 'sys-details'));
-    box.open = openDetails.process !== false;
-    if (box.addEventListener) box.addEventListener('toggle', function () { openDetails.process = box.open; });
-    add(box, el('summary', null, 'process details'));
+    var box = details(root, 'process', 'process details', 'sys-details');
     var ptable = add(add(box, el('div', 'sys-scroll')), el('table', 'sys-table wide'));
     var phead = add(add(ptable, el('thead')), el('tr'));
     ['component', 'bot', 'device', 'state', 'last seen (ET)', 'ago', 'pid', 'version', 'started (ET)'].forEach(function (t) { add(phead, el('th', null, t)); });
@@ -229,15 +236,17 @@ SCRIPT_COMPONENTS = r"""
       if (c.reason) add(cell, el('span', 'muted', ' ' + c.reason));
       if (typeof c.last_cycle_seconds === 'number') add(cell, el('span', 'muted', ' last cycle ' + Math.floor(c.last_cycle_seconds) + 's'));
       if (c.configured === false) add(cell, el('span', 'muted', ' (not configured)'));
-      add(tr, el('td', null, c.last_seen_et || 'never'));
+      add(tr, el('td', null, etCell(c.last_seen_et) || 'never'));
       ticking(add(tr, el('td', 'num')), c.last_seen_age_seconds, '', '');
       add(tr, el('td', 'num', c.pid === null || c.pid === undefined ? '—' : c.pid));
       var ver = add(tr, el('td', null, c.version));
       if (c.stale_code) add(ver, el('span', 'warn', ' stale code'));
-      add(tr, el('td', null, c.started_at_et || '—'));
+      add(tr, el('td', null, etCell(c.started_at_et) || '—'));
       mark('components', c.anchor + ':' + c.state, tr);
     });
   }
+
+  function etCell(v) { return v ? String(v).replace(/ ET$/, '') : v; }
 
   function driftOf(h) {
     var rows = (h.components || []).filter(function (c) { return c.configured !== false; });
@@ -258,22 +267,19 @@ SCRIPT_COMPONENTS = r"""
     if (newest && groups[newest]) out.push(groups[newest]);
     byStart.forEach(function (v) { if (v !== newest) out.push(groups[v]); });
     if (groups.unknown) out.push(groups.unknown);
-    var behind = 0;
-    out.forEach(function (g) {
-      g.tone = g.version === newest ? 'ok' : g.version === 'unknown' ? 'bad' : 'warn';
-      if (g.tone === 'warn') behind += g.rows.length;
-    });
-    return {groups: out, behind: behind};
+    out.forEach(function (g) { g.tone = g.version === newest ? 'ok' : g.version === 'unknown' ? 'bad' : 'warn'; });
+    return out;
   }
   function renderDrift(d) {
     var h = d.health || {known: false, components: []};
-    var drift = driftOf(h);
+    var groups = driftOf(h);
+    var behind = versionDrift(h).behind.length;
     var root = panel('drift', 'Version drift');
     if (!root) return;
     if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
-    add(root.children[0], el('span', 'count' + (drift.behind ? ' warn' : ''), drift.behind + ' behind'));
+    add(root.children[0], el('span', 'count' + (behind ? ' warn' : ''), behind + ' behind'));
     var box = add(root, el('div', 'sys-drift'));
-    drift.groups.forEach(function (g) {
+    groups.forEach(function (g) {
       var row = add(box, el('div', 'sys-ver'));
       add(row, el('span', 'name ' + g.tone, g.version));
       var blocks = add(row, el('span', 'blocks'));
@@ -288,7 +294,7 @@ SCRIPT_COMPONENTS = r"""
   function renderNoWaiter(d) {
     var h = d.health || {};
     var rows = h.no_waiter || [];
-    var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length ? rows.length + ' harnesses' : 'none');
+    var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length === 1 ? '1 harness' : rows.length + ' harnesses');
     if (!root) return;
     if (!rows.length) {
       var aged = agedHealth(d);
@@ -312,13 +318,25 @@ SCRIPT_COMPONENTS = r"""
 
 _LOG_KINDS = (
     (re.compile(r"exit rc=(?!0\b)\d+"), "bad"),
+    (re.compile(r"Traceback"), "bad"),
+    (re.compile(r"\b\w*(?:Error|Exception):"), "bad"),
+    (re.compile(r"\b(?:ERROR|CRITICAL)\b"), "bad"),
+    (re.compile(r"\b(?:WARNING|WARN)\b"), "warn"),
     (re.compile(r"another orch poll owns"), "warn"),
     (re.compile(r"poller start"), "start"),
 )
 
 
-def _log_kind(line: str) -> str | None:
-    return next((kind for pattern, kind in _LOG_KINDS if pattern.search(line)), None)
+def _log_kinds(lines: list[str]) -> list[str | None]:
+    kinds: list[str | None] = []
+    traceback = False
+    for line in lines:
+        if traceback and line[:1].isspace():
+            kinds.append("bad")
+            continue
+        traceback = "Traceback" in line
+        kinds.append(next((kind for pattern, kind in _LOG_KINDS if pattern.search(line)), None))
+    return kinds
 
 
 def _log(snapshot: dict) -> str:
@@ -328,12 +346,13 @@ def _log(snapshot: dict) -> str:
         if log["present"]
         else "absent"
     )
+    tail = log["tail"]
     lines = "".join(
-        f'<div class="{kind}">{_e(line)}</div>' if (kind := _log_kind(line)) else f"<div>{_e(line)}</div>"
-        for line in log["tail"]
+        f'<div class="{kind}">{_e(line)}</div>' if kind else f"<div>{_e(line)}</div>"
+        for line, kind in reversed(list(zip(tail, _log_kinds(tail))))
     )
     inner = (
-        f'<p class="sys-note">last {len(log["tail"])} lines, redacted</p>'
+        f'<p class="sys-note">last {len(log["tail"])} lines, newest first, redacted</p>'
         f'<div class="sys-log">{lines}</div>'
     )
     return _panel("log", "poller.log", inner, count=count)
@@ -490,6 +509,10 @@ def _matrix_cell(row: dict) -> str:
     return f'<td><span class="sys-cell">{inner}</span></td>'
 
 
+def _et_cell(value: str | None) -> str | None:
+    return value.removesuffix(" ET") if value else value
+
+
 def _components(snapshot: dict) -> str:
     health = snapshot.get("health") or {"known": False, "components": []}
     rows = health.get("components") or []
@@ -530,12 +553,12 @@ def _components(snapshot: dict) -> str:
             + _td(row["bot"] or None)
             + _td(row["device"])
             + f"<td>{_chip(label, cls)}{reason}</td>"
-            + _td(row["last_seen_et"] or "never")
+            + _td(_et_cell(row["last_seen_et"]) or "never")
             + _td(duration(row["last_seen_age_seconds"]), "num")
             + _td(row["pid"], "num")
             + (f'<td>{_e(row["version"])}{_span("warn", " stale code")}</td>'
                if row.get("stale_code") else _td(row["version"]))
-            + _td(row["started_at_et"])
+            + _td(_et_cell(row["started_at_et"]))
             + "</tr>"
         )
     thresholds = health.get("thresholds") or {}
@@ -547,7 +570,7 @@ def _components(snapshot: dict) -> str:
         " · unknown: this snapshot is too old to tell"
     )
     details = (
-        '<details class="sys-details" open><summary>process details</summary>'
+        '<details class="sys-details"><summary>process details</summary>'
         '<div class="sys-scroll"><table class="sys-table wide"><thead><tr>'
         + "".join(f"<th>{_e(text)}</th>" for text in heads)
         + "</tr></thead><tbody>"
@@ -558,11 +581,10 @@ def _components(snapshot: dict) -> str:
     return _panel("components", "Components", inner, count=count)
 
 
-def version_groups(health: dict) -> tuple[list[dict], int]:
+def version_groups(health: dict) -> list[dict]:
     """Version drift (SPEC 9: group components by version): the newest
     version first (the checkout's, else the latest started), then the other
-    known versions by latest start, then unknown; and how many components are
-    on a known version other than the newest (driftOf in the script)."""
+    known versions by latest start, then unknown (driftOf in the script)."""
     groups: dict[str, dict] = {}
     for row in health.get("components") or []:
         if row.get("configured") is False:
@@ -587,8 +609,23 @@ def version_groups(health: dict) -> tuple[list[dict], int]:
     for group in ordered:
         version = group["version"]
         group["tone"] = "ok" if version == newest else "bad" if version == "unknown" else "warn"
-    behind = sum(len(group["rows"]) for group in ordered if group["tone"] == "warn")
-    return ordered, behind
+    return ordered
+
+
+def version_drift(health: dict | None) -> dict:
+    """newest: the checkout's version; behind: configured code components on
+    another known version (lib/health.py stale_code); unknown: configured code
+    components whose version is unknown, not counted as behind."""
+    health = health or {}
+    rows = [
+        row for row in health.get("components") or []
+        if row.get("configured") is not False and row.get("component") in CODE_COMPONENTS
+    ]
+    return {
+        "newest": str(health.get("code_version") or "unknown"),
+        "behind": [row["label"] for row in rows if row.get("stale_code")],
+        "unknown": [row["label"] for row in rows if row.get("version") == "unknown"],
+    }
 
 
 def _drift(snapshot: dict) -> str:
@@ -596,7 +633,8 @@ def _drift(snapshot: dict) -> str:
     if not health.get("known"):
         text = f"unknown: {health['error']}" if health.get("error") else "no heartbeats recorded yet"
         return _panel("drift", "Version drift", f'<p class="empty">{_e(text)}</p>')
-    groups, behind = version_groups(health)
+    groups = version_groups(health)
+    behind = len(version_drift(health)["behind"])
     items = []
     for group in groups:
         rows = group["rows"]
@@ -641,7 +679,7 @@ def _no_waiter(snapshot: dict) -> str:
             else "unknown until a component heartbeats"
         )
         return _panel("no-waiter", "Queued jobs with no waiter", f'<p class="empty">{_e(text)}</p>',
-                      count="none")
+                      count="0 harnesses")
     items = "".join(
         f'<li{_anchor_attr(row.get("anchor"))}>'
         + _chip("no waiter", "bad")
@@ -656,4 +694,4 @@ def _no_waiter(snapshot: dict) -> str:
         for row in rows
     )
     return _panel("no-waiter", "Queued jobs with no waiter", f'<ul class="feed">{items}</ul>',
-                  count=f"{len(rows)} harnesses")
+                  count="1 harness" if len(rows) == 1 else f"{len(rows)} harnesses")
