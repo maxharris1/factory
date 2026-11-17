@@ -139,6 +139,7 @@ class HoldsMixin:
         )
         out = self._base_update_out(ticket)
         job = None
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if not out:

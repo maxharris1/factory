@@ -1492,8 +1492,11 @@ class LivePollSource:
             brief_comment=brief,
             issue_body=(
                 None
-                if brief is not None or source_issue is None
-                else self._source_issue_body(project.repo, number, source_issue, pull)
+                if source_issue is None
+                else self._source_issue_body(project.repo, number, source_issue, pull, comments)
+            ),
+            read_issue_body=(
+                None if source_issue is None else self._issue_reader(project.repo, number, source_issue)
             ),
             pr_body=_optional_string(pull.get("body")),
             grok_bot=project.grok_bot,
@@ -1603,23 +1606,38 @@ class LivePollSource:
             raise
 
     def _source_issue_body(
-        self, repo: str, number: str, source: str, pull: Mapping[str, Any]
+        self,
+        repo: str,
+        number: str,
+        source: str,
+        pull: Mapping[str, Any],
+        comments: Sequence[Comment],
     ) -> str | None:
-        """#495: the source issue's body, read once per PR head and only for
-        a ticket with no brief. A read that fails is recorded and left None."""
-
-        def read() -> str | None:
-            issue = _json_object(
-                self._gh_call(f"repos/{repo}/issues/{source.removeprefix('#')}"),
-                "GitHub issue",
-            )
-            return _optional_string(issue.get("body")) or ""
-
         try:
-            return self._per_head(f"issue{source}", repo, number, pull, read)
+            newest = comments[-1].id if comments else None
+            return self._per_head(
+                f"issue{source}", repo, number, pull, lambda: self._issue_body(repo, source), newest
+            )
         except Exception as exc:
             self._record(repo, number, exc)
             return None
+
+    def _issue_reader(self, repo: str, number: str, source: str) -> Callable[[], str | None]:
+        def read() -> str | None:
+            try:
+                return self._issue_body(repo, source, fresh=True)
+            except Exception as exc:
+                self._record(repo, number, exc)
+                return None
+
+        return read
+
+    def _issue_body(self, repo: str, source: str, *, fresh: bool = False) -> str:
+        issue = _json_object(
+            self._gh_call(f"repos/{repo}/issues/{source.removeprefix('#')}", fresh=fresh),
+            "GitHub issue",
+        )
+        return _optional_string(issue.get("body")) or ""
 
     def _per_head(
         self,
@@ -1628,11 +1646,12 @@ class LivePollSource:
         number: str,
         pull: Mapping[str, Any],
         read: Callable[[], Any],
+        extra: str | None = None,
     ) -> Any:
         key = (kind, repo.lower(), number)
         self._head_read_last_used[key] = self.clock()
         base = _object(pull.get("base") or {}, "GitHub pull request base")
-        version = (_pr_head(pull, repo, number), str(base.get("ref")), str(base.get("sha")))
+        version = (_pr_head(pull, repo, number), str(base.get("ref")), str(base.get("sha")), extra)
         cached = self._head_reads.get(key)
         if cached is not None and cached[0] == version:
             return cached[1]

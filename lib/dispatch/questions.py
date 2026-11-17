@@ -269,6 +269,7 @@ class QuestionsMixin:
                 unmapped=unmapped if isinstance(unmapped, str) and unmapped else None,
             ),
         )
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._enqueue_step(
@@ -578,6 +579,7 @@ class QuestionsMixin:
         if owed is None or self._open_fix_for_head(owed[0]):
             return
         job, source = owed
+        ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._enqueue_step(
