@@ -1,6 +1,6 @@
-"""index.html (Lanes, #140): Factory status tiles, the lanes (queue lane, then one row of slot
-tiles per device), Just happened and Intake. Copied from Lanes.dc.html, SlotTile.dc.html and
-the KPI and queue studies in Bits.dc.html."""
+"""index.html (Lanes, #140): the lanes (queue lane, then one row of slot tiles per device) with
+live counts in their header, Just happened and Intake. Copied from Lanes.dc.html, SlotTile.dc.html
+and the queue studies in Bits.dc.html."""
 
 from __future__ import annotations
 
@@ -9,19 +9,18 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    anchor, _bot, checks_link, checks_named, _chip, duration, _e, github_links, _job_label, _num, _panel,
+    anchor, _bot, checks_link, checks_named, _chip, duration, _e, github_links, _job_label, _panel,
     _short, _span, _ticket, _tile_label, _when,
 )
 
 
 CSS = """\
 #hud #lanes{grid-column:1/-1}
-.kpis{display:flex;flex-wrap:wrap;gap:12px}
-.kpi{position:relative;flex:1 1 140px;min-width:0;padding:10px 14px 12px;background:var(--bg);box-shadow:var(--elev)}
-.kpi b{display:block;font:600 30px/1.15 var(--mono);letter-spacing:-.03em;color:var(--text);font-variant-numeric:tabular-nums;white-space:pre}
-.kpi span{display:block;font:500 12px/1.3 var(--mono);color:var(--muted)}
-.kpi .px{position:absolute;top:0;left:0;width:100%;height:8px}
-.kpi.ok b{color:var(--ok)}.kpi.bad b{color:var(--bad)}
+#lanes h2{flex-wrap:wrap;gap:4px 8px}
+#lanes h2 .count{font-variant-numeric:tabular-nums}
+#lanes h2 .count b{font-weight:600;color:var(--text)}
+#lanes h2 .count b.ok{color:var(--ok)}#lanes h2 .count b.warn{color:var(--warn)}
+@media (max-width:640px){#lanes h2 .count{flex:1 1 100%}}
 .lanes{display:flex;flex-direction:column;gap:10px}
 .lane{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:flex-start;padding:12px;background:var(--bg);box-shadow:var(--elev)}
 .lane.disabled{color:var(--muted);box-shadow:none;outline:1px dashed var(--line-hi);outline-offset:-1px;
@@ -157,64 +156,11 @@ def verb_at(state: str, secs: int, seed: int) -> str:
 
 
 SCRIPT = r"""
-  // --- main page (#140): status tiles, lanes and slot tiles, Just happened, Intake -------
+  // --- main page (#140): lanes and slot tiles, Just happened, Intake -------
 
   var LANES = __LANES__;
   var LANES_MQ = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   function lanesStill() { return !!(LANES_MQ && LANES_MQ.matches); }
-
-  function kpiTiles(d) {
-    var t = d.queue.totals;
-    var stuck = d.stuck.tickets.length + d.stuck.overdue_jobs.length;
-    return [
-      ['running', t.running, 'ok', '#9ece6a'],
-      ['queued', t.queued, '', '#c0caf5'],
-      ['done', t.done, '', '#c0caf5'],
-      ['failed', t.failed, '', '#c0caf5'],
-      ['stuck / overdue', stuck, stuck ? 'bad' : '', stuck ? '#f7768e' : '#c0caf5']
-    ];
-  }
-
-  var kpiSeen = null;
-  var kpiBursts = {};
-  // Bits KPI decrypt: scrambled digits resolve left to right over three 160 ms steps.
-  function decrypt(node, txt) {
-    var glyphs = '0123456789#%=+';
-    var half = Math.floor(txt.length / 2);
-    [0, 1, 2].forEach(function (fr) {
-      setTimeout(function () {
-        var keep = fr === 0 ? 0 : fr === 1 ? half : Math.max(txt.length - 1, half);
-        if (txt.length === 1) keep = 0;
-        var out = '';
-        for (var j = 0; j < txt.length; j++) {
-          out += j < keep ? txt.charAt(j) : glyphs.charAt(Math.floor(Math.random() * glyphs.length));
-        }
-        node.textContent = out;
-      }, fr * 160);
-    });
-    setTimeout(function () { node.textContent = txt; }, 480);
-  }
-
-  function renderKpis(d) {
-    var root = panel('kpis', 'Factory status');
-    if (!root) return;
-    var row = add(root, el('div', 'kpis'));
-    var next = {};
-    var moving = kpiSeen !== null && !lanesStill();
-    kpiTiles(d).forEach(function (k, i) {
-      var tile = add(row, el('div', 'kpi' + (k[2] ? ' ' + k[2] : '')));
-      tile.setAttribute('data-kpi', k[0]);
-      var b = add(tile, el('b', null, num(k[1])));
-      add(tile, el('span', null, k[0]));
-      if (moving && kpiSeen[k[0]] !== k[1]) {
-        kpiBursts[k[0]] = (kpiBursts[k[0]] || 0) + 1;
-        decrypt(b, num(k[1]));
-      }
-      add(tile, PX.strip('kpi-' + i, {effect: 'off', tint: k[3], height: 8, burst: kpiBursts[k[0]] || 0}));
-      next[k[0]] = k[1];
-    });
-    kpiSeen = next;
-  }
 
   function queueSpeed(age) {
     var pts = LANES.speed;
@@ -415,12 +361,10 @@ SCRIPT = r"""
   function renderLanes(d) {
     var running = d.running || [];
     var lanes = laneDevices(d);
-    var used = 0, total = 0;
-    lanes.devices.forEach(function (dev) {
-      if (dev.enabled && !dev.placeholder && dev.slot_max) { used += dev.used; total += dev.slot_max; }
-    });
-    var root = panel('lanes', 'Lanes and slots', running.length + ' running · ' + used + ' of ' + total + ' slots used');
+    var root = panel('lanes', 'Lanes and slots');
     if (!root) return;
+    var count = add(root.children[0], el('span', 'count'));
+    var heldTiles = 0, idleTiles = 0;
     tileAnims = [];
     var box = add(root, el('div', 'lanes'));
     add(box, queueLane(d));
@@ -447,6 +391,8 @@ SCRIPT = r"""
       for (var h = 0; h < held; h++) { seed += 1; add(grid, emptyTile('slot-' + dev.name + '-' + seed, 'held', seed)); }
       var free = Math.max(0, (dev.slot_max || 0) - dev.used);
       if (!dev.used && !free) free = 1;
+      heldTiles += held;
+      if (dev.enabled) idleTiles += free;
       for (var i = 0; i < free; i++) { seed += 1; add(grid, emptyTile('slot-' + dev.name + '-' + seed, dev.enabled ? 'idle' : 'off', seed)); }
     });
     if (lanes.wakes.length) {
@@ -460,6 +406,11 @@ SCRIPT = r"""
     }
     var waiting = (d.tickets || []).filter(function (t) { return t.ci_wait; });
     if (waiting.length) add(box, ciLane(waiting));
+    [[running.length, 'ok', ' running · '], [heldTiles, heldTiles ? 'warn' : null, ' held · '],
+     [idleTiles, null, ' idle · '], [(d.queued || []).length, null, ' queued']].forEach(function (c) {
+      add(count, el('b', c[1], c[0]));
+      add(count, document.createTextNode(c[2]));
+    });
   }
 
   function renderJustHappened(d) {
@@ -561,32 +512,6 @@ SCRIPT = r"""
     }
   }
 """
-
-
-# --- Factory status ---------------------------------------------------------------------
-
-
-def kpi_tiles(snapshot: dict) -> list[tuple[str, object, str, str]]:
-    totals = snapshot["queue"]["totals"]
-    stuck = len(snapshot["stuck"]["tickets"]) + len(snapshot["stuck"]["overdue_jobs"])
-    return [
-        ("running", totals["running"], "ok", "#9ece6a"),
-        ("queued", totals["queued"], "", "#c0caf5"),
-        ("done", totals["done"], "", "#c0caf5"),
-        ("failed", totals["failed"], "", "#c0caf5"),
-        ("stuck / overdue", stuck, "bad" if stuck else "", _BAD if stuck else "#c0caf5"),
-    ]
-
-
-def _kpis(snapshot: dict) -> str:
-    from lib.dashboard_pages.shell import px_strip
-
-    inner = "".join(
-        f'<div class="kpi{" " + cls if cls else ""}" data-kpi="{_e(name)}"><b>{_num(value)}</b>'
-        f'{_span(None, name)}{px_strip(f"kpi-{i}", effect="off", tint=tint, height=8, burst=0)}</div>'
-        for i, (name, value, cls, tint) in enumerate(kpi_tiles(snapshot))
-    )
-    return _panel("kpis", "Factory status", f'<div class="kpis">{inner}</div>')
 
 
 # --- lanes --------------------------------------------------------------------------------
@@ -811,8 +736,7 @@ def _lanes(snapshot: dict) -> str:
     from lib.dashboard_pages.shell import px_strip
 
     devices, wakes = lane_devices(snapshot)
-    used = sum(d["used"] for d in devices if d["enabled"] and not d["placeholder"] and d["slot_max"])
-    total = sum(d["slot_max"] for d in devices if d["enabled"] and not d["placeholder"] and d["slot_max"])
+    held_tiles = idle_tiles = 0
     rows = [_queue_lane(snapshot)]
     for index, device in enumerate(devices):
         down = probe_down(snapshot, device["name"])
@@ -838,6 +762,9 @@ def _lanes(snapshot: dict) -> str:
         free = max(0, (cap or 0) - device["used"])
         if not device["used"] and not free:
             free = 1
+        held_tiles += device["used"] - len(device["jobs"])
+        if device["enabled"]:
+            idle_tiles += free
         for _ in range(free):
             seed += 1
             tiles.append(_empty_tile(f"slot-{device['name']}-{seed}", "idle" if device["enabled"] else "off", seed))
@@ -855,12 +782,12 @@ def _lanes(snapshot: dict) -> str:
             f'<div class="tiles">{"".join(_slot(row, i + 1) for i, row in enumerate(wakes))}</div></div>'
         )
     rows.extend(_ci_lane(snapshot))
-    return _panel(
-        "lanes",
-        "Lanes and slots",
-        f'<div class="lanes">{"".join(rows)}</div>',
-        count=f"{len(snapshot['running'])} running · {used} of {total} slots used",
+    warn = ' class="warn"' if held_tiles else ""
+    count = (
+        f'<b class="ok">{len(snapshot["running"])}</b> running · <b{warn}>{held_tiles}</b> held · '
+        f"<b>{idle_tiles}</b> idle · <b>{len(snapshot['queued'])}</b> queued"
     )
+    return _panel("lanes", "Lanes and slots", f'<div class="lanes">{"".join(rows)}</div>', count_html=count)
 
 
 # --- Just happened and Intake -------------------------------------------------------------
