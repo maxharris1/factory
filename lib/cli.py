@@ -37,6 +37,7 @@ from lib import (
 )
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dispatch.constants import HARNESS_WORK
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
 from lib.dispatch.poll import sleep_on_either_clock
@@ -1715,7 +1716,7 @@ def _retry_refusal(
                 connection.execute(
                     "SELECT id, action, recipient, state FROM jobs "
                     "WHERE lower(repo) = ? AND ticket_id = ? "
-                    "AND state IN ('queued', 'running') AND recipient != 'grok' "
+                    f"AND state IN ('queued', 'running') AND {HARNESS_WORK} "
                     "ORDER BY created_at LIMIT 1",
                     (repo.lower(), str(number)),
                 ).fetchone()
@@ -1726,7 +1727,7 @@ def _retry_refusal(
                 connection.execute(
                     "SELECT 1 FROM jobs JOIN job_events ON job_events.job_id = jobs.id "
                     "WHERE jobs.id = (SELECT id FROM jobs "
-                    "WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok' "
+                    f"WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK} "
                     "AND action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1) "
                     "AND jobs.action = 'plan' AND jobs.state = 'done' "
@@ -1743,7 +1744,7 @@ def _retry_refusal(
                     "JOIN device_slots AS slots ON slots.job_id = jobs.id "
                     "LEFT JOIN device_health AS health ON health.device = slots.device "
                     "WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? "
-                    "AND jobs.recipient != 'grok' AND jobs.state = 'running' "
+                    f"AND jobs.{HARNESS_WORK} AND jobs.state = 'running' "
                     "AND jobs.action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
                     "ORDER BY jobs.created_at LIMIT 1",
                     (repo.lower(), str(number)),

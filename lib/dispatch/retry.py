@@ -90,7 +90,7 @@ def _newest_harness_job(
     row = connection.execute(
         f"""
         SELECT * FROM jobs
-        WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+        WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK}
           AND action IN ({", ".join("?" for _ in _HARNESS_ACTIONS)})
         ORDER BY created_at DESC, rowid DESC
         LIMIT 1
@@ -276,9 +276,9 @@ class RetryMixin:
         self, connection: sqlite3.Connection, key: tuple[str, str], keep: str | None = None
     ) -> None:
         connection.execute(
-            """
+            f"""
             UPDATE jobs SET failure_handled = 1
-            WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok'
+            WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK}
               AND state = 'failed' AND failure_handled = 0 AND id IS NOT ?
             """,
             (*key, keep),
@@ -305,7 +305,7 @@ class RetryMixin:
             FROM jobs
             JOIN {SLOTS_TABLE} AS slots ON slots.job_id = jobs.id
             LEFT JOIN {HEALTH_TABLE} AS health ON health.device = slots.device
-            WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? AND jobs.recipient != 'grok'
+            WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? AND jobs.{HARNESS_WORK}
               AND jobs.action IN ({", ".join("?" for _ in _HARNESS_ACTIONS)})
               AND jobs.state = 'running'
             ORDER BY jobs.created_at, jobs.rowid

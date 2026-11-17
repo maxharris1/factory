@@ -86,3 +86,29 @@ def test_a_fail_without_a_blocking_line_wakes_nobody(tmp_path: Path) -> None:
     run.poll(12)
 
     assert _wakes(run) == []
+
+
+@pytest.mark.parametrize("merge_before_report", [False, True])
+def test_a_running_lane_fail_reported_after_the_merge_wakes_once(
+    tmp_path: Path, merge_before_report: bool
+) -> None:
+    run = Harness(tmp_path, qa_config(), ship="merge")
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1")), head=HEAD_A)
+    run.poll()
+    lane = run.queue.claim("qa")
+    assert lane is not None
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("v1", verdict(HEAD_A, "APPROVE"))
+    if merge_before_report:
+        run.poll()
+        assert run.rows("SELECT workflow_state FROM ticket_state") == [("merged",)]
+        assert [ref.ticket_id for ref in run.dispatcher._tracked_refs()] == ["763"]
+    run.post("q1", qa_report(HEAD_A, "FAIL", body=BLOCKING))
+    run.queue.finish(lane.id, owner="qa", handoff_comment_id="q1")
+    run.poll(12)
+
+    assert run.rows("SELECT state, result FROM qa_runs") == [("reported", "FAIL")]
+    assert [row[:3] for row in _wakes(run)] == [("grok", HEAD_A, "q1")]
+    assert run.rows("SELECT workflow_state FROM ticket_state") == [("merged",)]
+    assert run.dispatcher._tracked_refs() == ()

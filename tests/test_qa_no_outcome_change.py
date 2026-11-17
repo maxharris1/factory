@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.cli import _retry_refusal
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.queue import SQLiteJobQueue
 from tests.qa_support import (
@@ -22,6 +23,7 @@ from tests.qa_support import (
     REPO,
     TICKET,
     TRUSTED,
+    Harness,
     qa_config,
     qa_report,
     ready,
@@ -137,3 +139,18 @@ def test_the_replay_did_record_the_qa_fail_and_time_out_a_qa_job(tmp_path: Path)
     assert runs[1][:3] == (HEAD_B, "reported", "FAIL")
     assert failed >= 1
     assert [tuple(row) for row in wakes] == [("q1",)]
+
+
+@pytest.mark.parametrize("qa_on", [False, True])
+def test_a_queued_qa_job_does_not_block_an_operator_retry(tmp_path: Path, qa_on: bool) -> None:
+    run = Harness(tmp_path, qa_config() if qa_on else None)
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1")), head=HEAD_A)
+    run.poll()
+    for _ in range(2):
+        run.finish("codex", None)
+        run.poll()
+    assert run.rows("SELECT stuck, stuck_reason FROM ticket_state") == [(1, "job-failed-2")]
+    assert run.rows("SELECT state FROM jobs WHERE action = 'qa'") == ([("queued",)] if qa_on else [])
+
+    machines = tmp_path / "machines.yml"
+    assert _retry_refusal(run.queue.path, REPO, int(TICKET), "orch retry", machines) is None
