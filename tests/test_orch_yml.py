@@ -5,6 +5,7 @@ import pytest
 from lib.orch_yml import (
     DEFAULT_JOB_TIMEOUT_MINUTES,
     POLL_SECONDS,
+    DriverInbox,
     load_orch_yml,
     resolve_job_timeout,
 )
@@ -552,3 +553,61 @@ def test_refused_harnesses_is_validated(tmp_path: Path, value: str, message: str
     config, findings = load_orch_yml(path)
     assert config is None
     assert any(f.severity == "error" and f.message.startswith(message) for f in findings)
+
+
+INBOX_BASE = """
+poll_seconds: 60
+projects:
+  - repo: maxharris1/factory
+  - repo: aut0-code/aut0
+"""
+
+
+def _inbox_config(tmp_path: Path, factory_keys: str = "", aut0_keys: str = ""):
+    text = INBOX_BASE.replace(
+        "  - repo: maxharris1/factory\n", f"  - repo: maxharris1/factory\n{factory_keys}"
+    ).replace("  - repo: aut0-code/aut0\n", f"  - repo: aut0-code/aut0\n{aut0_keys}")
+    path = tmp_path / "orch.yml"
+    path.write_text(text, encoding="utf-8")
+    return load_orch_yml(path)
+
+
+def test_driver_inbox_names_one_issue_in_a_configured_project(tmp_path: Path) -> None:
+    config, findings = _inbox_config(
+        tmp_path,
+        aut0_keys="    driver_inbox: maxharris1/factory#737\n    grok_webhook: false\n",
+    )
+    assert findings == []
+    assert config is not None
+    factory, aut0 = config.projects
+    assert factory.driver_inbox is None and factory.grok_webhook is True
+    assert aut0.driver_inbox == DriverInbox("maxharris1/factory", 737)
+    assert aut0.grok_webhook is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["maxharris1/factory", "maxharris1/factory#0", "factory#3", "maxharris1/factory#x", "7"],
+)
+def test_check_config_refuses_a_malformed_driver_inbox(tmp_path: Path, value: str) -> None:
+    config, findings = _inbox_config(tmp_path, factory_keys=f"    driver_inbox: '{value}'\n")
+    assert config is None
+    assert [f.message for f in findings] == [
+        "projects[0].driver_inbox must be owner/name#<issue number>"
+    ]
+
+
+def test_check_config_refuses_a_driver_inbox_outside_the_projects(tmp_path: Path) -> None:
+    config, findings = _inbox_config(tmp_path, factory_keys="    driver_inbox: someone/else#3\n")
+    assert config is None
+    assert [f.message for f in findings] == [
+        "projects[0].driver_inbox repo someone/else is not a configured project"
+    ]
+
+
+def test_check_config_refuses_grok_webhook_off_without_an_inbox(tmp_path: Path) -> None:
+    config, findings = _inbox_config(tmp_path, factory_keys="    grok_webhook: false\n")
+    assert config is None
+    assert [f.message for f in findings] == [
+        "projects[0].grok_webhook: false requires driver_inbox, or its wakes go nowhere"
+    ]

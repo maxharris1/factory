@@ -382,6 +382,21 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS driver_inbox (
+                    job_id TEXT PRIMARY KEY,
+                    inbox_repo TEXT NOT NULL,
+                    inbox_number INTEGER NOT NULL,
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'posted')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at REAL NOT NULL,
+                    posted_at REAL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS auto_extra_comments (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

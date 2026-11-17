@@ -15,7 +15,8 @@ concurrency:
 jobs:
   test:
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -23,17 +24,22 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: |
-            3.11
-            3.12
-          cache: pip
-      - run: pip install -r requirements-dev.txt
-      - run: pytest -n $(( $(nproc) * 2 )) -m "not serial" --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+          python-version: "3.12"
+          activate-environment: true
+      - name: Put python3.11 on PATH
+        run: |
+          uv python install 3.11
+          mkdir -p "$RUNNER_TEMP/py311"
+          ln -sf "$(uv python find 3.11)" "$RUNNER_TEMP/py311/python3.11"
+          echo "$RUNNER_TEMP/py311" >> "$GITHUB_PATH"
+      - run: uv pip install -r requirements-dev.txt
+      - run: pytest -n 4 -m "not serial" --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   changes:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 5
     outputs:
       macos: ${{ steps.diff.outputs.macos }}
@@ -65,22 +71,24 @@ jobs:
 
   macos:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'
-    runs-on: macos-latest
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true')
+    runs-on: [self-hosted, macOS, factory-mac]
     timeout-minutes: 15
     steps:
+      - name: Runner identity
+        run: echo "runner $RUNNER_NAME as $(id -un)"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install -r requirements-dev.txt
+          activate-environment: true
+      - run: uv pip install -r requirements-dev.txt
       - run: pytest tests/test_process_discovery.py -p no:xdist -s -rs
 
   macos-pickup:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'
-    runs-on: ubuntu-latest
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true')
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 30
     permissions:
       actions: write
@@ -104,7 +112,7 @@ jobs:
                 in_progress) ;;
                 *)
                   if (( $(date +%s) - $(date -d "$created_at" +%s) >= PICKUP_SECONDS )); then
-                    echo "::error title=macos runner pickup::No macos-latest runner picked up the macos job within $((PICKUP_SECONDS / 60)) minutes (queued since $created_at). GitHub's hosted macOS pool is short of capacity, not a test failure. Cancelling this run. Rerun failed jobs to retry. See docs/decisions/628-macos-runner-pickup.md."
+                    echo "::error title=macos runner pickup::No factory-mac runner picked up the macos job within $((PICKUP_SECONDS / 60)) minutes (queued since $created_at). The Mac runner is offline, asleep or busy, not a test failure. Cancelling this run. Rerun failed jobs to retry. See docs/decisions/628-macos-runner-pickup.md and docs/decisions/711-self-hosted-runners.md."
                     gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
                     exit 1
                   fi
@@ -115,15 +123,18 @@ jobs:
           done
 
   checks:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 15
     steps:
+      - name: Runner identity
+        run: echo "runner $RUNNER_NAME as $(id -un)"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install -r requirements-dev.txt
+          activate-environment: true
+      - run: uv pip install -r requirements-dev.txt
       - run: pytest -m serial -p no:xdist
       - name: Validate shipped config including install placeholders
         run: python bin/orch check-config --orch orch.yml --allow-placeholders
@@ -136,19 +147,22 @@ jobs:
       - run: python bin/orch eval-report --input tests/fixtures/eval/week
 
   py311-compile:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.11"
+          activate-environment: true
       - run: python -c 'import sys; assert sys.version_info[:2] == (3, 11), sys.version'
       - run: python -m compileall -q lib bin
       - run: python -m py_compile bin/orch bin/skill-probe
 
   statechart:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

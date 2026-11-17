@@ -41,7 +41,7 @@ def test_log_message_appends_one_line(tmp_path: Path) -> None:
     args = ["log-message", "--log", str(log), "--repo", "maxharris1/Cleffy", "--pr", "443"]
     result = orch([*args, "--from", "grok-bot", "--to", "codex-bot"])
     assert result.returncode == 0, result.stderr
-    lines = log.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = [line for line in log.read_text(encoding="utf-8").splitlines(keepends=True) if line.strip()]
     assert len(lines) == 2
     assert LINE.fullmatch(lines[1])
 

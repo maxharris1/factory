@@ -13,7 +13,7 @@ import pytest
 import lib.dashboard_flow as flow
 import lib.dashboard_page as page
 from lib.dashboard_pages import tickets as tickets_page
-from lib.dashboard_pages.common import ticket_page_href
+from lib.dashboard_pages.common import _ticket, ticket_page_href
 from lib.dashboard import collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_pixelstrip as pixelstrip
@@ -155,10 +155,24 @@ HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", f"let nowMs = {in
     "      find(body, n => n.attrs[arg[0]] === arg[1]).focus();\n"
     "    } else if (kind === 'hashchange') {\n"
     "      windowListeners.hashchange.forEach(fn => fn());\n"
+    "    } else if (kind === 'type') {\n"
+    "      document.activeElement.value = arg;\n"
+    "      fire(document.activeElement, 'input');\n"
+    "    } else if (kind === 'keyon') {\n"
+    "      steps.push({keyon: arg, prevented: fire(document.activeElement, 'keydown', {key: arg}).defaultPrevented});\n"
+    "    } else if (kind === 'leave') {\n"
+    "      const to = find(body, n => (arg[0] === 'class' ? n.className : n.attrs[arg[0]]) === arg[1]);\n"
+    "      fire(document.activeElement, 'focusout', {relatedTarget: to});\n"
+    "      to.focus();\n"
+    "    } else if (kind === 'where') {\n"
+    "      steps.push({where: location.href || null, value: ids['find-ticket'].value || ''});\n"
     "    } else if (kind === 'focused') {\n"
     "      const node = document.activeElement;\n"
     "      steps.push({focused: node && node.isConnected ? [node.tagName, node.attrs[arg]] : 'BODY'});\n"
     "    } else if (kind === 'record') {",
+).replace(
+    "'</' + this.tagName + '>'; }",
+    "(this.tagName === 'input' ? '' : '</' + this.tagName + '>'); }",
 ).replace(
     "global.addEventListener = () => {};",
     "const windowListeners = {hashchange: []};\n"
@@ -169,6 +183,7 @@ HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", f"let nowMs = {in
 def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, page_from: dict | None = None) -> dict:
     assert "kind === 'press'" in HARNESS and f"nowMs = {int(NOW * 1000)};" in HARNESS
     assert "windowListeners[type].push" in HARNESS
+    assert "kind === 'keyon'" in HARNESS and "this.tagName === 'input'" in HARNESS
     html = render_pages(page_from or snapshot)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     return layout.run_harness(tmp_path, HARNESS, script, snapshot, "job", IDS, actions or [])
@@ -1364,3 +1379,254 @@ def test_a_project_press_recomputes_the_shelf(tmp_path: Path, shelf: dict) -> No
         _check_shelf(snap["shipped"], [i for i in SHIP_ORDER if repo in ("", _shipped(i)[0])])
         if repo:
             _check_counts(snap, [row for row in shelf["tickets"] if row["repo"] == repo])
+
+
+def _find(markup: str) -> dict:
+    return _one(_dom(markup), _cls("tk-find"))
+
+
+def _options(markup: str) -> list[tuple[str, str, str]]:
+    return [(_text(li), li["kids"][0]["attrs"]["href"], li["attrs"]["aria-selected"])
+            for li in _all(_find(markup), _attr("role", "option"))]
+
+
+def _expanded(markup: str) -> tuple[str, bool]:
+    find = _find(markup)
+    listbox = _one(find, _attr("role", "listbox"))
+    return _one(find, _attr("id", "find-ticket"))["attrs"]["aria-expanded"], "hidden" in listbox["attrs"]
+
+
+def _page(snapshot: dict, label: str) -> str:
+    (row,) = [row for row in snapshot["tickets"] if _ticket(row) == label]
+    return ticket_page_href(row)
+
+
+def _searched(tmp_path: Path, snapshot: dict, query: str, keys: list[str], *, project: str | None = None) -> dict:
+    actions: list = [["press", ["data-project", project]]] if project else []
+    actions += [["focus", ["id", "find-ticket"]], ["type", query], ["snap", ["ticket-filter"]]]
+    actions += [step for key in keys for step in (["keyon", key], ["snap", ["ticket-filter"]])]
+    actions += [["where", None], ["focused", "id"]]
+    steps = _script(tmp_path, snapshot, actions)["steps"]
+    snaps = [step["snap"]["ticket-filter"] for step in steps if "snap" in step]
+    (where,) = [step for step in steps if "where" in step]
+    (focused,) = [step["focused"] for step in steps if "focused" in step]
+    return {"snaps": snaps, "where": where["where"], "value": where["value"], "focused": focused,
+            "prevented": [step["prevented"] for step in steps if "keyon" in step]}
+
+
+def test_the_toolbar_has_a_labelled_find_a_ticket_box_after_the_view_toggle(snapshot: dict) -> None:
+    toolbar = _dom(_server(snapshot)["ticket-filter"])
+    (tools, find) = [kid for kid in toolbar["kids"] if isinstance(kid, dict)]
+    assert [g["attrs"]["aria-label"] for g in _all(tools, _attr("role", "group"))] == ["Project", "View"]
+    assert find["attrs"] == {"class": "tk-find", "role": "search"}
+    label = _one(find, lambda n: n["tag"] == "label")
+    field = _one(find, lambda n: n["tag"] == "input")
+    assert _text(label) == "Find a ticket" and label["attrs"]["for"] == field["attrs"]["id"] == "find-ticket"
+    assert {k: field["attrs"][k] for k in ("type", "placeholder", "autocomplete", "spellcheck", "role",
+                                           "aria-controls", "aria-expanded")} == {
+        "type": "text", "placeholder": "factory#470", "autocomplete": "off", "spellcheck": "false",
+        "role": "combobox", "aria-controls": "find-ticket-list", "aria-expanded": "false"}
+    listbox = _one(find, _attr("id", "find-ticket-list"))
+    assert listbox["attrs"]["role"] == "listbox" and "hidden" in listbox["attrs"] and not listbox["kids"]
+    opener = _one(find, _cls("tk-open"))
+    assert opener["attrs"]["aria-disabled"] == "true" and "href" not in opener["attrs"]
+    assert re.search(r"@media \(scripting:none\)\{[^@]*#ticket-filter\{display:none\}", page.CSS)
+
+
+@layout.needs_node
+def test_find_lists_eight_matches_from_every_project_whatever_the_filter(tmp_path: Path, snapshot: dict) -> None:
+    found = _searched(tmp_path, snapshot, "1", [], project="maxharris1/cleffy")
+    options = _options(found["snaps"][0])
+    assert len(options) == 8 and len(snapshot["tickets"]) > 8
+    assert {label.split("#")[0] for label, _, _ in options} == {"factory", "cleffy"}
+    assert _expanded(found["snaps"][0]) == ("true", False)
+    assert all(selected == "false" for _, _, selected in options)
+    assert found["focused"] == ["input", "find-ticket"] and found["value"] == "1"
+
+
+@layout.needs_node
+def test_find_ranks_an_exact_id_first_then_prefixes_then_the_rest(tmp_path: Path, snapshot: dict) -> None:
+    labels = [label for label, _, _ in _options(_searched(tmp_path, snapshot, "AUT-1", [])["snaps"][0])]
+    assert labels and all(label.startswith("aut0#AUT-1") for label in labels)
+    labels = [label for label, _, _ in _options(_searched(tmp_path / "sub", snapshot, "11", [])["snaps"][0])]
+    ids = [str(row["ticket_id"]) for row in snapshot["tickets"]]
+    starts = [_ticket(row) for row, i in zip(snapshot["tickets"], ids) if i.startswith("11")]
+    inside = [_ticket(row) for row, i in zip(snapshot["tickets"], ids) if "11" in i and not i.startswith("11")]
+    assert len(starts) < 8 < len(starts) + len(inside) and inside[0].startswith("aut0#")
+    assert labels == (starts + inside)[:8]
+    exact = "cleffy#200"
+    options = _options(_searched(tmp_path / "exact", snapshot, "200", [])["snaps"][0])
+    assert options[0][:2] == (exact, _page(snapshot, exact))
+    assert [label for label, _, _ in _options(_searched(tmp_path / "none", snapshot, "zzz", [])["snaps"][0])] == []
+
+
+@layout.needs_node
+def test_arrow_keys_pick_a_match_and_enter_opens_its_ticket_page(tmp_path: Path, snapshot: dict) -> None:
+    found = _searched(tmp_path, snapshot, "1", ["ArrowDown", "ArrowDown", "ArrowUp", "ArrowUp", "ArrowDown",
+                                                "ArrowDown", "Enter"])
+    picked = [[i for i, (_, _, sel) in enumerate(_options(snap)) if sel == "true"] for snap in found["snaps"][1:7]]
+    assert picked == [[0], [1], [0], [7], [0], [1]]
+    second = _options(found["snaps"][6])[1]
+    field = _one(_find(found["snaps"][6]), _attr("id", "find-ticket"))
+    assert field["attrs"]["aria-activedescendant"] == "find-ticket-1"
+    assert _one(_find(found["snaps"][6]), _cls("tk-open"))["attrs"]["href"] == second[1]
+    assert found["where"] == second[1] and found["prevented"] == [True] * 7
+
+
+@layout.needs_node
+def test_enter_with_nothing_picked_opens_the_first_match(tmp_path: Path, snapshot: dict) -> None:
+    found = _searched(tmp_path, snapshot, "cleffy#200", ["Enter"])
+    assert found["where"] == _page(snapshot, "cleffy#200")
+    assert _one(_find(found["snaps"][0]), _cls("tk-open"))["attrs"]["href"] == found["where"]
+
+
+@layout.needs_node
+def test_escape_closes_the_list_and_keeps_the_text(tmp_path: Path, snapshot: dict) -> None:
+    found = _searched(tmp_path, snapshot, "1", ["ArrowDown", "Escape", "Enter"])
+    assert _expanded(found["snaps"][2]) == ("false", True)
+    assert found["value"] == "1" and found["where"] == _options(found["snaps"][0])[0][1]
+
+
+@layout.needs_node
+def test_no_match_shows_no_list_and_a_disabled_open(tmp_path: Path, snapshot: dict) -> None:
+    found = _searched(tmp_path, snapshot, "no-such-ticket", ["ArrowDown", "Enter"])
+    for snap in found["snaps"]:
+        assert _options(snap) == [] and _expanded(snap) == ("false", True)
+        opener = _one(_find(snap), _cls("tk-open"))
+        assert "href" not in opener["attrs"] and opener["attrs"]["aria-disabled"] == "true"
+    assert found["where"] is None and found["prevented"] == [True, False]
+
+
+@layout.needs_node
+def test_a_redraw_while_typing_keeps_the_text_focus_and_picked_match(tmp_path: Path, snapshot: dict) -> None:
+    actions = [["focus", ["id", "find-ticket"]], ["type", "1"], ["keyon", "ArrowDown"], ["keyon", "ArrowDown"],
+               ["snap", ["ticket-filter"]], ["hashchange", None], ["press", ["data-view", "table"]],
+               ["focus", ["id", "find-ticket"]], ["hashchange", None], ["snap", ["ticket-filter"]],
+               ["focused", "id"], ["where", None], ["keyon", "Enter"], ["where", None]]
+    steps = _script(tmp_path, snapshot, actions)["steps"]
+    before, after = (step["snap"]["ticket-filter"] for step in steps if "snap" in step)
+    assert _options(after) == _options(before) and _options(after)[1][2] == "true"
+    assert _expanded(after) == ("true", False)
+    assert [step["focused"] for step in steps if "focused" in step] == [["input", "find-ticket"]]
+    wheres = [step for step in steps if "where" in step]
+    assert wheres[0] == {"where": None, "value": "1"}
+    assert wheres[1]["where"] == _options(before)[1][1]
+    assert _all(_dom(after), _attr("data-view", "table"))[0]["attrs"]["aria-pressed"] == "true"
+
+
+@layout.needs_node
+def test_typing_a_repo_and_id_opens_that_ticket_even_when_its_pr_differs(tmp_path: Path, snapshot: dict) -> None:
+    changed = copy.deepcopy(snapshot)
+    row = next(row for row in changed["tickets"] if row["repo"] == "maxharris1/cleffy" and row["ticket_id"] == "119")
+    row.update(ticket_id="10", pr=55)
+    found = _searched(tmp_path, changed, "cleffy#10", ["Enter"])
+    assert _options(found["snaps"][0])[0][0] == "cleffy#10 (PR #55)"
+    assert found["where"] == ticket_page_href(row)
+
+
+@layout.needs_node
+def test_moving_focus_out_of_the_box_closes_the_list(tmp_path: Path, snapshot: dict) -> None:
+    actions = [["focus", ["id", "find-ticket"]], ["type", "1"], ["keyon", "ArrowDown"],
+               ["leave", ["class", "tk-open"]], ["snap", ["ticket-filter"]],
+               ["leave", ["data-view", "table"]], ["hashchange", None], ["snap", ["ticket-filter"]], ["where", None]]
+    steps = _script(tmp_path, snapshot, actions)["steps"]
+    inside, outside = (step["snap"]["ticket-filter"] for step in steps if "snap" in step)
+    assert _expanded(inside) == ("true", False)
+    assert _expanded(outside) == ("false", True)
+    assert [step for step in steps if "where" in step] == [{"where": None, "value": "1"}]
+
+
+def _collected(tmp_path: Path, ids: list[str], *, owner: str = "maxharris1", source: str | None = None) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    repo = f"{owner}/factory"
+    with sqlite3.connect(db) as connection:
+        for ident in ids:
+            add_ticket(connection, repo, ident, state="intake")
+        if source:
+            connection.execute("INSERT INTO ticket_sources (repo, ticket_id, source, pr_number) VALUES (?, ?, ?, ?)",
+                               (repo, ids[-1], source, ids[-1]))
+    return collect_snapshot(db, tmp_path / "poller.log", now=NOW)
+
+
+@layout.needs_node
+def test_an_id_fragment_is_not_crowded_out_by_a_digit_in_the_owner(tmp_path: Path) -> None:
+    ids = ["200", "202", "203", "204", "205", "206", "207", "208", "209", "291"]
+    snap = _collected(tmp_path, ids)
+    found = _searched(tmp_path / "run", snap, "1", ["Enter"])
+    labels = [label for label, _, _ in _options(found["snaps"][0])]
+    assert labels[0] == "factory#291" and len(labels) == 8
+    assert found["where"] == _page(snap, "factory#291")
+
+
+@layout.needs_node
+@pytest.mark.parametrize("query", ["12", "#12"])
+def test_an_exact_source_issue_id_ranks_before_id_prefixes(tmp_path: Path, query: str) -> None:
+    snap = _collected(tmp_path, [str(i) for i in range(120, 128)] + ["999"], source="#12")
+    found = _searched(tmp_path / "run", snap, query, ["Enter"])
+    labels = [label for label, _, _ in _options(found["snaps"][0])]
+    assert labels[0] == "factory#12 (PR #999)"
+    (row,) = [row for row in snap["tickets"] if row["ticket_id"] == "999"]
+    assert found["where"] == ticket_page_href(row)
+
+
+SHIFT = 8
+
+
+def _press_key(chrome, key: str, code: int, modifiers: int = 0) -> None:
+    for kind in ("rawKeyDown", "keyUp"):
+        chrome.send("Input.dispatchKeyEvent", chrome.session, type=kind, key=key, code=key,
+                    windowsVirtualKeyCode=code, modifiers=modifiers)
+
+
+FIELD_STATE = """(() => {
+  const f = document.getElementById('find-ticket');
+  return {value: f.value, selection: [f.selectionStart, f.selectionEnd], focused: document.activeElement === f,
+          options: [...document.querySelectorAll('#find-ticket-list [role=option]')].map(li => li.textContent)};
+})()"""
+
+
+def test_the_first_render_keeps_a_keyboard_selection_in_the_find_box(tmp_path: Path, snapshot: dict) -> None:
+    import functools
+    import http.server
+    import threading
+
+    from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
+
+    if CHROME is None:
+        pytest.skip("Chrome is not installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "job.html").write_text(render_pages(snapshot)["job.html"], encoding="utf-8")
+    (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    gate = threading.Event()
+
+    class Held(QuietHandler):
+        def do_GET(self) -> None:
+            if self.path.endswith("/status.json"):
+                gate.wait(30)
+            super().do_GET()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Held, directory=str(site)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        chrome.send("Page.navigate", chrome.session, url=f"http://127.0.0.1:{server.server_address[1]}/job.html")
+        chrome.wait_for("document.readyState !== 'loading' && !!document.getElementById('find-ticket')", "find box")
+        chrome.run("window.serverList = document.getElementById('find-ticket-list');"
+                   "document.getElementById('find-ticket').focus()")
+        chrome.send("Input.insertText", chrome.session, text="107")
+        _press_key(chrome, "ArrowLeft", 37, SHIFT)
+        held = chrome.run(FIELD_STATE)
+        gate.set()
+        chrome.wait_for("document.getElementById('find-ticket-list') !== window.serverList", "first render")
+        drawn = chrome.run(FIELD_STATE)
+        chrome.send("Input.insertText", chrome.session, text="4")
+        typed = chrome.run(FIELD_STATE)
+    finally:
+        gate.set()
+        chrome.close()
+        server.shutdown()
+    assert held == {"value": "107", "selection": [2, 3], "focused": True, "options": []}
+    assert (drawn["value"], drawn["selection"], drawn["focused"]) == ("107", [2, 3], True)
+    assert typed["value"] == "104" and typed["options"][0] == "cleffy#104"

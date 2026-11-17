@@ -70,6 +70,14 @@ def send_webhook(
         ) from None
 
 
+class NoGrokWebhook:
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        raise GrokDeliveryError(
+            "orch.yml has no grok block for Grok webhook delivery",
+            detail="no-grok-block",
+        )
+
+
 class WebhookGrokDelivery:
     def __init__(
         self,

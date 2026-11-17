@@ -535,12 +535,21 @@ class GitHubReviewActions:
         return tuple(sorted(_labels([raw.get("labels")])))
 
     def _comment_once(self, repo: str, number: str, body: str, marker: str) -> None:
-        if any(
+        issue = int(_number(number))
+        if not self.issue_has_marker(repo, issue, marker):
+            self.post_issue_comment(repo, issue, body)
+
+    def issue_has_marker(self, repo: str, number: int, marker: str) -> bool:
+        return any(
             has_marker(comment.body, marker) and comment.author == self._login()
-            for comment in self.list_comments(repo, number)
-        ):
-            return
-        self._call("-X", "POST", f"{_repo_path(repo)}/issues/{number}/comments", "-f", f"body={body}")
+            for comment in self.list_comments(repo, str(_issue_number(number)))
+        )
+
+    def post_issue_comment(self, repo: str, number: int, body: str) -> None:
+        self._call(
+            "-X", "POST", f"{_repo_path(repo)}/issues/{_issue_number(number)}/comments",
+            "-f", f"body={body}",
+        )
 
     def _login(self) -> str:
         if self.login is None:

@@ -305,6 +305,15 @@ class ReviewActions(Protocol):
         ...
 
 
+class IssueComments(Protocol):
+    def issue_has_marker(self, repo: str, number: int, marker: str) -> bool:
+        """Whether this login has a comment carrying marker on issue `number` in repo."""
+        ...
+
+    def post_issue_comment(self, repo: str, number: int, body: str) -> None:
+        ...
+
+
 class GrokDelivery(Protocol):
     """Push a Grok job and return a non-empty delivery receipt.
 
@@ -415,14 +424,15 @@ class Feeder(Protocol):
 
     feed_once opens a draft PR plus brief and go handoffs for each eligible
     ticket that fits the free capacity and returns a report whose `fed`
-    lists the tickets it fed this poll as TicketRefs. hold_stacked_review
-    holds a ready's review, with the same Grok wake, while the ready's head
-    carries another open PR's commits, and says whether it did.
+    lists the tickets it fed this poll as TicketRefs. review_base_unless_stacked
+    holds a ready's review, with the same Grok wake, while the ready's head carries
+    another open PR's commits, and returns None when it did; otherwise it
+    returns the base the review runs against, the open PR's own base.
     """
 
     def feed_once(self) -> object: ...
 
-    def hold_stacked_review(self, ticket: TrackedTicket, head: str) -> bool: ...
+    def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None: ...
 
 
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is

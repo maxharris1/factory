@@ -2049,7 +2049,7 @@ A bot that hands work to another bot by hand, instead of through an `orch:v1` ha
 bin/orch log-message --repo maxharris1/factory --pr 443 --from grok-bot --to codex-bot
 ```
 
-That appends `TIMESTAMP repo=<owner/name> pr=<n> message from=<bot> to=<bot> kind=handoff` to `dispatcher.log` (`--log`, else beside `$ORCH_DB`). It refuses a repo that is not `owner/name`, a non-numeric pr, or an empty bot, and writes nothing. The report counts these manual messages against scripted handoffs (the `comment` rows) per repo and ISO week. No input records a per-message token count yet, so it prints no token-savings figure.
+That appends `TIMESTAMP repo=<owner/name> pr=<n> message from=<bot> to=<bot> kind=handoff` to `dispatcher.log` (`--log`, else beside `$ORCH_DB`). The line is written with a leading newline in one append, so a dispatcher line torn mid-write cannot swallow it; the report skips the blank lines this leaves. It refuses a repo that is not `owner/name`, a non-numeric pr, or an empty bot, and writes nothing. The report counts these manual messages against scripted handoffs (the `comment` rows) per repo and ISO week. No input records a per-message token count yet, so it prints no token-savings figure.
 
 ```sh
 bin/orch eval-report --db ~/.local/share/factory/backup/orch.db --baseline o4-orch.db

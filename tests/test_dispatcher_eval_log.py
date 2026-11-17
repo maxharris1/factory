@@ -78,7 +78,7 @@ def test_poll_appends_enter_comment_and_wake_lines_the_report_reads(
 
     monkeypatch.setenv("ORCH_DB", str(tmp_path / "d.db"))
     assert main(["log-message", "--repo", REPO, "--pr", "7", "--from", "grok-bot", "--to", "claude-bot"]) == 0
-    lines = log.read_text(encoding="utf-8").splitlines()
+    lines = [line for line in log.read_text(encoding="utf-8").splitlines() if line]
     assert len(lines) == 5 and lines[-1].endswith(
         f"repo={REPO} pr=7 message from=grok-bot to=claude-bot kind=handoff"
     )
@@ -210,10 +210,10 @@ def limited(limit: int, call, failures: list[int]):
     return run
 
 
-def short_append(tmp_path: Path, torn: int) -> tuple[list[bytes], SQLiteJobQueue]:
+def short_append(tmp_path: Path, torn: int, line: int = 2) -> tuple[list[bytes], SQLiteJobQueue]:
     batch = one_batch(tmp_path / "clean")
     assert len(batch) >= 3
-    written = b"".join(batch[:2]) + batch[2][:torn]
+    written = b"".join(batch[:line]) + batch[line][:torn]
     state = tmp_path / "state"
     state.mkdir()
     queue = SQLiteJobQueue(state / "d.db", clock=count(START, 1).__next__)
@@ -285,8 +285,14 @@ def test_a_short_write_is_finished_once_around_later_lines(
     ["lib.dispatch.eval_log.erase_with_spaces", "lib.dispatch.eval_log.append_lines", "lib.eval_log.append_bytes"],
     ids=["before-erase", "before-append", "inside-append"],
 )
-def test_recovery_stays_readable_around_a_manual_message(tmp_path: Path, hook: str) -> None:
-    batch, queue = short_append(tmp_path, 12)
+@pytest.mark.parametrize(
+    ("line", "torn"), [(2, 12), (-1, -len(b".md\n"))], ids=["timestamp-cut", "md-suffix-cut"]
+)
+def test_recovery_stays_readable_around_a_manual_message(
+    tmp_path: Path, hook: str, line: int, torn: int
+) -> None:
+    batch, queue = short_append(tmp_path, torn, line)
+    assert batch[-1].endswith(b"/102.md\n")
     log = queue.path.with_name("dispatcher.log")
     real = pkgutil.resolve_name(hook)
     manual: list[bytes] = []
@@ -299,6 +305,59 @@ def test_recovery_stays_readable_around_a_manual_message(tmp_path: Path, hook: s
     with patch(hook, message_first):
         restart(queue).poll_once(FakeSource(busy_ticket()))
     assert len(manual) == 1, "the message landed during recovery"
+    assert_readable(queue, batch, manual, tmp_path / "bundle")
+
+
+class _Paused:
+    def __init__(self, handle, before_write):
+        self._handle = handle
+        self._before_write = before_write
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self._handle.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def write(self, data: bytes) -> int:
+        self._before_write()
+        return self._handle.write(data)
+
+
+def test_a_manual_message_paused_after_its_eof_check_stays_its_own_record(tmp_path: Path) -> None:
+    batch = one_batch(tmp_path / "clean")
+    state = tmp_path / "state"
+    state.mkdir()
+    log = state / "dispatcher.log"
+    manual = [log_message(log)]
+    queue = SQLiteJobQueue(state / "d.db", clock=count(START, 1).__next__)
+    failures: list[int] = []
+    torn = len(log.read_bytes()) + len(b"".join(batch[:2])) + 12
+
+    def torn_poll() -> None:
+        with patch("lib.dispatch.eval_log.append_lines", limited(torn, append_lines, failures)):
+            restart(queue).poll_once(FakeSource(busy_ticket(), github=(busy_ticket(),)))
+
+    real_open = Path.open
+    armed = [True]
+
+    def open_then_pause(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        if armed[0] and self == log and "a" in mode:
+            armed[0] = False
+            return _Paused(handle, torn_poll)
+        return handle
+
+    with patch.object(Path, "open", open_then_pause):
+        manual.append(log_message(log))
+    assert not armed[0] and failures == [errno.EFBIG]
+    racing = log.read_bytes()
+    assert racing.index(batch[2][:12]) < racing.rindex(b" message from="), "the torn append landed first"
+
+    restart(queue).poll_once(FakeSource(busy_ticket()))
     assert_readable(queue, batch, manual, tmp_path / "bundle")
 
 

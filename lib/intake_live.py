@@ -382,6 +382,14 @@ class GitHubIntakeClient(GitHubReviewActions):
             return "merged"
         return str(state)
 
+    def pull_base(self, repo: str, number: int) -> str:
+        pull = self._json(f"{_repo_path(repo)}/pulls/{int(number)}")
+        base = pull.get("base") if isinstance(pull, dict) else None
+        ref = base.get("ref") if isinstance(base, dict) else None
+        if not isinstance(ref, str) or not _BRANCH.fullmatch(ref):
+            raise GitHubAdapterError("pull request base branch is not readable")
+        return ref
+
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
         made = self._json(
             "-X", "POST", f"{_repo_path(repo)}/pulls",
