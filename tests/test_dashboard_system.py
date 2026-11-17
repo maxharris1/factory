@@ -101,7 +101,6 @@ def test_every_health_attention_link_lands_on_its_row(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     pages = render_pages(snapshot)
     html = pages["health.html"]
-    # #526: the strip links the worst two items; the Activity panel links every item.
     assert set(_strip_fragments(_section(_no_script(html), "attention-strip"))) == {
         "health-linear-listener--box", "components"}
     fragments = set(_strip_fragments(html)) | set(_strip_fragments(_section(pages["activity.html"], "attention")))

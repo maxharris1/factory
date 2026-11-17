@@ -636,12 +636,10 @@ def _pages(tmp_path: Path) -> dict[str, str]:
 def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
     for name, html in _pages(tmp_path).items():
         keys = re.findall(r'<canvas class="px"[^>]*data-px-key="([^"]+)"', html)
-        # #526: the strip's phone line has its own block, except on Activity.
         shell = ["caret", "band", "attention"] + ([] if name == "activity.html" else ["attention-phone"])
         assert keys[: len(shell)] == shell, name
         own = keys[len(shell):]
         if name == "index.html":
-            # #140: the Lanes page adds its own strips after the shell's.
             assert {"queue", "meter-box"} <= set(own), keys
             continue
         board = [key for key in own if key.startswith(("phase-", "job-", "ticket-"))]

@@ -96,7 +96,6 @@ def _with(base: dict, items: list[dict]) -> dict:
 
 
 WORST = [("stuck", "aut0#AUT-7", "job.html"), ("overdue", "cleffy#14", "job.html#job-r-cursor")]
-# count: (tally in order as (text, tone), the "+M more" text or None, short tally)
 STRIPS = {
     1: ([("1 stuck", "bad")], None, "1 stuck"),
     2: ([("1 stuck", "bad"), ("1 overdue", "bad")], None, "1 stuck · 1 overdue"),
@@ -327,8 +326,6 @@ def _row() -> dict:
 
 @needs_node
 def test_the_script_strip_adds_what_an_overdue_snapshot_ages(tmp_path: Path, base: dict) -> None:
-    """The strip counts the badge's items plus agedHealth's: the writer that
-    went down, or the one overdue-snapshot item when no writer can alert."""
     writer = copy.deepcopy(base)
     writer["health"] = _health_rows(
         {}, {"component": "dashboard", "label": "dashboard @ box", "anchor": "health-dashboard-box"})
@@ -1203,7 +1200,6 @@ def _ticket_items(snapshot: dict) -> dict:
 
 
 TICKET_HREFS = ["job.html#job-r-codex-", "job.html#job-g-grok-c", "job.html"]
-# The strip shows the worst two: the stuck item, then the first warn item.
 STRIP_HREFS = TICKET_HREFS[:2]
 
 

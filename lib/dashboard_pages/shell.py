@@ -9,6 +9,7 @@ import json
 import math
 import re
 from decimal import Decimal, ROUND_HALF_UP
+from typing import NamedTuple
 
 from lib.dashboard_telemetry import TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
@@ -183,7 +184,6 @@ SCRIPT = r"""
     var rank = TONE_RANK[ATTENTION[kind]];
     return rank === undefined ? 2 : rank;
   }
-  // Mirrors strip_model.
   function stripModel(items) {
     var count = items.length;
     var need = count === 1 ? ' needs attention' : ' need attention';
@@ -192,12 +192,11 @@ SCRIPT = r"""
     items.forEach(function (x) {
       if (!Object.prototype.hasOwnProperty.call(at, x.kind)) {
         at[x.kind] = tally.length;
-        tally.push([x.kind, 0, ATTENTION[x.kind] || 'muted', tally.length]);
+        tally.push({kind: x.kind, n: 0, tone: ATTENTION[x.kind] || 'muted', first: tally.length});
       }
-      tally[at[x.kind]][1] += 1;
+      tally[at[x.kind]].n += 1;
     });
-    tally.sort(function (a, b) { return toneRank(a[0]) - toneRank(b[0]) || b[1] - a[1] || a[3] - b[3]; });
-    tally = tally.map(function (t) { return t.slice(0, 3); });
+    tally.sort(function (a, b) { return toneRank(a.kind) - toneRank(b.kind) || b.n - a.n || a.first - b.first; });
     var worst = items.map(function (x, i) {
       var age = x.age_seconds;
       return {x: x, i: i, age: typeof age === 'number' && isFinite(age) ? age : null};
@@ -205,16 +204,14 @@ SCRIPT = r"""
       return toneRank(a.x.kind) - toneRank(b.x.kind) || (a.age === null) - (b.age === null) ||
         (b.age || 0) - (a.age || 0) || a.i - b.i;
     }).slice(0, 2).map(function (p) { return p.x; });
-    var named = tally.map(function (t) { return t[1] + ' ' + t[0]; });
+    var named = tally.map(function (t) { return t.n + ' ' + t.kind; });
     var head = tally.slice(0, 2);
-    var rest = count - head.reduce(function (sum, t) { return sum + t[1]; }, 0);
+    var rest = count - head.reduce(function (sum, t) { return sum + t.n; }, 0);
     return {count: count, need: need, tally: tally, worst: worst, more: count - worst.length,
             short: named.slice(0, 2).concat(rest ? ['+' + rest] : []).join(' · '),
             label: count + need + ': ' + named.join(', ') + '. Open Activity.'};
   }
 
-  // The attention strip (#526): one row with the count, a tally per kind and
-  // the worst two items; the count alone on Activity; hidden when clear.
   function renderAttentionStrip(d) {
     var root = byId('attention-strip');
     if (!root) return;
@@ -248,7 +245,7 @@ SCRIPT = r"""
     var tally = add(row, el('div', 'attn-tally'));
     model.tally.forEach(function (t, i) {
       if (i) add(tally, el('span', null, '·')).setAttribute('aria-hidden', 'true');
-      add(tally, el('span', 'attn-n ' + t[2], t[1] + ' ' + t[0]));
+      add(tally, el('span', 'attn-n ' + t.tone, t.n + ' ' + t.kind));
     });
     add(row, el('span', 'attn-rule')).setAttribute('aria-hidden', 'true');
     model.worst.forEach(function (x) {
@@ -1218,23 +1215,25 @@ def _band(snapshot: dict) -> str:
 _TONE_RANK = {"bad": 0, "warn": 1}
 
 
+class Tally(NamedTuple):
+    kind: str
+    n: int
+    tone: str
+
+
 def _tone_rank(kind: str) -> int:
     return _TONE_RANK.get(_ATTENTION.get(kind), 2)
 
 
 def strip_model(items: list[dict]) -> dict:
-    """What the attention strip says about its items: the count, a tally per
-    kind (bad before warn, then the larger count, then first seen), the worst
-    two items (bad first, oldest first when aged, else snapshot order), and
-    the phone line's short tally and spoken label. Script twin: stripModel."""
     count = len(items)
     need = " needs attention" if count == 1 else " need attention"
     counts: dict[str, int] = {}
     for row in items:
         counts[row["kind"]] = counts.get(row["kind"], 0) + 1
     tally = sorted(
-        ((kind, n, _ATTENTION.get(kind, "muted")) for kind, n in counts.items()),
-        key=lambda entry: (_tone_rank(entry[0]), -entry[1]),
+        (Tally(kind, n, _ATTENTION.get(kind, "muted")) for kind, n in counts.items()),
+        key=lambda entry: (_tone_rank(entry.kind), -entry.n),
     )
 
     def worse(pair: tuple[int, dict]) -> tuple:
@@ -1244,8 +1243,8 @@ def strip_model(items: list[dict]) -> dict:
         return (_tone_rank(row["kind"]), 0 if aged else 1, -age if aged else 0, index)
 
     worst = [row for _, row in sorted(enumerate(items), key=worse)[:2]]
-    named = [f"{n} {kind}" for kind, n, _ in tally]
-    rest = count - sum(n for _, n, _ in tally[:2])
+    named = [f"{t.n} {t.kind}" for t in tally]
+    rest = count - sum(t.n for t in tally[:2])
     return {
         "count": count,
         "need": need,
@@ -1258,9 +1257,6 @@ def strip_model(items: list[dict]) -> dict:
 
 
 def _attention_strip(snapshot: dict, page: str) -> str:
-    """One 36px row: the count, a tally per kind and the worst two items,
-    with a one-link phone form; on Activity the count alone. Empty and
-    hidden when there is nothing."""
     items = (snapshot.get("attention") or {}).get("items") or []
     root = '<div class="attn" id="attention-strip" role="region" aria-label="Needs attention"'
     if not items:
