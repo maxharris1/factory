@@ -74,7 +74,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatch.helpers import _base_mismatch
-from lib.dispatch.types import CheckRow
+from lib.dispatch.types import CheckRow, RunJob
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -737,6 +737,16 @@ class GitHubReviewActions:
             logs.setdefault(job, []).append(entry)
         return {job: "\n".join(lines) for job, lines in logs.items()}
 
+    def run_jobs(self, repo: str, run_id: str) -> tuple[RunJob, ...]:
+        """The jobs of the run's latest attempt, one page of 100."""
+        if not run_id.isdigit():
+            raise GitHubAdapterError("Actions run id is not a number")
+        page = _object(self._json(f"{_repo_path(repo)}/actions/runs/{run_id}/jobs?per_page=100"))
+        jobs = page.get("jobs")
+        if not isinstance(jobs, list):
+            raise GitHubAdapterError("run jobs page has no jobs list")
+        return tuple(_run_job(_object(job)) for job in jobs)
+
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
     ) -> str:
@@ -985,6 +995,29 @@ def _check_row(run: dict[str, Any]) -> CheckRow:
         log_url=None if job is None else details,
         run_id=None if job is None else job.group(2),
         job_id=None if job is None else job.group(3),
+    )
+
+
+def _run_job(job: dict[str, Any]) -> RunJob:
+    job_id = job.get("id")
+    if isinstance(job_id, bool) or not isinstance(job_id, int):
+        raise GitHubAdapterError("run job has no numeric id")
+    status = _board_status(job.get("status"), job.get("conclusion"))
+    runner = job.get("runner_name")
+    runner = runner if isinstance(runner, str) and runner else None
+    if runner is not None:
+        kind = "github-hosted" if job.get("runner_group_name") == "GitHub Actions" else "self-hosted"
+    else:
+        kind = "none" if status == "completed" else None
+    return RunJob(
+        job_id=str(job_id),
+        name=str(job.get("name")),
+        status=status,
+        created_at=_epoch(job.get("created_at")),
+        started_at=None if status == "queued" else _epoch(job.get("started_at")),
+        completed_at=_epoch(job.get("completed_at")) if status == "completed" else None,
+        runner_name=runner,
+        runner_kind=kind,
     )
 
 

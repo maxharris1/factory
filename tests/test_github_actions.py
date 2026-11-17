@@ -22,7 +22,7 @@ from lib.dispatcher import (
     TrackedTicket,
     _comment_order,
 )
-from lib.dispatch.types import CheckRow
+from lib.dispatch.types import CheckRow, RunJob
 from lib.github_actions import (
     GH,
     GhResult,
@@ -1498,6 +1498,66 @@ def test_ci_status_is_the_same_gate_whatever_the_check_times_hold() -> None:
 
     assert result.status == "failure"
     assert (result.checks[0].started_at, result.checks[0].completed_at) == (None, None)
+
+
+RUN_JOBS = (f"{REPO}/actions/runs/123456/jobs?per_page=100",)
+
+
+def test_run_jobs_names_each_jobs_runner_in_one_read() -> None:
+    actions, gh = adapter()
+    gh.route(RUN_JOBS, served("run-jobs.json"))
+
+    jobs = actions.run_jobs("owner/repo", "123456")
+
+    queued = epoch("2026-11-10T19:49:30")
+    assert jobs == (
+        RunJob(
+            "31000000004",
+            "pytest",
+            "completed",
+            created_at=queued,
+            started_at=epoch("2026-11-10T19:50:00"),
+            completed_at=epoch("2026-11-10T19:55:00"),
+            runner_name="GitHub Actions 1000000123",
+            runner_kind="github-hosted",
+        ),
+        RunJob(
+            "31000000006",
+            "e2e",
+            "in_progress",
+            created_at=queued,
+            started_at=epoch("2026-11-10T19:52:10"),
+            runner_name="pc-wsl-bots-2",
+            runner_kind="self-hosted",
+        ),
+        RunJob("31000000007", "lint", "queued", created_at=queued),
+        RunJob(
+            "31000000008",
+            "deploy",
+            "completed",
+            created_at=queued,
+            started_at=queued,
+            completed_at=queued,
+            runner_kind="none",
+        ),
+    )
+    assert gh.keys() == [RUN_JOBS]
+
+
+def test_run_jobs_refuses_a_run_id_that_is_not_a_number() -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError):
+        actions.run_jobs("owner/repo", "../secrets")
+    assert gh.calls == []
+
+
+def test_run_jobs_refuses_a_page_without_a_jobs_list() -> None:
+    actions, gh = adapter()
+    gh.route(RUN_JOBS, GhResult(0, json.dumps({"total_count": 0}), ""))
+
+    with pytest.raises(GitHubAdapterError):
+        actions.run_jobs("owner/repo", "123456")
 
 
 RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")

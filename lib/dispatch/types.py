@@ -60,6 +60,22 @@ class CheckRow:
 
 
 @dataclass(frozen=True)
+class RunJob:
+    """One job of an Actions run, from its jobs list. runner_kind is
+    github-hosted, self-hosted, none (completed without a runner, e.g.
+    skipped), or None while no runner has taken it."""
+
+    job_id: str
+    name: str
+    status: str
+    created_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    runner_name: str | None = None
+    runner_kind: str | None = None
+
+
+@dataclass(frozen=True)
 class CIResult:
     status: str
     log: str | None = None
