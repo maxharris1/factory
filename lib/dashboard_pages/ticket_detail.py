@@ -1593,11 +1593,13 @@ _SCRIPT = r"""
     DETAIL.rowFromTicket.forEach(function (k) { if (t && k in t) r[k] = t[k]; });
     return r;
   }
-  function resolveTicket(d, address, records) {
+  function sameTicket(address) {
     var cut = address.indexOf('#');
     var repo = (cut < 0 ? address : address.slice(0, cut)).toLowerCase(), id = cut < 0 ? '' : address.slice(cut + 1);
-    var rules = [function (r) { return ticketAddress(r) === address; },
-                 function (r) { return String(r.repo).toLowerCase() === repo && String(r.ticket_id) === id; }];
+    return function (r) { return String(r.repo).toLowerCase() === repo && String(r.ticket_id) === id; };
+  }
+  function resolveTicket(d, address, records) {
+    var rules = [function (r) { return ticketAddress(r) === address; }, sameTicket(address)];
     for (var i = 0; i < rules.length; i++) {
       for (var k = 0; k < DETAIL.liveKinds.length; k++) {
         var kind = DETAIL.liveKinds[k];
@@ -1637,7 +1639,7 @@ _SCRIPT = r"""
   function ticketView(d, address, records) {
     var found = address === null ? null : resolveTicket(d, address, records);
     if (found) return ticketArticle(found, d);
-    var panel = DETAIL.panels[address === null ? 'none' : records ? 'missing' : 'loading'];
+    var panel = DETAIL.panels[address === null ? 'none' : records && !recordPending(d, address) ? 'missing' : 'loading'];
     var sec = el('section', 'panel');
     add(add(sec, el('h1')), el('span', null, panel[0]));
     var p = add(sec, el('p', 'empty'));
@@ -1668,12 +1670,18 @@ _SCRIPT = r"""
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
 
-  var RECORDS = {tickets: null, epoch: null, asked: null, busy: false};
-  function loadRecords(d) {
+  var RECORDS = {tickets: null, epoch: null, asked: null, poll: null, busy: false};
+  function recordPending(d, address) {
+    return RECORDS.tickets !== null && RECORDS.epoch < d.generated_at_epoch
+      && (d.tickets || []).some(sameTicket(address)) && !resolveTicket(d, address, RECORDS.tickets);
+  }
+  function loadRecords(d, address) {
     var epoch = d.generated_at_epoch;
-    if (RECORDS.busy || RECORDS.asked === epoch || (RECORDS.tickets && RECORDS.epoch >= epoch)) return;
+    var retry = address !== null && RECORDS.poll !== accepted && recordPending(d, address);
+    if (RECORDS.busy || (!retry && (RECORDS.asked === epoch || (RECORDS.tickets && RECORDS.epoch >= epoch)))) return;
     RECORDS.busy = true;
     RECORDS.asked = epoch;
+    RECORDS.poll = accepted;
     fetch('tickets.json', {cache: 'no-store', credentials: 'same-origin'}).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
@@ -1687,8 +1695,10 @@ _SCRIPT = r"""
   }
   function renderTicketView(d) {
     if (!GH.started) { GH.started = true; ghStart(); }
-    loadRecords(d);
-    byId('ticketview').replaceChildren(ticketView(d, hashAddress(), RECORDS.tickets));
+    var address = hashAddress();
+    loadRecords(d, address);
+    tickers.push({run: function () { loadRecords(latest, hashAddress()); }});
+    byId('ticketview').replaceChildren(ticketView(d, address, RECORDS.tickets));
   }
 """
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,

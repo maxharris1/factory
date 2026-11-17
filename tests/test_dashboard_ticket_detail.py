@@ -1345,6 +1345,40 @@ def test_the_ticket_page_fetches_tickets_json_once_per_snapshot(tmp_path: Path) 
     assert counts == {"polls": [1, 1, 2], "held": [1, 2]}
 
 
+SKEWED = (POLLED.replace("JSON.parse(ticketsText)", "JSON.parse(publishedTickets)")
+          .replace("let ticketFetches = 0;", "let ticketFetches = 0;\nlet publishedTickets = ticketsText;")
+          .replace("    } else if (kind === 'poll') {",
+                   "    } else if (kind === 'publish') {\n      publishedTickets = arg;\n    } else if (kind === 'poll') {"))
+
+
+@needs_node
+def test_records_older_than_the_status_load_again_on_each_poll_until_the_ticket_arrives(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    address = RECORD["idle"]
+    status = _unloaded(snapshot)
+    older = {**snapshot, "generated_at_epoch": snapshot["generated_at_epoch"] - 5,
+             RECORDS: {key: record for key, record in snapshot[RECORDS].items() if key != address}}
+    (script,) = re.findall(r"<script>(.*?)</script>", render_pages(snapshot)["ticket.html"], re.S)
+
+    def run(target: str, actions: list) -> dict:
+        return run_harness(tmp_path / str(len(actions)), SKEWED, script, status, "ticket", TICKET_IDS, actions,
+                           "#t=" + _quote(target), tickets_json(older))
+
+    out = run(address, [["snap", ["ticketview"]], ["count"], ["poll", status], ["snap", ["ticketview"]], ["count"],
+                        ["publish", tickets_json(snapshot)], ["poll", status], ["count"], ["poll", status], ["count"]])
+    loading = _ticket_server(status, address)
+    assert _h1s(loading) == ["Loading ticket"]
+    assert [step["snap"]["ticketview"] for step in out["steps"] if "snap" in step] == [loading, loading]
+    assert [step["tickets"] for step in out["steps"] if "tickets" in step] == [1, 2, 3, 3]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, address)
+
+    untracked = "owner/nowhere#1"
+    out = run(untracked, [["poll", status], ["poll", status], ["count"]])
+    assert out["steps"] == [{"tickets": 1}]
+    assert _h1s(out["html"]["ticketview"]) == ["Ticket not found"]
+    assert out["html"]["ticketview"] == _ticket_server(snapshot, untracked)
+
+
 NO_JOB = {
     "idle": (lambda record: None, ("static", "#ff9e64"),
              [("no reading", "in waiting-max"), ("0", "revise round"), ("1 hops", "1 off-chart")]),
