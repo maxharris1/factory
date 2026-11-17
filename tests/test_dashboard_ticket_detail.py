@@ -1710,13 +1710,14 @@ def _current_node(snapshot: dict, address: str) -> tuple[float, float]:
     return node["x"] * cell, (node["x"] + layout["node"]["w"]) * cell
 
 
+CHART_OPEN = "window.oldTicket = document.querySelector('article.ticketpage'); oldTicket.querySelector('details.jd-chart').open = true"
+
 CHART_VIEW = r"""
 (async () => {
-  const chart = document.querySelector('article.ticketpage details.jd-chart');
-  chart.open = true;
   await new Promise(r => setTimeout(r, 300));
+  const chart = document.querySelector('article.ticketpage details.jd-chart');
   const box = chart.querySelector('.jd-box');
-  return {left: box.scrollLeft, width: box.clientWidth, scroll: box.scrollWidth,
+  return {open: chart.open, left: box.scrollLeft, width: box.clientWidth, scroll: box.scrollWidth,
           page: document.documentElement.scrollWidth, inner: innerWidth};
 })()"""
 
@@ -1725,22 +1726,33 @@ CHART_VIEW = r"""
 @pytest.mark.parametrize("kind", ["running", "shipped", "stopped"])
 def test_on_a_phone_the_state_chart_opens_on_the_current_state_in_its_own_scroll_box(tmp_path: Path, kind: str) -> None:
     snapshot = _with_shipped(_snapshot(tmp_path))
-    server = _serve(tmp_path, {"fixture": snapshot})
+    records = threading.Event()
+    server = _serve(tmp_path, {"fixture": snapshot}, records_gate=records)
     base = f"http://127.0.0.1:{server.server_address[1]}/fixture/"
     chrome = _Chrome(tmp_path / "profile")
+    live = kind in LIVE
     views = {}
     try:
-        for width in (375, 320):
-            _ticket_at(chrome, base, ADDRESS[kind], width)
-            views[width] = chrome.run(CHART_VIEW)
+        if not live:
+            records.set()
+        _ticket_at(chrome, base, ADDRESS[kind], 375)
+        chrome.run(CHART_OPEN)
+        views[375, "opened"] = chrome.run(CHART_VIEW)
+        if live:
+            records.set()
+            chrome.wait_for("!window.oldTicket.isConnected", "the records redraw")
+            views[375, "redrawn"] = chrome.run(CHART_VIEW)
+        _ticket_at(chrome, base, ADDRESS[kind], 320)
+        views[320, "resized"] = chrome.run(CHART_VIEW)
     finally:
+        records.set()
         chrome.close()
         server.shutdown()
     left, right = _current_node(snapshot, ADDRESS[kind])
-    for width, view in views.items():
-        assert view["width"] < 1000 and view["scroll"] == 1000, width
-        assert view["left"] <= left and right <= view["left"] + view["width"], (width, view, left, right)
-        assert view["page"] == view["inner"] == width, width
+    for (width, when), view in views.items():
+        assert view["open"] and view["width"] < 1000 and view["scroll"] == 1000, (width, when, view)
+        assert view["left"] <= left and right <= view["left"] + view["width"], (width, when, view, left, right)
+        assert view["page"] == view["inner"] == width, (width, when)
 
 
 LIVE_RUN_STACK = r"""
