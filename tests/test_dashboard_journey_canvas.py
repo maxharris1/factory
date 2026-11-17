@@ -325,3 +325,39 @@ def test_a_live_journey_frames_only_a_picked_earlier_step(tmp_path: Path) -> Non
     out = _run(tmp_path, _model(), frames)["frames"]
     assert not _frame_rects(out["own"], "#c0caf5")
     assert _frame_rects(out["picked"], "#c0caf5")
+
+
+def _flapping(count: int, last: str, last_stop: bool) -> list:
+    middle = [("planning" if i % 2 else "building", "claude", 60 if i % 2 == 0 else 1, False, False) for i in range(1, count - 1)]
+    return [("intake", "script", 1, False, False), *middle, (last, "script", 100000, False, last_stop)]
+
+
+@needs_node
+@pytest.mark.parametrize("count", [19, 40])
+@pytest.mark.parametrize("ended,last,stop", [("shipped", "merged", False), ("stopped", "refused", True)])
+def test_many_short_steps_keep_every_ended_bar_on_the_canvas(tmp_path: Path, count: int, ended: str, last: str, stop: bool) -> None:
+    frames = {mode: dict(ENDED, t=10, scale=mode) for mode in ("even", "scale")}
+    out = _run(tmp_path, _model(_flapping(count, last, stop), hops=0, ended=ended), frames)
+    for mode in ("even", "scale"):
+        bars = out["bars"][mode]
+        assert [b["index"] for b in bars] == list(range(count)), mode
+        assert all(b["w"] > 0 for b in bars), (mode, [b for b in bars if b["w"] <= 0])
+        for left, right in zip(bars, bars[1:]):
+            assert left["x"] + left["w"] <= right["x"], mode
+        assert bars[0]["x"] >= 0 and bars[-1]["x"] + bars[-1]["w"] <= 1000, mode
+        frame = out["frames"][mode]
+        assert frame["error"] is None
+        top = (LANE_TOP["shipped" if ended == "shipped" else "stop"] + 1) * 4
+        frame_top = [r for r in _frame_rects(frame, "#c0caf5") if r[1] == top]
+        assert frame_top and frame_top[0][0] == bars[-1]["x"] - 4, (mode, "the selected end bar is framed")
+    assert out["bars"]["scale"][-1]["w"] == 48, "to scale keeps the fixed end mark"
+    scale = out["bars"]["scale"]
+    assert scale[2]["w"] > scale[1]["w"], "to scale still follows duration_seconds"
+
+
+@needs_node
+def test_a_long_live_journey_to_scale_keeps_every_bar_positive(tmp_path: Path) -> None:
+    path = [("planning" if i % 2 else "building", "claude", 60 if i % 2 == 0 else 1, False, False) for i in range(60)]
+    bars = _run(tmp_path, _model(path), {"t": dict(FRAME, t=10, scale="scale")})["bars"]["scale"]
+    assert all(b["w"] > 0 for b in bars), [b for b in bars if b["w"] <= 0]
+    assert bars[-1]["x"] + bars[-1]["w"] <= 24 * 4 + 176 * 4

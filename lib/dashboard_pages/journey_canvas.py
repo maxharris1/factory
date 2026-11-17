@@ -101,13 +101,20 @@ function journeyLayout(model, scale) {
   var toScale = scale === 'scale' && !!model.all_durations_known && total > 0;
   var even = Math.max(6, Math.min(24, Math.floor(PW / Math.max(1, n))));
   if (even * n > PW) even = Math.max(1, Math.floor(PW / n));
-  var w = [], sum = 0, big = 0;
+  var budget = PW - (n - timed) * endW;
+  var least = Math.max(1, Math.min(3, Math.floor(budget / Math.max(1, timed))));
+  var w = [], sum = 0, big;
   for (i = 0; i < n; i++) {
-    w.push(!toScale ? even : i < timed ? Math.max(3, Math.round((PW - (n - timed) * endW) * durs[i] / total)) : endW);
+    w.push(!toScale ? even : i < timed ? Math.max(least, Math.round(budget * durs[i] / total)) : endW);
     sum += w[i];
-    if (w[i] > w[big]) big = i;
   }
-  if (sum > PW) w[big] -= (sum - PW);
+  while (toScale && sum > PW) {
+    big = -1;
+    for (i = 0; i < timed; i++) if (w[i] > least && (big < 0 || w[i] > w[big])) big = i;
+    if (big < 0) break;
+    w[big] -= 1;
+    sum -= 1;
+  }
 
   var cur = n - 1;
   for (i = 0; i < n; i++) if (visits[i].current) cur = i;
