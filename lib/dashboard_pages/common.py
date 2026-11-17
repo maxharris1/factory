@@ -446,9 +446,10 @@ SCRIPT_TAIL = r"""
     return publish > 0 ? ((h.thresholds || {}).stale_beats || 3) * publish : STALE_SECONDS;
   }
   function freshness() {
-    if (!everOk) return 'boot';
+    if (!everOk && !failures) return 'boot';
     if (resuming) return 'paused';
     if (Date.now() - Math.max(lastOk, shownAt) > LINK_LOST_MS) return 'lost';
+    if (!everOk) return 'boot';
     return since() > staleSeconds() ? 'stale' : 'live';
   }
   function publishedAt() { return ET.format(new Date(generated * 1000)) + ' ET'; }
@@ -506,7 +507,7 @@ SCRIPT_TAIL = r"""
       }
       var moved = FRESH[state].band !== (FRESH[freshState] || FRESH.boot).band;
       freshState = state;
-      if (latest && moved) { renderBand(latest); PX.bind(); }
+      if (moved) { renderBand(latest); PX.bind(); }
       freshBar(state, age);
       statusAge(state, age);
     }

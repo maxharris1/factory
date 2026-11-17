@@ -1595,6 +1595,65 @@ def test_lost_outranks_stale_and_is_announced_on_entry(tmp_path: Path, base: dic
     assert lost["bar"]["say"] == "Cannot reach the dashboard. " + _showing(NOW - STALE_AGE)
 
 
+@needs_node
+def test_polls_that_fail_from_the_first_fetch_show_the_red_bar(tmp_path: Path, base: dict) -> None:
+    snapshot = _aged(base, STALE_AGE)
+    harness = (
+        _fresh_harness()
+        .replace("let failing = false;", "let failing = true;", 1)
+        .replace("body.attrs['data-generated'] = '1800000000.000';",
+                 f"body.attrs['data-generated'] = '{snapshot['generated_at_epoch']:.3f}';", 1)
+    )
+    assert "let failing = true;" in harness and f"'{NOW - STALE_AGE:.3f}'" in harness
+    out = _link_run(tmp_path, snapshot, [["fresh"], ["advance", 7], ["fresh"], ["advance", 1], ["fresh"]],
+                    ids=FRESH_IDS, harness=harness)
+    early, lost, later = [_plain(step["fresh"]) for step in out["steps"] if "fresh" in step]
+    assert (early["state"], early["text"], early["bar"]["hidden"]) == ("boot", "NO LINK · static view", True)
+    assert (lost["state"], lost["link"], lost["text"]) == ("lost", "link lost", "LINK LOST")
+    text = _showing(NOW - STALE_AGE)
+    assert lost["bar"] == {"hidden": False, "cls": "fresh-bar lost", "head": "Cannot reach the dashboard.",
+                           "text": text, "say": "Cannot reach the dashboard. " + text}
+    assert (_tint(lost["band"]), _still(lost["band"])) == (GREY, "true")
+    assert lost["caret"] == page.px_strip("caret", state="link-lost", height=12)
+    assert later["bar"] == lost["bar"], "announced once, not per tick"
+
+
+LOST = """(function () {
+  function shown(n) { return !!n && !n.hidden && n.getClientRects().length > 0; }
+  var bar = document.getElementById('fresh-bar'), band = document.querySelector('#band canvas');
+  var age = document.querySelector('#statusline [data-seg=age]');
+  return {state: document.body.getAttribute('data-fresh'), hidden: document.hidden,
+    link: document.getElementById('link-text').textContent,
+    bar: {shown: shown(bar), cls: bar.className, head: document.getElementById('fresh-head').textContent,
+          text: document.getElementById('fresh-text').textContent},
+    age: {shown: shown(age), cls: age.className, text: age.querySelector('.sl-t').textContent},
+    band: {tint: band.getAttribute('data-tint'), still: band.getAttribute('data-still')}};
+})()"""
+
+
+@needs_chrome
+def test_a_page_whose_polls_never_answer_reads_link_lost_in_a_browser(base: dict) -> None:
+    snapshot = _now(base, STALE_AGE)
+    html = _fresh_page(snapshot).replace("window.__fail = false;", "window.__fail = true;", 1)
+    browser = Browser()
+    try:
+        _open(browser, html, 1440, None)
+        browser.eval("window.__skew = 7000;")
+        deadline = time.monotonic() + 20
+        while browser.eval("document.body.getAttribute('data-fresh')") != "lost":
+            assert time.monotonic() < deadline, browser.eval(LOST)
+            time.sleep(0.05)
+        seen = _plain(browser.eval(LOST))
+    finally:
+        browser.close()
+    assert (seen["state"], seen["hidden"], seen["link"]) == ("lost", False, "LINK LOST")
+    assert seen["bar"] == {"shown": True, "cls": "fresh-bar lost", "head": "Cannot reach the dashboard.",
+                           "text": _showing(snapshot["generated_at_epoch"])}
+    assert (seen["age"]["shown"], seen["age"]["cls"]) == (True, "sl-age lost")
+    assert re.fullmatch(r"as of \d+m \d\ds ago", seen["age"]["text"]), seen["age"]
+    assert seen["band"] == {"tint": GREY, "still": "true"}
+
+
 def _assert_paused(seen: dict) -> None:
     assert (seen["state"], seen["link"], seen["text"]) == ("paused", "link paused", "PAUSED · resuming"), seen
     assert (seen["bar"]["hidden"], seen["bar"]["say"]) == (True, ""), seen["bar"]
