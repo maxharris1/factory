@@ -117,10 +117,27 @@ exit 2
         assert env.get("LINEAR_WEBHOOK_TUNNEL_HOST") == "", f"cron runs {line!r} with an empty tunnel host, env {env}"
 
 
-def _r15_rows(db: Path, shim: Path, start: str, end: str) -> list[str]:
+def _sqlite3_shim(tmp_path: Path) -> Path:
+    _executable(tmp_path / "shim/sqlite3", f"""#!{sys.executable}
+import pathlib, sqlite3, sys
+_, readonly, db, sql = sys.argv
+assert readonly == "-readonly"
+conn = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
+for statement in filter(str.strip, sql.split(";")):
+    for row in conn.execute(statement):
+        print("|".join("" if value is None else str(value) for value in row))
+""")
+    return tmp_path / "shim"
+
+
+EVIDENCE = "from jobs where created_at"
+COUNTS = "from jobs where finished_at"
+
+
+def _r15_rows(query: str, db: Path, shim: Path, start: str, end: str) -> list[str]:
     window = _span("R15", "date -d").replace("<start ISO>", start).replace("<end ISO>", end)
-    query = _span("R15", 'sqlite3 -readonly "$DB"')
-    result = _run(f"{window}\n{query}", {"PATH": f"{shim}:/usr/bin:/bin", "DB": str(db)})
+    command = _span("R15", query)
+    result = _run(f"{window}\n{command}", {"PATH": f"{shim}:/usr/bin:/bin", "DB": str(db)})
     assert result.returncode == 0, f"R15's window and query run: {result.stderr}"
     return result.stdout.splitlines()[1:]
 
@@ -131,21 +148,31 @@ def test_r15_query_finds_dispatch_and_merge_inside_the_window(tmp_path: Path) ->
     job = queue.claim("claude")
     queue.finish(job.id, owner="claude", handoff_comment_id="ready-test")
     dispatcher.record_terminal("owner/repo", "42", "merged")
-    _executable(tmp_path / "shim/sqlite3", f"""#!{sys.executable}
-import pathlib, sqlite3, sys
-_, readonly, db, sql = sys.argv
-assert readonly == "-readonly"
-conn = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
-for statement in filter(str.strip, sql.split(";")):
-    for row in conn.execute(statement):
-        print("|".join("" if value is None else str(value) for value in row))
-""")
+    shim = _sqlite3_shim(tmp_path)
 
-    inside = _r15_rows(queue.path, tmp_path / "shim", "2026-11-17T11:59:00Z", "2026-11-17T12:01:00Z")
+    inside = _r15_rows(EVIDENCE, queue.path, shim, "2026-11-17T11:59:00Z", "2026-11-17T12:01:00Z")
     assert any(re.fullmatch(r"queued\|build\|[1-9]\d*", row) for row in inside), f"a dispatch inside the window: {inside}"
     assert any(re.fullmatch(r"merged\|[1-9]\d*", row) for row in inside), f"a merge inside the window: {inside}"
-    later = _r15_rows(queue.path, tmp_path / "shim", "2026-11-17T12:59:00Z", "2026-11-17T13:01:00Z")
+    later = _r15_rows(EVIDENCE, queue.path, shim, "2026-11-17T12:59:00Z", "2026-11-17T13:01:00Z")
     assert not any(re.fullmatch(r"(queued\|.*|merged\|[1-9]\d*)", row) for row in later), f"nothing an hour later: {later}"
+
+
+def test_r15_evidence_ignores_a_cancel_of_a_job_queued_before_the_window(tmp_path: Path) -> None:
+    clock = [1794913200.0]
+    dispatcher, queue = setup(tmp_path, now=clock)
+    dispatcher.process(ticket(comment("go-1", GO.format(state="building"), author="grok-login")))
+    with sqlite3.connect(queue.path) as conn:
+        (job_id,) = conn.execute("select id from jobs where state = 'queued'").fetchone()
+    conn.close()
+    clock[0] = 1794916800.0
+    queue.cancel(job_id, reason="operator cancelled")
+    shim = _sqlite3_shim(tmp_path)
+
+    evidence = _r15_rows(EVIDENCE, queue.path, shim, "2026-11-17T11:59:00Z", "2026-11-17T12:01:00Z")
+    assert evidence == ["merged|0"], f"a 12:00 cancel of a job queued at 11:00 is neither dispatch nor merge: {evidence}"
+    counts = _r15_rows(COUNTS, queue.path, shim, "2026-11-17T11:59:00Z", "2026-11-17T12:01:00Z")
+    assert "finished|cancelled|1" in counts and "job_event|cancelled|1" in counts, \
+        f"the counts query still records the cancel: {counts}"
 
 
 def _commands(script: str) -> list[tuple[str, list[str]]]:
