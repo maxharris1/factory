@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +13,7 @@ from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.queue import SQLiteJobQueue
+from lib.settings_apply import Applier, LocalSpool, run_pass, running_from_db
 from lib.worktrees import pid_alive, process_start
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 from tests.test_remote_start import (
@@ -27,23 +31,46 @@ HARNESSES = ("claude", "codex", "cursor")
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(120)"]
 
 
-def edit(path: Path, old: str, new: str, ns: int) -> None:
-    text = path.read_text(encoding="utf-8")
-    assert text.count(old) == 1, f"{old!r} appears once in machines.yml"
-    path.write_text(text.replace(old, new), encoding="utf-8")
-    stamp(path, ns)
+class Settings:
+    """Mission Control requests applied through `orch settings apply`'s applier."""
+
+    def __init__(self, tmp_path: Path, machines: Path, db: Path):
+        self.machines = machines
+        self.spool = tmp_path / "spool"
+        self.spool.mkdir(mode=0o755)
+        self.restarts: list[list[str]] = []
+        state = tmp_path / "state"
+        state.mkdir()
+        self.applier = Applier(
+            machines=machines, state_dir=state, deploy=tmp_path / "deploy",
+            approver="maxharris1", environ={}, restart=("poller", "waiter:claude-bot"),
+            pending=(), running=running_from_db(db),
+            run=lambda argv, env, log: self.restarts.append(list(argv)) or 0,
+        )
+        self.count = 0
+
+    def apply(self, device: str, field: str, expect: object, value: object, ns: int):
+        self.count += 1
+        rid = f"drain-test-request-{self.count:04d}"
+        path = self.spool / f"{rid}.json"
+        path.write_text(json.dumps({
+            "id": rid, "actor": "maxharris1", "requested_at": "2026-11-17T10:00:00Z",
+            "device": device, "field": field, "expect": expect, "value": value,
+        }), encoding="utf-8")
+        path.chmod(0o644)
+        (entry,) = run_pass(self.applier, LocalSpool(self.spool),
+                            pwd.getpwuid(os.getuid()).pw_name)
+        stamp(self.machines, ns)
+        return entry
 
 
 @pytest.mark.parametrize(
-    ("old", "new"),
-    [
-        ("    local: true\n", "    local: true\n    drain: true\n"),
-        ("    slot_max: 6\n", "    slot_max: 1\n"),
-    ],
+    ("field", "expect", "value"),
+    [("drain", False, True), ("slot_max", 6, 1)],
     ids=["drain", "slot_max-below-running"],
 )
 def test_running_box_jobs_finish_and_new_jobs_wait_or_go_elsewhere(
-    tmp_path: Path, old: str, new: str
+    tmp_path: Path, field: str, expect: object, value: object
 ) -> None:
     now = [0.0]
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: now[0])
@@ -96,7 +123,21 @@ def test_running_box_jobs_finish_and_new_jobs_wait_or_go_elsewhere(
         poll_at(now, dispatcher, 0.0)
         assert_box_jobs_untouched("before the change")
 
-        edit(machines, old, new, 10**18)
+        settings = Settings(tmp_path, machines, queue.path)
+        refused = settings.apply("box", "enabled", True, False, 10**18 - 1)
+        assert (refused.result, refused.error) == (
+            "refused", "box holds 3 running job(s); drain it first"), "never disable a busy box"
+        assert settings.restarts == []
+
+        applied = settings.apply("box", field, expect, value, 10**18)
+        assert applied.result == "applied", applied
+        assert settings.restarts == [
+            [str(tmp_path / "deploy" / "poller-service.sh"), "restart"],
+            [str(tmp_path / "deploy" / "waiter-service.sh"), "claude-bot", "restart"],
+        ]
+        text = machines.read_text(encoding="utf-8")
+        assert "slot_max: 0" not in text and "enabled: false" in text.split("- name: pc")[1]
+        assert text.split("- name: pc")[0].count("enabled: false") == 0, "the box stays enabled"
         for at in (60.0, 120.0, 180.0):
             poll_at(now, dispatcher, at)
             assert_box_jobs_untouched(f"poll at {at} after the change")
@@ -110,7 +151,7 @@ def test_running_box_jobs_finish_and_new_jobs_wait_or_go_elsewhere(
         assert pool.claim("claude") is None, "no new placement on the box"
         assert state(queue, fourth) == "queued", "the fourth job stays queued"
 
-        edit(machines, "enabled: false", "enabled: true", 10**18 + 1)
+        assert settings.apply("pc", "enabled", False, True, 10**18 + 1).result == "applied"
         poll_at(now, dispatcher, 240.0)
         claimed = pool.claim("claude")
         assert claimed is not None and claimed[1].device == "pc", "the fourth job lands on pc"

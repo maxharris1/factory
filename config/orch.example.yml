@@ -29,6 +29,13 @@ dashboard:
     remote_dir: factory-dashboard
     method: scp
     # live: true
+  # Optional (#777): Mission Control device settings. `orch settings apply`
+  # reads requests from this spool on the push host, trusting only files the
+  # dashboard server's user owns; without this block it does nothing.
+  # settings:
+  #   spool: /home/factory-dashboard/settings-spool
+  #   spool_owner: factory-dashboard
+  #   approver: maxharris1
 # Optional: harnesses whose jobs the factory refuses; health then expects
 # no waiter for them.
 # refused_harnesses:

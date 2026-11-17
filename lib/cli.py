@@ -169,6 +169,7 @@ commands:
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report or forget (issue #92)
   heal             restart down or stale-code components (issue #107)
+  settings         apply device settings asked for in Mission Control (#777)
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
 
@@ -468,6 +469,16 @@ heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
   once). --dry-run prints each target's state and writes nothing.
   deploy/self-heal.sh starts it detached after each heal pass.
 
+settings apply [--state DIR] [--orch PATH] [--machines PATH] [--deploy DIR]
+               [--config DIR]
+  Apply each new request in orch.yml dashboard.settings.spool (enabled,
+  slot_max or drain of one device, asked for by the approver on the
+  Settings page): back up machines.yml, edit that one line, restart the
+  poller and this account's waiters, and append to settings-audit.jsonl in
+  the state dir. Without dashboard.settings it does nothing. Exits 1 when a
+  restart failed (the backup is restored) or the spool cannot be read.
+  deploy/self-heal.sh runs it before each health step.
+
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
   paused and stuck tickets, the feeder, the webhook and component health,
@@ -540,6 +551,10 @@ def main(argv: list[str] | None = None) -> int:
         from lib import heal
 
         return heal.main(argv[1:])
+    if argv[0] == "settings":
+        from lib import settings_apply
+
+        return settings_apply.main(argv[1:])
     if argv[0] == "status":
         return _call(status_main, argv[1:])
     if argv[0] == "retry":
