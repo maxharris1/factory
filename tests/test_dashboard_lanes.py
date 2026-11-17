@@ -750,3 +750,81 @@ if __name__ == "__main__":
         sys.exit("usage: python -m tests.test_dashboard_lanes --shots <dir>  (needs Chrome or Chromium)")
     for written in write_screenshots(Path(sys.argv[2])):
         print(written)
+
+
+def _counted(tmp_path: Path, held: int = 3) -> dict:
+    snapshot = _base(tmp_path)
+    template = snapshot["running"][0]
+    snapshot["running"] = [_row(template, "build"), _row(template, "review")]
+    snapshot["queued"] = [dict(snapshot["queued"][0], job=f"q-{i}") for i in range(3)]
+    snapshot["slots"]["devices"] = [
+        {"name": "box", "slot_max": 4, "held": held, "enabled": True, "placeholder": False, "harnesses": ["claude"]},
+        {"name": "pc", "slot_max": 3, "held": 0, "enabled": True, "placeholder": False, "harnesses": ["codex"]},
+        {"name": "mac", "slot_max": 2, "held": 0, "enabled": False, "placeholder": False, "harnesses": []},
+    ]
+    return snapshot
+
+
+def _header_counts(lanes: str) -> list[tuple[str, str, str]]:
+    head = re.search(r"<h2>(.*?)</h2>", lanes, re.S).group(1)
+    count = re.search(r'<span class="count">(.*?)</span>', head, re.S).group(1)
+    return re.findall(r'<b(?: class="([a-z]+)")?>(\d+)</b> (running|held|idle|queued)', count)
+
+
+def _server_lanes(snapshot: dict) -> str:
+    return _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+
+
+HELD = [("ok", "2", "running"), ("warn", "1", "held"), ("", "4", "idle"), ("", "3", "queued")]
+NONE_HELD = [("ok", "2", "running"), ("", "0", "held"), ("", "5", "idle"), ("", "3", "queued")]
+
+
+def test_header_counts_server(tmp_path: Path) -> None:
+    lanes = _server_lanes(_counted(tmp_path))
+    assert _header_counts(lanes) == HELD
+    assert ">2</b> running · <b" in lanes and "</b> queued</span></h2>" in lanes
+    assert _header_counts(_server_lanes(_counted(tmp_path / "none", held=0))) == NONE_HELD
+
+
+@needs_node
+def test_header_counts_script(tmp_path: Path) -> None:
+    out = _run_page(tmp_path / "held", _counted(tmp_path / "held"), "main", BAR + ["hud", "lanes"])
+    assert _header_counts(out["html"]["lanes"]) == HELD
+    assert out["text"]["lanes"].startswith("Lanes and slots2 running · 1 held · 4 idle · 3 queued")
+    none = _counted(tmp_path / "none", held=0)
+    out = _run_page(tmp_path / "none", none, "main", BAR + ["hud", "lanes"])
+    assert _header_counts(out["html"]["lanes"]) == NONE_HELD
+
+
+def test_kpi_row_is_gone(tmp_path: Path) -> None:
+    html = render_pages(_counted(tmp_path))["index.html"]
+    assert 'id="kpis"' not in html and "data-kpi" not in html and "Factory status" not in html
+    assert "renderKpis" not in html and ".kpi{" not in html and "#kpis" not in html
+
+
+def test_header_counts_colours_and_wrap_come_from_the_artboard() -> None:
+    assert "#lanes h2{flex-wrap:wrap;gap:4px 8px}" in CSS
+    assert "#lanes h2 .count{font-variant-numeric:tabular-nums}" in CSS
+    assert "#lanes h2 .count b{font-weight:600;color:var(--text)}" in CSS
+    assert "#lanes h2 .count b.ok{color:var(--ok)}#lanes h2 .count b.warn{color:var(--warn)}" in CSS
+    phone = CSS[CSS.index("@media (max-width:640px){#lanes h2 .count") :]
+    assert phone.startswith("@media (max-width:640px){#lanes h2 .count{flex:1 1 100%}}")
+
+
+def _still_held(lanes: str, page: str) -> None:
+    assert lanes.count('class="tile empty px-held"') == 1
+    style = "".join(re.findall(r"<style[^>]*>(.*?)</style>", page, re.S))
+    assert ".px-held::after{" in style
+    assert "px-march" not in style and not re.search(r"px-held[^{}]*\{[^}]*animation", style)
+
+
+def test_held_tile_is_still_server(tmp_path: Path) -> None:
+    snapshot = _counted(tmp_path)
+    _still_held(_server_lanes(snapshot), render_pages(snapshot)["index.html"])
+
+
+@needs_node
+def test_held_tile_is_still_script(tmp_path: Path) -> None:
+    snapshot = _counted(tmp_path)
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes"])
+    _still_held(out["html"]["lanes"], render_pages(snapshot)["index.html"])

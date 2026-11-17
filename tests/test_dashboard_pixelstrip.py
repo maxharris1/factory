@@ -590,7 +590,7 @@ def test_strip_escapes_and_clamps_its_input() -> None:
     assert "height:96px" in page.px_strip("k", height=500)
 
 
-def test_held_strip_frame_is_the_marching_dashed_border() -> None:
+def test_held_strip_frame_is_a_still_dashed_border() -> None:
     assert page.px_frame("held") == "px-held"
     assert page.px_frame("build") == ""
     css = page.CSS
@@ -598,8 +598,9 @@ def test_held_strip_frame_is_the_marching_dashed_border() -> None:
     rule = rule[: rule.index("}") + 1]
     assert rule.count("repeating-linear-gradient(90deg,var(--warn) 0 8px,transparent 8px 16px)") == 2
     assert rule.count("repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px)") == 2
-    assert "animation:px-march 2s steps(4) infinite" in rule
-    assert "@keyframes px-march{to{background-position:16px 0,-16px 100%,100% 16px,0 -16px}}" in css
+    assert "animation" not in rule
+    assert "px-march" not in css
+    assert not re.search(r"px-held[^{}]*\{[^}]*animation", css)
 
 
 @needs_node
