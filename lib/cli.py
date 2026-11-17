@@ -1300,7 +1300,7 @@ def _retired() -> str | None:
 
 
 def _lock_path(database: Path) -> Path:
-    return database.with_name(database.name + ".lock")
+    return Path(f"{database.resolve()}.lock")
 
 
 def _held_locks(database: Path) -> list[Path]:
@@ -1334,7 +1334,7 @@ def _poll_lock(path: Path, pidfile: Path | None = None):
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
-    lock_path = Path(f"{path.resolve()}.lock")
+    lock_path = _lock_path(path)
     handle = lock_path.open("a+", encoding="utf-8")
     written = False
     try:

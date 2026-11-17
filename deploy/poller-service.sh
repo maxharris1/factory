@@ -167,16 +167,15 @@ is_poller_pid() {
 poll_lock_path() {
     local db
     db="$("$RUNNER" --print-db 2>/dev/null 9>&-)" || db=""
-    printf '%s.lock\n' "${db:-${ORCH_DB:-${STATE}/orch.db}}"
+    db="${db:-${ORCH_DB:-${STATE}/orch.db}}"
+    printf '%s.lock\n' "$(readlink -f -- "$db" || printf '%s' "$db")"
 }
 
 # Is orch poll's own lock held? Without flock(1) or the lock file, no.
 poll_lock_held() {
     local lock status=0
     command -v flock >/dev/null 2>&1 || return 1
-    db="$("$RUNNER" --print-db 2>/dev/null 9>&-)" || db=""
-    db="${db:-${ORCH_DB:-${STATE}/orch.db}}"
-    lock="$(readlink -f -- "$db" || printf '%s' "$db").lock"
+    lock="$(poll_lock_path)"
     [[ -e "$lock" ]] || return 1
     flock -n -E 75 "$lock" true 9>&- || status=$?
     ((status == 75))
