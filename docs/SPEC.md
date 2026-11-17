@@ -663,7 +663,13 @@ backup is one `poll_errors` row (`backup:<ErrorClass>`) and polling goes on.
 `orch restore-db` restores a missing database after `PRAGMA
 integrity_check`, with its queued plans, builds, fixes and reviews held
 until the poller reads their threads (section 4.2); `orch backup-db` takes
-one by hand.
+one by hand. Before any manual write to `orch.db`, run `orch db-backup
+<label>` (issue #654). It copies the database the same way to
+`manual/orch-<UTC stamp>-<label>.db` beside the cycle backup, then keeps
+the newest 5 labelled backups plus any under 48 hours old and deletes the
+rest with their `-wal` and `-shm` files. The poller prunes them the same way
+once a day; a failed prune is one `poll_errors` row
+(`labelled-prune:<ErrorClass>`).
 The same hook keeps a weekly snapshot beside the backup, in
 `weekly/orch-<Monday>.db` (issue #545): the first cycle of each week in
 America/New_York takes it with the same online backup, so a running poller
