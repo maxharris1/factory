@@ -20,7 +20,7 @@ from lib.dashboard_pages.activity import (  # noqa: F401
     _ATTENTION, _HEALTH_LINK, _VERDICT, _attention, _health_link, _relay, relay_threads,
 )
 from lib.dashboard_pages.common import (  # noqa: F401
-    _BOTS, _JOB_STATE, LIST_MAX, _b, _bot, _chip, _e, _feed, _job_kind, _job_label, _num, _panel,
+    _BOTS, _JOB_STATE, LIST_MAX, _b, _bot, _chip, _e, _feed, _job_label, _num, _panel,
     _short, _span, _state_chip, _td, _ticket, _when, anchor, duration,
 )
 from lib.dashboard_pages.efficiency import _savings  # noqa: F401
@@ -39,10 +39,8 @@ from lib.dashboard_pages.system import (  # noqa: F401
     _ANCHOR, _BUDGET_STATE, _HEALTH_STATE, _LOG_KINDS, _POLL_STATE, _anchor_attr, _components,
     _drift, _health, _log, _log_row, _no_waiter, _rules, _versions, version_drift, version_groups,
 )
-from lib.dashboard_pages.ticket_detail import (  # noqa: F401
-    _detail_model, _job_article, _jobview,
-)
-from lib.dashboard_pages.tickets import _active_jobs, _board, _tickets  # noqa: F401
+from lib.dashboard_pages.ticket_detail import _detail_model  # noqa: F401
+from lib.dashboard_pages.tickets import _board, _tickets  # noqa: F401
 from lib.dashboard_telemetry import (  # noqa: F401
     TELEMETRY_CSS, TELEMETRY_SCRIPT, rollup_panel,
 )

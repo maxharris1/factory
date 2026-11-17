@@ -15,14 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from lib.dashboard import collect_snapshot, render_pages
+from lib.dashboard import collect_snapshot
 from lib.dashboard_pages.ticket_detail import compact
 from tests.test_dashboard import NOW, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
-from tests.test_dashboard_layout import JOB, _history, _no_script, _run_page, _section, needs_node
+from tests.test_dashboard_layout import _history, _section, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
+from tests.test_dashboard_ticket_detail import _quote, _ticket_script, _ticket_server
 
 PANEL = "liverun-job-h-review"
+ADDRESS = "maxharris1/cleffy#40"
 LIVE = ("plan", "current_task", "last_finished", "subagents")
 PLAN = [
     {"text": "Read the codex verdict", "status": "done"},
@@ -64,12 +66,11 @@ def _snapshot(tmp_path: Path, row: dict | None) -> dict:
 
 
 def _server(snapshot: dict) -> str:
-    return _section(_no_script(render_pages(snapshot)["job.html"]), PANEL)
+    return _section(_ticket_server(snapshot, ADDRESS), PANEL)
 
 
 def _script(tmp_path: Path, snapshot: dict) -> str:
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
-    return _section(out["html"]["jobview"], PANEL)
+    return _section(_ticket_script(tmp_path, snapshot, "#t=" + _quote(ADDRESS)), PANEL)
 
 
 def _text(markup: str) -> str:
@@ -197,12 +198,12 @@ def test_live_text_wraps_inside_the_panel_at_375px(tmp_path: Path) -> None:
            "subagents": json.dumps([{**AGENTS[0], "kind": UNBROKEN, "description": UNBROKEN}])}
     browser = Browser()
     try:
-        browser.open(_page_with_status_stub(_snapshot(tmp_path, row), "job.html"), 375)
-        browser.eval("""new Promise(function (done) { location.hash = '#job-h-review'; (function wait() {
-          if (document.querySelector('#jobview .lr-last')) done(true); else setTimeout(wait, 50); })(); })""")
+        browser.open(_page_with_status_stub(_snapshot(tmp_path, row), "ticket.html"), 375)
+        browser.eval("""new Promise(function (done) { location.hash = '#t=' + encodeURIComponent('maxharris1/cleffy#40'); (function wait() {
+          if (document.querySelector('#ticketview .lr-last')) done(true); else setTimeout(wait, 50); })(); })""")
         assert browser.eval("document.documentElement.scrollWidth") == 375
         spill = browser.eval("""(function () {
-          var panel = document.querySelector('#jobview .lr'), box = panel.getBoundingClientRect();
+          var panel = document.querySelector('#ticketview .lr'), box = panel.getBoundingClientRect();
           return [].filter.call(panel.querySelectorAll('*'), function (e) {
             var b = e.getBoundingClientRect(); return b.width && (b.left < box.left - 0.5 || b.right > box.right + 0.5);
           }).map(function (e) { return e.className; });
@@ -219,10 +220,10 @@ ARTBOARD_LINE_HEIGHT = {"lr-task": 1.35, "lr-kind": 1.6, "lr-tile b": 1.25}
 def test_live_text_keeps_the_artboard_line_heights(tmp_path: Path) -> None:
     browser = Browser()
     try:
-        browser.open(_page_with_status_stub(_snapshot(tmp_path, LIVE_ROW), "job.html"), 1440)
-        browser.eval("""new Promise(function (done) { location.hash = '#job-h-review'; (function wait() {
-          if (document.querySelector('#jobview .lr-desc')) done(true); else setTimeout(wait, 50); })(); })""")
-        rows = browser.eval("""[].filter.call(document.querySelectorAll('#jobview .lr *'), function (e) {
+        browser.open(_page_with_status_stub(_snapshot(tmp_path, LIVE_ROW), "ticket.html"), 1440)
+        browser.eval("""new Promise(function (done) { location.hash = '#t=' + encodeURIComponent('maxharris1/cleffy#40'); (function wait() {
+          if (document.querySelector('#ticketview .lr-desc')) done(true); else setTimeout(wait, 50); })(); })""")
+        rows = browser.eval("""[].filter.call(document.querySelectorAll('#ticketview .lr *'), function (e) {
             return [].some.call(e.childNodes, function (n) { return n.nodeType === 3 && n.data.trim(); });
           }).map(function (e) {
             var s = getComputedStyle(e), owner = e.closest('[class]');
