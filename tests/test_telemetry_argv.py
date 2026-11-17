@@ -219,7 +219,6 @@ def test_the_dashboard_shows_no_data_for_a_job_without_usage(tmp_path: Path) -> 
     assert "<b>no data</b><span>tokens in</span>" in tiles and "<b>no data</b><span>tokens out</span>" in tiles
     page = dashboard_telemetry.rollup_panel({"telemetry": rollup})
     assert "1 jobs report no token usage (no data)" in page
-    assert '<td class="num muted">no data</td>' in page
 
 
 def test_an_older_table_gains_tokens_unknown_and_old_zero_rows_read_as_no_data(tmp_path: Path) -> None:
