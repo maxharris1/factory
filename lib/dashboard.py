@@ -52,18 +52,21 @@ no record. A running or queued job is not in `now`: the page joins it
 from `running` and `queued`.
 
 CI (#717): `ci_runs` is {runs, failures} from the ci_jobs table the poller
-writes. A run is one ticket head's jobs; its status is derived, never
-stored: any job in progress, or some done and some queued, is in_progress;
-all queued is queued; all completed is failed when any conclusion is in
-CHECK_FAILED, else passed. `runs` lists only queued and in_progress runs,
-newest first: {repo, ticket_id, source, pr, tracker, head_short, status,
-age_seconds, jobs}. A job is {name, status, conclusion, run_id, job_id,
+writes. A run is one ticket head's jobs, from every workflow; its status
+is derived, never stored: any job in progress, or some done and some
+queued, is in_progress; all queued is queued; all completed is failed when
+any conclusion is in CHECK_FAILED, else passed. `runs` lists only queued
+and in_progress runs, newest first: {repo, ticket_id, source, pr, tracker,
+head_short, status, age_seconds, jobs}. A job is {name, status, conclusion, run_id, job_id,
 runner_kind, runner_name, created_at, started_at, completed_at,
 elapsed_seconds, queue_seconds}; runner_kind None means not looked up yet.
-`failures` is the newest RECENT_CI_FAILURES failed jobs seen in the last
-CI_FAILURE_WINDOW on any head: the ticket reference, head_short, name,
-conclusion, run_id, job_id, tests (the first CI_TESTS_SHOWN failing test
-names), more_tests and age_seconds. No URL is stored, since redaction
+`failures` is the newest RECENT_CI_FAILURES failed jobs that completed in
+the last CI_FAILURE_WINDOW on any head: the ticket reference, head_short,
+name, conclusion, run_id, job_id, tests (the first CI_TESTS_SHOWN failing
+test names), more_tests and age_seconds since the job completed. The
+poller spends at most 3 `actions/runs/{id}/jobs` reads (runners) and 1
+`actions/jobs/{id}/logs` read (failing tests, once per failed job attempt)
+a cycle, each one `gh api` request. No URL is stored, since redaction
 hides every URL: the pages build the github.com PR, commit, job log and
 issue-search links from these parts.
 
@@ -1036,7 +1039,10 @@ def _ci_runs(
         }
         grouped.setdefault((*key, head), []).append(job)
         refs.setdefault((*key, head), ref)
-        if status == "completed" and conclusion in CHECK_FAILED and float(row["seen_at"]) >= now - CI_FAILURE_WINDOW:
+        if (
+            status == "completed" and conclusion in CHECK_FAILED
+            and completed is not None and completed >= now - CI_FAILURE_WINDOW
+        ):
             tests, more = _ci_tests(row["failing_tests"])
             failures.append({
                 **ref,
@@ -1046,7 +1052,7 @@ def _ci_runs(
                 "job_id": job["job_id"],
                 "tests": tests,
                 "more_tests": more,
-                "at": completed if completed is not None else float(row["seen_at"]),
+                "at": completed,
             })
     runs = []
     for run_key, jobs in grouped.items():

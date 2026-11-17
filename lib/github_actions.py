@@ -739,6 +739,13 @@ class GitHubReviewActions:
             raise GitHubAdapterError("run jobs page has no jobs list")
         return tuple(_run_job(_object(job)) for job in jobs)
 
+    def job_log(self, repo: str, job_id: str) -> str:
+        """One job's whole log in one request; GitHub answers with a redirect
+        to the log blob, which is not an API request."""
+        if not job_id.isdigit():
+            raise GitHubAdapterError("Actions job id is not a number")
+        return self._call(f"{_repo_path(repo)}/actions/jobs/{job_id}/logs")
+
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
     ) -> str:
@@ -987,6 +994,7 @@ def _check_row(run: dict[str, Any]) -> CheckRow:
         log_url=None if job is None else details,
         run_id=None if job is None else job.group(2),
         job_id=None if job is None else job.group(3),
+        workflow=_workflow_identity(run),
     )
 
 

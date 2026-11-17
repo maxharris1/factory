@@ -71,6 +71,7 @@ class CheckRow:
     log_url: str | None = None
     run_id: str | None = None
     job_id: str | None = None
+    workflow: str = ""
 
 
 @dataclass(frozen=True)

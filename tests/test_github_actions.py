@@ -1427,6 +1427,7 @@ def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> No
             log_url="https://github.com/owner/repo/actions/runs/123456/job/31000000004",
             run_id="123456",
             job_id="31000000004",
+            workflow="actions-run:123456",
         ),
         CheckRow(
             "lint",
@@ -1434,6 +1435,7 @@ def test_ci_status_lists_every_latest_attempt_check_without_another_read() -> No
             "failure",
             started_at=epoch("2026-11-10T19:50:00"),
             completed_at=epoch("2026-11-10T19:56:00"),
+            workflow="suite:77",
         ),
     )
     assert gh.keys() == [CHECKS, STATUS]
@@ -1558,6 +1560,27 @@ def test_run_jobs_refuses_a_page_without_a_jobs_list() -> None:
 
     with pytest.raises(GitHubAdapterError):
         actions.run_jobs("owner/repo", "123456")
+
+
+JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs",)
+
+
+def test_job_log_reads_one_jobs_log_in_one_api_request() -> None:
+    actions, gh = adapter()
+    gh.route(JOB_LOG, GhResult(0, "2026-11-10T19:50:02Z FAILED tests/test_a.py::test_b\n", ""))
+
+    assert actions.job_log("owner/repo", "31000000004") == (
+        "2026-11-10T19:50:02Z FAILED tests/test_a.py::test_b\n"
+    )
+    assert gh.calls == [[*GH, "api", *JOB_LOG]]
+
+
+def test_job_log_refuses_a_job_id_that_is_not_a_number() -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError):
+        actions.job_log("owner/repo", "../secrets")
+    assert gh.calls == []
 
 
 RUN_LOG = ("run", "view", "123456", "--repo", "owner/repo", "--log-failed")

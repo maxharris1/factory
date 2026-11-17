@@ -125,7 +125,7 @@ class PollMixin:
                     ],
                     self.queue.now(),
                     run_jobs=self.ci_runs,
-                    ci_logs=self.ci_logs,
+                    job_log=self.ci_job_log,
                     log=self.log,
                 )
             except Exception as exc:

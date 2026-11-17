@@ -27,7 +27,8 @@ def add_ci(
     connection: sqlite3.Connection, ticket: str, head: str, name: str, status: str,
     conclusion: str | None = None, **columns: object,
 ) -> None:
-    row = {"repo": REPO, "ticket_id": ticket, "head": head, "check_name": name, "status": status,
+    row = {"repo": REPO, "ticket_id": ticket, "head": head, "workflow": "actions-run:1", "check_name": name,
+           "status": status,
            "conclusion": conclusion, "created_at": NOW - 600, "seen_at": NOW - 5, **columns}
     connection.execute(
         f"INSERT INTO ci_jobs ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})", tuple(row.values())
@@ -169,6 +170,18 @@ def test_failures_keep_a_day_newest_first_and_at_most_ten(tmp_path: Path) -> Non
 
     failures = snapshot_with(tmp_path, seed)["ci_runs"]["failures"]
     assert [f["name"] for f in failures] == [f"shard {i}" for i in range(10)]
+
+
+def test_a_failure_is_listed_for_a_day_from_when_it_completed_not_when_last_seen(tmp_path: Path) -> None:
+    def seed(connection: sqlite3.Connection) -> None:
+        add_ci(connection, "12", HEAD_A, "fresh", "completed", "failure", completed_at=NOW - 23 * 3600)
+        add_ci(connection, "12", HEAD_B, "stale", "completed", "failure", completed_at=NOW - 3 * 86400)
+
+    snapshot = snapshot_with(tmp_path, seed)
+    failures = snapshot["ci_runs"]["failures"]
+    assert [(f["name"], f["age_seconds"]) for f in failures] == [("fresh", 23 * 3600)]
+    failed = _server(snapshot).split("Recent failures (24 h)")[1]
+    assert "fresh" in failed and "stale" not in failed and HEAD_B[:7] not in failed
 
 
 def test_a_log_link_comes_only_from_github_job_ids(tmp_path: Path) -> None:

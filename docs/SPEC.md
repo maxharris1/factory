@@ -725,14 +725,16 @@ under the limit. Comment and CI reads retry with backoff, and a rate-limit
 403 or 429 backs every GitHub read off.
 
 The dashboard's CI board (`lib/dispatch/ci_board.py`, issue #717) adds at
-most 4 requests a cycle. Its rows come from the check runs `ci_status`
-already read, at no cost. Runner names and queue times take at most 3
-`actions/runs/{id}/jobs` reads a cycle, each run read until every started
-job's runner is saved. Failing tests take at most 1 `gh run view
---log-failed` a cycle, once per failed run attempt after the whole run
-finishes, and none when a CI-fix job's evidence already holds the log. At
-about 20 runs an hour that is about 60 to 80 requests an hour; the worst
-case is 480 an hour at `poll_seconds: 30`.
+most 4 requests a cycle, each a single `gh api` request with no
+`--paginate`. Its rows come from the check runs `ci_status` already read,
+at no cost, one per check per workflow at the ticket's head. Runner names
+and queue times take at most 3 `actions/runs/{id}/jobs` reads a cycle,
+each run read until every started job's runner is saved. Failing tests
+take at most 1 `actions/jobs/{id}/logs` read a cycle, once per failed job
+attempt, as soon as that job completes. At about 20 runs an hour that is
+about 60 to 80 requests an hour; the worst case is 480 an hour at
+`poll_seconds: 30`. Recent failures are listed for 24 hours from the time
+the job completed.
 
 **State backup (issue #108, #66).** After every cycle `orch poll` backs
 `orch.db` up with SQLite's online backup API to `$ORCH_DB_BACKUP`, default

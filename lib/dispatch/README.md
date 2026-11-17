@@ -72,5 +72,5 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
 | Poll | `poll.py` (`PollMixin`, `PollLoop`) | `poll_once`, handoff verification, poll-error streaks, attention |
 | Eval log | `eval_log.py` (`EvalLogMixin`) | `_export_eval_log`: append `dispatcher.log` beside the database from the rows each poll committed (#545) |
-| CI board | `ci_board.py` | `record`: the dashboard's `ci_jobs` rows from the check runs `ci_status` read, plus at most 3 run-jobs reads and 1 failed-log read a cycle (issue #717) |
+| CI board | `ci_board.py` | `record`: the dashboard's `ci_jobs` rows from the check runs `ci_status` read, plus at most 3 `actions/runs/{id}/jobs` reads and 1 `actions/jobs/{id}/logs` read a cycle, each one `gh api` request (issue #717) |
 | Cycle timing | `cycle_clock.py` (`CycleClock`) | per-phase cycle durations for poller.log and `orch status` |

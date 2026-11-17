@@ -70,6 +70,7 @@ class DispatcherBase:
         approvals: Approvals | None = None,
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
+        ci_job_log: Callable[[str, str], str] | None = None,
         hold_carry: HoldCarry | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
@@ -102,6 +103,7 @@ class DispatcherBase:
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
         self.ci_runs = ci_runs
+        self.ci_job_log = ci_job_log
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}

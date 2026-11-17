@@ -1176,6 +1176,7 @@ def _runtime(
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
         ci_runs=source.github.run_jobs,
+        ci_job_log=source.github.job_log,
         hold_carry=_hold_carry,
     )
     source.error_sink = dispatcher.record_poll_error

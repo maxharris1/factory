@@ -497,6 +497,7 @@ class SchemaMixin:
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
                     head TEXT NOT NULL,
+                    workflow TEXT NOT NULL,
                     check_name TEXT NOT NULL,
                     pr TEXT,
                     run_id TEXT,
@@ -511,7 +512,7 @@ class SchemaMixin:
                     runner_kind TEXT,
                     failing_tests TEXT,
                     seen_at REAL NOT NULL,
-                    PRIMARY KEY (repo, ticket_id, head, check_name)
+                    PRIMARY KEY (repo, ticket_id, head, workflow, check_name)
                 )
                 """
             )

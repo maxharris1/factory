@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import re
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
+from lib.dashboard import _ci_runs
+from lib.dashboard_pages.ci import _ci_section
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.types import CheckRow, CIResult, RunJob, TrackedTicket
 from lib.dispatcher import Dispatcher
+from lib.github_actions import GitHubReviewActions
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
     TRUSTED_LOGINS,
@@ -30,16 +35,18 @@ def check(
     run: str = "900",
     job: str = "1",
     started: float | None = 50.0,
+    completed: float | None = 60.0,
 ) -> CheckRow:
     return CheckRow(
         name=name,
         status=status,
         conclusion=conclusion,
         started_at=None if status == "queued" else started,
-        completed_at=60.0 if status == "completed" else None,
+        completed_at=completed if status == "completed" else None,
         log_url=f"https://github.com/owner/repo/actions/runs/{run}/job/{job}",
         run_id=run,
         job_id=job,
+        workflow=f"actions-run:{run}",
     )
 
 
@@ -71,7 +78,7 @@ def hosted(job: str, name: str = "pytest") -> RunJob:
 class GitHub:
     def __init__(self) -> None:
         self.jobs: dict[str, Sequence[RunJob] | Exception] = {}
-        self.logs: dict[str, Mapping[str, str] | Exception] = {}
+        self.logs: dict[str, str | Exception] = {}
         self.job_reads: list[str] = []
         self.log_reads: list[str] = []
 
@@ -83,10 +90,10 @@ class GitHub:
             raise answer
         return answer
 
-    def ci_logs(self, repo: str, run_id: str) -> Mapping[str, str]:
+    def job_log(self, repo: str, job_id: str) -> str:
         assert repo.lower() == REPO.lower()
-        self.log_reads.append(run_id)
-        answer = self.logs.get(run_id, {})
+        self.log_reads.append(job_id)
+        answer = self.logs.get(job_id, "")
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -112,8 +119,8 @@ class Board:
             review_actions=FakeReviewActions(),
             grok_delivery=FakeGrokDelivery(),
             log=self.lines.append,
-            ci_logs=self.github.ci_logs,
             ci_runs=self.github.run_jobs,
+            ci_job_log=self.github.job_log,
         )
         self.dispatcher.cycle_clock = CycleClock()
 
@@ -135,6 +142,10 @@ class Board:
                     "SELECT * FROM ci_jobs ORDER BY ticket_id, head, check_name"
                 )
             ]
+
+    def dashboard(self) -> dict:
+        with self.queue.connect() as connection:
+            return _ci_runs(connection, self.now[0], {}, {})
 
     def row(self, ticket_id: str, name: str) -> dict[str, object]:
         (row,) = [
@@ -237,7 +248,7 @@ def test_a_job_that_ran_without_a_runner_is_read_once(tmp_path: Path) -> None:
     assert board.row("1", "deploy")["runner_kind"] == "none"
 
 
-def test_a_failed_run_costs_one_log_read_once(tmp_path: Path) -> None:
+def test_each_failed_job_costs_one_log_read_once(tmp_path: Path) -> None:
     board = Board(tmp_path)
     board.track("1")
     failed = pr(
@@ -247,25 +258,24 @@ def test_a_failed_run_costs_one_log_read_once(tmp_path: Path) -> None:
         check("lint", "completed", "failure", job="2"),
         check("build", "completed", "success", job="3"),
     )
-    board.github.logs["900"] = {
-        "pytest": "collected 3 items\nFAILED tests/test_a.py::test_b - assert 1 == 2\n1 failed"
-    }
+    board.github.logs["1"] = "collected 3 items\nFAILED tests/test_a.py::test_b - assert 1 == 2\n1 failed"
 
-    board.cycle(failed)
-    assert board.github.log_reads == ["900"]
-    board.github.spent()
-    board.cycle(failed)
-    assert board.github.log_reads == []
+    reads = []
+    for _ in range(3):
+        board.cycle(failed)
+        reads.append(list(board.github.log_reads))
+        board.github.spent()
 
+    assert reads == [["1"], ["2"], []]
     assert json.loads(str(board.row("1", "pytest")["failing_tests"])) == ["tests/test_a.py::test_b"]
     assert json.loads(str(board.row("1", "lint")["failing_tests"])) == []
     assert board.row("1", "build")["failing_tests"] is None
 
 
-def test_the_log_read_waits_for_the_whole_run(tmp_path: Path) -> None:
+def test_a_failed_jobs_log_is_read_while_the_rest_of_its_run_still_runs(tmp_path: Path) -> None:
     board = Board(tmp_path)
     board.track("1")
-    board.github.logs["900"] = {"pytest": "FAILED tests/test_a.py::test_b"}
+    board.github.logs["1"] = "FAILED tests/test_a.py::test_b"
 
     board.cycle(
         pr(
@@ -275,17 +285,9 @@ def test_the_log_read_waits_for_the_whole_run(tmp_path: Path) -> None:
             check("e2e", "in_progress", job="2"),
         )
     )
-    assert board.github.log_reads == []
 
-    board.cycle(
-        pr(
-            "1",
-            HEAD,
-            check("pytest", "completed", "failure", job="1"),
-            check("e2e", "completed", "success", job="2"),
-        )
-    )
-    assert board.github.log_reads == ["900"]
+    assert board.github.log_reads == ["1"]
+    assert json.loads(str(board.row("1", "pytest")["failing_tests"])) == ["tests/test_a.py::test_b"]
 
 
 def fix_job_with_log(board: Board, log_tail: str | None) -> None:
@@ -319,29 +321,6 @@ def fix_job_with_log(board: Board, log_tail: str | None) -> None:
     )
 
 
-def test_a_ci_fix_that_holds_the_log_saves_the_log_read(tmp_path: Path) -> None:
-    board = Board(tmp_path)
-    board.track("1")
-    fix_job_with_log(board, "E   assert 1 == 2\nFAILED tests/test_a.py::test_b - assert 1 == 2")
-
-    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure")))
-
-    assert board.github.log_reads == []
-    assert json.loads(str(board.row("1", "pytest")["failing_tests"])) == ["tests/test_a.py::test_b"]
-
-
-def test_a_ci_fix_without_the_log_still_reads_it(tmp_path: Path) -> None:
-    board = Board(tmp_path)
-    board.track("1")
-    fix_job_with_log(board, None)
-    board.github.logs["900"] = {"pytest": "FAILED tests/test_a.py::test_c"}
-
-    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure")))
-
-    assert board.github.log_reads == ["900"]
-    assert json.loads(str(board.row("1", "pytest")["failing_tests"])) == ["tests/test_a.py::test_c"]
-
-
 def test_a_busy_board_never_spends_more_than_four_requests_a_cycle(tmp_path: Path) -> None:
     board = Board(tmp_path)
     ids = [str(n) for n in range(10, 22)]
@@ -363,7 +342,7 @@ def test_a_busy_board_never_spends_more_than_four_requests_a_cycle(tmp_path: Pat
             )
         )
         board.github.jobs[f"9{n}"] = (hosted(n),)
-        board.github.logs[f"9{n}"] = {"pytest": f"FAILED tests/test_{n}.py::test_x"}
+        board.github.logs[n] = f"FAILED tests/test_{n}.py::test_x"
 
     spent = []
     for _ in range(6):
@@ -416,7 +395,7 @@ def test_a_rerun_at_the_same_head_replaces_the_row_and_its_lookups(tmp_path: Pat
             runner_kind="self-hosted",
         ),
     )
-    board.github.logs["900"] = {"pytest": "FAILED tests/test_a.py::test_b"}
+    board.github.logs["1"] = "FAILED tests/test_a.py::test_b"
     board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
     assert board.row("1", "pytest")["runner_name"] == "pc-wsl-bots-2"
 
@@ -444,20 +423,36 @@ def test_a_rerun_at_the_same_head_replaces_the_row_and_its_lookups(tmp_path: Pat
     assert (row["runner_name"], row["failing_tests"]) == ("GitHub Actions 2", None)
 
 
-def test_two_checks_sharing_a_name_keep_the_failure(tmp_path: Path) -> None:
+def test_two_workflows_sharing_a_check_name_keep_both_jobs(tmp_path: Path) -> None:
     board = Board(tmp_path)
     board.track("1")
     shared = pr(
         "1",
         HEAD,
         check("build", "completed", "failure", run="901", job="1", started=10.0),
-        check("build", "completed", "success", run="902", job="2", started=20.0),
+        check("build", "in_progress", run="902", job="2", started=20.0),
     )
 
     board.cycle(shared)
     board.cycle(shared)
 
-    assert [(row["run_id"], row["conclusion"]) for row in board.rows()] == [("901", "failure")]
+    assert [(row["run_id"], row["status"], row["conclusion"]) for row in board.rows()] == [
+        ("901", "completed", "failure"),
+        ("902", "in_progress", None),
+    ]
+    dashboard = board.dashboard()
+    (run,) = dashboard["runs"]
+    assert run["status"] == "in_progress"
+    assert sorted((job["run_id"], job["status"]) for job in run["jobs"]) == [
+        ("901", "completed"),
+        ("902", "in_progress"),
+    ]
+    assert [(failure["run_id"], failure["name"]) for failure in dashboard["failures"]] == [
+        ("901", "build")
+    ]
+    section = _ci_section({"ci_runs": dashboard})
+    assert "no CI queued or running" not in section
+    assert "actions/runs/901/job/1" in section and "actions/runs/902/job/2" in section
 
 
 def test_a_finished_ticket_keeps_only_its_failures(tmp_path: Path) -> None:
@@ -512,3 +507,139 @@ def test_a_broken_board_never_fails_the_poll_cycle(tmp_path: Path) -> None:
     with board.queue.connect() as connection:
         errors = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
     assert [tuple(row) for row in errors] == [("ci-board", "OperationalError")]
+
+
+class RecordingGh:
+    """GitHub behind the real adapter: every gh argv, answered by endpoint."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(argv))
+        endpoint = argv[-1]
+        runs = re.search(r"/actions/runs/([0-9]+)/jobs", endpoint)
+        if runs:
+            job = {
+                "id": int(runs.group(1)) - 890,
+                "name": "pytest",
+                "status": "in_progress",
+                "conclusion": None,
+                "created_at": "2026-11-10T19:49:30Z",
+                "started_at": "2026-11-10T19:50:00Z",
+                "runner_name": "GitHub Actions 7",
+                "runner_group_name": "GitHub Actions",
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"total_count": 1, "jobs": [job]}), "")
+        if re.search(r"/actions/jobs/[0-9]+/logs$", endpoint):
+            return subprocess.CompletedProcess(argv, 0, "FAILED tests/test_x.py::test_y - boom\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "unexpected gh call")
+
+
+def test_the_board_spends_at_most_four_single_gh_api_requests_a_cycle(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    gh = RecordingGh()
+    actions = GitHubReviewActions(gh)
+    board.dispatcher.ci_runs = actions.run_jobs
+    board.dispatcher.ci_job_log = actions.job_log
+    board.track("1", "2", "3", "4")
+
+    board.cycle(
+        pr("1", HEAD, check("pytest", "in_progress", run="901", job="11")),
+        pr("2", HEAD, check("pytest", "in_progress", run="902", job="12")),
+        pr("3", HEAD, check("pytest", "in_progress", run="903", job="13")),
+        pr("4", HEAD, check("pytest", "completed", "failure", run="904", job="14")),
+    )
+
+    assert len(gh.calls) <= 4
+    for argv in gh.calls:
+        rest = argv[argv.index("gh") + 1 :]
+        assert rest[0] == "api" and "--paginate" not in rest, argv
+        assert "view" not in rest, argv
+    assert sorted(argv[-1] for argv in gh.calls) == [
+        "repos/owner/repo/actions/jobs/14/logs",
+        "repos/owner/repo/actions/runs/901/jobs?per_page=100",
+        "repos/owner/repo/actions/runs/902/jobs?per_page=100",
+        "repos/owner/repo/actions/runs/903/jobs?per_page=100",
+    ]
+    assert json.loads(str(board.row("4", "pytest")["failing_tests"])) == ["tests/test_x.py::test_y"]
+
+
+def test_a_rerun_shows_the_failing_tests_of_its_own_attempt(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    fix_job_with_log(board, "FAILED tests/test_old.py::test_old")
+    board.github.logs["1"] = "FAILED tests/test_old.py::test_old"
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
+    board.cycle(pr("1", HEAD, check("pytest", "queued", job="2")))
+    board.github.logs["2"] = "FAILED tests/test_new.py::test_new"
+    board.github.spent()
+
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="2", completed=70.0)))
+
+    assert board.github.log_reads == ["2"]
+    assert [failure["tests"] for failure in board.dashboard()["failures"]] == [
+        ["tests/test_new.py::test_new"]
+    ]
+
+
+def test_a_log_read_lands_only_on_the_attempt_it_read(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    read = board.github.job_log
+
+    def rerun_while_reading(repo: str, job_id: str) -> str:
+        board.dispatcher.ci_job_log = read
+        board.cycle(pr("1", HEAD, check("pytest", "queued", job="2")))
+        return "FAILED tests/test_old.py::test_old"
+
+    board.dispatcher.ci_job_log = rerun_while_reading
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
+
+    row = board.row("1", "pytest")
+    assert (row["job_id"], row["failing_tests"]) == ("2", None)
+
+
+def test_a_failure_leaves_the_dashboard_a_day_after_it_completed_though_still_polled(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    board.github.jobs["900"] = (
+        RunJob("1", "pytest", "completed", created_at=40.0, runner_kind="none"),
+    )
+    board.github.logs["1"] = "FAILED tests/test_a.py::test_b"
+    failed = pr("1", HEAD, check("pytest", "completed", "failure", job="1", completed=None))
+    board.cycle(failed)
+    assert [failure["age_seconds"] for failure in board.dashboard()["failures"]] == [0]
+    board.github.spent()
+
+    board.now[0] += 23 * 60 * 60
+    board.cycle(failed)
+    assert [failure["age_seconds"] for failure in board.dashboard()["failures"]] == [23 * 60 * 60]
+
+    board.now[0] += 2 * DAY + 60 * 60
+    board.cycle(failed)
+    dashboard = board.dashboard()
+    assert dashboard["failures"] == []
+    section = _ci_section({"ci_runs": dashboard})
+    assert "no CI failures in the last 24 h" in section and "actions/runs/900/job/1" not in section
+    assert board.github.spent() == 0
+
+
+def test_an_old_heads_failure_is_dropped_a_day_after_it_completed(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    failed = pr("1", HEAD, check("pytest", "completed", "failure", job="1", completed=1000.0))
+    board.cycle(failed)
+    board.now[0] += 20 * 60 * 60
+    board.cycle(failed)
+    rerun = pr("1", NEW_HEAD, check("pytest", "queued", run="901", job="2"))
+    board.now[0] += 3 * 60 * 60
+    board.cycle(rerun)
+    assert [row["head"] for row in board.rows()] == [HEAD, NEW_HEAD]
+
+    board.now[0] += 2 * 60 * 60
+    board.cycle(rerun)
+
+    assert [row["head"] for row in board.rows()] == [NEW_HEAD]
