@@ -162,8 +162,6 @@ def test_without_an_override_a_ticket_opens_on_factory_ref(tmp_path: Path) -> No
 
 
 def partly_fed(tmp_path: Path):
-    """AUT-7's PR opens on the feature branch, its Linear comment fails, and
-    the feature branch is then deleted, so the retry is held."""
     github, linear = BaseReadingGitHub(), FakeLinear()
     github.branches[(REPO, FEATURE)] = FEATURE_SHA
     linear.issues = [in_project("AUT-7", "proj-upload")]

@@ -286,14 +286,12 @@ class DispatcherBase:
             if self._watched(fresh):
                 self._abandon_closed(fresh)
             return fresh
-        mismatch = self._base_mismatched(fresh)
+        mismatch = self._sync_base_mismatch(fresh)
         if mismatch is not None:
             raise BaseMismatch(mismatch, fresh)
         return fresh
 
-    def _base_mismatched(self, ticket: TrackedTicket) -> str | None:
-        """Why the PR's live base is not the ticket's, flagged base-mismatch
-        once; a read that shows the right base clears the flag."""
+    def _sync_base_mismatch(self, ticket: TrackedTicket) -> str | None:
         mismatch = _base_mismatch(ticket)
         if mismatch is not None:
             with self._connect() as connection:

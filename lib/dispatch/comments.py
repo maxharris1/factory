@@ -61,7 +61,7 @@ class CommentsMixin:
         if ticket.closed and self._watched(ticket):
             self._abandon_closed(ticket)
             return
-        if self._base_mismatched(ticket) is not None:
+        if self._sync_base_mismatch(ticket) is not None:
             return
         comments = sorted(ticket.comments, key=_comment_order)
         try:

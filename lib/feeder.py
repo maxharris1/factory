@@ -165,6 +165,7 @@ STATES = (
     "done",
     "closed",
 )
+FEED_NOT_BEGUN = "branch IS NULL"
 UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
@@ -1123,7 +1124,7 @@ class Feeder:
                         tier = excluded.tier,
                         risk = CASE WHEN state IN ({unstarted}) THEN excluded.risk
                                     ELSE risk END,
-                        base_branch = CASE WHEN branch IS NULL THEN excluded.base_branch
+                        base_branch = CASE WHEN {FEED_NOT_BEGUN} THEN excluded.base_branch
                                            ELSE base_branch END,
                         harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
                                        ELSE excluded.harness END,
@@ -1155,11 +1156,10 @@ class Feeder:
                 (now,),
             )
             # A ticket that lost its signal before its feed began is forgotten;
-            # one with a branch is kept forever, so it is never opened twice
-            # or on another base.
+            # a begun one is kept forever, so it is never opened twice.
             connection.execute(
                 f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted}) "
-                "AND branch IS NULL",
+                f"AND {FEED_NOT_BEGUN}",
                 (now,),
             )
             connection.commit()
