@@ -32,7 +32,7 @@ from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import Device, MachinesConfig
-from lib.remote import TAG_ENV, Exchanged, RemoteTarget, ssh_argv
+from lib.remote import TAG_ENV, Exchanged, RemoteTarget, SshTransport, ssh_argv
 from lib.telemetry import Scrubber, Session, harness_argv, stream_flags
 from lib.usage import reserve_check
 from lib.usage_readings import (
@@ -542,8 +542,8 @@ time.sleep(60)
 """
 
 
-def _hanging_claude(tmp_path: Path) -> str:
-    path = tmp_path / "claude"
+def _hanging_claude(tmp_path: Path, name: str = "claude") -> str:
+    path = tmp_path / name
     path.write_text(HANGING_CLAUDE, encoding="utf-8")
     path.chmod(0o755)
     return str(path)
@@ -566,6 +566,23 @@ def test_a_local_probe_failure_logs_one_fixed_line(tmp_path: Path, binary: str, 
         lambda: usage_probe.claude_local(path, environ, timeout=timeout), lines.append,
     ).join(10)
     assert lines == [line] and added == []
+
+
+def test_a_remote_probe_timeout_logs_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _hanging_claude(tmp_path, "ssh")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("ORCH_SSH_MUX", "off")
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
+    monkeypatch.setenv(TAG_ENV, TAG_VALUE)
+    monkeypatch.setenv("PROBE_TEST", ENV_VALUE)
+    lines: list[str] = []
+    added: list[list[Reading]] = []
+    usage_probe.start_claude(
+        added.append, lambda: CAPTURED,
+        lambda: usage_probe.claude_remote(SshTransport(), TARGET, timeout=0.5), lines.append,
+    ).join(10)
+    assert lines == ["usage probe: failed (timed out after 0.5s)"] and added == []
+    assert not any(secret in lines[0] for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE))
 
 
 @pytest.mark.parametrize(

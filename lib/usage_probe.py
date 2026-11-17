@@ -114,6 +114,8 @@ def _exchange(transport: Transport, argv: list[str], data: bytes, timeout: float
     if not isinstance(transport, ByteTransport):
         raise ProbeFailed("no byte transport")
     result = transport.exchange(argv, timeout=timeout, input=data)
+    if result.timed_out:
+        raise ProbeFailed(f"timed out after {timeout:g}s")
     if result.code != 0:
         raise ProbeFailed(f"ssh exit {result.code}")
     return result.stdout[:MAX_REPLY_BYTES]
