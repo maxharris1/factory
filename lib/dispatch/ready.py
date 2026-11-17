@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from lib.dispatch.constants import CI_SILENT_REASON, CI_SILENT_SECONDS, CI_WAIT_REASONS, TERMINAL_STATES
@@ -13,6 +14,7 @@ from lib.dispatch.helpers import (
     _answering_outcome,
     _comment_link,
     _comment_order,
+    _detail_project_bot,
     _detail_round_number,
     _has_questions,
     _matching_head,
@@ -23,7 +25,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import BaseMismatch, CIResult, Comment, Registration, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment
-from lib.queue import JobRequest
+from lib.queue import JobRequest, _job
 from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
@@ -43,6 +45,48 @@ class ReadyMixin:
         handled, outcome = self._ready(ticket, comment, fields)
         self._record_ci_wait(ticket, comment, fields["head"], outcome)
         return handled, outcome
+
+    def _ready_at_base(self, ticket: TrackedTicket, comment: Comment) -> None:
+        """#705: the ready names the base itself (the PR has no commits), so
+        its job built nothing. Rerun the job once at the same attempt; a
+        second such ready stops the ticket for Max."""
+        with self._connect() as connection:
+            poster = connection.execute(
+                "SELECT * FROM jobs WHERE lower(repo) = ? AND ticket_id = ? AND handoff_comment_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+            repeated = connection.execute(
+                """
+                SELECT 1 FROM handled_comments
+                WHERE repo = ? AND ticket_id = ? AND outcome = 'rejected-ready-at-base'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if poster is None:
+            return
+        job = _job(poster)
+        if repeated is None:
+            self.queue.enqueue(
+                replace(job.request, generation=job.request.generation + 1),
+                dedupe_key=f"ready-at-base:{comment.id}",
+            )
+            return
+        self._mark_stuck_and_wake(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            source_comment_id=job.request.source_comment_id,
+            timeout_seconds=job.request.timeout_seconds,
+            reason="ready-at-base-2",
+            detail=json.dumps(
+                {
+                    "project_bot": _detail_project_bot(job.request.detail),
+                    "detail": f"{job.request.action} posted a ready at the base twice",
+                    "job_id": job.id,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
 
     def _ready(
         self,
@@ -85,6 +129,12 @@ class ReadyMixin:
             return True, f"ready-while-{parked}"
         if state == "blocked":
             return True, "blocked-ready"
+        if (
+            ticket.pr_commits == 0
+            and _matching_head(fields["head"], ticket.current_head) is not None
+        ):
+            self._ready_at_base(ticket, comment)
+            return True, "rejected-ready-at-base"
         reported_head = fields["head"]
         reentry: int | None = None
         rereview = False

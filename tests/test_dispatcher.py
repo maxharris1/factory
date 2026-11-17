@@ -8088,3 +8088,192 @@ def test_go_on_a_stuck_ticket_is_still_ticket_stuck(tmp_path: Path) -> None:
 
     assert handled_outcome(queue, "go-1") == "ticket-stuck"
     assert queued_harness_jobs(queue) == []
+
+
+BASE_705 = "c5e4c1226609516c5d948c7784c8309a61fbf698"
+REBUILT_705 = "8edaf0dfc7ad46922b9adc4fd635c7feca92e3e2"
+BRANCH_705 = "factory/issue-42"
+
+
+class BranchActions705(FakeReviewActions):
+    """GitHub's view of the PR branch: its tip and how far it is ahead of base."""
+
+    def __init__(self, tip: str, ahead: int) -> None:
+        super().__init__()
+        self.tip = tip
+        self.ahead = ahead
+        self.reopened: list[str] = []
+
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        assert branch == ticket.git_branch_name
+        return self.tip
+
+    def commits_ahead(self, ticket: TrackedTicket, *, base: str, head: str) -> int:
+        assert (base, head) == (ticket.pr_base, self.tip)
+        return self.ahead
+
+    def reopen(self, ticket: TrackedTicket) -> None:
+        self.reopened.append(ticket.ticket_id)
+
+
+def _pr_705(*comments: Comment, head: str, closed: bool, commits: int) -> TrackedTicket:
+    return replace(
+        ticket(*comments, head=head, ci={head: CIResult("success")}),
+        git_branch_name=BRANCH_705,
+        pr_number="42",
+        pr_base="main",
+        closed=closed,
+        pr_commits=commits,
+    )
+
+
+def _running_build_705(queue: SQLiteJobQueue, *, attempt: int = 1, key: str = "build:705") -> Job:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-705",
+            timeout_seconds=3600,
+            attempt=attempt,
+        ),
+        dedupe_key=key,
+    )
+    job = queue.claim("claude")
+    assert job is not None
+    return job
+
+
+def _jobs_705(queue: SQLiteJobQueue) -> list[tuple[str, str, int]]:
+    with queue.connect() as connection:
+        return [
+            (row["action"], row["state"], row["attempt"])
+            for row in connection.execute(
+                "SELECT action, state, attempt FROM jobs ORDER BY created_at, rowid"
+            )
+        ]
+
+
+def _stuck_705(queue: SQLiteJobQueue) -> tuple[int, str | None]:
+    with queue.connect() as connection:
+        row = connection.execute("SELECT stuck, stuck_reason FROM ticket_state").fetchone()
+    return (0, None) if row is None else (row["stuck"], row["stuck_reason"])
+
+
+@pytest.mark.job_bound
+def test_705_ac1_poller_reopens_an_emptied_pr_whose_branch_is_ahead_again(
+    tmp_path: Path,
+) -> None:
+    """#705 ac-1: GitHub closed the PR when its branch hit main (0 commits).
+    Once the branch is ahead of main again the poller reopens the PR, and the
+    build's ready at the new head is accepted."""
+    actions = BranchActions705(REBUILT_705, ahead=9)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+
+    dispatcher.process(_pr_705(head=BASE_705, closed=True, commits=0))
+    assert actions.reopened == ["42"]
+
+    ready = comment("ready-705", READY.format(head=REBUILT_705), author="claude-login")
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+    dispatcher.process(_pr_705(ready, head=REBUILT_705, closed=False, commits=9))
+
+    assert _outcomes(queue)["ready-705"] == "queued-review"
+    assert ("review", "queued", 1) in _jobs_705(queue)
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize(
+    ("commits", "tip", "ahead"),
+    [
+        (3, REBUILT_705, 9),
+        (0, BASE_705, 0),
+        (0, REBUILT_705, 0),
+    ],
+    ids=["closed-by-a-person", "branch-still-at-base", "branch-behind-base"],
+)
+def test_705_ac1_poller_leaves_other_closed_prs_closed(
+    tmp_path: Path, commits: int, tip: str, ahead: int
+) -> None:
+    actions = BranchActions705(tip, ahead=ahead)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    _running_build_705(queue)
+
+    dispatcher.process(_pr_705(head=BASE_705, closed=True, commits=commits))
+
+    assert actions.reopened == []
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("closed", [True, False])
+def test_705_ac2_ready_at_the_base_is_rejected_and_the_build_requeued_at_the_same_attempt(
+    tmp_path: Path, closed: bool
+) -> None:
+    """#705 ac-2: a ready naming a head equal to the base gets a named
+    outcome. The build runs again at the same attempt: no attempt is spent."""
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+    ready = comment("ready-base", READY.format(head=BASE_705), author="claude-login")
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+
+    dispatcher.process(_pr_705(ready, head=BASE_705, closed=closed, commits=0))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
+    assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+    assert _stuck_705(queue) == (0, None)
+
+
+@pytest.mark.job_bound
+def test_705_ac2_a_failed_build_whose_ready_was_at_the_base_spends_no_attempt(
+    tmp_path: Path,
+) -> None:
+    """The job failed after posting its ready at the base: T6 settles it done
+    from that ready instead of retrying it as attempt 2, and the requeued
+    build keeps attempt 1."""
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    build = _running_build_705(queue)
+    queue.finish(build.id, owner="claude", handoff_comment_id=None)
+    ready = comment(
+        "ready-base", READY.format(head=BASE_705), author="claude-login", created_at=150
+    )
+    pr = _pr_705(ready, head=BASE_705, closed=True, commits=0)
+
+    for _ in range(2):
+        dispatcher.process(pr)
+        dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
+    assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+    assert _stuck_705(queue) == (0, None)
+
+
+@pytest.mark.job_bound
+def test_705_ac2_a_second_ready_at_the_base_marks_the_ticket_stuck(tmp_path: Path) -> None:
+    """The free rebuild happens once per ticket; a requeued build that posts
+    at the base again stops the ticket for a person instead of looping."""
+    actions = BranchActions705(BASE_705, ahead=0)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    first = _running_build_705(queue)
+    ready = comment("ready-base", READY.format(head=BASE_705), author="claude-login")
+    queue.finish(first.id, owner="claude", handoff_comment_id=ready.id)
+    dispatcher.process(_pr_705(ready, head=BASE_705, closed=True, commits=0))
+
+    again = queue.claim("claude")
+    assert again is not None and again.request.attempt == 1
+    ready_again = comment(
+        "ready-base-2", READY.format(head=BASE_705), author="claude-login", created_at=2
+    )
+    queue.finish(again.id, owner="claude", handoff_comment_id=ready_again.id)
+    dispatcher.process(_pr_705(ready, ready_again, head=BASE_705, closed=True, commits=0))
+    dispatcher.reconcile_jobs()
+
+    assert _outcomes(queue)["ready-base-2"] == "rejected-ready-at-base"
+    assert _stuck_705(queue) == (1, "ready-at-base-2")
+    assert [job for job in _jobs_705(queue) if job[0] == "build"] == [
+        ("build", "done", 1),
+        ("build", "done", 1),
+    ]
