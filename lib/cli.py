@@ -557,10 +557,7 @@ def _check_config(argv: list[str]) -> int:
     if machines_path is not None:
         failed = _report(
             machines_path,
-            load_machines_yml(
-                machines_path,
-                allow_placeholders=args.allow_placeholders,
-            )[1],
+            load_machines_yml(machines_path)[1],
         ) or failed
     for path in factory_paths:
         factory, findings = load_factory_md(path)
@@ -1222,7 +1219,7 @@ def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | N
     machines_path = path if path is not None else ROOT / "machines.yml"
     if not machines_path.is_file() and not required and path is None:
         return None
-    config, findings = load_machines_yml(machines_path, allow_placeholders=True)
+    config, findings = load_machines_yml(machines_path)
     errors = [item for item in findings if item.severity == "error"]
     if config is None or errors:
         detail = errors[0].message if errors else "invalid machines.yml"

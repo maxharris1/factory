@@ -308,7 +308,7 @@ def test_shipped_inventory_fills_pc_and_box_and_never_places_on_the_mac(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
-    config, _ = load_machines_yml(root / "machines.yml", allow_placeholders=True)
+    config, _ = load_machines_yml(root / "machines.yml")
     assert config is not None
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
     pool = DevicePool(queue, config)

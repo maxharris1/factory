@@ -140,7 +140,7 @@ def test_machines_overlay_enables_a_device(overlay_on: None, shipped: tuple[Path
     shutil.copy(LOCAL_BOX_MACHINES, machines)
     overlay_path(machines).write_text(
         "devices:\n  - name: pc\n    enabled: true\n    slot_max: 1\n", encoding="utf-8")
-    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    config, findings = load_machines_yml(machines)
     assert config is not None, findings
     pc = config.device("pc")
     assert pc is not None and pc.enabled and pc.slot_max == 1
@@ -178,17 +178,17 @@ def test_the_env_switch_and_the_argument_turn_it_off(
     assert config is not None and config.poll_seconds == 30
 
 
-@pytest.mark.parametrize("base, example, load", [
-    ("orch.yml", "orch.local.example.yml", load_orch_yml),
-    ("machines.yml", "machines.local.example.yml", load_machines_yml),
+@pytest.mark.parametrize("base, example, load, options", [
+    ("orch.yml", "orch.local.example.yml", load_orch_yml, {"allow_placeholders": True}),
+    ("machines.yml", "machines.local.example.yml", load_machines_yml, {}),
 ])
 def test_the_shipped_examples_load_as_overlays(
-    overlay_on: None, tmp_path: Path, base: str, example: str, load
+    overlay_on: None, tmp_path: Path, base: str, example: str, load, options: dict
 ) -> None:
     target = tmp_path / base
     shutil.copy(ROOT / base, target)
     shutil.copy(ROOT / "config" / example, overlay_path(target))
-    config, findings = load(target, allow_placeholders=True)
+    config, findings = load(target, **options)
     assert config is not None
     assert not [f for f in findings if f.severity == "error"]
 

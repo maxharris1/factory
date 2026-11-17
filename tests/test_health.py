@@ -111,7 +111,7 @@ def orch(*, listener: bool = False, push: bool = False, public_url: str | None =
 
 
 def machines_config(tmp_path: Path, text: str = MACHINES):
-    config, _ = load_machines_yml(machines_file(tmp_path, text), allow_placeholders=True)
+    config, _ = load_machines_yml(machines_file(tmp_path, text))
     return config
 
 
@@ -390,7 +390,7 @@ class FakeTransport:
 
 
 def test_probe_targets_are_enabled_remote_devices_only(tmp_path: Path) -> None:
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     targets = health.probe_targets(machines)
     assert [(t.device, t.target.alias, t.target.user) for t in targets] == [
         ("pc", "pc-wsl-codex-bot", "codex-bot"),
@@ -399,7 +399,7 @@ def test_probe_targets_are_enabled_remote_devices_only(tmp_path: Path) -> None:
 
 def test_device_probe_marks_reachable_devices_up_and_unreachable_ones_unseen(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     writer = store(db)
     health.HealthStore(db, devices={"retired"}, clock=lambda: NOW).beat(
         "device-probe", "retired", pid=1, started_at=NOW, version="unknown", interval=60.0)
@@ -452,7 +452,7 @@ def test_the_poller_beats_on_the_orch_host(tmp_path: Path) -> None:
 
 
 def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path) -> None:
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     assert health.waiter_devices(machines, "codex-bot") == ["box", "pc"]
     assert health.waiter_devices(machines, "claude-bot") == ["box"]  # mac is disabled
     assert health.waiter_devices(None, "claude-bot") == ["box"]
@@ -462,7 +462,7 @@ def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path)
 
 
 def eligible(tmp_path: Path) -> dict:
-    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    machines, _ = load_machines_yml(machines_file(tmp_path))
     return health.eligible_devices(machines)
 
 

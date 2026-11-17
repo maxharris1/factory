@@ -67,7 +67,7 @@ def evidence(harness: str, fixture: str) -> sp.Evidence:
 def machines(tmp_path: Path, text: str = MACHINES):
     path = tmp_path / "machines.yml"
     path.write_text(text, encoding="utf-8")
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None, findings
     return config
 
@@ -269,7 +269,7 @@ def test_plan_launches_covers_local_and_remote_devices(tmp_path):
 def test_disabled_or_placeholder_device_is_skipped(tmp_path):
     devices = {l.device for l in plan(tmp_path)}
     assert "pc" not in devices and "spare" not in devices
-    local_box, _ = load_machines_yml(LOCAL_BOX_MACHINES, allow_placeholders=True)
+    local_box, _ = load_machines_yml(LOCAL_BOX_MACHINES)
     launches = sp.plan_launches(
         local_box, "claude-bot", CLAUDE_CMD, run_id="skill-probe-0000",
         local_root=str(tmp_path), homes={},

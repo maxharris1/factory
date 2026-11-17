@@ -907,7 +907,7 @@ def load_machines(path: Path | None) -> MachinesConfig | None:
     """machines.yml (default: the checkout's) or None when absent or invalid."""
     machines_path = path if path is not None else ROOT / "machines.yml"
     try:
-        config, findings = load_machines_yml(machines_path, allow_placeholders=True)
+        config, findings = load_machines_yml(machines_path)
     except (OSError, ValueError):
         return None
     if config is None or any(item.severity == "error" for item in findings):

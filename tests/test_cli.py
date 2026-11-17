@@ -400,7 +400,7 @@ def test_check_config_accepts_the_minimal_machines_example() -> None:
     assert result.stderr == ""
 
 
-def test_check_config_refuses_shipped_machines_placeholders_without_flag() -> None:
+def test_check_config_skips_shipped_machines_placeholder_device_with_a_warning() -> None:
     result = run(
         [
             "check-config",
@@ -411,13 +411,58 @@ def test_check_config_refuses_shipped_machines_placeholders_without_flag() -> No
         ]
     )
 
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+    for field in ("workdir_root", "ssh_alias"):
+        assert (
+            "machines.yml: warning: skipping device 'mac': "
+            f"devices[2].{field} is an install placeholder; it will not be scheduled"
+        ) in result.stderr
+    assert "devices[0]." not in result.stderr
+    assert "devices[1]." not in result.stderr
+
+
+def test_check_config_still_fails_a_real_error_beside_a_placeholder_device(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "orch_host: pc\n"
+        "devices:\n"
+        "  - name: pc\n"
+        "    tailscale_name: pc.example.ts.net\n"
+        "    slot_max: 0\n"
+        "    harnesses: {claude: claude-bot}\n"
+        "    workdir_root: /home/{bot}/factory-work\n"
+        "    ssh_alias: pc-{bot}\n"
+        "    factory_root: /home/{bot}/factory\n"
+        "  - name: mac\n"
+        "    tailscale_name: mac.example.ts.net\n"
+        "    slot_max: 2\n"
+        "    harnesses: {claude: claude-bot}\n"
+        "    workdir_root: REPLACE_WITH_MAC_WORKDIR_ROOT\n"
+        "    ssh_alias: mac-{bot}\n"
+        "    factory_root: /Users/{bot}/factory\n",
+        encoding="utf-8",
+    )
+
+    result = run(
+        [
+            "check-config",
+            "--orch",
+            str(ROOT / "config" / "orch.example.yml"),
+            "--machines",
+            str(machines),
+        ]
+    )
+
     assert result.returncode == 1
+    assert result.stdout.strip() != "ok"
+    assert f"{machines}: devices[0].slot_max must be a positive integer" in result.stderr
     assert (
-        "machines.yml: devices[2].workdir_root is an install placeholder"
+        f"{machines}: warning: skipping device 'mac': "
+        "devices[1].workdir_root is an install placeholder; it will not be scheduled"
     ) in result.stderr
-    assert "devices[1].workdir_root" not in result.stderr
-    assert "device 'pc' is disabled" not in result.stderr
-    assert "device 'box' is disabled" not in result.stderr
 
 
 def test_check_config_reports_machines_placeholders_and_disabled_devices() -> None:
@@ -434,10 +479,10 @@ def test_check_config_reports_machines_placeholders_and_disabled_devices() -> No
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
-    assert "accepted placeholder devices[1]" not in result.stderr
+    assert "devices[1]." not in result.stderr
     for line in (
-        "machines.yml: warning: accepted placeholder devices[2].workdir_root; "
-        "device 'mac' will not be scheduled",
+        "machines.yml: warning: skipping device 'mac': "
+        "devices[2].workdir_root is an install placeholder; it will not be scheduled",
         "machines.yml: warning: device 'mac' is disabled (enabled: false); "
         "it will not be scheduled",
     ):

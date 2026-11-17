@@ -124,7 +124,7 @@ def machines(tmp_path: Path, *, box: int = 3, pc: int = 0, mac: int = 0):
             ]
     path = tmp_path / "machines.yml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None, findings
     return config
 

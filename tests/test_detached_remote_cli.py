@@ -115,7 +115,7 @@ def test_a_remote_job_survives_a_forced_ssh_kill_and_completes(tmp_path: Path) -
     count = tmp_path / "count"
     db = Poller(tmp_path / "schema").path  # the dispatcher's tables, for job_events
     queue = SQLiteJobQueue(db, clock=time.time)
-    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    config, _ = load_machines_yml(machines)
     log: list[str] = []
     waiter = Waiter(
         bot="claude-bot",

@@ -16,7 +16,7 @@ CLAIM_HASH = job_token.digest(CLAIM_PROOF)
 
 
 def pool_claim(queue: SQLiteJobQueue, recipient: str, machines: Path | None = None) -> Job:
-    config, _ = load_machines_yml(machines or LOCAL_BOX_MACHINES, allow_placeholders=True)
+    config, _ = load_machines_yml(machines or LOCAL_BOX_MACHINES)
     assert config is not None
     claimed = DevicePool(queue, config).claim(recipient)
     assert claimed is not None

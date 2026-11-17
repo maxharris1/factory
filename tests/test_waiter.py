@@ -220,7 +220,7 @@ def make_queue(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:
 
 
 def local_pool(queue: SQLiteJobQueue, machines: Path = MACHINES) -> DevicePool:
-    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    config, findings = load_machines_yml(machines)
     assert config is not None, findings
     return DevicePool(queue, local_only(config))
 
@@ -523,7 +523,7 @@ def test_the_autostart_waiter_claims_remote_slots_too(tmp_path: Path) -> None:
     first = enqueue(queue, "a")
     second = enqueue(queue, "b")
     spawn = FakeSpawn()
-    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    config, findings = load_machines_yml(machines)
     assert config is not None, findings
     waiter = make_waiter(tmp_path, queue, db, spawn, machines=machines)
     waiter.pool = DevicePool(queue, config)

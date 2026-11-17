@@ -47,26 +47,16 @@ def remote(**fields: str) -> str:
 
 
 def test_shipped_machines_yml_runs_orch_on_pc_with_box_remote_and_mac_reported() -> None:
-    strict, strict_findings = load_machines_yml(ROOT / "machines.yml")
-    assert strict is None
-    assert errors(strict_findings) == [
-        "devices[2].workdir_root is an install placeholder; "
-        "Max must provide this inventory",
-        "devices[2].ssh_alias is an install placeholder; "
-        "Max must provide this inventory",
-    ]
-
-    config, findings = load_machines_yml(
-        ROOT / "machines.yml",
-        allow_placeholders=True,
-    )
+    config, findings = load_machines_yml(ROOT / "machines.yml")
 
     assert config is not None
     assert errors(findings) == []
     assert warnings(findings) == [
         "device 'mac' is disabled (enabled: false); it will not be scheduled",
-        "accepted placeholder devices[2].workdir_root; device 'mac' will not be scheduled",
-        "accepted placeholder devices[2].ssh_alias; device 'mac' will not be scheduled",
+        "skipping device 'mac': devices[2].workdir_root is an install placeholder; "
+        "it will not be scheduled",
+        "skipping device 'mac': devices[2].ssh_alias is an install placeholder; "
+        "it will not be scheduled",
     ]
     assert orch_host(config) == "pc"
     assert not any(device.local for device in config.devices)
@@ -115,7 +105,7 @@ def test_shipped_machines_yml_header_describes_orch_host_and_ssh_user() -> None:
 def test_shipped_pc_workdir_is_each_bots_home_off_the_windows_drive() -> None:
     """Factory decided (technical), Nov 11: /home/<bot>/factory-work on
     pc-wsl-bots, never under /mnt/c."""
-    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    config, _ = load_machines_yml(ROOT / "machines.yml")
     assert config is not None
     pc = config.device("pc")
     assert pc is not None
@@ -131,7 +121,7 @@ def test_shipped_pc_workdir_is_each_bots_home_off_the_windows_drive() -> None:
 
 
 def test_shipped_mac_stays_disabled_and_only_pc_and_box_schedule() -> None:
-    config, findings = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    config, findings = load_machines_yml(ROOT / "machines.yml")
     assert config is not None
     mac = config.device("mac")
     assert mac is not None
@@ -263,23 +253,19 @@ def test_disabled_device_is_reported_and_never_eligible(tmp_path: Path) -> None:
         ("workdir_root", "REPLACE_WITH_PC_WORKDIR_ROOT"),
     ],
 )
-def test_placeholder_is_refused_unless_allowed_and_then_never_eligible(
+def test_placeholder_device_loads_with_a_warning_and_is_never_eligible(
     tmp_path: Path,
     field: str,
     value: str,
 ) -> None:
     path = write(tmp_path, "orch_host: pc\ndevices:\n" + remote(**{field: value}))
 
-    strict, strict_findings = load_machines_yml(path)
-    assert strict is None
-    assert errors(strict_findings) == [
-        f"devices[0].{field} is an install placeholder; Max must provide this inventory"
-    ]
-
-    config, findings = load_machines_yml(path, allow_placeholders=True)
+    config, findings = load_machines_yml(path)
     assert config is not None
+    assert errors(findings) == []
     assert warnings(findings) == [
-        f"accepted placeholder devices[0].{field}; device 'pc' will not be scheduled"
+        f"skipping device 'pc': devices[0].{field} is an install placeholder; "
+        "it will not be scheduled"
     ]
     device = config.devices[0]
     assert device.placeholder
@@ -344,10 +330,7 @@ def test_placeholder_is_refused_unless_allowed_and_then_never_eligible(
     ],
 )
 def test_schema_errors(tmp_path: Path, text: str, message: str) -> None:
-    config, findings = load_machines_yml(
-        write(tmp_path, text),
-        allow_placeholders=True,
-    )
+    config, findings = load_machines_yml(write(tmp_path, text))
 
     assert config is None
     assert any(message in item for item in errors(findings)), findings

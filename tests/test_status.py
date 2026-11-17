@@ -175,7 +175,7 @@ devices:
 """.lstrip(),
         encoding="utf-8",
     )
-    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    config, _ = load_machines_yml(machines)
     assert config is not None
     source = FakeStatusSource()
 
