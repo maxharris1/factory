@@ -1,4 +1,4 @@
-"""#140: the Lanes page (index.html): status tiles, the queue lane, slot tiles per state,
+"""#140: the Lanes page (index.html): the queue lane, slot tiles per state,
 Just happened and Intake, server render against the page script."""
 
 import base64
@@ -465,7 +465,7 @@ def _shape(markup: str) -> list[str]:
 
 
 @needs_node
-@pytest.mark.parametrize("panel", ["kpis", "lanes", "just-happened", "intake"])
+@pytest.mark.parametrize("panel", ["lanes", "just-happened", "intake"])
 def test_server_render_equals_script_render(tmp_path: Path, panel: str) -> None:
     snapshot = _tiles(tmp_path)
     server = _section(_no_script(render_pages(snapshot)["index.html"]), panel)
@@ -511,7 +511,7 @@ def _run_series(tmp_path: Path, snapshots: list[dict]) -> list[dict]:
     (tmp_path / "harness.js").write_text(harness, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"), str(tmp_path / "status.json"),
-         "main", "", json.dumps(BAR + ["hud", "kpis", "lanes", "just-happened", "intake"]), "[]"],
+         "main", "", json.dumps(BAR + ["hud", "lanes", "just-happened", "intake"]), "[]"],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -519,14 +519,13 @@ def _run_series(tmp_path: Path, snapshots: list[dict]) -> list[dict]:
 
 
 @needs_node
-def test_beat_only_on_a_real_heartbeat_drop_and_burst_only_on_a_change(tmp_path: Path) -> None:
+def test_beat_only_on_a_real_heartbeat_drop(tmp_path: Path) -> None:
     first = _tiles(tmp_path)
     first["running"][1]["heartbeat_age_seconds"] = 40
     second = copy.deepcopy(first)
     second["running"][1]["heartbeat_age_seconds"] = 45
     third = copy.deepcopy(second)
     third["running"][1]["heartbeat_age_seconds"] = 3
-    third["queue"]["totals"]["queued"] += 1
     second["generated_at_epoch"] = first["generated_at_epoch"] + 1
     third["generated_at_epoch"] = first["generated_at_epoch"] + 2
     seen = _run_series(tmp_path, [first, second, third])
@@ -534,8 +533,6 @@ def test_beat_only_on_a_real_heartbeat_drop_and_burst_only_on_a_change(tmp_path:
     assert seen[0]["job-t-build"]["beats"] == 0 and seen[1]["job-t-build"]["beats"] == 0
     assert seen[-1]["job-t-build"]["beats"] == 1
     assert seen[-1]["job-t-plan"]["beats"] == 0
-    assert all(str(s["burst"]) == "0" for k, s in seen[0].items() if k.startswith("kpi-"))
-    assert str(seen[-1]["kpi-1"]["burst"]) == "1" and str(seen[-1]["kpi-0"]["burst"]) == "0"
 
 
 ROOT = Path(__file__).resolve().parents[1]

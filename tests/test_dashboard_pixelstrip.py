@@ -639,7 +639,7 @@ def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
         assert keys[:3] == ["caret", "band", "attention"], name
         if name == "index.html":
             # #140: the Lanes page adds its own strips after the shell's three.
-            assert {"kpi-0", "queue", "meter-box"} <= set(keys[3:]), keys
+            assert {"queue", "meter-box"} <= set(keys[3:]), keys
             continue
         board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
         rows = [key for key in keys[3:] if key.startswith("attention-")]
@@ -656,9 +656,7 @@ def test_strip_css_is_gradients_only() -> None:
     assert "linear-gradient" in "".join(rules)
 
 
-def test_reduced_motion_stills_the_held_border_and_the_script_reads_it() -> None:
-    block = page.CSS[page.CSS.index("@media (prefers-reduced-motion: reduce)") :]
-    assert ".px-held::after{animation:none}" in block
+def test_the_strip_script_reads_reduced_motion() -> None:
     assert "matchMedia('(prefers-reduced-motion: reduce)')" in page.px_script()
 
 

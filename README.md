@@ -1537,9 +1537,9 @@ and a **needs attention** badge with a count that links to the Activity
 page (stuck tickets, overdue, stale or dead jobs, then paused tickets not
 already listed as stuck, each once).
 
-- **Main** (`index.html`): factory status on top (running, queued, done,
-  failed, stuck or overdue), then the lanes and slots as the centerpiece:
-  one lane per device from `machines.yml` (box, pc, mac; disabled devices
+- **Main** (`index.html`): the lanes and slots as the centerpiece, with live
+  counts in their header (running, held, idle and queued, counted from the
+  tiles drawn): one lane per device from `machines.yml` (box, pc, mac; disabled devices
   dimmed and marked, placeholders flagged) with a slot per `slot_max`, and
   a lane for running Grok wakes. Each busy slot shows its job: the ticket
   (a GitHub ticket is shown as a PR, a Linear ticket by its id), bot, step
@@ -1548,7 +1548,7 @@ already listed as stuck, each once).
   round from its own detail (`round 1/1`; `—` for a job with no round),
   elapsed time and heartbeat age against its timeout. A claimed job shows
   how long ago it was claimed and `not started` instead of a timer and
-  heartbeat bar. Stale and dead jobs count in stuck / overdue. A lane counts `max(held, running)` slots, so a slot still
+  heartbeat bar. A lane counts `max(held, running)` slots, so a slot still
   held in `device_slots` is never shown as idle (#63 FU-1). The queue sits
   in a side rail beside the lanes with wait times. Clicking a slot or a
   queue item opens that job's flow (the same view as `job.html#job-<id>`)

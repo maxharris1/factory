@@ -15,7 +15,7 @@ from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _attention_key, _health_link, _relay
 from lib.dashboard_pages.common import _chip, duration, _e, _job_hrefs, _span, _ticket, ticket_href
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
-from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_devices, _lanes
+from lib.dashboard_pages.lanes import _just_happened_and_intake, lane_devices, _lanes
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE, version_drift,
 )
@@ -83,7 +83,7 @@ repeating-linear-gradient(90deg,var(--warn) 0 8px,transparent 8px 16px),
 repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px),
 repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px);
 background-size:100% 2px,100% 2px,2px 100%,2px 100%;background-repeat:repeat-x,repeat-x,repeat-y,repeat-y;
-background-position:0 0,0 100%,100% 0,0 0;animation:px-march 2s steps(4) infinite}
+background-position:0 0,0 100%,100% 0,0 0}
 """
 
 
@@ -1249,7 +1249,7 @@ def _statusline(snapshot: dict) -> str:
 
 
 _PANELS = {
-    "index.html": (_kpis, _lanes, _just_happened_and_intake),
+    "index.html": (_lanes, _just_happened_and_intake),
     "activity.html": (_attention, _relay),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel),
     "health.html": (_components, _drift_row, _log_row, _no_waiter),
