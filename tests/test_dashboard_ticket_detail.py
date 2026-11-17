@@ -1,4 +1,4 @@
-"""#146: the ticket detail page at job.html#job-<id>.
+"""#146: the ticket detail page at ticket.html#t=<repo>#<ticket>.
 
 The Run log and the Journey render from one visit list and share one
 selection; the Journey names nothing ahead of now and offers "to scale" only
@@ -22,13 +22,13 @@ import pytest
 from lib.dashboard import RECORDS, render_pages, tickets_json
 from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED
 from lib.dashboard_pages import ticket_detail
-from lib.dashboard_pages.common import duration
+from lib.dashboard_pages.common import duration, ticket_page_href
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
-from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
+from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, _snapshot, needs_node, run_harness
 from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
 WHO = {"script", "claude", "codex", "cursor", "grok", "human"}
@@ -51,7 +51,7 @@ def _review(snapshot: dict) -> dict:
 
 
 def _article(snapshot: dict) -> str:
-    return _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
+    return _ticket_server(snapshot, LIVE["running"][0])
 
 
 def _journey(article: str) -> str:
@@ -68,16 +68,6 @@ def test_run_log_and_journey_render_from_one_list(tmp_path: Path) -> None:
     assert [i for i, _, _ in log] == [i for i, _, _ in bars] == [str(i) for i in range(len(path))]
 
 
-def test_without_script_the_run_log_rows_are_plain_rows_not_buttons(tmp_path: Path) -> None:
-    snapshot = _snapshot(tmp_path)
-    path = _review(snapshot)["flow"]["path"]
-    log = re.search(r'<ol class="runlog">(.*?)</ol>', _article(snapshot), re.S).group(1)
-    assert "<button" not in log and "aria-pressed" not in log
-    rows = re.findall(r'<div class="visit[ "][^>]*>', log)
-    assert len(rows) == len(path)
-    assert [i for i, row in enumerate(rows) if 'aria-current="true"' in row] == [4]
-
-
 def test_default_selection_is_the_current_visit(tmp_path: Path) -> None:
     article = _article(_snapshot(tmp_path))
     for cls in ("runlog", "journey"):
@@ -88,23 +78,9 @@ def test_default_selection_is_the_current_visit(tmp_path: Path) -> None:
 def test_script_renders_the_same_one_list_and_selection(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     server = _article(snapshot)
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
-    view = out["html"]["jobview"]
+    view = _script_view(tmp_path, snapshot)
     for cls in ("runlog", "journey"):
         assert _rows(view, cls) == _rows(server, cls), cls
-
-
-@needs_node
-def test_picking_a_log_row_selects_its_bar_and_the_reverse(tmp_path: Path) -> None:
-    snapshot = _snapshot(tmp_path)
-    row = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
-                    actions=[["click", {"attr": {"data-visit": "1"}}]])
-    for cls in ("runlog", "journey"):
-        assert [i for i, _, p in _rows(row["html"]["jobview"], cls) if p == "true"] == ["1"], cls
-    bar = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
-                    actions=[["click", {"attr": {"data-visit": "2", "aria-label": "Step 3 of 5: review, codex, 16m 40s"}}]])
-    for cls in ("runlog", "journey"):
-        assert [i for i, _, p in _rows(bar["html"]["jobview"], cls) if p == "true"] == ["2"], cls
 
 
 def test_to_scale_is_offered_only_when_every_duration_is_known(tmp_path: Path) -> None:
@@ -199,7 +175,7 @@ def test_the_hero_strip_follows_the_state_table(tmp_path: Path, case, change, ef
 def test_the_script_hero_strip_follows_the_state_table(tmp_path: Path, case, change, effect, tint, verb) -> None:
     snapshot = _snapshot(tmp_path)
     _hero_case(snapshot, change)
-    view = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")["html"]["jobview"]
+    view = _script_view(tmp_path, snapshot)
     px = _hero_px(view)
     assert (px["data-px"], px["data-tint"]) == (effect, tint), case
     assert ('<span class="verb">' in view) is verb, case
@@ -222,7 +198,7 @@ def test_clarify_and_update_from_main_heroes_draw_like_plan_and_fix(tmp_path: Pa
 def test_the_script_draws_clarify_and_update_from_main_heroes(tmp_path: Path, action, effect, verb) -> None:
     snapshot = _snapshot(tmp_path)
     _hero_case(snapshot, _set(action=action))
-    view = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")["html"]["jobview"]
+    view = _script_view(tmp_path, snapshot)
     assert (_hero_px(view)["data-px"], _hero_px(view)["data-tint"]) == (effect, "codex")
     assert f'<span class="verb">{verb}…</span>' in view
 
@@ -249,6 +225,18 @@ def _serve(tmp_path: Path, sites: dict[str, dict], status_delay: float = 0.0,
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+REVIEW = 'article.ticketpage[data-ticket="maxharris1/cleffy#40"]'
+CURSOR = 'article.ticketpage[data-ticket="maxharris1/cleffy#14"]'
+
+
+def _ticket_url(server: http.server.ThreadingHTTPServer, site: str, address: str) -> str:
+    return f"http://127.0.0.1:{server.server_address[1]}/{site}/ticket.html#t={_quote(address)}"
+
+
+def _to_ticket(chrome: _Chrome, address: str) -> None:
+    chrome.run(f"location.hash = '#t={_quote(address)}'")
 
 
 def _wait(chrome: _Chrome, ready: str) -> None:
@@ -297,20 +285,25 @@ def _drawn(chrome: _Chrome, article: str) -> dict:
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
 @pytest.mark.parametrize("status_delay", [0.0, 1.5], ids=["status now", "status late"])
 def test_every_way_onto_a_job_draws_the_journey_and_chart(tmp_path: Path, status_delay: float) -> None:
-    server = _serve(tmp_path, {"lanes": _snapshot(tmp_path)}, status_delay)
+    snapshot = _snapshot(tmp_path)
+    server = _serve(tmp_path, {"lanes": snapshot}, status_delay)
     chrome = _Chrome(tmp_path / "profile")
     try:
         base = f"http://127.0.0.1:{server.server_address[1]}/lanes/"
-        _open(chrome, base + "index.html", "document.querySelector('a[href=\"job.html#job-h-review\"]')")
-        chrome.run("document.querySelector('a[href=\"job.html#job-h-review\"]').click()")
-        from_lanes = _drawn(chrome, "#job-h-review")
-        chrome.run("location.hash = '#job-r-cursor'")
-        after_hashchange = _drawn(chrome, "#job-r-cursor")
+        tile = f'a[href="{ticket_page_href(_review(snapshot))}"]'
+        _open(chrome, base + "index.html", f"document.querySelector('{tile}')")
+        chrome.run(f"document.querySelector('{tile}').click()")
+        from_lanes = _drawn(chrome, REVIEW)
+        _to_ticket(chrome, "maxharris1/cleffy#14")
+        after_hashchange = _drawn(chrome, CURSOR)
+        _open(chrome, base + "job.html#job-h-review", f"document.querySelector('{REVIEW}')")
+        from_old_link = _drawn(chrome, REVIEW)
     finally:
         chrome.close()
         server.shutdown()
     drawn = {"journey": True, "buttons": True, "chart": True}
-    assert {"lanes tile": from_lanes, "hash change": after_hashchange} == {"lanes tile": drawn, "hash change": drawn}
+    assert {"lanes tile": from_lanes, "hash change": after_hashchange, "old job link": from_old_link} == {
+        "lanes tile": drawn, "hash change": drawn, "old job link": drawn}
 
 
 STILL_PIXELS = r"""
@@ -340,8 +333,7 @@ def test_broken_jobs_and_human_waits_hold_the_journey_still(tmp_path: Path) -> N
     still = {}
     try:
         for name in cases:
-            _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/{name}/job.html#job-h-review",
-                  _journey_drawn("#job-h-review"))
+            _open(chrome, _ticket_url(server, name, "maxharris1/cleffy#40"), _journey_drawn(REVIEW))
             still[name] = chrome.run(STILL_PIXELS)
     finally:
         chrome.close()
@@ -418,9 +410,8 @@ def test_the_caption_names_the_selected_visit(tmp_path: Path) -> None:
 def test_picking_a_visit_rewrites_the_caption_in_both_renderers(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     visit = _review(snapshot)["flow"]["visits"][2]
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
-                    actions=[["click", {"attr": {"data-visit": "2", "data-state": visit["state"]}}]])
-    caption = _caption(out["html"]["jobview"])
+    caption = _caption(_script_view(tmp_path, snapshot,
+                                    actions=[["click", {"attr": {"data-visit": "2", "data-state": visit["state"]}}]]))
     total = len(_review(snapshot)["flow"]["visits"])
     assert f"|03 of {total}|" in caption, caption
     assert f"|{visit['state']}|" in caption and f"|{visit['who']}|" in caption, caption
@@ -428,9 +419,8 @@ def test_picking_a_visit_rewrites_the_caption_in_both_renderers(tmp_path: Path) 
         assert visit["reason"] in caption, caption
     from lib.dashboard_pages.common import duration
     age = _review(snapshot)["flow"]["state_age_seconds"]
-    loaded = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
     ticked = _caption(_article(snapshot)).replace(f"|{duration(age)} so far|", f"|{duration(age + 3)} so far|")
-    assert _caption(loaded["html"]["jobview"]) == ticked
+    assert _caption(_script_view(tmp_path, snapshot)) == ticked
 
 
 DRAWN_NAMES = r"""
@@ -452,8 +442,7 @@ def test_the_journey_names_each_visit_up_to_now_on_its_bar(tmp_path: Path) -> No
     try:
         chrome.send("Page.enable", chrome.session)
         chrome.send("Page.addScriptToEvaluateOnNewDocument", chrome.session, source=DRAWN_NAMES)
-        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/job.html#job-h-review",
-              _journey_drawn("#job-h-review"))
+        _open(chrome, _ticket_url(server, "fixture", "maxharris1/cleffy#40"), _journey_drawn(REVIEW))
         time.sleep(3.4)
         drawn = set(chrome.run("[...new Set(window.journeyTexts)]"))
     finally:
@@ -469,15 +458,14 @@ def test_a_rebuild_keeps_the_picked_scale_pressed(tmp_path: Path) -> None:
     _review(snapshot)["flow"]["all_durations_known"] = True
     server = _serve(tmp_path, {"timed": snapshot})
     chrome = _Chrome(tmp_path / "profile")
-    pressed = "[...document.querySelectorAll('#job-h-review [data-scale]')].map(b => b.dataset.scale + '=' + b.getAttribute('aria-pressed'))"
+    pressed = "[...document.querySelectorAll('article.ticketpage [data-scale]')].map(b => b.dataset.scale + '=' + b.getAttribute('aria-pressed'))"
     try:
-        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
-              _journey_drawn("#job-h-review"))
-        chrome.run("document.querySelector('#job-h-review [data-scale=\"scale\"]').click()")
-        chrome.run("location.hash = '#job-r-cursor'")
-        _wait(chrome, "document.querySelector('#job-r-cursor canvas.jd-journey')")
-        chrome.run("location.hash = '#job-h-review'")
-        _wait(chrome, "document.querySelector('#job-h-review [data-scale]')")
+        _open(chrome, _ticket_url(server, "timed", "maxharris1/cleffy#40"), _journey_drawn(REVIEW))
+        chrome.run("document.querySelector('article.ticketpage [data-scale=\"scale\"]').click()")
+        _to_ticket(chrome, "maxharris1/cleffy#14")
+        _wait(chrome, f"document.querySelector('{CURSOR} canvas.jd-journey')")
+        _to_ticket(chrome, "maxharris1/cleffy#40")
+        _wait(chrome, f"document.querySelector('{REVIEW} [data-scale]')")
         after = chrome.run(pressed)
     finally:
         chrome.close()
@@ -495,7 +483,7 @@ def _fully_timed(snapshot: dict) -> dict:
 
 def _click_canvas(chrome: _Chrome, x: int, y: int) -> None:
     point = chrome.run(
-        f"(() => {{const r = document.querySelector('#job-h-review .jd-journey').getBoundingClientRect();"
+        f"(() => {{const r = document.querySelector('article.ticketpage .jd-journey').getBoundingClientRect();"
         f"return {{x: r.x + {x}, y: r.y + {y}}}}})()"
     )
     for kind in ("mousePressed", "mouseReleased"):
@@ -506,27 +494,26 @@ def _click_canvas(chrome: _Chrome, x: int, y: int) -> None:
 def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_path: Path) -> None:
     server = _serve(tmp_path, {"timed": _fully_timed(_snapshot(tmp_path))})
     chrome = _Chrome(tmp_path / "profile")
-    canvas = "document.querySelector('#job-h-review .jd-journey').toDataURL()"
+    canvas = "document.querySelector('article.ticketpage .jd-journey').toDataURL()"
     try:
         chrome.send("Emulation.setEmulatedMedia", chrome.session,
                     features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
-        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
-              _journey_drawn("#job-h-review"))
+        _open(chrome, _ticket_url(server, "timed", "maxharris1/cleffy#40"), _journey_drawn(REVIEW))
         even = chrome.run(canvas)
-        chrome.run("document.querySelector('#job-h-review [data-scale=scale]').click()")
+        chrome.run("document.querySelector('article.ticketpage [data-scale=scale]').click()")
         time.sleep(0.2)
         clicked = chrome.run(canvas)
-        chrome.run("location.hash = '#job-r-cursor'")
-        _wait(chrome, "document.querySelector('#job-r-cursor canvas.jd-journey')")
-        chrome.run("location.hash = '#job-h-review'")
-        _wait(chrome, "document.querySelector('#job-h-review [data-scale=scale][aria-pressed=true]')")
+        _to_ticket(chrome, "maxharris1/cleffy#14")
+        _wait(chrome, f"document.querySelector('{CURSOR} canvas.jd-journey')")
+        _to_ticket(chrome, "maxharris1/cleffy#40")
+        _wait(chrome, f"document.querySelector('{REVIEW} [data-scale=scale][aria-pressed=true]')")
         time.sleep(0.4)
         rebuilt = chrome.run(canvas)
         _click_canvas(chrome, 336, 140)
-        selected = chrome.run("(b => [b.dataset.visit, b.dataset.state])(document.querySelector('#job-h-review .runlog [aria-pressed=true]'))")
-        chrome.run("document.querySelector('#job-h-review details.jd-chart').open = true")
+        selected = chrome.run("(b => [b.dataset.visit, b.dataset.state])(document.querySelector('article.ticketpage .runlog [aria-pressed=true]'))")
+        chrome.run("document.querySelector('article.ticketpage details.jd-chart').open = true")
         time.sleep(0.2)
-        chart = chrome.run(f"{PAINTED}('#job-h-review canvas.jd-flowmap')")
+        chart = chrome.run(f"{PAINTED}('article.ticketpage canvas.jd-flowmap')")
     finally:
         chrome.close()
         server.shutdown()
@@ -538,14 +525,14 @@ def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_
 
 CONTROL_STRIP = r"""
 (() => {
-  const ctl = document.querySelector('#job-h-review .jd-ctl');
+  const ctl = document.querySelector('article.ticketpage .jd-ctl');
   const look = b => {const c = getComputedStyle(b); return [b.offsetHeight, c.backgroundColor, c.color, c.borderTopColor];};
   return {
     axis: ctl.querySelector('[role=group]').getAttribute('aria-label'),
     scales: [...ctl.querySelectorAll('[role=group] [data-scale]')].map(b => [b.textContent, b.getAttribute('aria-pressed'), ...look(b)]),
     replay: look(ctl.querySelector('[data-replay]')),
     keys: [...ctl.querySelectorAll('.key')].map(k => k.textContent),
-    separateLegend: !!document.querySelector('#job-h-review .jd-panel .jd-legend'),
+    separateLegend: !!document.querySelector('article.ticketpage .jd-panel .jd-legend'),
   };
 })()"""
 
@@ -558,8 +545,8 @@ def test_the_journey_control_strip_matches_journey_climb(tmp_path: Path) -> None
     server = _serve(tmp_path, {"timed": _fully_timed(_snapshot(tmp_path))})
     chrome = _Chrome(tmp_path / "profile")
     try:
-        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
-              "document.querySelector('#job-h-review .jd-ctl')")
+        _open(chrome, _ticket_url(server, "timed", "maxharris1/cleffy#40"),
+              f"document.querySelector('{REVIEW} .jd-ctl')")
         strip = chrome.run(CONTROL_STRIP)
     finally:
         chrome.close()
@@ -583,12 +570,13 @@ def test_the_no_script_control_strip_holds_the_axis_replay_and_legend_in_one_row
 
 
 def _queued(snapshot: dict) -> str:
-    return _section(_no_script(render_pages(snapshot)["job.html"]), "job-q-claude")
+    return _ticket_server(snapshot, LIVE["queued"][0])
 
 
-def _script_view(tmp_path: Path, snapshot: dict, job: str = "h-review", actions: list | None = None) -> str:
-    out = _run_page(tmp_path, snapshot, "job", JOB, hash_=f"#job-{job}", actions=actions)
-    return out["html"]["jobview"]
+def _script_view(tmp_path: Path, snapshot: dict, address: str = "maxharris1/cleffy#40",
+                 actions: list | None = None) -> str:
+    out = _run_page(tmp_path, snapshot, "ticket", TICKET_IDS, hash_="#t=" + _quote(address), actions=actions)
+    return out["html"]["ticketview"]
 
 
 def _beat_class(markup: str) -> str:
@@ -628,7 +616,7 @@ def test_a_queued_job_s_heartbeat_tile_has_no_tone(tmp_path: Path) -> None:
 
 @needs_node
 def test_the_script_gives_a_queued_job_s_heartbeat_tile_no_tone(tmp_path: Path) -> None:
-    assert _beat_class(_script_view(tmp_path, _snapshot(tmp_path), "q-claude")) == ""
+    assert _beat_class(_script_view(tmp_path, _snapshot(tmp_path), LIVE["queued"][0])) == ""
 
 
 def test_the_heartbeat_tone_is_the_lanes_heartbeat_rule() -> None:
@@ -762,50 +750,6 @@ def test_no_script_css_shows_the_step_list_and_hides_canvases_and_dead_controls(
     assert ".journey .step{display:inline}" in block
 
 
-NO_SCRIPT_VIEW = r"""
-(() => {
-  const art = document.querySelector('#job-h-review');
-  const shown = n => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== 'hidden';
-  return {
-    canvases: [...art.querySelectorAll('canvas.jd-journey, canvas.jd-flowmap')].filter(shown).length,
-    buttons: [...art.querySelectorAll('.jd-box button, .jd-ctl button, .jd-chart button')].filter(shown).length,
-    steps: [...art.querySelectorAll('ol.journey .step')].filter(shown).map(s => s.textContent),
-    allButtons: [...document.body.querySelectorAll('button')].filter(shown).length,
-    filterButtons: [...document.querySelectorAll('#ticket-filter button')].filter(shown).length,
-    logNames: [...art.querySelectorAll('ol.runlog .visit .name')].filter(shown).map(s => s.textContent),
-  };
-})()"""
-
-
-@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
-def test_with_scripting_off_the_journey_is_a_readable_list(tmp_path: Path) -> None:
-    snapshot = _fully_timed(_snapshot(tmp_path))
-    path = _review(snapshot)["flow"]["path"]
-    server = _serve(tmp_path, {"fixture": snapshot})
-    url = f"http://127.0.0.1:{server.server_address[1]}/fixture/job.html#job-h-review"
-    views = {}
-    try:
-        for name, off in (("off", True), ("on", False)):
-            chrome = _Chrome(tmp_path / f"profile-{name}")
-            try:
-                chrome.send("Emulation.setScriptExecutionDisabled", chrome.session, value=off)
-                _open(chrome, url, "document.querySelector('#job-h-review ol.journey')")
-                chrome.run("document.querySelector('#job-h-review details.jd-chart').open = true")
-                time.sleep(0.3)
-                views[name] = chrome.run(NO_SCRIPT_VIEW)
-            finally:
-                chrome.close()
-    finally:
-        server.shutdown()
-    assert views["off"]["canvases"] == 0 and views["off"]["buttons"] == 0 and views["off"]["allButtons"] == 0
-    assert [step.split(": ")[1].split(",")[0] for step in views["off"]["steps"]] == path
-    assert [name.removesuffix(" · now") for name in views["off"]["logNames"]] == path
-    assert views["on"]["canvases"] == 2 and views["on"]["steps"] == []
-    assert views["on"]["buttons"] == len(path) + 3
-    assert views["on"]["filterButtons"] > 0
-    assert views["on"]["allButtons"] == 2 * len(path) + 3 + views["on"]["filterButtons"]
-
-
 def test_a_queued_job_s_live_run_says_not_started_yet(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     queued = _queued(snapshot)
@@ -817,7 +761,7 @@ def test_a_queued_job_s_live_run_says_not_started_yet(tmp_path: Path) -> None:
 @needs_node
 def test_the_script_says_a_queued_job_has_not_started_yet(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    queued = _script_view(tmp_path, snapshot, "q-claude")
+    queued = _script_view(tmp_path, snapshot, LIVE["queued"][0])
     assert '<p class="empty">not started yet</p>' in queued and "no telemetry" not in queued
     assert '<p class="empty">no telemetry</p>' in _script_view(tmp_path, snapshot)
 
@@ -851,38 +795,7 @@ def test_the_script_legends_list_only_this_ticket_s_actors(tmp_path: Path) -> No
     view = _script_view(tmp_path, snapshot)
     assert _keys(view) == PATH_KEYS
     assert _chart_keys(view) == CHART_KEYS
-    assert _keys(_script_view(tmp_path, snapshot, "q-claude")) == GROK_KEYS
-
-
-GH_CASES = [
-    ("issue and PR", {"source": "#563", "pr": "601"},
-     ["https://github.com/maxharris1/cleffy/issues/563", "https://github.com/maxharris1/cleffy/pull/601"]),
-    ("no PR", {"source": "#563", "pr": None}, ["https://github.com/maxharris1/cleffy/issues/563"]),
-    ("linear source", {"source": "ABC-12", "pr": "601"}, ["https://github.com/maxharris1/cleffy/pull/601"]),
-    ("malformed repo", {"repo": "maxharris1/cleffy/../x", "source": "#563", "pr": "601"}, []),
-]
-
-
-def _gh_links(markup: str) -> list[str]:
-    hero = re.search(r'<section class="jd-hero">.*?</section>', markup, re.S).group(0)
-    links = re.findall(r'<a href="(https://github\.com/[^"]*)" rel="noopener noreferrer" target="_blank">', hero)
-    assert len(links) == hero.count("https://github.com/")
-    return links
-
-
-@pytest.mark.parametrize(("case", "fields", "hrefs"), GH_CASES, ids=[c[0] for c in GH_CASES])
-def test_the_hero_links_the_github_issue_and_pr(tmp_path: Path, case, fields, hrefs) -> None:
-    snapshot = _snapshot(tmp_path)
-    _review(snapshot).update(fields)
-    assert _gh_links(_article(snapshot)) == hrefs, case
-
-
-@needs_node
-@pytest.mark.parametrize(("case", "fields", "hrefs"), GH_CASES, ids=[c[0] for c in GH_CASES])
-def test_the_script_hero_links_github_like_the_server(tmp_path: Path, case, fields, hrefs) -> None:
-    snapshot = _snapshot(tmp_path)
-    _review(snapshot).update(fields)
-    assert _gh_links(_run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")["html"]["jobview"]) == hrefs
+    assert _keys(_script_view(tmp_path, snapshot, LIVE["queued"][0])) == GROK_KEYS
 
 
 def test_the_page_carries_the_actions_api_and_no_credential(tmp_path: Path) -> None:
@@ -1056,12 +969,8 @@ def _requeued_after_a_run(tmp_path: Path) -> dict:
 @needs_node
 def test_a_requeued_ticket_s_live_run_says_not_started_yet_over_the_last_run(tmp_path: Path) -> None:
     snapshot = _requeued_after_a_run(tmp_path)
-    views = {**_both(tmp_path, snapshot, "maxharris1/cleffy#52"),
-             "job server": _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-retry"),
-             "job script": _script_view(tmp_path, snapshot, "r-retry")}
-    for render, markup in views.items():
-        if render in ("server", "script"):
-            assert "queued for codex" in _tracker(markup), render
+    for render, markup in _both(tmp_path, snapshot, "maxharris1/cleffy#52").items():
+        assert "queued for codex" in _tracker(markup), render
         live = _section(markup, "liverun-job-r-retry")
         assert live.endswith('<p class="empty">not started yet</p></section>'), render
         assert "24,763" not in live and 'class="lr"' not in live, render

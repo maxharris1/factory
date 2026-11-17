@@ -18,6 +18,7 @@ import pytest
 
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_page import CSS, TILE_STATE, intake_groups, queue_speed
+from lib.dashboard_pages.common import ticket_page_href
 from tests.test_dashboard import NOW, seeded
 from tests.test_dashboard_layout import BAR, HARNESS, NODE, _no_script, _run_page, _section, needs_node, run_harness
 from tests.merge_queue_support import sha
@@ -95,7 +96,7 @@ def _tiles(tmp_path: Path) -> dict:
 
 
 def _job_tile(html: str, job: str) -> str:
-    match = re.search(rf'<a class="tile [^"]*" href="job.html#job-{re.escape(job)}"[^>]*>.*?</a>', html, re.S)
+    match = re.search(rf'<a class="tile [^"]*" href="[^"]*" title="[^"]*\(job {re.escape(job)}\)">.*?</a>', html, re.S)
     assert match, job
     return match.group(0)
 
@@ -106,8 +107,11 @@ def _tile(html: str, name: str) -> str:
 
 @pytest.mark.parametrize("name", list(STATES))
 def test_each_slot_state_has_its_strip_chip_and_link(tmp_path: Path, name: str) -> None:
-    html = _no_script(render_pages(_tiles(tmp_path))["index.html"])
+    snapshot = _tiles(tmp_path)
+    html = _no_script(render_pages(snapshot)["index.html"])
     tile = _tile(html, name)
+    row = next(r for r in snapshot["running"] if r["job"] == f"t-{name}")
+    assert f'href="{ticket_page_href(row)}"' in tile
     assert f'data-px="{EFFECT[name]}"' in tile
     spec = TILE_STATE[name]
     if spec.get("chip"):

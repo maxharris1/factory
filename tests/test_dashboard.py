@@ -20,6 +20,7 @@ from lib.dashboard import (
     render_html,
     write_snapshot,
 )
+from lib.dashboard_pages.ticket_detail import ticket_view
 from lib.dispatcher import Dispatcher
 from lib.queue import SQLiteJobQueue
 
@@ -396,7 +397,7 @@ def test_active_jobs_count_their_tickets_accepted_retries(tmp_path: Path) -> Non
     assert all("retries" not in row for row in snapshot["queued"])
 
 
-def test_the_job_page_shows_its_tickets_retries(tmp_path: Path) -> None:
+def test_the_ticket_page_shows_its_tickets_retries(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute(RETRIES_TABLE)
@@ -406,11 +407,10 @@ def test_the_job_page_shows_its_tickets_retries(tmp_path: Path) -> None:
              "queued-retry-fix", NOW - 900),
         )
     snapshot = collect_snapshot(db, log, now=NOW)
-    page = dashboard.render_pages(snapshot)["job.html"]
-    assert "retried 1x" in page
+    assert "retried 1x" in ticket_view(snapshot, "maxharris1/cleffy#14")
     running = next(row for row in snapshot["running"] if row["ticket_id"] == "14")
     running["retries"] = 999
-    assert "retried 999x" in dashboard.render_pages(snapshot)["job.html"]
+    assert "retried 999x" in ticket_view(snapshot, "maxharris1/cleffy#14")
 
 
 # --- read-only open -------------------------------------------------------
