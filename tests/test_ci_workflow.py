@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from lib.factory_md import load_factory_md
+
 ROOT = Path(__file__).resolve().parents[1]
+FORK_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+MACOS_LABELS = ["self-hosted", "macOS", "factory-mac"]
 
 
 def _workflow() -> dict:
@@ -100,7 +105,6 @@ def test_a_failed_diff_fails_the_changes_job_instead_of_skipping_macos(tmp_path:
 
 def test_the_changes_step_reads_the_pr_shas_from_env_and_fetches_full_history() -> None:
     changes = _workflow()["jobs"]["changes"]
-    assert changes["runs-on"] == "ubuntu-latest"
     assert changes["outputs"] == {"macos": "${{ steps.diff.outputs.macos }}"}
     step = _changes_step()
     assert step["id"] == "diff"
@@ -112,7 +116,7 @@ def test_the_changes_step_reads_the_pr_shas_from_env_and_fetches_full_history() 
     checkout = changes["steps"][0]
     assert checkout["uses"].startswith("actions/checkout@")
     assert checkout["with"] == {"fetch-depth": 0}
-    assert "if" not in changes
+    assert changes["if"] == FORK_GUARD
     for each in changes["steps"]:
         assert each["if"] == "github.event_name == 'pull_request'"
 
@@ -122,8 +126,7 @@ def test_macos_runs_on_every_non_pr_event_and_on_prs_the_changes_job_flags() -> 
     assert workflow[True]["push"] == {"branches": ["main"]}
     macos = workflow["jobs"]["macos"]
     assert macos["needs"] == "changes"
-    assert macos["if"] == "github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'"
-    assert macos["runs-on"] == "macos-latest"
+    assert macos["if"] == f"({FORK_GUARD}) && (github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true')"
     assert "pytest tests/test_process_discovery.py -p no:xdist -s -rs" in [
         step.get("run") for step in macos["steps"]
     ]
@@ -311,7 +314,6 @@ def test_the_pickup_watchdog_mirrors_the_macos_job_and_fires_before_its_timeout(
     pickup = jobs["macos-pickup"]
     assert pickup["needs"] == jobs["macos"]["needs"]
     assert pickup["if"] == jobs["macos"]["if"]
-    assert pickup["runs-on"] == "ubuntu-latest"
     assert pickup["permissions"] == {"actions": "write"}
     step = _pickup_step()
     pickup_seconds = int(step["env"]["PICKUP_SECONDS"])
@@ -319,3 +321,108 @@ def test_the_pickup_watchdog_mirrors_the_macos_job_and_fires_before_its_timeout(
     assert pickup["timeout-minutes"] > pickup_seconds / 60 + jobs["macos"]["timeout-minutes"]
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert "${{" not in step["run"]
+
+
+SECRET_REF = re.compile(r"\bsecrets\s*(?:\.(?!GITHUB_TOKEN\b)|\[)")
+TOKEN_SHAPE = re.compile(r"\bA[A-Z0-9]{28}\b|--token\s+\S")
+WORKFLOWS = sorted((ROOT / ".github/workflows").glob("*.yml"))
+
+
+def _labels(job: dict) -> list[str]:
+    runs_on = job.get("runs-on", [])
+    return [runs_on] if isinstance(runs_on, str) else runs_on
+
+
+def _grants_id_token(permissions: object) -> bool:
+    return permissions == "write-all" or (
+        isinstance(permissions, dict) and permissions.get("id-token") == "write"
+    )
+
+
+def _self_hosted_credential_jobs(workflow: dict) -> list[str]:
+    return [
+        name
+        for name, job in workflow.get("jobs", {}).items()
+        if "self-hosted" in _labels(job)
+        and (
+            SECRET_REF.search(yaml.safe_dump(job)) is not None
+            or "environment" in job
+            or _grants_id_token(job.get("permissions"))
+            or _grants_id_token(workflow.get("permissions"))
+        )
+    ]
+
+
+def test_every_job_runs_on_a_self_hosted_factory_runner() -> None:
+    config, findings = load_factory_md(ROOT / "factory.md")
+    assert config is not None, findings
+    assert config.ci_runner == "factory-linux"
+    linux = ["self-hosted", "Linux", "X64", config.ci_runner]
+    for name, job in _workflow()["jobs"].items():
+        assert job["runs-on"] == (MACOS_LABELS if name == "macos" else linux), name
+
+
+def test_no_ci_job_uses_a_github_hosted_runner() -> None:
+    hosted = re.compile(r"^(ubuntu|macos|windows)-")
+    for name, job in _workflow()["jobs"].items():
+        assert not any(hosted.match(label) for label in _labels(job)), name
+
+
+def test_every_ci_job_skips_pull_requests_from_forks() -> None:
+    for name, job in _workflow()["jobs"].items():
+        assert FORK_GUARD in job.get("if", ""), name
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_a_self_hosted_workflow_never_runs_on_privileged_triggers(path: Path) -> None:
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not any("self-hosted" in _labels(job) for job in workflow["jobs"].values()):
+        return
+    triggers = workflow[True]
+    names = {triggers} if isinstance(triggers, str) else set(triggers)
+    assert names.isdisjoint({"pull_request_target", "workflow_run"})
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_no_self_hosted_job_holds_a_credential(path: Path) -> None:
+    assert _self_hosted_credential_jobs(yaml.safe_load(path.read_text(encoding="utf-8"))) == []
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        {"jobs": {"deploy": {"env": {"KEY": "${{ secrets.DEPLOY_KEY }}"}}}},
+        {"jobs": {"deploy": {"steps": [{"run": "echo ${{ secrets['DEPLOY_KEY'] }}"}]}}},
+        {"jobs": {"deploy": {"environment": "production"}}},
+        {"jobs": {"deploy": {"permissions": {"id-token": "write"}}}},
+        {"jobs": {"deploy": {"permissions": "write-all"}}},
+        {"permissions": {"id-token": "write"}, "jobs": {"deploy": {}}},
+    ],
+)
+def test_a_self_hosted_job_holding_a_credential_is_flagged(workflow: dict) -> None:
+    workflow["jobs"]["deploy"]["runs-on"] = ["self-hosted", "Linux"]
+    assert _self_hosted_credential_jobs(workflow) == ["deploy"]
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        {"runs-on": "ubuntu-latest", "env": {"KEY": "${{ secrets.DEPLOY_KEY }}"}},
+        {"runs-on": ["self-hosted", "Linux"], "env": {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}},
+    ],
+)
+def test_a_hosted_job_or_a_github_token_is_not_a_held_credential(job: dict) -> None:
+    assert _self_hosted_credential_jobs({"jobs": {"build": job}}) == []
+
+
+def test_no_runner_registration_token_is_committed() -> None:
+    paths = [ROOT / "factory.md"] + [
+        path for root in (".github", "docs") for path in (ROOT / root).rglob("*") if path.is_file()
+    ]
+    hits = [
+        f"{path.relative_to(ROOT)}:{text.count(chr(10), 0, match.start()) + 1}"
+        for path in paths
+        for text in [path.read_text(encoding="utf-8", errors="ignore")]
+        for match in TOKEN_SHAPE.finditer(text)
+    ]
+    assert hits == []

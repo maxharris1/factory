@@ -19,6 +19,7 @@ review:
     timeout_seconds: 300
 ship: handoff
 finish_line: merge
+ci_runner: factory-linux
 skills: []
 shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]
 feeder:
