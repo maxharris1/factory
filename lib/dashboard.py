@@ -866,15 +866,7 @@ _CHART_RULES = (
 
 
 def rules_and_limits(chart: dict | None) -> list[dict]:
-    """Each value is read from lib/health.py, the Linear budget or the chart's
-    edge labels, never copied."""
-    beat = f"{component_health.BEAT_SECONDS:g}"
-    probe = f"{component_health.PROBE_SECONDS:g}"
-    rows = [
-        {"key": "heartbeat", "text": f"every {beat} s (device probes every {probe} s)"},
-        {"key": "liveness", "text": f"up within {component_health.STALE_BEATS} intervals, "
-                                    f"stale within {component_health.DOWN_BEATS}, down older"},
-    ]
+    rows = []
     edges = (
         {} if chart is None
         else {(edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]}
@@ -888,8 +880,6 @@ def rules_and_limits(chart: dict | None) -> list[dict]:
         else:
             text = join(labels)
         rows.append({"key": key, "text": text})
-    rows.append({"key": "linear", "text": f"budget {LINEAR_BUDGET_REQUESTS_PER_HOUR:,} req/h and "
-                                          f"{LINEAR_BUDGET_COMPLEXITY_PER_HOUR:,} complexity/h"})
     return rows
 
 

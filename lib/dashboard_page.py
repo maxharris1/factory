@@ -37,7 +37,7 @@ from lib.dashboard_pages.shell import (  # noqa: F401
 )
 from lib.dashboard_pages.system import (  # noqa: F401
     _ANCHOR, _BUDGET_STATE, _HEALTH_STATE, _LOG_KINDS, _POLL_STATE, _anchor_attr, _components,
-    _drift, _drift_row, _health, _log, _log_row, _no_waiter, _rules, version_drift, version_groups,
+    _drift, _health, _log, _log_row, _no_waiter, _rules, _versions, version_drift, version_groups,
 )
 from lib.dashboard_pages.ticket_detail import (  # noqa: F401
     _detail_model, _job_article, _jobview,
