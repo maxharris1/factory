@@ -1220,17 +1220,17 @@ def harness_launched(transport: Transport, target: RemoteTarget) -> bool | None:
     return {0: True, 1: False}.get(code)
 
 
-def check_worker(transport: Transport, target: RemoteTarget) -> str:
+def check_worker(transport: Transport, target: RemoteTarget, *, fence: bool = True) -> str:
     """GONE (0), RUNNING (1), UNREACHABLE (ssh's 255) or UNKNOWN (anything else).
 
     Only GONE lets a slot go. UNKNOWN still proves the device answered.
     The target must carry the start's worker tag. The check first fences
     that tag's launch (fenced_check_script), so call it only once done with
-    the start; GONE then holds for good.
+    the start; GONE then holds for good. Pass fence=False only when no launch
+    of the tag can still reach the device (it answered and none went unanswered).
     """
-    code = transport.run(
-        ssh_argv(target, fenced_check_script(target)), timeout=PROBE_TIMEOUT_SECONDS
-    )
+    script = fenced_check_script(target) if fence else check_script(target)
+    code = transport.run(ssh_argv(target, script), timeout=PROBE_TIMEOUT_SECONDS)
     if code == 0:
         return GONE
     if code == 1:

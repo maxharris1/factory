@@ -410,6 +410,23 @@ def test_a_refused_launch_ends_without_a_follow(tmp_path: Path) -> None:
     end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", Stop())
     assert (end.kind, end.code) == (REFUSED, remote.START_REFUSED)
     assert transport.calls == ["LAUNCH"]
+    assert not end.in_transit
+
+
+def test_a_refused_launch_after_a_short_answer_has_nothing_in_transit(tmp_path: Path) -> None:
+    clock = Clock()
+    transport = Script([launched("short"), launched("refused rundir")])
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", Stop())
+    assert (end.kind, end.code, end.in_transit) == (REFUSED, remote.START_REFUSED, False)
+
+
+def test_a_refused_launch_after_an_unanswered_call_may_still_have_one_in_transit(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    transport = Script([DROP, launched("refused rundir")])
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", Stop())
+    assert (end.kind, end.code, end.in_transit) == (REFUSED, remote.START_REFUSED, True)
 
 
 def test_a_partial_transfer_is_discarded_and_fetched_again(tmp_path: Path) -> None:
