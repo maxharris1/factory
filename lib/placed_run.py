@@ -92,6 +92,7 @@ from lib.job_state import (
     requeue_unstarted,
 )
 from lib.machines_yml import Device, MachinesConfig
+from lib.process_tree import run_tag
 from lib.queue import SLOTS_TABLE, Proof, QueueError, SQLiteJobQueue, require_proof
 from lib.remote import (
     ENV_FILE,
@@ -355,6 +356,7 @@ class PlacedRun:
                 owner=self.owner,
                 pid=pid,
                 start=start,
+                run_tag=run_tag(pid),
                 runner=self.runner,
                 proof=self.proof,
             )

@@ -12,12 +12,15 @@ device that holds a slot or an orphan. A remote device gets all three
 steps below. On the box (a local device) a finished job's slot is
 released as below; when machines.yml sets it `enabled: false`, each
 running job whose worker started is handed to `on_lost` as below. A box
-orphan names its whole process tree (lib/job_run.py Tree): its `orch job
-run`, its worker, every descendant of either, and on Linux every process
-carrying the run's tag. On the poll that loses it, it is sent SIGTERM,
-through the runner or through the worker once that runner is gone; each
-later poll stops, then kills (SIGKILL), the whole tree. Its row is
-forgotten only once no process of the run is left.
+orphan names its whole process tree (lib/process_tree.py Tree): its `orch
+job run`, its worker, every descendant of either, and on Linux every
+process carrying the run's tag, which the slot recorded with the worker.
+Each poll rebuilds the tree from the row alone, so a restarted monitor
+finds it too: the tag, the recorded parents, and every member an earlier
+poll saw (pid and start time, kept on the row). On the poll that loses it,
+it is sent SIGTERM, through the runner or through the worker once that
+runner is gone; each later poll stops, then kills (SIGKILL), the whole
+tree. Its row is forgotten only once no process of the run is left.
 
 Release, only once the worker is confirmed gone. `orch job run` releases
 its own slot when its command exits; this catches the rest, for a slot
@@ -51,7 +54,8 @@ device off, and T6 requeues it under the link-drop budget.
 
 Orphans. After the lost step, each device_orphans row on the device is
 checked by its worker tag, so a job lost this poll is swept this poll. A
-worker still running is sent SIGTERM and its row kept; a gone worker's row
+worker still running is sent SIGTERM on the poll that loses it, SIGKILL on
+each later poll, and its row kept; a gone worker's row
 is forgotten, as is a row whose worker no check can name. An unreachable
 device ends its sweep for the poll after one failed check. A requeue
 placed back on the same device carries a new tag and is never stopped by
@@ -70,9 +74,9 @@ from typing import NamedTuple
 
 from lib.config_overlay import overlay_path
 from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
-from lib.job_run import Process, ProcessesUnknown, Tree, _responsible_pid, processes, run_tag
 from lib.job_state import Liveness, liveness, never_started
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
+from lib.process_tree import Process, ProcessesUnknown, Tree, _responsible_pid, processes, run_tag
 from lib.remote import (
     GONE,
     RUNNING,
@@ -175,7 +179,6 @@ class DeviceMonitor:
         self.scan = scan
         self.machines_path = machines_path
         self._stamp: Stamp | None = None
-        self._trees: dict[str, Tree] = {}
 
     def reload(self) -> None:
         """Load machines.yml again if it or its overlay changed since the last good load."""
@@ -204,11 +207,8 @@ class DeviceMonitor:
         groups: dict[str, list[HeldSlot]] = {}
         for slot in self.pool.held():
             groups.setdefault(slot.placement.device, []).append(slot)
-        orphans = self.pool.orphans()
-        for orphan in orphans:
+        for orphan in self.pool.orphans():
             groups.setdefault(orphan.device, [])
-        named = {orphan.job_id for orphan in orphans}
-        self._trees = {job_id: tree for job_id, tree in self._trees.items() if job_id in named}
         for name, slots in groups.items():
             device = self.config.device(name)
             if device is None:
@@ -217,7 +217,7 @@ class DeviceMonitor:
                 self._local(device, slots, now, on_lost, released, stopped, lost, forgotten)
                 continue
             self._remote(device, slots, now, lost_after, on_lost, released, stopped, lost)
-            self._sweep_orphans(device, stopped, forgotten)
+            self._sweep_orphans(device, now, stopped, forgotten)
         self.pool.forget_health(keep=self.pool.used().keys())
         return MonitorResult(tuple(released), tuple(stopped), tuple(lost), tuple(forgotten))
 
@@ -270,22 +270,20 @@ class DeviceMonitor:
         self, orphan: Orphan, now: float, stopped: list[str], forgotten: list[str]
     ) -> None:
         try:
-            tree = self._trees.get(orphan.job_id) or self._tree(orphan)
+            tree = self._tree(orphan)
             members = tree.track() if tree is not None else {}
+            if tree is not None and members:
+                self.pool.remember_run(orphan.job_id, tree.tag, tree.known)
+                if orphan.lost_at < now:
+                    tree.kill_round()
+                    self.pool.remember_run(orphan.job_id, tree.tag, tree.known)
         except ProcessesUnknown:
             return
         if tree is None or not members:
             self.pool.forget_orphan(orphan.job_id)
-            self._trees.pop(orphan.job_id, None)
             forgotten.append(orphan.job_id)
             return
-        self._trees[orphan.job_id] = tree
-        if orphan.lost_at < now:
-            try:
-                tree.kill_round()
-            except ProcessesUnknown:
-                return
-        else:
+        if orphan.lost_at >= now:
             gentle = [pid for pid in (orphan.runner_pid, orphan.worker_pid) if pid in members]
             for pid in gentle[:1] or members:
                 try:
@@ -295,28 +293,30 @@ class DeviceMonitor:
         stopped.append(orphan.job_id)
 
     def _tree(self, orphan: Orphan) -> Tree | None:
+        """The lost run as its row names it: its tag, every member seen so far, and
+        each recorded parent still live; None when nothing names it."""
         listing = self.scan(None)
-        seed = {
-            pid: listing[pid].start
-            for pid, start in (
-                (orphan.runner_pid, orphan.runner_start),
-                (orphan.worker_pid, orphan.worker_start),
-            )
-            if pid in listing and start in (None, listing[pid].start)
-        }
-        root = orphan.worker_pid if orphan.worker_pid in seed else orphan.runner_pid
-        if root is None or root not in seed:
+        known = dict(orphan.members)
+        for pid, start in (
+            (orphan.runner_pid, orphan.runner_start),
+            (orphan.worker_pid, orphan.worker_start),
+        ):
+            if pid in listing and start in (None, listing[pid].start):
+                known[pid] = listing[pid].start
+        tag = orphan.run_tag
+        worker = orphan.worker_pid
+        if tag is None and worker is not None and known.get(worker) == orphan.worker_start:
+            tag = run_tag(worker)
+        root = worker if worker is not None else orphan.runner_pid
+        if root is None or (tag is None and not known):
             return None
-        tag = run_tag(root) if root == orphan.worker_pid else None
-        if tag is not None and not self.alive(root, orphan.worker_start):
-            tag = None
         return Tree(
             root,
             tag,
             scan=self.scan,
             signal_pid=self.kill,
             responsible=_responsible_pid if sys.platform == "darwin" else None,
-            known=seed,
+            known=known,
         )
 
     def _local_gone(self, slot: HeldSlot) -> bool:
@@ -380,7 +380,9 @@ class DeviceMonitor:
                 on_lost(slot.placement.job_id, device.name, reason)
                 lost.append(slot.placement.job_id)
 
-    def _sweep_orphans(self, device: Device, stopped: list[str], forgotten: list[str]) -> None:
+    def _sweep_orphans(
+        self, device: Device, now: float, stopped: list[str], forgotten: list[str]
+    ) -> None:
         """Stop each lost job's worker still running on device; forget it once gone."""
         for orphan in self.pool.orphans():
             if orphan.device != device.name:
@@ -396,7 +398,9 @@ class DeviceMonitor:
             if status == GONE:
                 self.pool.forget_orphan(orphan.job_id)
                 forgotten.append(orphan.job_id)
-            elif status == RUNNING and stop_worker(self.transport, target):
+            elif status == RUNNING and stop_worker(
+                self.transport, target, kill=orphan.lost_at < now
+            ):
                 stopped.append(orphan.job_id)
 
     def _release(self, slot: HeldSlot, released: list[str]) -> None:
