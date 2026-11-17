@@ -39,6 +39,8 @@ Per component (its health label), in order:
    its previous update; otherwise it counts. Down restarts, failed restart
    commands, and counted updates get at most MAX_ATTEMPTS per
    WINDOW_SECONDS, then are skipped until the oldest leaves the window.
+   Components that share one restart command (the Linear listener and
+   tunnel) share a spent budget: while one is in backoff, neither restarts.
 6. Escalation, once per component per window: the backoff tripped, the
    restart command failed MAX_ATTEMPTS times, or the component flaps
    (FLAP_CHANGES process changes in the window that self-heal did not
@@ -84,7 +86,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
@@ -230,6 +232,7 @@ def decide(
     actions: list[Action] = []
     if not report.get("known"):
         return actions
+    spent: set[str] = set()
     for item in report.get("components") or ():
         service = service_of(item.get("component", ""), item.get("bot", ""))
         if (
@@ -286,11 +289,17 @@ def decide(
                                                  "waiting for the waiter to stop claiming"))
                 continue
         if len(attempts) >= MAX_ATTEMPTS:
+            spent.add(service)
             actions.append(act(SKIP, f"backoff: {len(attempts)} restarts in "
                                      f"{WINDOW_SECONDS // 60}m ({need})"))
             continue
         actions.append(act(RESTART, need))
-    return actions
+    return [
+        replace(a, kind=SKIP, reason=f"backoff: {a.service} shared with a component "
+                                     f"in backoff ({a.reason})")
+        if a.kind == RESTART and a.service in spent else a
+        for a in actions
+    ]
 
 
 def _escalation(key: KeyState, attempts: list[float], now: float, *, broken: bool) -> str | None:

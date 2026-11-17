@@ -540,6 +540,52 @@ def test_updates_toward_a_moving_checkout_that_never_land_back_off_and_escalate(
     assert len(saved(tmp_path)[POLLER]["attempts"]) == 3
 
 
+LISTENER = "linear-listener @ box"
+TUNNEL = "tunnel @ box"
+NEVER_UP_TUNNEL = component("tunnel", bot="", state="down", reason="never reached",
+                            pid=None, version="unknown")
+
+
+def test_a_listener_update_does_not_restart_past_its_tunnels_spent_budget(
+    tmp_path: Path,
+) -> None:
+    runs = Runs()
+    posts = Posts()
+    running, pid = COMMITS[0], 100
+    passes = []
+    for step in range(6):
+        checkout = COMMITS[step + 1]
+        listener = component("linear-listener", bot="", version=running, pid=pid)
+        listener["stale_code"] = True
+        before = len(runs.calls)
+        actions, _, _ = run_heal(
+            tmp_path, {"known": True, "code_version": checkout,
+                       "components": [listener, NEVER_UP_TUNNEL]},
+            now=NOW + step * 120, runs=runs, posts=posts)
+        passes.append(actions)
+        if len(runs.calls) > before:
+            running, pid = checkout, pid + 1
+    assert [call[0] for call in runs.calls] == [
+        ["/srv/factory/deploy/linear-webhook-service.sh", "restart"]] * 3
+    (skip,) = [a for a in passes[3] if a.label == LISTENER]
+    assert skip.kind == SKIP and skip.reason.startswith("backoff: linear-webhook shared")
+    (_, _, body), = posts.calls
+    assert [c["label"] for c in body["components"]] == [TUNNEL]
+
+
+@pytest.mark.parametrize("tunnel_first", [True, False], ids=["tunnel-first", "listener-first"])
+def test_a_shared_service_in_backoff_skips_every_component_on_it(tunnel_first: bool) -> None:
+    listener = component("linear-listener", bot="", version=COMMITS[0])
+    items = [NEVER_UP_TUNNEL, listener] if tunnel_first else [listener, NEVER_UP_TUNNEL]
+    states = {TUNNEL: KeyState(attempts=[NOW - 600, NOW - 480, NOW - 360])}
+    actions = heal.decide(report(*items), states, facts(), NOW)
+    assert RESTART not in [a.kind for a in actions]
+    (skip,) = [a for a in actions if a.label == LISTENER]
+    assert (skip.kind, skip.reason) == (
+        SKIP, f"backoff: linear-webhook shared with a component in backoff "
+              f"(stale code: running {COMMITS[0]}, checkout {CHECKOUT})")
+
+
 def test_failed_stale_restarts_count_even_toward_new_commits(tmp_path: Path) -> None:
     runs = Runs(code=1)
     posts = Posts()
