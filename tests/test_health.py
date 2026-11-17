@@ -997,7 +997,7 @@ def test_the_page_script_renders_the_health_tab_and_the_queue_flag(tmp_path: Pat
     # Down: the listener and the codex waiter; codex has no waiter.
     assert attention_count(page) == "3"
     (tmp_path / "main").mkdir()
-    main = _run_page(tmp_path / "main", data, "main", BAR + ["hud", "kpis", "lanes", "queue"])
+    main = _run_page(tmp_path / "main", data, "main", BAR + ["hud", "lanes", "queue"])
     assert "no waiter for codex" in main["text"]["queue"]
     assert "a.chip.bad[href=health.html#health-waiter-codex-bot]" in main["dump"]["queue"]
 

@@ -170,7 +170,7 @@ def test_static_server_serves_every_page() -> None:
 
 def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> None:
     html = _pages(tmp_path)["index.html"]
-    for panel in ("kpis", "lanes", "queue", "just-happened", "intake"):
+    for panel in ("lanes", "queue", "just-happened", "intake"):
         assert f'id="{panel}"' in html, panel
     # Moved to the Activity and Efficiency pages.
     for panel in ("health", "handoffs", "verdicts", "tickets", "log", "savings"):
@@ -178,8 +178,7 @@ def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> 
     for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
                   "Handoff savings", "poller.log", "scripted share"):
         assert words.lower() not in _text(_no_script(html)).lower(), words
-    # #140: status, then the lanes with the queue lane first, then Just happened beside Intake.
-    assert html.index('id="kpis"') < html.index('id="lanes"') < html.index('id="queue"')
+    assert html.index('id="lanes"') < html.index('id="queue"')
     assert html.index('id="queue"') < html.index('data-device="box"') < html.index('id="just-happened"')
     assert html.index('id="just-happened"') < html.index('id="intake"')
     assert 'id="queue" data-device="queue"' in _section(html, "lanes")
@@ -834,7 +833,7 @@ def attention_count(out: dict) -> str:
 @needs_node
 def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     snapshot = _held_more_than_running(tmp_path)
-    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "just-happened", "intake"])
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "lanes", "just-happened", "intake"])
     assert "LIVE" in out["text"]["link-text"]
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]

@@ -18,7 +18,7 @@ Name the module in a ticket's `Touches:` line.
 |---|---|---|---|
 | every page: TopBar, header band, attention strip, status line, nav, PixelStrip | `shell.py` | `_topbar`, `_band`, `_attention_strip`, `status_segments`, `_statusline`, `PAGES`, `_PAGE_NAMES`, `_PANELS`, `_page`, the `px_*` table and `PX_SCRIPT`; the shell CSS and the "every page" script | none (shared) |
 | every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop) | none (shared) |
-| `index.html` (Lanes) | `lanes.py` | `_kpis`, `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
+| `index.html` (Lanes) | `lanes.py` | `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
 | `health.html` (System) | `system.py` | `_components` (matrix and process details), `_drift`, `_health`, `_log`, `_rules`, `_no_waiter`; `_drift_row` and `_log_row` wrap two panels each in a `sys-row` | none |
 | `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns, Shipped shelf and Stopped group, from `board` and `phase_table`), `_tickets` (the table view), `_active_jobs` | #142 |
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
