@@ -1863,8 +1863,15 @@ def test_a_shell_read_that_fails_on_a_later_operand_keeps_the_file_it_printed(tm
         ("cat {skill} && cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
         ("cat {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
         ("cat {missing} || cat {skill}", 0, ["factory/factory-builder/SKILL.md"]),
+        ("head -n 3 {guide} && cat {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("sed -n 3p {guide} && cat {skill}; cat {missing}", 1, ["factory/factory-builder/SKILL.md"]),
+        ("head -n 3 {missing} && cat {skill}", 1, []),
+        ("head -n 3 {missing} || cat {skill}", 0, ["factory/factory-builder/SKILL.md"]),
     ],
-    ids=["and-after-failure", "and-before-failure", "semicolon", "or-after-failure"],
+    ids=[
+        "and-after-failure", "and-before-failure", "semicolon", "or-after-failure", "option-value-in-output",
+        "sed-program-in-output", "head-failure", "or-after-head-failure",
+    ],
 )
 def test_a_shell_read_counts_only_if_its_place_in_the_chain_ran(
     tmp_path: Path, harness: str, script: str, returncode: int, expected: list[str]
@@ -1873,7 +1880,11 @@ def test_a_shell_read_counts_only_if_its_place_in_the_chain_ran(
     router = root / "factory" / "factory-builder" / "SKILL.md"
     router.parent.mkdir(parents=True)
     router.write_text("# Factory builder\n", encoding="utf-8")
-    command = script.format(skill=shlex.quote(str(router)), missing=shlex.quote(str(tmp_path / "missing.md")))
+    guide = tmp_path / "guide.md"
+    guide.write_text("# Guide\n1. Read\n3. Run 3p\n", encoding="utf-8")
+    command = script.format(
+        skill=shlex.quote(str(router)), missing=shlex.quote(str(tmp_path / "missing.md")), guide=shlex.quote(str(guide))
+    )
     run = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=False)
     assert run.returncode == returncode
     if harness == "claude":

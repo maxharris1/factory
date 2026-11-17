@@ -1004,7 +1004,21 @@ class LiveRun:
 
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
-_READ_VERBS = frozenset({"cat", "head", "tail", "nl", "less", "more", "bat", "sed", "awk"})
+_VALUED_OPTIONS = {
+    "cat": frozenset(),
+    "more": frozenset(),
+    "head": frozenset({"-n", "-c", "--lines", "--bytes"}),
+    "tail": frozenset({"-n", "-c", "-s", "--lines", "--bytes", "--pid", "--sleep-interval", "--max-unchanged-stats"}),
+    "nl": frozenset({"-b", "-d", "-f", "-h", "-i", "-l", "-n", "-s", "-v", "-w"}),
+    "less": frozenset({"-b", "-h", "-j", "-k", "-o", "-O", "-p", "-P", "-t", "-T", "-x", "-y", "-z"}),
+    "bat": frozenset({"-l", "-r", "-H", "-m", "--language", "--line-range", "--highlight-line", "--style", "--theme", "--map-syntax"}),
+    "sed": frozenset({"-e", "-f", "-l", "--expression", "--file", "--line-length"}),
+    "awk": frozenset({"-f", "-v", "-F", "--file", "--assign", "--field-separator"}),
+}
+_PROGRAM_OPTIONS = {
+    "sed": frozenset({"-e", "-f", "--expression", "--file"}),
+    "awk": frozenset({"-f", "--file"}),
+}
 _SHELL_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "}", "!"})
 _OPERATORS = ";&|()<>\n"
 _NOT_A_PATH = re.compile(r"[$*?\[`~]")
@@ -1012,8 +1026,6 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 
 
 def _simple_commands(script: str) -> list[tuple[str, list[str]]]:
-    """Each simple command's words, paired with the operator that joined it
-    to the one before: "&&", "||", or "always" for any other."""
     lexer = shlex.shlex(script, posix=True, punctuation_chars=_OPERATORS)
     lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
     commands: list[tuple[str, list[str]]] = [("always", [])]
@@ -1034,13 +1046,44 @@ def _simple_commands(script: str) -> list[tuple[str, list[str]]]:
     ]
 
 
-class _Step(NamedTuple):
-    """One simple command of a call: how it joined the one before, every
-    non-flag argument of its reads, and each locked file it reads with the
-    operand that named it (None for a Read or Skill call)."""
+def _read_operands(verb: str, args: list[str]) -> list[str]:
+    valued, program = _VALUED_OPTIONS[verb], _PROGRAM_OPTIONS.get(verb, frozenset())
+    operands: list[str] = []
+    programmed = False
+    words = iter(args)
+    for arg in words:
+        if arg == "--":
+            operands.extend(words)
+        elif not arg.startswith("-"):
+            operands.append(arg)
+        else:
+            if arg.startswith("--"):
+                name, attached, _ = arg.partition("=")
+                options, takes_next = [name], not attached and name in valued
+            else:
+                options = [f"-{letter}" for letter in arg[1:]]
+                at = next((index for index, option in enumerate(options) if option in valued), len(options))
+                options, takes_next = options[: at + 1], at == len(options) - 1
+            programmed |= any(option in program for option in options)
+            if takes_next:
+                next(words, None)
+    return operands[1:] if program and not programmed else operands
 
+
+def _error_lines(output: str) -> list[tuple[str, str]]:
+    """Each output line as a program name and its message, for lines shaped
+    like `cat: <path>: No such file` or `[bat error]: '<path>' ...`."""
+    lines = []
+    for line in output.splitlines():
+        name, colon, message = line.partition(":")
+        if colon:
+            lines.append((posixpath.basename(name.strip().strip("[]").removesuffix(" error")), message))
+    return lines
+
+
+class _Step(NamedTuple):
     joined: str
-    operands: list[str]
+    reads: list[tuple[str, str]]
     found: dict[str, str | None]
 
 
@@ -1053,8 +1096,10 @@ class SkillReads:
     count only once its result arrives. A failed Read or refused Skill loaded
     nothing. A failed shell call loses the operands its output names, as
     `cat: <path>: No such file` does, and all of them when it printed
-    nothing. Its other commands are taken to have succeeded, so a read behind
-    a failed `&&`, or behind a `||` whose left side succeeded, did not run."""
+    nothing. In a failed call, a read failed when an output line from its
+    program names one of its file operands, and every other command is taken
+    to have succeeded, so a read behind a failed `&&`, or behind a `||` whose
+    left side succeeded, did not run."""
 
     def __init__(self, root: str, locked: frozenset[str]):
         self.root = posixpath.normpath(root)
@@ -1100,11 +1145,14 @@ class SkillReads:
             return
         if not output:
             return
+        errors = _error_lines(output)
         ok = True
         for step in steps:
             if (step.joined == "&&" and not ok) or (step.joined == "||" and ok):
                 continue
-            ok = not any(operand in output for operand in step.operands)
+            ok = not any(
+                program == verb and operand in message for verb, operand in step.reads for program, message in errors
+            )
             self.read |= {rel for rel, operand in step.found.items() if operand is not None and operand not in output}
 
     def row(self) -> str:
@@ -1141,13 +1189,12 @@ class SkillReads:
             return posixpath.normpath(posixpath.join(base or "", target))
         if verb in _SHELLS and len(args) > 1 and args[0].startswith("-") and "c" in args[0]:
             for inner in self._script(args[1], base):
-                step.operands.extend(inner.operands)
+                step.reads.extend(inner.reads)
                 step.found.update(inner.found)
-        elif verb in _READ_VERBS:
-            for arg in args:
-                if not arg.startswith("-"):
-                    step.operands.append(arg)
-                    self._path(step.found, arg, base)
+        elif verb in _VALUED_OPTIONS:
+            for operand in _read_operands(verb, args):
+                step.reads.append((verb, operand))
+                self._path(step.found, operand, base)
         return base
 
 
