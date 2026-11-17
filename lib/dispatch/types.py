@@ -221,6 +221,19 @@ class TicketRef:
     allow_merged: bool = False
 
 
+@dataclass(frozen=True)
+class LinearState:
+    name: str
+    type: str
+    handoff: bool
+
+
+@dataclass(frozen=True)
+class LinearStateRead:
+    states: Mapping[str, LinearState]
+    errors: Mapping[str, str]
+
+
 class PollSource(Protocol):
     def github_candidates(
         self,

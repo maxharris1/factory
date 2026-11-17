@@ -46,6 +46,9 @@ It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
 is reused, and a brief or go already on the ticket is not posted again. A
 ticket that was fed is never fed again, so a re-poll never opens a second PR.
+Nor is a ticket that `ticket_state` (read-only) shows past `questions` with
+no feed in flight, so one started by a go comment and moved back to the
+intake state by hand is not fed as new (#749).
 A feed that resumes on a recorded PR first checks that PR is still open; one
 closed or merged meanwhile ends the feed (`closed`) with nothing posted.
 
@@ -807,6 +810,7 @@ class Feeder:
         found: list[_Candidate] = []
         read: set[str] = set()
         errors = 0
+        started = self._started()
         for project in self.projects:
             intake = project.intake
             assert intake is not None
@@ -830,6 +834,8 @@ class Feeder:
             trusted = intake_trusted(self.config, project)
             for issue in issues:
                 if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
+                    continue
+                if (issue.repo.lower(), issue.key) in started:
                     continue
                 if not assignee_allowed(project, issue):
                     continue
@@ -1019,6 +1025,31 @@ class Feeder:
                 capped_release=bool(row["capped_release"]),
             )
         return found
+
+    def _started(self) -> set[tuple[str, str]]:
+        """The (repo, ticket_id) of tickets the dispatcher took past
+        questions whose feed is not in flight; read-only."""
+        with self.queue.connect() as connection:
+            if not _has_table(connection, "ticket_state"):
+                return set()
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+            if not {"repo", "ticket_id", "workflow_state"} <= columns:
+                return set()
+            return {
+                (str(repo).lower(), str(ticket_id))
+                for repo, ticket_id in connection.execute(
+                    f"""
+                    SELECT ticket.repo, ticket.ticket_id FROM ticket_state AS ticket
+                    WHERE COALESCE(ticket.workflow_state, 'intake') NOT IN ('intake', 'refused', 'questions')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {FEEDER_TABLE} AS feed
+                        WHERE feed.repo = lower(ticket.repo) AND feed.issue = ticket.ticket_id
+                          AND feed.state IN ({",".join("?" * len(IN_FLIGHT))})
+                      )
+                    """,
+                    IN_FLIGHT,
+                )
+            }
 
     def _capped(self, tickets: set[tuple[str, str]]) -> set[tuple[str, str]]:
         """The (repo, ticket_id) of tickets whose round is capped and not

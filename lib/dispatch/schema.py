@@ -179,7 +179,23 @@ class SchemaMixin:
                     "update_failures": "INTEGER NOT NULL DEFAULT 0",
                     "update_from_head": "TEXT",
                     "update_failed_job": "TEXT",
+                    "external_from_state": "TEXT",
+                    "external_from_stuck": "INTEGER",
+                    "external_at": "REAL",
                 },
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS linear_states (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    state_name TEXT,
+                    state_type TEXT,
+                    read_at REAL,
+                    read_error TEXT,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
             )
             connection.execute(
                 """
