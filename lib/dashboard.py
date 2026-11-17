@@ -55,7 +55,7 @@ CI (#717): `ci_runs` is {runs, failures} from the ci_jobs table the poller
 writes. A run is one ticket head's jobs; its status is derived, never
 stored: any job in progress, or some done and some queued, is in_progress;
 all queued is queued; all completed is failed when any conclusion is in
-CI_FAILED, else passed. `runs` lists only queued and in_progress runs,
+CHECK_FAILED, else passed. `runs` lists only queued and in_progress runs,
 newest first: {repo, ticket_id, source, pr, tracker, head_short, status,
 age_seconds, jobs}. A job is {name, status, conclusion, run_id, job_id,
 runner_kind, runner_name, created_at, started_at, completed_at,
@@ -138,6 +138,7 @@ from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import CI_WAIT_REASONS
+from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
@@ -954,7 +955,6 @@ CI_CONCLUSIONS = (
     "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required",
     "startup_failure", "stale",
 )
-CI_FAILED = ("failure", "timed_out", "cancelled", "action_required", "startup_failure")
 CI_RUNNER_KINDS = ("self-hosted", "github-hosted", "none")
 CI_FAILURE_WINDOW = 86400
 RECENT_CI_FAILURES = 10
@@ -968,7 +968,7 @@ def _ci_run_status(jobs: list[dict]) -> str:
     """A run's status from its jobs; never stored."""
     statuses = {job["status"] for job in jobs}
     if statuses == {"completed"}:
-        return "failed" if any(job["conclusion"] in CI_FAILED for job in jobs) else "passed"
+        return "failed" if any(job["conclusion"] in CHECK_FAILED for job in jobs) else "passed"
     if "in_progress" in statuses or "completed" in statuses:
         return "in_progress"
     return "queued"
@@ -1043,7 +1043,7 @@ def _ci_runs(
         }
         grouped.setdefault((*key, head), []).append(job)
         refs.setdefault((*key, head), ref)
-        if status == "completed" and conclusion in CI_FAILED and float(row["seen_at"]) >= now - CI_FAILURE_WINDOW:
+        if status == "completed" and conclusion in CHECK_FAILED and float(row["seen_at"]) >= now - CI_FAILURE_WINDOW:
             tests, more = _ci_tests(row["failing_tests"])
             failures.append({
                 **ref,

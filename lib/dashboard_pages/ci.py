@@ -53,7 +53,7 @@ SCRIPT = r"""
   var CI_JOB = {in_progress: ['running', 'accent'], queued: ['queued', 'warn']};
   var CI_DONE = {success: ['passed', 'ok'], failure: ['failed', 'bad'], timed_out: ['timed out', 'bad'],
                  cancelled: ['cancelled', 'bad'], action_required: ['action required', 'bad'],
-                 startup_failure: ['startup failure', 'bad']};
+                 startup_failure: ['startup failure', 'bad'], stale: ['stale', 'bad']};
   var CI_RUNNER = {'github-hosted': 'GitHub-hosted', none: 'no runner'};
   function ciLook(j) {
     if (CI_JOB[j.status]) return CI_JOB[j.status];
@@ -154,7 +154,7 @@ _JOB = {"in_progress": ("running", "accent"), "queued": ("queued", "warn")}
 _DONE = {
     "success": ("passed", "ok"), "failure": ("failed", "bad"), "timed_out": ("timed out", "bad"),
     "cancelled": ("cancelled", "bad"), "action_required": ("action required", "bad"),
-    "startup_failure": ("startup failure", "bad"),
+    "startup_failure": ("startup failure", "bad"), "stale": ("stale", "bad"),
 }
 _RUNNER = {"github-hosted": "GitHub-hosted", "none": "no runner"}
 
