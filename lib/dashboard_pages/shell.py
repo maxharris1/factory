@@ -94,7 +94,7 @@ background:var(--dim);border-top:1px solid var(--line);font:12px/1.3 var(--mono)
 :is([data-fresh=stale],[data-fresh=lost]) .statusline :is(.sl-k[data-short],.sl-t){font-size:0}
 :is([data-fresh=stale],[data-fresh=lost]) .statusline :is(.sl-k[data-short],.sl-t)::after{content:attr(data-short);font-size:12px}}
 main{position:relative;z-index:1;flex:1 0 auto;width:100%;display:grid;align-content:start;grid-template-columns:repeat(12,minmax(0,1fr));
-gap:16px;max-width:1600px;margin:0 auto;padding:20px 24px 32px}
+gap:16px;max-width:clamp(1600px,90vw,2400px);margin:0 auto;padding:20px 24px 32px}
 """
 
 
