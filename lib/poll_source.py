@@ -989,9 +989,8 @@ class LivePollSource:
             if self._budget_spent:
                 self._budget_spent = False
                 self._defer(f"tracked-read budget deferred {project.repo}")
-            else:
-                self._tracked_turn += 1
-                self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
+            self._tracked_turn += 1
+            self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
 
     def _require_budget(self, reserve: float = 0.0) -> float:

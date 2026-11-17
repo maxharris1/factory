@@ -280,3 +280,36 @@ def test_the_poller_log_and_stored_detail_name_the_repo_ticket_and_failing_call(
             "SELECT detail FROM poll_errors WHERE repo = 'poll'"
         ).fetchone()
     assert named in detail
+
+
+def test_the_ticket_that_spends_the_budget_yields_its_turn_to_the_next(tmp_path: Path) -> None:
+    now = [0.0]
+    tried: list[str] = []
+    gh = FakeGh(held_factory())
+
+    def runner(argv, timeout):
+        pulls = [part for part in argv if part.startswith("repos/acme/widgets/pulls/")]
+        if pulls:
+            tried.append(pulls[0].split("/")[4])
+        if any(part.startswith("repos/acme/widgets/") for part in argv):
+            if 19.0 > timeout:
+                now[0] += timeout
+                raise subprocess.TimeoutExpired(argv, timeout)
+            now[0] += 19.0
+        return gh(argv, timeout)
+
+    widgets = [("acme/widgets", str(number)) for number in range(12, 17)]
+    dispatcher = dispatcher_tracking(tmp_path, [*widgets, ("acme/gadgets", "30")])
+    source = LivePollSource(
+        projects("acme/widgets", "acme/gadgets"),
+        gh_runner=runner,
+        error_sink=dispatcher.record_poll_error,
+        clock=lambda: now[0],
+        sleep=lambda seconds: None,
+        tracked_read_budget_seconds=120.0,
+    )
+
+    for _ in range(6):
+        dispatcher.poll_once(source)
+
+    assert {number for _, number in widgets} <= set(tried)
