@@ -696,7 +696,6 @@ def test_ok_needs_a_session_and_csrf(max_client: Client, fake_github) -> None:
     assert fake_github.posts == []
 
 
-# Device settings (issue #777): the server only writes a request file.
 
 import time
 

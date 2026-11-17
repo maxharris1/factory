@@ -129,7 +129,6 @@ def test_no_credential_reaches_the_page_or_status_json(tmp_path: Path) -> None:
     assert "restart failed" in (out / "status.json").read_text(encoding="utf-8")
 
 
-# --- the page script ------------------------------------------------------------------------
 
 def _harness(session: dict | None, reply: dict | None = None) -> str:
     stubs = ""

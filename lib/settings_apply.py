@@ -53,7 +53,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
-from lib import heal
+from lib import dashboard_push, heal
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
 from lib.device_pool import slots_in_use
@@ -180,7 +180,6 @@ def append_audit(path: Path, entry: AuditEntry) -> None:
         os.fsync(out.fileno())
 
 
-# --- the spool -------------------------------------------------------------------------------
 
 
 class SpoolError(RuntimeError):
@@ -305,10 +304,6 @@ class SshSpool:
         self.runner = runner
 
     def read(self) -> SpoolListing:
-        # Imported here: lib.dashboard, which dashboard_push imports, reads
-        # this module's audit log for the snapshot.
-        from lib import dashboard_push
-
         config = ["-F", self.ssh_config] if self.ssh_config else []
         script = REMOTE_LIST.format(path=f"'{self.path}'", limit=MAX_REQUEST_BYTES + 1)
         argv = ["ssh", *config, *dashboard_push.SSH_OPTIONS, "--", self.host, script]
@@ -353,7 +348,6 @@ def parse_listing(text: str) -> SpoolListing:
     return SpoolListing(directory, dir_mode, tuple(files))
 
 
-# --- machines.yml edits ----------------------------------------------------------------------
 
 
 _DEVICES = re.compile(r"^devices:[ \t]*(#.*)?$")
@@ -487,7 +481,6 @@ def _replace(path: Path, data: bytes, mode: int) -> None:
         os.close(fd)
 
 
-# --- applying --------------------------------------------------------------------------------
 
 
 class Refused(Exception):
@@ -706,7 +699,6 @@ def describe(entry: AuditEntry) -> str:
     return text
 
 
-# --- orch settings apply ---------------------------------------------------------------------
 
 USAGE = """\
 orch settings apply [--state DIR] [--orch PATH] [--machines PATH] [--deploy DIR]
