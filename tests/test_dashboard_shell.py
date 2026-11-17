@@ -102,7 +102,7 @@ STRIPS = {
     3: ([("1 stuck", "bad"), ("1 overdue", "bad"), ("1 paused", "warn")], "+1 more →", "1 stuck · 1 overdue · +1"),
     16: ([("3 down", "bad"), ("1 stuck", "bad"), ("1 overdue", "bad"), ("1 no-waiter", "bad"), ("1 dead", "bad"),
           ("1 health", "bad"), ("1 needs-attention", "bad"), ("5 stale", "warn"), ("2 paused", "warn")],
-         "+14 more →", "3 down · 1 stuck · +12"),
+         "+14 more →", "5 stale · 3 down · +8"),
 }
 ITEM = re.compile(
     r'<div class="attn-item" data-attn="[^"]+"><span class="chip ([a-z-]+)">([^<]+)</span>'
@@ -204,6 +204,15 @@ def test_short_and_label_read_the_artboard_mix() -> None:
     assert (one["short"], one["label"]) == ("2 stale", "2 need attention: 2 stale. Open Activity.")
 
 
+@needs_node
+def test_the_phone_tally_names_the_two_largest_kinds_in_both_renders(tmp_path: Path, base: dict) -> None:
+    snapshot = _with(base, _kinds("stuck", "overdue", "paused", "paused", "paused"))
+    strip = _inner(render_pages(snapshot)["index.html"], "attention-strip")
+    assert '<span class="attn-short">3 paused · 1 stuck · +1</span>' in strip
+    assert 'aria-label="5 need attention: 1 stuck, 1 overdue, 3 paused. Open Activity."' in strip
+    assert _script(tmp_path, snapshot)["html"]["attention-strip"] == strip
+
+
 def test_activity_shows_the_count_only_and_holds_the_anchor(base: dict) -> None:
     html = _no_script(render_pages(_with(base, _items(base, 16)))["activity.html"])
     strip = _section(html, "attention-strip")
@@ -238,6 +247,15 @@ STRIP = """(function () {
           more: more && box(more).right,
           tally: row && [].map.call(row.querySelectorAll('.attn-tally'), function (n) { return n.scrollWidth <= n.clientWidth; })[0],
           ellipsis: what && [what.scrollWidth > what.clientWidth, getComputedStyle(what).textOverflow],
+          details: row && [].map.call(row.querySelectorAll('.attn-what'), function (n) { return box(n).width; }),
+          items: row && [].map.call(row.querySelectorAll('.attn-item'), function (item) {
+            var r = box(row), chip = box(item.querySelector('.chip')), who = item.querySelector('.attn-who'),
+                at = box(who), detail = box(item.querySelector('.attn-what'));
+            var hit = document.elementFromPoint((at.left + at.right) / 2, (at.top + at.bottom) / 2);
+            function inside(b) { return b.width > 0 && b.left >= r.left && b.right <= r.right; }
+            return {chip: inside(chip), who: inside(at) && who.scrollWidth <= who.clientWidth,
+                    clickable: !!hit && who.contains(hit), detail: inside(detail) && detail.width >= 20};
+          }),
           phone: shown('.attn-phone') && box(shown('.attn-phone')).height,
           here: shown('.attn-here') && box(shown('.attn-here')).height,
           sideways: document.documentElement.scrollWidth > innerWidth,
@@ -262,9 +280,13 @@ def test_the_strip_is_one_36px_row_at_every_count_and_width_in_a_browser(base: d
                 assert got["row"] == {"fits": True, "centers": 1}, where
                 assert got["phone"] is None and got["here"] is None, where
                 assert got["ellipsis"] == [True, "ellipsis"], where
+                drawn = {"chip": True, "who": True, "clickable": True, "detail": True}
+                assert got["items"] == [drawn] * min(2, count), f"each worst item shows its chip, subject and detail: {where}"
                 if count > 2:
                     assert got["more"] <= width, where
-                if width >= 1100 and count <= 16:
+                if not got["tally"]:
+                    assert max(got["details"]) <= 40, f"the tally is cut only once each detail is at its floor: {where}"
+                if width >= 1440 and count <= 16:
                     assert got["tally"] is True, f"a long detail must not squeeze the tally: {where}"
                 assert (got["sideways"], got["moving"]) == (False, 0), where
             for width in (375, 699):

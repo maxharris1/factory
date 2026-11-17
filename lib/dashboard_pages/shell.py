@@ -53,9 +53,8 @@ background:color-mix(in srgb,var(--bad) 9%,transparent);border-bottom:1px solid 
 .attn-count{font-weight:700;color:var(--bad);text-decoration:none}
 .attn-tally{flex:0 1 auto;min-width:0;overflow:hidden;display:flex;align-items:baseline;gap:6px;color:var(--muted)}
 .attn-rule{flex:none;width:1px;height:16px;background:color-mix(in srgb,var(--bad) 45%,transparent)}
-.attn-item{flex:0 1000 auto;min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
-.attn-item .chip{flex:none}
-.attn-who{flex:none;font-weight:600;color:var(--text);text-decoration:none}
+.attn-item{flex:0 100000 auto;display:grid;grid-template-columns:auto auto minmax(5ch,max-content);align-items:baseline;gap:8px}
+.attn-who{font-weight:600;color:var(--text);text-decoration:none}
 .attn-what{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
 .attn-more{flex:none;margin-left:auto;font-weight:600;color:var(--bad);text-decoration:none}
 .attn-below{color:var(--muted)}
@@ -204,12 +203,12 @@ SCRIPT = r"""
       return toneRank(a.x.kind) - toneRank(b.x.kind) || (a.age === null) - (b.age === null) ||
         (b.age || 0) - (a.age || 0) || a.i - b.i;
     }).slice(0, 2).map(function (p) { return p.x; });
-    var named = tally.map(function (t) { return t.n + ' ' + t.kind; });
-    var head = tally.slice(0, 2);
-    var rest = count - head.reduce(function (sum, t) { return sum + t.n; }, 0);
+    function named(t) { return t.n + ' ' + t.kind; }
+    var largest = tally.slice().sort(function (a, b) { return b.n - a.n; }).slice(0, 2);
+    var rest = count - largest.reduce(function (sum, t) { return sum + t.n; }, 0);
     return {count: count, need: need, tally: tally, worst: worst, more: count - worst.length,
-            short: named.slice(0, 2).concat(rest ? ['+' + rest] : []).join(' · '),
-            label: count + need + ': ' + named.join(', ') + '. Open Activity.'};
+            short: largest.map(named).concat(rest ? ['+' + rest] : []).join(' · '),
+            label: count + need + ': ' + tally.map(named).join(', ') + '. Open Activity.'};
   }
 
   function renderAttentionStrip(d) {
@@ -1243,16 +1242,16 @@ def strip_model(items: list[dict]) -> dict:
         return (_tone_rank(row["kind"]), 0 if aged else 1, -age if aged else 0, index)
 
     worst = [row for _, row in sorted(enumerate(items), key=worse)[:2]]
-    named = [f"{t.n} {t.kind}" for t in tally]
-    rest = count - sum(t.n for t in tally[:2])
+    largest = sorted(tally, key=lambda entry: -entry.n)[:2]
+    rest = count - sum(t.n for t in largest)
     return {
         "count": count,
         "need": need,
         "tally": tally,
         "worst": worst,
         "more": count - len(worst),
-        "short": " · ".join(named[:2] + ([f"+{rest}"] if rest else [])),
-        "label": f"{count}{need}: " + ", ".join(named) + ". Open Activity.",
+        "short": " · ".join([f"{t.n} {t.kind}" for t in largest] + ([f"+{rest}"] if rest else [])),
+        "label": f"{count}{need}: " + ", ".join(f"{t.n} {t.kind}" for t in tally) + ". Open Activity.",
     }
 
 
