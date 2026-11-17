@@ -1193,8 +1193,10 @@ class SkillReads:
     def _script(self, script: str, base: str | None) -> list[_Step]:
         steps = []
         for joined, words in _simple_commands(script):
-            steps.append(_Step(joined, [], {}, []))
-            base = self._cwd_after(steps[-1], words, base)
+            words = list(itertools.dropwhile(lambda word: word in _SHELL_WORDS, words))
+            if words:
+                steps.append(_Step(joined, [], {}, []))
+                base = self._cwd_after(steps[-1], words, base)
         return steps
 
     def _cwd_after(self, step: _Step, words: list[str], base: str | None) -> str | None:

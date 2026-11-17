@@ -1886,12 +1886,18 @@ BSD_SED = """sed() {
         ('bash -c "cat {missing} || cat {guide}" && cat {skill}; cat {missing}', 1, ["factory/factory-builder/SKILL.md"]),
         ('bash -c "cat {missing}; cat {guide}" && cat {skill}; cat {missing}', 1, ["factory/factory-builder/SKILL.md"]),
         ('bash -c "cat {guide} && cat {missing}" && cat {skill}', 1, []),
+        ('bash -c "cat {missing};" && cat {skill}; cat {missing}', 1, []),
+        ('bash -c "cat {missing}\n" && cat {skill}; cat {missing}', 1, []),
+        ('bash -c "cat {missing}; # note" && cat {skill}; cat {missing}', 1, []),
+        ("{{ cat {missing}; }} && cat {skill}; cat {missing}", 1, []),
     ],
     ids=[
         "and-after-failure", "and-before-failure", "semicolon", "or-after-failure", "option-value-in-output",
         "sed-program-in-output", "head-failure", "or-after-head-failure", "bsd-sed-joined-l", "bsd-sed-spaced-l",
         "gnu-sed-spaced-l", "gnu-sed-joined-l", "gnu-sed-line-length", "or-after-failed-probe",
         "and-after-recovered-shell", "and-after-shell-recovered-by-semicolon", "and-after-failed-shell",
+        "and-after-failed-shell-ending-in-semicolon", "and-after-failed-shell-ending-in-newline",
+        "and-after-failed-shell-ending-in-comment", "and-after-failed-brace-group",
     ],
 )
 def test_a_shell_read_counts_only_if_its_place_in_the_chain_ran(
