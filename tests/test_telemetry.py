@@ -36,6 +36,7 @@ from lib.telemetry import (
     harness_argv,
     last_seen,
     start_session,
+    stream_flags,
 )
 from tests.pool_helpers import LOCAL_BOX_MACHINES, pool_claim
 
@@ -347,7 +348,7 @@ def _session(
         bot="claude-bot",
         repo="acme/widgets",
         harness="claude",
-        argv=["claude"],
+        flags=stream_flags(["claude"]),
         raw_log=EventLog(tmp_path / "state" / "events.jsonl", max_bytes=max_bytes, log=messages.append),
         scrub=Scrubber(environ or {}, blind=worker_env),
         log=messages.append,
@@ -790,7 +791,7 @@ def test_start_session_is_off_with_orch_telemetry_off(tmp_path: Path) -> None:
     assert start_session(environ={"ORCH_TELEMETRY": "off"}, **kwargs) is None
     session = start_session(environ={}, **kwargs)
     assert session is not None
-    assert session.argv == ["codex", "exec", "--json", "-"] and session.harness == "codex"
+    assert session.flags.argv == ["codex", "exec", "--json", "-"] and session.harness == "codex"
     assert session.raw_log.path == tmp_path / "telemetry-codex-bot" / "j1" / "events.jsonl"
     session = start_session(environ={"ORCH_JOB_STATE_DIR": str(tmp_path / "w")}, **kwargs)
     assert session.raw_log.path == tmp_path / "w" / "events.jsonl"
@@ -1406,7 +1407,7 @@ def _persisted_live(tmp_path: Path, harness: str, text: str, environ: dict | Non
     db = tmp_path / f"{harness}.db"
     session = Session(
         connect=lambda: sqlite3.connect(db), job_id=harness, bot=f"{harness}-bot", repo="acme/widgets",
-        harness=harness, argv=[], raw_log=None, scrub=Scrubber(environ or {}), log=lambda _: None, stdout=io.BytesIO(),
+        harness=harness, flags=stream_flags([]), raw_log=None, scrub=Scrubber(environ or {}), log=lambda _: None, stdout=io.BytesIO(),
     )
     session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
     session.finish(0)
@@ -1599,7 +1600,7 @@ def test_counters_only_still_adds_the_stream_flags(tmp_path: Path) -> None:
         log=lambda line: None,
         environ={"ORCH_TELEMETRY": "counters"},
     )
-    assert session.argv == ["claude", "--output-format", "stream-json", "--verbose", "-p"]
+    assert session.flags.argv == ["claude", "--output-format", "stream-json", "--verbose", "-p"]
 
 
 def test_an_old_table_gains_the_live_run_columns(tmp_path: Path) -> None:
