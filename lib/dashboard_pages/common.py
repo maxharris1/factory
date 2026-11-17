@@ -308,7 +308,7 @@ SCRIPT_TAIL = r"""
     main: [renderLanes, renderJustHappened, renderIntake],
     job: [renderBoard, renderTickets, renderJobView],
     activity: [renderAttention, renderRelay],
-    efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens],
+    efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
     health: [renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);

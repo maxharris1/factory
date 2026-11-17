@@ -402,7 +402,7 @@ def test_moved_panels_left_their_old_pages(tmp_path: Path) -> None:
     assert 'id="health"' not in pages["efficiency.html"]
     assert 'id="log"' not in pages["activity.html"]
     assert "renderHealth, renderLog" in pages["health.html"]
-    assert re.search(r"efficiency: \[renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens\]",
+    assert re.search(r"efficiency: \[renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime\]",
                      pages["health.html"])
 
 
