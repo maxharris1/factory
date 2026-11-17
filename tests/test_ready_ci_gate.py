@@ -178,13 +178,39 @@ def test_a_ready_held_for_pending_ci_is_recorded_until_it_is_handled(tmp_path: P
     assert board.outcome(ready) is None
     assert ci_waits(board) == [{
         "repo": "owner/repo", "ticket_id": "42", "comment_id": ready, "head": sha(1),
-        "reason": "ci-pending", "checks": list(CHECKS), "since": since,
+        "reason": "ci-pending", "checks": list(CHECKS), "since": since, "next_round": 1,
     }]
 
     pr.ci[pr.head] = "success"
     board.poll()
     assert board.outcome(ready) == "queued-review"
     assert ci_waits(board) == []
+
+
+def approved_then_pushed_pending(tmp_path: Path):
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    pr.ci[sha(1)] = "success"
+    board.ready(pr, sha(1))
+    board.poll()
+    board.finish("codex")
+    pr.mergeable, pr.mergeable_state = None, None
+    board.approve(pr)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "merge-queue"
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, sha(2))
+    board.poll()
+    return board, pr
+
+
+def test_a_ready_held_for_ci_after_an_approval_records_the_round_re_entry_queues(tmp_path: Path) -> None:
+    board, pr = approved_then_pushed_pending(tmp_path)
+    assert [(w["reason"], w["next_round"]) for w in ci_waits(board)] == [("ci-pending", 2)]
+
+    pr.ci[sha(2)] = "success"
+    board.poll()
+    assert json.loads(board.jobs("review")[-1]["detail"])["round"] == "2/3"
 
 
 def test_a_covered_ready_held_for_pending_ci_is_recorded_until_it_ships(tmp_path: Path) -> None:
