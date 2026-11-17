@@ -303,3 +303,46 @@ def test_a_current_boot_success_outranks_an_earlier_boot_failure_ahead_on_the_wa
                                  uptime=clocks.uptime())
     (item,) = [c for c in report.components if c.component == component]
     assert (item.state, item.reason, item.pid) == ("up", "", 202)
+
+
+def previous_release_checked(db: Path, clocks: Clocks, component: str, device: str,
+                             interval: float, pid: int) -> None:
+    with sqlite3.connect(health.health_path(db)) as connection:
+        connection.execute(health._SCHEMA)
+        connection.execute(
+            f"INSERT INTO {health.TABLE} (component, device, bot, pid, started_at, last_seen, "
+            "version, interval_seconds, stopped_at, checked_at, cycle_started_at, "
+            "last_cycle_seconds, seen_boot, seen_monotonic) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL) "
+            "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
+            "started_at = excluded.started_at, version = excluded.version, "
+            "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
+            "checked_at = excluded.checked_at, "
+            "last_seen = CASE WHEN seen_boot <> ?9 THEN NULL ELSE last_seen END, "
+            "seen_monotonic = CASE WHEN seen_boot <> ?9 THEN NULL ELSE seen_monotonic END, "
+            "seen_boot = CASE WHEN seen_boot <> ?9 THEN NULL ELSE seen_boot END",
+            (component, device, "", pid, clocks.wall, "unknown", interval, clocks.wall,
+             clocks.boot),
+        )
+
+
+@pytest.mark.parametrize("failed_before", [False, True])
+@pytest.mark.parametrize(("component", "device", "interval"), CHECK_CASES)
+def test_a_previous_release_failed_check_after_a_current_format_success_stays_visible(
+        tmp_path: Path, component: str, device: str, interval: float,
+        failed_before: bool) -> None:
+    clocks = Clocks()
+    db = tmp_path / "orch.db"
+    if failed_before:
+        previous_release_checked(db, clocks, component, device, interval, pid=202)
+        clocks.advance(wall=1.0, monotonic=1.0)
+    health.HealthStore(db, devices=DEVICES, clock=lambda: clocks.wall,
+                       uptime=clocks.uptime).beat(component, device, pid=101,
+                                                  interval=interval)
+    clocks.advance(wall=1.0, monotonic=1.0)
+    previous_release_checked(db, clocks, component, device, interval, pid=202)
+    report = health.build_report(health.read_heartbeats(db), clocks.wall,
+                                 uptime=clocks.uptime())
+    (item,) = [c for c in report.components if c.component == component]
+    assert (item.state, item.pid) == ("stale", 202)
+    assert item.reason.endswith(" 1s ago")

@@ -469,6 +469,7 @@ class HealthStore:
                     (component, bot, pid, now, DOWN_BEATS, boot, monotonic, DOWN_BEATS,
                      monotonic),
                 )
+                _forget_unstamped_checks(connection, component, device, bot, boot)
         finally:
             connection.close()
 
@@ -489,19 +490,24 @@ class HealthStore:
         now = float(self.clock())
         seen = self.uptime()
         boot = None if seen is None else seen.boot
-        self._write(
-            f"INSERT INTO {TABLE} ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?9, ?5) "
-            "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
-            "started_at = excluded.started_at, version = excluded.version, "
-            "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
-            "checked_at = excluded.checked_at, checked_boot = excluded.checked_boot, "
-            "down_since = COALESCE(down_since, last_seen, excluded.down_since), "
-            f"{_FORGET_SUCCESS_FROM_ANOTHER_BOOT}",
-            (component, device, bot, pid, _real(started_at, now), version,
-             float(interval), now, boot),
-            busy,
-        )
+        connection = self._connect(busy)
+        try:
+            with connection:
+                connection.execute(
+                    f"INSERT INTO {TABLE} ({_COLUMNS}) "
+                    "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?9, ?5) "
+                    "ON CONFLICT (component, device, bot, pid) DO UPDATE SET "
+                    "started_at = excluded.started_at, version = excluded.version, "
+                    "interval_seconds = excluded.interval_seconds, stopped_at = NULL, "
+                    "checked_at = excluded.checked_at, checked_boot = excluded.checked_boot, "
+                    "down_since = COALESCE(down_since, last_seen, excluded.down_since), "
+                    f"{_FORGET_SUCCESS_FROM_ANOTHER_BOOT}",
+                    (component, device, bot, pid, _real(started_at, now), version,
+                     float(interval), now, boot),
+                )
+                _forget_unstamped_checks(connection, component, device, bot, boot)
+        finally:
+            connection.close()
 
     def stop(self, component: str, device: str, *, bot: str = "", pid: int) -> None:
         """Mark this process's row stopped (a clean exit)."""
@@ -547,6 +553,20 @@ class HealthStore:
                         )
         finally:
             connection.close()
+
+
+def _forget_unstamped_checks(connection: sqlite3.Connection, component: str, device: str,
+                             bot: str, boot: str | None) -> None:
+    """Drop the check rows a previous release wrote with no boot stamp. One
+    written before this boot could carry a wall clock ahead of this boot's, so
+    only rows a previous-release writer adds after this write stay, and the
+    reader can rank those by checked_at."""
+    if component in CHECKS and boot is not None:
+        connection.execute(
+            f"DELETE FROM {TABLE} WHERE component = ? AND device = ? AND bot = ? "
+            "AND seen_boot IS NULL AND checked_boot IS NULL",
+            (component, device, bot),
+        )
 
 
 def _real(value: float | None, default: float) -> float:
@@ -1320,11 +1340,11 @@ def _latest_checks(rows: Sequence[Heartbeat], uptime: Uptime | None) -> list[Hea
 
 def _without_earlier_boots_once_this_boot_succeeded(
         group: list[Heartbeat], uptime: Uptime | None) -> list[Heartbeat]:
+    """Rows with no boot stay: every current write drops them, so any left
+    were written after the group's newest stamped row."""
     if uptime is None or all(r.seen_boot != uptime.boot for r in group):
         return group
-    bootless_rows_predate_a_check = any(r.checked_boot == uptime.boot for r in group)
-    kept_boots = {uptime.boot} if bootless_rows_predate_a_check else {uptime.boot, None}
-    return [r for r in group if (r.checked_boot or r.seen_boot) in kept_boots]
+    return [r for r in group if (r.checked_boot or r.seen_boot) in (uptime.boot, None)]
 
 
 def _checked(row: Heartbeat) -> float:
