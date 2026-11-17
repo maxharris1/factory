@@ -82,7 +82,7 @@ def test_a_database_without_the_table_shows_no_telemetry(tmp_path: Path) -> None
     assert '<span class="t">Live run</span>' in article and '<p class="empty">no telemetry</p>' in article
     assert "lr-tile" not in article
     tokens = _section(_no_script(pages["efficiency.html"]), "tokens")
-    assert "Tokens and cost" in tokens and "no telemetry" in tokens
+    assert "Cost, last 7 days" in tokens and "no telemetry" in tokens
 
 
 def test_a_running_job_gets_its_counters_and_no_step_feed(tmp_path: Path) -> None:
@@ -465,7 +465,7 @@ def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path
         assert gone not in html, gone
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     tokens = eff["text"]["tokens"]
-    for needle in ("Tokens and cost", "last 7 days", "per harness", "per repo", "recent jobs",
+    for needle in ("Cost, last 7 days", "as reported by each harness", "per harness", "per repo", "recent jobs",
                    "$0.42", "success; exit 0", "1 jobs report no cost: codex 1"):
         assert needle in tokens, needle
 

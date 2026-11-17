@@ -446,7 +446,7 @@ def rollup_panel(snapshot: dict) -> str:
     """Efficiency: tokens and cost per job, per harness and per repo."""
     rollup = snapshot.get("telemetry") or _empty_rollup("none")
     totals = rollup["totals"]
-    count = f"last {rollup['window_days']} days"
+    heading = f"Cost, last {rollup['window_days']} days"
     if not totals["jobs"]:
         inner = '<p class="empty">no telemetry</p>'
     else:
@@ -482,8 +482,8 @@ def rollup_panel(snapshot: dict) -> str:
             + '<h3 class="tele-head">recent jobs</h3>' + _recent_table(rollup["recent"])
         )
     return (
-        '<section class="panel" id="tokens" aria-label="Tokens and cost">'
-        f"<h2>{_span(None, 'Tokens and cost')}{_span('count', count)}</h2>{inner}</section>"
+        f'<section class="panel" id="tokens" aria-label="{_e(heading)}">'
+        f"<h2>{_span(None, heading)}{_span('count', 'as reported by each harness')}</h2>{inner}</section>"
     )
 
 
@@ -551,7 +551,7 @@ TELEMETRY_SCRIPT = r"""
   }
   function renderTokens(d) {
     var r = d.telemetry || {window_days: 7, totals: {jobs: 0}, by_harness: [], by_repo: [], recent: []};
-    var root = panel('tokens', 'Tokens and cost', 'last ' + r.window_days + ' days');
+    var root = panel('tokens', 'Cost, last ' + r.window_days + ' days', 'as reported by each harness');
     if (!root) return;
     var t = r.totals || {jobs: 0};
     if (!t.jobs) { add(root, el('p', 'empty', 'no telemetry')); return; }

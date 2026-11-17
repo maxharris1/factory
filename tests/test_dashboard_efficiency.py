@@ -12,12 +12,12 @@ from lib import usage_readings
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages import efficiency
 from lib.usage_readings import Reading
-from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
+from tests.test_dashboard import NOW, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
 
-PANELS = ["savings", "jobs-lifetime", "rounds", "working", "headroom", "tokens"]
+PANELS = ["headroom", "tokens", "rounds", "savings", "jobs-lifetime"]
 
 
 def _machines(tmp_path: Path) -> Path:
@@ -186,40 +186,83 @@ def test_headroom_without_the_table_says_no_telemetry(tmp_path: Path) -> None:
     assert rows["cursor-bot"] == ["not tracked"] * 4
 
 
-def test_jobs_lifetime_counts_done_and_failed(tmp_path: Path) -> None:
+def _render(tmp_path: Path, snapshot: dict, render: str, ident: str) -> str:
+    if render == "server":
+        return _inner(_page(snapshot), ident)
+    return _run_page(tmp_path, snapshot, "efficiency", [ident])["html"][ident]
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+@pytest.mark.parametrize(("done", "failed", "lines"), [
+    (174, 74, ["174 jobs done", "74 failed", "70% of 248 finished jobs succeeded"]),
+    (0, 0, ["0 jobs done", "0 failed", "no finished jobs yet"]),
+])
+def test_lifetime_is_one_line_of_done_failed_and_success_rate(
+    tmp_path: Path, render: str, done: int, failed: int, lines: list[str]
+) -> None:
     snapshot = _snapshot(tmp_path)
-    snapshot["queue"]["totals"].update(done=174, failed=74)
-    panel = _inner(_page(snapshot), "jobs-lifetime")
-    assert '<span class="count">248 finished</span>' in panel
-    assert '<div class="ef-tile"><b class="ok">174</b><span>done</span></div>' in panel
-    assert '<div class="ef-tile"><b class="bad">74</b><span>failed</span></div>' in panel
-    assert (
-        '<div class="ef-bar" role="img" aria-label="174 jobs done, 74 jobs failed">'
-        '<span class="ok" style="flex:0 0 70.2%"></span><span class="bad" style="flex:0 0 29.8%"></span></div>'
-    ) in panel
-    assert "70% of 248 finished jobs succeeded" in _text(panel)
+    snapshot["queue"]["totals"].update(done=done, failed=failed)
+    panel = _render(tmp_path, snapshot, render, "jobs-lifetime")
+    assert panel.startswith("<h2><span>Lifetime</span></h2>"), panel[:80]
+    assert 'class="count"' not in panel
+    parts = [_text(m) for m in re.findall(r'<span class="ef-(?:life|pct)">(.*?)</span>(?=<span|$)', panel)]
+    assert parts == lines, panel
+    assert f'<b class="ok">{done}</b>' in panel and f'<b class="bad">{failed}</b>' in panel
 
 
-def test_jobs_lifetime_with_nothing_finished(tmp_path: Path) -> None:
-    snapshot = _snapshot(tmp_path)
-    snapshot["queue"]["totals"].update(done=0, failed=0)
-    panel = _inner(_page(snapshot), "jobs-lifetime")
-    assert '<div class="ef-bar" role="img" aria-label="0 jobs done, 0 jobs failed"></div>' in panel
-    assert "no finished jobs yet" in _text(panel)
-
-
-def test_revise_rounds_group_shipped_tickets(tmp_path: Path) -> None:
-    panel = _inner(_page(_snapshot(tmp_path)), "rounds")
-    assert '<span class="count">4 shipped tickets</span>' in panel
-    groups = re.findall(r'<div class="ef-group">(.*?)</div>', panel)
-    assert [_text(g) for g in groups] == [
-        "0 rounds 2 cleffy#96 · factory#65",
-        "1 round 1 factory#77",
-        "2 rounds 1 factory#98",
+def _shipped(snapshot: dict, rounds: list[int]) -> dict:
+    base = next(t for t in snapshot["tickets"] if t["state"] == "merged")
+    snapshot["tickets"] = [
+        {**base, "ticket_id": str(500 + n), "source": f"#{500 + n}", "state": "merged", "round": r}
+        for n, r in enumerate(rounds)
     ]
-    assert groups[0].count("<span></span>") == 2 and 'class="ef-sq zero"' in groups[0]
-    assert "factory#99" not in panel
+    return snapshot
+
+
+def _bars(panel: str) -> list[tuple[str, str, str]]:
+    return [
+        (label, width, _text(n))
+        for label, width, n in re.findall(
+            r'<div class="ef-rb"><span class="ef-k">(.*?)</span><span class="ef-track" aria-hidden="true">'
+            r'<span class="ef-fill(?: zero)?" style="width:([\d.]+%)"></span></span>'
+            r'<span class="ef-n">(.*?)</span></div>',
+            panel,
+        )
+    ]
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_revise_rounds_draw_five_bars_on_the_fixture(tmp_path: Path, render: str) -> None:
+    panel = _render(tmp_path, _snapshot(tmp_path), render, "rounds")
+    assert '<span class="count">4 shipped tickets</span>' in panel
+    assert _bars(panel) == [
+        ("0 rounds", "100.0%", "2 · 50%"),
+        ("1 round", "50.0%", "1 · 25%"),
+        ("2 rounds", "50.0%", "1 · 25%"),
+        ("3 rounds", "0.0%", "0 · 0%"),
+        ("4 or more", "0.0%", "0 · 0%"),
+    ]
     assert "2 of 4 shipped with no revise round" in _text(panel)
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_revise_rounds_bars_are_proportional_to_the_largest_bucket(tmp_path: Path, render: str) -> None:
+    snapshot = _shipped(_snapshot(tmp_path), [0] * 88 + [1] * 71 + [2] * 31 + [3] * 12 + [4, 5, 7, 7])
+    panel = _render(tmp_path, snapshot, render, "rounds")
+    assert '<span class="count">206 shipped tickets</span>' in panel
+    assert _bars(panel) == [
+        ("0 rounds", "100.0%", "88 · 43%"),
+        ("1 round", "80.7%", "71 · 34%"),
+        ("2 rounds", "35.2%", "31 · 15%"),
+        ("3 rounds", "13.6%", "12 · 6%"),
+        ("4 or more", "4.5%", "4 · 2%"),
+    ]
+    assert panel.count('class="ef-fill zero"') == 1
+    assert '<span class="ef-fill zero" style="width:100.0%"></span>' in panel
+    assert re.findall(r"<b[^>]*>", panel) == ['<b class="ok">'] + ["<b>"] * 4
+    assert re.search(r"[\w-]+#\d+", panel) is None
+    assert ('<div class="ef-foot"><p class="ef-note">88 of 206 shipped with no revise round</p>'
+            '<a href="job.html">see shipped tickets</a></div>') in panel
 
 
 def test_revise_rounds_with_no_shipped_ticket(tmp_path: Path) -> None:
@@ -228,52 +271,16 @@ def test_revise_rounds_with_no_shipped_ticket(tmp_path: Path) -> None:
     assert "no shipped tickets yet" in _text(_inner(_page(snapshot), "rounds"))
 
 
-def test_who_is_working_has_a_cell_per_slot_and_a_meter_per_device(tmp_path: Path) -> None:
-    panel = _inner(_page(_snapshot(tmp_path)), "working")
-    cells = re.search(r'<div class="ef-cells" role="img" aria-label="([^"]*)">(.*?)</div>', panel)
-    assert cells, panel
-    total = cells.group(2).count("<span")
-    assert total == 5
-    assert cells.group(1).startswith("5 slots: ")
-    assert "grok" in _text(panel)
-    meters = re.findall(r'<canvas class="px" data-px="meter"[^>]*data-used="(\d+)" data-slots="(\d+)"', panel)
-    assert meters == [("2", "3"), ("0", "2")]
-    assert "2 / 3 slots" in _text(panel) and "0 / 2 slots" in _text(panel)
-    assert "2 of 5 slots used" in _text(panel)
-
-
-def _disabled_box(tmp_path: Path, state: str) -> dict:
-    db = tmp_path / "orch.db"
-    make_db(db)
-    machines = tmp_path / "machines.yml"
-    machines.write_text(
-        "devices:\n  - name: box\n    local: true\n    enabled: false\n    slot_max: 3\n"
-        "    harnesses:\n      claude: claude-bot\n",
-        encoding="utf-8",
-    )
-    with sqlite3.connect(db) as connection:
-        add_job(connection, "on-disabled", state=state)
-    return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
-
-
-def test_a_disabled_device_keeps_its_running_job_but_offers_no_idle_slot(tmp_path: Path) -> None:
-    panel = _text(_inner(_page(_disabled_box(tmp_path, "running")), "working"))
-    assert "1 of 1 slots used" in panel
-    assert "claude 1" in panel and "idle 0" in panel
-    assert "box 1 / 1 slots" in panel
-
-
-def test_a_disabled_device_with_nothing_running_is_left_out(tmp_path: Path) -> None:
-    panel = _text(_inner(_page(_disabled_box(tmp_path, "done")), "working"))
-    assert "0 of 0 slots used" in panel and "box" not in panel
-
-
-@needs_node
-@pytest.mark.parametrize("state", ["running", "done"])
-def test_script_twin_matches_on_a_disabled_device(tmp_path: Path, state: str) -> None:
-    snapshot = _disabled_box(tmp_path, state)
-    out = _run_page(tmp_path, snapshot, "efficiency", ["working"])
-    assert out["html"]["working"] == _inner(_page(snapshot), "working")
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_who_is_working_is_gone(tmp_path: Path, render: str) -> None:
+    snapshot = _snapshot(tmp_path)
+    page = _page(snapshot)
+    if render == "server":
+        assert 'id="working"' not in page
+        assert "Who is working now" not in page
+    else:
+        out = _run_page(tmp_path, snapshot, "efficiency", ["working"])
+        assert out["html"]["working"] == "" and out["text"]["working"] == ""
 
 
 @needs_node
@@ -326,6 +333,34 @@ def test_efficiency_has_no_page_scroll_at_375_in_a_browser(tmp_path: Path) -> No
             assert browser.eval("document.querySelectorAll('#tokens .ef-scroll > table').length") == 3, script
             assert browser.eval(WIDER_THAN_THE_PAGE) == [], script
             assert browser.eval("document.documentElement.scrollWidth") <= browser.eval("innerWidth"), script
+            lefts = browser.eval(
+                "[].map.call(document.querySelectorAll('main .panel'), function (n) {"
+                " return [n.id, n.getBoundingClientRect().left]; })"
+            )
+            assert [ident for ident, _ in lefts] == PANELS, script
+            assert len({left for _, left in lefts}) == 1, (script, lefts)
+    finally:
+        browser.close()
+
+
+TOPS = """(function () {
+  var out = {};
+  [].forEach.call(document.querySelectorAll('main .panel'), function (n) { out[n.id] = n.getBoundingClientRect().top; });
+  return out;
+})()"""
+
+
+@needs_chrome
+def test_efficiency_rows_at_1440_in_a_browser(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    browser = Browser()
+    try:
+        for script in (False, True):
+            _load(browser, snapshot, 1440, script)
+            top = browser.eval(TOPS)
+            assert top["headroom"] == top["tokens"], (script, top)
+            assert top["rounds"] == top["savings"] > top["headroom"], (script, top)
+            assert top["jobs-lifetime"] > top["rounds"], (script, top)
     finally:
         browser.close()
 
@@ -339,6 +374,10 @@ def test_panels_are_in_the_artboard_order(tmp_path: Path) -> None:
     page = _page(_snapshot(tmp_path))
     found = [page.index(f'id="{ident}"') for ident in PANELS]
     assert found == sorted(found)
+    rows = re.findall(r'<div class="ef-row">(.*?</section>)</div>', _section(page, "hud"))
+    assert [re.findall(r'<section class="[^"]*" id="([^"]+)"', row) for row in rows] == [
+        ["headroom", "tokens"], ["rounds", "savings"],
+    ]
 
 
 def test_an_empty_factory_renders_every_panel(tmp_path: Path) -> None:
