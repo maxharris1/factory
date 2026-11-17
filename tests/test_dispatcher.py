@@ -7929,6 +7929,32 @@ def test_replan_after_a_lost_gap_plan_drops_the_gap_instruction(
     assert_fresh_plan_on_factory_pr(queue, sent.id)
 
 
+@pytest.mark.parametrize("kind", ["retry", "go"])
+def test_a_replan_before_the_handoff_audit_leaves_no_unverified_handoff(
+    tmp_path: Path, kind: str
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now=now)
+    seed_finished_plan(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    now[0] = 150
+    sent = (
+        retry(created_at=140)
+        if kind == "retry"
+        else comment("go-1", GO.format(state="planning"), author="grok-login", created_at=140)
+    )
+
+    dispatcher.poll_once(FakeSource(factory_pr_ticket(sent)))
+
+    assert handled_outcome(queue, sent.id) == (
+        "queued-retry-plan" if kind == "retry" else "queued-plan"
+    )
+    assert_fresh_plan_on_factory_pr(queue, sent.id)
+
+
 def landed_plan_comment(queue: SQLiteJobQueue) -> tuple[Comment, ...]:
     with queue.connect() as connection:
         connection.execute(
