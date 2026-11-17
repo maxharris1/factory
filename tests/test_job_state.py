@@ -554,18 +554,29 @@ def orch_yml(tmp_path: Path, extra: str) -> Path:
     return path
 
 
-def test_job_states_default_to_2_and_5_minutes(tmp_path: Path) -> None:
+def test_job_states_default_to_2_5_and_10_minutes(tmp_path: Path) -> None:
     config, findings = load_orch_yml(orch_yml(tmp_path, ""))
     assert config is not None, findings
-    assert config.job_states == JobStateConfig(stale_seconds=120, release_claimed_seconds=300)
+    assert config.job_states == JobStateConfig(
+        stale_seconds=120, release_claimed_seconds=300, unreachable_lost_seconds=600
+    )
 
 
 def test_job_states_are_configurable_in_orch_yml(tmp_path: Path) -> None:
     config, findings = load_orch_yml(
-        orch_yml(tmp_path, "job_states:\n  stale_minutes: 3\n  release_claimed_minutes: 10\n")
+        orch_yml(
+            tmp_path,
+            "job_states:\n  stale_minutes: 3\n  release_claimed_minutes: 10\n"
+            "  unreachable_lost_minutes: 15\n",
+        )
     )
     assert config is not None, findings
-    assert config.job_states == JobStateConfig(stale_seconds=180, release_claimed_seconds=600)
+    assert config.job_states == JobStateConfig(
+        stale_seconds=180, release_claimed_seconds=600, unreachable_lost_seconds=900
+    )
+
+
+LOST_MINUTES = "job_states.unreachable_lost_minutes must be a positive integer"
 
 
 @pytest.mark.parametrize(
@@ -576,6 +587,10 @@ def test_job_states_are_configurable_in_orch_yml(tmp_path: Path) -> None:
         ("job_states:\n  stale_minutes: 1.5\n", "job_states.stale_minutes must be a positive"),
         ("job_states:\n  release_claimed_minutes: x\n", "job_states.release_claimed_minutes"),
         ("job_states:\n  stale_seconds: 30\n", "unknown field 'job_states.stale_seconds'"),
+        *(
+            (f"job_states:\n  unreachable_lost_minutes: {value}\n", LOST_MINUTES)
+            for value in ("0", "-1", '"10"', "true")
+        ),
     ],
 )
 def test_bad_job_states_are_refused(tmp_path: Path, extra: str, message: str) -> None:

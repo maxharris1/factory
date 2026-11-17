@@ -66,7 +66,7 @@ DISPATCHER_METHODS = (
     "_cancel_answered", "_cancel_answered_jobs", "_check_devices", "_check_job_states",
     "_classify_update", "_clear_poll_error_streak", "_close_abandoned_jobs",
     "_complete_redrive", "_complete_ship_intent", "_config_cap", "_connect",
-    "_deliver_grok_jobs", "_device_offline", "_discard_pending_ship_intent",
+    "_deliver_grok_jobs", "_device_lost", "_discard_pending_ship_intent",
     "_discover", "_done_from_handoff", "_duplicate_verdict", "_effective_cap",
     "_enqueue_or_flag", "_enqueue_step", "_ensure_all_stuck_wakes",
     "_ensure_stuck_wake", "_ensure_stuck_wake_in_transaction", "_enter_merge_queue",

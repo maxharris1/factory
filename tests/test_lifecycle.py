@@ -803,8 +803,8 @@ def test_a_job_failing_after_the_merge_is_neither_retried_nor_stuck(
 
 
 def test_a_finished_ticket_is_never_marked_stuck(tmp_path: Path) -> None:
-    """Every stuck path (CI red, device offline, declined, job failed) goes
-    through one write; on a merged or done ticket it writes nothing."""
+    """Every stuck path (CI red, declined, job failed) goes through one
+    write; on a merged or done ticket it writes nothing."""
     dispatcher, queue = setup(tmp_path)
     dispatcher.record_terminal(REPO, TICKET, "merged")
 
@@ -813,7 +813,7 @@ def test_a_finished_ticket_is_never_marked_stuck(tmp_path: Path) -> None:
         ticket_id=TICKET,
         source_comment_id="c-1",
         timeout_seconds=3600,
-        reason="device-offline",
+        reason="job-failed-2",
         detail="{}",
     )
 

@@ -29,6 +29,7 @@ from lib.factory_md import HoldConfig
 from lib.job_state import (
     DEFAULT_RELEASE_CLAIMED_MINUTES,
     DEFAULT_STALE_MINUTES,
+    DEFAULT_UNREACHABLE_LOST_MINUTES,
     JobStateConfig,
 )
 from lib.load import Finding, is_strict_int, load_yaml
@@ -86,7 +87,7 @@ _MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
 APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
 _USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
-_JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
+_JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes", "unreachable_lost_minutes"}
 _LINEAR_WEBHOOK_KEYS = {
     "bind", "path", "secret_file", "reconcile_seconds", "public_url", "tunnel_alert_minutes",
 }
@@ -1024,8 +1025,9 @@ def _public_url_ok(url: object, path: object) -> bool:
 
 
 def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:
-    """job_states (#75): when a running job counts as stale, and how long a
-    claimed job that was never started waits before the poller requeues it.
+    """job_states (#75): when a running job counts as stale, how long a
+    claimed job that was never started waits before the poller requeues it,
+    and how long a device stays unreachable before its running jobs are lost.
     Whole minutes, at least 1; the stale threshold must stay above `orch job
     run`'s heartbeat (15 seconds by default, an override at most 30)."""
     if "job_states" not in data:
@@ -1040,6 +1042,7 @@ def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:
     for key, default in (
         ("stale_minutes", DEFAULT_STALE_MINUTES),
         ("release_claimed_minutes", DEFAULT_RELEASE_CLAIMED_MINUTES),
+        ("unreachable_lost_minutes", DEFAULT_UNREACHABLE_LOST_MINUTES),
     ):
         item = value.get(key, default)
         if not is_strict_int(item) or item < 1:
@@ -1053,6 +1056,7 @@ def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:
     return JobStateConfig(
         stale_seconds=minutes["stale_minutes"] * 60.0,
         release_claimed_seconds=minutes["release_claimed_minutes"] * 60.0,
+        unreachable_lost_seconds=minutes["unreachable_lost_minutes"] * 60.0,
     )
 
 

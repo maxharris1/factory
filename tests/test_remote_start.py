@@ -616,24 +616,24 @@ def test_monitor_releases_a_finished_box_slot_only_once_runner_and_worker_are_go
     pool.attach_runner(job_id, owner="claude", pid=11, start="s", alive=lambda *_: False)
     pool.attach_worker(job_id, owner="claude", pid=22, start="w")
     monitor = DeviceMonitor(pool, config, FakeTransport(), alive=lambda pid, _s: alive.get(pid, False))
-    offline: list = []
+    lost: list = []
 
-    monitor.reconcile(1000.0, lambda *args: offline.append(args))
+    monitor.reconcile(1000.0, 600.0, lambda *args: lost.append(args))
     assert pool.placement(job_id) is not None  # still running: never released
 
     queue.finish(job_id, owner="claude", handoff_comment_id="c1")
-    monitor.reconcile(1000.0, lambda *args: offline.append(args))
+    monitor.reconcile(1000.0, 600.0, lambda *args: lost.append(args))
     assert pool.placement(job_id) is not None  # runner alive
 
     alive[11] = False
-    monitor.reconcile(1000.0, lambda *args: offline.append(args))
+    monitor.reconcile(1000.0, 600.0, lambda *args: lost.append(args))
     assert pool.placement(job_id) is not None  # worker alive
 
     alive[22] = False
-    result = monitor.reconcile(1000.0, lambda *args: offline.append(args))
+    result = monitor.reconcile(1000.0, 600.0, lambda *args: lost.append(args))
     assert result.released == (job_id,)
     assert pool.placement(job_id) is None
-    assert offline == []
+    assert lost == []
 
 
 def test_monitor_releases_a_remote_slot_only_when_the_device_says_the_worker_is_gone(
@@ -645,18 +645,18 @@ def test_monitor_releases_a_remote_slot_only_when_the_device_says_the_worker_is_
     transport = FakeTransport(check=255)
     monitor = DeviceMonitor(pool, config, transport, alive=lambda *_: False)
 
-    monitor.reconcile(1000.0, lambda *_: None)
+    monitor.reconcile(1000.0, 600.0, lambda *_: None)
     assert pool.placement(job_id) is not None  # unreachable: kept
     assert transport.calls == [("check", "codex-bot", "fakepc-codex-bot")]
 
     transport.check = 1
-    result = monitor.reconcile(1060.0, lambda *_: None)
+    result = monitor.reconcile(1060.0, 600.0, lambda *_: None)
     assert result.stopped == (job_id,)  # an orphan with no runner is stopped
     assert pool.placement(job_id) is not None
     assert transport.calls[-1] == ("stop", "codex-bot", "fakepc-codex-bot")
 
     transport.check = 0
-    result = monitor.reconcile(1120.0, lambda *_: None)
+    result = monitor.reconcile(1120.0, 600.0, lambda *_: None)
     assert result.released == (job_id,)
     assert pool.placement(job_id) is None
 
@@ -668,16 +668,19 @@ def test_monitor_releases_a_remote_slot_no_worker_was_started_for_without_ssh(
     queue.finish(job_id, owner="codex", handoff_comment_id=None)
     transport = FakeTransport(check=255)
     result = DeviceMonitor(pool, config, transport, alive=lambda *_: False).reconcile(
-        1000.0, lambda *_: None
+        1000.0, 600.0, lambda *_: None
     )
     assert result.released == (job_id,)
     assert transport.calls == []
 
 
-# --- 60 minutes offline: stuck, Grok woken once --------------------------------
+# --- unreachable past the limit: lost, its slot freed (#662) ------------------
 
 
-def offline_setup(tmp_path: Path, check: int = 255):
+TAG = "d" * 32
+
+
+def lost_setup(tmp_path: Path, check: int = 255):
     now = [0.0]
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
@@ -685,98 +688,96 @@ def offline_setup(tmp_path: Path, check: int = 255):
     config = config_of(machines)
     pool = DevicePool(queue, config)
     transport = FakeTransport(check=check)
-    grok = FakeGrokDelivery()
     dispatcher = Dispatcher(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
-        grok_delivery=grok,
+        grok_delivery=FakeGrokDelivery(),
         devices=DeviceMonitor(pool, config, transport, alive=lambda *_: True),
     )
     snapshot = ticket(comment("go-1", GO.format(state="building"), author="grok-login"), timeout=60)
     dispatcher.process(snapshot)
     job, placement = pool.claim("claude")
-    pool.attach_worker(job.id, owner="claude", remote=True)
-    return now, queue, pool, transport, grok, dispatcher, snapshot, job
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True, tag=TAG)
+    return now, queue, pool, transport, dispatcher, job
 
 
-def stuck_wakes(grok: FakeGrokDelivery) -> list:
-    return [job for job in grok.jobs if job.request.action == "stuck"]
+def poll_at(now: list[float], dispatcher: Dispatcher, at: float) -> None:
+    now[0] = at
+    dispatcher.reconcile_jobs()
 
 
-def test_a_device_offline_60_minutes_marks_the_job_stuck_and_wakes_grok_once(
+def job_events(queue: SQLiteJobQueue, job_id: str) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute(
+                "SELECT event, detail FROM job_events WHERE job_id = ? ORDER BY id", (job_id,)
+            )
+        ]
+
+
+def orphans(queue: SQLiteJobQueue) -> list[tuple[str, str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in connection.execute(
+                "SELECT job_id, device, worker_tag FROM device_orphans ORDER BY job_id"
+            )
+        ]
+
+
+def test_a_device_unreachable_10_minutes_loses_the_job_and_frees_its_slot(
     tmp_path: Path,
 ) -> None:
-    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
-    # The runner on the box keeps beating (its ssh hangs), so T6 never fires.
-    for minute in range(0, 60, 10):
-        now[0] = minute * 60.0
-        queue.heartbeat(job.id, owner="claude")
-        dispatcher.reconcile_jobs()
-        assert state(queue, job.id) == "running"
-    now[0] = 3599.0
-    queue.heartbeat(job.id, owner="claude")
-    dispatcher.reconcile_jobs()
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    poll_at(now, dispatcher, 540.0)
     assert state(queue, job.id) == "running"
-    assert not dispatcher.is_stuck(snapshot)
+    assert pool.used() == {"pc": 1}
 
-    now[0] = 3600.0
-    dispatcher.reconcile_jobs()
+    poll_at(now, dispatcher, 600.0)
 
-    assert state(queue, job.id) == "failed"
-    assert dispatcher.is_stuck(snapshot)
-    wakes = stuck_wakes(grok)
-    assert len(wakes) == 1
-    assert "device pc offline 60 minutes" in wakes[0].request.detail
-    assert pool.placement(job.id) is not None  # the worker is not confirmed gone
-    assert [item for item in queue.outstanding() if item.request.recipient == "claude"] == []
-
-    for later in (3660.0, 7200.0, 10800.0):
-        now[0] = later
-        dispatcher.reconcile_jobs()
-    assert len(stuck_wakes(grok)) == 1
     with queue.connect() as connection:
-        done = connection.execute(
-            "SELECT COUNT(*) FROM jobs WHERE recipient = 'claude' AND state = 'done'"
-        ).fetchone()[0]
-        reason = connection.execute("SELECT stuck_reason FROM ticket_state").fetchone()[0]
-    assert done == 0
-    assert reason == "device-offline"
+        row = connection.execute(
+            "SELECT state, failure_handled FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()
+    assert (row["state"], row["failure_handled"]) == ("failed", 0)
+    assert ("device-lost", f"pc: unreachable 10 min; worker tag {TAG}") in job_events(
+        queue, job.id
+    )
+    assert pool.placement(job.id) is None
+    assert pool.used() == {}
+    assert orphans(queue) == [(job.id, "pc", TAG)]
+    with queue.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ticket_state WHERE stuck = 1").fetchone()[0] == 0
 
 
-def test_a_good_probe_restarts_the_offline_clock(tmp_path: Path) -> None:
-    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
-    dispatcher.reconcile_jobs()  # first failure at 0
-    now[0] = 1800.0
+def test_a_good_probe_restarts_the_lost_clock(tmp_path: Path) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    poll_at(now, dispatcher, 0.0)
     transport.check = 1  # the device answers: the worker runs
-    queue.heartbeat(job.id, owner="claude")
-    dispatcher.reconcile_jobs()
+    poll_at(now, dispatcher, 300.0)
     transport.check = 255
-    now[0] = 2400.0
-    queue.heartbeat(job.id, owner="claude")
-    dispatcher.reconcile_jobs()  # failing again from 2400
-    now[0] = 3600.0
-    queue.heartbeat(job.id, owner="claude")
-    dispatcher.reconcile_jobs()
+    poll_at(now, dispatcher, 400.0)
+    poll_at(now, dispatcher, 900.0)
     assert state(queue, job.id) == "running"
-    assert stuck_wakes(grok) == []
-    now[0] = 2400.0 + 3600.0
-    queue.heartbeat(job.id, owner="claude")
-    dispatcher.reconcile_jobs()
+    poll_at(now, dispatcher, 1000.0)
     assert state(queue, job.id) == "failed"
-    assert len(stuck_wakes(grok)) == 1
+    assert pool.placement(job.id) is None
 
 
 def test_the_offline_clock_is_forgotten_once_the_device_holds_no_slot(tmp_path: Path) -> None:
     queue, pool, config, job_id = monitor_setup(tmp_path, "codex", box=False)
     transport = FakeTransport(check=255)
     monitor = DeviceMonitor(pool, config, transport, alive=lambda *_: True)
-    monitor.reconcile(0.0, lambda *_: None)
+    monitor.reconcile(0.0, 600.0, lambda *_: None)
     assert pool.health("pc") == (None, 0.0)
     queue.finish(job_id, owner="codex", handoff_comment_id="c")
     monitor.alive = lambda *_: False
-    monitor.reconcile(60.0, lambda *_: None)  # no worker started: released, no probe
+    monitor.reconcile(60.0, 600.0, lambda *_: None)
     assert pool.used() == {}
     assert pool.health("pc") == (None, None)
 
@@ -786,7 +787,7 @@ def test_a_device_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
     queue = SQLiteJobQueue(path, clock=lambda: 0.0)
 
     class Exploding:
-        def reconcile(self, now, on_offline):
+        def reconcile(self, now, lost_after, on_lost):
             raise sqlite3.OperationalError("boom")
 
     dispatcher = Dispatcher(
@@ -961,13 +962,13 @@ def test_r1_f11_remote_child_that_will_not_stop_keeps_the_slot_until_it_is_gone(
         use_fake_ssh(monkeypatch, ssh)
         queue.finish(job_id, owner="codex", handoff_comment_id="c1")
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        result = monitor.reconcile(time.time(), lambda *_: None)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
         assert result.released == ()
         assert pool.placement(job_id) is not None
 
         kill_quietly(child)
         assert wait_gone(child)
-        result = monitor.reconcile(time.time(), lambda *_: None)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
         assert result.released == (job_id,)
     finally:
         kill_quietly(child)
@@ -1002,7 +1003,7 @@ def test_r1_f12_stale_pid_file_naming_another_live_group_leaves_it_untouched(
         )
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
         for _ in range(2):
-            result = monitor.reconcile(time.time(), lambda *_: None)
+            result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
             assert (result.stopped, result.released) == ((), ())
         time.sleep(0.2)
         assert other.poll() is None  # the other group was never signalled
@@ -1023,7 +1024,7 @@ def test_r1_f12_pid_file_from_an_earlier_boot_is_gone_and_signals_nothing(
             f"{other.pid} 00000000-0000-0000-0000-000000000000\n", encoding="utf-8"
         )
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        result = monitor.reconcile(time.time(), lambda *_: None)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
         assert result.released == (job_id,)
         assert result.stopped == ()
         assert other.poll() is None
@@ -1066,7 +1067,7 @@ def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
     (directory / remote.PID_FILE).write_text(record.format(boot=BOOT_ID), encoding="utf-8")
     transport = ChecksOnly()
     monitor = DeviceMonitor(pool, config_of(machines), transport)
-    result = monitor.reconcile(time.time(), lambda *_: None)
+    result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
     assert transport.stops == []
     assert transport.codes == [3]  # UNKNOWN: the device answered, but cannot tell
     assert (result.stopped, result.released) == ((), ())
@@ -1110,11 +1111,11 @@ def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
 
         queue.finish(job_id, owner="claude", handoff_comment_id="c1")
         monitor = DeviceMonitor(pool, config_of(machines), FakeTransport())
-        assert monitor.reconcile(time.time(), lambda *_: None).released == ()
+        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == ()
         assert pool.placement(job_id) is not None
         kill_quietly(worker)
         assert wait_gone(worker)
-        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
     finally:
         kill_quietly(worker)
         if first.poll() is None:
@@ -1160,7 +1161,7 @@ def test_r1_f13_remote_takeover_is_refused_while_the_dead_runners_worker_lives(
         use_fake_ssh(monkeypatch, ssh)
         queue.finish(job_id, owner="codex", handoff_comment_id="c1")
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        result = monitor.reconcile(time.time(), lambda *_: None)
+        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
         assert result.stopped == (job_id,)
         assert pool.placement(job_id) is not None
         deadline = time.monotonic() + 15
@@ -1171,7 +1172,7 @@ def test_r1_f13_remote_takeover_is_refused_while_the_dead_runners_worker_lives(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.05)
-        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+        assert monitor.reconcile(time.time(), 600.0, lambda *_: None).released == (job_id,)
     finally:
         kill_quietly(group, group=True)
         if first.poll() is None:
@@ -1259,13 +1260,13 @@ def test_r1_f15_device_holding_only_finished_jobs_with_live_runners_is_probed_ea
     transport = FakeTransport(check=255)
     monitor = DeviceMonitor(pool, config, transport, alive=lambda *_: True)  # runner lives
     for poll, now in enumerate((0.0, 60.0, 120.0), start=1):
-        result = monitor.reconcile(now, lambda *_: None)
+        result = monitor.reconcile(now, 600.0, lambda *_: None)
         assert result == type(result)()
         assert len(transport.calls) == poll
         assert transport.calls[-1] == ("check", "codex-bot", "fakepc-codex-bot")
     assert pool.health("pc") == (None, 0.0)
     transport.check = 1
-    monitor.reconcile(180.0, lambda *_: None)
+    monitor.reconcile(180.0, 600.0, lambda *_: None)
     assert pool.health("pc") == (180.0, None)
     assert pool.placement(job_id) is not None  # the runner still owns its release
 
@@ -1275,7 +1276,7 @@ def test_r1_f15_probe_is_skipped_once_cleanup_frees_every_slot(tmp_path: Path) -
     queue.finish(job_id, owner="codex", handoff_comment_id="c1")
     transport = FakeTransport(check=255)
     result = DeviceMonitor(pool, config, transport, alive=lambda *_: False).reconcile(
-        0.0, lambda *_: None
+        0.0, 600.0, lambda *_: None
     )
     assert result.released == (job_id,)
     assert transport.calls == []
@@ -1336,107 +1337,74 @@ def test_r1_gap_an_unknown_check_keeps_the_slot_stops_nothing_and_counts_as_cont
     queue.finish(job_id, owner="codex", handoff_comment_id=None)
     transport = FakeTransport(check=3)
     monitor = DeviceMonitor(pool, config, transport, alive=lambda *_: False)
-    result = monitor.reconcile(500.0, lambda *_: None)
+    result = monitor.reconcile(500.0, 600.0, lambda *_: None)
     assert (result.released, result.stopped) == ((), ())
     assert [kind for kind, *_ in transport.calls] == ["check"]
     assert pool.placement(job_id) is not None
     assert pool.health("pc") == (500.0, None)
 
 
-def test_r1_gap_offline_runs_before_t6_when_both_are_due(tmp_path: Path) -> None:
-    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
-    dispatcher.reconcile_jobs()  # the first failed probe, at 0; no heartbeat since
-    now[0] = 3600.0  # T6's timeout and the offline hour are both due now
-    dispatcher.reconcile_jobs()
-    assert state(queue, job.id) == "failed"
-    with queue.connect() as connection:
-        reason = connection.execute("SELECT stuck_reason FROM ticket_state").fetchone()[0]
-    assert reason == "device-offline"
-    assert [item for item in queue.outstanding() if item.request.recipient == "claude"] == []
-    assert len(stuck_wakes(grok)) == 1
-
-
-def test_r1_gap_offline_failure_is_handled_in_its_own_transaction(tmp_path: Path) -> None:
-    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
-    monitor = dispatcher.devices
-    monitor.reconcile(0.0, dispatcher._device_offline)
-    monitor.reconcile(3600.0, dispatcher._device_offline)  # no T6 runs here
-    with queue.connect() as connection:
-        row = connection.execute(
-            "SELECT state, failure_handled FROM jobs WHERE id = ?", (job.id,)
-        ).fetchone()
-    assert (row["state"], row["failure_handled"]) == ("failed", 1)
-    assert [item.id for item in queue.unhandled_failures()] == []
-
-
-def test_r1_gap_offline_leaves_a_job_that_is_no_longer_running_alone(tmp_path: Path) -> None:
-    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
+def test_r1_gap_lost_leaves_a_job_that_is_no_longer_running_alone(tmp_path: Path) -> None:
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
     queue.finish(job.id, owner="claude", handoff_comment_id="c1")
-    dispatcher._device_offline(job.id, "pc", 3600.0)
+    dispatcher._device_lost(job.id, "pc", "unreachable 10 min")
     assert state(queue, job.id) == "done"
-    assert not dispatcher.is_stuck(snapshot)
-    with queue.connect() as connection:
-        wakes = connection.execute(
-            "SELECT COUNT(*) FROM jobs WHERE recipient = 'grok' AND action = 'stuck'"
-        ).fetchone()[0]
-    assert wakes == 0
+    assert pool.placement(job.id) is not None
+    assert job_events(queue, job.id) == []
 
 
-def test_r1_gap_offline_rolls_back_when_the_wake_cannot_be_written(
+def test_r1_gap_lost_rolls_back_when_the_back_off_cannot_be_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
-    dispatcher.reconcile_jobs()
+    import lib.dispatch.jobs
+
+    now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path)
+    poll_at(now, dispatcher, 0.0)
 
     def broken(*_args, **_kwargs):
         raise sqlite3.OperationalError("disk I/O error")
 
-    monkeypatch.setattr(dispatcher, "_ensure_stuck_wake_in_transaction", broken)
-    now[0] = 3600.0
-    queue.heartbeat(job.id, owner="claude")
-    dispatcher.reconcile_jobs()
-    assert state(queue, job.id) == "running"  # the failure rolled back with the wake
-    assert not dispatcher.is_stuck(snapshot)
+    monkeypatch.setattr(lib.dispatch.jobs, "back_off", broken)
+    poll_at(now, dispatcher, 600.0)
+    assert state(queue, job.id) == "running"
+    assert pool.placement(job.id) is not None
+    assert job_events(queue, job.id) == []
     with queue.connect() as connection:
         errors = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
     assert ("devices", "OperationalError: disk I/O error") in [tuple(row) for row in errors]
 
 
-def test_r1_gap_offline_fails_every_running_job_on_the_device(tmp_path: Path) -> None:
+def test_r1_gap_lost_fails_every_running_job_on_the_device(tmp_path: Path) -> None:
     now = [0.0]
     path = tmp_path / "d.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
     config = config_of(machines_file(tmp_path, box_enabled=False))
     pool = DevicePool(queue, config)
-    grok = FakeGrokDelivery()
     dispatcher = Dispatcher(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
-        grok_delivery=grok,
+        grok_delivery=FakeGrokDelivery(),
         devices=DeviceMonitor(pool, config, FakeTransport(check=255), alive=lambda *_: True),
     )
-    snapshots = [
-        ticket(
-            comment(f"go-{number}", GO.format(state="building"), author="grok-login"),
-            timeout=600,
-            ticket_id=str(number),
+    for number in (41, 42):
+        dispatcher.process(
+            ticket(
+                comment(f"go-{number}", GO.format(state="building"), author="grok-login"),
+                timeout=600,
+                ticket_id=str(number),
+            )
         )
-        for number in (41, 42)
-    ]
-    for snapshot in snapshots:
-        dispatcher.process(snapshot)
-    jobs = [pool.claim("claude")[0] for _ in snapshots]
+    jobs = [pool.claim("claude")[0] for _ in range(2)]
     for job in jobs:
+        pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
         pool.attach_worker(job.id, owner="claude", remote=True)
-    dispatcher.reconcile_jobs()
-    now[0] = 3600.0
-    dispatcher.reconcile_jobs()
+    poll_at(now, dispatcher, 0.0)
+    poll_at(now, dispatcher, 600.0)
     assert [state(queue, job.id) for job in jobs] == ["failed", "failed"]
-    assert all(dispatcher.is_stuck(snapshot) for snapshot in snapshots)
-    assert sorted(job.request.ticket_id for job in stuck_wakes(grok)) == ["41", "42"]
-    assert all(pool.placement(job.id) is not None for job in jobs)
+    assert pool.used() == {}
+    assert sorted(job_id for job_id, _, _ in orphans(queue)) == sorted(job.id for job in jobs)
 
 
 def test_r1_gap_hostile_workdir_and_environment_values_reach_the_command_verbatim(
