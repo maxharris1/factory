@@ -76,6 +76,11 @@ offline. age_seconds is the age of the oldest repo's read. state is unread
 with no rows, live while age_seconds is at most CI_POOL_STALE_SECONDS,
 else stale.
 
+CI lane (#823): `ci_lane` is lib/ci_lane.ci_lane(snapshot): the runner
+slots, the GitHub-hosted, queued and failed groups and one card per ticket
+with its progress counts. The script draws it; the server render works it
+out again from ci_pool, ci_runs and tickets, so the two never disagree.
+
 Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
 `shipped_at` and `shipped_how`, its record's `shipped.at` and `shipped.how`
@@ -147,6 +152,7 @@ from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import CI_WAIT_REASONS, HANDED_OFF_EXTERNALLY
+from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
@@ -894,6 +900,7 @@ def collect_snapshot(
         "usage": usage,
         RECORDS: records,
     }
+    snapshot["ci_lane"] = ci_lane(snapshot)
     return _scrub(snapshot)  # type: ignore[return-value]
 
 

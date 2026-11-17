@@ -601,6 +601,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "relay",
         "ci_runs",
         "ci_pool",
+        "ci_lane",
         "attention",
         "health",  # component heartbeats (#92)
         "feeder",

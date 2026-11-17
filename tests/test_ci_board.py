@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from lib.dashboard import _ci_pool, _ci_runs
-from lib.dashboard_pages.ci import _ci_section
+from lib.dashboard_pages.ci import ci_popup
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.types import CheckRow, CIResult, PoolRunner, RunJob, TrackedTicket
 from lib.dispatcher import Dispatcher
@@ -27,6 +27,11 @@ REPO = "Owner/Repo"
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
 DAY = 24 * 60 * 60
+
+
+def _popup(dashboard: dict, ticket: str) -> str:
+    row = {"repo": REPO, "ticket_id": ticket, "source": None, "tracker": "github"}
+    return ci_popup({"ci_runs": dashboard}, f"{REPO}#{ticket}", row)
 
 
 def check(
@@ -502,7 +507,7 @@ def test_two_workflows_sharing_a_check_name_keep_both_jobs(tmp_path: Path) -> No
     assert [(failure["run_id"], failure["name"]) for failure in dashboard["failures"]] == [
         ("901", "build")
     ]
-    section = _ci_section({"ci_runs": dashboard})
+    section = _popup(dashboard, "1")
     assert "no CI queued or running" not in section
     assert "actions/runs/901/job/1" in section and "actions/runs/902/job/2" in section
 
@@ -682,7 +687,7 @@ def test_a_failure_leaves_the_dashboard_a_day_after_it_completed_though_still_po
     board.cycle(failed)
     dashboard = board.dashboard()
     assert dashboard["failures"] == []
-    section = _ci_section({"ci_runs": dashboard})
+    section = _popup(dashboard, "1")
     assert "no CI failures in the last 24 h" in section and "actions/runs/900/job/1" not in section
     assert board.github.spent() == 0
 

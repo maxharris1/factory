@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from lib.dashboard import collect_snapshot, render_pages, write_snapshot
+from lib.ci_lane import ci_lane
+from lib.dashboard import collect_snapshot, render_pages, tickets_json, write_snapshot
+from lib.dashboard_pages.ci import ci_popup
+from lib.dashboard_pages.ticket_detail import ticket_view
 from tests import test_dashboard_activity as activity
 from tests.test_dashboard import NOW, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
@@ -69,9 +72,23 @@ def ci_snapshot(tmp_path: Path) -> dict:
     return snapshot_with(tmp_path, ci_fixture)
 
 
-def _server(snapshot: dict) -> str:
-    outer = _section(_no_script(render_pages(snapshot)["index.html"]), "ci-runs")
-    return outer[outer.index(">") + 1 : outer.rindex("</")]
+def _popup(snapshot: dict, ticket: str = "12") -> str:
+    row = {"repo": REPO, "ticket_id": ticket, "source": None, "tracker": "github"}
+    return ci_popup(snapshot, f"{REPO}#{ticket}", row)
+
+
+def _ci_lane(html: str) -> str:
+    start = html.index('<div class="lane" data-device="ci"')
+    depth = 0
+    for tag in re.finditer(r"<(/?)div\b[^>]*>", html[start:]):
+        depth += -1 if tag.group(1) else 1
+        if depth == 0:
+            return html[start : start + tag.end()]
+    raise AssertionError("unclosed CI lane")
+
+
+def _lane(snapshot: dict) -> str:
+    return _ci_lane(_no_script(render_pages(snapshot)["index.html"]))
 
 
 def _text(markup: str) -> str:
@@ -94,15 +111,16 @@ def test_only_queued_and_running_runs_are_listed_newest_first(tmp_path: Path) ->
     assert (waiting["started_at"], waiting["elapsed_seconds"], waiting["queue_seconds"]) == (None, None, 300)
 
 
-def test_the_page_links_each_runs_pr_head_and_job_logs(tmp_path: Path) -> None:
-    section = _server(ci_snapshot(tmp_path))
-    assert section.count('class="ci-run"') == 2
+def test_the_lane_cards_link_pr_and_head_and_the_popup_links_job_logs(tmp_path: Path) -> None:
+    snapshot = ci_snapshot(tmp_path)
+    lane = _lane(snapshot)
+    assert lane.count('<div class="tile ci ') == 2
     for href in (f"https://github.com/{REPO}/pull/113", f"https://github.com/{REPO}/commit/{HEAD_B[:7]}",
-                 f"https://github.com/{REPO}/pull/112", f"https://github.com/{REPO}/commit/{HEAD_A[:7]}",
-                 f"https://github.com/{REPO}/actions/runs/9100/job/9102"):
-        assert f'href="{href}"' in section, href
-    assert HEAD_C[:7] not in section.split("Recent failures")[0]
-    assert HEAD_B not in section
+                 f"https://github.com/{REPO}/pull/112", f"https://github.com/{REPO}/commit/{HEAD_A[:7]}"):
+        assert f'href="{href}"' in lane, href
+    assert f'href="https://github.com/{REPO}/actions/runs/9100/job/9102"' in _popup(snapshot, "13")
+    assert HEAD_C[:7] not in lane and HEAD_B not in lane
+    assert "ci-job" not in lane
 
 
 @pytest.mark.parametrize(("jobs", "listed"), [
@@ -131,7 +149,7 @@ def test_runner_cells_name_the_runner_or_say_what_it_waits_for(tmp_path: Path) -
         add_ci(connection, "12", HEAD_A, "skipped", "completed", "cancelled", runner_kind="none")
         add_ci(connection, "12", HEAD_A, "unlooked", "in_progress", started_at=NOW - 600)
 
-    runners = re.findall(r'<span class="ci-runner">([^<]*)</span>', _server(snapshot_with(tmp_path, seed)))
+    runners = re.findall(r'<span class="ci-runner">([^<]*)</span>', _popup(snapshot_with(tmp_path, seed)))
     assert runners == [
         "GitHub-hosted · queued 10s",
         "self-hosted · pc-wsl-bots-1 · queued 1m 40s",
@@ -150,13 +168,13 @@ def test_recent_failures_name_the_failing_tests_with_a_flake_search(tmp_path: Pa
     ]
     assert failures[0]["tests"] == ["tests/test_dashboard_lanes.py::test_queue_belt_moves",
                                     "tests/test_feeder.py::test_waiting_on_capacity"]
-    section = _server(snapshot)
+    section = _popup(snapshot, "13")
     failed = section[section.index("Recent failures (24 h)"):]
     assert f'href="https://github.com/{REPO}/actions/runs/8800/job/8802"' in failed
     assert (f'href="https://github.com/{REPO}/issues?q=is%3Aissue%20%22tests%2Ftest_feeder.py%3A%3A'
             'test_waiting_on_capacity%22"') in failed
     assert ">tests/test_feeder.py::test_waiting_on_capacity</a>" in failed
-    assert "timed out" in _text(failed)
+    assert "timed out" not in _text(failed) and "timed out" in _text(_popup(snapshot, "12"))
 
 
 def test_failures_keep_a_day_newest_first_and_at_most_ten(tmp_path: Path) -> None:
@@ -179,7 +197,7 @@ def test_a_failure_is_listed_for_a_day_from_when_it_completed_not_when_last_seen
     snapshot = snapshot_with(tmp_path, seed)
     failures = snapshot["ci_runs"]["failures"]
     assert [(f["name"], f["age_seconds"]) for f in failures] == [("fresh", 23 * 3600)]
-    failed = _server(snapshot).split("Recent failures (24 h)")[1]
+    failed = _popup(snapshot).split("Recent failures (24 h)")[1]
     assert "fresh" in failed and "stale" not in failed and HEAD_B[:7] not in failed
 
 
@@ -190,7 +208,7 @@ def test_a_log_link_comes_only_from_github_job_ids(tmp_path: Path) -> None:
         add_ci(connection, "12", HEAD_A, "elsewhere", "queued", log_url="https://ci.example.invalid/runs/1/job/2")
         add_ci(connection, "12", HEAD_A, "bad-ids", "queued", run_id="1;drop", job_id="2")
 
-    section = _server(snapshot_with(tmp_path, seed))
+    section = _popup(snapshot_with(tmp_path, seed))
     assert re.findall(r'class="ci-a log" href="([^"]*)"', section) == [
         f"https://github.com/{REPO}/actions/runs/71/job/72"]
     assert "example.invalid" not in section
@@ -211,21 +229,24 @@ def test_ci_strings_are_redacted(tmp_path: Path) -> None:
     assert HEAD_A not in text and HEAD_A[:7] in text
 
 
-def test_a_database_without_ci_jobs_shows_an_empty_section(tmp_path: Path) -> None:
+def test_a_database_without_ci_jobs_shows_an_empty_lane_and_popup(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute("DROP TABLE ci_jobs")
     snapshot = collect_snapshot(db, log, now=NOW)
     assert snapshot["ci_runs"] == {"runs": [], "failures": []}
-    section = _server(snapshot)
-    assert "no CI queued or running" in section and "no CI failures in the last 24 h" in section
+    popup = _popup(snapshot)
+    assert "no CI queued or running" in popup and "no CI failures in the last 24 h" in popup
+    lane = _lane(snapshot)
+    assert "0 running · 0 queued" in lane and '<div class="tile ci ' not in lane
 
 
-def test_the_section_sits_after_the_lanes(tmp_path: Path) -> None:
+def test_the_ci_lane_replaces_the_ci_section_and_the_waiting_lane(tmp_path: Path) -> None:
     html = render_pages(ci_snapshot(tmp_path))["index.html"]
-    ids = re.findall(r'<section class="[^"]*" id="([^"]+)"', html)
-    assert ids.index("ci-runs") == ids.index("lanes") + 1
-
+    assert 'id="ci-runs"' not in html and 'data-device="ci-wait"' not in html
+    lanes = _section(_no_script(html), "lanes")
+    assert re.findall(r'data-device="([^"]+)"', lanes)[-1] == "ci"
+    assert "1 running · 1 queued" in _text(_lane(ci_snapshot(tmp_path / "again")))
 
 
 def test_a_rerun_with_its_times_cleared_shows_no_made_up_ages(tmp_path: Path) -> None:
@@ -235,7 +256,7 @@ def test_a_rerun_with_its_times_cleared_shows_no_made_up_ages(tmp_path: Path) ->
     snapshot = snapshot_with(tmp_path, seed)
     (run,) = snapshot["ci_runs"]["runs"]
     assert (run["status"], run["age_seconds"], run["jobs"][0]["queue_seconds"]) == ("queued", None, None)
-    section = _server(snapshot)
+    section = _popup(snapshot)
     assert "started" not in section and '<span class="ci-runner">waiting for runner</span>' in section
 
 
@@ -247,11 +268,11 @@ def test_the_script_draws_a_rerun_as_the_server_does(tmp_path: Path) -> None:
     snapshot = snapshot_with(tmp_path, seed)
     html = render_pages(snapshot)["index.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["ci-runs"]]])
-    assert out["steps"][0]["snap"]["ci-runs"] == _server(snapshot)
+    out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
+    assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
 
 
-IDS = BAR + ["hud", "lanes", "ci-runs", "just-happened", "intake"]
+IDS = BAR + ["hud", "lanes", "just-happened", "intake"]
 
 
 def _moved(snapshot: dict, seconds: int, status: str, conclusion: str | None = None) -> dict:
@@ -268,38 +289,60 @@ def _moved(snapshot: dict, seconds: int, status: str, conclusion: str | None = N
         later["ci_runs"]["runs"].pop(0)
     else:
         run["status"] = "in_progress"
+    later["ci_lane"] = ci_lane(later)
     return later
 
 
 @needs_node
-def test_the_script_redraws_the_section_live_as_the_server_draws_it(tmp_path: Path) -> None:
+def test_the_script_redraws_the_lane_live_as_the_server_draws_it(tmp_path: Path) -> None:
     first = ci_snapshot(tmp_path)
     running = _moved(first, 3, "in_progress")
     passed = _moved(first, 5, "completed", "success")
     html = render_pages(first)["index.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    snap = ["snap", ["ci-runs"]]
+    snap = ["snap", ["lanes"]]
     actions = [snap, ["advance", 3], snap, ["poll", running], snap, ["advance", 2], ["poll", passed], snap]
     out = run_harness(tmp_path, activity.HARNESS, script, first, "main", IDS, actions)
-    seen = [step["snap"]["ci-runs"] for step in out["steps"] if "snap" in step]
+    seen = [_ci_lane(step["snap"]["lanes"]) for step in out["steps"] if "snap" in step]
     assert out["fetches"] == 3
-    assert seen[0] == _server(first)
-    assert seen[2] == _server(running)
-    assert seen[3] == _server(passed)
-    ticked = _text(seen[1])
-    assert "started 5m 03s ago" in ticked and "4m 43s" in ticked and "waiting for runner · queued 1m 03s" in ticked
+    assert seen[0] == _lane(first)
+    assert seen[2] == _lane(running)
+    assert seen[3] == _lane(passed)
+    assert "started 5m 03s ago" in _text(seen[1])
     assert "1 running · 1 queued" in _text(seen[0])
     assert "2 running · 0 queued" in _text(seen[2]) and "1 running · 0 queued" in _text(seen[3])
-    assert "self-hosted · pc-wsl-bots-1 · queued 50s" in _text(seen[2]) and "13s" in _text(seen[2])
-    assert seen[3].count('class="ci-run"') == 1
+    assert seen[3].count('<div class="tile ci ') == 2 and 'data-group="failed"' in seen[3]
+    assert "1 failed in 24 h" in _text(seen[3]) and 'aria-label="CI failed"' in seen[3]
+    assert "ci-job" not in "".join(seen)
+
+
+@needs_node
+def test_the_ticket_page_script_draws_the_ci_popup_as_the_server_does(tmp_path: Path) -> None:
+    snapshot = ci_snapshot(tmp_path)
+    address = f"{REPO}#13"
+    card = re.search(r'<a class="cover" href="([^"]+)"', _lane(snapshot).split('data-ci="maxharris1/cleffy#13"')[1])
+    assert card.group(1).replace("&amp;", "&") == "ticket.html#t=maxharris1%2Fcleffy%2313&ci=1"
+    server = ticket_view(snapshot, address, ci=True)
+    dialog = server[server.index("<dialog"):server.index("</dialog>") + 9]
+    assert 'id="ci-pop"' in dialog and dialog.count('<li class="ci-job') == 5
+    assert "actions/runs/8800/job/8802" in dialog and "test_waiting_on_capacity" in dialog
+    html = render_pages(snapshot)["ticket.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "ticket", BAR + ["hud", "ticketview"],
+                      [["snap", ["ticketview"]]], "#t=maxharris1%2Fcleffy%2313&ci=1", tickets_json(snapshot))
+    drawn = out["steps"][0]["snap"]["ticketview"]
+    assert "cleffy#13" in drawn
+    assert drawn[drawn.index("<dialog"):drawn.index("</dialog>") + 9] == dialog
+    closed = run_harness(tmp_path / "closed", activity.HARNESS, script, snapshot, "ticket",
+                         BAR + ["hud", "ticketview"], [["snap", ["ticketview"]]], "#t=maxharris1%2Fcleffy%2313",
+                         tickets_json(snapshot))["steps"][0]["snap"]["ticketview"]
+    assert "<dialog" not in closed and 'class="ci-open" href="ticket.html#t=maxharris1%2Fcleffy%2313&amp;ci=1"' in closed
 
 
 CI_LAYOUT = """(function () {
-  var runs = document.querySelectorAll('#ci-runs .ci-run');
-  var jobs = [].map.call(document.querySelectorAll('#ci-runs .ci-job'), function (j) {
-    var b = j.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.right)]; });
-  return {runs: runs.length, jobs: jobs, fails: document.querySelectorAll('#ci-runs .ci-fails > li').length,
-          scrollWidth: document.documentElement.scrollWidth};
+  var cards = [].map.call(document.querySelectorAll('#lanes .lane[data-device="ci"] .tile'), function (t) {
+    var b = t.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.right)]; });
+  return {cards: cards, scrollWidth: document.documentElement.scrollWidth};
 })()"""
 
 
@@ -311,8 +354,8 @@ def test_the_phone_page_has_no_sideways_scroll(tmp_path: Path) -> None:
         found = browser.eval(CI_LAYOUT)
     finally:
         browser.close()
-    assert (found["runs"], len(found["jobs"]), found["fails"]) == (2, 6, 2), found
-    assert all(0 <= left and right <= 375 for left, right in found["jobs"]), found
+    assert len(found["cards"]) == 3, found
+    assert all(0 <= left and right <= 375 for left, right in found["cards"]), found
     assert found["scrollWidth"] <= 375, found
 
 

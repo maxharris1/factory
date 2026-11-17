@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.ci_lane import ci_lane
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_page import CSS, TILE_STATE, intake_groups, queue_speed
 from lib.dashboard_pages.common import ticket_page_href
@@ -300,20 +301,21 @@ def _held_for_ci(snapshot: dict) -> dict:
     snapshot["tickets"][2].update(ci_wait={
         "reason": "approved-ci-pending", "checks": [], "waiting_seconds": 3700,
     })
+    snapshot["ci_lane"] = ci_lane(snapshot)
     return snapshot
 
 
 def _ci_cards(lanes: str) -> list[str]:
     devices = re.findall(r'data-device="([^"]+)"', lanes)
-    assert devices[-1] == "ci-wait" and devices.count("ci-wait") == 1, devices
-    lane = lanes.split('data-device="ci-wait"')[1]
-    assert "waiting on CI" in lane and "2 tickets" in lane
+    assert devices[-1] == "ci" and devices.count("ci") == 1, devices
+    lane = lanes.split('data-device="ci"')[1]
+    assert "0 running · 2 queued" in lane and "Queued · no runner yet" in lane
     return re.split(r'<div class="tile ci', lane)[1:]
 
 
 def _assert_ci_lane(lanes: str, snapshot: dict) -> None:
     pending, approved = _ci_cards(lanes)
-    for needle in ("AUT-7", 'href="https://github.com/aut0-code/aut0/pull/13"', "waiting on CI", "then review",
+    for needle in ("AUT-7", 'href="https://github.com/aut0-code/aut0/pull/13"', "Queueing…", "then review",
                    "round 3", "build, lint", 'href="https://github.com/aut0-code/aut0/pull/13/checks"',
                    "waiting 2m 0"):
         assert needle in pending, needle
@@ -325,7 +327,8 @@ def _assert_ci_lane(lanes: str, snapshot: dict) -> None:
 
 def test_each_ticket_held_for_ci_gets_a_card_in_a_lane_after_the_devices(tmp_path: Path) -> None:
     base = _base(tmp_path)
-    assert 'data-device="ci-wait"' not in render_pages(base)["index.html"]
+    bare = _section(_no_script(render_pages(base)["index.html"]), "lanes").split('data-device="ci"')[1]
+    assert '<div class="tile ci' not in bare and "0 running · 0 queued" in bare
     snapshot = _held_for_ci(base)
     _assert_ci_lane(_section(_no_script(render_pages(snapshot)["index.html"]), "lanes"), snapshot)
 
@@ -335,7 +338,7 @@ def test_the_ci_lane_follows_the_grok_wakes_lane_too(tmp_path: Path) -> None:
     snapshot["running"].append(_row(snapshot["running"][0], "build", job="wake-1", device=None))
     lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
     devices = re.findall(r'data-device="([^"]+)"', lanes)
-    assert devices[-2:] == ["grok-wakes", "ci-wait"], devices
+    assert devices[-2:] == ["grok-wakes", "ci"], devices
 
 
 @needs_node
@@ -347,11 +350,11 @@ def test_the_page_script_draws_the_ci_lane_like_the_server(tmp_path: Path) -> No
     _assert_ci_lane(script, snapshot)
     assert _shape(script) == _shape(server[server.index(">") + 1 : server.rindex("<")])
     bare = _run_page(tmp_path, base, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
-    assert 'data-device="ci-wait"' not in bare
+    assert '<div class="tile ci' not in bare.split('data-device="ci"')[1]
 
 
 def _card_round(lanes: str) -> str:
-    return re.search(r'<span class="round">round (\d+)</span>', lanes.split('data-device="ci-wait"')[1]).group(1)
+    return re.search(r'<span class="round">round (\d+)</span>', lanes.split('data-device="ci"')[1]).group(1)
 
 
 @needs_node
@@ -735,7 +738,7 @@ def _one_row(snapshot: dict) -> dict:
 def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: Browser) -> None:
     board = fifteen_slot_snapshot(tmp_path)
     browser.open(_page_with_status_stub(_one_row(copy.deepcopy(board)), "index.html"), 1440)
-    rows = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
+    rows = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue):not([data-device="ci"])'), function (lane) {
       return {device: lane.getAttribute('data-device'), tiles: [].map.call(lane.querySelectorAll('.tile'),
         function (t) { var b = t.getBoundingClientRect(); return [b.top, b.bottom]; })};
     })""")
@@ -1030,7 +1033,7 @@ def test_head_rules_come_from_the_artboard_and_no_rail_rules_remain() -> None:
 @needs_chrome
 def test_idle_tiles_are_job_tile_sized_at_1440(tmp_path: Path, browser: Browser) -> None:
     browser.open(_page_with_status_stub(_idle_lanes(tmp_path), "index.html"), 1440)
-    lanes = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
+    lanes = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue):not([data-device="ci"])'), function (lane) {
       return {device: lane.getAttribute('data-device'), tiles: [].map.call(lane.querySelectorAll('.tiles > *'),
         function (t) { var b = t.getBoundingClientRect(), cs = getComputedStyle(t);
           return {cls: t.className, width: b.width, height: b.height, border: cs.borderTopStyle,
@@ -1055,7 +1058,7 @@ def test_every_tile_runs_full_width_and_stacks_at_375(tmp_path: Path, browser: B
                           for i in range(2)]
     browser.open(_page_with_status_stub(snapshot, "index.html"), 375)
     assert browser.eval("document.documentElement.scrollWidth") <= 375
-    lanes = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue)'), function (lane) {
+    lanes = browser.eval("""[].map.call(document.querySelectorAll('#lanes .lane[data-device]:not(#queue):not([data-device="ci"])'), function (lane) {
       var cs = getComputedStyle(lane), box = lane.getBoundingClientRect();
       var rect = function (e) { var b = e.getBoundingClientRect(); return {top: b.top, bottom: b.bottom, left: b.left, width: b.width}; };
       return {device: lane.getAttribute('data-device'),
