@@ -1675,6 +1675,20 @@ def test_a_tab_coming_back_reads_paused_until_the_first_poll_answers(tmp_path: P
 
 
 @needs_node
+def test_a_tab_coming_back_before_any_poll_answered_reads_paused(tmp_path: Path, base: dict) -> None:
+    snapshot = _aged(base)
+    harness = _fresh_harness().replace("let holding = false;", "let holding = true;", 1)
+    out = _link_run(tmp_path, snapshot, [
+        ["hide"], ["advance", 600], ["show"], ["fresh"], ["advance", 7], ["fresh"],
+        ["answer", _at(snapshot, NOW + 607)], ["fresh"]], ids=FRESH_IDS, harness=harness)
+    paused, waited, answered = [_plain(step["fresh"]) for step in out["steps"] if "fresh" in step]
+    assert (paused["age"], waited["age"]) == (None, None)
+    _assert_paused({**paused, "age": {"hidden": True}})
+    _assert_paused({**waited, "age": {"hidden": True}})
+    assert (answered["state"], answered["text"], answered["bar"]["hidden"]) == ("live", "LIVE", True)
+
+
+@needs_node
 def test_a_failed_first_poll_ends_paused_and_lost_waits_for_the_visible_interval(tmp_path: Path, base: dict) -> None:
     snapshot = _aged(base)
     answered, five, seven = _fresh_run(tmp_path, snapshot, [
