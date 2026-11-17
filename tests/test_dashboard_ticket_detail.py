@@ -1181,7 +1181,8 @@ KEEP_PLACE = r"""
   row.focus();
   window.scrollTo(0, 240);
   await sleep(50);
-  return {focused: document.activeElement === row, y: window.scrollY};
+  const now = document.activeElement;
+  return {focused: !!(now && now.closest('.runlog') && now.getAttribute('data-visit') === '2'), y: window.scrollY};
 })()"""
 
 AFTER_REDRAW = r"""

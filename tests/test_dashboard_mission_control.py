@@ -295,8 +295,8 @@ def test_page_polls_status_json_every_one_to_two_seconds(tmp_path: Path) -> None
     assert 1000 <= page.POLL_MS <= 2000
     assert f"var POLL_MS = {page.POLL_MS};" in script
     assert "var STATUS_URL = 'status.json';" in script
-    # The page polls the relative status.json; its only other calls are to its own /api.
-    assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "STATUS_URL"]
+    # The page polls the relative status.json; its only other calls are to its own tickets.json and /api.
+    assert re.findall(r"fetch\(([^,)]+)", script) == ["path", "'/api/session'", "'tickets.json'", "STATUS_URL"]
     assert all(path.startswith("/api/") for path in re.findall(r"ghPost\('([^']*)'", script))
     assert "cache: 'no-store'" in script
     assert "location.reload" in script  # falls back to reloading if polling is blocked
