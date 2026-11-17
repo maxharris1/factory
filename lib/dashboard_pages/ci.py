@@ -1,6 +1,3 @@
-"""The CI section on index.html (#717): in-flight runs per ticket head and the
-recent failures, from status.json `ci_runs` (lib/dashboard.py `_ci_runs`)."""
-
 from __future__ import annotations
 
 import urllib.parse

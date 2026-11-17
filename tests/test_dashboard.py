@@ -598,7 +598,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "poller",
         "handoff_savings",
         "relay",
-        "ci_runs",  # in-flight CI runs and recent failures (#717)
+        "ci_runs",
         "attention",
         "health",  # component heartbeats (#92)
         "feeder",

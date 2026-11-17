@@ -74,7 +74,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatch.helpers import _base_mismatch
-from lib.dispatch.types import CHECK_FAILED, CheckRow, RunJob
+from lib.dispatch.types import CHECK_FAILED, CheckRow, CIJobStatus, RunJob, RunnerKind
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -982,8 +982,8 @@ def _check_row(run: dict[str, Any]) -> CheckRow:
         name=str(run.get("name")),
         status=status,
         conclusion=conclusion if isinstance(conclusion, str) else None,
-        started_at=None if status == "queued" else _epoch(run.get("started_at")),
-        completed_at=_epoch(run.get("completed_at")) if status == "completed" else None,
+        started_at=None if status == "queued" else _display_time(run.get("started_at")),
+        completed_at=_display_time(run.get("completed_at")) if status == "completed" else None,
         log_url=None if job is None else details,
         run_id=None if job is None else job.group(2),
         job_id=None if job is None else job.group(3),
@@ -997,6 +997,7 @@ def _run_job(job: dict[str, Any]) -> RunJob:
     status = _board_status(job.get("status"), job.get("conclusion"))
     runner = job.get("runner_name")
     runner = runner if isinstance(runner, str) and runner else None
+    kind: RunnerKind | None
     if runner is not None:
         hosted = job.get("runner_group_name") == "GitHub Actions"
         kind = "github-hosted" if hosted else "self-hosted"
@@ -1006,24 +1007,21 @@ def _run_job(job: dict[str, Any]) -> RunJob:
         job_id=str(job_id),
         name=str(job.get("name")),
         status=status,
-        created_at=_epoch(job.get("created_at")),
-        started_at=None if status == "queued" else _epoch(job.get("started_at")),
-        completed_at=_epoch(job.get("completed_at")) if status == "completed" else None,
+        created_at=_display_time(job.get("created_at")),
+        started_at=None if status == "queued" else _display_time(job.get("started_at")),
+        completed_at=_display_time(job.get("completed_at")) if status == "completed" else None,
         runner_name=runner,
         runner_kind=kind,
     )
 
 
-def _board_status(status: object, conclusion: object) -> str:
-    """queued, in_progress or completed. A conclusion decides it, as in the gate (#720);
-    GitHub's waiting, requested and pending are all still queued."""
+def _board_status(status: object, conclusion: object) -> CIJobStatus:
     if conclusion is not None:
         return "completed"
     return "in_progress" if status == "in_progress" else "queued"
 
 
-def _epoch(value: object) -> float | None:
-    """A display time: unreadable is None, never an error that changes the gate."""
+def _display_time(value: object) -> float | None:
     try:
         return _created_at(value)
     except GitHubAdapterError:

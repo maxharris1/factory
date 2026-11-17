@@ -69,8 +69,6 @@ def hosted(job: str, name: str = "pytest") -> RunJob:
 
 
 class GitHub:
-    """The two reads the board may spend, recording every call."""
-
     def __init__(self) -> None:
         self.jobs: dict[str, Sequence[RunJob] | Exception] = {}
         self.logs: dict[str, Mapping[str, str] | Exception] = {}

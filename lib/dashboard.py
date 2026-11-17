@@ -965,7 +965,6 @@ _CI_JOB_LOG = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/actions/runs/([0-
 
 
 def _ci_run_status(jobs: list[dict]) -> str:
-    """A run's status from its jobs; never stored."""
     statuses = {job["status"] for job in jobs}
     if statuses == {"completed"}:
         return "failed" if any(job["conclusion"] in CHECK_FAILED for job in jobs) else "passed"
@@ -975,9 +974,6 @@ def _ci_run_status(jobs: list[dict]) -> str:
 
 
 def _ci_log_ids(row: sqlite3.Row) -> dict:
-    """The job log's run and job ids, from the columns or the stored log URL.
-    The pages build the github.com link from them; a URL itself would not
-    survive redaction."""
     run_id, job_id = (str(row[name] or "") for name in ("run_id", "job_id"))
     if not (_CI_ID.fullmatch(run_id) and _CI_ID.fullmatch(job_id)):
         found = _CI_JOB_LOG.fullmatch(str(row["log_url"] or ""))
@@ -1000,9 +996,6 @@ def _ci_runs(
     sources: dict[tuple[str, str], tuple[str | None, str | None]],
     trackers: dict[tuple[str, str], str | None],
 ) -> dict:
-    """#717: the CI section. `runs` is every (repo, ticket, head) whose jobs are
-    still queued or running, newest first; `failures` is the newest failed
-    jobs seen in the last CI_FAILURE_WINDOW, on any head."""
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     refs: dict[tuple[str, str, str], dict] = {}
     failures = []

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from lib.factory_md import FactoryConfig
 from lib.hold import LabelEvent, MergeUpdate
@@ -57,10 +57,14 @@ CHECK_FAILED = (
 )
 
 
+CIJobStatus = Literal["queued", "in_progress", "completed"]
+RunnerKind = Literal["self-hosted", "github-hosted", "none"]
+
+
 @dataclass(frozen=True)
 class CheckRow:
     name: str
-    status: str
+    status: CIJobStatus
     conclusion: str | None = None
     started_at: float | None = None
     completed_at: float | None = None
@@ -71,18 +75,14 @@ class CheckRow:
 
 @dataclass(frozen=True)
 class RunJob:
-    """One job of an Actions run, from its jobs list. runner_kind is
-    github-hosted, self-hosted, none (completed without a runner, e.g.
-    skipped), or None while no runner has taken it."""
-
     job_id: str
     name: str
-    status: str
+    status: CIJobStatus
     created_at: float | None = None
     started_at: float | None = None
     completed_at: float | None = None
     runner_name: str | None = None
-    runner_kind: str | None = None
+    runner_kind: RunnerKind | None = None
 
 
 @dataclass(frozen=True)
@@ -94,8 +94,6 @@ class CIResult:
     reported: bool = True
     failed: tuple[FailedCheck, ...] = ()
     pending: tuple[str, ...] = ()
-    # #717: every latest-attempt check run, for the dashboard's CI section.
-    # Never part of the gate, so it never takes part in equality either.
     checks: tuple[CheckRow, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:

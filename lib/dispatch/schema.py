@@ -491,9 +491,6 @@ class SchemaMixin:
                 """
             )
             _add_missing_columns(connection, "ci_waits", {"next_round": "INTEGER"})
-            # #717: one row per latest-attempt check run on a tracked
-            # ticket's head, for the dashboard's CI section. Written only
-            # by lib/dispatch/ci_board.py.
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ci_jobs (

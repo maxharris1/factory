@@ -1,13 +1,3 @@
-"""The dashboard's CI board (#717): one ci_jobs row per check run on a tracked ticket's head.
-
-record runs once per poll cycle, after the process phase. The rows come from
-the check runs ci_status already read, at no request. Two lookups fill in
-what a check run lacks, within a fixed budget a cycle: RUN_READS reads of a
-run's jobs for runner names and queue times, once per run, and LOG_READS
-reads of a finished run's failed logs for the failing tests, once per run
-attempt, free when a CI-fix job's evidence already holds the log.
-"""
-
 from __future__ import annotations
 
 import json
@@ -53,8 +43,6 @@ _UPSERT = f"""
 
 @dataclass(frozen=True)
 class FailedRun:
-    """A finished run with failed rows whose failing tests are not read yet."""
-
     repo: str
     ticket_id: str
     head: str
@@ -71,9 +59,6 @@ def record(
     ci_logs: Callable[[str, str], Mapping[str, str]] | None,
     log: Callable[[str], None] | None,
 ) -> None:
-    """Write this cycle's check runs, prune, then spend the lookup budget.
-
-    No GitHub read runs inside a transaction."""
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         for ticket in tickets:
@@ -111,8 +96,6 @@ def _rows(ticket: TrackedTicket, now: float) -> list[tuple[object, ...]]:
 
 
 def _one_per_name(checks: Sequence[CheckRow]) -> list[CheckRow]:
-    """Two workflows may share a job name; the row is keyed by name, so keep
-    a failure over a pass, then the later start, the same choice every cycle."""
     kept: dict[str, CheckRow] = {}
     for check in checks:
         held = kept.get(check.name)
@@ -128,7 +111,6 @@ def _rank(check: CheckRow) -> tuple[bool, float, str]:
 def _prune(
     connection: sqlite3.Connection, tickets: Sequence[TrackedTicket], now: float
 ) -> None:
-    """Rows live on a tracked ticket's current head; a failure stays a day for the recent list."""
     connection.execute("DELETE FROM ci_jobs WHERE seen_at < ?", (now - RETAIN_SECONDS,))
     connection.executemany(
         f"""
@@ -156,7 +138,6 @@ def _read_runners(
     run_jobs: Callable[[str, str], Sequence[RunJob]],
     log: Callable[[str], None] | None,
 ) -> None:
-    """Newest runs first, so a run whose read keeps failing never starves a new one."""
     with connect() as connection:
         runs = connection.execute(
             """
@@ -275,7 +256,6 @@ def _failed_runs(connection: sqlite3.Connection) -> list[FailedRun]:
 
 
 def _evidence_logs(connection: sqlite3.Connection, run: FailedRun) -> dict[str, str]:
-    """The log tails a CI-fix job at this head already read for this run, by check name."""
     logs: dict[str, str] = {}
     for row in connection.execute(
         """

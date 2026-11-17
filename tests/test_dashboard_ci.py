@@ -1,7 +1,3 @@
-"""#717: the CI section on index.html: runs read from ci_jobs, their derived
-status, recent failures, the server render against the page script, and the
-phone layout."""
-
 from __future__ import annotations
 
 import copy
@@ -46,9 +42,6 @@ def snapshot_with(tmp_path: Path, seed) -> dict:
 
 
 def ci_fixture(connection: sqlite3.Connection) -> None:
-    """Two in-flight runs (a pytest shard run on hosted and self-hosted runners
-    with one shard waiting, and a queued run), a run that passed, and two
-    recent failures, one with failing test names."""
     for shard, runner, kind in ((1, None, "github-hosted"), (2, "pc-wsl-bots-1", "self-hosted"),
                                 (3, "pc-wsl-bots-2", "self-hosted")):
         add_ci(connection, "13", HEAD_B, f"pytest ({shard}/4)", "in_progress", pr="113", run_id="9100",
@@ -83,9 +76,6 @@ def _server(snapshot: dict) -> str:
 
 def _text(markup: str) -> str:
     return re.sub(r"<[^>]+>", " ", markup)
-
-
-# --- the reader ----------------------------------------------------------------------------
 
 
 def test_only_queued_and_running_runs_are_listed_newest_first(tmp_path: Path) -> None:
@@ -249,13 +239,10 @@ def test_the_script_draws_a_rerun_as_the_server_does(tmp_path: Path) -> None:
     assert out["steps"][0]["snap"]["ci-runs"] == _server(snapshot)
 
 
-# --- the page script -----------------------------------------------------------------------
-
 IDS = BAR + ["hud", "lanes", "ci-runs", "just-happened", "intake"]
 
 
 def _moved(snapshot: dict, seconds: int, status: str, conclusion: str | None = None) -> dict:
-    """The snapshot `seconds` later with the queued run's job in a new state."""
     later = copy.deepcopy(snapshot)
     later["generated_at_epoch"] += seconds
     run = later["ci_runs"]["runs"][0]
@@ -294,8 +281,6 @@ def test_the_script_redraws_the_section_live_as_the_server_draws_it(tmp_path: Pa
     assert "self-hosted · pc-wsl-bots-1 · queued 50s" in _text(seen[2]) and "13s" in _text(seen[2])
     assert seen[3].count('class="ci-run"') == 1
 
-
-# --- the phone ------------------------------------------------------------------------------
 
 CI_LAYOUT = """(function () {
   var runs = document.querySelectorAll('#ci-runs .ci-run');
