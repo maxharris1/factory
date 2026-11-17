@@ -608,3 +608,25 @@ def test_a_dead_update_behind_a_new_queue_head_settles_once_ci_finishes(
     assert len([job for job in board.jobs(action) if job["head"] == sha(2)]) == 1
     assert board.state("42")["workflow_state"] == ("review" if ci == "success" else "fixing")
     assert members() == ["43"]
+
+
+@pytest.mark.parametrize("ci", ["success", "failure"])
+@pytest.mark.parametrize("ci_at_opt_out", ["pending", "done"])
+def test_a_dead_update_settles_nothing_once_finish_line_leaves_merge(
+    tmp_path: Path, ci: str, ci_at_opt_out: str
+) -> None:
+    board, pr = died_after_push(tmp_path, ci="pending")
+    if ci_at_opt_out == "pending":
+        board.poll()
+        assert board.state("42")["update_failures"] == 1
+    board.factory = replace(board.factory, finish_line="ready-for-review")
+    pr.ci[sha(2)] = ci
+    for _ in range(3):
+        board.poll()
+
+    assert [job["head"] for job in board.jobs("review")] == [sha(1)]
+    assert board.jobs("fix") == []
+    assert board.classified == []
+    assert board.actions.merges == []
+    row = board.state("42")
+    assert (row["workflow_state"], row["approved_head"]) == ("merge-queue", sha(1))

@@ -443,6 +443,8 @@ class MergeQueueMixin:
     def _update_orphaned(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> bool:
         """#660: no ready will settle a head its gone update job pushed.
         Pending CI waits, as TU's ready would."""
+        if ticket.factory.finish_line != "merge":
+            return False
         from_head = row["update_from_head"]
         if from_head is None or not int(row["update_failures"]):
             return False
