@@ -893,6 +893,14 @@ def _without_checkout_paths(health: dict) -> dict:
                                   for device in health["devices"]]}
 
 
+def _ship_rule(labels: list[str]) -> str:
+    parts = [label.removeprefix("ship = ").partition(", ") for label in labels]
+    text = "{}, {}, or {}".format(*(way for way, _, _ in parts))
+    conditions = {condition for _, _, condition in parts}
+    shared = conditions.pop() if len(conditions) == 1 else ""
+    return f"{text}, when {shared}" if shared else text
+
+
 _CHART_RULES = (
     ("stuck", (("building", "stuck"),), lambda labels: labels[0]),
     ("plan-check", (("plan-check", "planning"), ("plan-check", "stuck")),
@@ -900,7 +908,7 @@ _CHART_RULES = (
     ("rounds", (("review", "fixing"), ("review", "capped"), ("capped", "fixing")),
      lambda labels: f"{labels[0]} → fixing; {labels[1]} → capped ({labels[2]})"),
     ("ship", (("ship", "merged"), ("ship", "handed-off"), ("ship", "waiting-external")),
-     lambda labels: "{}, {}, or {}".format(*(label.removeprefix("ship = ") for label in labels))),
+     _ship_rule),
     ("approver", (("waiting-external", "stuck"),),
      lambda labels: f"{labels[0]} from an external approver → stuck"),
 )

@@ -172,6 +172,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "start_before_ci": False,
         "no_ci_base": None,
         "local_checks": (),
+        "qa_gate": None,
     }
     text = "\n".join(review_brief.task_lines(facts))
     assert not [phrase for phrase in UNCONDITIONAL_PASS if phrase in text]

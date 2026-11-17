@@ -1245,7 +1245,8 @@ device slot is still held. Once none is, it writes
 waiters, self-heal and the Linear listener through their service scripts.
 While `orch-retired` exists, the poller, waiter, self-heal and Linear service
 scripts refuse to start (exit 79), and so does the `self-heal.sh once` pass
-the systemd timer runs. After stopping self-heal, `export` runs `self-heal.sh
+the systemd timer runs. `orch poll` and `orch wait` themselves exit 79 on a
+retired host. After stopping self-heal, `export` runs `self-heal.sh
 wait-idle`, which waits up to `ORCH_HEAL_IDLE_WAIT` seconds (default 900) for
 a self-heal pass already under way, and the device deploy it started
 detached, to finish before `export` takes its copy. A wait that runs out
@@ -1253,8 +1254,9 @@ fails the export like a failed stop. `poller-service.sh stop` finds the
 poller by the `orch.db.lock` it holds open when its pidfile is not
 `~/.local/state/factory/poller.pid`, as with `orch-poll.service`. Before the
 copy, `orch move-db unlocked` checks that no process still holds
-`orch.db.lock`, the lock every `orch poll` on that database holds, and fails
-the export if one does. The export
+`orch.db.lock`, the lock every `orch poll` on that database holds, or a
+`waiter-<bot>.lock` beside `orch.db`, the lock every `orch wait` holds, and
+fails the export if one does. The export
 directory (default `~/.local/share/factory/orch-move/<UTC time>`) holds
 `orch.db`, `manifest.json` (sha256, row count per table, integrity, the
 retired line) and `machines.<source>.yml`, the source host's `machines.yml`.
@@ -1262,10 +1264,16 @@ It also holds `job-detail/`, the per-job detail files #653 keeps beside
 `orch.db`. The manifest records each file's sha256. `orch move-db manifest`
 refuses a copy with a spilled job row whose file is missing.
 
-After `export` and before `import`, check the source host by hand. A
-launch that was already under way when the export began can still start a
-poller (#775). Confirm `~/.config/factory/orch-retired` exists and that no
-`orch poll` or `orch wait` process runs:
+`orch poll` and `orch wait` check `orch-retired` again once they hold their
+lock, and exit 79 if it exists. `export` writes `orch-retired` before it
+checks those locks. A poller or waiter that took its lock before then still
+holds it, so `export` fails and writes no manifest. One that takes its lock
+after sees `orch-retired` and exits (#775). A successful export therefore
+leaves no `orch poll` or `orch wait` on that database able to poll or claim.
+
+Before `import`, you can confirm this on the source host by hand. Check that
+`~/.config/factory/orch-retired` exists and that no `orch poll` or `orch wait`
+process runs:
 
 ```sh
 # on the source host: ls lists the file, pgrep prints nothing
@@ -1508,8 +1516,19 @@ The rules for each component:
   the marker its own stop wrote, so the next pass retries and, after 3
   failures, escalates.
 - A component restarted less than a minute ago is left to come up.
-- A component gets at most 3 restarts in 30 minutes. After that it is
-  skipped until the oldest restart leaves the window.
+- A restart that moves a running component onto a new checkout commit is a
+  version update. It succeeds when the restart command exits 0. It is free
+  only once the component was seen running the commit of its previous
+  update, so components keep up with any merge rate. Otherwise it counts
+  toward the restart budget. A component that was waiting (draining, busy,
+  settling) restarts once onto the current checkout, not onto each commit
+  it missed.
+- The restart budget is 3 restarts in 30 minutes. It counts down
+  restarts, failed restart commands, and version updates made before the
+  previous one was seen running. Once the budget is spent, the component
+  is skipped until the oldest counted restart leaves the window. The
+  Linear listener and its tunnel share one restart command, so they share
+  a spent budget: while either is in backoff, neither restarts.
 - Self-heal escalates once per component per 30 minutes: when that backoff
   trips, when the restart command fails 3 times, or when the component
   flaps (3 process changes in the window that self-heal did not cause).
@@ -2152,7 +2171,7 @@ bin/orch doctor --print-canary
 bin/orch doctor --home "$HOME" --responses DIR
 ```
 
-`install-skills` symlinks each pinned skill, and each router skill in `skills/factory` (`factory-builder`, `factory-reviewer`), into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A link into another or removed checkout's `skills/pstack/skills/` or `skills/factory/` is re-linked to this checkout, and a missing skill is added. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
+`install-skills` symlinks each pinned skill, and each skill in `skills/factory` (the routers `factory-builder` and `factory-reviewer`, and `factory-qa`), into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A link into another or removed checkout's `skills/pstack/skills/` or `skills/factory/` is re-linked to this checkout, and a missing skill is added. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
 
 `doctor` checks every installed skill and router against the lock, then prints a canary that asks the harness to read the installed `factory-builder` skill, name it, and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot and Codex Bot each start their own harness and write the reply; Cursor is not asked. `doctor` fails if either harness did not load that version. It does not start `claude` or `codex`.
 

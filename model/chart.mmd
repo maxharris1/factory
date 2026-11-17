@@ -65,11 +65,11 @@ stateDiagram-v2
   s11 --> s10: approver's go, fresh review at the same round
   s12 --> s7: post-merge fails, follow-up filed or post-merge passes
   s13 --> s10: head changed and the patch differs
-  s13 --> s16: ship = merge or handoff and the PR is held
-  s13 --> s17: ship = handoff
-  s13 --> s18: APPROVE, finish_line merge
-  s13 --> s8: ship = merge
-  s13 --> s19: ship = after an approver
+  s13 --> s16: ship = merge or handoff and the PR is held, QA covers the head
+  s13 --> s17: ship = handoff, QA covers the head
+  s13 --> s18: APPROVE, finish_line merge, QA covers the head
+  s13 --> s8: ship = merge, QA covers the head
+  s13 --> s19: ship = after an approver, QA covers the head
   s10 --> s14: job dies twice (T6)
   s14 --> s20: Max moves the Linear issue to a handoff state
   s15 --> s10: ready, CI green
@@ -101,10 +101,12 @@ stateDiagram-v2
   s15 --> s14: CI red three times or job dies twice (T6)
   s21 --> s10: non-trivial update, cross-family re-review
   s21 --> s18: trivial update, approval carried
+  s13 --> s5: QA environment fails twice at one head
   s21 --> s14: two failed updates (update-failed-2)
   s10 --> s22: REVISE at the cap
   s22 --> s20: Max moves the Linear issue to a handoff state
   s22 --> s15: Max okays one more round
+  s5 --> s13: answer, QA runs again at the same head
   s16 --> s22: REVISE at the cap
   s17 --> s15: approver's go at the cap, one more round
   s20 --> s22: Linear back to a started state, the prior state resumes
