@@ -71,7 +71,9 @@
 #     listener as the holder (kept in linear-webhook-tunnel.holder for
 #     status), and sends SIGTERM to the sshd or sshd-session whose pid this
 #     state directory's CLAIM recorded: the tunnel's own stale session (sshd
-#     there may keep a dead tunnel's forward for hours). When ss shows no pid
+#     there may keep a dead tunnel's forward for hours). CLAIM records that
+#     pid with its start time, and a pid whose start time differs has been
+#     reused by another process and is never signalled. When ss shows no pid
 #     (sshd's session process is hidden from the tunnel user, issue #647), a
 #     listener is that session's only while the recorded pid still runs the
 #     claim shell carrying this tunnel's id. Any other holder, another
@@ -338,15 +340,19 @@ held_here() {
 read -r -d '' CLAIM_ON_HOST <<'EOF' || true
 umask 077
 mkdir -p "$HOME/.cache/factory" &&
-    echo "$PPID" >"$HOME/.cache/factory/linear-webhook-tunnel.@ID@" || exit 1
+    echo "$PPID" $(ps -o lstart= -p "$PPID") >"$HOME/.cache/factory/linear-webhook-tunnel.@ID@" ||
+    exit 1
 while kill -0 "$PPID" 2>/dev/null; do sleep 30; done
 EOF
 
 read -r -d '' RECLAIM_ON_HOST <<'EOF' || true
 listeners=$(ss -Hltnp "sport = :@PORT@") || exit 1
 [ -n "$listeners" ] || exit 0
-mine=$(cat "$HOME/.cache/factory/linear-webhook-tunnel.@ID@" 2>/dev/null)
+claim=$(cat "$HOME/.cache/factory/linear-webhook-tunnel.@ID@" 2>/dev/null)
+mine=${claim%% *}
 case $mine in '' | *[!0-9]*) mine=0 ;; esac
+started=$(ps -o lstart= -p "$mine" 2>/dev/null)
+[ -n "$started" ] && [ "$claim" = "$(echo "$mine" $started)" ] || mine=0
 own="\(\"sshd(-session)?\",pid=${mine},"
 pidless='^[^(]*$'
 if [ "$mine" != 0 ] && pgrep -P "$mine" -f "linear-webhook-tunnel\.@ID@" >/dev/null; then

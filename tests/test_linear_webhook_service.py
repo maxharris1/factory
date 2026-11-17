@@ -968,11 +968,12 @@ TUNNEL_ID = "0123456789abcdef"
 
 
 def _remote_holder(home: Path, process_name: str, claimed_by: str | None = None,
-                   pid_hidden: bool = False, claim_shell_of: str | None = None) -> subprocess.Popen:
+                   pid_hidden: bool = False, claim_shell_of: str | None = None,
+                   reused_pid: bool = False) -> subprocess.Popen:
     claim = home / ".cache" / "factory" / f"linear-webhook-tunnel.{claimed_by}"
     claim_shell_of = claim_shell_of or claimed_by
     script = (
-        "import fcntl, os, time\n"
+        "import fcntl, os, subprocess, time\n"
         "home = os.environ['HOME']\n"
         "forward = open(os.path.join(home, 'remote-forward.lock'), 'a')\n"
         "fcntl.flock(forward, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
@@ -983,9 +984,12 @@ def _remote_holder(home: Path, process_name: str, claimed_by: str | None = None,
         f"if {claimed_by is not None!r}:\n"
         f"    os.makedirs({str(claim.parent)!r}, exist_ok=True)\n"
         f"    with open({str(claim)!r}, 'w') as claim:\n"
-        "        claim.write(f'{os.getpid()}\\n')\n"
+        "        started = subprocess.run(['ps', '-o', 'lstart=', '-p', str(os.getpid())],\n"
+        "                                 capture_output=True, text=True, check=True).stdout\n"
+        f"        if {reused_pid!r}:\n"
+        "            started = 'Thu Jan  1 00:00:00 1970'\n"
+        "        claim.write(' '.join([str(os.getpid()), *started.split()]) + '\\n')\n"
         f"if {claim_shell_of is not None!r}:\n"
-        "    import subprocess\n"
         "    subprocess.Popen(['sh', '-c', 'while kill -0 $PPID 2>/dev/null; do sleep 0.2; done',\n"
         f"                      'linear-webhook-tunnel.{claim_shell_of}'])\n"
         "print('ready', flush=True)\n"
@@ -1045,23 +1049,25 @@ def test_a_held_tunnel_ends_its_own_stale_sshd_session_and_comes_back_without_st
     assert "held by another owner" not in _service(home, "status").stdout
 
 
-@pytest.mark.parametrize("process_name, claimed_by, pid_hidden, claim_shell_of", [
-    ("python3", None, False, None),
-    ("sshd", None, False, None),
-    ("sshd", "fedcba9876543210", False, None),
-    ("sshd", None, True, None),
-    ("sshd", "fedcba9876543210", True, None),
-    ("sshd", TUNNEL_ID, True, "fedcba9876543210"),
+@pytest.mark.parametrize("process_name, claimed_by, pid_hidden, claim_shell_of, reused_pid", [
+    ("python3", None, False, None, False),
+    ("sshd", None, False, None, False),
+    ("sshd", "fedcba9876543210", False, None, False),
+    ("sshd", None, True, None, False),
+    ("sshd", "fedcba9876543210", True, None, False),
+    ("sshd", TUNNEL_ID, True, "fedcba9876543210", False),
+    ("sshd", TUNNEL_ID, False, None, True),
+    ("sshd", TUNNEL_ID, True, None, True),
 ])
 def test_a_foreign_holder_is_left_alone_and_the_tunnel_returns_within_the_held_retry(
     home: Path, process_name: str, claimed_by: str | None, pid_hidden: bool,
-    claim_shell_of: str | None,
+    claim_shell_of: str | None, reused_pid: bool,
 ) -> None:
     port = _port_of(home)
     held = _state(home) / "linear-webhook-tunnel.held"
     _own_tunnel_id(home, _state(home))
     foreign = _remote_holder(home, process_name, claimed_by=claimed_by, pid_hidden=pid_hidden,
-                             claim_shell_of=claim_shell_of)
+                             claim_shell_of=claim_shell_of, reused_pid=reused_pid)
     users = "another user" if pid_hidden else f'users:(("{process_name}",pid={foreign.pid},fd=3))'
     assert _service(home, "ensure", **HELD_SETTINGS).returncode == 0
 
