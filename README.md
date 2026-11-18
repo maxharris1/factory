@@ -470,6 +470,19 @@ feeder recorded, else the newest PR on the issue's own branch, open first. A
 PR that only names the key or is linked from Linear is never bound (#600).
 `ready`, `verdict`, and `stuck` go on PR issue comments, never reviews or
 inline comments.
+
+A tracked GitHub PR that the poller has read before is first probed, with one
+GraphQL query per repo per 25 PRs. The probe returns the PR's state, head,
+base, mergeability, labels, newest 100 comments, review count and the head's
+CI contexts. When that matches the probe taken before the PR's last full read,
+and that read is less than 10 minutes old (`FULL_READ_SECONDS`), the poller
+reuses the read and makes no per-PR call (#870). A changed probe, a PR missing
+from the probe, a GraphQL error under the PR or under no single PR, a failed probe (a `GitHub probe failed` deferral) or an older
+read gets the full read: the PR, its comments, CI, and the hold's labels,
+files and label events. A caller's fresh read never reuses. The probe's time
+is the `github-graphql` source of the `tracked-read` phase on the `cycle end`
+line, and `scripts/issue-870-tracked-read-times.py` prints that phase's median
+and p90 over `poller.log`.
 `projects[].grok_bot` routes stop and terminal results. When a webhook wake's
 `target_bot` is set, only that project bot handles it; when it is `null`, Grok
 Bot handles it for the repo's project.

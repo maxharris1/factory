@@ -137,6 +137,23 @@ MARK_READY_QUERY = (
     "{ pullRequest { id isDraft headRefOid } } }"
 )
 
+PULL_FINGERPRINT_FIELDS = """
+    state merged isDraft updatedAt title
+    headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus
+    labels(first: 100) { totalCount pageInfo { hasNextPage } nodes { name } }
+    comments(last: 100) { totalCount nodes { databaseId updatedAt } }
+    reviews { totalCount }
+    commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) {
+      totalCount pageInfo { hasNextPage }
+      nodes {
+        __typename
+        ... on CheckRun { databaseId status conclusion }
+        ... on StatusContext { context state }
+      }
+    } } } } }
+"""
+PULL_FINGERPRINT_CHUNK = 25
+
 _CHECK_NOT_RUN = ("neutral", "skipped")
 
 
@@ -592,6 +609,39 @@ class GitHubReviewActions:
                 seen.add(int(comment.id))
                 comments.append(comment)
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
+
+    def pull_fingerprints(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
+        owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
+        wanted = list(dict.fromkeys(_number(number) for number in numbers))
+        found: dict[str, str] = {}
+        for start in range(0, len(wanted), PULL_FINGERPRINT_CHUNK):
+            chunk = wanted[start : start + PULL_FINGERPRINT_CHUNK]
+            fields = " ".join(
+                f"p{number}: pullRequest(number: {number}) {{ ...pull }}" for number in chunk
+            )
+            query = (
+                "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) "
+                f"{{ {fields} }} }} fragment pull on PullRequest {{ {PULL_FINGERPRINT_FIELDS} }}"
+            )
+            document = _object(
+                self._json(
+                    "-X", "POST", "graphql",
+                    "-f", f"query={query}",
+                    "-f", f"owner={owner}",
+                    "-f", f"name={name}",
+                    partial_graphql=True,
+                )
+            )
+            pulls = _object(document.get("data")).get("repository")
+            broken = _error_aliases(document)
+            if not isinstance(pulls, dict) or None in broken:
+                continue
+            for number in chunk:
+                pull = pulls.get(f"p{number}")
+                whole = isinstance(pull, dict) and _whole_fingerprint(pull)
+                if whole and f"p{number}" not in broken:
+                    found[number] = json.dumps(pull, sort_keys=True, separators=(",", ":"))
+        return found
 
     def pull_labels(self, repo: str, number: str) -> tuple[str, ...]:
         """The PR's labels, all pages (issue #86 hold label)."""
@@ -1202,6 +1252,32 @@ def _route(args: Sequence[str]) -> str:
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         method = "<method>"
     return f"{method} {route or '<route>'}"
+
+
+def _whole_fingerprint(pull: dict[str, Any]) -> bool:
+    commits = pull.get("commits") or {}
+    rollups = [
+        ((node or {}).get("commit") or {}).get("statusCheckRollup")
+        for node in commits.get("nodes") or ()
+    ]
+    connections = [pull.get("labels"), *(rollup.get("contexts") for rollup in rollups if rollup)]
+    return all(
+        isinstance(connection, dict)
+        and (connection.get("pageInfo") or {}).get("hasNextPage") is False
+        for connection in connections
+    )
+
+
+def _error_aliases(document: dict[str, Any]) -> set[str | None]:
+    """The repository field each GraphQL error sits under; None for an
+    error that names no single field, which spoils the whole response."""
+    errors = document.get("errors")
+    aliases: set[str | None] = set()
+    for error in errors if isinstance(errors, list) else ():
+        path = error.get("path") if isinstance(error, dict) else None
+        named = isinstance(path, list) and len(path) > 1 and path[0] == "repository"
+        aliases.add(path[1] if named and isinstance(path[1], str) else None)
+    return aliases
 
 
 def _has_graphql_data(text: str) -> bool:
