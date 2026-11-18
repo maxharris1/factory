@@ -610,22 +610,25 @@ def _contain(tag: str) -> str:
     starts in a scope of its own on the unified cgroup hierarchy (the
     probe's `0::` line), and only once the scope record names the unit;
     otherwise "$@" is empty and the run starts uncontained, as before.
-    The scope runs with environment expansion off where systemd-run has
-    `--expand-environment` (254+), so the job's words reach bash verbatim.
+    systemd-run 254+ expands `${VAR}` in a scope's argv unless given
+    `--expand-environment=no`, a flag older releases lack.
     XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager, is
     the lingering user's runtime directory when the session gave none.
     """
     unit = f"orch-run-{tag}.scope"
+    scope = "systemd-run --user --scope --quiet --collect $noexpand"
     return (
         'set --; u=$(id -u 2>/dev/null) && '
         '[ "$(loginctl show-user "$u" -p Linger --value 2>/dev/null)" = yes ] && '
         "x=${XDG_RUNTIME_DIR:-/run/user/$u} && "
-        'probe() { XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect "$@" '
-        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1; } && "
-        "{ probe --expand-environment=no && e=--expand-environment=no || { probe && e=; }; } && "
+        "noexpand=--expand-environment=no && "
+        "if help=$(systemd-run --help 2>/dev/null); then "
+        "case $help in *--expand-environment*) ;; *) noexpand= ;; esac; fi && "
+        f'XDG_RUNTIME_DIR="$x" {scope} '
+        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1 && "
         f"echo {unit} > {shlex.quote(scope_record(tag))} && "
         'export XDG_RUNTIME_DIR="$x" && '
-        f"set -- systemd-run --user --scope --quiet --collect $e --unit={unit} --; "
+        f"set -- {scope} --unit={unit} --; "
     )
 
 

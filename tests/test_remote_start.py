@@ -1511,7 +1511,19 @@ while args and args[0].startswith("-"):
     if word == "--":
         break
     options.append(word)
-if os.environ.get("FAKE_SYSTEMD_OLD") == "1" and any(
+old = os.environ.get("FAKE_SYSTEMD_OLD") == "1"
+if "--help" in options:
+    if os.environ.get("FAKE_SYSTEMD_HELP_FAILS") == "1":
+        sys.exit(1)
+    print("  --scope    Run this as scope rather than service")
+    if not old:
+        print("  --expand-environment=BOOL    Control expansion of environment variables")
+    sys.exit(0)
+bus_blip = os.environ.get("FAKE_SYSTEMD_BUS_BLIP", "")
+if bus_blip and os.path.exists(bus_blip):
+    os.remove(bus_blip)
+    sys.exit("Failed to connect to bus: No such file or directory")
+if old and any(
     o.startswith("--expand-environment") for o in options
 ):
     sys.exit("systemd-run: unrecognized option '--expand-environment=no'")
@@ -1534,7 +1546,7 @@ def expand(word):
     return [re.sub(r"\\$\\$|\\$\\{{([^}}]*)\\}}",
                    lambda m: "$" if m[0] == "$$" else value(m[1]), word)]
 
-if os.environ.get("FAKE_SYSTEMD_OLD") != "1" and "--expand-environment=no" not in options:
+if not old and "--expand-environment=no" not in options:
     args = args[:1] + [w for a in args[1:] for w in expand(a)]
 os.execvp(args[0], args)
 """
@@ -3027,13 +3039,34 @@ def test_a_profile_name_reference_never_puts_the_job_token_on_stderr(
     assert json.loads(report.read_text(encoding="utf-8")) == [["--add-dir", str(tmp_path)], JOB_SECRET]
 
 
-@pytest.mark.parametrize("old_systemd", [False, True], ids=["systemd-254+", "systemd-252"])
+@pytest.mark.parametrize(
+    ("old_systemd", "help_fails", "bus_blip", "launch"),
+    [
+        (False, False, False, ["--expand-environment=no"]),
+        (True, False, False, []),
+        (False, True, False, ["--expand-environment=no"]),
+        (True, True, False, None),
+        (False, False, True, None),
+        (True, False, True, None),
+    ],
+    ids=[
+        "systemd-254+",
+        "systemd-252",
+        "systemd-254+-help-fails",
+        "systemd-252-help-fails",
+        "systemd-254+-bus-blip",
+        "systemd-252-bus-blip",
+    ],
+)
 def test_a_contained_start_hands_the_command_its_argv_whatever_systemd_expands(
-    tmp_path: Path, old_systemd: bool
+    tmp_path: Path, old_systemd: bool, help_fails: bool, bus_blip: bool, launch: list[str] | None
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
     log = tmp_path / "systemd-run.log"
+    blip = tmp_path / "bus-down"
+    if bus_blip:
+        blip.touch()
     report = tmp_path / "report.json"
     dump = f"import json, os, sys\njson.dump([sys.argv[1:], os.environ.get('GH_TOKEN')], open({str(report)!r}, 'w'))\n"
     target = _token_target(tmp_path)
@@ -3049,6 +3082,8 @@ def test_a_contained_start_hands_the_command_its_argv_whatever_systemd_expands(
             "HOME": str(home),
             "FAKE_SYSTEMD_LOG": str(log),
             "FAKE_SYSTEMD_OLD": "1" if old_systemd else "0",
+            "FAKE_SYSTEMD_HELP_FAILS": "1" if help_fails else "0",
+            "FAKE_SYSTEMD_BUS_BLIP": str(blip),
         },
     )
     assert result.returncode == 0, result.stderr
@@ -3057,9 +3092,10 @@ def test_a_contained_start_hands_the_command_its_argv_whatever_systemd_expands(
         ["--add-dir", str(tmp_path), *args], "x${HOME}y"
     ]
     assert not any(tmp_path.rglob("pwn*"))
-    [options] = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    assert f"--unit=orch-run-{target.tag}.scope" in options
-    if old_systemd:
-        assert not any(o.startswith("--expand-environment") for o in options)
+    launches = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    if launch is None:
+        assert launches == []
     else:
-        assert "--expand-environment=no" in options
+        [options] = launches
+        assert f"--unit=orch-run-{target.tag}.scope" in options
+        assert [o for o in options if o.startswith("--expand-environment")] == launch
