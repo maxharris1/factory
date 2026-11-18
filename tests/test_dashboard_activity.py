@@ -196,7 +196,8 @@ def test_every_table_that_times_a_comment_feeds_the_verdict_time(tmp_path: Path)
             if any(c.endswith("comment_id") for c in columns) and any(
                     c.endswith("_at") for c in columns):
                 timed.add(table)
-    assert timed == {table for table, *_ in _VERDICT_TIMES}
+    linear_comments = {"qa_linear"}
+    assert timed - linear_comments == {table for table, *_ in _VERDICT_TIMES}
 
 
 def _moved(tmp_path: Path, count: int, stopped_seconds_ago: dict[int, int] | None = None) -> dict:

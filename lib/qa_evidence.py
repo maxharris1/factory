@@ -356,7 +356,7 @@ def _shown(name: str) -> str:
     return scrub_detail(name) or "<empty name>"
 
 
-def _kind(lane_rel: PurePosixPath) -> Kind:
+def kind(lane_rel: PurePosixPath) -> Kind:
     if len(lane_rel.parts) == 1 and lane_rel.name in _RESERVED:
         return "manifest"
     if lane_rel.name == NETWORK_NAME:
@@ -590,7 +590,7 @@ def _recycle_run(run_fd: int, standing: Standing) -> Iterator[tuple[Outcome, Pur
 
             def keep(rel: PurePosixPath) -> bool:
                 result = results.get(rel.parts[0]) if len(rel.parts) > 1 else None
-                return keeps(standing, result, _kind(rel))
+                return keeps(standing, result, kind(rel))
 
             for outcome, rel in _sweep(lane_fd, PurePosixPath(), keep):
                 yield outcome, PurePosixPath(lane, rel)

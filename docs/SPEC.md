@@ -335,7 +335,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **Seams.** The worker is given `storage(repo)`, which returns the project's `Storage` (built in production from `projects[].qa_storage`), and `evidence`, each project's `qa_storage` entry. It reads lane results with the real intake, `qa_evidence.collect` over that storage, into the entry's `evidence_root` (Lane rules, Read). Before each launch the worker signs the lane's links with `links_for_lane`, for its run id, its lane number, the distinct packs its scenarios name and `qa.timeout_minutes` in seconds. The brief carries them. Without `storage` the worker claims nothing. A job whose repo has no `evidence` entry gets no plan, so it is never claimed and no lane launches. A `Lane`'s repr leaves out the brief, and no log line or comment holds a link. The base commit is the merge-base of the head and the base branch, from the waiter's fetched clone. The worker reads the project's `qa` block from `factory.md` at `projects[].factory_ref`. It is also given `head(repo, pr)`, which reads the PR's current head sha from GitHub (`pull_head`) at call time. Without `head` the worker claims nothing.
 
-**`qa_lanes`.** One row per agent attempt: `lane_id`, `run_id`, `job_id`, `slice`, `kind` (`head`, `regression` or `base-check`), `lane_no` (the next unused number in its run when the row was reserved, 1 to 8), `scenarios` (the `qa-<n>` ids), `commit_sha` (the commit the lane tests), `base_commit`, `runner`, `agent_id`, `agent_url`, `state`, `attempt` (1 or 2), `reason`, `result` (the accepted result JSON), `started_at`, `finished_at` and `launch_called_at` (written before the first launch call). States: `launching` (a reserved slot, no agent yet), `running`, `reported`, `dropped`, `gap`, `cancelled` and `timed-out`. `(run_id, slice, attempt)` is unique, so a replayed tick never launches twice. A slice's outcome is its newest row.
+**`qa_lanes`.** One row per agent attempt: `lane_id`, `run_id`, `job_id`, `slice`, `kind` (`head`, `regression` or `base-check`), `lane_no` (the next unused number in its run when the row was reserved, 1 to 8), `scenarios` (the `qa-<n>` ids), `commit_sha` (the commit the lane tests), `base_commit`, `runner`, `agent_id`, `agent_url`, `state`, `attempt` (1 or 2), `reason`, `result` (the accepted result JSON), `started_at`, `finished_at`, `launch_called_at` (written before the first launch call) and `pack_keys` (section 7, Signed pack keys). States: `launching` (a reserved slot, no agent yet), `running`, `reported`, `dropped`, `gap`, `cancelled` and `timed-out`. `(run_id, slice, attempt)` is unique, so a replayed tick never launches twice. A slice's outcome is its newest row.
 
 **Slicing.** The run's ids split into at most `qa.lanes` slices. When the plan named regression ids among them and `qa.lanes` is at least 2, one slice is the `regression` lane and tests the base commit. Every run id is also tested at the head, split into the remaining lanes as contiguous chunks whose sizes differ by at most one. Each `qa_lanes` row gets the next unused lane number in its run, in the order rows are reserved. When the cap has room, the slices take 1 to 3 and a relaunch or base-check takes the next number. Under a full cap, a relaunch can take a number before a later slice does. A lane's evidence key (`qa/<repo>/<run_id>/lane-<n>/`) is then never shared between two agents. The brief uses `s-<n>` for `qa-<n>`, and a `Saves:` phrase becomes a plain file name (`after screenshot` is `after-screenshot.png`). Every scenario also saves `after-screenshot.png` and `pass-test-output.txt`. A run with no scenarios (`smoke`) launches nothing and posts `BLOCKED` with the gap `no scenarios`.
 
@@ -1125,6 +1125,20 @@ plus one byte and keeps no partial file. A missing object is "not there
 yet", not an error. The QA worker calls `links_for_lane` before each launch
 (section 4.2.2), and the lane brief carries the links. No `repr`, log line
 or comment holds one.
+
+**Signed pack keys.** `qa_lanes.pack_keys` is a JSON list of the
+`packs/<pack_id>` keys that `links_for_lane` signed for the lane. The worker
+writes it in the same update that records the lane's `agent_id`, so it lists
+exactly the packs the launched agent got a link for (`[]` when its scenarios
+name no pack). NULL means no record: the lane never launched, or it launched
+before the column existed.
+
+**Linear evidence ledger.** `qa_linear` holds one row per QA run whose
+evidence goes to a Linear ticket (issue #792). `run_id` is the primary key,
+so a replay adds no second row. The other columns are `repo`, `ticket_id`,
+`state` (`pending`, `posted`, `skipped` or `failed`), `reason`, `comment_id`
+(the Linear comment), `attempts` and `updated_at`. `ensure_qa_lanes` creates
+it. Nothing writes it yet.
 
 **Intake.** `lib/qa_evidence.py`, `collect(run_id, lane, *, storage, repo,
 ticket, root)`, treats everything in a bundle as untrusted:

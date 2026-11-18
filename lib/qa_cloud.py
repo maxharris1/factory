@@ -34,7 +34,7 @@ from lib.qa_evidence import (
     MANIFEST_NAME, EvidenceRefused, collect, lane_dir, record_evidence_dir, recycle, run_dir, stored,
 )
 from lib.qa_runners import Lane, Runner, RunnerOutage, UsageLimit
-from lib.qa_storage import Storage, StorageError, links_for_lane
+from lib.qa_storage import LaneLinks, Storage, StorageError, links_for_lane
 
 SliceKind = Literal["head", "regression", "base-check"]
 Result = Literal["PASS", "FAIL", "BLOCKED"]
@@ -575,7 +575,8 @@ class QaWorker:
         limited: list[str] = []
         while True:
             try:
-                launched = self.runners[runner].launch(self._lane(plan, row, runner))
+                lane, links = self._lane(plan, row, runner)
+                launched = self.runners[runner].launch(lane)
             except (RunnerOutage, UsageLimit) as exc:
                 if not first:
                     self._close(row, "gap", f"launch-failed:{type(exc).__name__}")
@@ -604,15 +605,15 @@ class QaWorker:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                UPDATE qa_lanes SET agent_id = ?, agent_url = ?, state = 'running', started_at = ?
+                UPDATE qa_lanes SET agent_id = ?, agent_url = ?, state = 'running', started_at = ?, pack_keys = ?
                 WHERE lane_id = ? AND state = 'launching'
                 """,
-                (launched.agent_id, launched.url, self.queue.now(), row.lane_id),
+                (launched.agent_id, launched.url, self.queue.now(), _keys(links), row.lane_id),
             )
             connection.commit()
         return "launched"
 
-    def _lane(self, plan: RunPlan, row: LaneRow, runner: str) -> Lane:
+    def _lane(self, plan: RunPlan, row: LaneRow, runner: str) -> tuple[Lane, LaneLinks]:
         scenarios = tuple(_scenario(plan.detail.live[item]) for item in row.scenarios)
         links = links_for_lane(
             row.run_id, row.lane_no, pack_ids(scenarios), plan.qa.timeout_minutes * 60,
@@ -640,7 +641,7 @@ class QaWorker:
             base_ref=plan.factory.base_branch,
             environment_name=config.environment,
             model=config.model,
-        )
+        ), links
 
     def _watch(self, plan: RunPlan, row: LaneRow) -> None:
         runner = self.runners[row.runner]
@@ -757,12 +758,14 @@ class QaWorker:
         try:
             agent_id = row.agent_id
             if agent_id is None:
-                launched = runner.launch(self._lane(self._plan(job), row, row.runner))
+                lane, links = self._lane(self._plan(job), row, row.runner)
+                launched = runner.launch(lane)
                 agent_id = launched.agent_id
                 with self.queue.connect() as connection:
                     connection.execute(
-                        "UPDATE qa_lanes SET agent_id = ?, agent_url = ? WHERE lane_id = ? AND agent_id IS NULL",
-                        (agent_id, launched.url, row.lane_id),
+                        "UPDATE qa_lanes SET agent_id = ?, agent_url = ?, pack_keys = ?"
+                        " WHERE lane_id = ? AND agent_id IS NULL",
+                        (agent_id, launched.url, _keys(links), row.lane_id),
                     )
             runner.stop(agent_id)
         except Exception as exc:
@@ -941,6 +944,10 @@ def _scenario(item: Mapping) -> Scenario:
         pack=item.get("pack") or "none",
         save=named + tuple(name for name in (AFTER_SCREENSHOT, PASS_OUTPUT) if name not in named),
     )
+
+
+def _keys(links: LaneLinks) -> str:
+    return json.dumps([link.key for link in links.packs])
 
 
 def _open_count(connection: sqlite3.Connection, runner: str) -> int:
