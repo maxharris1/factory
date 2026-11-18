@@ -16,6 +16,7 @@ from lib import cli
 from lib import lane_limit
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
+from lib.linear_upload import HttpLinear, LinearClient
 from lib.orch_yml import QaStorage, load_orch_yml
 from lib.qa_audit import Gap, GapKind
 from lib.qa_cloud import (
@@ -24,6 +25,7 @@ from lib.qa_cloud import (
 from lib.qa_evidence import collect, record_evidence_dir, run_dir
 from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.fake import FakeRunner
+from lib.poll_source import HTTPResult
 from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError
 from lib.queue import JobRequest, job_from_row
 from tests.qa_support import (
@@ -44,6 +46,9 @@ from tests.qa_support import (
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
 BASE = "d" * 40
+NO_COMMENTS = HTTPResult(200, json.dumps(
+    {"data": {"issue": {"comments": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+))
 GIB = 2**30
 _BRIEF_IDS = re.compile(r'"id": "(s-[0-9]+)"')
 
@@ -110,6 +115,7 @@ class Lab:
         cap: int = 10,
         shootout: bool = False,
         shares_usage_with: dict[str, str] | None = None,
+        linear: LinearClient | None = None,
     ):
         qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5)
         qa = replace(qa, runners=tuple(item for name in runners for item in qa.runners if item.name == name))
@@ -130,6 +136,7 @@ class Lab:
         self.logs: list[str] = []
         self.cap = cap
         self.shares_usage_with = shares_usage_with or {}
+        self.linear = linear or HttpLinear("lab-linear-key", post=lambda *_: NO_COMMENTS)
         self.worker = self.new_worker()
 
     def new_worker(self) -> QaWorker:
@@ -145,6 +152,7 @@ class Lab:
             log=self.logs.append,
             evidence=self.evidence,
             head=lambda repo, pr: self.current_head,
+            linear=self.linear,
         )
 
     def post(self, repo: str, pr: int, body: str, marker: str) -> str:
@@ -448,7 +456,7 @@ def test_cap_two_three_jobs_two_run_one_lane_each_build_claimed(tmp_path: Path) 
 
 
 def _ready_thread(lab: Lab) -> str:
-    lab.run.post("r1", ready(HEAD_A, body=scenarios("qa-1", "qa-2")), head=HEAD_A)
+    lab.run.post("r1", ready(HEAD_A, body=scenarios("qa-1", "qa-2", pack="demo")), head=HEAD_A)
     lab.run.poll()
     return lab.run.rows("SELECT run_id FROM qa_runs")[0][0]
 

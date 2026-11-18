@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.client import HTTPException
-from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, Protocol, TypeVar
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from lib.brief.qa import AFTER_SCREENSHOT
 from lib.poll_source import LINEAR_ENDPOINT, LinearTransport, post_json
+from lib.qa_evidence import MANIFEST_NAME, kind
 
 T = TypeVar("T")
 CACHE_CONTROL = "public, max-age=31536000"
+UPLOAD_CAP_BYTES = 100 * 2**20
+CONTENT_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".webm": "video/webm", ".mp4": "video/mp4",
+}
 _ISSUE = "query($id: String!) { issue(id: $id) { id } }"
 _COMMENTS = """query($id: String!, $after: String) { issue(id: $id) { comments(first: 100, after: $after) {
 nodes { id body } pageInfo { hasNextPage endCursor } } } }"""
@@ -91,6 +99,106 @@ class HttpLinear:
         if not isinstance(parsed, dict) or parsed.get("errors"):
             raise LinearError(f"{operation}: GraphQL error")
         return _redacted(operation, lambda: read(parsed["data"]))
+
+
+@dataclass(frozen=True)
+class Pick:
+    lane: int
+    path: str
+    kind: Literal["screenshot", "video"]
+    size: int
+    sha256: str
+    file: Path
+
+    @property
+    def name(self) -> str:
+        return f"lane-{self.lane}/{self.path}"
+
+    @property
+    def content_type(self) -> str:
+        return CONTENT_TYPES[PurePosixPath(self.path).suffix.lower()]
+
+
+@dataclass(frozen=True)
+class Subset:
+    uploads: tuple[Pick, ...]
+    over_limit: tuple[Pick, ...]
+    left_out: tuple[str, ...]
+
+
+def subset(lanes: Sequence[tuple[int, Path]], cap: int = UPLOAD_CAP_BYTES) -> Subset:
+    uploads: list[Pick] = []
+    over_limit: list[Pick] = []
+    left_out: list[str] = []
+    for lane, folder in lanes:
+        try:
+            files = json.loads((folder / MANIFEST_NAME).read_bytes())["files"]
+        except (OSError, ValueError, TypeError, KeyError):
+            left_out.append(f"lane-{lane}/{MANIFEST_NAME}: unreadable")
+            continue
+        for entry in files if isinstance(files, list) else ():
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                continue
+            rel = PurePosixPath(entry["path"])
+            chosen = _chosen(rel)
+            if chosen is None:
+                continue
+            size, sha256 = entry.get("size"), entry.get("sha256")
+            if rel.is_absolute() or ".." in rel.parts or type(size) is not int or not isinstance(sha256, str):
+                left_out.append(f"lane-{lane}/{entry['path']}: not a safe manifest entry")
+                continue
+            pick = Pick(lane, entry["path"], chosen, size, sha256, folder / rel)
+            if size > cap:
+                over_limit.append(pick)
+            elif _matches(pick):
+                uploads.append(pick)
+            else:
+                left_out.append(f"{pick.name}: missing, or not the file its manifest lists")
+    return Subset(tuple(uploads), tuple(over_limit), tuple(left_out))
+
+
+def render(
+    *,
+    run_id: str,
+    result: str,
+    head: str,
+    table: str,
+    assets: Sequence[tuple[Pick, str]],
+    chosen: Subset,
+    report: str,
+) -> str:
+    parts = [f"QA result: {result} at `{head[:12]}`"]
+    if table:
+        parts.append(table)
+    shots = [f"![{pick.name}]({url})" for pick, url in assets if pick.kind == "screenshot"]
+    if shots:
+        parts.append("Screenshots:\n\n" + "\n\n".join(shots))
+    videos = [f"- [{pick.name}]({url})" for pick, url in assets if pick.kind == "video"]
+    if videos:
+        parts.append("Videos:\n" + "\n".join(videos))
+    left = [f"- {pick.name} ({pick.size} bytes): over the upload limit" for pick in chosen.over_limit]
+    left += [f"- {line}" for line in chosen.left_out]
+    if left:
+        parts.append("Left out:\n" + "\n".join(left))
+    parts.append(f"Full QA report: {report}")
+    parts.append(f"QA run {run_id}")
+    return "\n\n".join(parts) + "\n"
+
+
+def _chosen(rel: PurePosixPath) -> Literal["screenshot", "video"] | None:
+    if len(rel.parts) == 2 and rel.name == AFTER_SCREENSHOT:
+        return "screenshot"
+    return "video" if kind(rel) == "video" else None
+
+
+def _matches(pick: Pick) -> bool:
+    try:
+        with os.fdopen(os.open(pick.file, os.O_RDONLY | os.O_NOFOLLOW), "rb") as file:
+            if os.fstat(file.fileno()).st_size != pick.size:
+                return False
+            return hashlib.file_digest(file, "sha256").hexdigest() == pick.sha256
+    except OSError:
+        return False
 
 
 @dataclass
