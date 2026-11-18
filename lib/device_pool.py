@@ -233,6 +233,7 @@ class DevicePool:
         self.queue = queue
         self.config = config
         self.machines_path = machines_path
+        self._loaded: tuple[str, str | None] | None = None
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -293,6 +294,12 @@ class DevicePool:
         live = live_settings.narrowed(connection, self.machines_path)
         return live.placement_config(self.config), live
 
+    def _loaded_digest(self, machines: Path) -> str | None:
+        key = live_settings.file_key(machines)
+        if self._loaded is None or self._loaded[0] != key:
+            self._loaded = key, live_settings.loaded_digest(machines)
+        return self._loaded[1]
+
     def serving(self, harness: str) -> frozenset[str]:
         """The accounts of harness on devices placement may use."""
         with self.queue.connect() as connection:
@@ -321,8 +328,10 @@ class DevicePool:
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             config, live = self._placement(connection)
-            if live is not None:
-                live_settings.record_seen(connection, harness, live.adopted)
+            if live is not None and self.machines_path is not None:
+                version = live.loaded_version(self._loaded_digest(self.machines_path))
+                if version is not None:
+                    live_settings.record_seen(connection, harness, version)
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}

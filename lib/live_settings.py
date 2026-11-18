@@ -22,13 +22,17 @@ than the view the poller's DeviceMonitor acts on:
   treats that device as enabled.
 
 `written` counts the file versions the row has seen and `adopted` the last
-of them the poller acted on. The settings applier records `written` right
-after its write as the change's `version`; the change is applied once
-`adopted` reaches it (`peek`, read by the dashboard).
+of them the poller acted on, with `adopted_digest` the digest of the
+settings it adopted. The settings applier records `written` right after its
+write as the change's `version`; the change is applied once `adopted`
+reaches it (`peek`, read by the dashboard) and every waiter it names has
+reported, by `loaded_version`, a version whose settings match the
+machines.yml that waiter itself loaded.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -66,6 +70,7 @@ class Live:
     switches: Mapping[str, Switch]
     written: int
     adopted: int
+    adopted_digest: str = ""
     seen: Mapping[str, int] = field(default_factory=dict)
 
     def placement_config(self, config: MachinesConfig) -> MachinesConfig:
@@ -79,10 +84,24 @@ class Live:
     def is_applied(self, version: int) -> bool:
         return self.adopted >= version
 
+    def loaded_version(self, digest: str | None) -> int | None:
+        """The adopted version when a process's own machines.yml, by its
+        `loaded_digest`, holds the settings the poller adopted; else None."""
+        if digest is None or digest != self.adopted_digest:
+            return None
+        return self.adopted
+
 
 def file_key(machines: Path) -> str:
     """Changes whenever machines.yml or its machines.local.yml overlay does."""
     return json.dumps([_stat(machines), _stat(overlay_path(machines))])
+
+
+def loaded_digest(machines: Path) -> str | None:
+    """The digest of the device settings machines.yml holds now; None when it
+    does not parse."""
+    config = _load(machines)
+    return None if config is None else _digest(_switches(config))
 
 
 def narrowed(connection: sqlite3.Connection, machines: Path) -> Live:
@@ -98,7 +117,7 @@ def narrowed(connection: sqlite3.Connection, machines: Path) -> Live:
     config = _load(machines)
     if config is None:
         return row
-    live = Live(_meet(row.switches, _switches(config)), row.written + 1, row.adopted)
+    live = replace(row, switches=_meet(row.switches, _switches(config)), written=row.written + 1)
     _write(connection, live, key)
     return live
 
@@ -122,7 +141,8 @@ def adopted(connection: sqlite3.Connection, machines: Path) -> tuple[Live, Machi
         written = 1
     else:
         written = found[0].written + (found[1] != key)
-    live = Live(_switches(config), written=written, adopted=written)
+    switches = _switches(config)
+    live = Live(switches, written=written, adopted=written, adopted_digest=_digest(switches))
     _write(connection, live, key)
     return live, config
 
@@ -179,6 +199,20 @@ def _switches(config: MachinesConfig) -> dict[str, Switch]:
     return {d.name: Switch(d.enabled, d.drain, d.slot_max) for d in config.devices}
 
 
+def _encode(switches: Mapping[str, Switch]) -> str:
+    return json.dumps(
+        {
+            name: {"enabled": s.enabled, "drain": s.drain, "slot_max": s.slot_max}
+            for name, s in sorted(switches.items())
+        },
+        separators=(",", ":"),
+    )
+
+
+def _digest(switches: Mapping[str, Switch]) -> str:
+    return hashlib.sha256(_encode(switches).encode("utf-8")).hexdigest()
+
+
 def _meet(row: Mapping[str, Switch], file: Mapping[str, Switch]) -> dict[str, Switch]:
     return {
         name: row.get(name, CLOSED).meet(file.get(name, CLOSED))
@@ -194,6 +228,7 @@ def _create(connection: sqlite3.Connection) -> None:
             switches TEXT NOT NULL,
             written INTEGER NOT NULL,
             adopted INTEGER NOT NULL,
+            adopted_digest TEXT NOT NULL,
             file_key TEXT NOT NULL
         )
         """
@@ -202,7 +237,7 @@ def _create(connection: sqlite3.Connection) -> None:
 
 def _read(connection: sqlite3.Connection) -> tuple[Live, str] | None:
     row = connection.execute(
-        f"SELECT switches, written, adopted, file_key FROM {TABLE} WHERE id = 1"
+        f"SELECT switches, written, adopted, adopted_digest, file_key FROM {TABLE} WHERE id = 1"
     ).fetchone()
     if row is None:
         return None
@@ -210,7 +245,7 @@ def _read(connection: sqlite3.Connection) -> tuple[Live, str] | None:
         str(name): Switch(bool(value["enabled"]), bool(value["drain"]), value["slot_max"])
         for name, value in json.loads(row[0]).items()
     }
-    return Live(switches, int(row[1]), int(row[2])), str(row[3])
+    return Live(switches, int(row[1]), int(row[2]), str(row[3])), str(row[4])
 
 
 def _seen(connection: sqlite3.Connection) -> dict[str, int]:
@@ -222,20 +257,13 @@ def _seen(connection: sqlite3.Connection) -> dict[str, int]:
 
 
 def _write(connection: sqlite3.Connection, live: Live, key: str) -> None:
-    switches = json.dumps(
-        {
-            name: {"enabled": s.enabled, "drain": s.drain, "slot_max": s.slot_max}
-            for name, s in sorted(live.switches.items())
-        },
-        separators=(",", ":"),
-    )
     connection.execute(
         f"""
-        INSERT INTO {TABLE} (id, switches, written, adopted, file_key)
-        VALUES (1, ?, ?, ?, ?)
+        INSERT INTO {TABLE} (id, switches, written, adopted, adopted_digest, file_key)
+        VALUES (1, ?, ?, ?, ?, ?)
         ON CONFLICT (id) DO UPDATE SET switches = excluded.switches,
             written = excluded.written, adopted = excluded.adopted,
-            file_key = excluded.file_key
+            adopted_digest = excluded.adopted_digest, file_key = excluded.file_key
         """,
-        (switches, live.written, live.adopted, key),
+        (_encode(live.switches), live.written, live.adopted, live.adopted_digest, key),
     )
