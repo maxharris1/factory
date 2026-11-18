@@ -1,0 +1,25 @@
+# Factory QA worker (issue #784): `orch qa-worker` claims queued qa jobs,
+# starts their cloud QA lanes through the registered runners, applies the
+# lane rules and posts one kind=qa comment per run. It holds no build slot
+# and makes no model call. Install it as a user unit of the orch host's
+# user, beside orch-poll.service; it reads the same orch.db through ORCH_DB.
+#
+# Restart=always brings a killed or crashed worker back by itself. Every
+# fact a run needs is in orch.db, so a restarted worker carries on.
+#
+# Nothing in this repository installs, enables or starts this unit.
+[Unit]
+Description=Factory QA worker (coordinates cloud QA lanes for qa jobs)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/factory
+EnvironmentFile=-%h/.config/factory/orch-poll.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/orch qa-worker
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=79
+
+[Install]
+WantedBy=default.target

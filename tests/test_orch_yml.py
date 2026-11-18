@@ -688,3 +688,24 @@ projects:
     assert [finding.message for finding in findings] == [
         "projects[1].linear_handoff_states requires linear_project_id"
     ]
+
+
+@pytest.mark.parametrize(
+    ("block", "lanes", "error"),
+    [
+        ("", 10, None),
+        ("qa:\n  max_cloud_lanes: 2\n", 2, None),
+        ("qa:\n  max_cloud_lanes: 0\n", None, "qa.max_cloud_lanes must be an integer of at least 1"),
+        ("qa:\n  max_cloud_lanes: true\n", None, "qa.max_cloud_lanes must be an integer of at least 1"),
+        ("qa:\n  lanes: 2\n", None, "qa.lanes"),
+        ("qa: 3\n", None, "qa must be a mapping"),
+    ],
+)
+def test_qa_max_cloud_lanes_default_and_bounds(tmp_path: Path, block: str, lanes: int | None, error: str | None) -> None:
+    config, findings = _driver_config(tmp_path, block)
+    if error is None:
+        assert findings == []
+        assert config is not None and config.qa.max_cloud_lanes == lanes
+    else:
+        assert config is None
+        assert any(error in finding.message for finding in findings), findings
