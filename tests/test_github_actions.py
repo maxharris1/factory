@@ -2227,3 +2227,22 @@ def test_comment_on_issue_once_posts_on_the_issue_only_once() -> None:
     gh.route(ISSUE_COMMENTS, GhResult(0, json.dumps([pr_comment(1, ADDITION)]), ""))
     actions.comment_on_issue_once(pr(), 307, ADDITION, ADDITION_MARKER)
     assert gh.keys() == [ISSUE_COMMENTS, USER]
+
+
+QA_MARKER = "<!-- qa-run run-1 -->"
+QA_BODY = f"<!-- orch:v1 kind=qa -->\n\n{QA_MARKER}"
+POST_QA = ("-X", "POST", f"{REPO}/issues/42/comments", "-f", f"body={QA_BODY}")
+
+
+def test_post_issue_comment_once_returns_the_new_or_existing_comment_id() -> None:
+    actions, gh = adapter_as_own_login()
+    forged = pr_comment(1, QA_BODY, login="untrusted-contributor")
+    gh.route(COMMENTS, GhResult(0, json.dumps([forged]), ""))
+    gh.route(POST_QA, GhResult(0, json.dumps({"id": 555}), ""))
+    assert actions.post_issue_comment_once("owner/repo", 42, QA_BODY, QA_MARKER) == "555"
+    assert gh.count(POST_QA) == 1
+
+    actions, gh = adapter_as_own_login()
+    gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(9, QA_BODY)]), ""))
+    assert actions.post_issue_comment_once("owner/repo", 42, QA_BODY, QA_MARKER) == "9"
+    assert gh.count(POST_QA) == 0
