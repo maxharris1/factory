@@ -71,6 +71,7 @@ from lib.hold import FACTORY_MD
 from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
 from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
+    DEFAULT_LINEAR_HANDOFF_STATES,
     LINEAR_POLL_SECONDS,
     OrchConfig,
     Project,
@@ -1953,9 +1954,15 @@ class LivePollSource:
             pr_body=_optional_string(pull.get("body")),
             grok_bot=project.grok_bot,
             linear_issue_id=_optional_string(issue.get("id")),
-            linear_ready_state_id=_linear_ready_state_id(issue),
+            linear_ready_state_id=_linear_ready_state_id(
+                issue, project.linear_handoff_states[0]
+            ),
             linear_ready_for_review=project.linear_ready_for_review,
-            linear_state_phase=_linear_state_phase(issue),
+            linear_state_phase=_linear_state_phase(
+                issue,
+                project.linear_handoff_states[0],
+                frozenset(project.linear_rework_states),
+            ),
             ready_starts_review=project.ready_starts_review,
             source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
             pr_title=pr_title,
@@ -2583,33 +2590,36 @@ def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _linear_ready_state(issue: Mapping[str, Any]) -> dict[str, Any] | None:
+def _linear_team_state(issue: Mapping[str, Any], key: str, value: object) -> dict[str, Any] | None:
     team = issue.get("team")
     if team is None:
         return None
     states = _object(_object(team, "Linear team").get("states"), "Linear states")
     for raw in _array(states.get("nodes"), "Linear state nodes"):
         state = _object(raw, "Linear state")
-        if state.get("name") == "Ready for Review":
+        if state.get(key) == value:
             return state
     return None
 
 
-def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
-    state = _linear_ready_state(issue)
+def _linear_ready_state(
+    issue: Mapping[str, Any], name: str = DEFAULT_LINEAR_HANDOFF_STATES[0]
+) -> dict[str, Any] | None:
+    return _linear_team_state(issue, "name", name)
+
+
+def _linear_ready_state_id(
+    issue: Mapping[str, Any], name: str = DEFAULT_LINEAR_HANDOFF_STATES[0]
+) -> str | None:
+    state = _linear_ready_state(issue, name)
     return _optional_string(state.get("id")) if state is not None else None
 
 
-def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
-    """Where the issue stands relative to Ready for Review, or None if unknown.
-
-    before-review: backlog, triage, unstarted, or started and not after
-    Ready for Review in the team's order. ready-for-review: in that state.
-    moved-on: completed, canceled, or a started state after Ready for
-    Review. no-ready-state: not completed or canceled, on a team that has
-    no Ready for Review state, so there is nothing to move it to.
-    The handoff moves only a before-review issue and fails closed on None.
-    """
+def _linear_state_phase(
+    issue: Mapping[str, Any],
+    ready_name: str = DEFAULT_LINEAR_HANDOFF_STATES[0],
+    rework: frozenset[str] = frozenset(),
+) -> str | None:
     state = issue.get("state")
     if not isinstance(state, dict):
         return None
@@ -2619,7 +2629,7 @@ def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
         return None
     if not isinstance(issue.get("team"), dict):
         return None
-    ready = _linear_ready_state(issue)
+    ready = _linear_ready_state(issue, ready_name)
     if ready is not None and ready.get("id") == state_id:
         return "ready-for-review"
     if kind in ("completed", "canceled"):
@@ -2628,6 +2638,9 @@ def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
         return None
     if ready is None:
         return "no-ready-state"
+    current = _linear_team_state(issue, "id", state_id)
+    if current is not None and current.get("name") in rework:
+        return "rework"
     if kind != "started" or ready.get("type") != "started":
         return "before-review"
     here, there = state.get("position"), ready.get("position")

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from lib.dispatch.constants import (
     HARNESS_WORK,
     MERGED_BEFORE_HANDOFF,
+    SETTLE_CLEARS,
     SETTLE_FAILURES_TO_WAKE,
     WATCHED_STATES,
     _NOT_FINISHED,
@@ -469,6 +470,7 @@ class ShipMixin:
             state,
             source="ship-state",
             at=self.queue.now(),
+            also=SETTLE_CLEARS,
             guard=_NOT_FINISHED,
         )
 
@@ -515,6 +517,7 @@ class ShipMixin:
                 "handed-off",
                 source="handoff-reconcile",
                 at=self.queue.now(),
+                also=SETTLE_CLEARS,
                 guard="workflow_state = 'building'",
             )
             if written:

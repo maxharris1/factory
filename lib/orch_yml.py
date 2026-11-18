@@ -107,6 +107,7 @@ _PROJECT_KEYS = {
     "grok_bot",
     "linear_ready_for_review",
     "linear_handoff_states",
+    "linear_rework_states",
     "ready_starts_review",
     "intake",
     "driver_inbox",
@@ -192,6 +193,7 @@ class Project:
     grok_bot: str = "grok-bot"
     linear_ready_for_review: bool = False
     linear_handoff_states: tuple[str, ...] = DEFAULT_LINEAR_HANDOFF_STATES
+    linear_rework_states: tuple[str, ...] = ()
     # A trusted ready from factory.md's builder starts review even with no
     # factory-queued build job (PRs built outside the queue). Default off.
     ready_starts_review: bool = False
@@ -783,6 +785,39 @@ def _projects(
             )
             ok = False
             continue
+        rework_states = item.get("linear_rework_states", [])
+        if not (
+            isinstance(rework_states, list)
+            and all(isinstance(name, str) and name.strip() for name in rework_states)
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_rework_states must be a list of Linear state names",
+                )
+            )
+            ok = False
+            continue
+        if "linear_rework_states" in item and not linear_project_ids:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_rework_states requires linear_project_id",
+                )
+            )
+            ok = False
+            continue
+        overlap = sorted(set(rework_states) & set(handoff_states))
+        if overlap:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_rework_states names a handoff state: "
+                    + ", ".join(overlap),
+                )
+            )
+            ok = False
+            continue
         ready_starts_review = item.get("ready_starts_review", False)
         if not isinstance(ready_starts_review, bool):
             findings.append(
@@ -845,6 +880,7 @@ def _projects(
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
                 linear_handoff_states=tuple(handoff_states),
+                linear_rework_states=tuple(rework_states),
                 ready_starts_review=ready_starts_review,
                 intake=intake,
                 driver_inbox=driver_inbox,

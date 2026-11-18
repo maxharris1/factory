@@ -955,9 +955,6 @@ class LinearReviewActions(GitHubReviewActions):
         raise GitHubAdapterError("Linear tickets can only use handoff")
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
-        """Mark the PR ready, then move a before-review issue to Ready for
-        Review. Returns a note for the done wake when the move was skipped
-        because the team has no Ready for Review state, else None."""
         if self.fresh_ticket is not None:
             try:
                 fresh = self.fresh_ticket(
@@ -989,18 +986,15 @@ class LinearReviewActions(GitHubReviewActions):
             error.write_confirmed = False
             raise error
         marked = self._mark_ready(ticket, head)
-        # Move only an issue still before review (Backlog, Triage, Todo, or
-        # started before Ready for Review). One already in Ready for Review
-        # (a no-op re-drive) or moved on by a human (Done, Canceled, or past
-        # Ready for Review) is left where it is. A team with no Ready for
-        # Review state has nowhere to move it: the handoff still completes,
-        # and the note tells the project bot the issue was not moved.
         if (
             self.move_ready_for_review
             and ticket.linear_state_phase == "no-ready-state"
         ):
             return LINEAR_NO_READY_STATE_NOTE
-        if self.move_ready_for_review and ticket.linear_state_phase == "before-review":
+        if self.move_ready_for_review and ticket.linear_state_phase in (
+            "before-review",
+            "rework",
+        ):
             try:
                 self.linear_ready(ticket)
             except RetryableStateError as exc:

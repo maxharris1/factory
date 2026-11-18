@@ -690,6 +690,67 @@ projects:
     ]
 
 
+_REWORK_BASE = """
+poll_seconds: 60
+linear:
+  api_key_env: LINEAR_KEY
+projects:
+  - repo: acme/widgets
+    linear_project_id: 11111111-2222-3333-4444-555555555555
+""".strip()
+
+
+def test_linear_rework_states_default_empty_and_a_list_parses(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(_REWORK_BASE + "\n", encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None
+    assert config.projects[0].linear_rework_states == ()
+
+    path.write_text(
+        _REWORK_BASE + "\n    linear_rework_states: [Changes Requested]\n", encoding="utf-8"
+    )
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None
+    assert config.projects[0].linear_rework_states == ("Changes Requested",)
+
+
+@pytest.mark.parametrize(
+    ("extra", "error"),
+    [
+        (
+            "\n    linear_rework_states: Changes Requested\n",
+            "projects[0].linear_rework_states must be a list of Linear state names",
+        ),
+        (
+            "\n    linear_rework_states: [Changes Requested, 3]\n",
+            "projects[0].linear_rework_states must be a list of Linear state names",
+        ),
+        (
+            "\n    linear_rework_states: ['  ']\n",
+            "projects[0].linear_rework_states must be a list of Linear state names",
+        ),
+        (
+            "\n  - repo: acme/other\n    linear_rework_states: [Changes Requested]\n",
+            "projects[1].linear_rework_states requires linear_project_id",
+        ),
+        (
+            "\n    linear_rework_states: [Changes Requested, In Review]\n",
+            "projects[0].linear_rework_states names a handoff state: In Review",
+        ),
+    ],
+    ids=["string", "non-string", "blank", "github-only", "overlaps-handoff"],
+)
+def test_linear_rework_states_errors(tmp_path: Path, extra: str, error: str) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(_REWORK_BASE + extra, encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert config is None
+    assert [finding.message for finding in findings] == [error]
+
+
 @pytest.mark.parametrize(
     ("block", "lanes", "error"),
     [

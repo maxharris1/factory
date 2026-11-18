@@ -480,8 +480,13 @@ unstarted, or started and before Ready for Review in the team's order), per
 Max's standing rule that the factory may move approved Aut0 tickets to Ready
 for Review. An issue already in Ready for Review, or moved on by a human (Done,
 Canceled, or a started state after Ready for Review), is left where it is; an
-unknown state fails the handoff before any write. On a team with no Ready for
-Review state the PR is still marked ready and the handoff completes; the
+unknown state fails the handoff before any write. The target is the first
+`linear_handoff_states` name (default Ready for Review).
+`projects[].linear_rework_states` (default none) names the states a reviewer
+uses to send an issue back, such as `[Changes Requested]`; the approved fix
+round moves an issue in one of them back to the target, wherever the state
+sits in the team's order. A name may not also be a handoff state. On a team
+with no Ready for Review state the PR is still marked ready and the handoff completes; the
 `done` wake's detail carries `note: "linear-not-moved: team has no Ready for
 Review state"` so the project bot can move the issue by hand. No other
 dispatcher state writes Linear, and `ship: handoff` never merges.
