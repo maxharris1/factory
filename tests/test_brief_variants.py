@@ -387,6 +387,62 @@ def test_a_review_fix_whose_link_is_a_bare_comment_id_gets_a_url():
     assert VERDICT_URL in task
 
 
+def test_a_qa_fix_links_the_qa_report_and_names_its_failed_scenarios():
+    qa_url = "https://github.com/owner/repo/pull/42#issuecomment-901"
+    brief = _render(
+        "fix",
+        1,
+        HEAD,
+        {
+            "instruction": "comment:901",
+            "round": "2/3",
+            "qa_findings": {
+                "link": "comment:901",
+                "evidence_link": "https://example.test/run/1",
+                "failed": ["qa-1", "qa-3"],
+            },
+            "evidence": _evidence(
+                findings={"findings": [FINDING], "reviewed_head": HEAD, "reviewed_base": None, "verdict_url": VERDICT_URL},
+            ),
+        },
+    )
+    task = _task(brief)
+    assert f"Fix the failed QA scenarios of the QA report at {qa_url}." in task
+    assert "These scenarios failed: `qa-1`, `qa-3`. Evidence: https://example.test/run/1." in task
+    assert "2. For each failed scenario: name the rule it breaks" in task
+    assert "REVISE" not in task
+    assert "f-2: the poller writes the row directly." not in task
+    assert "(quoted in the What to do section)" not in brief
+
+
+def test_a_revise_fix_with_a_qa_fail_quotes_the_findings_and_names_the_failed_scenarios():
+    qa_url = "https://github.com/owner/repo/pull/42#issuecomment-901"
+    brief = _render(
+        "fix",
+        1,
+        HEAD,
+        {
+            "instruction": VERDICT_URL,
+            "round": "2/3",
+            "qa_findings": {
+                "link": "comment:901",
+                "evidence_link": "https://example.test/run/1",
+                "failed": ["qa-1"],
+            },
+            "evidence": _evidence(
+                findings={"findings": [FINDING], "reviewed_head": HEAD, "reviewed_base": None, "verdict_url": VERDICT_URL},
+            ),
+        },
+    )
+    task = _task(brief)
+    assert f"Fix the `[blocking]` findings of the REVISE verdict at {VERDICT_URL}." in task
+    assert "f-2: the poller writes the row directly." in task
+    assert (
+        f"QA also failed at this head, in the report at {qa_url}. "
+        "These scenarios failed: `qa-1`. Evidence: https://example.test/run/1."
+    ) in task
+
+
 def test_the_remote_checkout_clones_into_a_subfolder_of_the_run_folder():
     brief = _render(*BUILD, remote=True)
     assert "empty at the start" not in brief

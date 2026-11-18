@@ -58,6 +58,7 @@ ACTIONS = (
     "go-not-from-approver",
     "qa",
     "qa-failed",
+    "qa-env-failed",
 )
 QA_RECIPIENT = "qa"
 RECIPIENTS = ("claude", "codex", "cursor", "grok", QA_RECIPIENT)
