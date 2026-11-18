@@ -601,9 +601,23 @@ class SchemaMixin:
                     comment_id TEXT,
                     started_at REAL NOT NULL,
                     finished_at REAL,
+                    ruling TEXT CHECK (ruling IS NULL OR ruling IN ('right', 'wrong')),
+                    ruled_by TEXT,
+                    ruled_at REAL,
+                    ruling_reason TEXT,
                     CHECK ((scope = 'none') = (job_id IS NULL))
                 )
                 """
+            )
+            _add_missing_columns(
+                connection,
+                "qa_runs",
+                {
+                    "ruling": "TEXT CHECK (ruling IS NULL OR ruling IN ('right', 'wrong'))",
+                    "ruled_by": "TEXT",
+                    "ruled_at": "REAL",
+                    "ruling_reason": "TEXT",
+                },
             )
             connection.execute(
                 """
