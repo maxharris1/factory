@@ -403,6 +403,9 @@ def _harness_value(
                 return None
         user = raw.get("bot")
         account_id = raw.get("account", account_id)
+        if not isinstance(account_id, str):
+            findings.append(Finding("error", f"{qualified}.account must be an account id"))
+            return None
     expected = BOT_USERS[harness]
     if user != expected:
         findings.append(
@@ -413,14 +416,14 @@ def _harness_value(
             )
         )
         return None
-    account = accounts.get(account_id) if isinstance(account_id, str) else None
+    account = accounts.get(account_id)
     if account is None and account_id in {default_account(name) for name in HARNESSES}:
         account = Account(account_id, account_id.removesuffix("-default"))
     if account is None:
         findings.append(
             Finding(
                 "error",
-                f"{qualified} names unknown account {str(account_id)!r}; "
+                f"{qualified} names unknown account {account_id!r}; "
                 "declare it under accounts",
             )
         )

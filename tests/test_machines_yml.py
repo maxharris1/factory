@@ -671,6 +671,14 @@ def test_draining_device_account_does_not_serve(tmp_path: Path) -> None:
             "devices[0].harnesses.codex names account 'claude-default' of harness 'claude'",
         ),
         (
+            "devices:\n" + remote(harnesses="{codex: {bot: codex-bot, account: []}}"),
+            "devices[0].harnesses.codex.account must be an account id",
+        ),
+        (
+            "devices:\n" + remote(harnesses="{codex: {bot: codex-bot, account: {}}}"),
+            "devices[0].harnesses.codex.account must be an account id",
+        ),
+        (
             "accounts:\n  - {id: codex-default, harness: claude}\ndevices:\n" + remote(),
             "devices[0].harnesses.codex names account 'codex-default' of harness 'claude'",
         ),
