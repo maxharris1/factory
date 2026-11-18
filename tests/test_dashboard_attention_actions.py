@@ -248,18 +248,20 @@ def test_ok_sends_the_head_it_shows_and_a_changed_head_keeps_the_words(tmp_path:
     key = KEYS["awaiting-ok"]
     with _browse(tmp_path, snapshot, SIGNED_IN, replies) as chrome:
         _open(chrome, key, "ok")
-        chrome.wait_for(f"{_send(key)}.textContent === 'OK aaaaaaa'", "the head")
+        chrome.wait_for(f"{_send(key)}.textContent === 'OK {old}'", "the head")
+        shown = chrome.run(f"{_row(key)}.innerText")
         _type(chrome, key, "Ship it.")
         chrome.run(f"{_send(key)}.click()")
-        chrome.wait_for(f"/bbbbbbb/.test({_row(key)}.querySelector('.at-out').textContent)", "the new head")
+        chrome.wait_for(f"/{new}/.test({_row(key)}.querySelector('.at-out').textContent)", "the new head")
         _rerendered(chrome)
         after = chrome.run(f"[{_row(key)}.querySelector('.at-out').textContent,"
                            f" {_row(key)}.querySelector('textarea').value, {_send(key)}.textContent]")
         posts = chrome.run("window.posts")
+    assert old in shown
     assert posts == [
         {"url": "/api/head", "csrf": "x", "body": {"repo": REPO, "pr": 31}},
         {"url": "/api/act", "csrf": "x", "body": {
             "repo": REPO, "ticket_id": "31", "action": "ok", "expect_state": "awaiting-ok",
             "expect_why": "awaiting-ok", "words": "Ship it.", "head": old}},
     ]
-    assert after == ["error: head-changed, the PR head is now bbbbbbb", "Ship it.", "OK bbbbbbb"]
+    assert after == [f"error: head-changed, the PR head is now {new}", "Ship it.", f"OK {new}"]

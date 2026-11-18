@@ -417,7 +417,7 @@ _SCRIPT = r"""
     p.form.hidden = !p.action;
     p.root.hidden = !p.action && !p.out.textContent;
     if (p.action) p.text.setAttribute('aria-label', 'Your words for ' + ACT.label[p.action]);
-    p.send.textContent = !ok ? 'Send ' + (ACT.label[p.action] || '') : p.head ? 'OK ' + p.head.slice(0, 7) : 'OK (reading head…)';
+    p.send.textContent = !ok ? 'Send ' + (ACT.label[p.action] || '') : p.head ? 'OK ' + p.head : 'OK (reading head…)';
     p.send.disabled = p.busy || !p.text.value.trim() || (ok && !p.head);
   }
   function atActs(row, x, key) {
@@ -469,7 +469,7 @@ _SCRIPT = r"""
       var head = String(res.data.head || '');
       if (res.error === 'head-changed' && SHA.test(head)) {
         p.head = head;
-        p.out.textContent = 'error: head-changed, the PR head is now ' + head.slice(0, 7);
+        p.out.textContent = 'error: head-changed, the PR head is now ' + head;
       }
       if (res.ok) { p.text.value = ''; p.action = null; }
       if (latest) render(latest);
