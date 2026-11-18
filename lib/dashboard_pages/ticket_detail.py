@@ -1142,11 +1142,15 @@ def _records(snapshot: dict) -> dict | None:
     return snapshot.get(RECORDS)
 
 
-def ticket_view(snapshot: dict, address: str | None) -> str:
+def ticket_view(snapshot: dict, address: str | None, open_ci: bool = False) -> str:
+    from lib.dashboard_pages.ci import ci_extras
+
     records = _records(snapshot)
     found = None if address is None else resolve_ticket(snapshot, address, records)
-    inner = _ticket_article(found, snapshot) if found else _no_ticket(address, records is not None)
-    return f'<div id="ticketview">{inner}</div>'
+    if not found:
+        return f'<div id="ticketview">{_no_ticket(address, records is not None)}</div>'
+    extras = ci_extras(snapshot, found["address"], found["row"], open_ci)
+    return f'<div id="ticketview">{_ticket_article(found, snapshot)}{extras}</div>'
 
 
 def _ticketview(snapshot: dict) -> str:
@@ -2191,7 +2195,10 @@ _SCRIPT = r"""
     var address = hashAddress();
     loadRecords(d, address);
     tickers.push({run: function () { loadRecords(latest, hashAddress()); }});
-    byId('ticketview').replaceChildren(ticketView(d, address, RECORDS.tickets));
+    var view = byId('ticketview');
+    view.replaceChildren(ticketView(d, address, RECORDS.tickets));
+    var found = address === null ? null : resolveTicket(d, address, RECORDS.tickets);
+    if (found) ciExtras(view, d, found.address, found.row, hashParam('ci') === '1');
   }
 """
 _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKERS": TRACKER_NAMES,

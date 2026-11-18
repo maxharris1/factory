@@ -4,14 +4,16 @@ import json
 import re
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
-from lib.dashboard import _ci_runs
-from lib.dashboard_pages.ci import _ci_section
+from lib.dashboard import _ci_pool, _ci_runs
+from lib.dashboard_pages.ci import ci_popup
 from lib.dispatch.cycle_clock import CycleClock
-from lib.dispatch.types import CheckRow, CIResult, RunJob, TrackedTicket
+from lib.dispatch.types import CheckRow, CIResult, PoolRunner, RunJob, TrackedTicket
 from lib.dispatcher import Dispatcher
 from lib.github_actions import GitHubReviewActions
+from lib.project_rules import FactoryRead
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
     TRUSTED_LOGINS,
@@ -25,6 +27,11 @@ REPO = "Owner/Repo"
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
 DAY = 24 * 60 * 60
+
+
+def _popup(dashboard: dict, ticket: str) -> str:
+    row = {"repo": REPO, "ticket_id": ticket, "source": None, "tracker": "github"}
+    return ci_popup({"ci_runs": dashboard}, f"{REPO}#{ticket}", row)
 
 
 def check(
@@ -81,6 +88,8 @@ class GitHub:
         self.logs: dict[str, str | Exception] = {}
         self.job_reads: list[str] = []
         self.log_reads: list[str] = []
+        self.pool: dict[str, Sequence[PoolRunner] | Exception] = {}
+        self.pool_reads: list[str] = []
 
     def run_jobs(self, repo: str, run_id: str) -> Sequence[RunJob]:
         assert repo.lower() == REPO.lower()
@@ -98,11 +107,27 @@ class GitHub:
             raise answer
         return answer
 
+    def runners(self, repo: str) -> Sequence[PoolRunner]:
+        self.pool_reads.append(repo)
+        answer = self.pool[repo]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
     def spent(self) -> int:
         spent = len(self.job_reads) + len(self.log_reads)
         self.job_reads.clear()
         self.log_reads.clear()
         return spent
+
+
+class ProjectSource(FakeSource):
+    def __init__(self, reads: Sequence[FactoryRead]) -> None:
+        super().__init__()
+        self.reads = tuple(reads)
+
+    def factory_reads(self) -> tuple[FactoryRead, ...]:
+        return self.reads
 
 
 class Board:
@@ -121,6 +146,7 @@ class Board:
             log=self.lines.append,
             ci_runs=self.github.run_jobs,
             ci_job_log=self.github.job_log,
+            ci_pool=self.github.runners,
         )
         self.dispatcher.cycle_clock = CycleClock()
 
@@ -133,6 +159,13 @@ class Board:
 
     def cycle(self, *tickets: TrackedTicket) -> None:
         self.dispatcher.poll_once(FakeSource(*tickets))
+
+    def pool_cycle(self, *reads: FactoryRead) -> None:
+        self.dispatcher.poll_once(ProjectSource(reads))
+
+    def pool(self) -> dict:
+        with self.queue.connect() as connection:
+            return _ci_pool(connection, self.now[0])
 
     def rows(self) -> list[dict[str, object]]:
         with self.queue.connect() as connection:
@@ -474,7 +507,7 @@ def test_two_workflows_sharing_a_check_name_keep_both_jobs(tmp_path: Path) -> No
     assert [(failure["run_id"], failure["name"]) for failure in dashboard["failures"]] == [
         ("901", "build")
     ]
-    section = _ci_section({"ci_runs": dashboard})
+    section = _popup(dashboard, "1")
     assert "no CI queued or running" not in section
     assert "actions/runs/901/job/1" in section and "actions/runs/902/job/2" in section
 
@@ -654,7 +687,7 @@ def test_a_failure_leaves_the_dashboard_a_day_after_it_completed_though_still_po
     board.cycle(failed)
     dashboard = board.dashboard()
     assert dashboard["failures"] == []
-    section = _ci_section({"ci_runs": dashboard})
+    section = _popup(dashboard, "1")
     assert "no CI failures in the last 24 h" in section and "actions/runs/900/job/1" not in section
     assert board.github.spent() == 0
 
@@ -675,3 +708,102 @@ def test_an_old_heads_failure_is_dropped_a_day_after_it_completed(tmp_path: Path
     board.cycle(rerun)
 
     assert [row["head"] for row in board.rows()] == [NEW_HEAD]
+
+
+POOL_REPO = REPO.lower()
+LINUX = ("self-hosted", "Linux", "X64")
+POOL = (
+    PoolRunner("pc-wsl-bots-2", "Linux", "online", True, LINUX),
+    PoolRunner("pc-wsl-bots-1", "Linux", "online", False, LINUX),
+    PoolRunner("maxs-macbook-pro", "macOS", "online", False, ("self-hosted", "factory-mac")),
+    PoolRunner("box-1", "Linux", "offline", False, LINUX),
+)
+
+
+def project(repo: str = REPO, ci_runner: str | None = "self-hosted") -> FactoryRead:
+    return FactoryRead(repo, replace(factory(), ci_runner=ci_runner), None)
+
+
+def names(board: Board) -> list[str]:
+    return [runner["name"] for runner in board.pool()["runners"]]
+
+
+def test_a_ci_runner_project_shows_one_slot_per_runner_in_its_pool(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.github.pool[POOL_REPO] = POOL
+
+    board.pool_cycle(project())
+
+    assert board.pool() == {
+        "state": "live",
+        "age_seconds": 0,
+        "runners": [
+            {"repo": POOL_REPO, "name": "box-1", "os": "Linux", "status": "offline",
+             "busy": False, "labels": list(LINUX)},
+            {"repo": POOL_REPO, "name": "maxs-macbook-pro", "os": "macOS", "status": "online",
+             "busy": False, "labels": ["self-hosted", "factory-mac"]},
+            {"repo": POOL_REPO, "name": "pc-wsl-bots-1", "os": "Linux", "status": "online",
+             "busy": False, "labels": list(LINUX)},
+            {"repo": POOL_REPO, "name": "pc-wsl-bots-2", "os": "Linux", "status": "online",
+             "busy": True, "labels": list(LINUX)},
+        ],
+    }
+
+
+def test_a_project_without_ci_runner_never_reads_the_pool(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.github.pool[POOL_REPO] = POOL
+
+    board.pool_cycle(project(ci_runner=None), FactoryRead("Owner/Broken", None, "unreadable"))
+
+    assert board.github.pool_reads == []
+    assert board.pool() == {"state": "unread", "age_seconds": None, "runners": []}
+
+
+def test_a_failed_read_keeps_the_last_pool_until_a_good_read_replaces_it(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.github.pool[POOL_REPO] = POOL
+    board.pool_cycle(project())
+
+    board.github.pool[POOL_REPO] = RuntimeError("HTTP 502")
+    board.now[0] += 60
+    board.pool_cycle(project())
+
+    assert len(names(board)) == 4
+    assert board.pool()["age_seconds"] == 60
+    assert f"ci board: {POOL_REPO} runners unavailable: RuntimeError" in board.lines
+
+    board.github.pool[POOL_REPO] = POOL[:2]
+    board.pool_cycle(project())
+
+    assert names(board) == ["pc-wsl-bots-1", "pc-wsl-bots-2"]
+    assert board.pool()["age_seconds"] == 0
+
+
+def test_a_pool_goes_stale_after_five_minutes_and_drops_after_a_day(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.github.pool[POOL_REPO] = POOL
+    board.pool_cycle(project())
+
+    board.now[0] += 301
+    assert board.pool()["state"] == "stale"
+
+    board.pool_cycle(project(ci_runner=None))
+    assert len(names(board)) == 4
+
+    board.now[0] += DAY
+    board.pool_cycle(project(ci_runner=None))
+    assert board.pool() == {"state": "unread", "age_seconds": None, "runners": []}
+
+
+def test_a_broken_pool_never_fails_the_poll_cycle(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.github.pool[POOL_REPO] = POOL
+    with board.queue.connect() as connection:
+        connection.execute("DROP TABLE ci_runners")
+
+    board.pool_cycle(project())
+
+    with board.queue.connect() as connection:
+        errors = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
+    assert [tuple(row) for row in errors] == [("ci-pool", "OperationalError")]

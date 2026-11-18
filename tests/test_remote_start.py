@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, remote
+from lib import device_monitor, job_run, process_tree, remote
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
@@ -652,13 +652,15 @@ class FakeTransport:
     def __init__(self, check: int = 0):
         self.check = check
         self.calls: list[tuple[str, str, str]] = []
+        self.signals: list[str] = []
 
     def run(self, argv, *, timeout: float) -> int:
         assert argv[0] == "ssh" and timeout > 0
         user, alias, script = argv[-4], argv[-2], argv[-1]
-        kind = "stop" if "kill -TERM" in script else "check"
+        kind = "stop" if "kill -TERM" in script or "kill -KILL" in script else "check"
         self.calls.append((kind, user, alias))
         if kind == "stop":
+            self.signals.append("KILL" if "kill -KILL" in script else "TERM")
             return 255 if self.check == 255 else 0
         return self.check
 
@@ -941,6 +943,11 @@ def box_job_setup(tmp_path: Path, *, alive: dict[int, bool]):
         kill=lambda pid, sig: kills.append((pid, sig)),
         machines_path=machines,
     )
+    monitor.scan = lambda _tag: {
+        pid: process_tree.Process(pid, 1, start, False)
+        for pid, start in ((11, "r"), (12, "w"))
+        if alive.get(pid, False)
+    }
     dispatcher = Dispatcher(
         queue.path,
         queue,
@@ -988,12 +995,16 @@ def test_disabling_the_box_loses_its_running_job_and_stops_it_within_one_poll(
 
     poll_at(now, dispatcher, 120.0)
     assert orphans(queue) == [(job.id, "box", "None")]
-    assert kills[1:] == [(pid, signal.SIGKILL) for pid in sorted(live)]
+    round_ = kills[1:]
+    stops = [pid for pid, sig in round_[: len(live)] if sig == signal.SIGSTOP]
+    killed = [pid for pid, sig in round_[len(live):] if sig == signal.SIGKILL]
+    assert len(round_) == 2 * len(live)
+    assert sorted(stops) == sorted(killed) == sorted(live)
 
     live.clear()
     poll_at(now, dispatcher, 180.0)
     assert orphans(queue) == []
-    assert len(kills) == 1 + len(alive)
+    assert len(kills) == 1 + 2 * len(alive)
 
 
 def test_a_lost_box_worker_that_ignores_sigterm_keeps_its_orphan_until_it_is_killed(
@@ -1008,7 +1019,8 @@ def test_a_lost_box_worker_that_ignores_sigterm_keeps_its_orphan_until_it_is_kil
             "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "Path(sys.argv[1]).touch(); time.sleep(120)",
             str(ready),
-        ]
+        ],
+        env={key: value for key, value in os.environ.items() if key != process_tree.RUN_TAG_ENV},
     )
     try:
         deadline = time.monotonic() + 10
@@ -1019,6 +1031,7 @@ def test_a_lost_box_worker_that_ignores_sigterm_keeps_its_orphan_until_it_is_kil
         monitor = dispatcher.devices
         monitor.alive = pid_alive
         monitor.kill = os.kill
+        monitor.scan = process_tree.processes
         runner = subprocess.Popen([sys.executable, "-c", "pass"])
         runner_pid, runner_start = runner.pid, process_start(runner.pid)
         runner.wait()
@@ -1047,6 +1060,382 @@ def test_a_lost_box_worker_that_ignores_sigterm_keeps_its_orphan_until_it_is_kil
     finally:
         worker.kill()
         worker.wait()
+
+
+def test_a_lost_box_job_stops_its_descendants_and_never_a_reused_pid(tmp_path: Path) -> None:
+    listing = {
+        11: process_tree.Process(11, 1, "r", False),
+        12: process_tree.Process(12, 11, "w", False),
+        13: process_tree.Process(13, 12, "g", False),
+        14: process_tree.Process(14, 1, "x", False),
+    }
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True, 12: True})
+    dispatcher.devices.scan = lambda _tag: dict(listing)
+    disable_box(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert kills == [(11, signal.SIGTERM)]
+
+    del listing[11], listing[12]
+    listing[13] = process_tree.Process(13, 1, "g", False)
+    listing[12] = process_tree.Process(12, 14, "reused", False)
+    kills.clear()
+    poll_at(now, dispatcher, 60.0)
+    assert kills == [(13, signal.SIGSTOP), (13, signal.SIGKILL)]
+    assert orphans(queue) == [(job.id, "box", "None")]
+
+    del listing[13]
+    poll_at(now, dispatcher, 120.0)
+    assert orphans(queue) == []
+    assert kills == [(13, signal.SIGSTOP), (13, signal.SIGKILL)]
+
+
+LOST_TREE = """\
+import os, signal, subprocess, sys, time
+from pathlib import Path
+
+here = Path(sys.argv[1])
+if sys.argv[2] == "grandchild":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (here / "grandchild.pid").write_text(str(os.getpid()))
+    while True:
+        (here / "tick").write_text(str(time.monotonic_ns()))
+        time.sleep(0.02)
+if sys.argv[2] == "worker":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    subprocess.Popen([sys.executable, __file__, str(here), "grandchild"])
+    time.sleep(120)
+from lib.job_run import run
+sys.exit(run([sys.executable, __file__, str(here), "worker"], beat=lambda: None,
+    interval=60, log=print, started=lambda pid: (here / "worker.pid").write_text(str(pid))))
+"""
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_a_lost_box_job_keeps_its_orphan_until_its_whole_tree_is_gone(tmp_path: Path) -> None:
+    script = tmp_path / "lost_tree.py"
+    script.write_text(LOST_TREE)
+    runner = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), "runner"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+    )
+    started: list[int] = []
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "tick").exists():
+            assert time.monotonic() < deadline and runner.poll() is None
+            time.sleep(0.02)
+        worker = int((tmp_path / "worker.pid").read_text())
+        grandchild = int((tmp_path / "grandchild.pid").read_text())
+        started = [worker, grandchild]
+        now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={})
+        monitor = dispatcher.devices
+        monitor.alive = pid_alive
+        monitor.kill = os.kill
+        monitor.scan = process_tree.processes
+        with queue.connect() as connection:
+            connection.execute(
+                "UPDATE device_slots SET runner_pid = ?, runner_start = ?, "
+                "worker_pid = ?, worker_start = ? WHERE job_id = ?",
+                (runner.pid, process_start(runner.pid), worker, process_start(worker), job.id),
+            )
+            connection.commit()
+
+        disable_box(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert state(queue, job.id) == "failed"
+        assert pool.used() == {}
+        assert orphans(queue) == [(job.id, "box", "None")]
+
+        poll_at(now, dispatcher, 60.0)
+        runner.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while pid_alive(worker, None) or pid_alive(grandchild, None):
+            assert orphans(queue) == [(job.id, "box", "None")]
+            assert time.monotonic() < deadline, "the lost job's tree outlived its SIGKILL"
+            time.sleep(0.02)
+        tick = (tmp_path / "tick").read_text()
+
+        poll_at(now, dispatcher, 120.0)
+        time.sleep(0.1)
+        assert (tmp_path / "tick").read_text() == tick, "lost job still executes"
+        assert orphans(queue) == []
+    finally:
+        for pid in (runner.pid, *started):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        runner.wait()
+
+
+CRASHED_RUN = """\
+import os, signal, subprocess, sys, time
+from pathlib import Path
+
+here = Path(sys.argv[1])
+if sys.argv[2] == "leaf":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (here / "leaf.pid").write_text(str(os.getpid()))
+    while True:
+        (here / "tick").write_text(str(time.monotonic_ns()))
+        time.sleep(0.02)
+if sys.argv[2] == "worker":
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    subprocess.Popen([sys.executable, __file__, str(here), "leaf"])
+    time.sleep(120)
+from lib.job_run import run
+from lib.process_tree import run_tag
+
+def started(pid):
+    (here / "worker.pid").write_text(str(pid))
+    (here / "run.tag").write_text(run_tag(pid) or "")
+
+sys.exit(run([sys.executable, __file__, str(here), "worker"], beat=lambda: None,
+    interval=60, log=print, started=started))
+"""
+
+
+def start_crashed_run(tmp_path: Path) -> tuple[subprocess.Popen[bytes], int, int]:
+    """A real `orch job run` tree (runner, worker, TERM-ignoring leaf), its runner then
+    killed as a crash would."""
+    script = tmp_path / "crashed_run.py"
+    script.write_text(CRASHED_RUN)
+    runner = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), "runner"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+    )
+    deadline = time.monotonic() + 10
+    while not (tmp_path / "tick").exists():
+        assert time.monotonic() < deadline and runner.poll() is None
+        time.sleep(0.02)
+    return runner, int((tmp_path / "worker.pid").read_text()), int((tmp_path / "leaf.pid").read_text())
+
+
+def real_box_job(tmp_path: Path, runner: subprocess.Popen[bytes], worker: int, tag: str | None):
+    now, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
+    monitor = dispatcher.devices
+    monitor.alive = pid_alive
+    monitor.kill = os.kill
+    monitor.scan = process_tree.processes
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE device_slots SET runner_pid = ?, runner_start = ?, "
+            "worker_pid = ?, worker_start = ?, run_tag = ? WHERE job_id = ?",
+            (runner.pid, process_start(runner.pid), worker, process_start(worker), tag, job.id),
+        )
+        connection.commit()
+    return now, queue, pool, dispatcher, job
+
+
+def restart_monitor(dispatcher: Dispatcher, pool: DevicePool) -> None:
+    monitor = dispatcher.devices
+    dispatcher.devices = DeviceMonitor(
+        pool, monitor.config, monitor.transport, alive=pid_alive, kill=os.kill,
+        scan=process_tree.processes, machines_path=monitor.machines_path,
+    )
+
+
+def kill_all(*pids: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+@pytest.mark.parametrize("restart", [False, True], ids=["same-monitor", "restarted-monitor"])
+def test_a_lost_box_jobs_survivor_keeps_its_orphan_across_a_monitor_restart(
+    tmp_path: Path, restart: bool
+) -> None:
+    runner, worker, leaf = start_crashed_run(tmp_path)
+    try:
+        now, queue, pool, dispatcher, job = real_box_job(tmp_path, runner, worker, None)
+        runner.kill()
+        runner.wait(timeout=10)
+        disable_box(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert orphans(queue) == [(job.id, "box", "None")]
+        deadline = time.monotonic() + 10
+        while pid_alive(worker, None):
+            assert time.monotonic() < deadline, "the worker ignored its SIGTERM"
+            time.sleep(0.01)
+        assert pid_alive(leaf, None)
+        if restart:
+            restart_monitor(dispatcher, pool)
+
+        poll_at(now, dispatcher, 60.0)
+        assert orphans(queue) == [(job.id, "box", "None")], "live leaf lost its cleanup row"
+        deadline = time.monotonic() + 10
+        while pid_alive(leaf, None):
+            assert time.monotonic() < deadline, "the leaf outlived its SIGKILL"
+            time.sleep(0.02)
+        tick = (tmp_path / "tick").read_text()
+        if restart:
+            restart_monitor(dispatcher, pool)
+
+        poll_at(now, dispatcher, 120.0)
+        time.sleep(0.1)
+        assert (tmp_path / "tick").read_text() == tick, "lost job still executes"
+        assert orphans(queue) == []
+    finally:
+        kill_all(runner.pid, worker, leaf)
+        runner.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_the_recorded_run_tag_finds_a_survivor_whose_parents_died_before_any_poll(
+    tmp_path: Path,
+) -> None:
+    runner, worker, leaf = start_crashed_run(tmp_path)
+    try:
+        tag = (tmp_path / "run.tag").read_text()
+        assert len(tag) == 32
+        now, queue, pool, dispatcher, job = real_box_job(tmp_path, runner, worker, tag)
+        runner.kill()
+        os.kill(worker, signal.SIGKILL)
+        runner.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while pid_alive(worker, None):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert pid_alive(leaf, None)
+
+        disable_box(tmp_path)
+        poll_at(now, dispatcher, 0.0)
+        assert orphans(queue) == [(job.id, "box", "None")], "the tagged leaf was not found"
+        restart_monitor(dispatcher, pool)
+        poll_at(now, dispatcher, 60.0)
+        assert orphans(queue) == [(job.id, "box", "None")]
+        deadline = time.monotonic() + 10
+        while pid_alive(leaf, None):
+            assert time.monotonic() < deadline, "the leaf outlived its SIGKILL"
+            time.sleep(0.02)
+
+        poll_at(now, dispatcher, 120.0)
+        assert orphans(queue) == []
+    finally:
+        kill_all(runner.pid, worker, leaf)
+        runner.wait()
+
+
+UNRECORDED_ORPHAN = """\
+import os, signal, subprocess, sys, time
+from pathlib import Path
+
+here = Path(sys.argv[1])
+if sys.argv[2] == "leaf":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (here / "leaf.pid").write_text(str(os.getpid()))
+    while True:
+        (here / "tick").write_text(str(time.monotonic_ns()))
+        time.sleep(0.02)
+if sys.argv[2] == "worker":
+    def end(signum, frame):
+        subprocess.Popen([sys.executable, __file__, str(here), "leaf"],
+            env={"PATH": os.environ["PATH"]})
+        os._exit(0)
+    signal.signal(signal.SIGTERM, end)
+    (here / "ready").touch()
+    time.sleep(120)
+from lib.job_run import run
+from lib.process_tree import run_tag
+
+def started(pid):
+    (here / "worker.pid").write_text(str(pid))
+    (here / "run.tag").write_text(run_tag(pid) or "")
+
+sys.exit(run([sys.executable, __file__, str(here), "worker"], beat=lambda: None,
+    interval=60, log=print, started=started))
+"""
+
+
+def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "unrecorded_orphan.py"
+    script.write_text(UNRECORDED_ORPHAN)
+    runner = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), "runner"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        start_new_session=True,
+    )
+    worker = leaf = None
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "ready").exists():
+            assert time.monotonic() < deadline and runner.poll() is None
+            time.sleep(0.02)
+        worker = int((tmp_path / "worker.pid").read_text())
+        tag = (tmp_path / "run.tag").read_text() or None
+        now, queue, pool, dispatcher, job = real_box_job(tmp_path, runner, worker, tag)
+        runner.kill()
+        runner.wait(timeout=10)
+        disable_box(tmp_path)
+
+        poll_at(now, dispatcher, 0.0)
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "tick").exists() or pid_alive(worker, None):
+            assert time.monotonic() < deadline, "the worker did not hand off to its leaf"
+            time.sleep(0.02)
+        leaf = int((tmp_path / "leaf.pid").read_text())
+        assert process_tree.run_tag(leaf) is None
+        restart_monitor(dispatcher, pool)
+
+        poll_at(now, dispatcher, 60.0)
+        assert orphans(queue) == [(job.id, "box", "None")], "live orphan lost its cleanup row"
+        deadline = time.monotonic() + 10
+        while pid_alive(leaf, None):
+            assert time.monotonic() < deadline, "the orphan outlived its SIGKILL"
+            time.sleep(0.02)
+        tick = (tmp_path / "tick").read_text()
+
+        poll_at(now, dispatcher, 120.0)
+        time.sleep(0.1)
+        assert (tmp_path / "tick").read_text() == tick, "lost job still executes"
+        assert orphans(queue) == []
+    finally:
+        kill_all(*[pid for pid in (runner.pid, worker, leaf) if pid])
+        runner.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_a_box_jobs_slot_records_the_run_tag_its_command_carries(tmp_path: Path) -> None:
+    from lib import placed_run
+
+    _, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE device_slots SET worker_pid = NULL, worker_start = NULL WHERE job_id = ?",
+            (job.id,),
+        )
+        connection.commit()
+    placed = placed_run.PlacedRun(
+        pool=pool,
+        placement=pool.placement(job.id),
+        device=dispatcher.devices.config.device("box"),
+        owner="claude",
+        log=lambda _m: None,
+        transport=FakeTransport(),
+        runner=11,
+    )
+    seen = tmp_path / "tag"
+    code = job_run.run(
+        ["sh", "-c", f'printf %s "${process_tree.RUN_TAG_ENV}" > {seen}'],
+        beat=lambda: None,
+        interval=60,
+        log=lambda _m: None,
+        started=placed.started,
+    )
+    assert code == 0
+    with queue.connect() as connection:
+        recorded = connection.execute(
+            "SELECT run_tag FROM device_slots WHERE job_id = ?", (job.id,)
+        ).fetchone()[0]
+    assert recorded == seen.read_text() and len(recorded) == 32
 
 
 def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:
@@ -1176,6 +1565,7 @@ def test_an_orphan_is_stopped_when_its_device_answers_and_forgotten_once_gone(
     transport.check = 1
     poll_at(now, dispatcher, 660.0)
     assert transport.calls[-1] == STOP
+    assert transport.signals == ["KILL"], "a worker lost on an earlier poll is killed"
     assert orphans(queue) == [(job.id, "pc", TAG)]
 
     transport.check = 0
@@ -1195,6 +1585,7 @@ def test_disabling_an_answering_device_stops_the_lost_worker_in_the_same_poll(
 
     assert state(queue, job.id) == "failed"
     assert transport.calls[-1] == STOP
+    assert transport.signals == ["TERM"], "the poll that loses a worker only asks it to stop"
     assert orphans(queue) == [(job.id, "pc", TAG)]
 
 
@@ -1442,7 +1833,8 @@ def test_suite_guard_shadows_any_real_ssh() -> None:
 # results, so they test what the scripts do to real processes.
 
 
-BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+def boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
 def gone(pid: int) -> bool:
@@ -1618,7 +2010,7 @@ def test_r1_f12_stale_pid_file_naming_another_live_group_leaves_it_untouched(
     other = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
         (directory / remote.PID_FILE).write_text(
-            record.format(pid=other.pid, boot=BOOT_ID), encoding="utf-8"
+            record.format(pid=other.pid, boot=boot_id()), encoding="utf-8"
         )
         monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
         for _ in range(2):
@@ -1683,7 +2075,7 @@ def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: str
 ) -> None:
     machines, queue, pool, job_id, ssh, directory = _finished_remote_slot(tmp_path, monkeypatch)
-    (directory / remote.PID_FILE).write_text(record.format(boot=BOOT_ID), encoding="utf-8")
+    (directory / remote.PID_FILE).write_text(record.format(boot=boot_id()), encoding="utf-8")
     transport = ChecksOnly()
     monitor = DeviceMonitor(pool, config_of(machines), transport)
     result = monitor.reconcile(time.time(), 600.0, lambda *_: None)

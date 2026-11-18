@@ -234,11 +234,19 @@ SCRIPT_HEAD = r"""
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function threadKey(r) { return String(r.repo).toLowerCase() + '#' + r.ticket_id; }
   function ticketAddress(r) { return String(r.repo) + '#' + r.ticket_id; }
-  function ticketPageHref(r) { return 'ticket.html#t=' + encodeURIComponent(ticketAddress(r)); }
+  function ticketPageHref(r, openCi) { return 'ticket.html#t=' + encodeURIComponent(ticketAddress(r)) + (openCi ? '&ci=1' : ''); }
   function hashAddress() {
     var hash = String(location.hash || '');
     if (hash.indexOf('#t=') !== 0) return null;
-    try { return decodeURIComponent(hash.slice(3)) || null; } catch (err) { return null; }
+    try { return decodeURIComponent(hash.slice(3).split('&')[0]) || null; } catch (err) { return null; }
+  }
+  function hashParam(name) {
+    var parts = String(location.hash || '').slice(1).split('&');
+    for (var i = 1; i < parts.length; i++) {
+      var eq = parts[i].indexOf('=');
+      if (eq > 0 && parts[i].slice(0, eq) === name) return parts[i].slice(eq + 1);
+    }
+    return null;
   }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
@@ -391,7 +399,7 @@ __TELEMETRY__
 
 SCRIPT_TAIL = r"""
   var PAGES = {
-    main: [renderLanes, renderCiRuns, renderJustHappened, renderIntake],
+    main: [renderLanes, renderJustHappened, renderIntake],
     job: [redirectMoved, renderBoard, renderTickets],
     activity: [renderAttention, renderRelay],
     efficiency: [renderHeadroom, renderTokens, renderRounds, renderSavings, renderJobsLifetime],
@@ -781,8 +789,9 @@ def ticket_address(row: dict) -> str:
 ENCODE_URI_COMPONENT_SAFE = "-_.!~*'()"
 
 
-def ticket_page_href(row: dict) -> str:
-    return "ticket.html#t=" + urllib.parse.quote(ticket_address(row), safe=ENCODE_URI_COMPONENT_SAFE)
+def ticket_page_href(row: dict, open_ci: bool = False) -> str:
+    href = "ticket.html#t=" + urllib.parse.quote(ticket_address(row), safe=ENCODE_URI_COMPONENT_SAFE)
+    return href + "&ci=1" if open_ci else href
 
 
 def _b(value: object, cls: str = "") -> str:

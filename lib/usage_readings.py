@@ -27,9 +27,10 @@ reading is observed at its event's own time, so rereading the same event
 never makes it fresher. A window the account's readings, on any of its
 devices, leave out of its newest NOT_ON_PLAN_READINGS distinct source
 observations, ordered by source time (fresh readings that report other
-limits: a null or missing window in a reply with limits), is `not on plan`:
-the plan has no such limit. A Codex event read again is the same
-observation, and any reading that reports the window ends the streak.
+limits: a window the event leaves out), is `not on plan`: the plan has no
+such limit. Only harnesses in PLAN_INFERRED (Codex) are read this way. A
+Codex event read again is the same observation, and any reading that
+reports the window ends the streak.
 `Session._write` (lib/telemetry.py) stores them in `usage_readings` in the
 same transaction as the job's telemetry row, on the existing heartbeat
 flush. A reading is keyed by harness, bot (the account's
@@ -68,6 +69,7 @@ RESET_HORIZON_SECONDS = 30 * 24 * 3600
 CLOCK_SKEW_SECONDS = 300
 STALE_SECONDS = 24 * 3600
 NOT_ON_PLAN_READINGS = 3
+PLAN_INFERRED = frozenset({"codex"})
 MAX_REPLY_BYTES = 256 * 1024
 
 DDL = f"""
@@ -213,8 +215,8 @@ def iso_time(value: object) -> float | None:
 def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
     """The 5-hour and 7-day readings in Claude Code's `get_usage` reply.
 
-    A null window (counted as absent) or a bad reset gives that window a
-    no-reading, and a login without limits (`rate_limits_available` not true) gives both.
+    A null window or a bad reset gives that window a no-reading, and a
+    login without limits (`rate_limits_available` not true) gives both.
     An error reply, or no reply, is no observation at all."""
     for line in stdout[:MAX_REPLY_BYTES].splitlines():
         try:
@@ -235,9 +237,6 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
         found = []
         for window in WINDOWS:
             info = limits.get(window)
-            if info is None:
-                found.append(missing(window, now, 1, now))
-                continue
             resets = iso_time(info.get("resets_at")) if isinstance(info, dict) else None
             resets_at = reset_time(int(resets), now) if resets is not None else None
             if resets_at is None:
@@ -362,16 +361,17 @@ def from_row(
     return Reading(str(window), used_fraction(used), resets_at, observed)
 
 
-def window_state(reading: Reading, now: float) -> str:
+def window_state(reading: Reading, now: float, harness: str | None = None) -> str:
     """`stale` once the window has reset or the reading is old; else `ok`;
-    `not on plan` once absent from NOT_ON_PLAN_READINGS readings; else `no reading`."""
+    `not on plan` for a PLAN_INFERRED harness once absent from
+    NOT_ON_PLAN_READINGS readings; else `no reading`."""
     if (reading.resets_at is not None and reading.resets_at <= now) or (
         now - reading.observed_at > STALE_SECONDS
     ):
         return "stale"
     if reading.used is not None:
         return "ok"
-    if reading.resets_at is None and reading.absent >= NOT_ON_PLAN_READINGS:
+    if harness in PLAN_INFERRED and reading.resets_at is None and reading.absent >= NOT_ON_PLAN_READINGS:
         return "not on plan"
     return "no reading"
 

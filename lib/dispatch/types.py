@@ -59,6 +59,7 @@ CHECK_FAILED = (
 
 CIJobStatus = Literal["queued", "in_progress", "completed"]
 RunnerKind = Literal["self-hosted", "github-hosted", "none"]
+RunnerStatus = Literal["online", "offline"]
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,15 @@ class RunJob:
     completed_at: float | None = None
     runner_name: str | None = None
     runner_kind: RunnerKind | None = None
+
+
+@dataclass(frozen=True)
+class PoolRunner:
+    name: str
+    os: str
+    status: RunnerStatus
+    busy: bool
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

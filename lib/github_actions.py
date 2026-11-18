@@ -74,7 +74,14 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatch.helpers import _base_mismatch
-from lib.dispatch.types import CHECK_FAILED, CheckRow, CIJobStatus, RunJob, RunnerKind
+from lib.dispatch.types import (
+    CHECK_FAILED,
+    CheckRow,
+    CIJobStatus,
+    PoolRunner,
+    RunJob,
+    RunnerKind,
+)
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -739,6 +746,15 @@ class GitHubReviewActions:
             raise GitHubAdapterError("run jobs page has no jobs list")
         return tuple(_run_job(_object(job)) for job in jobs)
 
+    def list_runners(self, repo: str) -> tuple[PoolRunner, ...]:
+        page = _object(
+            self._json(f"{_repo_path(repo)}/actions/runners?per_page=100", cache_ttl="60s")
+        )
+        runners = page.get("runners")
+        if not isinstance(runners, list):
+            raise GitHubAdapterError("runners page has no runners list")
+        return tuple(_pool_runner(_object(runner)) for runner in runners)
+
     def job_log(self, repo: str, job_id: str) -> str:
         """gh 2.97+ exits 1 on a body with escape sequences unless allowed,
         and pytest's output is coloured."""
@@ -1022,6 +1038,25 @@ def _run_job(job: dict[str, Any]) -> RunJob:
         completed_at=_display_time(job.get("completed_at")) if status == "completed" else None,
         runner_name=runner,
         runner_kind=kind,
+    )
+
+
+def _pool_runner(runner: dict[str, Any]) -> PoolRunner:
+    name = runner.get("name")
+    if not isinstance(name, str) or not name:
+        raise GitHubAdapterError("runner has no name")
+    os_name = runner.get("os")
+    labels = runner.get("labels")
+    return PoolRunner(
+        name=name,
+        os=os_name if isinstance(os_name, str) else "",
+        status="online" if runner.get("status") == "online" else "offline",
+        busy=runner.get("busy") is True,
+        labels=tuple(
+            label["name"]
+            for label in (labels if isinstance(labels, list) else ())
+            if isinstance(label, dict) and isinstance(label.get("name"), str)
+        ),
     )
 
 

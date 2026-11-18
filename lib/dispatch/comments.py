@@ -6,7 +6,7 @@ import math
 import sqlite3
 from collections.abc import Mapping, Sequence
 
-from lib.approver_commands import parse_slash_go
+from lib.approver_commands import SlashQa, parse_slash_go, parse_slash_qa
 from lib.dispatch.constants import FINISHED_STATES, WATCHED_STATES
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
@@ -175,6 +175,8 @@ class CommentsMixin:
             if fields is None:
                 if parse_slash_go(comment.body) is not None:
                     self._mark_handled(ticket, comment.id, self._slash_go(ticket, comment))
+                elif (ruling := parse_slash_qa(comment.body)) is not None:
+                    self._mark_handled(ticket, comment.id, self._slash_qa(ticket, comment, ruling))
                 continue
             kind = fields["kind"]
             if kind == "ok" and _holds(ticket):
@@ -310,6 +312,13 @@ class CommentsMixin:
             or self._resume_paused(ticket, comment)
         )
         return "slash-go-no-target" if resumed is None else resumed[1]
+
+    def _slash_qa(self, ticket: TrackedTicket, comment: Comment, command: SlashQa) -> str:
+        if comment.edited_at is not None:
+            return "rejected-edited"
+        if not self.approvals.may_approve(comment.author):
+            return "qa-ruling-not-from-approver"
+        return self._qa_ruling(ticket, comment, command)
 
     def _after_finish(
         self, ticket: TrackedTicket, comment: Comment, fields: Mapping[str, str] | None
@@ -510,17 +519,20 @@ class CommentsMixin:
                         ticket.changed_lines
                         if _matching_head(head, ticket.current_head) is not None
                         else None,
+                        fields.get("verdict"),
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
                 """
                 INSERT INTO verdict_heads (
-                    repo, ticket_id, comment_id, head, review_round, posted_at, changed_lines
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, head, review_round, posted_at, changed_lines,
+                    verdict
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
                 SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at),
-                    changed_lines = COALESCE(verdict_heads.changed_lines, excluded.changed_lines)
+                    changed_lines = COALESCE(verdict_heads.changed_lines, excluded.changed_lines),
+                    verdict = COALESCE(verdict_heads.verdict, excluded.verdict)
                 """,
                 rows,
             )

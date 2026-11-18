@@ -253,6 +253,23 @@ def test_headroom_on_one_window_is_neutral_and_names_it(
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_a_claude_window_null_in_three_replies_shows_no_reading(tmp_path: Path, render: str) -> None:
+    db, log = seeded(tmp_path)
+    resets = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW + 86400))
+    reply = {"type": "control_response", "response": {
+        "subtype": "success", "request_id": usage_readings.GET_USAGE_ID, "response": {
+            "rate_limits_available": True, "rate_limits": {
+                "five_hour": None, "seven_day": {"utilization": 26, "resets_at": resets}}}}}
+    with sqlite3.connect(db) as connection:
+        for offset in (180, 120, 60):
+            parsed = usage_readings.parse_get_usage(json.dumps(reply).encode(), NOW - offset)
+            _store(connection, "claude", "claude-bot", "box", *parsed)
+    snapshot = collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
+    assert _rows(_render(tmp_path, snapshot, render, "headroom"))[CLAUDE] == [
+        "no reading", "26% used", "in 1d 0h", "74% (7-day only)"]
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 def test_a_window_not_on_the_plan_leaves_the_other_as_the_whole_plan(tmp_path: Path, render: str) -> None:
     snapshot = _snapshot(tmp_path)
     [codex] = [e for e in snapshot["usage"]["accounts"] if e["harness"] == "codex"]

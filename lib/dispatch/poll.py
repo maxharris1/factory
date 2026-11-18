@@ -147,7 +147,9 @@ class PollMixin:
             finally:
                 self._read_started = None
         with self._phase("factory-reads"):
-            self._record_factory_reads(source)
+            reads = self._record_factory_reads(source)
+        with self._phase("ci-pool"):
+            self._read_ci_pool(reads)
         self._export_eval_log()
         self._prune_poll_errors()
         failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
@@ -264,17 +266,30 @@ class PollMixin:
             )
         return None
 
-    def _record_factory_reads(self, source: PollSource) -> None:
+    def _record_factory_reads(self, source: PollSource) -> tuple[project_rules.FactoryRead, ...]:
         """Store each project's factory.md as this cycle read it (#152)."""
         reads = getattr(source, "factory_reads", None)
         if reads is None:
-            return
+            return ()
         try:
             cycle = reads()
             with self._connect() as connection:
                 project_rules.record_reads(connection, cycle, self.queue.now())
         except Exception as exc:
             self.record_poll_error("factory", "-", type(exc).__name__)
+            return ()
+        return tuple(cycle)
+
+    def _read_ci_pool(self, reads: tuple[project_rules.FactoryRead, ...]) -> None:
+        if self.ci_pool is None:
+            return
+        repos = sorted(
+            {read.repo.lower() for read in reads if read.config is not None and read.config.ci_runner}
+        )
+        try:
+            ci_board.read_pool(self._connect, repos, self.ci_pool, self.queue.now(), self.log)
+        except Exception as exc:
+            self.record_poll_exception("ci-pool", "-", exc)
 
     def _prune_poll_errors(self) -> None:
         try:
