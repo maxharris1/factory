@@ -418,6 +418,41 @@ def test_execute_only_ancestor_still_recycles(db: sqlite3.Connection, tmp_path: 
     assert _remaining(kept) == {"lane-1/result.json", "lane-1/manifest.json"}
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_partly_removed_run_counts_only_what_is_left(db: sqlite3.Connection, root: Path) -> None:
+    older = _failed_run(db, root, "m-1", "12", NOW - 3 * DAY, 10_000)
+    newer = _failed_run(db, root, "m-2", "13", NOW - 2 * DAY, 5000)
+    _closed(db, "12", "merged", NOW - DAY)
+    _closed(db, "13", "merged", NOW - DAY)
+    older.parent.chmod(0o500)
+    try:
+        report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=_bytes(newer))
+    finally:
+        older.parent.chmod(0o700)
+
+    assert newer.exists()
+    assert _bytes(older) == 0
+    assert report.removed == ()
+    assert [run_id for run_id, _reason in report.skipped] == ["m-1"]
+    assert "Permission denied" in report.skipped[0][1]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_unmeasurable_run_is_reported_and_left(db: sqlite3.Connection, root: Path) -> None:
+    folder = _failed_run(db, root, "m-1", "12", NOW - 3 * DAY, 1024)
+    _closed(db, "12", "merged", NOW - DAY)
+    blocked = folder / "blocked"
+    blocked.mkdir(mode=0o000)
+    try:
+        report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1)
+    finally:
+        blocked.chmod(0o700)
+
+    assert report.removed == ()
+    assert report.skipped == (("m-1", "cannot measure evidence folder (Permission denied)"),)
+    assert _bytes(folder) > 1024
+
+
 def test_repeated_scenario_id_leaves_that_lane_alone(db: sqlite3.Connection, root: Path) -> None:
     folder = run_dir(root, REPO, TICKET, "run-1")
     _lane(folder, 1, {"s-1": "failed"}, _files("s-1"))

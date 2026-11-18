@@ -459,7 +459,14 @@ def _remove_oldest_closed_runs(
         (repo.lower(),),
     ).fetchall()
     runs = [(run_id, _resolve(run_id, folder, real_root), removable) for run_id, folder, removable in rows]
-    sizes = {run_id: _size(root_fd, parts) for run_id, parts, _ in runs if not isinstance(parts, str)}
+    sizes: dict[str, int] = {}
+    for run_id, parts, _ in runs:
+        if isinstance(parts, str):
+            continue
+        try:
+            sizes[run_id] = _size(root_fd, parts)
+        except OSError as exc:
+            skipped.append((run_id, f"cannot measure evidence folder ({exc.strerror or exc})"))
     usage = sum(sizes.values())
     for run_id, parts, removable in runs:
         if usage <= budget:
@@ -468,6 +475,8 @@ def _remove_oldest_closed_runs(
             continue
         if isinstance(parts, str):
             skipped.append((run_id, parts))
+            continue
+        if run_id not in sizes:
             continue
         try:
             ticket_fd = _open_unlinked(root_fd, parts[:-1])
@@ -479,6 +488,11 @@ def _remove_oldest_closed_runs(
             continue
         except OSError as exc:
             skipped.append((run_id, f"cannot remove evidence folder ({exc.strerror or exc})"))
+            try:
+                remaining = _size(root_fd, parts)
+            except OSError:
+                remaining = 0
+            usage -= sizes[run_id] - remaining
             continue
         usage -= sizes[run_id]
         removed.append(PurePosixPath(*parts).as_posix())
@@ -488,12 +502,10 @@ def _remove_oldest_closed_runs(
 def _size(root_fd: int, parts: tuple[str, ...]) -> int:
     try:
         fd = _open_unlinked(root_fd, parts)
-    except OSError:
+    except FileNotFoundError:
         return 0
     try:
         return _tree_bytes(fd)
-    except OSError:
-        return 0
     finally:
         os.close(fd)
 
