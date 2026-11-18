@@ -26,8 +26,6 @@ STORE = "https://store.invalid"
 
 
 class FakeStorage:
-    """Signs links tagged with SIGNATURE and serves `objects` as the bucket."""
-
     def __init__(self, objects: dict[str, bytes] | None = None) -> None:
         self.objects = {} if objects is None else objects
         self.signed: list[tuple[str, str, int]] = []

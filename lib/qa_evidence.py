@@ -107,13 +107,10 @@ def run_dir(root: Path, repo: str, ticket: str, run_id: str) -> Path:
 
 
 def lane_dir(root: Path, repo: str, ticket: str, run_id: str, lane: int) -> Path:
-    folder = run_dir(root, repo, ticket, run_id)
-    lane_prefix(repo, run_id, lane)
-    return folder / f"lane-{lane}"
+    return run_dir(root, repo, ticket, run_id) / PurePosixPath(lane_prefix(repo, run_id, lane)).name
 
 
 def stored(folder: Path) -> dict[str, Any]:
-    """What `collect` returned for the lane it stored in `folder`."""
     result = json.loads((folder / RESULT_NAME).read_bytes())
     manifest = json.loads((folder / MANIFEST_NAME).read_bytes())
     return {**result, "mismatches": manifest["mismatches"]}

@@ -60,8 +60,6 @@ def live(count: int, packs: dict[str, str | None] | None = None) -> list[dict]:
 
 
 class LabStorage(FakeStorage):
-    """A lane uploads its result and bundle once it has launched and is not silent."""
-
     def __init__(self, lab: Lab) -> None:
         super().__init__()
         self.lab = lab
