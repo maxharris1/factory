@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from lib.brief.common import NO_EDIT_RULE
+from lib.brief.rules import CONTAINER_RULE, rules
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
 AUTHORITY = (
@@ -32,3 +33,18 @@ def test_every_brief_forbids_editing_a_posted_handoff(kind: str) -> None:
     for brief in briefs:
         handoff = brief.split("## Handoff comment\n", 1)[1].split("\n## ", 1)[0]
         assert NO_EDIT_RULE in handoff
+
+
+@pytest.mark.parametrize("remote_device", [None, "mac"], ids=["box", "remote"])
+def test_the_rules_require_labelled_containers_and_a_teardown_trap(remote_device: str | None) -> None:
+    text = rules(remote_device)
+    line = next(line for line in text.splitlines() if "factory.job=" in line)
+    assert "`factory.job=$ORCH_JOB_ID`" in line
+    assert "compose" in line and "trap" in line
+
+
+@pytest.mark.parametrize("kind", sorted(CASES))
+def test_every_brief_carries_the_container_rule(kind: str) -> None:
+    for brief in render_snapshot(kind).split("=====")[2::2]:
+        section = brief.split("## Rules\n", 1)[1].split("\n## ", 1)[0] + "\n"
+        assert f"- {CONTAINER_RULE}\n" in section

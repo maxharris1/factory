@@ -71,7 +71,7 @@ def review_rules(facts: dict) -> str:
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
         f"- That reviewer runs the project's verify skill when factory.md names one, {adversarial} "
-        "and may run code in a throwaway copy.\n"
+        "and may run code in a throwaway copy, its containers labelled as the Rules section says.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "
         f"{high_risk}\n"
@@ -87,6 +87,11 @@ def review_rules(facts: dict) -> str:
     )
 
 
+CONTAINER_RULE = (
+    "Label every container or compose stack you start with `factory.job=$ORCH_JOB_ID` "
+    "(`docker run --label`, or a `labels:` entry on each compose service), and install a trap "
+    "that removes them when your script exits. Factory teardown removes any left when the job ends."
+)
 SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
 
 
@@ -104,6 +109,7 @@ def rules(remote_device: str | None = None, *, follow_ups: bool = False) -> str:
         f"- Run GitHub as `{GH}`.\n"
         f"- {SECRET_RULE}\n"
         f"{scratch}"
+        f"- {CONTAINER_RULE}\n"
         "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
         f"{follow_up}"
         "- Post only this job's handoff, or a `questions` handoff. Never post `go`, `ok`, `answers`, "
@@ -142,6 +148,7 @@ RULE_PHRASES = {
     "rule-gh": "- Run GitHub as `",
     "rule-secrets": SECRET_RULE,
     "rule-scratch": "under `$TMPDIR`.",
+    "rule-containers": "`factory.job=$ORCH_JOB_ID`",
     "rule-one-channel": "Message no other bot.",
     "rule-no-follow-up-fixes": "Builders do not fix `[follow-up]` findings.",
     "rule-post-only": "Post only this job's handoff, or a `questions` handoff.",

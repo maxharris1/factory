@@ -236,8 +236,8 @@ def task_lines(facts: dict) -> list[str]:
             ]
         ),
         *([] if fix_round else [gate]),
-        "You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
-        "and seen it fail, and give the repro.",
+        "You may run code in a throwaway copy, its containers labelled as the Rules section says. "
+        "Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.",
         *([_bar_step(variant)] if user_impact else []),
         "Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same "
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "

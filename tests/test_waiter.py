@@ -46,6 +46,7 @@ from lib.waiter import (
     local_only,
 )
 from tests import fake_runner
+from tests.fake_docker import Docker
 from tests.child_reaper import descendants
 from tests.pool_helpers import LOCAL_BOX_MACHINES
 from tests.procs import alive
@@ -405,6 +406,120 @@ def test_a_failed_scratch_removal_is_retried_until_it_succeeds(tmp_path: Path) -
     assert sum("could not remove" in line for line in log) == 1
     waiter._reap()
     assert not scratch.exists()
+
+
+def sweeping_waiter(tmp_path: Path, queue: SQLiteJobQueue, db: Path, log: list[str],
+                    pool: DevicePool | None = None) -> tuple[Waiter, list[float]]:
+    now = [0.0]
+    waiter = Waiter(
+        bot="claude-bot", queue=queue, pool=pool or local_pool(queue),
+        harness=HarnessCommand(bot="claude-bot", command=("fake-harness", "-p")),
+        context=FakeContext(), state_dir=tmp_path / "state", db=db, machines=MACHINES,
+        orch=("python3", "/factory/bin/orch"), spawn=FakeSpawn(), log=log.append,
+        environ={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, clock=lambda: now[0],
+    )
+    return waiter, now
+
+
+def set_state(db: Path, job_id: str, job_state: str) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET state = ? WHERE id = ?", (job_state, job_id))
+
+
+def test_the_sweep_removes_finished_jobs_containers_and_keeps_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, queue = make_queue(tmp_path)
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    jobs = {}
+    for job_state in ("done", "failed", "cancelled", "running", "queued"):
+        jobs[job_state] = enqueue(queue, job_state)
+        set_state(db, jobs[job_state], job_state)
+        docker.start_for(jobs[job_state])
+    unknown = "f" * 32
+    docker.start_for(unknown)
+    docker.start(**{"factory.job": "not a job"})
+    docker.start(app="web")
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log)
+
+    waiter._reap()
+    assert docker.calls() == []
+    now[0] = waiter_module.CONTAINER_SWEEP_SECONDS
+    waiter._reap()
+    assert sorted(docker.labelled()) == sorted(
+        [jobs["running"], jobs["queued"], unknown, "not a job", ""]
+    )
+    assert sum(f"of finished job {jobs['done']}" in line for line in log) == 1
+    assert sum(f"of job {unknown}: not in orch.db" in line for line in log) == 1
+    assert sum("'not a job': not a job id" in line for line in log) == 1
+
+    calls = len(docker.calls())
+    now[0] += waiter_module.CONTAINER_SWEEP_SECONDS - 1
+    waiter._reap()
+    assert len(docker.calls()) == calls
+    lines = len(log)
+    now[0] += 1
+    waiter._reap()
+    assert len(docker.calls()) > calls
+    assert len(log) == lines
+
+    set_state(db, jobs["running"], "done")
+    now[0] += waiter_module.CONTAINER_SWEEP_SECONDS
+    waiter._reap()
+    assert sorted(docker.labelled()) == sorted([jobs["queued"], unknown, "not a job", ""])
+
+
+def test_a_stopped_docker_daemon_is_logged_once_and_the_step_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, queue = make_queue(tmp_path)
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    job_id = enqueue(queue, "done")
+    set_state(db, job_id, "done")
+    docker.start_for(job_id)
+    docker.down().touch()
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log)
+    for _ in range(2):
+        now[0] += waiter_module.CONTAINER_SWEEP_SECONDS
+        waiter._reap()
+    assert sum("could not list factory.job containers on" in line for line in log) == 1
+    docker.down().unlink()
+    now[0] += waiter_module.CONTAINER_SWEEP_SECONDS
+    waiter._reap()
+    assert docker.labelled() == []
+
+
+def test_the_sweep_reaches_a_remote_device_over_the_bots_own_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_remote_start import Ssh
+    from tests.test_waiter_remote import remote_machines
+
+    ssh = Ssh(tmp_path)
+    docker = Docker(tmp_path)
+    for name, value in ssh.env().items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}/usr/bin:/bin")
+    monkeypatch.setenv("FAKE_SSH_PATH", docker.path("/usr/bin:/bin"))
+    db, queue = make_queue(tmp_path)
+    config, findings = load_machines_yml(remote_machines(tmp_path))
+    assert config is not None, findings
+    done, running = enqueue(queue, "done"), enqueue(queue, "running")
+    set_state(db, done, "done")
+    set_state(db, running, "running")
+    docker.start_for(done)
+    docker.start_for(running)
+    log: list[str] = []
+    waiter, now = sweeping_waiter(tmp_path, queue, db, log, pool=DevicePool(queue, config))
+    now[0] = waiter_module.CONTAINER_SWEEP_SECONDS
+    waiter._reap()
+    assert docker.labelled() == [running]
+    assert any(f"on pc of finished job {done}" in line for line in log), log
+    assert {(call["alias"], call["user"]) for call in ssh.calls()} == {("fakepc-claude-bot", "claude-bot")}
 
 
 @pytest.mark.parametrize("replaced", ["never", "after-scratch", "before-scratch"])

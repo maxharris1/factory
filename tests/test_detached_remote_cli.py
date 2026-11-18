@@ -25,8 +25,10 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
 from lib.remote_follow import EXITED, KILL_AFTER_SECONDS, STOPPED, FollowEnd
 from lib.waiter import HarnessCommand, Waiter
+from tests.fake_docker import Docker
 from tests.handoff_store import serve_job
 from tests.test_detached_remote import HARNESS
+from tests.test_job_run import START_CONTAINER
 from tests.test_job_state import Poller
 from tests.test_liveness_requeue import _remote
 from tests.test_remote_darwin import Mac, mac_env
@@ -482,3 +484,22 @@ def test_the_brief_file_is_the_harness_stdin_on_the_device(tmp_path: Path) -> No
         _, err = proc.communicate(timeout=60)
     assert proc.returncode == 0, err
     assert Path(f"{count}.brief").read_bytes() == brief.read_bytes()
+
+
+def test_a_remote_runs_teardown_removes_its_labelled_containers_on_the_device(tmp_path: Path) -> None:
+    poller, db, job_id, ssh = setup(tmp_path)
+    docker = Docker(tmp_path)
+    docker.start(app="web")
+    proc = run(poller, job_id, ssh, "--", sys.executable, "-c", START_CONTAINER,
+               env={"PATH": docker.path(ssh.env()["PATH"]), "ORCH_TELEMETRY": "off"})
+    try:
+        _, err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0, err
+    assert any(call[:4] == ["run", "-d", "--label", f"factory.job={job_id}"] for call in docker.calls())
+    assert docker.labelled() == [""]
+    removals = [call for call in ssh.calls()
+                if f"label=factory.job={job_id}" in (call["script"] or "")]
+    assert len(removals) == 1 and removals[0]["alias"] == CODEX

@@ -15,6 +15,7 @@ import pytest
 from lib import job_run
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
+from tests.fake_docker import Docker
 from tests.handoff_store import serve_job
 from tests.pool_helpers import LOCAL_BOX_MACHINES, pool_claim
 
@@ -750,6 +751,61 @@ def test_cli_job_run_gives_the_command_a_job_tmpdir_and_removes_it(
     scratch = str(job_dir / "tmp")
     assert json.loads(seen.read_text()) == {"TMPDIR": scratch, "TMP": scratch, "TEMP": scratch}
     assert not (job_dir / "tmp").exists()
+
+
+START_CONTAINER = (
+    "import os, subprocess; subprocess.run(['docker', 'run', '-d', '--label', "
+    "'factory.job=' + os.environ['ORCH_JOB_ID'], 'alpine', 'sleep', '600'], check=True)"
+)
+
+
+def test_cli_job_run_teardown_removes_only_the_jobs_labelled_containers(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    job = _running_job(queue)
+    other = queue.enqueue(
+        JobRequest(repo="acme/widgets", ticket_id="13", action="review", recipient="codex",
+                   source_comment_id="2", timeout_seconds=60),
+        dedupe_key="other",
+    )
+    docker = Docker(tmp_path)
+    docker.start_for(other.id)
+    docker.start(app="web")
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(queue.path),
+        "--", sys.executable, "-c", START_CONTAINER,
+        env={"PATH": docker.path(), "ORCH_TELEMETRY": "off"},
+    )
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    assert ["run", "-d", "--label", f"factory.job={job.id}", "alpine", "sleep", "600"] in docker.calls()
+    assert sorted(docker.labelled()) == sorted([other.id, ""])
+
+
+@pytest.mark.parametrize("end", ["killed", "wall-clock"])
+def test_cli_job_run_removes_the_containers_of_an_agent_that_never_cleaned_up(
+    tmp_path: Path, end: str
+) -> None:
+    queue = _queue(tmp_path)
+    job = _running_job(queue, timeout=60 if end == "killed" else 2)
+    docker = Docker(tmp_path)
+    after = (
+        "os.kill(os.getpid(), signal.SIGKILL)" if end == "killed" else "time.sleep(60)"
+    )
+    script = f"import os, signal, time\n{START_CONTAINER}\n{after}\n"
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(queue.path),
+        "--", sys.executable, "-c", script,
+        env={"PATH": docker.path(), "ORCH_TELEMETRY": "off"},
+    )
+    _, stderr = proc.communicate(timeout=60)
+
+    assert any(call[0] == "run" for call in docker.calls()), stderr
+    if end == "killed":
+        assert proc.returncode == 128 + signal.SIGKILL, stderr
+    else:
+        assert proc.returncode != 0 and "wall-clock" in stderr, stderr
+    assert docker.labelled() == []
 
 
 def test_cli_job_run_removes_a_job_tmpdir_its_command_locked(tmp_path: Path) -> None:
