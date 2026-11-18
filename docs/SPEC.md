@@ -1142,9 +1142,14 @@ ticket, root)`, treats everything in a bundle as untrusted:
 5. Store the fetched `result.json` in the folder, over any copy in the
    bundle. Write `manifest.json`: the run id, lane, commit, every file with
    its sha256 and size after scrubbing, and the mismatches.
-6. Move the folder to `<root>/<owner>/<repo>/<ticket>/<run_id>/lane-<n>/`
-   in one rename. An existing destination is refused, never replaced.
+6. Move the folder to `lane_dir(root, repo, ticket, run_id, lane)`,
+   `<root>/<owner>/<repo>/<ticket>/<run_id>/lane-<n>/`, in one rename. An
+   existing destination is refused, never replaced.
 7. Return the parsed result with its mismatches.
+
+`stored(folder)` reads a lane folder that intake already wrote and returns
+what `collect` returned for it: the stored `result.json` with the
+mismatches from `manifest.json`.
 
 A refusal raises `EvidenceRefused`, whose text names the reason and the
 scrubbed member, and nothing from that bundle reaches the evidence root.

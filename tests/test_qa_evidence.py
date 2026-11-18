@@ -97,6 +97,8 @@ def test_happy_path_stores_evidence_with_manifest(root: Path) -> None:
     assert returned["status"] == "pass"
     assert returned["mismatches"] == [], "artifact checks ran on the uploaded bytes, before scrubbing"
     lane = _lane_dir(root)
+    assert qa_evidence.lane_dir(root, REPO, TICKET, RUN, 1) == lane
+    assert qa_evidence.stored(lane) == returned
     assert (lane / "screens" / "home.png").read_bytes() == shot
     assert json.loads((lane / RESULT_NAME).read_text())["artifacts"] == artifacts
     manifest = json.loads((lane / "manifest.json").read_text())

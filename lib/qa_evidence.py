@@ -106,6 +106,19 @@ def run_dir(root: Path, repo: str, ticket: str, run_id: str) -> Path:
     return root / owner / name / ticket / run_id
 
 
+def lane_dir(root: Path, repo: str, ticket: str, run_id: str, lane: int) -> Path:
+    folder = run_dir(root, repo, ticket, run_id)
+    lane_prefix(repo, run_id, lane)
+    return folder / f"lane-{lane}"
+
+
+def stored(folder: Path) -> dict[str, Any]:
+    """What `collect` returned for the lane it stored in `folder`."""
+    result = json.loads((folder / RESULT_NAME).read_bytes())
+    manifest = json.loads((folder / MANIFEST_NAME).read_bytes())
+    return {**result, "mismatches": manifest["mismatches"]}
+
+
 def record_evidence_dir(connection: sqlite3.Connection, run_id: str, folder: Path) -> None:
     connection.execute(
         "UPDATE qa_runs SET evidence_dir = ? WHERE run_id = ? AND evidence_dir IS NULL",
@@ -120,7 +133,7 @@ def collect(
 
     None when the lane uploaded no result.json. Returns the parsed result
     with "mismatches" set to the artifact and scrub findings."""
-    dest = run_dir(root, repo, ticket, run_id) / f"lane-{lane}"
+    dest = lane_dir(root, repo, ticket, run_id, lane)
     prefix = lane_prefix(repo, run_id, lane)
 
     staging_root = root / ".staging"
