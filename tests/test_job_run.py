@@ -735,3 +735,29 @@ def test_the_command_waits_for_a_keeper_that_ignores_term(tmp_path: Path) -> Non
     assert (tmp_path / "code").read_text() == "127", output
     assert "cannot start the session keeper" in output
     assert not (tmp_path / "ran").exists(), "the command never ran"
+
+
+KEEPER_BARE_PATH_RUN = """import sys
+from pathlib import Path
+from lib.job_run import run
+here = Path(sys.argv[1])
+code = run([sys.executable, "-c", f"open({str(here / 'ran')!r}, 'w')"], env={"PATH": "/nonexistent"},
+    beat=lambda: None, interval=60, log=print)
+(here / "code").write_text(str(code))
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the keeper is Linux only")
+def test_the_keeper_does_not_search_the_command_path(tmp_path: Path) -> None:
+    """#863 f-8: the keeper is the runner's own process, so a command env whose
+    PATH holds no shell still runs the command."""
+    script = tmp_path / "bare_path_run.py"
+    script.write_text(KEEPER_BARE_PATH_RUN)
+    runner = subprocess.run(
+        [sys.executable, str(script), str(tmp_path)],
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+        start_new_session=True,
+    )
+    assert (tmp_path / "code").read_text() == "0", runner.stdout + runner.stderr
+    assert (tmp_path / "ran").exists(), "the command ran"

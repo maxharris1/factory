@@ -1,8 +1,8 @@
 """The QA worker and lane coordinator (#784): a fixed program, never a model session.
 
 `orch qa-worker` calls QaWorker.tick on a timer. A tick claims queued `qa`
-jobs under the per-runner lane cap, grants extra lanes while the cap has room,
-then advances every run: launch reserved lanes, read results, apply the swarm
+jobs under the per-runner lane cap, then advances every run: launch reserved
+lanes, grant extra lanes while the cap has room, read results, apply the swarm
 rules, and post one `kind=qa` comment when the run is decided. Every fact a
 restarted worker needs is in the jobs, qa_runs and qa_lanes rows, so a fresh
 worker carries on where the last one stopped. docs/SPEC.md section 4.2.2.
@@ -20,13 +20,14 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from lib import lane_limit
-from lib.brief.qa import LaneFacts, Scenario, Upload, expected_paths, render_qa_brief
+from lib.brief.qa import AFTER_SCREENSHOT, PASS_OUTPUT, LaneFacts, Scenario, pack_ids, render_qa_brief
 from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.qa import record_runner_moved
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.factory_md import FactoryConfig, QaConfig
 from lib.queue import QA_RECIPIENT, Job, SQLiteJobQueue, claim_order, job_from_row
 from lib.qa_runners import Lane, Runner, RunnerOutage, UsageLimit
+from lib.qa_storage import Storage, links_for_lane
 
 SliceKind = Literal["head", "regression", "base-check"]
 Result = Literal["PASS", "FAIL", "BLOCKED"]
@@ -53,10 +54,6 @@ class Slice:
     index: int
     kind: SliceKind
     ids: tuple[str, ...]
-
-    @property
-    def lane_no(self) -> int:
-        return min(self.index + 1, 3)
 
 
 @dataclass(frozen=True)
@@ -306,7 +303,6 @@ def render_comment(
 
 
 Collect = Callable[[LaneRow], "dict | None"]
-Uploads = Callable[[LaneRow, list[str]], "tuple[Upload, ...]"]
 Post = Callable[[str, int, str, str], str]
 
 
@@ -318,7 +314,7 @@ class QaWorker:
     base_commit: Callable[[str, str, str], str]
     post: Post
     collect: Collect | None = None
-    uploads: Uploads | None = None
+    storage: Callable[[str], Storage] | None = None
     max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
     shares_usage_with: Mapping[str, str] = field(default_factory=dict)
     log: Callable[[str], None] = lambda line: None
@@ -330,15 +326,16 @@ class QaWorker:
             ensure_qa_lanes(connection)
 
     def tick(self) -> None:
-        if not self.runners or self.collect is None or self.uploads is None:
+        if not self.runners or self.collect is None or self.storage is None:
             return
+        waiting: Counter[str] = Counter()
         try:
-            self._grant(self._claim())
+            waiting = self._claim()
         except Exception as exc:
             self.log(f"qa claim: {type(exc).__name__}: {exc}")
         for job in self._active_jobs():
             try:
-                self._advance(job)
+                self._advance(job, waiting)
                 if self._job_state(job.id) == "running":
                     self.queue.heartbeat(job.id, owner=QA_RECIPIENT)
             except Exception as exc:
@@ -386,34 +383,28 @@ class QaWorker:
                 connection.commit()
         return waiting
 
-    def _grant(self, waiting: Counter[str]) -> None:
-        for job in self._running_jobs():
-            try:
-                plan = self._plan(job)
-            except Exception as exc:
-                self.log(f"qa job {job.id}: no plan: {type(exc).__name__}: {exc}")
+    def _grant(self, job: Job, plan: RunPlan, waiting: Counter[str]) -> None:
+        rows = self._lanes(plan.detail.run_id)
+        if not any(row.agent_id for row in rows):
+            return
+        runner = rows[0].runner
+        with self.queue.connect() as connection:
+            if self._paused(connection, runner, self.queue.now()) is not None:
+                return
+        taken = {row.slice for row in rows}
+        for item in plan.slices:
+            if item.index in taken:
                 continue
-            rows = self._lanes(plan.detail.run_id)
-            if not any(row.agent_id for row in rows):
-                continue
-            runner = rows[0].runner
             with self.queue.connect() as connection:
-                if self._paused(connection, runner, self.queue.now()) is not None:
-                    continue
-            taken = {row.slice for row in rows}
-            for item in plan.slices:
-                if item.index in taken:
-                    continue
-                with self.queue.connect() as connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    room = self.max_cloud_lanes - _open_count(connection, runner) - waiting[runner]
-                    if room > 0:
-                        _reserve(connection, job, plan, item, runner, attempt=1, now=self.queue.now())
-                    connection.commit()
-                if room <= 0:
-                    break
+                connection.execute("BEGIN IMMEDIATE")
+                room = self.max_cloud_lanes - _open_count(connection, runner) - waiting[runner]
+                if room > 0:
+                    _reserve(connection, job, plan, item, runner, attempt=1, now=self.queue.now())
+                connection.commit()
+            if room <= 0:
+                break
 
-    def _advance(self, job: Job) -> None:
+    def _advance(self, job: Job, waiting: Counter[str]) -> None:
         detail = Detail.of(json.loads(job.request.detail or "{}"))
         if job.state != "running" or self._run_cancelled(detail.run_id):
             self._cancel(job, detail)
@@ -422,6 +413,7 @@ class QaWorker:
         for row in self._lanes(detail.run_id):
             if row.state == "launching" and self._launch(job, plan, row) == "requeued":
                 return
+        self._grant(job, plan, waiting)
         for row in self._lanes(detail.run_id):
             if row.state == "running":
                 self._watch(plan, row)
@@ -487,6 +479,10 @@ class QaWorker:
 
     def _lane(self, plan: RunPlan, row: LaneRow, runner: str) -> Lane:
         scenarios = tuple(_scenario(plan.detail.live[item]) for item in row.scenarios)
+        links = links_for_lane(
+            row.run_id, row.lane_no, pack_ids(scenarios), plan.qa.timeout_minutes * 60,
+            storage=self.storage(plan.repo), repo=plan.repo,
+        )
         facts = LaneFacts(
             repo=plan.repo,
             pr=plan.detail.pr,
@@ -499,7 +495,7 @@ class QaWorker:
             lane_config=plan.qa.lane,
             verify=plan.qa.verify,
             evidence=plan.qa.evidence,
-            uploads=tuple(self.uploads(row, expected_paths(scenarios))),
+            links=links,
         )
         config = next(item for item in plan.qa.runners if item.name == runner)
         return Lane(
@@ -698,7 +694,7 @@ class QaWorker:
             return [
                 LaneRow.of(row)
                 for row in connection.execute(
-                    "SELECT * FROM qa_lanes WHERE run_id = ? ORDER BY slice, attempt", (run_id,)
+                    "SELECT * FROM qa_lanes WHERE run_id = ? ORDER BY lane_no", (run_id,)
                 )
             ]
 
@@ -718,16 +714,6 @@ class QaWorker:
         with self.queue.connect() as connection:
             row = connection.execute("SELECT state FROM qa_runs WHERE run_id = ?", (run_id,)).fetchone()
         return row is not None and row["state"] == "cancelled"
-
-    def _running_jobs(self) -> list[Job]:
-        with self.queue.connect() as connection:
-            return [
-                job_from_row(row, connection)
-                for row in connection.execute(
-                    "SELECT * FROM jobs WHERE recipient = ? AND state = 'running' ORDER BY created_at, id",
-                    (QA_RECIPIENT,),
-                )
-            ]
 
     def _active_jobs(self) -> list[Job]:
         with self.queue.connect() as connection:
@@ -754,13 +740,14 @@ class QaWorker:
 
 
 def _scenario(item: Mapping) -> Scenario:
+    named = tuple(name for name in (save_name(phrase) for phrase in item.get("saves", ())) if name)
     return Scenario(
         id=s_id(item["id"]),
         criterion=item["criterion"],
         steps=(item["steps"],),
         pass_test=item["passes"],
         pack=item.get("pack") or "none",
-        save=tuple(name for name in (save_name(phrase) for phrase in item.get("saves", ())) if name),
+        save=named + tuple(name for name in (AFTER_SCREENSHOT, PASS_OUTPUT) if name not in named),
     )
 
 
@@ -806,12 +793,12 @@ def _reserve(
     now: float,
 ) -> None:
     commit = plan.base_commit if item.kind in _ON_BASE else plan.detail.head
-    _insert(connection, (plan.detail.run_id, job.id, item.index, item.kind, item.lane_no, json.dumps(list(item.ids)),
+    _insert(connection, (plan.detail.run_id, job.id, item.index, item.kind, json.dumps(list(item.ids)),
                          commit, plan.base_commit, runner), attempt=attempt, now=now)
 
 
 def _relaunch(connection: sqlite3.Connection, row: LaneRow, now: float) -> None:
-    _insert(connection, (row.run_id, row.job_id, row.slice, row.kind, row.lane_no, json.dumps(list(row.scenarios)),
+    _insert(connection, (row.run_id, row.job_id, row.slice, row.kind, json.dumps(list(row.scenarios)),
                          row.commit, row.base_commit, row.runner), attempt=2, now=now)
 
 
@@ -819,11 +806,13 @@ def _insert(connection: sqlite3.Connection, facts: tuple, *, attempt: int, now: 
     connection.execute(
         """
         INSERT OR IGNORE INTO qa_lanes (
-            lane_id, run_id, job_id, slice, kind, lane_no, scenarios, commit_sha, base_commit,
-            runner, state, attempt, started_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'launching', ?, ?)
+            lane_id, run_id, job_id, slice, kind, scenarios, commit_sha, base_commit,
+            runner, state, attempt, started_at, lane_no
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'launching', ?, ?, COALESCE(MAX(lane_no), 0) + 1
+        FROM qa_lanes WHERE run_id = ?
         """,
-        (uuid.uuid4().hex, *facts, attempt, now),
+        (uuid.uuid4().hex, *facts, attempt, now, facts[0]),
     )
 
 

@@ -351,7 +351,7 @@ launch() {
         return 0
     fi
     refuse_if_retired start
-    nohup bash "$SELF" "$BOT" _supervise "$STATE" >>"$LOG" 2>&1 </dev/null 9>&- &
+    factory_detach bash "$SELF" "$BOT" _supervise "$STATE" >>"$LOG" 2>&1 </dev/null 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
