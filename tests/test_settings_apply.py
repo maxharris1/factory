@@ -370,6 +370,20 @@ def test_a_failed_restart_restores_the_backup_restarts_again_and_records_failed(
     assert box.audit()[0]["result"] == "failed"
 
 
+def test_a_failed_restart_never_undoes_an_enable_under_a_job_claimed_since(
+    tmp_path: Path,
+) -> None:
+    box = Box(tmp_path, running={"pc": 1}, codes=[0, 1])
+    box.machines.write_text(MACHINES.replace("enabled: true", "enabled: false"), encoding="utf-8")
+    box.request(device="pc", field="enabled", expect=False, value=True)
+
+    (entry,) = box.run()
+
+    assert entry.result == "failed"
+    assert entry.error == "restart waiter-claude-bot exited 1; not restored: pc holds 1 running job(s)"
+    assert "    enabled: true" in box.machines.read_text(), "pc stays enabled under its job"
+
+
 def test_two_applies_in_one_second_keep_both_backups(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.request()
@@ -621,9 +635,13 @@ def test_a_claim_racing_a_disable_never_lands_on_the_disabled_device(tmp_path: P
     @contextmanager
     def racing():
         with lock() as held:
-            claim.start()
-            claim.join(timeout=0.5)
-            yield held
+            def held_then_claim(config):
+                counts = held(config)
+                claim.start()
+                claim.join(timeout=0.5)
+                return counts
+
+            yield held_then_claim
 
     try:
         entry = placed.applier(racing).apply(_request("enabled", True, False))

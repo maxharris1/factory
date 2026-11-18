@@ -29,7 +29,8 @@ not seen:
   (lib/heal.py service_argv) with heal's scrubbed environment, after the lock
   is released; services another account owns are listed as pending, and the
   result is then `pending`, not `applied`. A failed restart restores the
-  backup, restarts them again and records `failed`.
+  backup under the same lock (not when that would disable a device now
+  holding a job), restarts them again and records `failed`.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -640,13 +641,29 @@ class Applier:
         if failure is None:
             return self._entry(request, PENDING if self.pending else APPLIED, previous,
                                backup=backup.name, restarted=restarted, pending=self.pending)
-        _replace(self.machines, old_bytes, mode)
+        kept = self._restore(request, old_bytes, mode)
         again, refailure = self._restart(stop_on_failure=False)
-        error = f"{failure}; restored {backup.name}" + (f"; then {refailure}" if refailure else "")
+        error = (f"{failure}; " + (kept or f"restored {backup.name}")
+                 + (f"; then {refailure}" if refailure else ""))
         return self._entry(request, FAILED, previous, error,
                            backup=backup.name,
                            restarted=tuple(dict.fromkeys(restarted + again)),
                            pending=self.pending)
+
+    def _restore(self, request: SettingsRequest, old_bytes: bytes, mode: int) -> str | None:
+        """Put the old file back under the claim lock. Undoing an enable is a
+        disable, so it is skipped (the reason returned) while the device holds a job."""
+        try:
+            with self.claims() as held:
+                if request.field == "enabled" and request.value is True:
+                    now, _ = load_machines_yml(self.machines)
+                    running = 0 if now is None else held(now).get(request.device, 0)
+                    if running:
+                        return f"not restored: {request.device} holds {running} running job(s)"
+                _replace(self.machines, old_bytes, mode)
+        except sqlite3.Error:
+            return "not restored: cannot read running jobs"
+        return None
 
     def _backup(self, data: bytes, mode: int) -> Path:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.clock()))
