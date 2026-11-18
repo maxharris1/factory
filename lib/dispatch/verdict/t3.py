@@ -4,12 +4,16 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from lib import job_detail
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.queue import JobRequest
+
+if TYPE_CHECKING:
+    from lib.dispatch.qa import QaFix
 
 
 @dataclass(frozen=True)
@@ -49,8 +53,21 @@ class T3Mixin:
             if gate.outcome is not None:
                 return gate.outcome
             ci_failure = gate.ci_failure
+        return self._spend_review_round(
+            ticket, comment, reported_round, ci_failure=ci_failure
+        )
+
+    def _spend_review_round(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        reported_round: int | None,
+        *,
+        ci_failure: tuple[str, ...] = (),
+        qa: QaFix | None = None,
+    ) -> tuple[bool, str]:
         outcome, state = self._record_revise(
-            ticket, comment, fields, reported_round, ci_failure
+            ticket, comment, reported_round, ci_failure, qa
         )
         if state is None:
             self._wake_comment_problem(ticket, comment, "stale", outcome)
@@ -64,9 +81,9 @@ class T3Mixin:
         self,
         ticket: TrackedTicket,
         comment: Comment,
-        fields: Mapping[str, str],
         reported_round: int | None,
         ci_failure: tuple[str, ...],
+        qa: QaFix | None = None,
     ) -> tuple[str, str | None]:
         ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
@@ -103,8 +120,11 @@ class T3Mixin:
             assert state is not None
             round_number = int(state["review_round"]) + 1
             cap = self._effective_cap(ticket, connection)
+            # A QA FAIL spends the round of an APPROVE, which T4 and T2 also
+            # run in `fixing` behind a held CI fix.
+            allowed = ("review", "awaiting-ok") if qa is None else ("review", "awaiting-ok", "fixing")
             if (
-                state["workflow_state"] not in ("review", "awaiting-ok")
+                state["workflow_state"] not in allowed
                 or reported_round != round_number
             ):
                 connection.commit()
@@ -125,8 +145,9 @@ class T3Mixin:
                     head=ticket.current_head,
                     round_number=round_number + 1,
                     cap=cap,
-                    instruction=_comment_link(comment),
+                    instruction=_comment_link(comment) if qa is None else qa.link,
                     ci_failure=ci_failure,
+                    qa_findings=qa,
                 )
                 request = JobRequest(
                     repo=ticket.repo,

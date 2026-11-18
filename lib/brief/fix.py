@@ -1,8 +1,9 @@
-"""The fix job: a REVISE verdict or a red CI run, fixed as a class.
+"""The fix job: a REVISE verdict, a QA FAIL or a red CI run, fixed as a class.
 
-A fix whose `instruction` links a comment is a review-fix: the open findings
-from the evidence bundle are inlined, each fixed by its rule. Any other
-instruction is a CI-fix.
+A fix with `qa_findings` is a QA-fix: the failed scenarios of the QA report it
+links. A fix whose `instruction` links a comment is a review-fix: the open
+findings from the evidence bundle are inlined, each fixed by its rule. Any
+other instruction is a CI-fix.
 """
 
 from __future__ import annotations
@@ -14,12 +15,20 @@ from lib.queue import Job
 
 def task_lines(job: Job, facts: dict) -> list[str]:
     detail = detail_of(job)
+    qa = detail.get("qa_findings")
     verdict = _revise_verdict_url(detail, facts)
-    lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(detail, facts)
+    if isinstance(qa, dict):
+        lines = _qa_fix(qa, facts)
+    elif verdict:
+        lines = _review_fix(detail, facts, verdict)
+    else:
+        lines = _ci_fix(detail, facts)
     return [*lines, *builder_notes(job, facts)]
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
+    if isinstance(detail.get("qa_findings"), dict):
+        return []
     return _open_findings(detail) if _revise_verdict_url(detail, facts) else []
 
 
@@ -69,14 +78,39 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
     return [
         f"Fix the `[blocking]` findings of the REVISE verdict at {verdict}. Follow the router in Skills above.",
         *shown,
+        *_class_fix_steps(facts, "finding", "Fixing only the line the reviewer quoted is not a fix."),
+    ]
+
+
+def _qa_fix(qa: dict[str, object], facts: dict) -> list[str]:
+    report = comment_url(facts, qa.get("link")) or qa.get("link")
+    failed = [qa_id for qa_id in qa.get("failed") or () if isinstance(qa_id, str)]
+    shown = (
+        "These scenarios failed: " + ", ".join(code_span(qa_id) for qa_id in failed) + "."
+        if failed
+        else "Read the failed scenarios in the report."
+    )
+    evidence = qa.get("evidence_link")
+    if isinstance(evidence, str):
+        shown += f" Evidence: {evidence}."
+    return [
+        f"Fix the failed QA scenarios of the QA report at {report}. Follow the router in Skills above.",
+        shown,
+        *_class_fix_steps(
+            facts, "failed scenario", "Fixing only the step the scenario drove is not a fix."
+        ),
+    ]
+
+
+def _class_fix_steps(facts: dict, item: str, narrow: str) -> list[str]:
+    return [
         _checkout(facts),
-        "2. For each finding: name the rule it breaks, find every path that breaks that rule, fix them all, "
-        "and add a test of the rule that fails on the current head. Fixing only the line the reviewer "
-        "quoted is not a fix.",
+        f"2. For each {item}: name the rule it breaks, find every path that breaks that rule, fix them all, "
+        f"and add a test of the rule that fails on the current head. {narrow}",
         f"3. Run only the new tests and the tests for the files you touched, plus a short smoke set, {TEST_SCOPE} "
         "Then run the router's \"Before ready\" steps.",
         base_step(4, facts),
-        "5. Push, then post the ready handoff below with the head you pushed. Say, for each finding, "
+        f"5. Push, then post the ready handoff below with the head you pushed. Say, for each {item}, "
         "the rule, the paths you fixed and the test that covers it.",
     ]
 

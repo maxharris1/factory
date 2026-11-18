@@ -71,6 +71,81 @@ def decide_scope(facts: ScopeInput) -> Run | NoRun:
     return Run("targeted", facts.unpassed or facts.live_ids)
 
 
+@dataclass(frozen=True)
+class Covered:
+    pass
+
+
+@dataclass(frozen=True)
+class Failed:
+    report_id: str
+
+
+@dataclass(frozen=True)
+class EnvFailed:
+    pass
+
+
+@dataclass(frozen=True)
+class Running:
+    pass
+
+
+@dataclass(frozen=True)
+class Missing:
+    pass
+
+
+QaStatus = Covered | Failed | EnvFailed | Running | Missing
+
+
+@dataclass(frozen=True)
+class Proceed:
+    pass
+
+
+@dataclass(frozen=True)
+class Wait:
+    outcome: str
+
+
+@dataclass(frozen=True)
+class FixFromQa:
+    report_id: str
+
+
+@dataclass(frozen=True)
+class EnsureQa:
+    pass
+
+
+GateAction = Proceed | Wait | FixFromQa | EnsureQa
+
+
+@dataclass(frozen=True)
+class QaFix:
+    link: str
+    evidence_link: str | None
+    failed: tuple[str, ...]
+
+
+def decide_gate(verdict: str, status: QaStatus) -> GateAction:
+    """What a verdict does under qa.gate: block, given the head's QA status (#765)."""
+    if verdict != "APPROVE":
+        raise ValueError(f"no QA gate row for {verdict!r}")
+    match status:
+        case Covered():
+            return Proceed()
+        case Failed(report_id):
+            return FixFromQa(report_id)
+        case Running():
+            return Wait("approve-qa-running")
+        case Missing():
+            return EnsureQa()
+        case EnvFailed():
+            return Wait("approve-qa-env-failed")
+
+
 def _arms(qa: QaConfig) -> tuple[tuple[str, str], ...]:
     primary, *others = qa.runners
     arms = [(primary.name, "primary")]
@@ -381,7 +456,57 @@ class QaMixin:
                 key,
             ).fetchall()
             connection.commit()
-        self._wake_on_qa_fail(ticket, failed)
+        if ticket.factory.qa.gate != "block":
+            self._wake_on_qa_fail(ticket, failed)
+
+    def _qa_gate(self, ticket: TrackedTicket, verdict: str, head: str) -> GateAction:
+        if ticket.factory.qa is None or ticket.factory.qa.gate != "block":
+            return Proceed()
+        return decide_gate(verdict, self._qa_status(ticket, head))
+
+    def _qa_status(self, ticket: TrackedTicket, head: str) -> QaStatus:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT state, result, reason, comment_id FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+            if row is None:
+                return Missing()
+            report_id, carried = row["comment_id"], row["reason"] or ""
+            while row["result"] == "FAIL" and report_id is None and carried.startswith("carried:"):
+                source = connection.execute(
+                    "SELECT comment_id, reason FROM qa_runs WHERE run_id = ?",
+                    (carried.removeprefix("carried:"),),
+                ).fetchone()
+                if source is None:
+                    break
+                report_id, carried = source["comment_id"], source["reason"] or ""
+        match (row["state"], row["result"]):
+            case ("queued" | "running", _):
+                return Running()
+            case ("reported", "PASS"):
+                return Covered()
+            case ("reported", None) if row["reason"] == "qa-not-required":
+                return Covered()
+            case ("reported", "FAIL"):
+                return Failed(report_id or "")
+            case _:
+                return EnvFailed()
+
+    def _qa_fix(self, ticket: TrackedTicket, report_id: str) -> QaFix:
+        report = next((comment for comment in ticket.comments if comment.id == report_id), None)
+        if report is None:
+            return QaFix(f"comment:{report_id}", None, ())
+        evidence = _EVIDENCE.search(report.body)
+        return QaFix(
+            _comment_link(report),
+            evidence.group(1) if evidence else None,
+            tuple(qa_id for qa_id, passed in _scenario_rows(report.body) if not passed),
+        )
 
     def _wake_on_qa_fail(self, ticket: TrackedTicket, failed: list[sqlite3.Row]) -> None:
         comments = {comment.id: comment for comment in ticket.comments}
