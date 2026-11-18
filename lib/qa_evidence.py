@@ -419,18 +419,16 @@ def recycle(
             os.close(run_fd)
     removed: list[str] = []
     if budget_bytes is not None:
-        _over_budget(connection, repo, real_root, budget_bytes, removed, skipped)
+        removed, refused = _remove_oldest_closed_runs(connection, repo, real_root, budget_bytes)
+        skipped += refused
     return Recycled(deleted=tuple(deleted), skipped=tuple(dict.fromkeys(skipped)), removed=tuple(removed))
 
 
-def _over_budget(
-    connection: sqlite3.Connection,
-    repo: str,
-    real_root: str,
-    budget: int,
-    removed: list[str],
-    skipped: list[tuple[str, str]],
-) -> None:
+def _remove_oldest_closed_runs(
+    connection: sqlite3.Connection, repo: str, real_root: str, budget: int
+) -> tuple[list[str], list[tuple[str, str]]]:
+    removed: list[str] = []
+    skipped: list[tuple[str, str]] = []
     closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
     rows = connection.execute(
         f"""
@@ -438,20 +436,20 @@ def _over_budget(
             SELECT 1 FROM ticket_state s
             WHERE lower(s.repo) = r.repo AND s.ticket_id = r.ticket_id
                 AND s.workflow_state IN ({closed})
-        )
+        ) AS removable
         FROM qa_runs r
         WHERE r.repo = ? AND r.evidence_dir IS NOT NULL
         ORDER BY r.started_at, r.rowid
         """,
         (repo.lower(),),
     ).fetchall()
-    runs = [(run_id, _resolve(run_id, folder, real_root), candidate) for run_id, folder, candidate in rows]
+    runs = [(run_id, _resolve(run_id, folder, real_root), removable) for run_id, folder, removable in rows]
     sizes = {run_id: _size(real_root, parts) for run_id, parts, _ in runs if not isinstance(parts, str)}
     usage = sum(sizes.values())
-    for run_id, parts, candidate in runs:
+    for run_id, parts, removable in runs:
         if usage <= budget:
-            return
-        if not candidate:
+            break
+        if not removable:
             continue
         if isinstance(parts, str):
             skipped.append((run_id, parts))
@@ -469,6 +467,7 @@ def _over_budget(
             continue
         usage -= sizes[run_id]
         removed.append(PurePosixPath(*parts).as_posix())
+    return removed, skipped
 
 
 def _size(real_root: str, parts: tuple[str, ...]) -> int:

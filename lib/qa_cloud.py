@@ -570,7 +570,7 @@ class QaWorker:
                 _set_state(connection, row.lane_id, "reported", None, self.queue.now(), result=result)
                 run = connection.execute("SELECT ticket_id FROM qa_runs WHERE run_id = ?", (row.run_id,)).fetchone()
                 if entry is not None and run is not None:
-                    folder = run_dir(entry.evidence_root, plan.repo, run["ticket_id"], row.run_id)
+                    folder = run_dir(entry.evidence_root.resolve(), plan.repo, run["ticket_id"], row.run_id)
                     record_evidence_dir(connection, row.run_id, folder)
             return
         runner.stop(row.agent_id)

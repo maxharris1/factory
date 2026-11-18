@@ -745,7 +745,9 @@ def test_low_disk_claims_nothing_and_logs_once(tmp_path: Path, unreadable: bool)
 def test_accepted_result_records_evidence_dir(tmp_path: Path) -> None:
     lab = Lab(tmp_path, lanes=2)
     root = (tmp_path / "evidence").resolve()
-    lab.worker.evidence = evidence(root)
+    root.mkdir()
+    (tmp_path / "linked").symlink_to(root, target_is_directory=True)
+    lab.worker.evidence = evidence(tmp_path / "linked")
     run_id = _ready_thread(lab)
     lab.tick(3)
 
