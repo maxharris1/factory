@@ -39,9 +39,11 @@ same process that runs the command:
   descendant, even one that left the session and dropped the tag, stays
   findable by the scope; a user with no usable user manager or Linger off
   gets a log line saying the run is uncontained, and the command still runs;
-* on macOS the command runs as its own responsible process (#329), which
-  every descendant inherits, so a descendant reparented to launchd before
-  any look saw its parent is killed with the rest.
+* on macOS the command runs as the child of an anchor that is its own
+  responsible process (#329, #846), an identity every descendant inherits;
+  the anchor keeps the worker pid and lives until the run's kill round, so
+  a descendant reparented to launchd, even after its parent exited, is
+  killed with the rest.
 
 `run` never finishes the job: `orch job done` stays the bot's call.
 """
@@ -52,6 +54,7 @@ import ctypes
 import math
 import os
 import secrets
+import select
 import signal
 import sqlite3
 import subprocess
@@ -99,10 +102,12 @@ Log = Callable[[str], None]
 # command never runs. Before the exec it puts back the signal dispositions
 # Python changed at its own start-up, as Popen does for a direct command.
 # argv[2] is a close-on-exec report pipe: EOF with no byte means the exec
-# happened (#99 A2), a byte means the command could not be exec'd.
-# On macOS the gate execs the command disclaimed (#329): the command becomes
-# its own responsible process, an identity each descendant inherits and
-# cannot shed.
+# happened (#99 A2), a byte "x" means the command could not be exec'd.
+# On macOS (#846) the gate instead execs _ANCHOR disclaimed (#329), same
+# pid: the anchor is its own responsible process and starts the command as
+# its child, so the command and every descendant name the anchor, an
+# identity none can shed. The anchor outlives the command, so that name
+# stays live for the run's kill round.
 _GATE = """\
 import os, signal, sys
 if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
@@ -115,7 +120,6 @@ if not go:
 for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
-os.set_inheritable(report, False)
 
 def disclaimed_exec(argv):
     import ctypes
@@ -136,13 +140,56 @@ def disclaimed_exec(argv):
 
 try:
     if sys.platform == "darwin":
-        disclaimed_exec(sys.argv[3:])
+        disclaimed_exec([sys.executable, "-I", "-S", "-c", ANCHOR, str(report), *sys.argv[3:]])
+    os.set_inheritable(report, False)
     os.execvp(sys.argv[3], sys.argv[3:])
 except (OSError, AttributeError) as exc:
     os.write(report, b"x")
     print(f"orch job run: cannot start {sys.argv[3]}: {exc}", file=sys.stderr)
     sys.exit(127)
 """
+
+# The macOS anchor (#846). It writes "s" on the report pipe (argv[1]) once
+# the command started, or "x" if it could not, then the command's exit
+# status and a newline once it exits. It forwards SIGTERM and SIGHUP; SIGINT
+# reaches the command through their shared process group. It never exits
+# on its own: only the run's kill round ends it.
+_ANCHOR = """\
+import os, signal, subprocess, sys, time
+report = int(sys.argv[1])
+os.set_inheritable(report, False)
+child = None
+pending = []
+
+def forward(signum, frame):
+    if child is None:
+        pending.append(signum)
+    elif signum != signal.SIGINT:
+        child.send_signal(signum)
+
+def say(message):
+    try:
+        os.write(report, message)
+    except OSError:
+        pass
+
+for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    if signal.getsignal(signum) is not signal.SIG_IGN:
+        signal.signal(signum, forward)
+try:
+    child = subprocess.Popen(sys.argv[2:])
+except OSError as exc:
+    say(b"x")
+    print(f"orch job run: cannot start {sys.argv[2]}: {exc}", file=sys.stderr)
+    sys.exit(127)
+say(b"s")
+for signum in pending:
+    child.send_signal(signum)
+say(b"%d\\n" % child.wait())
+while True:
+    time.sleep(3600)
+"""
+_GATE = _GATE.replace("ANCHOR", repr(_ANCHOR))
 
 
 def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
@@ -254,8 +301,9 @@ def run(
     are Python handlers, never SIG_IGN, so the command starts with default
     dispositions (a disposition the caller already set to SIG_IGN is left
     alone and inherited, as for any command). A signal that arrives before
-    the command starts is not dropped: during setup it means the command
-    never runs (exit 128 + the signal); during the spawn it is sent to the
+    the command starts is not dropped: during setup, or before a gated
+    command's gate opens, it means the command never runs (exit 128 + the
+    signal); during the spawn of an ungated command it is sent to the
     command once it exists. `started` gets the command's pid before the
     command may run (the device pool records it as the job's worker): the
     process waits at a gate until `started` returns, so a command never runs
@@ -283,11 +331,13 @@ def run(
     keeper: subprocess.Popen[bytes] | None = None
     reader: threading.Thread | None = None
     reaper: bool | None = None
+    status: int | None = None
     pending: list[int] = []
     previous: dict[int, object] = {}
+    at_gate = False
 
     def on_signal(signum: int, _frame: FrameType | None) -> None:
-        if child is None:
+        if child is None or at_gate:
             pending.append(signum)
         elif signum != signal.SIGINT and child.poll() is None:
             child.send_signal(signum)
@@ -328,6 +378,7 @@ def run(
             spawn = [
                 sys.executable, "-I", "-S", "-c", _GATE, str(read_end), str(report_write), *spawn
             ]
+        at_gate = gated
         try:
             child = subprocess.Popen(
                 spawn,
@@ -356,6 +407,10 @@ def run(
             gate = write_end
 
             def go() -> None:
+                nonlocal at_gate
+                at_gate = False
+                if pending:
+                    return
                 try:
                     os.write(gate, b"go\n")
                 except BrokenPipeError:
@@ -381,11 +436,21 @@ def run(
                 os.close(report_read)
                 raise
             os.close(write_end)
-            try:
-                failed = os.read(report_read, 1) != b""
-            finally:
+            if pending:
                 os.close(report_read)
-            if not failed and execed is not None:
+                log(f"not starting {argv[0]}: got signal {pending[0]}")
+                child.wait()
+                return 128 + pending[0]
+            try:
+                said = os.read(report_read, 1)
+            except BaseException:
+                os.close(report_read)
+                raise
+            if said == b"s":
+                status = report_read
+            else:
+                os.close(report_read)
+            if said != b"x" and execed is not None:
                 execed()
         elif execed is not None:
             execed()
@@ -398,11 +463,14 @@ def run(
             scope=scope,
         )
         try:
-            code = _wait(child, budget, argv[0], log, tree)
+            code = _wait(child, budget, argv[0], log, tree, status)
         finally:
             tree.end(log)
+            child.wait()
         code = _past_budget(code if code >= 0 else 128 - code, budget)
     finally:
+        if status is not None:
+            os.close(status)
         if keeper is not None:
             keeper.kill()
             keeper.wait()
@@ -461,19 +529,28 @@ def _past_budget(code: int, budget: Budget | None) -> int:
 
 
 def _wait(
-    child: subprocess.Popen[bytes], budget: Budget | None, name: str, log: Log, tree: Tree
+    child: subprocess.Popen[bytes],
+    budget: Budget | None,
+    name: str,
+    log: Log,
+    tree: Tree,
+    status: int | None = None,
 ) -> int:
-    """child.wait(), stopping the child once the budget runs out; returns once it is reaped.
+    """The command's exit status, stopping it once the budget runs out.
 
+    Without `status` the command is the child, and this returns once it is
+    reaped. With `status` (#846, the macOS anchor's report pipe) the child is
+    the anchor, and this returns once the anchor reports the command's
+    status; past the budget, the SIGKILL goes to the whole tree in one round.
     While it waits it tracks the child's process tree every TRACK_SECONDS.
     """
+    exited = _Exit(child, status)
     while True:
         tree.track_if_listable()
         timeout = TRACK_SECONDS if budget is None else min(TRACK_SECONDS, budget.remaining())
-        try:
-            return child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
+        code = exited.wait(timeout)
+        if code is not None:
+            return code
         if budget is not None and budget.remaining() <= 0:
             break
     assert budget is not None
@@ -485,17 +562,42 @@ def _wait(
     grace = time.monotonic() + budget.grace
     while True:
         tree.track_if_listable()
-        try:
-            return child.wait(timeout=max(0.0, min(0.2, grace - time.monotonic())))
-        except subprocess.TimeoutExpired:
-            pass
+        code = exited.wait(max(0.0, min(0.2, grace - time.monotonic())))
+        if code is not None:
+            return code
         if time.monotonic() >= grace:
             break
     log(f"{name} (pid {child.pid}) ignored SIGTERM for {budget.grace:g}s; killing it (SIGKILL)")
     budget.signum = signal.SIGKILL
     tree.track_if_listable()
-    child.kill()
-    return child.wait()
+    if status is None:
+        child.kill()
+        return child.wait()
+    tree.end(log)
+    return -signal.SIGKILL
+
+
+class _Exit:
+    def __init__(self, child: subprocess.Popen[bytes], status: int | None):
+        self.child = child
+        self.status = status
+        self.said = b""
+
+    def wait(self, timeout: float) -> int | None:
+        if self.status is None:
+            try:
+                return self.child.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return None
+        if not select.select([self.status], [], [], timeout)[0]:
+            return None
+        chunk = os.read(self.status, 64)
+        if not chunk:
+            return self.child.wait()
+        self.said += chunk
+        if not self.said.endswith(b"\n"):
+            return None
+        return int(self.said)
 
 
 class Control:

@@ -79,11 +79,14 @@ def _run_changes(tmp_path: Path, touched: list[str], *, base_sha: str | None = N
 
 MACOS_PATHS = [
     ".github/workflows/ci.yml",
+    "lib/device_monitor.py",
     "lib/job_run.py",
+    "lib/process_tree.py",
     "lib/remote.py",
     "tests/test_process_discovery.py",
     "tests/test_remote_start.py",
     "tests/test_remote_tree.py",
+    "tests/test_job_run.py",
     "requirements.txt",
     "requirements-dev.txt",
 ]
@@ -134,11 +137,15 @@ def test_macos_runs_on_every_non_pr_event_and_on_prs_the_changes_job_flags() -> 
     workflow = _workflow()
     assert workflow[True]["push"] == {"branches": ["main"]}
     macos = workflow["jobs"]["macos"]
+    runs = [step.get("run") for step in macos["steps"]]
     assert macos["needs"] == "changes"
     assert macos["if"] == f"({FORK_GUARD}) && (github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true')"
-    assert "pytest tests/test_process_discovery.py tests/test_remote_tree.py -p no:xdist -s -rs" in [
-        step.get("run") for step in macos["steps"]
-    ]
+    assert (
+        "pytest tests/test_process_discovery.py tests/test_remote_tree.py "
+        "tests/test_remote_start.py::test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed "
+        "-p no:xdist -s -rs"
+    ) in runs
+    assert "pytest tests/test_job_run.py -k macos -p no:xdist -s -rs -v" in runs
 
 
 @pytest.mark.parametrize("source", ["lib/remote.py", "tests/test_process_discovery.py"])

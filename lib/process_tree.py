@@ -202,7 +202,8 @@ class Tree:
     before the run, which is never adopted or disowned into it. With `adopts` (run
     is the subreaper), a child of this process belongs to it too. With
     `responsible` (macOS), an orphan whose responsible process is the root
-    belongs to it. `responsible` returns None for a process that is
+    belongs to it: the root is the run's anchor (#846, lib/job_run.py), which
+    outlives every process that names it until the kill round. `responsible` returns None for a process that is
     gone or not this user's, and raises ProcessesUnknown when it cannot say.
     With `scope`, every process in that systemd scope belongs to it.
     With `session`, a process whose `group` it is belongs to it while a member
