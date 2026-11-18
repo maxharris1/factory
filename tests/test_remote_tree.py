@@ -28,8 +28,8 @@ from tests.test_remote_start import (
     LocalShell,
     config_of,
     disable_pc,
-    kill_quietly,
     kill_all,
+    kill_quietly,
     lost_setup,
     machines_file,
     orphans,
@@ -385,6 +385,88 @@ while True:
                 pass
 
 
+@linux_path
+def test_a_term_before_the_keeper_ignores_it_leaves_no_untracked_child(
+    tmp_path: Path,
+) -> None:
+    """#827 f-6: the keeper is held before its first instruction while the
+    stop's TERM arrives; a worker that answers TERM by starting an untagged
+    child in its session must not have run, or the KILL must reach that child."""
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
+    assert target is not None
+    shell = LocalShell()
+    held, worker_pid, child_pid = tmp_path / "held", tmp_path / "worker.pid", tmp_path / "child.pid"
+    shims = tmp_path / "shims"
+    path_shim(
+        shims,
+        "sh",
+        'if [ "$3" = orch-keeper ]; then\n'
+        f": > {shlex.quote(str(held))}\n"
+        "while :; do sleep 0.05; done\n"
+        "fi",
+    )
+    child = f"""import os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(child_pid)!r}).write_text(str(os.getpid()))
+while True:
+    time.sleep(.05)
+"""
+    worker = f"""import os, signal, subprocess, sys, time
+from pathlib import Path
+def answer(*_):
+    subprocess.Popen([sys.executable, '-c', {child!r}], env={{'PATH': os.environ['PATH']}})
+    os._exit(0)
+signal.signal(signal.SIGTERM, answer)
+Path({str(worker_pid)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+"""
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=120, grace=1
+    )
+    exit_file = Path(remote.run_file(target, "exit"))
+    wrapper = None
+    try:
+        result = subprocess.run(
+            ["sh", "-c", launch],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            env={**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"},
+        )
+        assert result.returncode == 0, result.stderr
+        wrapper = int(Path(remote.run_file(target, "pid")).read_text().split()[0])
+        wait_until(held.exists, "the keeper is held before its first instruction")
+        try:
+            wait_until(worker_pid.exists, "the worker runs beside an unprotected keeper", 1.0)
+        except AssertionError:
+            pass
+
+        assert remote.stop_worker(shell, target)
+        wait_until(exit_file.exists, "the run ended after the TERM")
+        if child_pid.exists():
+            wait_until(lambda: child_pid.read_text() != "", "the child wrote its pid")
+        assert remote.stop_worker(shell, target, kill=True)
+        if child_pid.exists():
+            orphan = int(child_pid.read_text())
+            wait_until(
+                lambda: not pid_alive(orphan, None),
+                "the KILL reached the untagged child the worker started on TERM",
+                5.0,
+            )
+        assert not worker_pid.exists(), "the worker never runs before the keeper ignores TERM"
+    finally:
+        remote.stop_worker(shell, target, kill=True)
+        kill_group(wrapper)
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+
 UNLOCKED_WRITE_SECONDS = 3
 
 
@@ -518,6 +600,22 @@ class SyntheticDevice:
     def tree(self) -> list[str]:
         record = self.job / remote.tree_record(self.target.require_tag())
         return record.read_text().splitlines() if record.exists() else []
+
+
+@linux_path
+@pytest.mark.parametrize(("state", "expected"), [("Z", 0), ("S", 3)], ids=["zombie", "live"])
+def test_the_recorded_group_holds_the_check_only_while_a_live_process_is_in_it(
+    tmp_path: Path, state: str, expected: int
+) -> None:
+    """#827 f-7: an exited keeper its adopter has not reaped stays a zombie in
+    the start's group; a zombie runs nothing, so it never makes the check unsure."""
+    device = SyntheticDevice(tmp_path)
+    left = device.proc / "4242"
+    left.mkdir()
+    (left / "stat").write_text(
+        stat_line(4242, RECORDED_SESSION, 9000).replace(" S ", f" {state} ", 1)
+    )
+    assert device.run(remote.check_script(device.target)) == expected
 
 
 @linux_path
