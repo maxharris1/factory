@@ -1388,6 +1388,24 @@ def test_head_moved_posts_nothing_marks_stale_and_wakes_grok_once(tmp_path: Path
     ]
 
 
+def test_head_moved_while_lanes_are_described_posts_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    run_id = _ready_thread(lab)
+    runner = lab.fakes["claude-cloud"]
+    describe = runner.describe
+
+    def push_then_describe(agent_id: str):
+        lab.current_head = HEAD_B
+        return describe(agent_id)
+
+    monkeypatch.setattr(runner, "describe", push_then_describe)
+    lab.tick(4)
+
+    assert lab.posted == {}
+    assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
+    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+
+
 def test_head_moved_replay_queues_no_second_wake(tmp_path: Path) -> None:
     lab = Lab(tmp_path, lanes=2)
     _stale_run(lab)
@@ -1473,3 +1491,12 @@ def test_audit_gap_lines_name_only_kind_scenario_and_lane() -> None:
         "qa-4: scenario-missing, no lane reported it",
         "evidence-malformed, the result or manifest is malformed",
     )
+
+
+def test_spec_audit_section_names_the_finish_that_calls_it() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert "from lib.qa_audit import" in (root / "lib" / "qa_cloud.py").read_text(encoding="utf-8")
+    spec = (root / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    section = spec.split("\n### QA receipts audit\n", 1)[1].split("\n## ", 1)[0]
+    assert "Nothing calls it yet" not in section
+    assert "section 4.2.2, Finish" in section

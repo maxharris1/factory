@@ -695,16 +695,17 @@ class QaWorker:
     def _finish(self, job: Job, plan: RunPlan, rows: Sequence[LaneRow]) -> None:
         detail = plan.detail
         decision = decide(rows, detail)
+        latest = [row for row in newest(rows).values() if row.agent_id]
+        lanes = [(row, self._describe(row)) for row in latest]
+        evidence = receipts(plan, rows)
         current = self.head(job.request.repo, detail.pr)
-        verdict = audit(receipts(plan, rows), asked(detail), start_commit=detail.head, current_head=current)
+        verdict = audit(evidence, asked(detail), start_commit=detail.head, current_head=current)
         outcome = audited(decision, verdict, detail.head, current)
         if isinstance(outcome, Stale):
             self._stale(job, detail, outcome)
             return
         for gap in () if verdict == "clean" else verdict:
             self.log(f"qa audit {detail.run_id}: {gap.detail}")
-        latest = [row for row in newest(rows).values() if row.agent_id]
-        lanes = [(row, self._describe(row)) for row in latest]
         runner = rows[0].runner if rows else detail.runner
         body = render_comment(plan, detail, outcome, runner=runner, attempt=job.request.attempt, lanes=lanes)
         comment_id = self.post(job.request.repo, detail.pr, body, f"<!-- qa-run {detail.run_id} -->")

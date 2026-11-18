@@ -345,7 +345,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 2. Advance. Check for cancel and launch reserved lanes, in lane number order. Then grant: a running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner. Then read each running lane's result through the evidence intake (Lane rules, Read), so a slice the cap has room for is reserved before a relaunch takes a number. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
 3. Finish. When every slice has a final row, or any slice is a gap and no lane is open, the run finishes in this order:
    1. Decide (Decision, below).
-   2. Audit the receipts with `qa_audit.audit`. Each newest `reported` row gives one receipt: its lane number, the commit and method its result named, the stored result, and the lane's stored `manifest.json` (an unreadable manifest reads as empty, so it fails closed). Each run scenario asks for `s-<n>/after-screenshot.png` and `s-<n>/pass-test-output.txt`. The start commit is the job's `head`, and the current head is read live through `head(repo, pr)`. A failed read raises, the tick logs it, and the next tick tries again, so nothing posts on a failed read.
+   2. Audit the receipts with `qa_audit.audit`. Each newest `reported` row gives one receipt: its lane number, the commit and method its result named, the stored result, and the lane's stored `manifest.json` (an unreadable manifest reads as empty, so it fails closed). Each run scenario asks for `s-<n>/after-screenshot.png` and `s-<n>/pass-test-output.txt`. The start commit is the job's `head`, and the current head is read live through `head(repo, pr)`. That read comes after every other call the finish makes before the audit, such as each lane's `describe` for the comment, so a push during those calls makes the run stale instead of posting the old head's decision. A failed read raises, the tick logs it, and the next tick tries again, so nothing posts on a failed read.
    3. Map the decision and the audit's verdict with `audited`, the only place the two meet. A clean audit keeps the decision as it is. A `head-moved` gap makes the run stale. Any other gap makes the result `BLOCKED` and adds one `Gaps:` line per gap kind and scenario, `qa-<n> (lane <k>): <kind>, <fixed phrase>`. The line holds no lane-controlled text; each gap's full detail goes to the worker log as `qa audit <run_id>: <detail>`. The audit can only turn a result into `BLOCKED`, never into `PASS`. It checks receipts only for scenarios a lane marked verified, so a mismatch on a failed scenario's artifact leaves a `FAIL` a `FAIL`.
    4. Stale: post nothing. In one transaction, `record_stale` sets the `qa_runs` row `stale` with reason `head-moved`, and one `qa-head-moved` job is queued for Grok Bot (recipient `grok`), with the dedupe key `qa-head-moved:<run_id>` and the detail `run_id`, `from`, `to` and `link` (the PR). Then the job finishes with no comment id, so T6 records `qa-no-retry` and leaves the `stale` row as it is.
    5. Otherwise post the mapped decision once and finish the job with the comment id.
@@ -1357,8 +1357,8 @@ mapping, or has no mismatch list, counts as a malformed mismatch list. A
 lane yields one lane-wide `evidence-malformed` gap however many of its
 lists are malformed. So no malformed input yields a false `"clean"`. The audit does no I/O, imports nothing that does, and never
 changes a result. It checks that evidence exists and matches, not what a
-screenshot shows. Nothing calls it yet. A later ticket wires it into the
-program that runs lanes.
+screenshot shows. The QA worker calls it once per run, when the run
+finishes and before anything posts (section 4.2.2, Finish).
 
 ## 8. Review and merge rules
 
