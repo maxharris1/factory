@@ -680,6 +680,33 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
     assert len(fake.launched) == 1
 
 
+def test_a_restarted_worker_adopts_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    fake = lab.fakes["claude-cloud"]
+    launch = fake.launch
+
+    def launch_then_crash(lane):
+        launch(lane)
+        raise SystemExit("worker killed")
+
+    fake.launch = launch_then_crash
+    with pytest.raises(SystemExit):
+        lab.tick()
+    fake.launch = launch
+    lab.silent.add((0, 1))
+    lab.worker = lab.new_worker()
+    lab.tick()
+
+    assert lab.run.rows("SELECT state, agent_id FROM qa_lanes") == [("running", "claude-cloud-1")]
+    assert len(fake.launched) == 1
+
+    lab.silent.clear()
+    lab.tick()
+    assert lab.header()["result"] == "PASS"
+    assert len(fake.launched) == 1
+
+
 SHARED = {"claude-cloud": "claude"}
 
 
