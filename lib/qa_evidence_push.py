@@ -3,12 +3,15 @@
 A full `orch dashboard push` calls `push_evidence` once the snapshot is out.
 Each settled run's lane files and a rendered index.html go as one tar over
 one ssh, unpacked into a temp folder beside `<remote_dir>/qa/<run_id>` and
-moved into place only when whole. A run whose files have not changed since
-its last send to this destination and remote_dir (`.qa-push.json` beside
-the snapshot) is not sent again. A symlink, a hard-linked file or a folder outside
-the evidence root is never sent: the run is refused with one log line and the
-others still go. `plan()` decides which runs leave the PC first (#921): runs
-gone from the box, then closed tickets' runs, oldest first, while over budget.
+moved into place only when whole. Each push first reads the PC's `qa` folder
+(one `du -sk` over ssh); that inventory is `plan()`'s view of what the PC
+holds (#927). `.qa-push.json` beside the snapshot keeps only the fingerprint
+each run last had when sent to this destination and remote_dir, so a run on
+the PC with an unchanged fingerprint is not sent again. A symlink, a
+hard-linked file or a folder outside the evidence root is never sent: the run
+is refused with one log line and the others still go. `plan()` decides which
+runs leave the PC first (#921): runs gone from the box, then closed tickets'
+runs, oldest first, while over budget.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -30,8 +34,7 @@ from typing import NamedTuple
 from lib.dashboard import redact
 from lib.dashboard_config import valid_remote_dir
 from lib.dashboard_pages.qa_evidence import run_page
-from lib.dashboard_push import SEND_TIMEOUT_SECONDS, TEMP_SUFFIX, SshTransport
-from lib.load import is_strict_int
+from lib.dashboard_push import SEND_TIMEOUT_SECONDS, TEMP_SUFFIX, PushError, SshTransport
 from lib.qa_evidence import CLOSED_STATES, EvidenceRefused, RunFile, _open_root, _resolve, walk_run, write_run_tar
 from lib.qa_storage import check_id
 
@@ -39,18 +42,13 @@ EVIDENCE_DEADLINE_SECONDS = 120
 STORE_NAME = ".qa-push.json"
 LOCK_NAME = ".qa-push.lock"
 _MIB = 1024 * 1024
-
-
-@dataclass(frozen=True)
-class Sent:
-    mark: str
-    bytes: int
+_DU_LINE = re.compile(r"(\d+)\t([^/\t]+)/?")
 
 
 @dataclass
 class Store:
     dest: str
-    runs: dict[str, Sent] = field(default_factory=dict)
+    sent: dict[str, str] = field(default_factory=dict)
 
 
 class SettledRun(NamedTuple):
@@ -126,10 +124,18 @@ def fingerprint(files: Iterable[RunFile]) -> str:
 
 
 def plan(
-    *, all_ids: frozenset[str], runs: Sequence[BoxRun], pc: Mapping[str, Sent], budget_bytes: int | None
+    *,
+    all_ids: frozenset[str],
+    runs: Sequence[BoxRun],
+    pc: Mapping[str, int],
+    sent: Mapping[str, str],
+    budget_bytes: int | None,
 ) -> Plan:
-    """What one push removes from the PC and sends to it. An empty `all_ids`
-    (no qa_runs rows read) names nothing, and a Held run is never named."""
+    """What one push removes from the PC and sends to it. `pc` is the PC's
+    `qa` inventory in disk bytes and `sent` the fingerprint each run last went
+    with. A Ready run counts its own file bytes against the budget, so a fixed
+    budget settles. An empty `all_ids` (no qa_runs rows read) names nothing,
+    and a Held run is never named."""
     local = {run.run_id: run.local for run in runs}
     remove = [
         run_id
@@ -142,9 +148,13 @@ def plan(
     sends = [
         run.run_id
         for run in newest_first
-        if isinstance(run.local, Ready) and (run.run_id not in pc or pc[run.run_id].mark != run.local.mark)
+        if isinstance(run.local, Ready) and (run.run_id not in pc or sent.get(run.run_id) != run.local.mark)
     ]
-    size = {run_id: sent.bytes for run_id, sent in pc.items() if run_id not in remove}
+    size = {
+        run_id: ready.bytes if isinstance(ready := local.get(run_id), Ready) else disk
+        for run_id, disk in pc.items()
+        if run_id not in remove
+    }
     size.update({run_id: local[run_id].bytes for run_id in sends})
     total = sum(size.values())
     if budget_bytes is not None and all_ids:
@@ -166,6 +176,27 @@ def _nameable(run_id: str) -> bool:
     except ValueError:
         return False
     return not run_id.startswith(".")
+
+
+def inventory_script(remote_dir: str) -> str:
+    if not valid_remote_dir(remote_dir):
+        raise ValueError("remote_dir must be a plain path")
+    return f'cd -- {remote_dir}/qa 2>/dev/null || exit 0; set -- */; test -e "$1" || exit 0; du -sk -- "$@"'
+
+
+def parse_inventory(stdout: str) -> dict[str, int]:
+    """`{run_id: disk bytes}` from `inventory_script`'s output. Empty output is
+    an empty (wiped) PC; any line that is not `du -sk` output raises."""
+    inventory = {}
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        match = _DU_LINE.fullmatch(line)
+        if match is None:
+            raise PushError("qa inventory unparsable")
+        if _nameable(match[2]):
+            inventory[match[2]] = int(match[1]) * 1024
+    return inventory
 
 
 def upload_script(remote_dir: str, run_id: str) -> str:
@@ -208,11 +239,13 @@ def push_evidence(
     deadline: float = EVIDENCE_DEADLINE_SECONDS,
     budget_bytes: int | None = None,
 ) -> None:
-    """Under `<store dir>/.qa-push.lock`, remove the planned runs from the PC
-    in one ssh step, then send each planned run, newest first, until `deadline`.
-    Another push holding the lock skips the evidence step.
+    """Under `<store dir>/.qa-push.lock`, read the PC's `qa` inventory, remove
+    the planned runs from the PC in one ssh step, then send each planned run,
+    newest first, until `deadline`. Another push holding the lock skips the
+    evidence step.
 
-    A transport PushError propagates; what was done before it stays recorded."""
+    A transport PushError, or an inventory that does not parse, propagates;
+    what was done before it stays recorded."""
     lock = os.open(store.parent / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
@@ -238,14 +271,16 @@ def _push_locked(
     started = clock()
     state = _load_for_dest(store, f"{transport.destination()}:{transport.remote_dir}")
     all_ids = frozenset(run_id for (run_id,) in connection.execute("SELECT run_id FROM qa_runs"))
+    pc = parse_inventory(transport.remote(inventory_script(transport.remote_dir)))
+    state.sent = {run_id: mark for run_id, mark in state.sent.items() if run_id in pc}
     opened: dict[str, tuple[str, int | None]] = {}
     try:
         runs = [_box_run(row, opened, roots, log) for row in settled_runs(connection)]
-        planned = plan(all_ids=all_ids, runs=runs, pc=state.runs, budget_bytes=budget_bytes)
+        planned = plan(all_ids=all_ids, runs=runs, pc=pc, sent=state.sent, budget_bytes=budget_bytes)
         if planned.remove:
             transport.remote(remove_script(transport.remote_dir, planned.remove))
             for run_id in planned.remove:
-                del state.runs[run_id]
+                state.sent.pop(run_id, None)
             _save(store, state)
         if planned.over_budget:
             log("dashboard push: qa evidence stays over qa_budget_gib; nothing more can be removed for budget")
@@ -270,7 +305,7 @@ def _push_locked(
             except (EvidenceRefused, OSError, ValueError) as exc:
                 _refused(run_id, exc, log)
                 continue
-            state.runs[run_id] = Sent(ready.mark, ready.bytes)
+            state.sent[run_id] = ready.mark
             _save(store, state)
     finally:
         for _root, fd in opened.values():
@@ -331,28 +366,21 @@ def _load_for_dest(store: Path, dest: str) -> Store:
         data = json.loads(store.read_bytes())
     except (OSError, ValueError, RecursionError):
         return Store(dest)
-    if not isinstance(data, dict) or data.get("version") != 2 or data.get("dest") != dest:
+    if not isinstance(data, dict) or data.get("version") != 3 or data.get("dest") != dest:
         return Store(dest)
-    runs = data.get("runs")
+    sent = data.get("sent")
     return Store(
         dest,
-        runs={
-            run: Sent(entry["mark"], entry["bytes"])
-            for run, entry in (runs.items() if isinstance(runs, dict) else ())
-            if isinstance(run, str)
-            and isinstance(entry, dict)
-            and isinstance(entry.get("mark"), str)
-            and is_strict_int(entry.get("bytes"))
+        {
+            run: mark
+            for run, mark in (sent.items() if isinstance(sent, dict) else ())
+            if isinstance(run, str) and isinstance(mark, str)
         },
     )
 
 
 def _save(store: Path, state: Store) -> None:
-    data = {
-        "version": 2,
-        "dest": state.dest,
-        "runs": {run: {"mark": sent.mark, "bytes": sent.bytes} for run, sent in state.runs.items()},
-    }
+    data = {"version": 3, "dest": state.dest, "sent": state.sent}
     fd, temp = tempfile.mkstemp(prefix=f".{store.name}.", dir=store.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
