@@ -1240,6 +1240,62 @@ as below the floor. When intake stores a lane's result, accepted or not,
 the worker records the run's `run_dir` as `evidence_dir` before it closes
 the lane.
 
+### QA evidence page
+
+People open a QA run's evidence from one link on the PC dashboard server
+(issue #875; Max, 2026-11-18). Full evidence stays on the tailnet.
+
+**Layout on the PC.** A run lives at `<DASHBOARD_DIR>/qa/<run_id>/`. It holds
+the run's `lane-<n>/` folders exactly as `collect()` writes them
+(`result.json`, `manifest.json`, `<scenario-id>/<file>`), plus one
+`index.html`. #875b (#910) pushes this layout and recycles it on the PC.
+
+**Page.** `lib/dashboard_pages/qa_evidence.py`, `run_page(run_folder,
+run_id)`, builds `index.html` on the box before the push. It reads each
+lane's `result.json` and `manifest.json` and no database. It lists each
+lane's scenarios with their result. A scenario's files are the manifest
+files under its folder: an image (`.png`, `.jpg`, `.jpeg`, `.webp`) shows as
+`<img>`, a video (`.webm`, `.mp4`) as `<video>`, anything else as a link. A
+lane whose `result.json` or `manifest.json` is missing or unreadable, a
+listed file that is gone, and a run with no lanes each show "evidence
+recycled or missing". The page has inline CSS and no script. Every link is
+relative, `<run_id>/lane-<n>/<part>/...`, because the page is served at
+`/qa/runs/<run_id>` with no trailing slash.
+
+**Routes.** `deploy/factory-dashboard-http.py` answers `GET` and `HEAD` for:
+
+| Path | File | Type |
+| --- | --- | --- |
+| `/qa/runs/<run_id>` | `qa/<run_id>/index.html` | `text/html` |
+| `/qa/runs/<run_id>/lane-<n>/<path>` | `qa/<run_id>/lane-<n>/<path>` | from the table below |
+
+The server splits the path on `/` before it decodes anything, then decodes
+each part alone. Each of these is 404, as every unknown path is: a part that
+is empty, `.` or `..`, starts with `.` (the push's temp names), or holds
+`/`, `\` or NUL once decoded; a run id that `check_id` would refuse;
+`lane-0`; a trailing slash; and any other shape under `/qa`. Files are
+opened under the pinned `DASHBOARD_DIR` descriptor one part at a time with
+`O_NOFOLLOW`, as snapshot files are, and served only when the last part is
+a regular file with one link. So a symlink or a hard link is 404, and no
+directory is listed. Evidence is streamed with its size from `fstat`, not
+through the snapshot files' 8 MiB cap.
+
+| Suffix | Content type |
+| --- | --- |
+| `.png` | `image/png` |
+| `.jpg`, `.jpeg` | `image/jpeg` |
+| `.webp` | `image/webp` |
+| `.webm` | `video/webm` |
+| `.mp4` | `video/mp4` |
+| `.json` | `application/json` |
+| anything else | `text/plain; charset=utf-8`, `Content-Disposition: attachment` |
+
+Every response carries the snapshot's security headers. A `200` under
+`/qa/runs/` adds `img-src 'self'; media-src 'self'` to the same
+Content-Security-Policy so the page can show its images and videos. Video
+seeking needs HTTP range requests, which the server does not answer, so a
+video plays from the start.
+
 ### QA receipts audit
 
 A QA lane reports on its own work, so no claim it makes is trusted until a
