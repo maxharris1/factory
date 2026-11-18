@@ -52,7 +52,7 @@ class CommentsMixin:
         try:
             ticket = self._routed(ticket)
         except RouteError as error:
-            if ticket.closed and self._watched(ticket):
+            if self._closed_unfinished(ticket):
                 self._abandon_closed(ticket)
             else:
                 self._reject_route(ticket, error)
@@ -67,7 +67,7 @@ class CommentsMixin:
             self._follow_current_pull(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
-        if ticket.closed and self._watched(ticket):
+        if self._closed_unfinished(ticket):
             self._abandon_closed(ticket)
             return
         if self._sync_base_mismatch(ticket) is not None:
