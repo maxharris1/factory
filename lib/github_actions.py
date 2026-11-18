@@ -754,13 +754,14 @@ class GitHubReviewActions:
 
     def _read_failure_annotations(self, repo: str, run_id: int) -> tuple[str, ...] | None:
         try:
-            page = self._json(f"{_repo_path(repo)}/check-runs/{run_id}/annotations?per_page=100")
+            pages = self._pages(f"{_repo_path(repo)}/check-runs/{run_id}/annotations?per_page=100")
         except GitHubAdapterError:
             return None
-        if not isinstance(page, list):
+        if not all(isinstance(page, list) for page in pages):
             return None
         return tuple(
             text
+            for page in pages
             for item in page
             if isinstance(item, dict) and item.get("annotation_level") == "failure"
             for text in (item.get("title"), item.get("message"))
