@@ -115,6 +115,7 @@ _PROJECT_KEYS = {
 }
 _QA_STORAGE_KEYS = {
     "bucket", "region", "endpoint", "access_key_env", "secret_key_env", "evidence_root",
+    "evidence_budget_gib", "min_free_gib",
 }
 _QA_STORAGE_REQUIRED = ("bucket", "region", "access_key_env", "secret_key_env", "evidence_root")
 _BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
@@ -178,6 +179,8 @@ class QaStorage:
     access_key_env: str
     secret_key_env: str
     evidence_root: Path
+    evidence_budget_gib: int | None = None
+    min_free_gib: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1623,9 +1626,15 @@ def _qa_storage(value: object, where: str, findings: list[Finding]) -> QaStorage
     access = _env_name(value["access_key_env"], "qa_storage.access_key_env", findings)
     secret = _env_name(value["secret_key_env"], "qa_storage.secret_key_env", findings)
     root = _absolute_path(value, "evidence_root", "qa_storage.evidence_root", findings)
+    for key in ("evidence_budget_gib", "min_free_gib"):
+        gib = value.get(key)
+        if gib is not None and (type(gib) is not int or gib < 1):
+            findings.append(Finding("error", f"qa_storage.{key} must be a positive integer (GiB)"))
     if len(findings) > before or access is None or secret is None or root is None:
         return None
-    return QaStorage(bucket, region, endpoint, access, secret, root)
+    return QaStorage(
+        bucket, region, endpoint, access, secret, root, value.get("evidence_budget_gib"), value.get("min_free_gib")
+    )
 
 
 def _https_url(value: object) -> bool:

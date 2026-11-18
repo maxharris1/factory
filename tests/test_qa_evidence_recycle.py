@@ -234,7 +234,7 @@ def test_folder_outside_root_is_skipped_and_reported(
 
     report = recycle(db, root=root, repo=REPO, now=NOW)
 
-    assert report.deleted == ()
+    assert report.deleted == report.removed == ()
     assert [run_id for run_id, _reason in report.skipped] == ["run-1"]
     assert report.skipped[0][1]
     assert _snapshot(tmp_path) == before
@@ -269,6 +269,73 @@ def test_symlink_inside_a_run_is_reported_and_left(db: sqlite3.Connection, root:
     assert (target / "trace.zip").read_text() == "outside trace"
     assert not (folder / "lane-1" / "s-a" / "trace.zip").exists()
     assert sorted(run_id for run_id, _reason in report.skipped) == ["run-1", "run-1"]
+
+
+def _failed_run(db: sqlite3.Connection, root: Path, run_id: str, ticket: str, started_at: float, size: int) -> Path:
+    folder = run_dir(root, REPO, ticket, run_id)
+    _lane(folder, 1, {"s-f": "failed"}, [])
+    (folder / "lane-1" / "s-f").mkdir()
+    (folder / "lane-1" / "s-f" / "video.webm").write_bytes(b"v" * size)
+    _run(db, run_id, folder, ticket=ticket, started_at=started_at)
+    return folder
+
+
+def _bytes(folder: Path) -> int:
+    return sum(path.lstat().st_size for path in folder.rglob("*") if path.is_file() and not path.is_symlink())
+
+
+def test_over_budget_deletes_merged_runs_oldest_first(db: sqlite3.Connection, root: Path) -> None:
+    open_old = _failed_run(db, root, "o-1", "13", NOW - 9 * DAY, 5000)
+    merged = [_failed_run(db, root, f"m-{n}", "12", NOW - (6 - n) * DAY, 1000 * n) for n in (1, 2, 3)]
+    open_new = _failed_run(db, root, "o-2", "13", NOW - DAY, 7000)
+    _closed(db, "12", "merged", NOW - DAY)
+    opened = {folder: _snapshot(folder) for folder in (open_old, open_new)}
+    total = sum(_bytes(folder) for folder in [open_old, open_new, *merged])
+    budget = total - _bytes(merged[0]) - _bytes(merged[1])
+
+    report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=budget)
+
+    assert report == Recycled(deleted=(), skipped=(), removed=("Acme/Shop/12/m-1", "Acme/Shop/12/m-2"))
+    assert [folder.exists() for folder in merged] == [False, False, True]
+    assert {folder: _snapshot(folder) for folder in opened} == opened
+
+    report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1)
+
+    assert report == Recycled(deleted=(), skipped=(), removed=("Acme/Shop/12/m-3",))
+    assert {folder: _snapshot(folder) for folder in opened} == opened
+    assert recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1) == Recycled(deleted=(), skipped=())
+    assert db.execute("SELECT COUNT(*) FROM qa_runs WHERE evidence_dir IS NOT NULL").fetchone() == (5,)
+
+
+@pytest.mark.parametrize("level", ["run", "ticket"])
+def test_budget_never_follows_a_link_out(db: sqlite3.Connection, root: Path, tmp_path: Path, level: str) -> None:
+    outside = tmp_path.resolve() / "outside"
+    _lane(outside / "run-1", 1, {"s-a": "verified"}, _files("s-a"))
+    link = run_dir(root, REPO, TICKET, "run-1")
+    if level == "run":
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside / "run-1", target_is_directory=True)
+    else:
+        link.parent.parent.mkdir(parents=True)
+        link.parent.symlink_to(outside, target_is_directory=True)
+    _run(db, "run-1", link, started_at=NOW - 3 * DAY)
+    _closed(db, TICKET, "merged", NOW - DAY)
+    _failed_run(db, root, "o-1", "13", NOW - DAY, 5000)
+    before = _snapshot(outside)
+
+    report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1)
+
+    assert report.deleted == report.removed == ()
+    assert [run_id for run_id, _reason in report.skipped] == ["run-1"]
+    assert report.skipped[0][1]
+    assert _snapshot(outside) == before
+
+
+def test_missing_run_folder_is_nothing_to_do(db: sqlite3.Connection, root: Path) -> None:
+    _run(db, "run-1", run_dir(root, REPO, TICKET, "run-1"))
+    _closed(db, TICKET, "merged", NOW - 30 * DAY)
+
+    assert recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1) == Recycled(deleted=(), skipped=())
 
 
 def _swappable_root(tmp_path: Path) -> tuple[Path, Path, Path]:

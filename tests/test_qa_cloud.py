@@ -11,10 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from lib import cli
 from lib import lane_limit
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
+from lib.orch_yml import QaStorage, load_orch_yml
 from lib.qa_cloud import LaneRow, QaWorker, plan_slices, qa_id, s_id, save_name
+from lib.qa_evidence import record_evidence_dir, run_dir
 from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.fake import FakeRunner
 from lib.queue import JobRequest
@@ -35,6 +38,7 @@ from tests.qa_support import (
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
 BASE = "d" * 40
+GIB = 2**30
 _BRIEF_IDS = re.compile(r'"id": "(s-[0-9]+)"')
 
 
@@ -124,7 +128,7 @@ class Lab:
 
     def enqueue(self, *, ids: int = 5, regression: tuple[str, ...] = (), ticket: str = "784",
                 runner: str = "claude-cloud", arm: str = "primary",
-                packs: dict[str, str | None] | None = None) -> str:
+                packs: dict[str, str | None] | None = None, repo: str = REPO) -> str:
         detail = {
             "action": "qa", "head": HEAD_A, "scope": "full", "runner": runner, "arm": arm,
             "scenarios": [f"qa-{n}" for n in range(1, ids + 1)], "live": live(ids, packs),
@@ -132,7 +136,7 @@ class Lab:
         }
         job = self.run.queue.enqueue(
             JobRequest(
-                repo=REPO, ticket_id=ticket, action="qa", recipient="qa", source_comment_id=f"c-{ticket}",
+                repo=repo, ticket_id=ticket, action="qa", recipient="qa", source_comment_id=f"c-{ticket}",
                 timeout_seconds=300, head=HEAD_A, detail=json.dumps(detail),
             ),
             dedupe_key=f"qa:{ticket}:{runner}:{arm}",
@@ -958,3 +962,141 @@ def test_a_lanes_table_capped_at_lane_three_is_widened_and_keeps_its_rows(tmp_pa
     assert connection.execute("SELECT lane_id, lane_no FROM qa_lanes ORDER BY lane_no").fetchall() == [
         ("lane-3", 3), ("lane-4", 4),
     ]
+
+
+def evidence(root: Path, **gib: int) -> dict[str, QaStorage]:
+    return {REPO.lower(): QaStorage("factory-qa", "us-east-1", None, "QA_KEY", "QA_SECRET", root, **gib)}
+
+
+def test_worker_recycles_each_tick(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    root = (tmp_path / "evidence").resolve()
+    folder = run_dir(root, REPO, "41", "run-41")
+    (folder / "lane-1").mkdir(parents=True)
+    with open(folder / "lane-1" / "video.webm", "wb") as video:
+        video.truncate(2 * GIB)
+    with lab.run.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO qa_runs (run_id, repo, ticket_id, head, round, scope, runner, arm, job_id, state, started_at)"
+            " VALUES ('run-41', ?, '41', ?, 1, 'full', 'claude-cloud', 'primary', 'job-41', 'reported', 1.0)",
+            (REPO.lower(), HEAD_A),
+        )
+        record_evidence_dir(connection, "run-41", folder)
+        connection.execute("INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, '41', 'merged')", (REPO,))
+    lines: list[str] = []
+    worker = lab.new_worker()
+    worker.runners = {}
+    worker.evidence = evidence(root, evidence_budget_gib=1)
+    worker.log = lines.append
+    worker.tick()
+
+    assert not folder.exists()
+    assert lines == [f"qa recycle {REPO.lower()}: removed run run-41 for the budget"]
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_low_disk_claims_nothing_and_logs_once(tmp_path: Path, unreadable: bool) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    root = (tmp_path / "evidence").resolve()
+    free = [1 * GIB]
+
+    def free_bytes(path: Path) -> int:
+        assert path == root
+        if unreadable and free[0] < 5 * GIB:
+            raise PermissionError(13, "Permission denied")
+        return free[0]
+
+    lines: list[str] = []
+    lab.worker.evidence = evidence(root, min_free_gib=5)
+    lab.worker.free_bytes = free_bytes
+    lab.worker.log = lines.append
+    job = lab.enqueue(ids=1)
+    lab.silent.add((0, 1))
+    lab.tick(2)
+
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("queued",)]
+    assert lab.lanes() == []
+    paused = [line for line in lines if line.startswith("qa claim paused")]
+    assert len(paused) == 1 and str(root) in paused[0]
+    if unreadable:
+        assert "Permission denied" in paused[0]
+    else:
+        assert "1 GiB free, below 5 GiB" in paused[0]
+
+    free[0] = 10 * GIB
+    lab.tick()
+
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("running",)]
+    assert len(lab.lanes()) == 1
+    assert [line for line in lines if line.startswith("qa claim")] == [
+        paused[0], f"qa claim resumed for {REPO.lower()}: {root}",
+    ]
+
+
+def test_a_low_floor_project_on_the_same_root_keeps_the_other_paused(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    root = (tmp_path / "evidence").resolve()
+    other = "owner/other"
+    lines: list[str] = []
+    lab.worker.evidence = {
+        **evidence(root, min_free_gib=5),
+        other: QaStorage("factory-qa", "us-east-1", None, "QA_KEY", "QA_SECRET", root, min_free_gib=1),
+    }
+    lab.worker.free_bytes = lambda path: 2 * GIB
+    lab.worker.log = lines.append
+    lab.worker._backoff["claude-cloud"] = float("inf")
+    jobs = [lab.enqueue(ids=1, ticket="784"), lab.enqueue(ids=1, ticket="785", repo=other)]
+    lab.tick(3)
+
+    assert [lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) for job in jobs] == [[("queued",)]] * 2
+    assert [line for line in lines if line.startswith("qa claim")] == [
+        f"qa claim paused for {REPO.lower()}: {root} has 2 GiB free, below 5 GiB",
+    ]
+
+
+def test_accepted_result_records_evidence_dir(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    root = (tmp_path / "evidence").resolve()
+    root.mkdir()
+    (tmp_path / "linked").symlink_to(root, target_is_directory=True)
+    lab.worker.evidence = evidence(tmp_path / "linked")
+    run_id = _ready_thread(lab)
+    lab.tick(3)
+
+    assert [row[3] for row in lab.lanes()] == ["reported", "reported"]
+    ticket = lab.run.rows("SELECT ticket_id FROM qa_runs WHERE run_id = ?", run_id)[0][0]
+    assert lab.run.rows("SELECT evidence_dir FROM qa_runs WHERE run_id = ?", run_id) == [
+        (str(run_dir(root, REPO, ticket, run_id)),)
+    ]
+
+
+def test_qa_worker_gets_each_project_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 30\n"
+        "trusted_logins:\n  maxharris1: [grok-bot]\n"
+        "projects:\n"
+        "  - repo: Owner/Repo\n"
+        "    qa_storage:\n"
+        "      bucket: factory-qa-owner\n      region: us-east-1\n"
+        "      access_key_env: QA_S3_KEY_ID\n      secret_key_env: QA_S3_SECRET\n"
+        "      evidence_root: /srv/factory/qa-evidence\n"
+        "      evidence_budget_gib: 40\n      min_free_gib: 5\n"
+        "  - repo: owner/other\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(orch)
+    assert findings == []
+
+    class Source:
+        def __init__(self, config: object) -> None:
+            pass
+
+        def review_actions_by_repo(self) -> dict:
+            return {}
+
+    monkeypatch.setattr(cli, "LivePollSource", Source)
+    worker = cli._qa_runtime(Lab(tmp_path).run.queue.path, config)
+
+    assert worker.evidence == {"owner/repo": config.projects[0].qa_storage}
+    assert worker.evidence["owner/repo"].evidence_budget_gib == 40
