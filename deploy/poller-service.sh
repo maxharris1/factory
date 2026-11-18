@@ -285,7 +285,7 @@ launch() {
     }
     refuse_if_retired start
     # fd 9 is the service lock; the poller must not inherit it.
-    nohup "$RUNNER" --pidfile "$PIDFILE" >>"$LOG" 2>&1 </dev/null 9>&- &
+    factory_detach "$RUNNER" --pidfile "$PIDFILE" >>"$LOG" 2>&1 </dev/null 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
@@ -401,7 +401,7 @@ ensure_watchdog() {
         flock -n -E 75 "$ENSURE_LOOP_LOCK" true 9>&- || status=$?
         ((status == 75)) && return 0
     fi
-    ORCH_POLL_AUTOSTART_LOOP=1 nohup "$ENSURE_LOOP" >>"${STATE}/poller-ensure-loop.log" 2>&1 </dev/null 9>&- &
+    factory_detach env ORCH_POLL_AUTOSTART_LOOP=1 "$ENSURE_LOOP" >>"${STATE}/poller-ensure-loop.log" 2>&1 </dev/null 9>&-
 }
 
 ensure() {

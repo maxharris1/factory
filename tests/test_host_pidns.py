@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "deploy" / "host-pidns.sh"
@@ -109,3 +113,25 @@ def test_waiter_status_still_answers_outside_the_host_pid_namespace(tmp_path: Pa
     )
     assert result.returncode == 3, result.stderr
     assert "refusing" not in result.stderr
+
+
+def test_factory_detach_survives_its_callers_group_dying_the_moment_it_returns(
+    tmp_path: Path,
+) -> None:
+    shell = shutil.which("dash") or "sh"
+    launch = ('. "$1"; factory_detach sleep 60 >/dev/null 2>&1 </dev/null; '
+              'echo $! >"$2"; kill -KILL 0')
+    for trial in range(20):
+        pidfile = tmp_path / f"pid-{trial}"
+        caller = subprocess.Popen([shell, "-c", launch, "sh", str(HELPER), str(pidfile)],
+                                  env={"PATH": "/usr/bin:/bin"}, process_group=0)
+        caller.wait(timeout=30)
+        pid = int(pidfile.read_text())
+        try:
+            assert alive(pid), f"trial {trial}: the caller's group took the launch down"
+            assert os.getsid(pid) == pid, f"trial {trial}: the launch kept the caller's session"
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

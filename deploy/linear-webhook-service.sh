@@ -500,8 +500,8 @@ launch_one() {
         [[ -z "$loud" ]] || say "_${mode}-loop already running (lock held)"
         return 0
     fi
-    nohup bash "$SELF" "_${mode}-loop" --state "$STATE" \
-        >>"$(log_file "$mode")" 2>&1 </dev/null 8>&- 9>&- &
+    factory_detach bash "$SELF" "_${mode}-loop" --state "$STATE" \
+        >>"$(log_file "$mode")" 2>&1 </dev/null 8>&- 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if lock_held "$mode"; then
