@@ -1495,6 +1495,30 @@ def test_mismatch_on_a_failed_scenarios_artifact_stays_fail(tmp_path: Path) -> N
     assert "Gaps:" not in lab.only_comment()
 
 
+def test_mismatch_spelled_with_a_dot_prefix_blocks_a_verified_scenario(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=1)
+    upload = lab.storage._upload
+
+    def respelled_upload(folder: str) -> None:
+        upload(folder)
+        key = f"{folder}/{RESULT_NAME}"
+        result = json.loads(lab.storage.objects[key])
+        entry = result["artifacts"][0]
+        entry["path"] = "./" + entry["path"]
+        entry["sha256"] = "0" * 64
+        lab.storage.objects[key] = json.dumps(result).encode()
+
+    lab.storage._upload = respelled_upload
+    lab.tick(4)
+
+    head = json.loads(lab.run.rows("SELECT result FROM qa_lanes")[0][0])
+    assert {"path": "s-1/after-screenshot.png", "reason": "sha256"} in head["mismatches"]
+    assert lab.header()["result"] == "BLOCKED"
+    gaps = lab.only_comment().split("Gaps:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert any(line.startswith("- qa-1 (lane 1): artifact-mismatch") for line in gaps)
+
+
 @pytest.mark.parametrize("result", ["PASS", "FAIL", "BLOCKED"])
 @pytest.mark.parametrize("kind", [*get_args(GapKind), "clean"])
 def test_audited_never_yields_pass(result: str, kind: str) -> None:

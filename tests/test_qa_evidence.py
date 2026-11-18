@@ -256,6 +256,24 @@ def test_artifact_mismatches_reach_manifest_and_result(root: Path) -> None:
     assert manifest["mismatches"] == expected
 
 
+def test_artifact_mismatches_name_the_canonical_path(root: Path) -> None:
+    shot = b"screenshot bytes"
+    bundle = _bundle(_file("s-1/after-screenshot.png", shot))
+    artifacts = [
+        {"path": "./s-1/after-screenshot.png", "sha256": "0" * 64, "size": len(shot)},
+        {"path": "s-1//gone.png", "sha256": _sha(b""), "size": 0},
+    ]
+
+    returned = _collect(root, _storage(_result(artifacts=artifacts), bundle))
+
+    expected = [
+        {"path": "s-1/after-screenshot.png", "reason": "sha256"},
+        {"path": "s-1/gone.png", "reason": "missing"},
+    ]
+    assert returned is not None and returned["mismatches"] == expected
+    assert json.loads((_lane_dir(root) / "manifest.json").read_text())["mismatches"] == expected
+
+
 def test_log_lines_are_scrubbed(root: Path) -> None:
     bundle = _bundle(_file("logs/app.log", f"server ready\n{SIGNED_LOG_LINE}\n".encode()))
 

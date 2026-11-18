@@ -275,14 +275,15 @@ def _check_artifacts(artifacts: list[Any], unpack: Path) -> list[dict[str, str]]
         if parts is None:
             mismatches.append({"path": path if isinstance(path, str) else "", "reason": "bad path"})
             continue
+        canonical = "/".join(parts)
         file = unpack.joinpath(*parts)
         if not file.is_file():
-            mismatches.append({"path": path, "reason": "missing"})
+            mismatches.append({"path": canonical, "reason": "missing"})
             continue
         if file.stat().st_size != entry.get("size"):
-            mismatches.append({"path": path, "reason": "size"})
+            mismatches.append({"path": canonical, "reason": "size"})
         if _sha256(file) != entry.get("sha256"):
-            mismatches.append({"path": path, "reason": "sha256"})
+            mismatches.append({"path": canonical, "reason": "sha256"})
     return mismatches
 
 
