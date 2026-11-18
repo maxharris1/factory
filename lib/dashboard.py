@@ -160,6 +160,7 @@ from typing import NamedTuple
 import yaml
 
 from lib import health as component_health
+from lib import live_settings
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import (
@@ -185,6 +186,7 @@ from lib.dispatch.cycle_clock import LOCK_ERRORS, SLOW_CYCLE
 from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
+from lib.heal import POLLER_SERVICE
 from lib.job_state import (
     DEAD,
     JOB_STATES,
@@ -206,6 +208,7 @@ from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
 from lib.schema import TICKETS
 from lib import max_actions
 from lib.status import PAUSED_STATES, _hold_approvers
+from lib.wait import OWNING_BOTS
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
@@ -224,7 +227,7 @@ RELAY_STEPS = 40
 SETTINGS_AUDIT = "settings-audit.jsonl"
 SETTINGS_RESULTS = 50
 AUDIT_KEYS = ("id", "actor", "requested_at", "applied_at", "device", "field", "previous", "new",
-              "result", "error", "backup", "restarted", "pending")
+              "result", "error", "backup", "restarted", "pending", "version")
 AUDIT_RESULTS = ("applied", "pending", "refused", "failed")
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
@@ -820,6 +823,7 @@ def collect_snapshot(
         telemetry = read_telemetry(connection, now)  # issue #93
         rules = read_project_rules(connection)  # issue #152
         usage = read_usage(connection, now, machines)  # issue #151
+        live = live_settings.peek(connection)
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -883,7 +887,7 @@ def collect_snapshot(
             "box": {"name": _clean(host, 40), "running": box_running, "slot_max": box_max},
             "devices": devices,
         },
-        "settings": {"results": _settings_results(db_path.parent / SETTINGS_AUDIT)},
+        "settings": {"results": _settings_results(db_path.parent / SETTINGS_AUDIT, live)},
         "stuck": {
             "tickets": db["stuck_tickets"],
             "overdue_jobs": db["overdue_jobs"],
@@ -2399,7 +2403,20 @@ def _audit_value(value: object) -> object:
     return _clean(value, 200)
 
 
-def _settings_results(path: Path) -> list[dict]:
+_WAITER_HARNESS = {f"waiter-{bot}": harness for bot, harness in OWNING_BOTS.items()}
+
+
+def _every_service_uses(pending: object, version: int, live: live_settings.Live | None) -> bool:
+    if live is None or not live.is_applied(version) or not isinstance(pending, list):
+        return False
+    return all(
+        name == POLLER_SERVICE
+        or (name in _WAITER_HARNESS and live.seen.get(_WAITER_HARNESS[name], 0) >= version)
+        for name in pending
+    )
+
+
+def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]:
     """The last SETTINGS_RESULTS entries of the settings audit log (#777),
     oldest first, each cut to the AuditEntry keys with its strings clipped."""
     results = []
@@ -2411,6 +2428,14 @@ def _settings_results(path: Path) -> list[dict]:
         if isinstance(entry, dict):
             row = {key: _audit_value(entry.get(key)) for key in AUDIT_KEYS}
             row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
+            version = row["version"]
+            if row["result"] == "applied" and type(version) is int:
+                row["waiting"] = live is None or not live.is_applied(version)
+                if row["waiting"]:
+                    row["result"] = "pending"
+            elif row["result"] == "pending" and type(version) is int:
+                if _every_service_uses(row["pending"], version, live):
+                    row["result"] = "applied"
             results.append(row)
     return results
 

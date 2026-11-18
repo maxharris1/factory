@@ -32,7 +32,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
-from tests.pool_helpers import LOCAL_BOX_MACHINES, write_target_machines
+from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts, write_target_machines
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
@@ -962,10 +962,12 @@ def test_plain_orch_wait_beats_as_a_waiter_while_it_blocks(
     tmp_path: Path, monkeypatch, capsys, restore_signals
 ) -> None:
     db, queue = make_db(tmp_path)
+    machines = machines_file(tmp_path)
+    poller_adopts(queue, machines)
     queue.enqueue(request("codex"), dedupe_key="a")
     Recorder.entered = []
     monkeypatch.setattr(health, "Beater", Recorder)
-    assert cli_main(["wait", "codex-bot", "--db", str(db), "--machines", str(machines_file(tmp_path))]) == 0
+    assert cli_main(["wait", "codex-bot", "--db", str(db), "--machines", str(machines)]) == 0
     assert [(e["component"], e["bot"], e["devices"], e["on_exit"]) for e in Recorder.entered] == [
         ("waiter", "codex-bot", ["box", "pc"], "delete"),
     ]

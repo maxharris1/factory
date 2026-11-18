@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, job_run, process_tree, remote
+from lib import device_monitor, job_run, live_settings, process_tree, remote
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
@@ -30,7 +30,7 @@ from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
 from lib.worktrees import pid_alive, process_start
-from tests.pool_helpers import TARGET_MACHINES_YML, write_target_machines
+from tests.pool_helpers import TARGET_MACHINES_YML, poller_adopts, write_target_machines
 from tests.test_dispatcher import (
     GO,
     TRUSTED_LOGINS,
@@ -363,6 +363,7 @@ def test_orch_wait_claims_a_box_slot_and_names_the_device(tmp_path: Path) -> Non
     machines = machines_file(tmp_path, box_slots=3, pc=False)
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
+    poller_adopts(queue, machines)
     first = enqueue(queue, "claude", "1")
     proc = orch("wait", "claude-bot", "--db", str(db), "--machines", str(machines))
     out, err = proc.communicate(timeout=20)
@@ -1816,13 +1817,13 @@ def test_an_unchanged_machines_yml_is_not_loaded_again(
 ) -> None:
     now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
     loads: list[Path] = []
-    real = device_monitor.load_machines_yml
+    real = live_settings.load_machines_yml
 
     def counted(path: Path, **kwargs):
         loads.append(path)
         return real(path, **kwargs)
 
-    monkeypatch.setattr(device_monitor, "load_machines_yml", counted)
+    monkeypatch.setattr(live_settings, "load_machines_yml", counted)
     for at in (0.0, 60.0, 120.0):
         poll_at(now, dispatcher, at)
     assert loads == [tmp_path / "machines.yml"]

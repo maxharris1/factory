@@ -50,7 +50,7 @@ from lib.waiter import (
 from tests import fake_runner
 from tests.fake_docker import Docker
 from tests.child_reaper import descendants
-from tests.pool_helpers import LOCAL_BOX_MACHINES
+from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts
 from tests.procs import alive
 from tests.test_brief import FACTORY_MD, detail
 from tests.test_wait import GO, dispatcher_for, tracked
@@ -225,6 +225,7 @@ def make_queue(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:
 def local_pool(queue: SQLiteJobQueue, machines: Path = MACHINES) -> DevicePool:
     config, findings = load_machines_yml(machines)
     assert config is not None, findings
+    poller_adopts(queue, machines)
     return DevicePool(queue, local_only(config), machines_path=machines)
 
 
@@ -1066,6 +1067,7 @@ def autostart(tmp_path: Path):
     )
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
+    poller_adopts(queue, MACHINES)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -1210,6 +1212,7 @@ def test_autostart_refuses_to_start_without_a_valid_harness_config(tmp_path: Pat
 def test_plain_wait_still_prints_and_exits_without_starting_anything(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
+    poller_adopts(queue, ROOT / "machines.yml")
     job_id = enqueue(queue, "a")
     env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
     result = subprocess.run(

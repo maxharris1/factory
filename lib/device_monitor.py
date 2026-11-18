@@ -4,10 +4,13 @@
 The dispatcher runs `DeviceMonitor.reconcile` once per poll, before T6
 looks at timeouts. First it calls `DeviceMonitor.reload`, which loads
 machines.yml again on the first poll (the config the monitor was built
-with was read before it could stamp the file) and then whenever its
-mtime or its machines.local.yml overlay's has changed since the last good
-load; a file that fails to load raises and the monitor keeps the last
-good config, so the next poll tries again. `reconcile` then walks each
+with was read before it could stamp the file) and then whenever it or its
+machines.local.yml overlay has changed since the last good load. The load
+is an adopt (lib/live_settings.py, #852): in one BEGIN IMMEDIATE it sets
+the adopted switches of the shared settings row every claim places by to
+the file, and the monitor acts on that same parse, so no claim lands on a
+device this monitor still holds disabled. A file that fails to load raises
+and the monitor keeps the last good config, so the next poll tries again. `reconcile` then walks each
 device that holds a slot or an orphan. A remote device gets all three
 steps below. On the box (a local device) a finished job's slot is
 released as below; when machines.yml sets it `enabled: false`, each
@@ -73,12 +76,11 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
 
-from lib.config_overlay import overlay_path
+from lib import live_settings
 from lib.device_pool import DevicePool, HeldSlot, Orphan, Placement
 from lib.job_state import Liveness, liveness, never_started
-from lib.machines_yml import Device, MachinesConfig, load_machines_yml
+from lib.machines_yml import Device, MachinesConfig
 from lib.process_tree import Process, ProcessesUnknown, Tree, _responsible_pid, processes, run_tag
 from lib.remote import (
     GONE,
@@ -96,11 +98,6 @@ from lib.worktrees import pid_alive
 Log = Callable[[str], None]
 OnLost = Callable[[str, str, str], None]  # job_id, device, reason
 Alive = Callable[[int | None, str | None], bool]
-
-
-class Stamp(NamedTuple):
-    machines_ns: int
-    overlay_ns: int | None
 
 
 @dataclass(frozen=True)
@@ -148,14 +145,6 @@ def stranded(
     return f"unreachable {int((now - failing_since) // 60)} min"
 
 
-def _stamp(path: Path) -> Stamp:
-    try:
-        overlay: int | None = overlay_path(path).stat().st_mtime_ns
-    except FileNotFoundError:
-        overlay = None
-    return Stamp(path.stat().st_mtime_ns, overlay)
-
-
 def retry_stranded(device: Device, failing_since: float | None, now: float) -> str | None:
     if not device.enabled:
         return "disabled"
@@ -181,24 +170,22 @@ class DeviceMonitor:
         self.kill = kill
         self.scan = scan
         self.machines_path = machines_path
-        self._stamp: Stamp | None = None
+        self._stamp: str | None = None
 
     def reload(self) -> None:
-        """Load machines.yml again if it or its overlay changed since the last good load."""
+        """Adopt machines.yml again if it or its overlay changed since the last
+        good load: write it to the shared settings row and act on that same
+        parse from now on (lib/live_settings.py, #852)."""
         path = self.machines_path
         if path is None:
             return
-        try:
-            stamp = _stamp(path)
-            if stamp == self._stamp:
-                return
-            config, findings = load_machines_yml(path)
-        except OSError as exc:
-            raise ValueError(f"{path}: cannot read: {type(exc).__name__}") from exc
-        errors = [item for item in findings if item.severity == "error"]
-        if config is None or errors:
-            detail = errors[0].message if errors else "invalid machines.yml"
-            raise ValueError(f"{path}: {detail}")
+        stamp = live_settings.file_key(path)
+        if stamp == self._stamp:
+            return
+        with self.pool.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _, config = live_settings.adopted(connection, path)
+            connection.commit()
         self.config = self.pool.config = config
         self._stamp = stamp
 

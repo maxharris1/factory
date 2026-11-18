@@ -31,7 +31,7 @@ from lib.wait import (
     wait_for_job,
 )
 from tests.handoff_store import env_store, serve_handoff
-from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF, LOCAL_BOX_MACHINES, pool_claim
+from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF, LOCAL_BOX_MACHINES, poller_adopts, pool_claim
 
 
 class QueuePool:
@@ -62,7 +62,9 @@ TRUSTED_LOGINS = {
 
 def make_db(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:
     path = tmp_path / "orch.db"
-    return path, SQLiteJobQueue(path, clock=time.time)
+    queue = SQLiteJobQueue(path, clock=time.time)
+    poller_adopts(queue, ROOT / "machines.yml")
+    return path, queue
 
 
 def dispatcher_for(path: Path) -> Dispatcher:

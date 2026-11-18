@@ -15,6 +15,7 @@ RESULT_TONE = {"applied": "ok", "pending": "warn", "refused": "warn", "failed": 
 RESULTS_PER_DEVICE = 5
 QUEUED = "queued (applies within ~2 min)"
 READ_ONLY = "read-only: sign-in is not available here"
+WAITING = "waiting for the poller's next cycle"
 
 
 def drain_state(row: dict) -> tuple[str, str]:
@@ -52,7 +53,11 @@ def result_line(row: dict) -> str:
 
 
 def pending_line(row: dict) -> str | None:
-    if row.get("result") != "pending" or not row.get("pending"):
+    if row.get("result") != "pending":
+        return None
+    if row.get("waiting"):
+        return WAITING
+    if not row.get("pending"):
         return None
     return "restart pending: " + ", ".join(row["pending"])
 
@@ -229,7 +234,9 @@ _SCRIPT = r"""
       add(li, chip(r.result, ST.tone[r.result] || 'muted'));
       add(li, el('span', 'st-what', stLine(r)));
       if (r.error) add(li, el('span', 'st-err', r.error));
-      if (r.result === 'pending' && (r.pending || []).length) {
+      if (r.result === 'pending' && r.waiting) {
+        add(li, el('span', 'st-err', ST.waiting));
+      } else if (r.result === 'pending' && (r.pending || []).length) {
         add(li, el('span', 'st-err', 'restart pending: ' + r.pending.join(', ')));
       }
     });
@@ -249,5 +256,6 @@ _SCRIPT = r"""
   }
 """
 SCRIPT = _SCRIPT.replace("__ST__", json.dumps(
-    {"tone": RESULT_TONE, "perDevice": RESULTS_PER_DEVICE, "queued": QUEUED, "readOnly": READ_ONLY}
+    {"tone": RESULT_TONE, "perDevice": RESULTS_PER_DEVICE, "queued": QUEUED, "readOnly": READ_ONLY,
+     "waiting": WAITING}
 ))

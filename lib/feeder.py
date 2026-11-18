@@ -113,7 +113,7 @@ from typing import NamedTuple, Protocol
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from lib import attention
+from lib import attention, live_settings
 from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
@@ -1131,11 +1131,15 @@ class Feeder:
 
     def _room(self, harnesses: set[str], now: float) -> dict[str, int]:
         room: dict[str, int] = {}
+        machines = self.machines
         with self.queue.connect() as connection:
-            used = slots_in_use(connection, self.machines)
-            blocked = placement_blocked(connection, now, self.machines)
+            live = live_settings.peek(connection)
+            if live is not None and machines is not None:
+                machines = live.placement_config(machines)
+            used = slots_in_use(connection, machines)
+            blocked = placement_blocked(connection, now, machines)
             for harness in harnesses:
-                free = free_slots(self.machines, harness, used, blocked) if self.machines else 0
+                free = free_slots(machines, harness, used, blocked) if machines else 0
                 queued = connection.execute(
                     "SELECT COUNT(*) FROM jobs WHERE state = 'queued' AND recipient = ?",
                     (harness,),
