@@ -31,7 +31,7 @@ from lib.remote_follow import (
 )
 from tests.fake_path import link_path_without
 from tests.test_remote_darwin import Mac
-from tests.test_remote_start import Ssh, gone, kill_quietly, use_fake_ssh, wait_file, wait_gone
+from tests.test_remote_start import Ssh, gone, kill_quietly, past_uncontained, use_fake_ssh, wait_file, wait_gone
 
 ALIAS = "fakepc-codex-bot"
 
@@ -157,7 +157,7 @@ def test_the_harness_runs_detached_and_writes_its_files_in_the_run_dir(box: Box)
     files = sorted(path.name for path in box.run_dir().iterdir())
     assert files == ["exit", "handoff", "log", "pid", "stdin"]
     assert (box.run_dir() / "handoff").read_text() == "ORCH-HANDOFF: 123456\n"
-    log = (box.run_dir() / "log").read_text()
+    log = past_uncontained((box.run_dir() / "log").read_bytes()).decode()
     assert log.startswith("line 0 ") and log.endswith("ORCH-HANDOFF: 123456\n")
     assert (box.run_dir() / "stdin").read_bytes() == b"the brief"
     assert Path(f"{box.count}.brief").read_bytes() == b"the brief"

@@ -797,7 +797,7 @@ time.sleep(120)
         worker_pid = int(wait_file(ready))
         cgroup = Path(f"/proc/{worker_pid}/cgroup").read_text().strip()
         said = (box.run_dir() / "log").read_text().splitlines()
-        assert said.count("orch: the run is uncontained (no systemd scope)") == (
+        assert said.count(remote.UNCONTAINED) == (
             1 if linger == "no" else 0
         ), said
         if linger == "no":

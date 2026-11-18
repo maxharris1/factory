@@ -35,8 +35,8 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   and execs the login shell under `systemd-run --user --scope` in that
   unit, with environment expansion off, so the run is contained: every
   process it starts stays in the scope, whatever its session or
-  environment. Otherwise it writes `orch: the run is uncontained (no
-  systemd scope)` to the run log and runs as above, uncontained. Before either,
+  environment. Otherwise it writes UNCONTAINED to the run log and runs
+  as above, uncontained. Before either,
   when it leads its session, the start leaves the keeper (KEEPER, #827)
   there and waits until the keeper ignores TERM, HUP and INT: tagged, and
   there until it is the session's last process, so the session holds a
@@ -449,6 +449,9 @@ def tree_record(tag: str) -> str:
     return f".orch-worker-{tag}.tree.pid"
 
 
+UNCONTAINED = "orch: the run is uncontained (no systemd scope)"
+
+
 def scope_record(tag: str) -> str:
     """Linux: names the systemd user scope the run is contained in, when it is (#817)."""
     return f".orch-worker-{tag}.scope"
@@ -610,7 +613,7 @@ def _contain(tag: str) -> str:
     Only on a device whose user manager lingers and puts a process it
     starts in a scope of its own on the unified cgroup hierarchy (the
     probe's `0::` line), and only once the scope record names the unit;
-    otherwise "$@" is empty and the run starts uncontained.
+    otherwise "$@" is empty, UNCONTAINED goes to stderr and the run starts uncontained.
     systemd-run 254+ expands `${VAR}` in a scope's argv unless given
     `--expand-environment=no`, a flag older releases lack.
     XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager, is
@@ -630,7 +633,7 @@ def _contain(tag: str) -> str:
         f"echo {unit} > {shlex.quote(scope_record(tag))} && "
         'export XDG_RUNTIME_DIR="$x"; '
         f"then set -- {scope} --unit={unit} --; "
-        "else echo 'orch: the run is uncontained (no systemd scope)' >&2; fi; "
+        f"else echo {shlex.quote(UNCONTAINED)} >&2; fi; "
     )
 
 

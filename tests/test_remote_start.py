@@ -2170,6 +2170,13 @@ def boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
+def past_uncontained(log: bytes) -> bytes:
+    said = remote.UNCONTAINED.encode() + b"\n"
+    rest = log.removeprefix(said)
+    assert said not in rest, log
+    return rest
+
+
 def gone(pid: int) -> bool:
     """True once pid has exited (a zombie waiting to be reaped counts as gone)."""
     try:
@@ -2810,7 +2817,7 @@ def test_an_uncontained_start_says_so_in_the_run_log_and_still_runs(tmp_path: Pa
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "HARNESS_RAN\n"
-    assert result.stderr == "orch: the run is uncontained (no systemd scope)\n"
+    assert result.stderr == remote.UNCONTAINED + "\n"
     assert not (Path(target.job_dir) / remote.scope_record(target.tag)).exists()
 
 
