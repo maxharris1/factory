@@ -84,14 +84,16 @@ out again from ci_pool, ci_runs and tickets.
 
 QA (#790): `qa` is {runs, cap, runners, queued} from the qa_runs and
 qa_lanes tables the QA worker writes. `runs` holds each tracked ticket's
-runs at the head of its newest run row, by ticket and primary before
-shootout, leaving out scope none and cancelled or stale runs: {repo,
+runs at the head of its newest run row of any scope or state, by ticket
+and primary before shootout, then leaves out that head's scope none and
+cancelled or stale runs, so an older head never shows: {repo,
 ticket_id, runner, arm, state, scope, result, lanes, passed, total,
 elapsed_seconds, run}. `lanes`
 counts the distinct slices launched (base checks left out). `passed` and
 `total` are set only once the run is reported: over the newest attempt of
-each slice, `total` is the scenarios asked and `passed` those its lane
-result marks verified. `elapsed_seconds` runs from started_at to now, or
+each head slice (regression slices run on the base commit and are left
+out), `total` is the scenarios asked and `passed` those its lane result
+marks verified. `elapsed_seconds` runs from started_at to now, or
 to finished_at once reported. `run` is the run id as two 16-character
 halves (a whole 32-hex id would be redacted), or None when the id is not
 32 hex; the page joins them into the `/qa/runs/<run_id>` evidence link.
@@ -1191,14 +1193,14 @@ def _qa_scenarios(lanes: list[sqlite3.Row]) -> tuple[int, int]:
 def _qa(
     connection: sqlite3.Connection, now: float, tables: set[str], tracked: dict[tuple[str, str], TicketInfo]
 ) -> dict:
+    newest: dict[tuple[str, str], object] = {}
     heads: dict[tuple[str, str], list[sqlite3.Row]] = {}
     if "qa_runs" in tables:
-        for row in connection.execute(
-            "SELECT rowid, * FROM qa_runs WHERE scope != 'none' AND state NOT IN ('cancelled', 'stale') "
-            "ORDER BY rowid DESC"
-        ):
+        for row in connection.execute("SELECT rowid, * FROM qa_runs ORDER BY rowid DESC"):
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
-            if key in tracked and (key not in heads or heads[key][0]["head"] == row["head"]):
+            if key not in tracked or newest.setdefault(key, row["head"]) != row["head"]:
+                continue
+            if row["scope"] != "none" and row["state"] not in ("cancelled", "stale"):
                 heads.setdefault(key, []).append(row)
     lanes = "qa_lanes" in tables
     runs = []
@@ -1209,7 +1211,9 @@ def _qa(
                 "WHERE run_id = ? AND kind != 'base-check'", (row["run_id"],)
             ).fetchall() if lanes else []
             state = _enum(row["state"], QA_RUN_STATES)
-            passed, total = _qa_scenarios(found) if state == "reported" else (None, None)
+            passed, total = (
+                _qa_scenarios([lane for lane in found if lane["kind"] == "head"]) if state == "reported" else (None, None)
+            )
             run_id = str(row["run_id"])
             reported = state == "reported" and row["finished_at"] is not None
             runs.append({

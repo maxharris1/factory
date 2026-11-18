@@ -107,6 +107,7 @@ def orch(*, listener: bool = False, push: bool = False, public_url: str | None =
         if listener else None,
         dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
         refused_harnesses=refused,
+        qa=SimpleNamespace(max_cloud_lanes=2),
     )
 
 

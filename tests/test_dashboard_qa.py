@@ -220,3 +220,48 @@ def test_ac3_the_script_draws_the_qa_lane_like_the_server(tmp_path: Path, snapsh
                                 "runners": [{"runner": "claude-cloud", "open": 0}, {"runner": "cursor-cloud", "open": 0}]}}
     bare = _run_page(tmp_path / "quiet", quiet, "main", BAR + ["hud", "lanes"])["html"]["lanes"]
     assert 'data-device="qa"' not in bare
+
+
+def _one_ticket(tmp_path: Path, build) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, REPO, RUNNING[0], state="ship")
+        build(connection)
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+def test_ac1_scenarios_count_only_the_head_slices_and_lanes_count_every_launched_slice(tmp_path: Path) -> None:
+    run_id = "e" * 32
+
+    def build(connection) -> None:
+        _run(connection, run_id, RUNNING[0], result="PASS", finished_at=NOW - 300)
+        _lane(connection, run_id, 0, ["qa-1"], results={"qa-1": "verified"})
+        _lane(connection, run_id, 1, ["qa-2"], results={"qa-2": "verified"})
+        _lane(connection, run_id, 2, ["qa-2"], kind="regression", results={"qa-2": "failed"})
+
+    snapshot = _one_ticket(tmp_path, build)
+    [run] = snapshot["qa"]["runs"]
+    assert (run["lanes"], run["passed"], run["total"]) == (3, 2, 2)
+    card = _card(_server(snapshot)["pipeline"], f"{REPO}#{RUNNING[0]}")
+    assert _qa_lines(card) == ["QA PASSclaude-cloudreported · full · 3 lanes · 2/2 scenariosevidence10m 00s"]
+
+
+@pytest.mark.parametrize("newer", [
+    {"scope": "targeted", "state": "cancelled"},
+    {"scope": "targeted", "state": "stale"},
+    {"scope": "none", "state": "reported", "result": "PASS", "finished_at": NOW - 10},
+])
+def test_a_hidden_run_at_the_newest_head_never_brings_back_an_older_heads_result(tmp_path: Path, newer: dict) -> None:
+    def build(connection) -> None:
+        _run(connection, "a" * 32, RUNNING[0], head="ha", result="PASS", finished_at=NOW - 2000)
+        _lane(connection, "a" * 32, 0, ["qa-1"], results={"qa-1": "verified"})
+        _run(connection, "b" * 32, RUNNING[0], head="hb", **newer)
+
+    snapshot = _one_ticket(tmp_path, build)
+    assert snapshot["qa"]["runs"] == []
+    card = _card(_server(snapshot)["pipeline"], f"{REPO}#{RUNNING[0]}")
+    assert _qa_lines(card) == []
+    assert _links(card) == []
