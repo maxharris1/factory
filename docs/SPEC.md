@@ -333,7 +333,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **Runners.** A runner is one vendor, behind the interface in `lib/qa_runners/__init__.py`. `launch(lane)` starts one cloud agent and returns its id and link. Launching the same `lane_id` again returns the first agent, so a worker that crashed between a launch and its write never starts a second one. A `Lane` is the lane id, the rendered brief (`lib/brief/qa.py`), the repo, the base branch, the `qa.<runner>.environment` name (`environment_name`) and the model. It has no field that could hold a secret value. `status(agent_id)` is `running` or `ended`. `stop(agent_id)` ends an agent, and stopping an ended one is not an error. `describe(agent_id)` gives the machine size and the agent version. A launch raises `RunnerOutage`, `UsageLimit` or `LaunchFailed`, each a `LaunchError`. Runners register by name. The worker builds only the names in `factory_md.QA_RUNNERS` that are registered. `lib/qa_runners/fake.py` registers `fake`, for tests; `factory.md` refuses that name. With no runner registered (today), the worker claims nothing.
 
-**Seams.** The worker is given `collect(lane)`, which returns the lane's parsed `result.json` or nothing yet, and `storage(repo)`, which returns the project's `Storage` (built in production from `projects[].qa_storage`). `collect` is still a test double until #866 supplies the real intake. Before each launch the worker signs the lane's links with `links_for_lane`, for its run id, its lane number, the distinct packs its scenarios name and `qa.timeout_minutes` in seconds. The brief carries them. Without either seam the worker claims nothing. A `Lane`'s repr leaves out the brief, and no log line or comment holds a link. The base commit is the merge-base of the head and the base branch, from the waiter's fetched clone. The worker reads the project's `qa` block from `factory.md` at `projects[].factory_ref`.
+**Seams.** The worker is given `storage(repo)`, which returns the project's `Storage` (built in production from `projects[].qa_storage`), and `evidence`, each project's `qa_storage` entry. It reads lane results with the real intake, `qa_evidence.collect` over that storage, into the entry's `evidence_root` (Lane rules, Read). Before each launch the worker signs the lane's links with `links_for_lane`, for its run id, its lane number, the distinct packs its scenarios name and `qa.timeout_minutes` in seconds. The brief carries them. Without `storage` the worker claims nothing. A job whose repo has no `evidence` entry gets no plan, so it is never claimed and no lane launches. A `Lane`'s repr leaves out the brief, and no log line or comment holds a link. The base commit is the merge-base of the head and the base branch, from the waiter's fetched clone. The worker reads the project's `qa` block from `factory.md` at `projects[].factory_ref`.
 
 **`qa_lanes`.** One row per agent attempt: `lane_id`, `run_id`, `job_id`, `slice`, `kind` (`head`, `regression` or `base-check`), `lane_no` (the next unused number in its run when the row was reserved, 1 to 8), `scenarios` (the `qa-<n>` ids), `commit_sha` (the commit the lane tests), `base_commit`, `runner`, `agent_id`, `agent_url`, `state`, `attempt` (1 or 2), `reason`, `result` (the accepted result JSON), `started_at`, `finished_at` and `launch_called_at` (written before the first launch call). States: `launching` (a reserved slot, no agent yet), `running`, `reported`, `dropped`, `gap`, `cancelled` and `timed-out`. `(run_id, slice, attempt)` is unique, so a replayed tick never launches twice. A slice's outcome is its newest row.
 
@@ -342,13 +342,14 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 **The tick.**
 
 1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, yields to its shared account (below), or is at `qa.max_cloud_lanes`; a skipped job blocks nothing behind it. A job skipped for the cap, a backed-off runner or a shared account gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
-2. Advance. Check for cancel and launch reserved lanes, in lane number order. Then grant: a running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner. Then read each running lane, so a slice the cap has room for is reserved before a relaunch takes a number. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
+2. Advance. Check for cancel and launch reserved lanes, in lane number order. Then grant: a running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner. Then read each running lane's result through the evidence intake (Lane rules, Read), so a slice the cap has room for is reserved before a relaunch takes a number. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
 3. Finish. When every slice has a final row, or any slice is a gap and no lane is open, decide, post once, and finish the job with the comment id.
 
 **Lane rules.**
 
+- Read. A running lane's result comes from `collect` (section 7), which stores its checked and scrubbed evidence at `lane_dir` under the project's `evidence_root`. When that folder already exists, as after a crash between intake and the `reported` write, the worker reads it back with `stored` and fetches nothing. Any stored result, accepted or not, records the run's `run_dir` as `evidence_dir`. `EvidenceRefused` is a miss with the reason `evidence-refused` (Drop). Its text names lane-controlled member names, so it goes only to the worker log, as `qa lane <n> of <run_id>: evidence refused: <text>`, never to a row or the comment. `StorageError` means no result this tick: the worker logs `qa lane <n> of <run_id>: StorageError: <text>` and fetches again next tick, and the timeout still applies. Neither text holds a signed link.
 - Drop. A result is accepted only when its `run_id`, `lane`, `kind`, `commit`, `base_commit` and scenario ids match the brief, its `method` is the verify skill or `fallback-playwright` or `fallback-control-ui`, its `status` is `PASS`, `ISSUES` or `BLOCKED`, and each scenario result is `verified`, `failed`, `inconclusive` or `needs-human`. A first miss stops the agent, writes the lane `dropped` and reserves its relaunch (attempt 2) in the same slot. A second miss writes it `gap`.
-- Ended. `status` says ended and there is no result: `gap` at once, with no relaunch.
+- Ended. `status` says ended and a fetch found no `result.json`: `gap` at once, with no relaunch. A `StorageError` is not such a fetch.
 - Timeout. No result `qa.timeout_minutes` after the agent started: `stop()`, then `timed-out`, which counts as a gap.
 - Base-check. When every slice reported and some failed head scenario has no base result, exactly one `base-check` lane starts for those ids, at the base commit, in the last lane's slot, as the slice after the highest one written. It is the only extra lane a run may start.
 - Launch failures. An outage or usage limit on the run's first launch falls back (below). Any other launch failure, and any failure of a later launch (an extra lane, a relaunch, the base-check), makes that slice a gap.
@@ -1142,9 +1143,14 @@ ticket, root)`, treats everything in a bundle as untrusted:
 5. Store the fetched `result.json` in the folder, over any copy in the
    bundle. Write `manifest.json`: the run id, lane, commit, every file with
    its sha256 and size after scrubbing, and the mismatches.
-6. Move the folder to `<root>/<owner>/<repo>/<ticket>/<run_id>/lane-<n>/`
-   in one rename. An existing destination is refused, never replaced.
+6. Move the folder to `lane_dir(root, repo, ticket, run_id, lane)`,
+   `<root>/<owner>/<repo>/<ticket>/<run_id>/lane-<n>/`, in one rename. An
+   existing destination is refused, never replaced.
 7. Return the parsed result with its mismatches.
+
+`stored(folder)` reads a lane folder that intake already wrote and returns
+what `collect` returned for it: the stored `result.json` with the
+mismatches from `manifest.json`.
 
 A refusal raises `EvidenceRefused`, whose text names the reason and the
 scrubbed member, and nothing from that bundle reaches the evidence root.
@@ -1230,9 +1236,9 @@ worker logs `qa claim paused for <repo>` once when the repo's root drops
 below that repo's floor and `qa claim resumed for <repo>` once when it
 recovers. Pause state is per repo, so repos that share a root with different
 floors pause and resume apart. A root whose free space cannot be read counts
-as below the floor. When the worker accepts a lane's result,
-it records the run's `run_dir` as `evidence_dir`, in the transaction that
-closes the lane.
+as below the floor. When intake stores a lane's result, accepted or not,
+the worker records the run's `run_dir` as `evidence_dir` before it closes
+the lane.
 
 ### QA receipts audit
 

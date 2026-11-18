@@ -17,9 +17,10 @@ from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
 from lib.orch_yml import QaStorage, load_orch_yml
 from lib.qa_cloud import LaneRow, QaWorker, plan_slices, qa_id, s_id, save_name
-from lib.qa_evidence import record_evidence_dir, run_dir
+from lib.qa_evidence import collect, record_evidence_dir, run_dir
 from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.fake import FakeRunner
+from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError
 from lib.queue import JobRequest
 from tests.qa_support import (
     HEAD_A,
@@ -27,8 +28,9 @@ from tests.qa_support import (
     REPO,
     SIGNATURE,
     STORE,
+    FakeStorage,
     Harness,
-    SigningStorage,
+    bundle,
     qa_config,
     ready,
     scenarios,
@@ -57,6 +59,34 @@ def live(count: int, packs: dict[str, str | None] | None = None) -> list[dict]:
     ]
 
 
+class LabStorage(FakeStorage):
+    def __init__(self, lab: Lab) -> None:
+        super().__init__()
+        self.lab = lab
+
+    def fetch(self, key: str, dest: Path, max_bytes: int) -> bool:
+        folder = key.rsplit("/", 1)[0]
+        if f"{folder}/{RESULT_NAME}" not in self.objects:
+            self._upload(folder)
+        return super().fetch(key, dest, max_bytes)
+
+    def _upload(self, folder: str) -> None:
+        _, _, run_id, lane = folder.split("/")
+        with self.lab.run.queue.connect() as connection:
+            found = connection.execute(
+                "SELECT * FROM qa_lanes WHERE run_id = ? AND lane_no = ?", (run_id, int(lane.removeprefix("lane-")))
+            ).fetchone()
+        if found is None or found["agent_id"] is None:
+            return
+        row = LaneRow.of(found)
+        result = self.lab.report(row)
+        if result is None:
+            return
+        self.objects[f"{folder}/{RESULT_NAME}"] = json.dumps(result).encode()
+        if (row.slice, row.attempt) not in self.lab.unbundled:
+            self.objects[f"{folder}/{BUNDLE_NAME}"] = bundle()
+
+
 class Lab:
     def __init__(
         self,
@@ -76,8 +106,11 @@ class Lab:
         self.base_outcome: dict[str, str] = {}
         self.broken: dict[tuple[int, int], Callable[[dict], None]] = {}
         self.silent: set[tuple[int, int]] = set()
+        self.unbundled: set[tuple[int, int]] = set()
         self.posted: dict[str, tuple[int, str]] = {}
-        self.storage = SigningStorage()
+        self.storage = LabStorage(self)
+        self.root = (tmp_path / "evidence").resolve()
+        self.evidence = evidence(self.root)
         self.logs: list[str] = []
         self.cap = cap
         self.shares_usage_with = shares_usage_with or {}
@@ -90,11 +123,11 @@ class Lab:
             factory=lambda repo: self.run.thread.base.factory,
             base_commit=lambda repo, branch, head: BASE,
             post=self.post,
-            collect=self.collect,
             storage=lambda repo: self.storage,
             max_cloud_lanes=self.cap,
             shares_usage_with=self.shares_usage_with,
             log=self.logs.append,
+            evidence=self.evidence,
         )
 
     def post(self, repo: str, pr: int, body: str, marker: str) -> str:
@@ -105,7 +138,7 @@ class Lab:
         self.posted[comment_id] = (pr, body)
         return comment_id
 
-    def collect(self, row: LaneRow) -> dict | None:
+    def report(self, row: LaneRow) -> dict | None:
         if (row.slice, row.attempt) in self.silent:
             return None
         outcomes = self.base_outcome if row.kind != "head" else self.head_outcome
@@ -160,6 +193,12 @@ class Lab:
 
     def header(self) -> dict[str, str]:
         return parse_comment(self.only_comment()).as_dict()
+
+
+def assert_no_signed_link(lab: Lab) -> None:
+    texts = [*lab.logs, *(body for _, body in lab.posted.values())]
+    texts += [str(value) for row in lab.run.rows("SELECT reason, result FROM qa_lanes") for value in row]
+    assert [text for text in texts if SIGNATURE in text] == []
 
 
 def brief_ids(brief: str) -> set[str]:
@@ -226,6 +265,13 @@ def test_result_without_commit_is_dropped_and_relaunched_once(tmp_path: Path) ->
     ]
     assert len(lab.launched()) == 2
     assert lab.header()["result"] == "PASS"
+    prefix = "qa/factory/run-784-claude-cloud/"
+    assert sorted(set(lab.storage.fetched)) == [
+        f"{prefix}lane-{n}/{name}" for n in (1, 2) for name in (BUNDLE_NAME, RESULT_NAME)
+    ]
+    folder = run_dir(lab.root, REPO, "784", "run-784-claude-cloud")
+    assert sorted(item.name for item in folder.iterdir()) == ["lane-1", "lane-2"]
+    assert [line for line in lab.logs if "already stored" in line] == []
 
 
 def test_every_lane_row_has_its_own_lane_number(tmp_path: Path) -> None:
@@ -568,10 +614,7 @@ def test_a_run_that_errors_every_tick_stops_its_heartbeat(tmp_path: Path) -> Non
     lab.tick()
     claimed_at = lab.run.rows("SELECT last_activity_at FROM jobs WHERE id = ?", job)
 
-    def broken(row: LaneRow) -> dict | None:
-        raise RuntimeError("collector down")
-
-    lab.worker.collect = broken
+    lab.storage.fail.extend(RuntimeError("store down") for _ in range(3))
     lab.tick(3)
 
     assert lab.run.rows("SELECT last_activity_at FROM jobs WHERE id = ?", job) == claimed_at
@@ -1124,6 +1167,32 @@ def test_accepted_result_records_evidence_dir(tmp_path: Path) -> None:
     ]
 
 
+def test_rejected_results_stay_in_reach_of_recycle(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    run_id = _ready_thread(lab)
+    lab.broken[(0, 1)] = lambda result: result.pop("commit")
+    lab.broken[(0, 2)] = lambda result: result.update(commit=BASE)
+    lab.tick(4)
+
+    assert [row[3:5] for row in lab.lanes()] == [("dropped", "wrong-commit"), ("gap", "dropped-twice:wrong-commit")]
+    assert lab.header()["result"] == "BLOCKED"
+    lab.run.post("q1", lab.only_comment())
+    lab.run.poll()
+    ticket = lab.run.rows("SELECT ticket_id FROM qa_runs WHERE run_id = ?", run_id)[0][0]
+    folder = run_dir(lab.root, REPO, ticket, run_id)
+    assert len(list(folder.iterdir())) == 2
+    with lab.run.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, 'merged')"
+            " ON CONFLICT (repo, ticket_id) DO UPDATE SET workflow_state = 'merged'",
+            (REPO, ticket),
+        )
+    lab.worker.evidence = evidence(lab.root, evidence_budget_gib=0)
+    lab.tick()
+
+    assert not folder.exists()
+
+
 def test_qa_worker_gets_each_project_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orch = tmp_path / "orch.yml"
     orch.write_text(
@@ -1154,3 +1223,96 @@ def test_qa_worker_gets_each_project_storage(tmp_path: Path, monkeypatch: pytest
 
     assert worker.evidence == {"owner/repo": config.projects[0].qa_storage}
     assert worker.evidence["owner/repo"].evidence_budget_gib == 40
+
+
+def test_reported_lane_evidence_is_stored(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    lab.enqueue(ids=3)
+    lab.tick(4)
+
+    assert lab.header()["result"] == "PASS"
+    folder = run_dir(lab.root, REPO, "784", "run-784-claude-cloud")
+    for n in (1, 2):
+        assert sorted(item.name for item in (folder / f"lane-{n}").iterdir()) == ["manifest.json", RESULT_NAME]
+        prefix = f"qa/factory/run-784-claude-cloud/lane-{n}/"
+        assert {prefix + RESULT_NAME, prefix + BUNDLE_NAME} <= set(lab.storage.fetched)
+    assert_no_signed_link(lab)
+
+
+def test_refused_evidence_drops_and_relaunches_once(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.unbundled.add((0, 1))
+    lab.tick(4)
+
+    assert lab.lanes() == [
+        (0, "head", 1, "dropped", "evidence-refused", "claude-cloud"),
+        (0, "head", 2, "reported", None, "claude-cloud"),
+    ]
+    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1"]
+    assert "qa lane 1 of run-784-claude-cloud: evidence refused: bundle.tar.gz is missing" in lab.logs
+    assert lab.header()["result"] == "PASS"
+    assert_no_signed_link(lab)
+
+
+def test_evidence_refused_twice_is_a_gap(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.unbundled.update({(0, 1), (0, 2)})
+    lab.tick(4)
+
+    assert [row[3:5] for row in lab.lanes()] == [
+        ("dropped", "evidence-refused"), ("gap", "dropped-twice:evidence-refused"),
+    ]
+    assert lab.header()["result"] == "BLOCKED"
+    assert "lane 2 (head): gap, dropped-twice:evidence-refused" in lab.only_comment()
+    assert_no_signed_link(lab)
+
+
+def test_storage_error_waits_and_retries(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    job = lab.enqueue(ids=1)
+    outage = "fetch qa/factory/run-784-claude-cloud/lane-1/result.json: HTTP 503"
+    lab.storage.fail.append(StorageError(outage))
+    lab.tick()
+    lab.fakes["claude-cloud"].end("claude-cloud-1")
+    lab.storage.fail.append(StorageError(outage))
+    lab.tick()
+
+    assert [row[3] for row in lab.lanes()] == ["running"]
+    assert lab.run.rows("SELECT state, last_activity_at FROM jobs WHERE id = ?", job) == [("running", 1030.0)]
+    assert [line for line in lab.logs if "StorageError" in line] == [
+        f"qa lane 1 of run-784-claude-cloud: StorageError: {outage}"
+    ] * 2
+
+    lab.tick()
+    assert lab.lanes() == [(0, "head", 1, "reported", None, "claude-cloud")]
+    assert lab.header()["result"] == "PASS"
+    assert_no_signed_link(lab)
+
+
+def test_restarted_worker_reads_stored_evidence(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.silent.add((0, 1))
+    lab.tick()
+    lab.silent.clear()
+    collect("run-784-claude-cloud", 1, storage=lab.storage, repo=REPO, ticket="784", root=lab.root)
+    lab.worker = lab.new_worker()
+    lab.tick()
+
+    assert lab.lanes() == [(0, "head", 1, "reported", None, "claude-cloud")]
+    assert lab.storage.fetched.count(f"qa/factory/run-784-claude-cloud/lane-1/{BUNDLE_NAME}") == 1
+    assert lab.header()["result"] == "PASS"
+    assert_no_signed_link(lab)
+
+
+def test_a_repo_without_qa_storage_is_never_claimed(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.worker.evidence = {}
+    job = lab.enqueue(ids=1)
+    lab.tick()
+
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("queued",)]
+    assert lab.launched() == []
+    assert f"qa job {job}: no plan: ValueError: orch.yml has no projects[].qa_storage for this repo" in lab.logs

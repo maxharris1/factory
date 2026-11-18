@@ -29,9 +29,9 @@ from lib.dispatch.schema import ensure_qa_lanes
 from lib.factory_md import FactoryConfig, QaConfig
 from lib.orch_yml import QaStorage
 from lib.queue import QA_RECIPIENT, Job, SQLiteJobQueue, claim_order, job_from_row
-from lib.qa_evidence import record_evidence_dir, recycle, run_dir
+from lib.qa_evidence import EvidenceRefused, collect, lane_dir, record_evidence_dir, recycle, run_dir, stored
 from lib.qa_runners import Lane, Runner, RunnerOutage, UsageLimit
-from lib.qa_storage import Storage, links_for_lane
+from lib.qa_storage import Storage, StorageError, links_for_lane
 
 SliceKind = Literal["head", "regression", "base-check"]
 Result = Literal["PASS", "FAIL", "BLOCKED"]
@@ -136,9 +136,11 @@ class Detail:
 @dataclass(frozen=True)
 class RunPlan:
     repo: str
+    ticket: str
     detail: Detail
     factory: FactoryConfig
     qa: QaConfig
+    evidence_root: Path
     base_commit: str
     slices: tuple[Slice, ...]
 
@@ -307,7 +309,6 @@ def render_comment(
     return "\n\n".join(parts) + "\n"
 
 
-Collect = Callable[[LaneRow], "dict | None"]
 Post = Callable[[str, int, str, str], str]
 
 
@@ -318,7 +319,6 @@ class QaWorker:
     factory: Callable[[str], FactoryConfig]
     base_commit: Callable[[str, str, str], str]
     post: Post
-    collect: Collect | None = None
     storage: Callable[[str], Storage] | None = None
     max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
     shares_usage_with: Mapping[str, str] = field(default_factory=dict)
@@ -335,7 +335,7 @@ class QaWorker:
 
     def tick(self) -> None:
         self._recycle()
-        if not self.runners or self.collect is None or self.storage is None:
+        if not self.runners or self.storage is None:
             return
         waiting: Counter[str] = Counter()
         try:
@@ -580,28 +580,45 @@ class QaWorker:
 
     def _watch(self, plan: RunPlan, row: LaneRow) -> None:
         runner = self.runners[row.runner]
-        result = self.collect(row)
-        if result is None and runner.status(row.agent_id) == "ended":
-            result = self.collect(row)
-            if result is None:
-                self._close(row, "gap", "ended-without-result")
-                return
+        try:
+            result = self._intake(plan, row)
+            if result is None and runner.status(row.agent_id) == "ended":
+                result = self._intake(plan, row)
+                if result is None:
+                    self._close(row, "gap", "ended-without-result")
+                    return
+        except StorageError as exc:
+            self.log(f"qa lane {row.lane_no} of {row.run_id}: StorageError: {exc}")
+            result = None
+        except EvidenceRefused as exc:
+            self.log(f"qa lane {row.lane_no} of {row.run_id}: evidence refused: {exc}")
+            self._drop(row, "evidence-refused")
+            return
         if result is None:
             if self.queue.now() - row.started_at >= plan.qa.timeout_minutes * 60:
                 runner.stop(row.agent_id)
                 self._close(row, "timed-out", "no-result-in-time")
             return
+        with self.queue.connect() as connection:
+            record_evidence_dir(connection, row.run_id, run_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id))
         reason = rejection(row, result, plan.qa.verify)
         if reason is None:
-            entry = self.evidence.get(plan.repo.lower())
             with self.queue.connect() as connection:
                 _set_state(connection, row.lane_id, "reported", None, self.queue.now(), result=result)
-                run = connection.execute("SELECT ticket_id FROM qa_runs WHERE run_id = ?", (row.run_id,)).fetchone()
-                if entry is not None and run is not None:
-                    folder = run_dir(entry.evidence_root.resolve(), plan.repo, run["ticket_id"], row.run_id)
-                    record_evidence_dir(connection, row.run_id, folder)
             return
-        runner.stop(row.agent_id)
+        self._drop(row, reason)
+
+    def _intake(self, plan: RunPlan, row: LaneRow) -> dict | None:
+        folder = lane_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id, row.lane_no)
+        if folder.exists():
+            return stored(folder)
+        return collect(
+            row.run_id, row.lane_no, storage=self.storage(plan.repo), repo=plan.repo, ticket=plan.ticket,
+            root=plan.evidence_root,
+        )
+
+    def _drop(self, row: LaneRow, reason: str) -> None:
+        self.runners[row.runner].stop(row.agent_id)
         if row.attempt == 2:
             self._close(row, "gap", f"dropped-twice:{reason}")
             return
@@ -749,13 +766,18 @@ class QaWorker:
         factory = self.factory(job.request.repo)
         if factory.qa is None:
             raise ValueError("factory.md has no qa block")
+        entry = self.evidence.get(job.request.repo.lower())
+        if entry is None:
+            raise ValueError("orch.yml has no projects[].qa_storage for this repo")
         rows = self._lanes(detail.run_id)
         base = rows[0].base_commit if rows else self.base_commit(job.request.repo, factory.base_branch, detail.head)
         plan = RunPlan(
             repo=job.request.repo,
+            ticket=job.request.ticket_id,
             detail=detail,
             factory=factory,
             qa=factory.qa,
+            evidence_root=entry.evidence_root.resolve(),
             base_commit=base,
             slices=plan_slices(detail.ids, detail.regression, factory.qa.lanes),
         )
