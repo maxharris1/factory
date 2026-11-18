@@ -1356,7 +1356,8 @@ def _attention(
         })
     for row in flags:
         detail = row["reason"] + (f": {row['detail']}" if row["detail"] else "")
-        items.append({"kind": "needs-attention", **_same_ref(row), "detail": detail})
+        items.append({"kind": "needs-attention", **_same_ref(row), "detail": detail,
+                      **acting.get((row["repo"], row["ticket_id"]), {})})
     listed = {(row["repo"], row["ticket_id"]) for row in stuck}
     listed |= {(row["repo"], row["ticket_id"]) for row in flags}
     for row in paused:
