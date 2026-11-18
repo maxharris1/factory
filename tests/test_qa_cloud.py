@@ -16,6 +16,7 @@ from lib import cli
 from lib import lane_limit
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
+from lib.linear_upload import HttpLinear, LinearClient
 from lib.orch_yml import QaStorage, load_orch_yml
 from lib.qa_audit import Gap, GapKind
 from lib.qa_cloud import (
@@ -24,6 +25,7 @@ from lib.qa_cloud import (
 from lib.qa_evidence import collect, record_evidence_dir, run_dir
 from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.fake import FakeRunner
+from lib.poll_source import HTTPResult
 from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError
 from lib.queue import JobRequest, job_from_row
 from tests.qa_support import (
@@ -44,6 +46,9 @@ from tests.qa_support import (
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
 BASE = "d" * 40
+NO_COMMENTS = HTTPResult(200, json.dumps(
+    {"data": {"issue": {"comments": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+))
 GIB = 2**30
 _BRIEF_IDS = re.compile(r'"id": "(s-[0-9]+)"')
 
@@ -110,6 +115,7 @@ class Lab:
         cap: int = 10,
         shootout: bool = False,
         shares_usage_with: dict[str, str] | None = None,
+        linear: LinearClient | None = None,
     ):
         qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5)
         qa = replace(qa, runners=tuple(item for name in runners for item in qa.runners if item.name == name))
@@ -130,6 +136,7 @@ class Lab:
         self.logs: list[str] = []
         self.cap = cap
         self.shares_usage_with = shares_usage_with or {}
+        self.linear = linear or HttpLinear("lab-linear-key", post=lambda *_: NO_COMMENTS)
         self.worker = self.new_worker()
 
     def new_worker(self) -> QaWorker:
@@ -145,6 +152,7 @@ class Lab:
             log=self.logs.append,
             evidence=self.evidence,
             head=lambda repo, pr: self.current_head,
+            linear=self.linear,
         )
 
     def post(self, repo: str, pr: int, body: str, marker: str) -> str:
@@ -448,7 +456,7 @@ def test_cap_two_three_jobs_two_run_one_lane_each_build_claimed(tmp_path: Path) 
 
 
 def _ready_thread(lab: Lab) -> str:
-    lab.run.post("r1", ready(HEAD_A, body=scenarios("qa-1", "qa-2")), head=HEAD_A)
+    lab.run.post("r1", ready(HEAD_A, body=scenarios("qa-1", "qa-2", pack="demo")), head=HEAD_A)
     lab.run.poll()
     return lab.run.rows("SELECT run_id FROM qa_runs")[0][0]
 
@@ -1054,6 +1062,36 @@ def test_a_lane_moved_to_a_limited_fallback_before_a_crash_waits_after_restart(t
     lab.tick()
     assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
     assert len(lab.fakes["cursor-cloud"].launched) == 1
+
+
+def test_a_launch_records_exactly_the_pack_keys_it_signed(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=3)
+    lab.enqueue(ids=3, packs={"qa-1": "demo", "qa-2": "other", "qa-3": None})
+    lab.tick(4)
+
+    recorded = dict(lab.run.rows("SELECT slice, pack_keys FROM qa_lanes"))
+    assert {n: json.loads(keys) for n, keys in recorded.items()} == {
+        0: ["packs/demo"], 1: ["packs/other"], 2: [],
+    }
+    signed = {key for kind, key, _ in lab.storage.signed if kind == "download"}
+    assert signed == {"packs/demo", "packs/other"}
+
+
+def test_a_lane_written_before_pack_keys_existed_reads_null(tmp_path: Path) -> None:
+    connection = sqlite3.connect(tmp_path / "old.db")
+    ensure_qa_lanes(connection)
+    connection.execute("ALTER TABLE qa_lanes DROP COLUMN pack_keys")
+    connection.execute(
+        "INSERT INTO qa_lanes (lane_id, run_id, job_id, slice, kind, lane_no, scenarios, commit_sha, base_commit,"
+        " runner, agent_id, state, attempt, started_at)"
+        " VALUES ('lane-1', 'run', 'job', 0, 'head', 1, '[]', ?, ?, 'r', 'agent-1', 'reported', 1, 0)",
+        (HEAD_A, BASE),
+    )
+    connection.commit()
+
+    ensure_qa_lanes(connection)
+
+    assert connection.execute("SELECT agent_id, pack_keys FROM qa_lanes").fetchall() == [("agent-1", None)]
 
 
 def test_a_lanes_table_capped_at_lane_three_is_widened_and_keeps_its_rows(tmp_path: Path) -> None:

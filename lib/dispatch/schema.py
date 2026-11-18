@@ -698,14 +698,15 @@ def _add_missing_columns(
     columns: Mapping[str, str],
 ) -> None:
     connection.execute("BEGIN IMMEDIATE")
-    present = {
-        str(row["name"])
-        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-    }
+    present = set(_column_names(connection, table))
     for name, declaration in columns.items():
         if name not in present:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
     connection.commit()
+
+
+def _column_names(connection: sqlite3.Connection, table: str) -> list[str]:
+    return [str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
 QA_LANE_STATES = ("launching", "running", "reported", "dropped", "gap", "cancelled", "timed-out")
@@ -734,6 +735,7 @@ def _qa_lanes_table(name: str) -> str:
             started_at REAL NOT NULL,
             finished_at REAL,
             launch_called_at REAL,
+            pack_keys TEXT,
             UNIQUE (run_id, slice, attempt)
         )
         """
@@ -750,12 +752,14 @@ def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
     if _qa_lanes_capped_at_three(connection):
         connection.execute("BEGIN IMMEDIATE")
         if _qa_lanes_capped_at_three(connection):
+            columns = ", ".join(_column_names(connection, "qa_lanes"))
             connection.execute("DROP TABLE IF EXISTS qa_lanes_next")
             connection.execute(_qa_lanes_table("qa_lanes_next"))
-            connection.execute("INSERT INTO qa_lanes_next SELECT * FROM qa_lanes")
+            connection.execute(f"INSERT INTO qa_lanes_next ({columns}) SELECT {columns} FROM qa_lanes")
             connection.execute("DROP TABLE qa_lanes")
             connection.execute("ALTER TABLE qa_lanes_next RENAME TO qa_lanes")
         connection.commit()
+    _add_missing_columns(connection, "qa_lanes", {"pack_keys": "TEXT"})
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS qa_lanes_open ON qa_lanes (runner)
@@ -764,4 +768,18 @@ def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS qa_runner_backoff (runner TEXT PRIMARY KEY, until REAL NOT NULL)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS qa_linear (
+            run_id TEXT PRIMARY KEY,
+            repo TEXT NOT NULL,
+            ticket_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'posted', 'skipped', 'failed')),
+            reason TEXT,
+            comment_id TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        )
+        """
     )

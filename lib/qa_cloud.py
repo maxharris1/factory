@@ -27,6 +27,7 @@ from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.qa import record_runner_moved, record_stale
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.factory_md import FactoryConfig, QaConfig
+from lib.linear_upload import UPLOAD_CAP_BYTES, LinearClient, LinearError, render, subset
 from lib.orch_yml import QaStorage
 from lib.queue import QA_RECIPIENT, Job, JobRequest, SQLiteJobQueue, claim_order, job_from_row
 from lib.qa_audit import AskedScenario, Gap, GapKind, LaneEvidence, audit
@@ -34,7 +35,7 @@ from lib.qa_evidence import (
     MANIFEST_NAME, EvidenceRefused, collect, lane_dir, record_evidence_dir, recycle, run_dir, stored,
 )
 from lib.qa_runners import Lane, Runner, RunnerOutage, UsageLimit
-from lib.qa_storage import Storage, StorageError, links_for_lane
+from lib.qa_storage import LaneLinks, Storage, StorageError, links_for_lane, pack_key
 
 SliceKind = Literal["head", "regression", "base-check"]
 Result = Literal["PASS", "FAIL", "BLOCKED"]
@@ -47,6 +48,7 @@ LANE_STATUSES = ("PASS", "ISSUES", "BLOCKED")
 BACKOFF_SECONDS = 300
 DEFAULT_MAX_CLOUD_LANES = 10
 GIB = 2**30
+LINEAR_ATTEMPTS = 3
 
 _WORDS = {
     "verified": "Verified",
@@ -92,6 +94,7 @@ class LaneRow:
     result: dict | None
     started_at: float
     launch_called_at: float | None
+    pack_keys: tuple[str, ...] | None
 
     @classmethod
     def of(cls, row: sqlite3.Row) -> LaneRow:
@@ -114,6 +117,7 @@ class LaneRow:
             result=None if row["result"] is None else json.loads(row["result"]),
             started_at=row["started_at"],
             launch_called_at=row["launch_called_at"],
+            pack_keys=None if row["pack_keys"] is None else tuple(json.loads(row["pack_keys"])),
         )
 
 
@@ -257,6 +261,18 @@ def owed_base_check(rows: Sequence[LaneRow]) -> tuple[str, ...]:
     return tuple(item for item, outcome in head.items() if outcome == "failed" and item not in base)
 
 
+def head_lanes(rows: Sequence[LaneRow]) -> list[LaneRow]:
+    return [row for row in newest(rows).values() if row.kind == "head" and row.state == "reported"]
+
+
+def unsigned_pack(rows: Sequence[LaneRow], detail: Detail) -> str | None:
+    for row in head_lanes(rows):
+        for pack in pack_ids(tuple(_scenario(detail.live[item]) for item in row.scenarios)):
+            if pack_key(pack) not in (row.pack_keys or ()):
+                return pack
+    return None
+
+
 def decide(rows: Sequence[LaneRow], detail: Detail) -> Decision:
     latest = list(newest(rows).values())
     gaps: list[str] = [] if detail.ids else ["no scenarios"]
@@ -355,10 +371,7 @@ def render_comment(
     fields.extend((f"runner={runner}", f"arm={detail.arm}", f"attempt={attempt}"))
     parts = [f"<!-- orch:v1 {' '.join(fields)} -->", f"## QA result: {decision.result}"]
     if decision.table:
-        parts.append(
-            "| Scenario | Criterion | Result |\n| --- | --- | --- |\n"
-            + "\n".join(f"| {item} | {criterion} | {word} |" for item, criterion, word in decision.table)
-        )
+        parts.append(scenario_table(decision.table))
     if decision.findings:
         parts.append("Findings:\n" + "\n".join(decision.findings))
     if decision.gaps:
@@ -370,6 +383,14 @@ def render_comment(
         )
     parts.append(f"<!-- qa-run {detail.run_id} -->")
     return "\n\n".join(parts) + "\n"
+
+
+def scenario_table(table: Sequence[tuple[str, str, str]]) -> str:
+    if not table:
+        return ""
+    return "| Scenario | Criterion | Result |\n| --- | --- | --- |\n" + "\n".join(
+        f"| {item} | {criterion} | {word} |" for item, criterion, word in table
+    )
 
 
 Post = Callable[[str, int, str, str], str]
@@ -389,9 +410,12 @@ class QaWorker:
     log: Callable[[str], None] = lambda line: None
     evidence: Mapping[str, QaStorage] = field(default_factory=dict)
     free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
+    linear: LinearClient | None = None
+    upload_cap: int = UPLOAD_CAP_BYTES
     _plans: dict[str, RunPlan] = field(default_factory=dict)
     _low_disk: set[str] = field(default_factory=set)
     _skips_logged: set[tuple[str, str]] = field(default_factory=set)
+    _no_linear_logged: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         with self.queue.connect() as connection:
@@ -399,6 +423,10 @@ class QaWorker:
 
     def tick(self) -> None:
         self._recycle()
+        try:
+            self._post_linear()
+        except Exception as exc:
+            self.log(f"qa linear: {type(exc).__name__}")
         if not self.runners or self.storage is None or self.head is None:
             return
         waiting: Counter[str] = Counter()
@@ -575,7 +603,8 @@ class QaWorker:
         limited: list[str] = []
         while True:
             try:
-                launched = self.runners[runner].launch(self._lane(plan, row, runner))
+                lane, links = self._lane(plan, row, runner)
+                launched = self.runners[runner].launch(lane)
             except (RunnerOutage, UsageLimit) as exc:
                 if not first:
                     self._close(row, "gap", f"launch-failed:{type(exc).__name__}")
@@ -604,15 +633,15 @@ class QaWorker:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                UPDATE qa_lanes SET agent_id = ?, agent_url = ?, state = 'running', started_at = ?
+                UPDATE qa_lanes SET agent_id = ?, agent_url = ?, state = 'running', started_at = ?, pack_keys = ?
                 WHERE lane_id = ? AND state = 'launching'
                 """,
-                (launched.agent_id, launched.url, self.queue.now(), row.lane_id),
+                (launched.agent_id, launched.url, self.queue.now(), _keys(links), row.lane_id),
             )
             connection.commit()
         return "launched"
 
-    def _lane(self, plan: RunPlan, row: LaneRow, runner: str) -> Lane:
+    def _lane(self, plan: RunPlan, row: LaneRow, runner: str) -> tuple[Lane, LaneLinks]:
         scenarios = tuple(_scenario(plan.detail.live[item]) for item in row.scenarios)
         links = links_for_lane(
             row.run_id, row.lane_no, pack_ids(scenarios), plan.qa.timeout_minutes * 60,
@@ -640,7 +669,7 @@ class QaWorker:
             base_ref=plan.factory.base_branch,
             environment_name=config.environment,
             model=config.model,
-        )
+        ), links
 
     def _watch(self, plan: RunPlan, row: LaneRow) -> None:
         runner = self.runners[row.runner]
@@ -709,8 +738,88 @@ class QaWorker:
         runner = rows[0].runner if rows else detail.runner
         body = render_comment(plan, detail, outcome, runner=runner, attempt=job.request.attempt, lanes=lanes)
         comment_id = self.post(job.request.repo, detail.pr, body, f"<!-- qa-run {detail.run_id} -->")
+        if plan.factory.tickets == "linear":
+            self._ledger(plan, rows)
         self.queue.finish(job.id, owner=QA_RECIPIENT, handoff_comment_id=str(comment_id))
         self._plans.pop(detail.run_id, None)
+
+    def _ledger(self, plan: RunPlan, rows: Sequence[LaneRow]) -> None:
+        state, reason = "pending", None
+        if plan.detail.arm != "primary":
+            state, reason = "skipped", "shootout-arm"
+        elif (pack := unsigned_pack(rows, plan.detail)) is not None:
+            state, reason = "skipped", f"pack-not-signed: {pack}"
+        with self.queue.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO qa_linear (run_id, repo, ticket_id, state, reason, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (plan.detail.run_id, plan.repo, plan.ticket, state, reason, self.queue.now()),
+            )
+
+    def _post_linear(self) -> None:
+        with self.queue.connect() as connection:
+            pending = connection.execute(
+                """
+                SELECT l.run_id, l.repo, l.ticket_id, r.state, r.result, r.comment_id, j.detail
+                FROM qa_linear l JOIN qa_runs r ON r.run_id = l.run_id JOIN jobs j ON j.id = r.job_id
+                WHERE l.state = 'pending' ORDER BY l.updated_at, l.run_id
+                """
+            ).fetchall()
+        for row in pending:
+            try:
+                self._post_one(row)
+            except Exception as exc:
+                failure = f"{type(exc).__name__}: {exc}" if isinstance(exc, LinearError) else type(exc).__name__
+                self.log(f"qa linear {row['run_id']}: {failure}")
+                with self.queue.connect() as connection:
+                    connection.execute(
+                        "UPDATE qa_linear SET attempts = attempts + 1, reason = ?, updated_at = ?,"
+                        " state = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE state END"
+                        " WHERE run_id = ? AND state = 'pending'",
+                        (failure, self.queue.now(), LINEAR_ATTEMPTS, row["run_id"]),
+                    )
+
+    def _post_one(self, row: sqlite3.Row) -> None:
+        run_id, repo, ticket = row["run_id"], row["repo"], row["ticket_id"]
+        if row["state"] in ("cancelled", "stale"):
+            self._settle(run_id, "skipped", None, f"run-{row['state']}")
+            return
+        if row["state"] != "reported":
+            return
+        if self.linear is None:
+            if run_id not in self._no_linear_logged:
+                self._no_linear_logged.add(run_id)
+                self.log(f"qa linear {run_id}: no Linear client, left pending")
+            return
+        issue = self.linear.issue_id(ticket)
+        comment_id = self.linear.find_comment(issue, f"QA run {run_id}")
+        if comment_id is None:
+            detail = Detail.of(json.loads(row["detail"]))
+            rows = self._lanes(run_id)
+            root = self.evidence[repo.lower()].evidence_root.resolve()
+            chosen = subset(
+                [(lane.lane_no, lane_dir(root, repo, ticket, run_id, lane.lane_no)) for lane in head_lanes(rows)],
+                self.upload_cap,
+            )
+            assets = [
+                (pick, self.linear.upload(pick.file, PurePosixPath(pick.path).name, pick.content_type, pick.size))
+                for pick in chosen.uploads
+            ]
+            body = render(
+                run_id=run_id, result=row["result"], head=detail.head, table=scenario_table(decide(rows, detail).table),
+                assets=assets, chosen=chosen,
+                report=f"https://github.com/{repo}/pull/{detail.pr}#issuecomment-{row['comment_id']}",
+            )
+            comment_id = self.linear.comment(issue, body)
+        self._settle(run_id, "posted", comment_id, None)
+
+    def _settle(self, run_id: str, state: str, comment_id: str | None, reason: str | None) -> None:
+        with self.queue.connect() as connection:
+            connection.execute(
+                "UPDATE qa_linear SET state = ?, comment_id = ?, reason = ?, updated_at = ?"
+                " WHERE run_id = ? AND state = 'pending'",
+                (state, comment_id, reason, self.queue.now(), run_id),
+            )
 
     def _stale(self, job: Job, detail: Detail, stale: Stale) -> None:
         self.log(f"qa run {detail.run_id}: head moved from {stale.start[:12]} to {stale.head[:12]}")
@@ -757,12 +866,14 @@ class QaWorker:
         try:
             agent_id = row.agent_id
             if agent_id is None:
-                launched = runner.launch(self._lane(self._plan(job), row, row.runner))
+                lane, links = self._lane(self._plan(job), row, row.runner)
+                launched = runner.launch(lane)
                 agent_id = launched.agent_id
                 with self.queue.connect() as connection:
                     connection.execute(
-                        "UPDATE qa_lanes SET agent_id = ?, agent_url = ? WHERE lane_id = ? AND agent_id IS NULL",
-                        (agent_id, launched.url, row.lane_id),
+                        "UPDATE qa_lanes SET agent_id = ?, agent_url = ?, pack_keys = ?"
+                        " WHERE lane_id = ? AND agent_id IS NULL",
+                        (agent_id, launched.url, _keys(links), row.lane_id),
                     )
             runner.stop(agent_id)
         except Exception as exc:
@@ -941,6 +1052,10 @@ def _scenario(item: Mapping) -> Scenario:
         pack=item.get("pack") or "none",
         save=named + tuple(name for name in (AFTER_SCREENSHOT, PASS_OUTPUT) if name not in named),
     )
+
+
+def _keys(links: LaneLinks) -> str:
+    return json.dumps([link.key for link in links.packs])
 
 
 def _open_count(connection: sqlite3.Connection, runner: str) -> int:

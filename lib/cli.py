@@ -84,6 +84,7 @@ from lib.orch_yml import (
     parse_bind,
 )
 from lib.poll_source import FedPulls, IntakeRisks, LivePollSource, PollSourceError
+from lib.linear_upload import HttpLinear
 from lib.qa_cloud import QaWorker
 from lib.qa_storage import S3Storage
 from lib.pstack_models import rules_text
@@ -954,6 +955,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
             raise ValueError(f"{repo} has no projects[].qa_storage in orch.yml")
         return S3Storage.from_entry(entry)
 
+    linear_key = os.environ.get(config.linear.api_key_env) if config.linear else None
     return QaWorker(
         open_queue(path),
         runners={name: qa_runners.create(name) for name in QA_RUNNERS if name in qa_runners.registered()},
@@ -966,6 +968,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         shares_usage_with=config.qa.shares_usage_with,
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
         evidence={p.repo.lower(): p.qa_storage for p in config.projects if p.qa_storage},
+        linear=HttpLinear(linear_key) if linear_key else None,
     )
 
 

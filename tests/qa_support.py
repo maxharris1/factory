@@ -91,8 +91,9 @@ def qa_config(*, shootout: bool = False, paths: tuple[str, ...] = (), full_rerun
     )
 
 
-def scenarios(*ids: str) -> str:
-    lines = [f"- {qa} (ac-1): open the page. Pass: tests/test_x.py" for qa in ids]
+def scenarios(*ids: str, pack: str | None = None) -> str:
+    steps = f"open the page with pack {pack}." if pack else "open the page."
+    lines = [f"- {qa} (ac-1): {steps} Pass: tests/test_x.py" for qa in ids]
     return "\n## Verify, live\n" + "\n".join(lines) + "\n"
 
 
