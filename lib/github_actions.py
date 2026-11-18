@@ -648,6 +648,10 @@ class GitHubReviewActions:
         endpoint = f"{_repo_path(repo)}/issues/{_number(number)}/labels?per_page=100"
         return tuple(sorted(_labels(self._pages(endpoint))))
 
+    def pull_head(self, repo: str, number: str) -> str:
+        pull = _object(self._json(f"{_repo_path(repo)}/pulls/{_number(number)}"))
+        return _sha(_object(pull.get("head")).get("sha"), "pull request head")
+
     def pull_files(self, repo: str, number: str) -> tuple[str, ...]:
         """Every path the PR's diff against base touches, all pages, with a
         rename's old path too (issue #86 hold paths). GitHub lists at most

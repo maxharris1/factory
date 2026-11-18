@@ -59,6 +59,7 @@ ACTIONS = (
     "qa",
     "qa-failed",
     "qa-env-failed",
+    "qa-head-moved",
 )
 QA_RECIPIENT = "qa"
 RECIPIENTS = ("claude", "codex", "cursor", "grok", QA_RECIPIENT)
