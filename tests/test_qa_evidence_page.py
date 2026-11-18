@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable
 from html.parser import HTMLParser
@@ -173,3 +174,25 @@ def test_untrusted_text_is_escaped(run: Path) -> None:
     assert hostile in page.text and "<b>fail</b>" in page.text
     assert "script" not in page.tags and "b" not in page.tags
     assert hostile not in markup
+
+
+def test_a_listed_path_that_is_not_utf8_reads_as_recycled(run: Path) -> None:
+    lane = run / "lane-2"
+    manifest = json.loads((lane / "manifest.json").read_text())
+    _rewrite_manifest(lane, [entry["path"] for entry in manifest["files"]] + ["search/\udcff.png"])
+    with contextlib.suppress(OSError):
+        (lane / "search" / "\udcff.png").write_bytes(PNG)
+    markup = run_page(run, RUN)
+    page = Page(markup.encode().decode())
+
+    assert page.text.count(MISSING) == 1
+    assert "search/\\udcff.png" in page.text
+    assert linked_files(page, run) == expected_links(LANES)
+
+
+def test_a_scenario_that_is_not_utf8_reads_as_an_unreadable_lane(run: Path) -> None:
+    (run / "lane-2" / RESULT_NAME).write_text(json.dumps({"scenarios": [{"id": "search\udcff", "result": "pass"}]}))
+    page = Page(run_page(run, RUN).encode().decode())
+
+    assert page.text.count(MISSING) == 1
+    assert linked_files(page, run) == expected_links({1: LANES[1]})
