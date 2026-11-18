@@ -168,6 +168,7 @@ SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
 BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 LINEAR_PROCESS_HEADROOM = 2
 HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
+FULL_READ_SECONDS = 600.0
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
@@ -461,6 +462,26 @@ class FedPulls:
         return None if row is None or row[0] is None else str(row[0])
 
 
+class LastRead(NamedTuple):
+    """#870: one open PR's last full read, and the probe taken before it."""
+
+    fingerprint: str | None
+    read_at: float
+    pull: dict[str, Any]
+    comments: tuple[Comment, ...]
+    ci: CIResult
+    hold_inputs: dict[str, Any]
+
+
+def reusable(last: LastRead | None, probed: str | None, now: float) -> bool:
+    return (
+        last is not None
+        and probed is not None
+        and probed == last.fingerprint
+        and now - last.read_at < FULL_READ_SECONDS
+    )
+
+
 class LivePollSource:
     def __init__(
         self,
@@ -514,6 +535,7 @@ class LivePollSource:
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
+        self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._backoff_until = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
@@ -686,6 +708,11 @@ class LivePollSource:
             key: value
             for key, value in self._head_reads.items()
             if key in self._head_read_last_used
+        }
+        self._last_reads = {
+            key: last
+            for key, last in self._last_reads.items()
+            if now - last.read_at < 2 * FULL_READ_SECONDS
         }
         if self._dirty_fetched and self.linear_dirty is not None:
             fetched = tuple(self._dirty_fetched.values())
@@ -979,6 +1006,7 @@ class LivePollSource:
                 key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
             )
         )
+        probes = self._pull_fingerprints(ordered, projects)
         spent: dict[str, float] = {}
         for ref in ordered:
             project = projects.get(ref.repo.lower())
@@ -996,7 +1024,7 @@ class LivePollSource:
             self._budget_deadline = started + left
             self._budget_spent = False
             try:
-                ticket = self._tracked_ticket(ref, project)
+                ticket = self._tracked_ticket(ref, project, probes.get((repo, ref.ticket_id)))
             except Exception as exc:
                 if not isinstance(exc, _TerminalTicket):
                     self._record(ref.repo, ref.ticket_id, exc)
@@ -1012,6 +1040,33 @@ class LivePollSource:
             self._tracked_turn += 1
             self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
+
+    def _pull_fingerprints(
+        self,
+        refs: Sequence[TicketRef],
+        projects: Mapping[str, Project],
+    ) -> dict[tuple[str, str], str]:
+        """#870: probe the GitHub PRs this source has read before and not
+        yet this cycle. A repo whose probe fails gets full reads."""
+        wanted: dict[str, list[str]] = {}
+        for ref in refs:
+            repo = ref.repo.lower()
+            if (
+                ref.tracker == "github"
+                and repo in projects
+                and (repo, ref.ticket_id) in self._last_reads
+                and ("github", repo, ref.ticket_id) not in self._ticket_cache
+            ):
+                wanted.setdefault(repo, []).append(ref.ticket_id)
+        probes: dict[tuple[str, str], str] = {}
+        for repo, numbers in wanted.items():
+            try:
+                found = self.github.pull_fingerprints(projects[repo].repo, numbers)
+            except Exception:
+                self._defer(f"GitHub probe failed for {projects[repo].repo}, read in full")
+                continue
+            probes.update({(repo, number): fingerprint for number, fingerprint in found.items()})
+        return probes
 
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
         if not self._linear_due:
@@ -1104,6 +1159,7 @@ class LivePollSource:
         self,
         ref: TicketRef,
         project: Project,
+        probed: str | None = None,
     ) -> TrackedTicket | None:
         if ref.tracker == "linear":
             cached = ref.ticket_id in self._linear_issue_cache
@@ -1137,6 +1193,7 @@ class LivePollSource:
             self._factory(project),
             ref.ticket_id,
             allow_merged=ref.allow_merged,
+            probed=probed,
         )
 
     def _reusable_linear_issue(self, ref: TicketRef) -> dict[str, Any] | None:
@@ -1622,12 +1679,22 @@ class LivePollSource:
         fresh: bool = False,
         allow_merged: bool = False,
         comments: tuple[Comment, ...] | None = None,
+        probed: str | None = None,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
         cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
             return cached
-        pull = self._github_pull(project.repo, number, fresh=fresh)
+        read_at = self.clock()
+        last = None if fresh else self._last_reads.get((project.repo.lower(), number))
+        if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.hold_applies:
+            last = None
+        if last is None:
+            # gh's --cache could serve a body older than the probe, which
+            # would then be stored under the probe's fingerprint.
+            pull = self._github_pull(project.repo, number, fresh=fresh or probed is not None)
+        else:
+            pull = last.pull
         merged = pull.get("merged") is True
         head = _pr_head(pull, project.repo, number)
         if merged and not fresh:
@@ -1642,23 +1709,27 @@ class LivePollSource:
                 )
             if not allow_merged:
                 raise _TerminalTicket()
-        if comments is None:
-            comments = self.github.list_comments(project.repo, number)
+        if last is not None:
+            comments, ci, hold_inputs = last.comments, last.ci, last.hold_inputs
+        else:
+            if comments is None:
+                comments = self.github.list_comments(project.repo, number)
+            hold_inputs = self._hold_inputs(project.repo, number, factory, pull)
+            ci = self.github.ci_status(project.repo, head)
+            if not fresh and None not in hold_inputs.values():
+                self._last_reads[(project.repo.lower(), number)] = LastRead(
+                    probed, read_at, pull, comments, ci, hold_inputs
+                )
         brief = canonical_brief(comments, self._trusted)
         source_issue = github_source(pull, project.repo, number)
         ticket = TrackedTicket(
-            **self._hold_inputs(project.repo, number, factory, pull),
+            **hold_inputs,
             repo=project.repo,
             ticket_id=number,
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={
-                head: ci_on_base(
-                    self.github.ci_status(project.repo, head),
-                    no_ci_base(factory, _pr_base(pull)),
-                )
-            },
+            ci={head: ci_on_base(ci, no_ci_base(factory, _pr_base(pull)))},
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -2336,6 +2407,8 @@ def _is_gh_read(args: Sequence[str]) -> bool:
 
 
 def _gh_source(argv: Sequence[str]) -> str:
+    if "graphql" in argv:
+        return "github-graphql"
     for index, part in enumerate(argv):
         match = _REPO_ROUTE.match(part)
         if match:
