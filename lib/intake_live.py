@@ -10,13 +10,12 @@ configured environment variable at request time.
 
 Reads:
 * ahead_commits, open_pull_commits, merge_base and branch_has: a branch's
-  commits past the base, every open PR's commits in one GraphQL read, the
-  merge base of two commits, and whether a branch already contains a
-  commit, for the stacked-branch hold (#205, #896). A long branch costs two
-  reads, however many commits it carries. Successful reads of the open PRs
-  are kept for a minute, of a head sha's ahead commits for ten minutes and
-  of two shas' merge base for good, so a retry after a failed read repeats
-  only that read;
+  commits past the base, every open PR's commits (GraphQL, 50 PRs a read,
+  then one read per further 100 commits of the long ones), the merge base
+  of two commits, and whether a branch already contains a commit, for the
+  stacked-branch hold (#205, #896). The open PRs are kept for a minute and
+  two shas' merge base for good, so neither grows with a branch's length
+  and a retry repeats only the reads that failed;
 * github_intake: open issues carrying the label (`issues?labels=`), and for
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
@@ -33,11 +32,13 @@ the branch ref, the draft PR, the PR labels, PR comments, Linear comments.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any
 from urllib.parse import quote
 
 from lib.branch_stack import OpenPull
@@ -111,20 +112,19 @@ LINKED_PULLS_QUERY = (
     "{ repository(owner: $owner, name: $name) { issue(number: $number) { "
     + _LINKED_PULLS.replace("{after}", ", after: $after") + " } } }"
 )
-# The stacked-branch hold's snapshot of open PRs (#896): 50 PRs a page, past
-# the cap the read fails. A PR's first 100 commits are read; a longer PR is
-# incomplete and branch_stack compares its head instead.
+# GitHub lists at most 250 commits of a PR; a longer PR stays incomplete
+# and branch_stack compares its head instead.
 OPEN_PULLS_MAX_PAGES = 20
+OPEN_PULL_COMMIT_ROUNDS = 5
+OPEN_PULL_COMMITS_CHUNK = 50
+_PULL_COMMITS = "{ totalCount pageInfo { hasNextPage endCursor } nodes { commit { oid } } }"
 OPEN_PULL_COMMITS_QUERY = (
     "query($owner: String!, $name: String!, $after: String) "
     "{ repository(owner: $owner, name: $name) { pullRequests(states: OPEN, first: 50, after: $after) "
-    "{ nodes { number baseRefName headRefOid commits(first: 100) "
-    "{ totalCount nodes { commit { oid } } } } pageInfo { hasNextPage endCursor } } } }"
+    f"{{ nodes {{ number baseRefName headRefOid commits(first: 100) {_PULL_COMMITS} }} "
+    "pageInfo { hasNextPage endCursor } } } }"
 )
 OPEN_PULLS_TTL = 60.0
-# A stale ahead set can only over-hold: a base that moved on lacks fewer of
-# the tip's commits, never more.
-AHEAD_COMMITS_TTL = 600.0
 _ISSUE_UNFINISHED = {"NOT_PLANNED": "closed as not planned", "DUPLICATE": "closed as duplicate"}
 # 40 pages of 50: past that the read fails, rather than feed from a partial
 # list that could hide an urgent ticket.
@@ -170,7 +170,6 @@ class GitHubIntakeClient(GitHubReviewActions):
         self._applied: dict[tuple[str, int, str, str], str | None] = {}
         self.clock: Callable[[], float] = time.monotonic
         self._open_pulls: dict[str, tuple[float, dict[int, OpenPull]]] = {}
-        self._ahead: dict[tuple[str, str, str], tuple[float, tuple[str, ...]]] = {}
         self._merge_bases: dict[tuple[str, str, str], str] = {}
 
     def github_intake(self, repo: str, label: str) -> list[IntakeIssue]:
@@ -373,14 +372,6 @@ class GitHubIntakeClient(GitHubReviewActions):
     def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         """The commits on tip that base lacks (#205). The compare read
         lists up to 250; a longer list fails rather than hide a commit."""
-        if not _SHA.fullmatch(tip):
-            return self._ahead_commits(repo, base, tip)
-        return _remembered(
-            self._ahead, (repo.lower(), base, tip), self.clock(), AHEAD_COMMITS_TTL,
-            lambda: self._ahead_commits(repo, base, tip),
-        )
-
-    def _ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
         compared = self._json(
             f"{_repo_path(repo)}/compare/{_branch_path(base)}...{_branch_path(tip)}"
         )
@@ -397,38 +388,78 @@ class GitHubIntakeClient(GitHubReviewActions):
         return shas
 
     def open_pull_commits(self, repo: str) -> dict[int, OpenPull]:
-        return _remembered(
-            self._open_pulls, repo.lower(), self.clock(), OPEN_PULLS_TTL,
-            lambda: self._open_pull_commits(repo),
-        )
+        key, now = repo.lower(), self.clock()
+        held = self._open_pulls.get(key)
+        if held is not None and now - held[0] < OPEN_PULLS_TTL:
+            return held[1]
+        pulls = self._open_pull_commits(repo)
+        self._open_pulls[key] = (now, pulls)
+        return pulls
 
     def _open_pull_commits(self, repo: str) -> dict[int, OpenPull]:
         owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
         found: dict[int, OpenPull] = {}
+        cursors: dict[int, str] = {}
         after: tuple[str, ...] = ()
         for _ in range(OPEN_PULLS_MAX_PAGES):
             document = self._json(
                 "graphql", "-f", f"query={OPEN_PULL_COMMITS_QUERY}",
                 "-f", f"owner={owner}", "-f", f"name={name}", *after,
             )
-            data = document.get("data") if isinstance(document, dict) else None
-            repository = data.get("repository") if isinstance(data, dict) else None
-            pulls = repository.get("pullRequests") if isinstance(repository, dict) else None
-            if not isinstance(pulls, dict) or not isinstance(pulls.get("nodes"), list) or (
-                document.get("errors")
-            ):
+            pulls = _graphql_repository(document).get("pullRequests")
+            if not isinstance(pulls, dict) or not isinstance(pulls.get("nodes"), list):
                 raise GitHubAdapterError("open pull request read returned no pull requests")
             for node in pulls["nodes"]:
-                number, pull = _open_pull(node)
+                number, pull, cursor = _open_pull(node)
                 found[number] = pull
+                if cursor is not None:
+                    cursors[number] = cursor
             page = pulls.get("pageInfo")
             if not isinstance(page, dict) or page.get("hasNextPage") is not True:
-                return found
+                return self._more_pull_commits(owner, name, found, cursors)
             cursor = page.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubAdapterError("open pull request page has no cursor")
             after = ("-f", f"after={cursor}")
         raise GitHubAdapterError("open pull requests exceed the page cap")
+
+    def _more_pull_commits(
+        self, owner: str, name: str, found: dict[int, OpenPull], cursors: dict[int, str]
+    ) -> dict[int, OpenPull]:
+        """Every long PR's next 100 commits, 50 PRs to a read."""
+        for _ in range(OPEN_PULL_COMMIT_ROUNDS):
+            if not cursors:
+                return found
+            waiting = sorted(cursors.items())
+            cursors = {}
+            for start in range(0, len(waiting), OPEN_PULL_COMMITS_CHUNK):
+                chunk = waiting[start:start + OPEN_PULL_COMMITS_CHUNK]
+                fields = " ".join(
+                    f"p{number}: pullRequest(number: {number}) "
+                    f"{{ commits(first: 100, after: {json.dumps(cursor)}) {_PULL_COMMITS} }}"
+                    for number, cursor in chunk
+                )
+                query = (
+                    "query($owner: String!, $name: String!) "
+                    f"{{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+                )
+                nodes = _graphql_repository(self._json(
+                    "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}",
+                ))
+                for number, _ in chunk:
+                    node = nodes.get(f"p{number}")
+                    shas, total, cursor = _commit_page(
+                        number, node.get("commits") if isinstance(node, dict) else None
+                    )
+                    commits = found[number].commits | shas
+                    found[number] = replace(
+                        found[number], commits=commits, complete=total == len(commits)
+                    )
+                    if cursor is not None:
+                        cursors[number] = cursor
+        if cursors:
+            raise GitHubAdapterError("open pull request commits exceed the page cap")
+        return found
 
     def merge_base(self, repo: str, a: str, b: str) -> str:
         if not (_SHA.fullmatch(a) and _SHA.fullmatch(b)):
@@ -526,33 +557,35 @@ def _linear_blockers(relations: Sequence[object]) -> tuple[tuple[str, str | None
     return tuple(found)
 
 
-_T = TypeVar("_T")
+def _graphql_repository(document: object) -> dict[str, Any]:
+    data = document.get("data") if isinstance(document, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    if not isinstance(repository, dict) or document.get("errors"):
+        raise GitHubAdapterError("open pull request read returned no repository")
+    return repository
 
 
-def _remembered(
-    memo: dict[Any, tuple[float, _T]], key: object, now: float, ttl: float, read: Callable[[], _T]
-) -> _T:
-    """A read kept for ttl seconds; a failed read keeps nothing."""
-    held = memo.get(key)
-    if held is not None and now - held[0] < ttl:
-        return held[1]
-    value = read()
-    for stale in [old for old, (at, _) in memo.items() if now - at >= ttl]:
-        del memo[stale]
-    memo[key] = (now, value)
-    return value
-
-
-def _open_pull(node: object) -> tuple[int, OpenPull]:
+def _open_pull(node: object) -> tuple[int, OpenPull, str | None]:
     number = node.get("number") if isinstance(node, dict) else None
     if not isinstance(number, int) or isinstance(number, bool):
         raise GitHubAdapterError("open pull request has no number")
-    base, head, commits = node.get("baseRefName"), node.get("headRefOid"), node.get("commits")
+    base, head = node.get("baseRefName"), node.get("headRefOid")
     if not _github_branch(base) or not isinstance(head, str) or not _SHA.fullmatch(head):
         raise GitHubAdapterError(f"open PR #{number} base or head is not readable")
+    shas, total, cursor = _commit_page(number, node.get("commits"))
+    pull = OpenPull(commits=shas, complete=total == len(shas), base=base, head=head)
+    return number, pull, cursor
+
+
+def _commit_page(number: int, commits: object) -> tuple[frozenset[str], int, str | None]:
+    """A page of a PR's commits, their total, and the cursor of the next page."""
     nodes = commits.get("nodes") if isinstance(commits, dict) else None
     total = commits.get("totalCount") if isinstance(commits, dict) else None
-    if not isinstance(nodes, list) or not isinstance(total, int) or isinstance(total, bool):
+    page = commits.get("pageInfo") if isinstance(commits, dict) else None
+    if (
+        not isinstance(nodes, list) or not isinstance(page, dict)
+        or not isinstance(total, int) or isinstance(total, bool)
+    ):
         raise GitHubAdapterError(f"open PR #{number} commits are not readable")
     shas = [
         item["commit"].get("oid")
@@ -561,9 +594,12 @@ def _open_pull(node: object) -> tuple[int, OpenPull]:
     ]
     if any(not isinstance(sha, str) or not _SHA.fullmatch(sha) for sha in shas) or total < len(shas):
         raise GitHubAdapterError(f"open PR #{number} commits are not readable")
-    return number, OpenPull(
-        commits=frozenset(shas), complete=total == len(shas), base=base, head=head
-    )
+    cursor = page.get("endCursor")
+    if page.get("hasNextPage") is not True:
+        return frozenset(shas), total, None
+    if not isinstance(cursor, str) or not cursor:
+        raise GitHubAdapterError(f"open PR #{number} commit page has no cursor")
+    return frozenset(shas), total, cursor
 
 
 def _linked_page(node: object) -> tuple[bool, str | None]:

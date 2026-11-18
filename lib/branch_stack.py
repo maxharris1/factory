@@ -9,9 +9,8 @@ from lib.feeder_gates import Wait, github_ref
 
 @dataclass(frozen=True)
 class OpenPull:
-    """An open PR's commits on its head that its base lacks. GitHub lists
-    at most 250 of them, and the snapshot reads 100, so a longer PR is
-    incomplete and its head is compared instead."""
+    """An open PR's commits on its head that its base lacks; complete is
+    false when GitHub listed only some of them."""
 
     commits: frozenset[str]
     complete: bool
