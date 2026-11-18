@@ -270,7 +270,6 @@ class SQLiteJobQueue:
             job_detail.write(job_detail.root(connection), job_id, spill)
         if (
             row["id"] == job_id
-            and request.recipient != "grok"
             and _has_table(connection, "needs_attention")
         ):
             connection.execute(

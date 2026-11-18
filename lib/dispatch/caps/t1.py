@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.dispatch.constants import WATCHED_STATES
+from lib.dispatch.constants import TERMINAL_STATES, WATCHED_STATES
 from lib.dispatch.helpers import _route_go, _scope
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
+
+# #108: a go on a ready-for-review handoff or a closed ticket changes nothing.
+GO_KEEPS_GENERATION = TERMINAL_STATES | {"waiting-external"}
 
 
 class T1Mixin:
@@ -84,8 +87,6 @@ class T1Mixin:
             )
             return True, "queued-go-clarification"
         once = self._go_once(ticket, comment, action, generation, current)
-        if once is None:
-            return True, f"deduped-{action}"
         if current in WATCHED_STATES or (
             current == "waiting-external"
             and self._queue_row(ticket)["approved_head"] is not None
@@ -131,7 +132,7 @@ class T1Mixin:
         action: str,
         generation: int,
         current: str | None,
-    ) -> str | None:
+    ) -> str:
         prefix = f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
         with self._connect() as connection:
             held = {
@@ -143,10 +144,10 @@ class T1Mixin:
                 )
             }
             if prefix + comment.id in held:
-                return None
+                return comment.id
             spent = held.get(f"{prefix}g{generation}")
             if (
-                current in ("building", "fixing")
+                current not in GO_KEEPS_GENERATION
                 and spent is not None
                 and spent["state"] not in ("queued", "running")
                 and spent["source_comment_id"] != comment.id

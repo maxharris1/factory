@@ -7,12 +7,15 @@ from lib.dispatch.transitions import write_workflow_state
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
     GO,
+    PLAN,
+    FakeReviewActions,
     _attention,
     comment,
     handled_outcome,
     queued_harness_jobs,
     setup,
     ticket,
+    ticket_row,
 )
 
 SCOPE = _scope("owner/repo", "42")
@@ -67,7 +70,7 @@ def enqueue(queue: SQLiteJobQueue, action: str, recipient: str) -> None:
     )
 
 
-@pytest.mark.parametrize("state", ["fixing", "building"])
+@pytest.mark.parametrize("state", ["fixing", "building", "review"])
 def test_a_go_after_a_finished_build_queues_a_build_keyed_on_the_go(
     tmp_path: Path, state: str
 ) -> None:
@@ -91,7 +94,6 @@ def test_a_go_after_a_finished_build_queues_a_build_keyed_on_the_go(
     replay(queue, "go-2")
     dispatcher.process(ticket(first, second))
 
-    assert handled_outcome(queue, "go-2") == "deduped-build"
     assert queued_harness_jobs(queue) == []
     assert len(job_keys(queue, "build")) == 2
 
@@ -147,30 +149,70 @@ def test_a_go_on_a_fixing_ticket_with_a_queued_fix_queues_no_parallel_build(
     assert len(job_keys(queue, "build")) == 1
 
 
-def dropped_go(tmp_path: Path) -> SQLiteJobQueue:
+def test_a_replayed_go_retries_the_failed_label_write(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    first = go("go-1", "planning", 1)
+    second = go("go-2", "planning", 2)
+    dispatcher.process(ticket(first))
+    finish_next(queue, "plan")
+    set_state(queue, "fixing")
+    actions.state_failures.add(("owner/repo", "planning"))
+    with pytest.raises(Exception, match="planning"):
+        dispatcher.process(ticket(first, second))
+    actions.state_failures.clear()
+
+    dispatcher.process(ticket(first, second))
+
+    assert ticket_row(queue)["workflow_state"] == "planning"
+    assert len(job_keys(queue, "plan")) == 2
+    finish_next(queue, "plan")
+    plan = comment(
+        "plan-2", PLAN.format(round=1, ac="met"), author="claude-login", created_at=3
+    )
+    dispatcher.process(ticket(first, second, plan))
+    assert handled_outcome(queue, "plan-2") == "queued-plan-build"
+
+
+def test_a_go_while_the_replacement_build_is_queued_is_deduped_quietly(
+    tmp_path: Path,
+) -> None:
     dispatcher, queue = setup(tmp_path)
     first = go("go-1", "building", 1)
+    second = go("go-2", "building", 2)
     dispatcher.process(ticket(first))
     finish_next(queue, "build")
+    dispatcher.process(ticket(first, second))
+
+    dispatcher.process(ticket(first, second, go("go-3", "building", 3)))
+
+    assert handled_outcome(queue, "go-3") == "deduped-build"
+    (build,) = queued_harness_jobs(queue)
+    assert build.request.source_comment_id == "go-2"
+    assert _attention(queue) == []
+
+
+def flagged(tmp_path: Path) -> SQLiteJobQueue:
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.process(ticket(go("go-1", "building", 1)))
+    finish_next(queue, "build")
     set_state(queue, "review")
-    dispatcher.process(ticket(first, go("go-2", "building", 2)))
-    assert handled_outcome(queue, "go-2") == "deduped-build"
+    dispatcher.flag_attention("owner/repo", "42", "dedupe-dropped", "test")
     assert _attention(queue) == ["dedupe-dropped"]
     return queue
 
 
-def test_a_later_harness_job_clears_the_dedupe_dropped_flag(tmp_path: Path) -> None:
-    queue = dropped_go(tmp_path)
+@pytest.mark.parametrize("recipient", ["grok", "claude"])
+def test_a_later_job_clears_the_dedupe_dropped_flag(tmp_path: Path, recipient: str) -> None:
+    queue = flagged(tmp_path)
 
-    enqueue(queue, "clarify", "grok")
-    assert _attention(queue) == ["dedupe-dropped"]
+    enqueue(queue, "clarify", recipient)
 
-    enqueue(queue, "fix", "claude")
     assert _attention(queue) == []
 
 
 def test_a_workflow_state_change_clears_the_dedupe_dropped_flag(tmp_path: Path) -> None:
-    queue = dropped_go(tmp_path)
+    queue = flagged(tmp_path)
 
     for state, flags in (("review", ["dedupe-dropped"]), ("fixing", [])):
         with queue.connect() as connection:

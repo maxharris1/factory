@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.merge_queue_support import Board, sha
+from tests.merge_queue_support import REPO, Board, sha
 
 
 def queued(tmp_path: Path, **options):
@@ -63,7 +63,23 @@ def test_a_replayed_go_queues_no_second_job(tmp_path: Path) -> None:
         connection.execute("DELETE FROM handled_comments WHERE comment_id = 'go-again'")
     board.poll()
     assert len(board.jobs("build")) == builds
-    assert board.outcome("go-again") == "deduped-build"
+    assert board.state("42")["workflow_state"] == "building"
+
+
+def test_a_replayed_go_retries_the_failed_label_write(tmp_path: Path) -> None:
+    board, pr = queued(tmp_path)
+    builds = len(board.jobs("build"))
+    board.actions.state_failures.add((REPO, "building"))
+    board.go(pr, "go-again")
+    board.poll()
+    assert board.outcome("go-again") is None
+    board.actions.state_failures.clear()
+
+    board.poll()
+
+    assert len(board.jobs("build")) == builds + 1
+    assert board.state("42")["workflow_state"] == "building"
+    assert board.actions.states[-1] == "building"
 
 
 def test_an_untrusted_go_is_rejected_and_the_ticket_stays_queued(tmp_path: Path) -> None:
