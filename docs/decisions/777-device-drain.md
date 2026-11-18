@@ -1,0 +1,3 @@
+- **Decision:** A `machines.yml` device takes `drain: true` to stop new placement while its running jobs finish untouched; `enabled: false` keeps its #679 meaning (running jobs are lost and stopped), and `slot_max: 0` stays invalid.
+- **When:** 2026-11-17 5:43 PM ET, by Max (approved the #818 plan and its four-ticket split; this is ticket 1)
+- **Source:** https://github.com/maxharris1/factory/pull/818#issuecomment-6963160893

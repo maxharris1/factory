@@ -70,7 +70,8 @@ def test_serves_index_at_root_and_by_name(get) -> None:
         assert headers["content-type"] == "text/html; charset=utf-8"
 
 
-@pytest.mark.parametrize("name", ["activity.html", "efficiency.html", "job.html", "health.html", "ticket.html"])
+@pytest.mark.parametrize("name", ["activity.html", "efficiency.html", "job.html", "health.html", "ticket.html",
+                                  "settings.html"])
 def test_serves_the_other_pages(site: Path, get, name: str) -> None:
     status, _, _ = get(f"/{name}")
     assert status == 404  # not written yet
@@ -266,6 +267,8 @@ BOT_TYPE_TOKEN = "gho_LEAKCANARYbotTypeTok3n00000000000000"
 BOT_LOGIN_TOKEN = "gho_LEAKCANARYbotLoginTok3n0000000000000"
 VIA_APP_TOKEN = "ghu_LEAKCANARYviaAppTok3n00000000000000"
 OAUTH_VIA_APP_TOKEN = "gho_LEAKCANARYoauthViaAppTok3n0000000000"
+CLAUDE_BOT_TOKEN = "gho_LEAKCANARYclaudeBotTok3n00000000000"
+GROK_TOKEN = "gho_LEAKCANARYgrokTok3n000000000000000000"
 DEVICE_CODE = "devcode_LEAKCANARY3584f1e2b0c9d7a6"
 USER_CODE = "LKCN-7Q2Z"
 REPO = "maxharris1/widgets"
@@ -278,6 +281,11 @@ SNAPSHOT = {
          "state": "awaiting-ok", "waiting_on": "maxharris1"},
         {"repo": REPO, "ticket_id": "13", "source": "#13", "pr": "35", "state": "building"},
     ],
+    "slots": {"devices": [
+        {"name": "box", "local": True, "enabled": True, "slot_max": 6, "drain": False},
+        {"name": "pc-wsl-bots", "local": False, "enabled": False, "slot_max": 2, "drain": True},
+    ]},
+    "settings": {"results": []},
 }
 IDENTITIES = {
     MAX_TOKEN: (200, {"login": "maxharris1", "type": "User"}),
@@ -287,6 +295,8 @@ IDENTITIES = {
     BOT_LOGIN_TOKEN: (200, {"login": "maxharris1[bot]", "type": "User"}),
     VIA_APP_TOKEN: (200, {"login": "MaxHarris1", "type": "User"}),
     OAUTH_VIA_APP_TOKEN: (200, {"login": "maxharris1", "type": "User"}),
+    CLAUDE_BOT_TOKEN: (200, {"login": "claude-bot", "type": "User"}),
+    GROK_TOKEN: (200, {"login": "grok", "type": "User"}),
 }
 
 
@@ -455,19 +465,23 @@ def actions_site(site: Path) -> Path:
 def serve_actions(actions_site: Path, fake_github: FakeGitHub):
     servers = []
 
-    def start(clients: tuple[str, ...] = ("127.0.0.1",)) -> Client:
+    def start(clients: tuple[str, ...] = ("127.0.0.1",), spool: Path | None = None,
+              approver: str = "maxharris1") -> Client:
         config = server_module.ActionsConfig(
             client_id="Ov23liTESTCLIENT",
-            approver="maxharris1",
+            approver=approver,
             clients=frozenset(server_module.ipaddress.IPv4Address(c) for c in clients),
             api_base=fake_github.base,
             web_base=fake_github.base,
+            settings_spool=spool,
         )
         server = server_module.make_server("127.0.0.1", 0, actions_site, config)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         servers.append((server, thread))
-        return Client(server.server_address[1])
+        client = Client(server.server_address[1])
+        client.server = server
+        return client
 
     yield start
     for server, thread in servers:
@@ -506,7 +520,7 @@ def test_the_approver_signs_in_and_comments_as_himself(max_client: Client, fake_
 
 
 @pytest.mark.parametrize("token", [OTHER_TOKEN, APP_TOKEN, BOT_TYPE_TOKEN, BOT_LOGIN_TOKEN,
-                                   VIA_APP_TOKEN, "denied"])
+                                   VIA_APP_TOKEN, CLAUDE_BOT_TOKEN, GROK_TOKEN, "denied"])
 def test_a_token_that_is_not_the_approver_is_refused(serve_actions, fake_github, token) -> None:
     client = serve_actions()
     assert client.sign_in(fake_github, token) == "refused"
@@ -682,20 +696,200 @@ def test_ok_needs_a_session_and_csrf(max_client: Client, fake_github) -> None:
     assert fake_github.posts == []
 
 
+
+import time
+
+REQUEST_KEYS = {"id", "actor", "requested_at", "device", "field", "expect", "value"}
+
+
+@pytest.fixture
+def spool(tmp_path: Path) -> Path:
+    path = tmp_path / "spool"
+    path.mkdir(mode=0o755)
+    return path
+
+
+@pytest.fixture
+def settings_client(serve_actions, fake_github, spool: Path) -> Client:
+    client = serve_actions(spool=spool)
+    assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
+    return client
+
+
+def change(client: Client, **fields):
+    payload = {"device": "box", "field": "slot_max", "expect": 6, "value": 4, **fields}
+    return client.post("/api/settings", payload)
+
+
+def seed(spool: Path, count: int) -> list[str]:
+    ids = [f"seeded{n:02d}" + "x" * 12 for n in range(count)]
+    for request_id in ids:
+        (spool / f"{request_id}.json").write_text("{}", encoding="utf-8")
+    return ids
+
+
+@pytest.mark.parametrize("device,field,expect,value", [
+    ("box", "slot_max", 6, 4),
+    ("box", "slot_max", 6, 64),
+    ("box", "enabled", True, False),
+    ("box", "drain", False, True),
+    ("pc-wsl-bots", "enabled", False, True),
+    ("pc-wsl-bots", "slot_max", 2, 1),
+])
+def test_the_approver_queues_exactly_the_request(
+    settings_client: Client, spool: Path, device, field, expect, value
+) -> None:
+    status, answer = change(settings_client, device=device, field=field, expect=expect,
+                            value=value)
+    assert status == 202 and set(answer) == {"id"}
+    (path,) = spool.iterdir()
+    assert path.name == f"{answer['id']}.json"
+    assert re.fullmatch(r"[A-Za-z0-9_-]{16,64}", answer["id"])
+    assert path.stat().st_mode & 0o777 == 0o644
+    text = path.read_text(encoding="utf-8")
+    request = json.loads(text)
+    assert set(request) == REQUEST_KEYS
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", request.pop("requested_at"))
+    assert request == {"id": answer["id"], "actor": "maxharris1", "device": device,
+                       "field": field, "expect": expect, "value": value}
+    session = settings_client.server.actions.session
+    for secret in (MAX_TOKEN, session.session_id, session.csrf, "127.0.0.1"):
+        assert secret not in text
+
+
+@pytest.mark.parametrize("fields,status,code", [
+    ({"field": "name"}, 400, "bad-field"),
+    ({"field": "local"}, 400, "bad-field"),
+    ({"field": None}, 400, "bad-field"),
+    ({"field": ["slot_max"]}, 400, "bad-field"),
+    ({"value": 0}, 400, "bad-value"),
+    ({"value": 65}, 400, "bad-value"),
+    ({"value": True}, 400, "bad-value"),
+    ({"value": "6"}, 400, "bad-value"),
+    ({"value": 4.0}, 400, "bad-value"),
+    ({"value": None}, 400, "bad-value"),
+    ({"expect": "6"}, 400, "bad-value"),
+    ({"expect": True}, 400, "bad-value"),
+    ({"field": "enabled", "expect": True, "value": 0}, 400, "bad-value"),
+    ({"field": "drain", "expect": 0, "value": True}, 400, "bad-value"),
+    ({"field": "drain", "expect": False, "value": "true"}, 400, "bad-value"),
+    ({"device": "nope"}, 404, "not-in-snapshot"),
+    ({"device": "BOX"}, 404, "not-in-snapshot"),
+    ({"device": None}, 404, "not-in-snapshot"),
+    ({"expect": 5}, 409, "changed"),
+    ({"field": "enabled", "expect": False, "value": True}, 409, "changed"),
+    ({"field": "drain", "expect": True, "value": False}, 409, "changed"),
+])
+def test_a_bad_or_stale_change_is_refused_and_writes_nothing(
+    settings_client: Client, spool: Path, fields, status, code
+) -> None:
+    assert change(settings_client, **fields) == (status, {"error": code})
+    assert list(spool.iterdir()) == []
+
+
+def test_a_settings_post_needs_a_session_and_csrf(settings_client: Client, spool: Path) -> None:
+    payload = {"device": "box", "field": "slot_max", "expect": 6, "value": 4}
+    for overrides in ({"X-Factory-CSRF": None}, {"X-Factory-CSRF": "not-the-csrf"}):
+        assert settings_client.post("/api/settings", payload, **overrides) == (
+            403, {"error": "csrf"})
+    settings_client.cookies.pop("factory_session")
+    assert change(settings_client) == (401, {"error": "no-session"})
+    assert list(spool.iterdir()) == []
+
+
+def test_an_unlisted_peer_gets_404_for_settings(serve_actions, spool: Path) -> None:
+    client = serve_actions(clients=("100.64.0.9",), spool=spool)
+    assert change(client) == (404, {"error": "not-found"})
+    assert list(spool.iterdir()) == []
+
+
+def test_without_a_spool_settings_is_an_unknown_route(max_client: Client) -> None:
+    assert change(max_client) == (404, {"error": "not-found"})
+
+
+def _forge(client: Client, login: str) -> None:
+    session = server_module.Session("forged-session-" + login, login, "gho_forged",
+                                    "forged-csrf", time.monotonic() + 60)
+    client.server.actions.session = session
+    client.cookies["factory_session"] = session.session_id
+    client.csrf = session.csrf
+
+
+@pytest.mark.parametrize("login", ["claude-bot", "grok", "someone-else", "x[bot]",
+                                   "maxharris1[bot]"])
+def test_a_session_for_another_login_is_not_the_approver(
+    serve_actions, spool: Path, login: str
+) -> None:
+    client = serve_actions(spool=spool)
+    _forge(client, login)
+    assert change(client) == (403, {"error": "not-approver"})
+    assert list(spool.iterdir()) == []
+
+
+def test_a_bot_login_is_refused_even_as_the_configured_approver(
+    serve_actions, spool: Path
+) -> None:
+    client = serve_actions(spool=spool, approver="claude-bot")
+    _forge(client, "claude-bot")
+    assert change(client) == (403, {"error": "not-approver"})
+    assert list(spool.iterdir()) == []
+
+
+def test_the_approver_check_is_casefolded(serve_actions, spool: Path) -> None:
+    client = serve_actions(spool=spool)
+    _forge(client, "MaxHarris1")
+    status, answer = change(client)
+    assert status == 202
+    assert json.loads((spool / f"{answer['id']}.json").read_text())["actor"] == "MaxHarris1"
+
+
+def test_more_than_twenty_pending_requests_is_busy(settings_client: Client, spool: Path) -> None:
+    seed(spool, 19)
+    assert change(settings_client)[0] == 202
+    assert change(settings_client) == (429, {"error": "busy"})
+    assert len(list(spool.iterdir())) == 20
+
+
+def test_applied_requests_are_cleared_before_counting(
+    settings_client: Client, spool: Path, actions_site: Path
+) -> None:
+    ids = seed(spool, 20)
+    (spool / ".half-written.tmp").write_text("", encoding="utf-8")
+    assert change(settings_client) == (429, {"error": "busy"})
+    snapshot = {**SNAPSHOT, "settings": {"results": [{"id": ids[0]}, {"id": "not-here" * 3}]}}
+    (actions_site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    status, answer = change(settings_client)
+    assert status == 202
+    names = {path.name for path in spool.iterdir()}
+    assert f"{ids[0]}.json" not in names
+    assert names == {f"{i}.json" for i in ids[1:]} | {f"{answer['id']}.json", ".half-written.tmp"}
+
+
 LOG_LINE = re.compile(r"(GET|HEAD|POST) /[A-Za-z0-9./_-]* \d{3} 127\.0\.0\.1")
 
 
+GITHUB_CREDENTIAL = re.compile(r"gh[opsu]_|github_pat_")
+
+
 def test_no_credential_reaches_a_response_page_or_log(
-    serve_actions, fake_github, actions_site: Path, capsys
+    serve_actions, fake_github, actions_site: Path, spool: Path, capsys
 ) -> None:
-    (actions_site / "activity.html").write_text("<!doctype html><title>a</title>", "utf-8")
-    client = serve_actions()
+    for name in ("activity.html", "settings.html"):
+        (actions_site / name).write_text(f"<!doctype html><title>{name}</title>", "utf-8")
+    client = serve_actions(spool=spool)
     assert client.sign_in(fake_github, MAX_TOKEN) == "signed-in"
     client.session()
     assert comment(client, "canary run")[0] == 201
     assert client.post("/api/head", {"repo": REPO, "pr": 34})[0] == 200
     assert ok(client)[0] == 201
-    for path in ("/", "/index.html", "/activity.html", "/status.json", "/api/session?x=1"):
+    settings_from = len(client.seen)
+    assert change(client)[0] == 202
+    assert change(client, expect=5)[0] == 409
+    assert change(client, field="token")[0] == 400
+    settings_replies = [body for _, _, body in client.seen[settings_from:]]
+    session = client.server.actions.session
+    for path in ("/", "/index.html", "/activity.html", "/settings.html", "/status.json",
+                 "/api/session?x=1"):
         client.raw("GET", path)
     assert client.post("/api/signout")[0] == 200
     sign_in_reply = client.seen[0][2]
@@ -714,12 +908,22 @@ def test_no_credential_reaches_a_response_page_or_log(
     session_ids.discard("")
     assert len(session_ids) == 1 and MAX_TOKEN not in session_ids.pop()
 
-    for name in ("index.html", "activity.html", "status.json"):
-        text = (actions_site / name).read_text(encoding="utf-8")
-        assert "LEAKCANARY" not in text and USER_CODE not in text
+    secrets = (session.session_id, session.csrf, DEVICE_CODE, USER_CODE, "LEAKCANARY")
+    for reply in settings_replies:
+        text = reply.decode()
+        assert not any(secret in text for secret in secrets) and not GITHUB_CREDENTIAL.search(text)
+
+    written = [path.read_text(encoding="utf-8") for path in spool.iterdir()]
+    pages = [(actions_site / name).read_text(encoding="utf-8")
+             for name in ("index.html", "activity.html", "settings.html", "status.json")]
+    assert len(written) == 1
+    for text in written + pages:
+        assert not any(secret in text for secret in secrets), text
+        assert not GITHUB_CREDENTIAL.search(text), text
 
     log = capsys.readouterr().err
-    assert "LEAKCANARY" not in log and USER_CODE not in log and "canary run" not in log
+    assert not any(secret in log for secret in secrets) and "canary run" not in log
+    assert not GITHUB_CREDENTIAL.search(log)
     lines = log.splitlines()
     assert lines and all(LOG_LINE.fullmatch(line) for line in lines), lines
     assert "?" not in log
@@ -769,3 +973,37 @@ def test_load_config_refuses_unsafe_actions_settings(site: Path, change, user, n
     env = _env(site, **{**ACTIONS_ENV, "USER": "factory-dash", **change})
     with pytest.raises(server_module.ConfigError, match=needle):
         server_module.load_config(env, process_user=user)
+
+
+def test_load_config_takes_the_settings_spool_with_actions(site: Path, spool: Path) -> None:
+    env = _env(site, **ACTIONS_ENV, USER="factory-dash", DASHBOARD_SETTINGS_SPOOL=str(spool))
+    *_, actions = server_module.load_config(env, process_user="factory-dash")
+    assert actions.settings_spool == spool
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("relative", "absolute"),
+    ("missing", "does not exist"),
+    ("file", "not a directory"),
+    ("symlink", "symlink"),
+    ("group-writable", "group- or world-writable"),
+    ("world-writable", "group- or world-writable"),
+    ("without-actions", "needs GitHub actions"),
+])
+def test_load_config_refuses_an_unsafe_settings_spool(
+    site: Path, spool: Path, case: str, needle: str
+) -> None:
+    (spool.parent / "plain-file").write_text("x", encoding="utf-8")
+    (spool.parent / "spool-link").symlink_to(spool, target_is_directory=True)
+    if case.endswith("-writable"):
+        spool.chmod(0o775 if case == "group-writable" else 0o757)
+    value = {
+        "relative": "spool",
+        "missing": str(spool.parent / "nope"),
+        "file": str(spool.parent / "plain-file"),
+        "symlink": str(spool.parent / "spool-link"),
+    }.get(case, str(spool))
+    actions = {} if case == "without-actions" else ACTIONS_ENV
+    env = _env(site, **actions, USER="factory-dash", DASHBOARD_SETTINGS_SPOOL=value)
+    with pytest.raises(server_module.ConfigError, match=needle):
+        server_module.load_config(env, process_user="factory-dash")

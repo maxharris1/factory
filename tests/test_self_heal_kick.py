@@ -35,7 +35,8 @@ def test_once_deploys_before_health_and_heal(home: Path) -> None:
     assert result.returncode == 0, result.stderr
     order = _order(home)
     assert order[0] == "heal deploy"
-    assert sorted(order[1:]) == ["heal --health-json", "health --json"]
+    assert order[1] == "settings apply"
+    assert sorted(order[2:]) == ["heal --health-json", "health --json"]
     (deploy,) = [json.loads(line) for line in (home / "deploy-calls").read_text().splitlines()]
     assert deploy["argv"] == ["heal", "deploy", "--state", str(home / STATE)]
     assert deploy["db"] == str(home / STATE / "orch.db")
@@ -70,11 +71,13 @@ def test_kick_without_the_timer_runs_a_detached_pass(home: Path) -> None:
     started = time.monotonic()
     result = _run(home, "kick")
     assert result.returncode == 0, result.stderr
+    detached = ["heal --health-json", "heal devices", "health --json"]
     deadline = time.monotonic() + 30
-    while len(_order(home)) < 4 and time.monotonic() < deadline:
+    while len(_order(home)) < 2 + len(detached) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert _order(home)[0] == "heal deploy"
-    assert sorted(_order(home)[1:]) == ["heal --health-json", "heal devices", "health --json"]
+    assert _order(home)[1] == "settings apply"
+    assert sorted(_order(home)[2:]) == detached
     assert time.monotonic() - started < 30
     assert "kick: started a detached pass" in _service_log(home)
 
