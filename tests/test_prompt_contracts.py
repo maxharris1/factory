@@ -491,6 +491,7 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "rule-gh": wording_gh,
     "rule-secrets": wording_secrets,
     "rule-scratch": lambda: carried("rule-scratch", side="box"),
+    "rule-containers": wording("rule-containers"),
     "rule-one-channel": wording("rule-one-channel"),
     "rule-no-follow-up-fixes": wording_no_follow_up_fixes,
     "rule-job-text": wording("rule-job-text"),

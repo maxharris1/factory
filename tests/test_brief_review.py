@@ -283,3 +283,20 @@ def test_verify_unavailable_waives_only_the_skill_factory_md_names_now() -> None
     assert "`verify-cleffy`" in text
     assert UNREADABLE_BLOCKS in text
     assert "review.verify_unavailable" not in text
+
+
+@pytest.mark.parametrize("kind", ["review", "build"])
+def test_a_review_and_a_build_brief_require_labelled_containers(kind: str) -> None:
+    for brief in snapshots.render_snapshot(kind).split("=====")[2::2]:
+        assert "`factory.job=$ORCH_JOB_ID`" in brief and "EXIT trap" in brief
+
+
+def test_the_review_rules_point_the_throwaway_copy_at_the_container_rule() -> None:
+    brief = review_brief("1/3")
+    review_rules = brief.split("## Review rules", 1)[1]
+    throwaway = [line for line in review_rules.splitlines() if "throwaway copy" in line]
+    assert len(throwaway) == 1 and "its containers labelled as the Rules say" in throwaway[0]
+
+
+def test_the_review_task_still_forbids_merging_and_pushing() -> None:
+    assert "Do not merge. Do not push to the PR." in review_brief("1/3")
