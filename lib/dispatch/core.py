@@ -108,9 +108,8 @@ class DispatcherBase:
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
-        self._ci_log_reads: dict[
-            tuple[str, str, tuple[str | None, ...]], Mapping[str, str] | None
-        ] = {}
+        self._ci_log_reads: dict[tuple[str, str, tuple[str | None, ...]], Mapping[str, str]] = {}
+        self._ci_log_failures: set[tuple[str, str, tuple[str | None, ...]]] = set()
         self.ci_rerun = ci_rerun
         self.ci_runs = ci_runs
         self.ci_job_log = ci_job_log

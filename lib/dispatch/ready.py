@@ -639,8 +639,7 @@ class ReadyMixin:
     def _ci_fix_evidence(
         self, repo: str, result: CIResult, dedupe_key: str
     ) -> CIEvidence | None:
-        """Runs outside the enqueue's transaction, so no network read holds the DB lock.
-        The result comes classified from _settled_red."""
+        """Runs outside the enqueue's transaction, so no network read holds the DB lock."""
         from lib.evidence.ci import ci_evidence
 
         with self._connect() as connection:
@@ -652,7 +651,6 @@ class ReadyMixin:
         return ci_evidence(failed=failed_checks(result), logs=self._failed_job_logs(repo, result))
 
     def _failed_job_logs(self, repo: str, result: CIResult) -> dict[str, str | None]:
-        """Each failed job's log by job id, each run's failed attempt read at most once."""
         failed = failed_checks(result)
         logs: dict[str, str | None] = {}
         if self.ci_logs is None:
@@ -660,17 +658,14 @@ class ReadyMixin:
         for run_id in dict.fromkeys(check.run_id for check in failed if check.run_id is not None):
             checks = [check for check in failed if check.run_id == run_id]
             key = (repo.lower(), run_id, tuple(check.job_id for check in checks))
-            if key in self._ci_log_reads:
-                run_logs = self._ci_log_reads[key] or {}
-            else:
-                read: Mapping[str, str] | None
+            run_logs = self._ci_log_reads.get(key, {})
+            if key not in self._ci_log_reads and key not in self._ci_log_failures:
                 try:
-                    run_logs = read = self.ci_logs(repo, run_id)
+                    run_logs = self._ci_log_reads[key] = self.ci_logs(repo, run_id)
                 except Exception as exc:
-                    run_logs, read = {}, None
+                    self._ci_log_failures.add(key)
                     if self.log is not None:
                         self.log(f"ci log: {repo} run {run_id} unavailable: {type(exc).__name__}")
-                self._ci_log_reads[key] = read
                 if len(self._ci_log_reads) > _CI_LOG_READS:
                     del self._ci_log_reads[next(iter(self._ci_log_reads))]
             for check in checks:
