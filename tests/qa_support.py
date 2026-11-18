@@ -10,6 +10,7 @@ from pathlib import Path
 from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.factory_md import QaConfig, QaLane, QaRunner
 from lib.orch_yml import Approvals
+from lib.qa_storage import DownloadLink, UploadLink
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, factory
 
@@ -18,6 +19,27 @@ TICKET = "763"
 TRUSTED = {"github": {"maxharris1": {"grok-bot", "claude-bot", "codex-bot"}}}
 APPROVALS = Approvals(logins=frozenset({"maxharris1"}))
 HEAD_A, HEAD_B, HEAD_C = "a" * 40, "b" * 40, "c" * 40
+SIGNATURE = "sig-7f3c9e1d"
+STORE = "https://store.invalid"
+
+
+class SigningStorage:
+    """Signs links whose every URL and form carries SIGNATURE, so a test can look for a leak."""
+
+    def __init__(self) -> None:
+        self.signed: list[tuple[str, str, int]] = []
+
+    def sign_upload(self, key: str, max_bytes: int, expires_s: int) -> UploadLink:
+        self.signed.append(("upload", key, expires_s))
+        return UploadLink(key, max_bytes, expires_s, url=f"{STORE}/{key}?up={SIGNATURE}",
+                          fields={"key": key, "policy": SIGNATURE})
+
+    def sign_download(self, key: str, expires_s: int) -> DownloadLink:
+        self.signed.append(("download", key, expires_s))
+        return DownloadLink(key, expires_s, url=f"{STORE}/{key}?down={SIGNATURE}")
+
+    def fetch(self, key: str, dest: Path, max_bytes: int) -> bool:
+        raise AssertionError("signing only")
 
 
 def qa_config(*, shootout: bool = False, paths: tuple[str, ...] = (), full_rerun_lines: int = 400) -> QaConfig:
