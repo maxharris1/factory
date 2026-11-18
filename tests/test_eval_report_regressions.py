@@ -132,7 +132,8 @@ def test_a_held_approval_is_accepted_from_its_hold_time(tmp_path):
     with sqlite3.connect(queue.path) as connection:
         for comment_id, posted in (("held", 10.0), ("before", 15.0), ("after", 30.0)):
             connection.execute(
-                "INSERT INTO verdict_heads VALUES ('owner/repo', '1', ?, ?, 1, ?, NULL)",
+                "INSERT INTO verdict_heads (repo, ticket_id, comment_id, head, review_round, posted_at)"
+                " VALUES ('owner/repo', '1', ?, ?, 1, ?)",
                 (comment_id, head, posted),
             )
         connection.execute(

@@ -9,12 +9,14 @@ from pathlib import Path
 
 from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.factory_md import QaConfig, QaLane, QaRunner
+from lib.orch_yml import Approvals
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, factory
 
 REPO = "maxharris1/factory"
 TICKET = "763"
 TRUSTED = {"github": {"maxharris1": {"grok-bot", "claude-bot", "codex-bot"}}}
+APPROVALS = Approvals(logins=frozenset({"maxharris1"}))
 HEAD_A, HEAD_B, HEAD_C = "a" * 40, "b" * 40, "c" * 40
 
 
@@ -66,8 +68,17 @@ class Thread:
         self.merged = False
         self.config = type("Config", (), {"poll_seconds": 30})()
 
-    def post(self, comment_id: str, body: str, *, at: float, head: str | None = None) -> Comment:
-        item = Comment(id=comment_id, author="maxharris1", body=body, created_at=at)
+    def post(
+        self,
+        comment_id: str,
+        body: str,
+        *,
+        at: float,
+        head: str | None = None,
+        author: str = "maxharris1",
+        edited_at: float | None = None,
+    ) -> Comment:
+        item = Comment(id=comment_id, author=author, body=body, created_at=at, edited_at=edited_at)
         self.comments.append(item)
         if head is not None:
             self.head = head
@@ -95,7 +106,15 @@ class Thread:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, qa: QaConfig | None, *, qa_diff: Callable | None = None, ship: str = "handoff"):
+    def __init__(
+        self,
+        tmp_path: Path,
+        qa: QaConfig | None,
+        *,
+        qa_diff: Callable | None = None,
+        ship: str = "handoff",
+        approvals: Approvals = APPROVALS,
+    ):
         self.now = [1000.0]
         path = tmp_path / "orch.db"
         self.queue = SQLiteJobQueue(path, clock=lambda: self.now[0])
@@ -107,6 +126,7 @@ class Harness:
             trusted_logins=TRUSTED,
             review_actions=self.actions,
             grok_delivery=FakeGrokDelivery(),
+            approvals=approvals,
             **kwargs,
         )
         base = TrackedTicket(
@@ -128,8 +148,8 @@ class Harness:
             self.dispatcher.poll_once(self.thread)
             self.now[0] += 30
 
-    def post(self, comment_id: str, body: str, *, head: str | None = None) -> Comment:
-        return self.thread.post(comment_id, body, at=self.now[0], head=head)
+    def post(self, comment_id: str, body: str, *, head: str | None = None, author: str = "maxharris1") -> Comment:
+        return self.thread.post(comment_id, body, at=self.now[0], head=head, author=author)
 
     def rows(self, sql: str, *args: object) -> list[tuple]:
         with self.queue.connect() as connection:

@@ -50,6 +50,7 @@ from lib.eval_report import (
     render,
     render_json,
     render_metrics,
+    render_qa,
 )
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
@@ -210,7 +211,8 @@ eval-report --db PATH --baseline PATH
   collected logs. It does not contact GitHub or Linear. --json prints
   the --input report as JSON.
   --db prints the #209 metrics of a backed-up orch.db, opened read-only,
-  beside those of the --baseline snapshot (O4's).
+  beside those of the --baseline snapshot (O4's), then the --db
+  snapshot's QA section, split by runner.
 
 log-message --repo OWNER/NAME [--pr N] --from BOT --to BOT [--kind KIND]
             [--log PATH]
@@ -667,6 +669,7 @@ def _eval_report(argv: list[str]) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         print(render_metrics(current, baseline), end="")
+        print(render_qa(current), end="")
         return 0
     if args.baseline is not None:
         parser.error("--baseline needs --db")
@@ -1189,6 +1192,7 @@ def _runtime(
         ci_logs=source.github.failed_run_logs,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
+        ci_pool=source.github.list_runners,
         hold_carry=_hold_carry,
         qa_diff=_qa_diff,
     )

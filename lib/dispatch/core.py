@@ -34,6 +34,7 @@ from lib.dispatch.types import (
     GrokDelivery,
     Hook,
     HoldCarry,
+    PoolRunner,
     QaDiff,
     RebaseClassifier,
     Registration,
@@ -73,6 +74,7 @@ class DispatcherBase:
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
+        ci_pool: Callable[[str], Sequence[PoolRunner]] | None = None,
         hold_carry: HoldCarry | None = None,
         qa_diff: QaDiff | None = None,
     ):
@@ -109,6 +111,7 @@ class DispatcherBase:
         self.ci_logs = ci_logs
         self.ci_runs = ci_runs
         self.ci_job_log = ci_job_log
+        self.ci_pool = ci_pool
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}

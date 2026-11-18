@@ -111,13 +111,13 @@ def test_a_login_without_limits_gives_no_reading(out: bytes) -> None:
         Reading("seven_day", None, None, CAPTURED, 0, CAPTURED)]
 
 
-@pytest.mark.parametrize(("five_hour", "absent"), [(None, 1), ("missing", 1), ({"utilization": 3}, 0)])
-def test_a_null_or_missing_window_is_no_reading_never_zero(five_hour: object, absent: int) -> None:
+@pytest.mark.parametrize("five_hour", [None, "missing", {"utilization": 3}])
+def test_a_null_or_missing_window_is_no_reading_never_zero_nor_absent(five_hour: object) -> None:
     limits = {"seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
     if five_hour != "missing":
         limits["five_hour"] = five_hour
     assert parse_get_usage(reply(limits), CAPTURED) == [
-        Reading("five_hour", None, None, CAPTURED, absent, CAPTURED),
+        Reading("five_hour", None, None, CAPTURED, 0, CAPTURED),
         Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED, 0, CAPTURED)]
 
 
@@ -1089,15 +1089,32 @@ def test_one_future_stamped_event_polled_three_times_is_one_omission(tmp_path: P
         assert codex["five_hour"]["state"] == "no reading", parsed_at
 
 
-def test_a_claude_window_null_in_three_replies_is_not_on_the_plan(tmp_path: Path) -> None:
+@pytest.mark.parametrize("replies", [3, 5])
+def test_a_claude_window_null_in_every_reply_stays_no_reading(tmp_path: Path, replies: int) -> None:
     db = tmp_path / "orch.db"
     limits = {"five_hour": None, "seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
     with sqlite3.connect(db) as connection:
-        for offset in (0, 600, 1200):
+        for offset in range(0, 600 * replies, 600):
             usage_readings.store(connection, harness="claude", bot="claude-bot", device="box", job_id="j",
                                  readings=parse_get_usage(reply(limits), CAPTURED + offset))
-        claude = _accounts(read_usage(connection, CAPTURED + 1260, BOX))["claude"]
-    assert claude["five_hour"]["state"] == "not on plan" and claude["headroom"] == 0.76
+        claude = _accounts(read_usage(connection, CAPTURED + 600 * replies, BOX))["claude"]
+    assert claude["five_hour"] == {
+        "used": None, "resets_at": None, "observed_at": CAPTURED + 600 * (replies - 1), "state": "no reading"}
+    assert claude["seven_day"]["used"] == 0.24 and claude["headroom"] == 0.76
+
+
+def test_a_claude_streak_stored_before_the_fix_reads_as_no_reading(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        usage_readings.ensure_table(connection)
+        connection.executemany(
+            "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id, absent)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(harness, f"{harness}-bot", "box", "five_hour", None, None, CAPTURED, "j", 3)
+             for harness in ("claude", "codex")])
+        accounts = _accounts(read_usage(connection, CAPTURED + 60, BOX))
+    assert accounts["claude"]["five_hour"]["state"] == "no reading"
+    assert accounts["codex"]["five_hour"]["state"] == "not on plan"
 
 
 def test_a_late_reading_that_reported_the_window_before_three_newer_omissions_keeps_not_on_the_plan(
