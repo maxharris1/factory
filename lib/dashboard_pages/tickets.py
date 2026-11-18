@@ -197,6 +197,11 @@ SCRIPT_TICKETS = r"""
     first(queued, d.queued, function (r) { return r; });
     first(verdicts, d.poller ? d.poller.verdicts : null, function (r) { return r; });
     first(reasons, d.stuck ? d.stuck.tickets : null, function (r) { return r.reason; });
+    var qa = new Map();
+    ((d.qa || {}).runs || []).forEach(function (r) {
+      if (!qa.has(joinKey(r))) qa.set(joinKey(r), []);
+      qa.get(joinKey(r)).push(r);
+    });
     var generated = d.generated_at_epoch;
     var cards = rows.filter(function (r) { return !project || r.repo === project; }).map(function (t) {
       var key = joinKey(t);
@@ -204,7 +209,7 @@ SCRIPT_TICKETS = r"""
       var lv = live.get(key) || null, q = queued.get(key) || null;
       return {ticket: t, phase: t.stuck || !charted ? 'Stop' : table.states[t.state],
               live: lv, queued: q, kind: lv ? (lv.job_state === 'stale' ? 'stale' : 'live') : q ? 'queued' : 'idle',
-              verdict: verdicts.get(key) || null, reason: reasons.get(key) || null,
+              verdict: verdicts.get(key) || null, reason: reasons.get(key) || null, qa: qa.get(key) || [],
               ago: known(t.shipped_at) && known(generated) ? generated - t.shipped_at : null};
     });
     function rank(c) {
@@ -306,6 +311,30 @@ SCRIPT_TICKETS = r"""
     else ticking(span, t.state_age_seconds, 'in ' + t.state + ' ');
   }
 
+  function qaHref(halves) {
+    var run = Array.isArray(halves) && halves.length === 2 ? halves.join('') : '';
+    return /^[0-9a-f]{32}$/.test(run) ? '/qa/runs/' + run : null;
+  }
+
+  function tkQa(card, main, runs) {
+    runs.forEach(function (r) {
+      var facts = [r.state, r.scope];
+      if (r.lanes) facts.push(r.lanes + (r.lanes === 1 ? ' lane' : ' lanes'));
+      if (known(r.passed)) facts.push(r.passed + '/' + r.total + ' scenarios');
+      var line = add(main, el('div', 'tk-run'));
+      add(line, chip(r.result ? 'QA ' + r.result : 'QA', BOARD.qa_tones[r.result || r.state] || 'muted'));
+      add(line, el('span', 'tk-dev', r.runner));
+      if (r.arm === 'shootout') add(line, el('span', 'tk-tag', 'shootout'));
+      add(line, el('span', 'tk-out', facts.join(' · ')));
+      var href = qaHref(r.run);
+      if (href) add(line, link(null, href)).textContent = 'evidence';
+      var t = add(line, el('span', 'tk-t'));
+      if (r.state === 'reported') t.textContent = dur(r.elapsed_seconds);
+      else ticking(t, r.elapsed_seconds);
+    });
+    return card;
+  }
+
   function tkCard(c) {
     var t = c.ticket, job = c.live || c.queued;
     var stop = c.phase === 'Stop', waiting = WAITING.hasOwnProperty(t.state);
@@ -334,7 +363,7 @@ SCRIPT_TICKETS = r"""
       tkInState(state, t);
       tkChips(state, c.live);
       if (c.reason) add(main, el('div', 'tk-reason', c.reason));
-      return card;
+      return tkQa(card, main, c.qa);
     }
     if (c.kind === 'idle') tkInState(state, t);
     else add(state, el('span', null, t.state));
@@ -349,13 +378,13 @@ SCRIPT_TICKETS = r"""
         add(run, el('span', 'tk-dev', 'for'));
         add(run, bot(job.recipient));
         ticking(add(run, el('span', 'tk-t')), job.age_seconds, 'waiting ');
-        return card;
+        return tkQa(card, main, c.qa);
       }
       add(run, bot(job.recipient));
       if (job.device) add(run, el('span', 'tk-dev', '@ ' + job.device));
       ticking(add(run, el('span', 'tk-t')), job.elapsed_seconds, 'T+ ');
       if (c.kind === 'stale') ticking(add(main, el('div', 'tk-hb')), job.heartbeat_age_seconds, 'no heartbeat for ');
-      return card;
+      return tkQa(card, main, c.qa);
     }
     if (ci) tkCi(main, t, ci);
     if (t.no_ci) tkNoCi(main, t.no_ci);
@@ -365,7 +394,7 @@ SCRIPT_TICKETS = r"""
       add(said, chip(c.verdict.kind, VERDICT[c.verdict.kind] || 'muted'));
       add(said, el('span', 'tk-out', c.verdict.outcome));
     }
-    return card;
+    return tkQa(card, main, c.qa);
   }
 
   function tkPhases(root, columns) {
@@ -681,6 +710,8 @@ _EMPTY = {"Ask": "nothing waiting on questions", "Stop": "nothing stopped"}
 COLUMNS = (*PIPELINE, "Stop")
 COLUMN_NAMES = {"Stop": "Stopped"}
 _ROUND = re.compile(r"([0-9]+)/([0-9]+)")
+QA_TONES = {"queued": "muted", "running": "accent", "PASS": "ok", "FAIL": "bad", "BLOCKED": "warn"}
+_QA_RUN = re.compile(r"[0-9a-f]{32}")
 
 
 def _phase_glyph(phase: str) -> dict:
@@ -692,6 +723,7 @@ def board_constants() -> dict:
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
         "chips": JOB_CHIPS, "kinds": CARD_KINDS, "cap": CAP, "shelf_newest": SHELF_NEWEST, "shelf_page": SHELF_PAGE,
         "shelf_phone": SHELF_PHONE, "find_max": FIND_MAX,
+        "qa_tones": QA_TONES,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
 
@@ -758,6 +790,9 @@ def board(snapshot: dict, project: str | None = None) -> dict:
     queued = _first(snapshot["queued"])
     verdicts = _first(snapshot["poller"].get("verdicts"))
     reasons = {key: row.get("reason") for key, row in _first(snapshot["stuck"]["tickets"]).items()}
+    qa: dict[str, list[dict]] = {}
+    for run in snapshot.get("qa", {}).get("runs", []):
+        qa.setdefault(_join(run), []).append(run)
     generated = snapshot.get("generated_at_epoch")
     cards = [
         {
@@ -768,6 +803,7 @@ def board(snapshot: dict, project: str | None = None) -> dict:
             "kind": _kind(live.get(_join(row)), queued.get(_join(row))),
             "verdict": verdicts.get(_join(row)),
             "reason": reasons.get(_join(row)),
+            "qa": qa.get(_join(row), []),
             "ago": None if row.get("shipped_at") is None or generated is None else generated - row["shipped_at"],
         }
         for row in rows
@@ -835,6 +871,28 @@ def _in_state(ticket: dict) -> str:
     return _span("tk-in", f"in {ticket['state']}" + ("" if age is None else f" {duration(age)}"))
 
 
+def _qa_href(halves: object) -> str | None:
+    run = "".join(map(str, halves)) if isinstance(halves, list) and len(halves) == 2 else ""
+    return f"/qa/runs/{run}" if _QA_RUN.fullmatch(run) else None
+
+
+def _qa_line(run: dict) -> str:
+    facts = [run["state"], run["scope"]]
+    if run["lanes"]:
+        facts.append(f"{run['lanes']} lane" + ("" if run["lanes"] == 1 else "s"))
+    if run["passed"] is not None:
+        facts.append(f"{run['passed']}/{run['total']} scenarios")
+    label = f"QA {run['result']}" if run["result"] else "QA"
+    shootout = _span("tk-tag", "shootout") if run["arm"] == "shootout" else ""
+    href = _qa_href(run["run"])
+    evidence = f'<a href="{href}">evidence</a>' if href else ""
+    return (
+        f'<div class="tk-run">{_chip(label, QA_TONES.get(run["result"] or run["state"], "muted"))}'
+        f'{_span("tk-dev", run["runner"])}{shootout}{_span("tk-out", " · ".join(facts))}{evidence}'
+        f'{_span("tk-t", duration(run["elapsed_seconds"]))}</div>'
+    )
+
+
 def _card(card: dict) -> str:
     ticket, live, kind = card["ticket"], card["live"], card["kind"]
     job = live or card["queued"]
@@ -893,6 +951,7 @@ def _card(card: dict) -> str:
                     f'<div class="tk-run">{_chip(verdict["kind"], _VERDICT.get(verdict["kind"], "muted"))}'
                     f'{_span("tk-out", verdict["outcome"])}</div>'
                 )
+    lines += "".join(_qa_line(run) for run in card["qa"])
     cls = "tk-card tk-stop" if stop else "tk-card tk-stale" if kind == "stale" else "tk-card"
     return (
         f'<div class="{cls}" data-ticket="{_e(_key(ticket))}"'

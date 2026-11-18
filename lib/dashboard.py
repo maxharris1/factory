@@ -82,6 +82,26 @@ slots, the GitHub-hosted, queued and failed groups and one card per ticket
 with its progress counts. The script draws it; the server render works it
 out again from ci_pool, ci_runs and tickets.
 
+QA (#790): `qa` is {runs, cap, runners, queued} from the qa_runs and
+qa_lanes tables the QA worker writes. `runs` holds each tracked ticket's
+runs at the head of its newest run row, by ticket and primary before
+shootout, leaving out scope none and cancelled or stale runs: {repo,
+ticket_id, runner, arm, state, scope, result, lanes, passed, total,
+elapsed_seconds, run}. `lanes`
+counts the distinct slices launched (base checks left out). `passed` and
+`total` are set only once the run is reported: over the newest attempt of
+each slice, `total` is the scenarios asked and `passed` those its lane
+result marks verified. `elapsed_seconds` runs from started_at to now, or
+to finished_at once reported. `run` is the run id as two 16-character
+halves (a whole 32-hex id would be redacted), or None when the id is not
+32 hex; the page joins them into the `/qa/runs/<run_id>` evidence link.
+The cloud agents' URLs are not carried. `cap` is orch.yml
+qa.max_cloud_lanes (None without an OrchConfig), the lane cap each runner
+has. `runners` is {runner, open} for each name in QA_RUNNERS, open being
+its lanes launching or running. `queued` is {repo, count} of queued qa
+jobs per repo, by repo. Missing tables read as no runs, no open lanes
+and no queued jobs.
+
 Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
 `shipped_at` and `shipped_how`, its record's `shipped.at` and `shipped.how`
@@ -157,6 +177,7 @@ from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
+from lib.factory_md import QA_RUNNERS
 from lib.feeder import STATES as FEEDER_STATES
 from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
@@ -177,6 +198,7 @@ from lib.machines_yml import DEFAULT_ORCH_HOST
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.pr_title import SOURCE, read_sources
 from lib.project_rules import read_rows as read_project_rules
+from lib.qa_cloud import qa_id
 from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
 from lib.schema import TICKETS
 from lib.status import PAUSED_STATES, _hold_approvers
@@ -886,6 +908,7 @@ def collect_snapshot(
         "relay": db["relay"],
         "ci_runs": db["ci_runs"],
         "ci_pool": db["ci_pool"],
+        "qa": {**db["qa"], "cap": orch.qa.max_cloud_lanes if orch is not None else None},
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
             report,
@@ -1128,6 +1151,92 @@ def _ci_runs(
             for item in failures[:RECENT_CI_FAILURES]
         ],
     }
+
+
+QA_RUN_STATES = ("queued", "running", "reported")
+QA_SCOPES = ("full", "targeted", "smoke")
+QA_ARMS = ("primary", "shootout")
+QA_RESULTS = ("PASS", "FAIL", "BLOCKED")
+_QA_RUN_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _json(text: object) -> object:
+    try:
+        return json.loads(str(text)) if text is not None else None
+    except ValueError:
+        return None
+
+
+def _list(value: object) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _qa_scenarios(lanes: list[sqlite3.Row]) -> tuple[int, int]:
+    newest: dict[int, sqlite3.Row] = {}
+    for lane in sorted(lanes, key=lambda row: (row["slice"], row["attempt"])):
+        newest[lane["slice"]] = lane
+    passed = total = 0
+    for lane in newest.values():
+        asked = [item for item in _list(_json(lane["scenarios"])) if isinstance(item, str)]
+        result = _json(lane["result"])
+        verified = {
+            qa_id(item["id"]) for item in _list(result.get("scenarios") if isinstance(result, dict) else None)
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("result") == "verified"
+        }
+        total += len(asked)
+        passed += sum(item in verified for item in asked)
+    return passed, total
+
+
+def _qa(
+    connection: sqlite3.Connection, now: float, tables: set[str], tracked: dict[tuple[str, str], TicketInfo]
+) -> dict:
+    heads: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    if "qa_runs" in tables:
+        for row in connection.execute(
+            "SELECT rowid, * FROM qa_runs WHERE scope != 'none' AND state NOT IN ('cancelled', 'stale') "
+            "ORDER BY rowid DESC"
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            if key in tracked and (key not in heads or heads[key][0]["head"] == row["head"]):
+                heads.setdefault(key, []).append(row)
+    lanes = "qa_lanes" in tables
+    runs = []
+    for key in sorted(heads):
+        for row in sorted(heads[key], key=lambda row: (row["arm"] != "primary", row["rowid"])):
+            found = connection.execute(
+                "SELECT slice, kind, attempt, scenarios, result FROM qa_lanes "
+                "WHERE run_id = ? AND kind != 'base-check'", (row["run_id"],)
+            ).fetchall() if lanes else []
+            state = _enum(row["state"], QA_RUN_STATES)
+            passed, total = _qa_scenarios(found) if state == "reported" else (None, None)
+            run_id = str(row["run_id"])
+            reported = state == "reported" and row["finished_at"] is not None
+            runs.append({
+                "repo": _clean(row["repo"], 100),
+                "ticket_id": _clean(row["ticket_id"], 64),
+                "runner": _enum(row["runner"], QA_RUNNERS),
+                "arm": _enum(row["arm"], QA_ARMS),
+                "state": state,
+                "scope": _enum(row["scope"], QA_SCOPES),
+                "result": _enum(row["result"], QA_RESULTS) if row["result"] is not None else None,
+                "lanes": len({lane["slice"] for lane in found}),
+                "passed": passed,
+                "total": total,
+                "elapsed_seconds": _age(float(row["finished_at"]) if reported else now, row["started_at"]),
+                "run": [run_id[:16], run_id[16:]] if _QA_RUN_ID.fullmatch(run_id) else None,
+            })
+    open_lanes = dict(connection.execute(
+        "SELECT runner, COUNT(*) FROM qa_lanes WHERE state IN ('launching', 'running') GROUP BY runner"
+    ).fetchall()) if lanes else {}
+    runners = [{"runner": name, "open": int(open_lanes.get(name, 0))} for name in QA_RUNNERS]
+    queued = [
+        {"repo": _clean(repo, 100), "count": int(count)}
+        for repo, count in connection.execute(
+            "SELECT repo, COUNT(*) FROM jobs WHERE action = 'qa' AND state = 'queued' GROUP BY repo ORDER BY repo"
+        )
+    ] if "jobs" in tables else []
+    return {"runs": runs, "runners": runners, "queued": queued}
 
 
 def _ticket_ref(
@@ -1977,6 +2086,7 @@ def _read_db(
         "relay": _relay(connection, tables, sources, handled, ticket_records, waiting_on, len(tickets), now),
         "ci_runs": ci_runs,
         "ci_pool": ci_pool,
+        "qa": _qa(connection, now, tables, ticket_info),
         "linear_budget": {
             "state": budget_state,
             "deferrals_last_hour": budget["deferrals"],
