@@ -133,7 +133,6 @@ def test_qa_section_reports_each_figure_split_by_runner(tmp_path: Path) -> None:
 def test_rulings_count_wrong_fails_and_passes_per_runner(tmp_path: Path) -> None:
     db = _db(tmp_path)
     with sqlite3.connect(db) as connection:
-        connection.execute("ALTER TABLE qa_runs ADD COLUMN ruling TEXT")
         _run(connection, "c1", result="FAIL")
         _run(connection, "c2", ticket="13", result="FAIL")
         _run(connection, "c3", ticket="14", result="PASS")
@@ -147,6 +146,19 @@ def test_rulings_count_wrong_fails_and_passes_per_runner(tmp_path: Path) -> None
     assert lines[codex + 5 : codex + 7] == ["wrong-fail 1", "wrong-pass 1"]
     cursor = lines.index("runner cursor")
     assert lines[cursor + 5 : cursor + 7] == ["wrong-fail not ruled", "wrong-pass not ruled"]
+
+
+def test_a_snapshot_without_the_ruling_column_reports_not_ruled(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    with sqlite3.connect(db) as connection:
+        for column in ("ruling", "ruled_by", "ruled_at", "ruling_reason"):
+            connection.execute(f"ALTER TABLE qa_runs DROP COLUMN {column}")
+        _run(connection, "c1", result="FAIL")
+
+    lines = _section(db)
+
+    codex = lines.index("runner codex")
+    assert lines[codex + 5 : codex + 7] == ["wrong-fail not ruled", "wrong-pass not ruled"]
 
 
 def test_pairs_report_agreement_and_list_each_disagreeing_ticket_with_both_links(
