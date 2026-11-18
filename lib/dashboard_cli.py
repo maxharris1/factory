@@ -147,7 +147,7 @@ def main(argv: list[str]) -> int:
             once=args.once,
             sleep=time.sleep,
             log=_log,
-            evidence=_evidence(args, transport, orch),
+            evidence=_evidence(args, transport, orch, config.push.qa_budget_gib),
         )
 
     if not _paths_ok(args, prog):
@@ -165,7 +165,7 @@ def main(argv: list[str]) -> int:
 
 
 def _evidence(
-    args: argparse.Namespace, transport: object, orch: OrchConfig | None
+    args: argparse.Namespace, transport: object, orch: OrchConfig | None, budget_gib: int | None
 ) -> Callable[[], None] | None:
     roots = {
         project.repo.lower(): project.qa_storage.evidence_root
@@ -178,7 +178,14 @@ def _evidence(
     def evidence() -> None:
         connection = sqlite3.connect(f"{_db(args).resolve().as_uri()}?mode=ro", uri=True)
         try:
-            push_evidence(transport, connection=connection, roots=roots, store=_out(args) / STORE_NAME, log=_log)
+            push_evidence(
+                transport,
+                connection=connection,
+                roots=roots,
+                store=_out(args) / STORE_NAME,
+                log=_log,
+                budget_bytes=None if budget_gib is None else budget_gib * 1024**3,
+            )
         finally:
             connection.close()
 

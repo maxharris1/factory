@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ from lib.load import Finding
 from lib.orch_yml import load_orch_yml
 from lib.qa_evidence import EvidenceRefused, RunFile, run_dir, walk_run, write_run_tar
 from lib.qa_evidence_push import push_evidence
-from tests.test_qa_evidence_recycle import REPO, TICKET, _lane, _run, db, root  # noqa: F401
+from tests.test_qa_evidence_recycle import DAY, NOW, REPO, TICKET, _closed, _lane, _run, db, root  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "pc-wsl-bots.tail68624b.ts.net"
@@ -847,25 +848,41 @@ class FakePC:
 LANE_FILES = ["s-1/after-screenshot.png", "s-1/console.log"]
 
 
-def _settled(db, root: Path, run_id: str, state: str = "reported") -> Path:
-    folder = run_dir(root, REPO, TICKET, run_id)
+def _settled(
+    db, root: Path, run_id: str, state: str = "reported", *, ticket: str = TICKET, started_at: float = NOW - DAY
+) -> Path:
+    folder = run_dir(root, REPO, ticket, run_id)
     _lane(folder, 1, {"s-1": "pass"}, LANE_FILES)
-    _run(db, run_id, folder, state=state)
+    _run(db, run_id, folder, state=state, ticket=ticket, started_at=started_at)
     return folder
 
 
-def _push_evidence(db, root: Path, tmp_path: Path) -> tuple[FakePC, list[str]]:
+def _push_evidence(
+    db,
+    root: Path,
+    tmp_path: Path,
+    *,
+    remote_dir: str = "factory-dashboard",
+    budget_bytes: int | None = None,
+    roots: dict[str, Path] | None = None,
+) -> tuple[FakePC, list[str]]:
     home = tmp_path / "pc"
-    (home / "factory-dashboard").mkdir(parents=True, exist_ok=True)
+    (home / remote_dir).mkdir(parents=True, exist_ok=True)
     pc, lines = FakePC(home), []
-    transport = SshTransport(TARGET, "factory-dashboard", runner=pc)
-    roots = {REPO.lower(): root}
-    push_evidence(transport, connection=db, roots=roots, store=tmp_path / ".qa-push.json", log=lines.append)
+    transport = SshTransport(TARGET, remote_dir, runner=pc)
+    push_evidence(
+        transport,
+        connection=db,
+        roots={REPO.lower(): root} if roots is None else roots,
+        store=tmp_path / ".qa-push.json",
+        log=lines.append,
+        budget_bytes=budget_bytes,
+    )
     return pc, lines
 
 
-def _on_pc(tmp_path: Path) -> dict[str, bytes]:
-    qa = tmp_path / "pc" / "factory-dashboard" / "qa"
+def _on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard") -> dict[str, bytes]:
+    qa = tmp_path / "pc" / remote_dir / "qa"
     assert not [path for path in qa.rglob("*") if path.is_symlink()]
     return {path.relative_to(qa).as_posix(): path.read_bytes() for path in qa.rglob("*") if path.is_file()}
 
@@ -894,6 +911,76 @@ def test_full_push_copies_each_settled_run_once_and_tracks_box_recycling(db, roo
     assert len(pc.scripts) == 1
     assert "run-1/lane-1/s-1/console.log" not in _on_pc(tmp_path)
     assert "run-1/lane-1/s-1/after-screenshot.png" in _on_pc(tmp_path)
+
+
+def _runs_on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard") -> set[str]:
+    return {path.split("/")[0] for path in _on_pc(tmp_path, remote_dir)}
+
+
+@pytest.mark.parametrize("gone", ["folder", "row"])
+def test_a_run_gone_from_the_box_is_removed_from_the_pc(db, root: Path, tmp_path: Path, gone: str) -> None:
+    folder = _settled(db, root, "run-1")
+    _settled(db, root, "run-2")
+    _push_evidence(db, root, tmp_path)
+    if gone == "folder":
+        shutil.rmtree(folder)
+    else:
+        db.execute("DELETE FROM qa_runs WHERE run_id = 'run-1'")
+        db.commit()
+    pc, lines = _push_evidence(db, root, tmp_path)
+    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-1"]
+    assert lines == []
+    assert _runs_on_pc(tmp_path) == {"run-2"}
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+
+def test_over_budget_the_oldest_closed_runs_leave_the_pc_and_open_runs_stay(
+    db, root: Path, tmp_path: Path
+) -> None:
+    big = _settled(db, root, "run-old", started_at=NOW - 3 * DAY)
+    (big / "lane-1" / "s-1" / "video.webm").write_bytes(b"v" * 1024 * 1024)
+    _settled(db, root, "run-mid", started_at=NOW - 2 * DAY)
+    _settled(db, root, "run-open", ticket="13", started_at=NOW - 4 * DAY)
+    _closed(db, TICKET, "merged", NOW)
+    pc, _ = _push_evidence(db, root, tmp_path)
+    assert len(pc.scripts) == 3 and not [script for script in pc.scripts if "rm -rf -- qa/" in script]
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=512 * 1024)
+    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-old"]
+    assert _runs_on_pc(tmp_path) == {"run-mid", "run-open"}
+
+    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=1)
+    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-mid"]
+    assert _runs_on_pc(tmp_path) == {"run-open"}
+
+    (big / "lane-1" / "s-1" / "video.webm").write_bytes(b"w" * 1024)
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+    assert _runs_on_pc(tmp_path) == {"run-open"}
+
+
+def test_a_new_remote_dir_gets_every_run(db, root: Path, tmp_path: Path) -> None:
+    _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path)
+    pc, _ = _push_evidence(db, root, tmp_path, remote_dir="dashboard-b")
+    assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
+    assert b"QA run run-1" in _on_pc(tmp_path, "dashboard-b")["run-1/index.html"]
+    assert _runs_on_pc(tmp_path) == {"run-1"}
+
+
+@pytest.mark.parametrize("why", ["refused", "held"])
+def test_a_refused_or_held_run_stays_on_the_pc(db, root: Path, tmp_path: Path, why: str) -> None:
+    folder = _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path)
+    roots = None
+    if why == "refused":
+        os.symlink(tmp_path, folder / "lane-1" / "s-1" / "leak.png")
+    else:
+        roots = {}
+    pc, lines = _push_evidence(db, root, tmp_path, roots=roots, budget_bytes=1)
+    assert pc.scripts == []
+    assert len(lines) == 1 and f"qa run run-1 {why}" in lines[0]
+    assert _runs_on_pc(tmp_path) == {"run-1"}
 
 
 def test_a_folder_outside_the_evidence_root_is_refused(db, root: Path, tmp_path: Path) -> None:
@@ -996,3 +1083,19 @@ def test_cli_status_only_push_never_sends_evidence(
     argv = ["push", "--once", "--orch", str(orch), "--db", db_path, "--out", str(tmp_path / "out")]
     assert lib.dashboard_cli.main(argv + (["--status-only"] if status_only else [])) == 0
     assert evidence == [{REPO.lower(): Path("/srv/factory/qa-evidence")}] * pushes
+
+
+@pytest.mark.parametrize("line, budget", [("", None), ("    qa_budget_gib: 2\n", 2 * 1024**3)])
+def test_cli_push_passes_the_qa_budget_in_bytes(
+    db, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str, budget: int | None
+) -> None:
+    orch = tmp_path / "orch.yml"
+    orch.write_text(QA_ORCH + line, encoding="utf-8")
+    budgets: list[object] = []
+    transport = SshTransport(TARGET, "factory-dashboard", method="scp", runner=Recorder())
+    monkeypatch.setattr(lib.dashboard_cli, "transport_for", lambda config: transport)
+    monkeypatch.setattr(lib.dashboard_cli, "push_evidence", lambda *a, **kwargs: budgets.append(kwargs["budget_bytes"]))
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
+    argv = ["push", "--once", "--orch", str(orch), "--db", db_path, "--out", str(tmp_path / "out")]
+    assert lib.dashboard_cli.main(argv) == 0
+    assert budgets == [budget]
