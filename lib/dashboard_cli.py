@@ -167,7 +167,6 @@ def main(argv: list[str]) -> int:
 def _evidence(
     args: argparse.Namespace, transport: object, orch: OrchConfig | None
 ) -> Callable[[], None] | None:
-    """A full ssh push's QA evidence step, or None when there is nothing to send."""
     roots = {
         project.repo.lower(): project.qa_storage.evidence_root
         for project in (orch.projects if orch is not None else ())

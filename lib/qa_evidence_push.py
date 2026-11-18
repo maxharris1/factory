@@ -50,7 +50,6 @@ def fingerprint(files: Iterable[RunFile]) -> str:
 
 
 def upload_script(remote_dir: str, run_id: str) -> str:
-    """Unpack the tar on stdin beside qa/<run_id>, then swap it in."""
     check_id(run_id, "run_id")
     if not valid_remote_dir(remote_dir):
         raise ValueError("remote_dir must be a plain path")

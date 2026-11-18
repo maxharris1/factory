@@ -818,9 +818,6 @@ def test_cli_push_refuses_invalid_orch_yml(tmp_path: Path) -> None:
     assert "dashboard.push.host is required for ssh" in result.stderr
 
 
-# --- QA evidence (#910) ---------------------------------------------------------
-
-
 def test_remote_runs_one_ssh_with_the_feed_and_timeout() -> None:
     runner = Recorder()
     feed = object()
@@ -834,8 +831,6 @@ def test_remote_runs_one_ssh_with_the_feed_and_timeout() -> None:
 
 
 class FakePC:
-    """Runs each ssh script with sh in a local stand-in for the PC login's home."""
-
     def __init__(self, home: Path):
         self.home = home
         self.scripts: list[str] = []

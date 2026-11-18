@@ -48,13 +48,6 @@ started, with one log line per failure; a success clears it. A live
 pusher's pending change is kept, so it goes out once the backoff ends.
 With `record`, each push's outcome goes to the `dashboard-push` Health
 component (lib/health.py `push_result`).
-
-#910: a full push over ssh (never `--status-only`) then copies each settled
-QA run's evidence folder and its rendered index.html to
-`<remote_dir>/qa/<run_id>/` (lib/qa_evidence_push.py). `SshTransport.remote`
-streams one tar per run into one ssh that unpacks it beside the live folder
-and moves it into place. An evidence failure is one `dashboard push: qa`
-line and never fails the push.
 """
 
 from __future__ import annotations
@@ -225,7 +218,6 @@ class SshTransport:
             self._run(argv)
 
     def remote(self, script: str, *, feed: IO[bytes] | None = None, timeout: int | None = None) -> None:
-        """Run `script` on the host with `feed` as its stdin."""
         self._run(
             ["ssh", *self._ssh_options(), "--", self.host, script],
             stdin=subprocess.DEVNULL if feed is None else feed,
@@ -310,7 +302,7 @@ def run_push(
         if ok and evidence is not None:
             try:
                 evidence()
-            except Exception as exc:  # the snapshot went out; evidence retries next push
+            except Exception as exc:
                 text = " ".join(str(exc).split()) or type(exc).__name__
                 log(f"dashboard push: qa {redact(text)}")
         if once:
