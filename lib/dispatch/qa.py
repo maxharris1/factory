@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from lib.approver_commands import SlashQa
 from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.helpers import _comment_link, _scope
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.factory_md import QaConfig
 from lib.feeder_gates import path_matches
@@ -83,7 +84,7 @@ class Failed:
 
 @dataclass(frozen=True)
 class EnvFailed:
-    pass
+    failures: int
 
 
 @dataclass(frozen=True)
@@ -115,11 +116,33 @@ class FixFromQa:
 
 
 @dataclass(frozen=True)
+class ReviewFix:
+    report_id: str | None
+
+
+@dataclass(frozen=True)
 class EnsureQa:
     pass
 
 
-GateAction = Proceed | Wait | FixFromQa | EnsureQa
+@dataclass(frozen=True)
+class RetryQa:
+    pass
+
+
+@dataclass(frozen=True)
+class ParkQa:
+    pass
+
+
+@dataclass(frozen=True)
+class CancelQa:
+    pass
+
+
+GateAction = Proceed | Wait | FixFromQa | ReviewFix | EnsureQa | RetryQa | ParkQa | CancelQa
+
+ENV_RETRIES = 1
 
 
 @dataclass(frozen=True)
@@ -129,20 +152,31 @@ class QaFix:
     failed: tuple[str, ...]
 
 
-def decide_gate(verdict: str, status: QaStatus) -> GateAction:
-    if verdict != "APPROVE":
-        raise ValueError(f"no QA gate row for {verdict!r}")
-    match status:
-        case Covered():
+def decide_gate(verdict: str, status: QaStatus, *, waited_out: bool = False) -> GateAction:
+    match verdict, status:
+        case "APPROVE", Covered():
             return Proceed()
-        case Failed(report_id):
+        case "APPROVE", Failed(report_id):
             return FixFromQa(report_id)
-        case Running():
+        case "APPROVE", EnvFailed(failures) if failures <= ENV_RETRIES:
+            return RetryQa()
+        case "APPROVE", EnvFailed():
+            return ParkQa()
+        case "APPROVE", Running():
             return Wait("approve-qa-running")
-        case Missing():
+        case "APPROVE", Missing():
             return EnsureQa()
-        case EnvFailed():
-            return Wait("approve-qa-env-failed")
+        case "REVISE", Failed(report_id):
+            return ReviewFix(report_id)
+        case "REVISE", Running() if not waited_out:
+            return Wait("revise-qa-running")
+        case "REVISE", _:
+            return ReviewFix(None)
+        case "BLOCKED", Running():
+            return CancelQa()
+        case "BLOCKED", _:
+            return Proceed()
+    raise ValueError(f"no QA gate row for {verdict!r}")
 
 
 def _arms(qa: QaConfig) -> tuple[tuple[str, str], ...]:
@@ -262,8 +296,11 @@ class QaMixin:
         run: Run,
         runner: str,
         arm: str,
+        *,
+        attempt: int = 1,
     ) -> None:
         run_id = uuid.uuid4().hex
+        retry = "" if attempt == 1 else f":attempt-{attempt}"
         job = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
@@ -274,6 +311,7 @@ class QaMixin:
                 source_comment_id=comment.id,
                 timeout_seconds=qa.timeout_minutes * 60,
                 generation=generation,
+                attempt=attempt,
                 head=head,
                 detail=json.dumps(
                     {
@@ -290,18 +328,18 @@ class QaMixin:
                     sort_keys=True,
                 ),
             ),
-            dedupe_key=f"qa:{_scope(ticket.repo, ticket.ticket_id)}:{run.scope}:{head}:{runner}:{arm}",
+            dedupe_key=f"qa:{_scope(ticket.repo, ticket.ticket_id)}:{run.scope}:{head}:{runner}:{arm}{retry}",
         )
         connection.execute(
             """
             INSERT INTO qa_runs (
-                run_id, repo, ticket_id, head, patch_id, round, scope, runner, arm,
+                run_id, repo, ticket_id, head, patch_id, round, attempt, scope, runner, arm,
                 job_id, state, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
             """,
             (
                 run_id, ticket.repo.lower(), ticket.ticket_id, head, patch_id, review_round,
-                run.scope, runner, arm, job.id, self.queue.now(),
+                attempt, run.scope, runner, arm, job.id, self.queue.now(),
             ),
         )
 
@@ -458,23 +496,28 @@ class QaMixin:
         if ticket.factory.qa.gate != "block":
             self._wake_on_qa_fail(ticket, failed)
 
-    def _qa_gate(self, ticket: TrackedTicket, verdict: str, head: str) -> GateAction:
-        if ticket.factory.qa is None or ticket.factory.qa.gate != "block":
+    def _qa_gate(
+        self, ticket: TrackedTicket, verdict: str, head: str, *, since: float | None = None
+    ) -> GateAction:
+        qa = ticket.factory.qa
+        if qa is None or qa.gate != "block":
             return Proceed()
-        return decide_gate(verdict, self._qa_status(ticket, head))
+        waited_out = since is not None and self.queue.now() - since >= qa.timeout_minutes * 60
+        return decide_gate(verdict, self._qa_status(ticket, head), waited_out=waited_out)
 
     def _qa_status(self, ticket: TrackedTicket, head: str) -> QaStatus:
         with self._connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT state, result, reason, comment_id FROM qa_runs
                 WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
-                ORDER BY rowid DESC LIMIT 1
+                ORDER BY rowid DESC
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
-            ).fetchone()
-            if row is None:
+            ).fetchall()
+            if not rows:
                 return Missing()
+            row = rows[0]
             report_id, carried = row["comment_id"], row["reason"] or ""
             while row["result"] == "FAIL" and report_id is None and carried.startswith("carried:"):
                 source = connection.execute(
@@ -494,7 +537,96 @@ class QaMixin:
             case ("reported", "FAIL"):
                 return Failed(report_id or "")
             case _:
-                return EnvFailed()
+                return EnvFailed(sum(_env_failure(item) for item in rows))
+
+    def _retry_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
+        qa = ticket.factory.qa
+        assert qa is not None
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        generation = self._generation(ticket.repo, ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            last = connection.execute(
+                """
+                SELECT qa_runs.run_id, qa_runs.patch_id, qa_runs.round, qa_runs.attempt,
+                       qa_runs.scope, qa_runs.runner, jobs.detail
+                FROM qa_runs JOIN jobs ON jobs.id = qa_runs.job_id
+                WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ? AND qa_runs.head = ?
+                  AND qa_runs.arm = 'primary'
+                ORDER BY qa_runs.rowid DESC LIMIT 1
+                """,
+                (*key, head),
+            ).fetchone()
+            scenarios = tuple(json.loads(last["detail"]).get("scenarios") or ())
+            connection.execute(
+                """
+                UPDATE qa_runs SET state = 'cancelled', reason = 'env-retry'
+                WHERE run_id = ? AND state = 'reported'
+                """,
+                (last["run_id"],),
+            )
+            self._queue_qa_run(
+                connection, ticket, qa, comment, head, last["patch_id"], int(last["round"]),
+                generation, Run(last["scope"], scenarios), last["runner"], "primary",
+                attempt=int(last["attempt"]) + 1,
+            )
+            connection.commit()
+
+    def _park_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
+        generation = self._generation(ticket.repo, ticket.ticket_id)
+        with self._connect() as connection:
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "waiting-max",
+                source="waiting-max-qa",
+                at=self.queue.now(),
+                also={
+                    "paused_action": "qa",
+                    "paused_recipient": QA_RECIPIENT,
+                    "paused_head": head,
+                    "paused_generation": generation,
+                    "paused_question_id": comment.id,
+                },
+                guard="workflow_state IN ('review', 'awaiting-ok', 'fixing')",
+            )
+            connection.commit()
+        self.wake_grok_once(
+            ticket,
+            reason="qa-env-failed",
+            source_comment_id=comment.id,
+            detail=self._project_wake_detail(
+                ticket,
+                f"waiting-max-qa: QA at {head} failed on its environment {ENV_RETRIES + 1} times; "
+                f"the APPROVE {_comment_link(comment)} waits for Max",
+            ),
+            head=head,
+            once_key=head,
+        )
+        self._write_state_label(ticket, "waiting-max")
+
+    def _cancel_open_qa(self, ticket: TrackedTicket, reason: str) -> None:
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT qa_runs.run_id, jobs.id AS job_id, jobs.state AS job_state
+                FROM qa_runs LEFT JOIN jobs ON jobs.id = qa_runs.job_id
+                WHERE qa_runs.repo = ? AND qa_runs.ticket_id = ?
+                  AND qa_runs.state IN ('queued', 'running')
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+            for row in rows:
+                if row["job_state"] == "queued":
+                    cancel_queued(connection, row["job_id"], f"qa-{reason}", now)
+                connection.execute(
+                    "UPDATE qa_runs SET state = 'cancelled', reason = ?, finished_at = ? WHERE run_id = ?",
+                    (reason, now, row["run_id"]),
+                )
+            connection.commit()
 
     def _qa_fix(self, ticket: TrackedTicket, report_id: str) -> QaFix:
         report = next((comment for comment in ticket.comments if comment.id == report_id), None)
@@ -668,3 +800,9 @@ def _first_blocking(body: str) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+def _env_failure(row: sqlite3.Row) -> bool:
+    return row["result"] == "BLOCKED" or (
+        row["state"] == "cancelled" and row["reason"] in ("job-failed", "job-cancelled")
+    )

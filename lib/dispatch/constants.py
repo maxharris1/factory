@@ -44,6 +44,8 @@ BASE_UPDATE_GRACE_SECONDS = 120.0
 STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
+REVISE_ROUND_STATES = ("review", "awaiting-ok")
+APPROVE_ROUND_STATES = (*REVISE_ROUND_STATES, "fixing")
 GROK_WAKE_REASONS = (
     "blocked",
     "capped",
@@ -57,6 +59,7 @@ GROK_WAKE_REASONS = (
     "awaiting-ok",
     "go-not-from-approver",
     "qa-failed",
+    "qa-env-failed",
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})
 CORE_KINDS = ("go", "plan", "ready", "retry")

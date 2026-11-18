@@ -415,6 +415,34 @@ def test_a_qa_fix_links_the_qa_report_and_names_its_failed_scenarios():
     assert "(quoted in the What to do section)" not in brief
 
 
+def test_a_revise_fix_with_a_qa_fail_quotes_the_findings_and_names_the_failed_scenarios():
+    qa_url = "https://github.com/owner/repo/pull/42#issuecomment-901"
+    brief = _render(
+        "fix",
+        1,
+        HEAD,
+        {
+            "instruction": VERDICT_URL,
+            "round": "2/3",
+            "qa_findings": {
+                "link": "comment:901",
+                "evidence_link": "https://example.test/run/1",
+                "failed": ["qa-1"],
+            },
+            "evidence": _evidence(
+                findings={"findings": [FINDING], "reviewed_head": HEAD, "reviewed_base": None, "verdict_url": VERDICT_URL},
+            ),
+        },
+    )
+    task = _task(brief)
+    assert f"Fix the `[blocking]` findings of the REVISE verdict at {VERDICT_URL}." in task
+    assert "f-2: the poller writes the row directly." in task
+    assert (
+        f"QA also failed at this head, in the report at {qa_url}. "
+        "These scenarios failed: `qa-1`. Evidence: https://example.test/run/1."
+    ) in task
+
+
 def test_the_remote_checkout_clones_into_a_subfolder_of_the_run_folder():
     brief = _render(*BUILD, remote=True)
     assert "empty at the start" not in brief

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from lib.approve_rule import ApproveRefusal, approve_refusal
-from lib.dispatch.constants import MERGED_BEFORE_HANDOFF
+from lib.dispatch.constants import APPROVE_ROUND_STATES, MERGED_BEFORE_HANDOFF
 from lib.dispatch.helpers import (
     _comment_link,
     _holds,
@@ -12,7 +12,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.qa import EnsureQa, FixFromQa, Wait
+from lib.dispatch.qa import EnsureQa, FixFromQa, ParkQa, RetryQa, Wait
 from lib.dispatch.types import (
     AlreadyMergedShip,
     CIResult,
@@ -170,9 +170,21 @@ class T4Mixin:
             case EnsureQa():
                 self._queue_qa(ticket, comment, head=current_head, review_round=reported_round or 0)
                 return False, "approve-qa-pending"
+            case RetryQa():
+                self._retry_qa(ticket, comment, current_head)
+                return False, "approve-qa-env-retry"
+            case ParkQa():
+                self._park_qa(ticket, comment, current_head)
+                return False, "waiting-max-qa"
             case FixFromQa(report_id):
+                qa = self._qa_fix(ticket, report_id)
+                repeat = self._repeat_trigger(ticket, comment, reported_round, frozenset(qa.failed))
+                if repeat is not None:
+                    return self._t3_repeat(
+                        ticket, comment, repeat, reported_round, states=APPROVE_ROUND_STATES
+                    )
                 return self._spend_review_round(
-                    ticket, comment, reported_round, qa=self._qa_fix(ticket, report_id)
+                    ticket, comment, reported_round, qa=qa, from_approve=True
                 )
         if _holds(ticket):
             held = self._hold_gate(ticket, comment, current_head)

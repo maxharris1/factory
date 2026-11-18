@@ -9,7 +9,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
     detail = detail_of(job)
     qa = detail.get("qa_findings")
     verdict = _revise_verdict_url(detail, facts)
-    if isinstance(qa, dict):
+    if _qa_only(detail):
         lines = _qa_fix(qa, facts)
     elif verdict:
         lines = _review_fix(detail, facts, verdict)
@@ -19,9 +19,14 @@ def task_lines(job: Job, facts: dict) -> list[str]:
 
 
 def quoted_findings(detail: dict[str, object], facts: dict) -> list[dict[str, object]]:
-    if isinstance(detail.get("qa_findings"), dict):
+    if _qa_only(detail):
         return []
     return _open_findings(detail) if _revise_verdict_url(detail, facts) else []
+
+
+def _qa_only(detail: dict[str, object]) -> bool:
+    qa = detail.get("qa_findings")
+    return isinstance(qa, dict) and qa.get("link") == detail.get("instruction")
 
 
 def _revise_verdict_url(detail: dict[str, object], facts: dict) -> str | None:
@@ -56,6 +61,9 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
         ]
     else:
         shown = [f"Read the findings in the verdict at {verdict}."]
+    qa = detail.get("qa_findings")
+    if isinstance(qa, dict):
+        shown.append(f"QA also failed at this head, in the report at {_qa_report(qa, facts)}. {_qa_shown(qa)}")
     ci_failure = detail.get("ci_failure")
     checks = ci_failure.get("failed_checks") if isinstance(ci_failure, dict) else None
     if isinstance(checks, list) and checks and all(isinstance(name, str) for name in checks):
@@ -74,8 +82,11 @@ def _review_fix(detail: dict[str, object], facts: dict, verdict: str) -> list[st
     ]
 
 
-def _qa_fix(qa: dict[str, object], facts: dict) -> list[str]:
-    report = comment_url(facts, qa.get("link")) or qa.get("link")
+def _qa_report(qa: dict[str, object], facts: dict) -> object:
+    return comment_url(facts, qa.get("link")) or qa.get("link")
+
+
+def _qa_shown(qa: dict[str, object]) -> str:
     failed = [qa_id for qa_id in qa.get("failed") or () if isinstance(qa_id, str)]
     shown = (
         "These scenarios failed: " + ", ".join(code_span(qa_id) for qa_id in failed) + "."
@@ -85,9 +96,14 @@ def _qa_fix(qa: dict[str, object], facts: dict) -> list[str]:
     evidence = qa.get("evidence_link")
     if isinstance(evidence, str):
         shown += f" Evidence: {evidence}."
+    return shown
+
+
+def _qa_fix(qa: dict[str, object], facts: dict) -> list[str]:
     return [
-        f"Fix the failed QA scenarios of the QA report at {report}. Follow the router in Skills above.",
-        shown,
+        f"Fix the failed QA scenarios of the QA report at {_qa_report(qa, facts)}. "
+        "Follow the router in Skills above.",
+        _qa_shown(qa),
         *_class_fix_steps(
             facts, "failed scenario", "Fixing only the step the scenario drove is not a fix."
         ),

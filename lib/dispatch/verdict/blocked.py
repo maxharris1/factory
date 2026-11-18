@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number
+from lib.dispatch.qa import CancelQa
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 
@@ -37,6 +38,8 @@ class BlockedMixin:
             if not self._record_blocked_review(ticket, comment, reported_round):
                 return True, "stale-blocked"
         head = _matching_head(reported_head, ticket.current_head) or reported_head
+        if isinstance(self._qa_gate(ticket, "BLOCKED", head), CancelQa):
+            self._cancel_open_qa(ticket, "blocked")
         self.wake_grok_once(
             ticket,
             reason="blocked",

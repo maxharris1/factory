@@ -127,6 +127,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `ship-failed` | The merge or the merged-state write failed. `detail` has the error. | Tell Max once. Do not merge by hand. |
 | `awaiting-ok` | A `ship: merge` pull request is held before merge by `factory.md`'s `hold:`. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that the pull request at that head waits on his `ok` or `/ok <sha>`. |
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
+| `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. The ticket is parked at `waiting-max` with `paused_action` `qa`. | Tell Max once. The APPROVE waits until he answers. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, for example a Linear issue that was not moved. |
 
 ## Stalled ticket

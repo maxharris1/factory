@@ -20,6 +20,7 @@ from lib.dispatch.helpers import (
     _queue_state,
     _scope,
 )
+from lib.dispatch.qa import EnsureQa, Proceed
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
@@ -650,6 +651,9 @@ class MergeQueueMixin:
         approved = str(row["approved_head"])
         if not self._approval_covers(ticket, approved, head):
             return f"approval at {approved[:12]} does not cover {head[:12]}"
+        qa_wait = self._queue_qa_wait(ticket, row, head)
+        if qa_wait is not None:
+            return qa_wait
         ship = ticket.factory.ship
         if ship.startswith("after:"):
             # The approver's ok still ships it (ReviewShipper).
@@ -663,6 +667,21 @@ class MergeQueueMixin:
                 parts.append(f"unread: {held.unread}")
             return f"held ({', '.join(parts)})"
         return None
+
+    def _queue_qa_wait(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> str | None:
+        match self._qa_gate(ticket, "APPROVE", head):
+            case Proceed():
+                return None
+            case EnsureQa():
+                self._queue_qa(
+                    ticket,
+                    self._queue_comment(ticket, row),
+                    head=head,
+                    review_round=int(row["review_round"] or 0),
+                )
+                return f"QA queued at {head[:12]}"
+            case _:
+                return f"no covering QA PASS at {head[:12]}"
 
     def _log_queue_wait(self, ticket: TrackedTicket, head: str | None, reason: str) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)

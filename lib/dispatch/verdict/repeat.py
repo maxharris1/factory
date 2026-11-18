@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 
+from lib.dispatch.constants import REVISE_ROUND_STATES
 from lib.dispatch.helpers import _comment_link, _comment_order, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -31,6 +33,15 @@ class _EarlierRevise:
     blocking: frozenset[str]
 
 
+def _qa_failed(connection: sqlite3.Connection, ticket: TrackedTicket, comment_id: str) -> set[str]:
+    row = connection.execute(
+        "SELECT detail FROM jobs WHERE dedupe_key = ?",
+        (f"t3:{_scope(ticket.repo, ticket.ticket_id)}:{comment_id}",),
+    ).fetchone()
+    findings = json.loads(row["detail"] or "{}").get("qa_findings") if row else None
+    return set(findings.get("failed") or ()) if isinstance(findings, dict) else set()
+
+
 def _stopped_rule(wake: str) -> str:
     return str(json.loads(wake)["detail"]).split(", ", 1)[0].removeprefix("repeat-block: ")
 
@@ -41,6 +52,7 @@ class RepeatBlockMixin:
         ticket: TrackedTicket,
         comment: Comment,
         reported_round: int | None,
+        qa_ids: frozenset[str] = frozenset(),
     ) -> RepeatBlock | None:
         from lib.evidence.findings import blocking_ids
 
@@ -53,7 +65,7 @@ class RepeatBlockMixin:
             return RepeatBlock(named, None if holding is None else holding.comment)
         if previous is None:
             return None
-        shared = blocking_ids(handoff.body) & previous.blocking
+        shared = (blocking_ids(handoff.body) | qa_ids) & previous.blocking
         return RepeatBlock(min(shared), previous.comment) if shared else None
 
     def _accepted_revises(
@@ -73,6 +85,9 @@ class RepeatBlockMixin:
                     (ticket.repo.lower(), ticket.ticket_id, *_ACCEPTED_REVISE),
                 )
             }
+            qa_failed = {
+                comment_id: _qa_failed(connection, ticket, comment_id) for comment_id in accepted
+            }
         found = []
         for item in ticket.comments:
             if item.id not in accepted:
@@ -84,7 +99,7 @@ class RepeatBlockMixin:
             number = _round_number(handoff.as_dict().get("round"))
             if number is not None and number < (reported_round or 0):
                 named = repeat_id(handoff)
-                blocking = blocking_ids(handoff.body) | ({named} if named else set())
+                blocking = blocking_ids(handoff.body) | ({named} if named else set()) | qa_failed[item.id]
                 found.append(_EarlierRevise(number, item, blocking))
         return sorted(found, key=lambda entry: (entry.round, _comment_order(entry.comment)), reverse=True)
 
@@ -121,6 +136,8 @@ class RepeatBlockMixin:
         comment: Comment,
         block: RepeatBlock,
         reported_round: int | None,
+        *,
+        states: tuple[str, ...] = REVISE_ROUND_STATES,
     ) -> tuple[bool, str]:
         key = (ticket.repo.lower(), ticket.ticket_id)
         detail = self._repeat_detail(ticket, comment, block)
@@ -146,7 +163,7 @@ class RepeatBlockMixin:
             ).fetchone()
             if (
                 state is None
-                or state["workflow_state"] not in ("review", "awaiting-ok")
+                or state["workflow_state"] not in states
                 or reported_round != int(state["review_round"]) + 1
             ):
                 connection.commit()
