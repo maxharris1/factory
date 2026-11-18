@@ -1,9 +1,3 @@
-"""A QA run's evidence page, rendered from the run folder `lib.qa_evidence.collect()` writes.
-
-Served on the PC at /qa/runs/<run_id> with no trailing slash, so every link
-is relative to /qa/runs/ and starts with the run id.
-"""
-
 from __future__ import annotations
 
 import html

@@ -337,10 +337,13 @@ def open_root(root: Path) -> int:
     return fd
 
 
-def qa_route(path: str) -> tuple[tuple[str, ...], str, dict[str, str]] | None:
-    """The parts below the root, content type and headers for a raw
-    /qa/runs/ path, or None. Each part is decoded alone, so an encoded slash
-    or dot never joins or climbs out of a part."""
+class QaRoute(NamedTuple):
+    parts: tuple[str, ...]
+    content_type: str
+    headers: dict[str, str]
+
+
+def qa_route(path: str) -> QaRoute | None:
     parts = [urllib.parse.unquote(part) for part in path[len(QA_RUNS):].split("/")]
     if any(not part or part.startswith(".") or any(c in part for c in "/\\\0") for part in parts):
         return None
@@ -348,18 +351,15 @@ def qa_route(path: str) -> tuple[tuple[str, ...], str, dict[str, str]] | None:
     if RUN_ID.fullmatch(run_id) is None:
         return None
     if not rest:
-        return ("qa", run_id, "index.html"), "text/html; charset=utf-8", QA_HEADERS
+        return QaRoute(("qa", run_id, "index.html"), "text/html; charset=utf-8", QA_HEADERS)
     if len(rest) < 2 or LANE.fullmatch(rest[0]) is None:
         return None
     suffix = os.path.splitext(rest[-1])[1].lower()
     content_type, headers = (QA_TYPES[suffix], QA_HEADERS) if suffix in QA_TYPES else QA_DOWNLOAD
-    return ("qa", run_id, *rest), content_type, headers
+    return QaRoute(("qa", run_id, *rest), content_type, headers)
 
 
 def open_under(root_fd: int, parts: tuple[str, ...]) -> int | None:
-    """A descriptor for root/<parts...> if every directory on the way and the
-    file itself are reached without following a symlink and the file is
-    regular with one link; otherwise None. The caller closes it."""
     fd = root_fd
     try:
         for part in parts[:-1]:
@@ -382,8 +382,6 @@ def open_under(root_fd: int, parts: tuple[str, ...]) -> int | None:
 
 
 def read_snapshot_file(root_fd: int, name: str) -> bytes | None:
-    """The bytes of `name` directly in the pinned root if open_under allows
-    it and it is at most MAX_BYTES; otherwise None."""
     fd = open_under(root_fd, (name,))
     if fd is None:
         return None
@@ -1145,14 +1143,13 @@ class SnapshotHandler(BaseHTTPRequestHandler):
 
     def _serve_qa(self, path: str, *, body: bool) -> None:
         route = qa_route(path)
-        fd = open_under(self.server.root_fd, route[0]) if route else None  # type: ignore[attr-defined]
+        fd = open_under(self.server.root_fd, route.parts) if route else None  # type: ignore[attr-defined]
         if route is None or fd is None:
             self._send(404, b"not found\n", "text/plain; charset=utf-8", body=body)
             return
-        _, content_type, headers = route
         with os.fdopen(fd, "rb") as handle:
             remaining = os.fstat(handle.fileno()).st_size
-            self._send_head(200, content_type, remaining, headers)
+            self._send_head(200, route.content_type, remaining, route.headers)
             while body and remaining > 0 and (chunk := handle.read(min(QA_CHUNK, remaining))):
                 self.wfile.write(chunk)
                 remaining -= len(chunk)

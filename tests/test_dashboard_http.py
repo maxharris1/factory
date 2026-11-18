@@ -3,7 +3,7 @@
 Each test serves a scratch directory on loopback through `make_server`
 (the tailnet-only bind is enforced by `load_config`, tested in
 tests/test_deploy.py) and checks that only the snapshot files (status.json, the pages and tickets.json)
-and a QA run's evidence under /qa/runs/ are served, never anything outside the directory, never a listing.
+are served, never anything outside the directory, never a listing.
 """
 
 import http.client
