@@ -11,9 +11,27 @@ import pytest
 import lib.queue
 from lib.dispatch import bookkeeping
 from lib.dispatch.bookkeeping import LockLedger
-from lib.dispatch.cycle_clock import PHASES, CycleClock
+from lib.dispatch.cycle_clock import (
+    CALM_CYCLES,
+    LOCK_ERRORS,
+    LOCKED_CYCLES,
+    PHASES,
+    POLLER_REPO,
+    POLLER_TICKET,
+    SLOW_CYCLE,
+    SLOW_CYCLE_SECONDS,
+    CycleClock,
+)
+from lib.dispatch.poll import PollLoop
 from lib.wait import lock_backoff
-from tests.test_dispatcher import FakeSource, ticket
+from tests.test_dispatcher import (
+    FakeSource,
+    _attention,
+    _done_build,
+    _handoff_events,
+    setup,
+    ticket,
+)
 from tests.test_feeder import dispatcher_for, issue, make_feeder
 
 TICKETS = ("42", "43")
@@ -142,17 +160,142 @@ def test_a_deferred_intake_record_ends_the_feed_with_an_error_and_no_pr(
     assert len(lines) == 1
 
 
-def test_an_attention_flag_is_never_dropped_on_a_held_lock(
+def test_an_attention_flag_raised_under_a_held_lock_lands_once_the_lock_is_gone(
     tmp_path: Path, slept: list[float]
 ) -> None:
-    dispatcher, queue, _, _, _ = world(tmp_path)
+    dispatcher, queue, _, source, _ = world(tmp_path)
     lock = hold_lock(queue.path)
 
-    with pytest.raises(sqlite3.OperationalError, match="locked"):
-        dispatcher.flag_attention("owner/repo", "42", "ship-failed", "merge ship failed")
-    lock.execute("ROLLBACK")
     dispatcher.flag_attention("owner/repo", "42", "ship-failed", "merge ship failed")
+    lock.execute("ROLLBACK")
+    assert attention(queue) == []
 
+    dispatcher.poll_once(source)
+
+    assert attention(queue) == [("42", "ship-failed")]
+    assert dispatcher.attention_outbox == {}
+
+
+def test_a_clear_after_a_queued_flag_wins(tmp_path: Path, slept: list[float]) -> None:
+    dispatcher, queue, _, source, _ = world(tmp_path)
+    dispatcher.flag_attention("owner/repo", "42", "ship-failed", "merge ship failed")
+    lock = hold_lock(queue.path)
+
+    dispatcher.clear_attention("owner/repo", "42", "ship-failed")
+    dispatcher.flag_attention("owner/repo", "43", "ship-failed", "merge ship failed")
+    lock.execute("ROLLBACK")
+    dispatcher.poll_once(source)
+
+    assert attention(queue) == [("43", "ship-failed")]
+
+
+def test_an_unverified_handoff_flag_survives_a_lock_released_just_before_the_audit(
+    tmp_path: Path, slept: list[float]
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "ready-x")
     with queue.connect() as connection:
-        raised = connection.execute("SELECT ticket_id, reason FROM needs_attention").fetchall()
-    assert [tuple(row) for row in raised] == [("42", "ship-failed")]
+        connection.executemany(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', ?, 'github', 0)",
+            [(ticket_id,) for ticket_id in TICKETS],
+        )
+    now[0] = 200.0
+    holder: list[sqlite3.Connection] = []
+
+    class LocksThroughTheProcessPhase(FakeSource):
+        def tracked_tickets(self, refs):
+            if not holder:
+                holder.append(hold_lock(queue.path))
+            return super().tracked_tickets(refs)
+
+    audit = dispatcher._verify_handoffs
+
+    def release_then_audit(source, read_from):
+        holder[0].execute("ROLLBACK")
+        assert dispatcher.lock_ledger.spent()
+        audit(source, read_from)
+
+    dispatcher._verify_handoffs = release_then_audit
+    source = LocksThroughTheProcessPhase(*(ticket(ticket_id=ticket_id) for ticket_id in TICKETS))
+
+    dispatcher.poll_once(source)
+
+    assert _handoff_events(queue) == ["handoff-unverified"]
+    assert _attention(queue) == ["unverified-handoff"]
+
+
+def test_a_cycle_over_the_threshold_flags_its_slowest_phase(tmp_path: Path) -> None:
+    dispatcher, queue, _, _, _ = world(tmp_path)
+    wall = [1000.0]
+
+    class SlowRead(FakeSource):
+        def tracked_tickets(self, refs):
+            wall[0] += 400
+            return super().tracked_tickets(refs)
+
+    loop = PollLoop(dispatcher, SlowRead(*(ticket(ticket_id=t) for t in TICKETS)),
+                    interval_seconds=0)
+    loop.clock = CycleClock(wall=lambda: wall[0])
+
+    loop.run(max_polls=1)
+
+    assert loop.clock.last_cycle_seconds == 400.0
+    (detail,) = attention_detail(queue, SLOW_CYCLE)
+    assert "tracked-read 400s" in detail, detail
+
+
+def test_a_slow_flag_clears_after_calm_cycles(tmp_path: Path) -> None:
+    dispatcher, queue, _, source, _ = world(tmp_path)
+    clock = CycleClock(wall=lambda: 0.0)
+    clock.start()
+    clock.end()
+    clock.last_cycle_seconds = SLOW_CYCLE_SECONDS + 1
+    dispatcher.watch_cycle(clock)
+    assert attention_detail(queue, SLOW_CYCLE)
+
+    clock.last_cycle_seconds = 1.0
+    for _ in range(CALM_CYCLES):
+        dispatcher.watch_cycle(clock)
+
+    assert attention_detail(queue, SLOW_CYCLE) == []
+
+
+def test_locked_cycles_in_a_row_flag_the_phase_once_the_lock_lifts(
+    tmp_path: Path, slept: list[float]
+) -> None:
+    dispatcher, queue, _, source, _ = world(tmp_path)
+    loop = PollLoop(dispatcher, source, sleep=lambda seconds: None, interval_seconds=0)
+    lock = hold_lock(queue.path)
+
+    loop.run(max_polls=LOCKED_CYCLES + 1)
+    lock.execute("ROLLBACK")
+    assert attention_detail(queue, LOCK_ERRORS) == []
+    loop.run(max_polls=1)
+
+    (detail,) = attention_detail(queue, LOCK_ERRORS)
+    assert f"{LOCKED_CYCLES + 1} poll cycles in a row" in detail, detail
+    assert re.search(r"most in phase [a-z-]+ \(", detail), detail
+
+
+def attention(queue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row["ticket_id"]), str(row["reason"]))
+            for row in connection.execute(
+                "SELECT ticket_id, reason FROM needs_attention ORDER BY ticket_id"
+            )
+        ]
+
+
+def attention_detail(queue, reason: str) -> list[str]:
+    with queue.connect() as connection:
+        return [
+            str(row["detail"])
+            for row in connection.execute(
+                "SELECT detail FROM needs_attention WHERE repo = ? AND ticket_id = ? "
+                "AND reason = ?",
+                (POLLER_REPO, POLLER_TICKET, reason),
+            )
+        ]

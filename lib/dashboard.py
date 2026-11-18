@@ -158,6 +158,7 @@ from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
+from lib.dispatch.cycle_clock import LOCK_ERRORS, SLOW_CYCLE
 from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
@@ -219,7 +220,7 @@ HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
-    *FEEDER_ATTENTION_REASONS,
+    SLOW_CYCLE, LOCK_ERRORS, *FEEDER_ATTENTION_REASONS,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (

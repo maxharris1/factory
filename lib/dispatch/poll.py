@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from lib import project_rules
 from lib.dispatch import ci_board
-from lib.dispatch.bookkeeping import bookkeeping_write, must_write
+from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     HANDED_OFF_EXTERNALLY,
@@ -24,7 +24,14 @@ from lib.dispatch.constants import (
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
 )
-from lib.dispatch.cycle_clock import CycleClock
+from lib.dispatch.cycle_clock import (
+    LOCK_ERRORS,
+    POLLER_REPO,
+    POLLER_TICKET,
+    SLOW_CYCLE,
+    SLOW_CYCLE_SECONDS,
+    CycleClock,
+)
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
 from lib.dispatch.helpers import _matching_head
 from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
@@ -69,6 +76,7 @@ class PollMixin:
         self.lock_ledger.reset()
         if self.feeder is not None:
             self.feeder.ledger = self.lock_ledger
+        self._send_attention(self.lock_ledger)
         tracked: tuple[TrackedTicket, ...] = ()
         read_from = self.queue.now()
         with self._phase("linear-states"):
@@ -168,6 +176,8 @@ class PollMixin:
             self._read_ci_pool(reads)
         self._export_eval_log()
         self._prune_poll_errors()
+        if not self._send_attention(None):
+            self.lock_ledger.missed("attention")
         if self.lock_ledger.misses and self.log is not None:
             self.log(f"lock misses: {self.lock_ledger.summary()}")
         failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
@@ -388,16 +398,14 @@ class PollMixin:
         reason: str,
         detail: str,
     ) -> None:
-        """Show a ticket as needs-attention in orch status and the dashboard."""
-        values = (repo.lower(), ticket_id, reason, detail[:SHIP_ERROR_LIMIT], self.queue.now())
-        must_write(
-            bookkeeping_write(
-                self._connect,
-                lambda connection: _write_attention(connection, values),
-                site="flag_attention",
-                ledger=self.lock_ledger,
-            )
-        )
+        """Show a ticket as needs-attention in orch status and the dashboard.
+
+        The flag waits in `attention_outbox` until orch.db takes it, retried
+        at each cycle's start and end, so a held lock never drops it (#839).
+        """
+        key = (repo.lower(), ticket_id, reason)
+        self.attention_outbox[key] = (detail[:SHIP_ERROR_LIMIT], self.queue.now())
+        self._send_attention(self.lock_ledger)
         if self.log is not None:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
@@ -421,14 +429,53 @@ class PollMixin:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
     def clear_attention(self, repo: str, ticket_id: str, reason: str) -> None:
-        must_write(
-            bookkeeping_write(
-                self._connect,
-                lambda connection: _delete_attention(connection, repo, ticket_id, reason),
-                site="clear_attention",
-                ledger=self.lock_ledger,
-            )
+        self.attention_outbox[(repo.lower(), ticket_id, reason)] = None
+        self._send_attention(self.lock_ledger)
+
+    def _send_attention(self, ledger: LockLedger | None) -> bool:
+        if not self.attention_outbox:
+            return True
+        pending = dict(self.attention_outbox)
+
+        def work(connection: sqlite3.Connection) -> None:
+            for (repo, ticket_id, reason), flag in pending.items():
+                if flag is None:
+                    _delete_attention(connection, repo, ticket_id, reason)
+                else:
+                    _write_attention(connection, (repo, ticket_id, reason, *flag))
+
+        if not bookkeeping_write(self._connect, work, site="attention", ledger=ledger):
+            return False
+        for key, flag in pending.items():
+            if self.attention_outbox.get(key) == flag:
+                del self.attention_outbox[key]
+        return True
+
+    def watch_cycle(self, clock: CycleClock) -> None:
+        """Flag a slow cycle, or a run of cycles that hit lock errors, naming
+        the phase that cost the most (#839 ac-4)."""
+        seconds = clock.last_cycle_seconds or 0.0
+        phase, spent = clock.slowest() or ("-", 0.0)
+        locked = self.cycle_alarms[LOCK_ERRORS]
+        self._sound(
+            SLOW_CYCLE,
+            seconds > SLOW_CYCLE_SECONDS,
+            lambda: f"poll cycle took {seconds:.0f}s (over {SLOW_CYCLE_SECONDS:g}s); "
+            f"slowest phase {phase} {spent:.0f}s",
         )
+        self._sound(
+            LOCK_ERRORS,
+            self.lock_ledger.misses > 0,
+            lambda: f"{locked.bad} poll cycles in a row hit orch.db lock errors; "
+            f"most in phase {self.lock_ledger.worst_phase()} ({self.lock_ledger.summary()})",
+        )
+
+    def _sound(self, reason: str, bad: bool, detail: Callable[[], str]) -> None:
+        change = self.cycle_alarms[reason].observe(bad)
+        if change == "raise":
+            self.flag_attention(POLLER_REPO, POLLER_TICKET, reason, detail())
+        elif change == "clear":
+            self.clear_attention(POLLER_REPO, POLLER_TICKET, reason)
 
     def _record_poll_error(self, ticket: TrackedTicket, exc: BaseException) -> None:
         """Record a ticket's failed poll; the POLL_ERROR_STREAK-th failure
@@ -608,6 +655,9 @@ class PollLoop:
                         _after_poll(after_poll)
             finally:
                 print(self.clock.end(), flush=True)
+            watch = getattr(self.dispatcher, "watch_cycle", None)
+            if watch is not None:
+                watch(self.clock)
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return

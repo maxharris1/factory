@@ -35,6 +35,9 @@ class LockLedger:
     def spent(self) -> bool:
         return self.misses >= LOCK_MISS_BUDGET
 
+    def worst_phase(self) -> str | None:
+        return max(self._sites, key=lambda phase: len(self._sites[phase]), default=None)
+
     def summary(self) -> str:
         return ", ".join(
             f"{phase} {len(sites)} ({', '.join(dict.fromkeys(sites))})"
