@@ -323,3 +323,12 @@ if sys.argv[1:3] == ["poll", "--pidfile"]:
     finally:
         os.killpg(launcher.pid, 9)
         launcher.wait(timeout=10)
+
+
+def test_cutover_evidence_records_the_hold_ok_and_the_r15_split() -> None:
+    rows = _rows()
+    hold = re.search(r"Hold OK: .*?\((\d\d:\d\d)Z\)", rows["R4"]["evidence"])
+    export = re.search(r"exported at (\d\d:\d\d):\d\dZ", rows["R4"]["evidence"])
+    assert hold and export and hold[1] < export[1], f"R4 records the hold OK before the export: {rows['R4']['evidence']}"
+    assert rows["R15"]["evidence"].startswith("pending"), rows["R15"]["evidence"]
+    assert "#933" in rows["R15"]["evidence"], f"R15 points to its follow-up ticket: {rows['R15']['evidence']}"
