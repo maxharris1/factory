@@ -795,6 +795,16 @@ def record_runner_moved(connection: sqlite3.Connection, run_id: str, runner: str
     connection.execute("UPDATE qa_runs SET runner = ? WHERE run_id = ?", (runner, run_id))
 
 
+def record_stale(connection: sqlite3.Connection, run_id: str, now: float) -> None:
+    connection.execute(
+        """
+        UPDATE qa_runs SET state = 'stale', reason = 'head-moved', finished_at = ?
+        WHERE run_id = ? AND state IN ('queued', 'running')
+        """,
+        (now, run_id),
+    )
+
+
 def _prior(connection: sqlite3.Connection, where: str, args: tuple) -> Prior | None:
     row = connection.execute(
         f"""

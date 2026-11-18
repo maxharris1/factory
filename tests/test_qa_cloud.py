@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -16,12 +17,15 @@ from lib import lane_limit
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
 from lib.orch_yml import QaStorage, load_orch_yml
-from lib.qa_cloud import LaneRow, QaWorker, plan_slices, qa_id, s_id, save_name
+from lib.qa_audit import Gap, GapKind
+from lib.qa_cloud import (
+    Decision, LaneRow, QaWorker, Stale, audited, decide, newest, plan_slices, qa_id, render_comment, s_id, save_name,
+)
 from lib.qa_evidence import collect, record_evidence_dir, run_dir
 from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.fake import FakeRunner
 from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError
-from lib.queue import JobRequest
+from lib.queue import JobRequest, job_from_row
 from tests.qa_support import (
     HEAD_A,
     HEAD_B,
@@ -30,9 +34,9 @@ from tests.qa_support import (
     STORE,
     FakeStorage,
     Harness,
-    bundle,
     qa_config,
     ready,
+    receipts_bundle,
     scenarios,
     verdict,
 )
@@ -82,9 +86,18 @@ class LabStorage(FakeStorage):
         result = self.lab.report(row)
         if result is None:
             return
+        key = (row.slice, row.attempt)
+        data, artifacts = receipts_bundle(
+            [s_id(item) for item in row.scenarios],
+            omit=self.lab.omitted.get(key, ()),
+            corrupt=self.lab.corrupt.get(key, ()),
+        )
+        result["artifacts"] = artifacts
+        for item in result["scenarios"]:
+            item["artifacts"] = [entry for entry in artifacts if entry["path"].startswith(f"{item['id']}/")]
         self.objects[f"{folder}/{RESULT_NAME}"] = json.dumps(result).encode()
-        if (row.slice, row.attempt) not in self.lab.unbundled:
-            self.objects[f"{folder}/{BUNDLE_NAME}"] = bundle()
+        if key not in self.lab.unbundled:
+            self.objects[f"{folder}/{BUNDLE_NAME}"] = data
 
 
 class Lab:
@@ -107,6 +120,9 @@ class Lab:
         self.broken: dict[tuple[int, int], Callable[[dict], None]] = {}
         self.silent: set[tuple[int, int]] = set()
         self.unbundled: set[tuple[int, int]] = set()
+        self.omitted: dict[tuple[int, int], set[str]] = {}
+        self.corrupt: dict[tuple[int, int], set[str]] = {}
+        self.current_head = HEAD_A
         self.posted: dict[str, tuple[int, str]] = {}
         self.storage = LabStorage(self)
         self.root = (tmp_path / "evidence").resolve()
@@ -128,6 +144,7 @@ class Lab:
             shares_usage_with=self.shares_usage_with,
             log=self.logs.append,
             evidence=self.evidence,
+            head=lambda repo, pr: self.current_head,
         )
 
     def post(self, repo: str, pr: int, body: str, marker: str) -> str:
@@ -1232,8 +1249,11 @@ def test_reported_lane_evidence_is_stored(tmp_path: Path) -> None:
 
     assert lab.header()["result"] == "PASS"
     folder = run_dir(lab.root, REPO, "784", "run-784-claude-cloud")
-    for n in (1, 2):
-        assert sorted(item.name for item in (folder / f"lane-{n}").iterdir()) == ["manifest.json", RESULT_NAME]
+    for n, ids in ((1, ["s-1", "s-2"]), (2, ["s-3"])):
+        assert sorted(item.name for item in (folder / f"lane-{n}").iterdir()) == ["manifest.json", RESULT_NAME, *ids]
+        assert sorted(item.name for item in (folder / f"lane-{n}" / ids[0]).iterdir()) == [
+            "after-screenshot.png", "pass-test-output.txt",
+        ]
         prefix = f"qa/factory/run-784-claude-cloud/lane-{n}/"
         assert {prefix + RESULT_NAME, prefix + BUNDLE_NAME} <= set(lab.storage.fetched)
     assert_no_signed_link(lab)
@@ -1316,3 +1336,167 @@ def test_a_repo_without_qa_storage_is_never_claimed(tmp_path: Path) -> None:
     assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("queued",)]
     assert lab.launched() == []
     assert f"qa job {job}: no plan: ValueError: orch.yml has no projects[].qa_storage for this repo" in lab.logs
+
+
+def test_verified_without_after_screenshot_posts_blocked_naming_it(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.omitted[(0, 1)] = {"s-2/after-screenshot.png"}
+    lab.tick(4)
+
+    comment = lab.only_comment()
+    assert lab.header()["result"] == "BLOCKED"
+    assert "| qa-2 | ac-2 | Verified |" in comment
+    gaps = comment.split("Gaps:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert any(line.startswith("- qa-2 (lane 1): artifact-missing") for line in gaps)
+    assert all("qa-1" not in line for line in gaps)
+    assert "s-2/after-screenshot.png" not in comment
+    assert any(line.startswith("qa audit run-784-claude-cloud: ") and "s-2/after-screenshot.png" in line
+               for line in lab.logs)
+
+
+def _stale_run(lab: Lab) -> str:
+    run_id = _ready_thread(lab)
+    lab.current_head = HEAD_B
+    lab.tick(4)
+    return run_id
+
+
+def _wakes(lab: Lab) -> list[tuple]:
+    return [
+        (recipient, json.loads(detail)["from"], json.loads(detail)["to"])
+        for recipient, detail in lab.run.rows("SELECT recipient, detail FROM jobs WHERE action = 'qa-head-moved'")
+    ]
+
+
+def test_head_moved_posts_nothing_marks_stale_and_wakes_grok_once(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    run_id = _stale_run(lab)
+
+    assert lab.posted == {}
+    assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
+    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+    assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa'") == [("failed",)]
+    assert f"qa run {run_id}: head moved from {HEAD_A[:12]} to {HEAD_B[:12]}" in lab.logs
+
+    lab.run.poll()
+    assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa-head-moved'") == [("done",)]
+    assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
+    qa_job = lab.run.rows("SELECT id FROM jobs WHERE action = 'qa'")[0][0]
+    assert lab.run.rows("SELECT event FROM job_events WHERE job_id = ? AND event = 'qa-no-retry'", qa_job) == [
+        ("qa-no-retry",)
+    ]
+
+
+def test_head_moved_while_lanes_are_described_posts_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    run_id = _ready_thread(lab)
+    runner = lab.fakes["claude-cloud"]
+    describe = runner.describe
+
+    def push_then_describe(agent_id: str):
+        lab.current_head = HEAD_B
+        return describe(agent_id)
+
+    monkeypatch.setattr(runner, "describe", push_then_describe)
+    lab.tick(4)
+
+    assert lab.posted == {}
+    assert lab.run.rows("SELECT state, reason FROM qa_runs WHERE run_id = ?", run_id) == [("stale", "head-moved")]
+    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+
+
+def test_head_moved_replay_queues_no_second_wake(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    _stale_run(lab)
+    with lab.run.queue.connect() as connection:
+        connection.execute("UPDATE jobs SET state = 'running' WHERE action = 'qa'")
+    lab.current_head = HEAD_A
+    lab.worker = lab.new_worker()
+    lab.tick()
+
+    assert _wakes(lab) == [("grok", HEAD_A, HEAD_B)]
+    assert lab.posted == {}
+    assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa'") != [("running",)]
+
+
+def _decided_comment(lab: Lab) -> tuple[Decision, str]:
+    with lab.run.queue.connect() as connection:
+        job = job_from_row(connection.execute("SELECT * FROM jobs WHERE action = 'qa'").fetchone(), connection)
+        rows = [LaneRow.of(row) for row in connection.execute("SELECT * FROM qa_lanes ORDER BY lane_no")]
+    plan = lab.worker._plan(job)
+    decision = decide(rows, plan.detail)
+    lanes = [(row, "(machine fake-4cpu-16gb, agent fake-1.0)") for row in newest(rows).values()]
+    return decision, render_comment(plan, plan.detail, decision, runner="claude-cloud", attempt=1, lanes=lanes)
+
+
+@pytest.mark.parametrize(("failed", "result"), [((), "PASS"), (("qa-2",), "FAIL")])
+def test_clean_audit_posts_exactly_the_decision(tmp_path: Path, failed: tuple[str, ...], result: str) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    lab.enqueue(ids=3)
+    lab.head_outcome.update(dict.fromkeys(failed, "failed"))
+    lab.tick(6)
+
+    decision, expected = _decided_comment(lab)
+    assert decision.result == result
+    assert lab.only_comment() == expected
+    assert [line for line in lab.logs if line.startswith("qa audit")] == []
+
+
+def test_mismatch_on_a_failed_scenarios_artifact_stays_fail(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.head_outcome["qa-1"] = "failed"
+    lab.corrupt[(0, 1)] = {"s-1/after-screenshot.png"}
+    lab.tick(5)
+
+    head = json.loads(lab.run.rows("SELECT result FROM qa_lanes WHERE kind = 'head'")[0][0])
+    assert {"path": "s-1/after-screenshot.png", "reason": "sha256"} in head["mismatches"]
+    assert lab.header()["result"] == "FAIL"
+    assert "- [blocking] qa-1 (ac-1)" in lab.only_comment()
+    assert "Gaps:" not in lab.only_comment()
+
+
+@pytest.mark.parametrize("result", ["PASS", "FAIL", "BLOCKED"])
+@pytest.mark.parametrize("kind", [*get_args(GapKind), "clean"])
+def test_audited_never_yields_pass(result: str, kind: str) -> None:
+    decision = Decision(result, (("qa-1", "ac-1", "Verified"),), (), ())
+    verdict = "clean" if kind == "clean" else (Gap(kind, "s-1", 1, "lane wrote ../../etc/passwd"),)
+    outcome = audited(decision, verdict, HEAD_A, HEAD_B)
+
+    if kind == "clean":
+        assert outcome == decision
+    elif kind == "head-moved":
+        assert outcome == Stale(HEAD_A, HEAD_B)
+    else:
+        assert outcome.result == "BLOCKED"
+        assert [line.split(",", 1)[0] for line in outcome.gaps] == [f"qa-1 (lane 1): {kind}"]
+        assert "passwd" not in "".join(outcome.gaps)
+
+
+def test_audit_gap_lines_name_only_kind_scenario_and_lane() -> None:
+    decision = Decision("PASS", (), (), ("lane 3 (head): reported BLOCKED",))
+    verdict = (
+        Gap("artifact-missing", "s-2", 1, "one"),
+        Gap("artifact-missing", "s-2", 1, "two"),
+        Gap("lane-method", None, 2, "three"),
+        Gap("scenario-missing", "s-4", None, "four"),
+        Gap("evidence-malformed", None, None, "five"),
+    )
+
+    assert audited(decision, verdict, HEAD_A, HEAD_A).gaps == (
+        "lane 3 (head): reported BLOCKED",
+        "qa-2 (lane 1): artifact-missing, a receipt it relies on is not in the evidence",
+        "lane 2: lane-method, the result names another method",
+        "qa-4: scenario-missing, no lane reported it",
+        "evidence-malformed, the result or manifest is malformed",
+    )
+
+
+def test_spec_audit_section_names_the_finish_that_calls_it() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert "from lib.qa_audit import" in (root / "lib" / "qa_cloud.py").read_text(encoding="utf-8")
+    spec = (root / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    section = spec.split("\n### QA receipts audit\n", 1)[1].split("\n## ", 1)[0]
+    assert "Nothing calls it yet" not in section
+    assert "section 4.2.2, Finish" in section
