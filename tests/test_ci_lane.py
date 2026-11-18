@@ -6,7 +6,7 @@ import pytest
 
 from lib.ci_lane import SEGMENTS, ci_lane, progress, progress_text, segment
 from lib.dashboard import CI_CONCLUSIONS
-from lib.dashboard_pages.ci import ci_lane_html, ci_popup
+from lib.dashboard_pages.ci import ci_extras, ci_lane_html, ci_popup
 from lib.dispatch.types import CHECK_FAILED
 
 REPO = "maxharris1/cleffy"
@@ -188,3 +188,22 @@ def test_a_card_click_opens_the_ticket_with_the_ci_popup_and_its_job_rows() -> N
     assert re.findall(r'<span class="ci-runner">([^<]+)</span>', popup) == [
         "runner unknown · queued 5s", "self-hosted · pc-wsl-bots-1 · queued 5s"]
     assert popup.count('class="ci-a log"') == 2 and "no CI failures in the last 24 h" in popup
+
+
+def test_a_waiting_ticket_stays_queued_even_after_an_older_failure() -> None:
+    waiting = {"repo": REPO, "ticket_id": "15", "source": None, "tracker": "github", "pr": "115",
+               "ci_wait": {"reason": "ci-pending", "checks": ["pytest"], "waiting_seconds": 30, "round": 2}}
+    failure = {"repo": REPO, "ticket_id": "15", "source": None, "pr": "115", "tracker": "github",
+               "head_short": "c3d4e5f", "name": "pytest", "conclusion": "failure", "run_id": "8800",
+               "job_id": "8802", "tests": [], "more_tests": 0, "age_seconds": 600}
+    lane = ci_lane(snapshot(full_pool(), failures=[failure], tickets=[waiting]))
+    assert lane["groups"] == [{"name": "queued", "cards": ["maxharris1/cleffy#15"]}]
+    assert lane["cards"]["maxharris1/cleffy#15"]["status"] == "queued" and lane["failed_24h"] == 0
+
+
+def test_a_queued_card_with_no_jobs_still_opens_the_ci_popup() -> None:
+    row = {"repo": REPO, "ticket_id": "14", "source": None, "tracker": "github"}
+    shot = snapshot(full_pool())
+    assert ci_extras(shot, f"{REPO}#14", row, False) == ""
+    opened = ci_extras(shot, f"{REPO}#14", row, True)
+    assert 'id="ci-pop"' in opened and "no CI queued or running" in opened

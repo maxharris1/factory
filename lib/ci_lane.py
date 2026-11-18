@@ -129,6 +129,10 @@ def ci_lane(snapshot: dict) -> dict:
         slots.append(slot)
     hosted = [key for key in hosted if key not in led]
     queued = [key for key in cards if key not in led and key not in hosted]
+    waits = [t for t in tickets.values() if t.get("ci_wait") and card_key(t) not in cards]
+    for ticket in waits:
+        cards[card_key(ticket)] = _card(ticket, "queued", None, _wait(ticket), progress([]))
+        queued.append(card_key(ticket))
     failed_heads: dict[str, list[dict]] = {}
     for row in ci["failures"]:
         key = card_key(row)
@@ -137,11 +141,6 @@ def ci_lane(snapshot: dict) -> dict:
         rows = failed_heads.setdefault(key, [])
         if not rows or rows[0]["head_short"] == row["head_short"]:
             rows.append(row)
-    waits = [t for t in tickets.values() if t.get("ci_wait") and card_key(t) not in cards]
-    for ticket in waits:
-        if card_key(ticket) not in failed_heads:
-            cards[card_key(ticket)] = _card(ticket, "queued", None, _wait(ticket), progress([]))
-            queued.append(card_key(ticket))
     failed = []
     for key, rows in failed_heads.items():
         p = {**dict.fromkeys(SEGMENTS, 0), "failed": len(rows), "total": len(rows)}

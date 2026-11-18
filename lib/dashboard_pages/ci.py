@@ -290,7 +290,7 @@ SCRIPT = r"""
   }
   function ciExtras(view, d, address, row, open) {
     var found = ciPopRuns(d, address);
-    if (!found[0].length && !found[1].length) return;
+    if (!open && !found[0].length && !found[1].length) return;
     add(view, link('ci-open', ticketPageHref(row, true))).textContent = 'CI';
     if (open) add(view, ciPopup(d, address, row));
   }
@@ -538,7 +538,7 @@ def ci_popup(snapshot: dict, address: str, row: dict) -> str:
 def ci_extras(snapshot: dict, address: str, row: dict, open_: bool) -> str:
     """The ticket page's CI button, and the CI dialog when the hash carries ci=1."""
     runs, failures = ci_popup_runs(snapshot, address)
-    if not (runs or failures):
+    if not (open_ or runs or failures):
         return ""
     button = f'<a class="ci-open" href="{_e(ticket_page_href(row, ci=True))}">CI</a>'
     return button + (ci_popup(snapshot, address, row) if open_ else "")
