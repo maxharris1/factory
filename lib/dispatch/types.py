@@ -11,7 +11,7 @@ from lib.factory_md import FactoryConfig
 from lib.hold import LabelEvent, MergeUpdate
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job
-from lib.update_check import RebaseScope, UpdateClass
+from lib.update_check import HeadDiff, RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
     from lib.dispatcher import Dispatcher
@@ -59,6 +59,7 @@ CHECK_FAILED = (
 
 CIJobStatus = Literal["queued", "in_progress", "completed"]
 RunnerKind = Literal["self-hosted", "github-hosted", "none"]
+RunnerStatus = Literal["online", "offline"]
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,15 @@ class RunJob:
     completed_at: float | None = None
     runner_name: str | None = None
     runner_kind: RunnerKind | None = None
+
+
+@dataclass(frozen=True)
+class PoolRunner:
+    name: str
+    os: str
+    status: RunnerStatus
+    busy: bool
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -219,6 +229,19 @@ class TicketRef:
     ticket_id: str
     tracker: str
     allow_merged: bool = False
+
+
+@dataclass(frozen=True)
+class LinearState:
+    name: str
+    type: str
+    handoff: bool
+
+
+@dataclass(frozen=True)
+class LinearStateRead:
+    states: Mapping[str, LinearState]
+    errors: Mapping[str, str]
 
 
 class PollSource(Protocol):
@@ -486,3 +509,7 @@ RebaseClassifier = Callable[[str, str, str, str], RebaseScope | None]
 
 class HoldCarry(Protocol):
     def __call__(self, repo: str, base: str, approved: str, head: str) -> MergeUpdate: ...
+
+
+class QaDiff(Protocol):
+    def __call__(self, repo: str, base: str, since: str | None, head: str) -> HeadDiff: ...

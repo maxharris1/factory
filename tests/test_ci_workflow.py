@@ -82,6 +82,8 @@ MACOS_PATHS = [
     "lib/job_run.py",
     "lib/remote.py",
     "tests/test_process_discovery.py",
+    "tests/test_remote_start.py",
+    "tests/test_remote_tree.py",
     "requirements.txt",
     "requirements-dev.txt",
 ]
@@ -134,7 +136,7 @@ def test_macos_runs_on_every_non_pr_event_and_on_prs_the_changes_job_flags() -> 
     macos = workflow["jobs"]["macos"]
     assert macos["needs"] == "changes"
     assert macos["if"] == f"({FORK_GUARD}) && (github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true')"
-    assert "pytest tests/test_process_discovery.py -p no:xdist -s -rs" in [
+    assert "pytest tests/test_process_discovery.py tests/test_remote_tree.py -p no:xdist -s -rs" in [
         step.get("run") for step in macos["steps"]
     ]
 
@@ -646,3 +648,13 @@ def test_no_runner_registration_token_is_committed() -> None:
         for match in TOKEN_SHAPE.finditer(text)
     ]
     assert hits == []
+
+
+def test_the_test_shards_start_a_lingering_user_manager_before_pytest() -> None:
+    steps = _workflow()["jobs"]["test"]["steps"]
+    runs = [step.get("run", "") for step in steps]
+    linger = next(i for i, run in enumerate(runs) if "enable-linger" in run)
+    pytest_step = next(i for i, run in enumerate(runs) if run.startswith("pytest"))
+    assert linger < pytest_step
+    assert "XDG_RUNTIME_DIR" in runs[linger]
+    assert "systemd-run --user --scope" in runs[linger]

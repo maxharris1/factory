@@ -15,6 +15,7 @@ import itertools
 import json
 import math
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -31,12 +32,21 @@ from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import Device, MachinesConfig
-from lib.remote import Exchanged, RemoteTarget, ssh_argv
-from lib.telemetry import Scrubber, Session, harness_argv
+from lib.remote import TAG_ENV, Exchanged, RemoteTarget, SshTransport, ssh_argv
+from lib.telemetry import Scrubber, Session, harness_argv, stream_flags
 from lib.usage import reserve_check
-from lib.usage_readings import Reading, TelemetryUsage, parse_codex, parse_get_usage
-from tests import child_reaper
+from lib.usage_readings import (
+    Reading,
+    TelemetryUsage,
+    parse_codex,
+    parse_get_usage,
+    parse_rate_limit_event,
+)
+from tests import child_reaper, test_telemetry_argv
+from tests.pool_helpers import CLAIM_PROOF, LOCAL_BOX_MACHINES
 from tests.test_dashboard import make_db
+from tests.test_telemetry import _orch, _running_job
+from tests.test_telemetry_argv import CLAUDE_BOT
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "usage"
@@ -86,22 +96,28 @@ def test_the_get_usage_reply_gives_both_windows_as_fractions() -> None:
     ]
 
 
+OBSERVED_UNAVAILABLE = (
+    b'{"type":"control_response","response":{"subtype":"success","request_id":"orch-usage",'
+    b'"response":{"rate_limits_available":false,"rate_limits":{}}}}\n'
+)
+
+
 @pytest.mark.parametrize(
-    "out", [UNAVAILABLE, reply({"five_hour": {"utilization": 1, "resets_at": "2026-11-14T19:25:32+00:00"}},
-                               available="true")])
+    "out", [UNAVAILABLE, OBSERVED_UNAVAILABLE,
+            reply({"five_hour": {"utilization": 1, "resets_at": "2026-11-14T19:25:32+00:00"}}, available="true")])
 def test_a_login_without_limits_gives_no_reading(out: bytes) -> None:
     assert parse_get_usage(out, CAPTURED) == [
         Reading("five_hour", None, None, CAPTURED, 0, CAPTURED),
         Reading("seven_day", None, None, CAPTURED, 0, CAPTURED)]
 
 
-@pytest.mark.parametrize(("five_hour", "absent"), [(None, 1), ("missing", 1), ({"utilization": 3}, 0)])
-def test_a_null_or_missing_window_is_no_reading_never_zero(five_hour: object, absent: int) -> None:
+@pytest.mark.parametrize("five_hour", [None, "missing", {"utilization": 3}])
+def test_a_null_or_missing_window_is_no_reading_never_zero_nor_absent(five_hour: object) -> None:
     limits = {"seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
     if five_hour != "missing":
         limits["five_hour"] = five_hour
     assert parse_get_usage(reply(limits), CAPTURED) == [
-        Reading("five_hour", None, None, CAPTURED, absent, CAPTURED),
+        Reading("five_hour", None, None, CAPTURED, 0, CAPTURED),
         Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED, 0, CAPTURED)]
 
 
@@ -129,6 +145,71 @@ def test_an_invalid_utilization_is_kept_as_unknown(utilization: object) -> None:
 def test_a_bad_reset_is_no_reading(resets_at: object) -> None:
     out = reply({"five_hour": {"utilization": 10, "resets_at": resets_at}})
     assert parse_get_usage(out, CAPTURED)[0] == Reading("five_hour", None, None, CAPTURED, 0, CAPTURED)
+
+
+def rate_limit_event(windows: object) -> dict:
+    return {"type": "rate_limit_event", "uuid": "u", "session_id": "s", "rate_limit_info": {
+        "status": "allowed", "resetsAt": SEVEN_DAY_RESET, "rateLimitType": "seven_day", "utilization": 0.82,
+        "unifiedWindows": windows}}
+
+
+def test_a_rate_limit_event_gives_its_unified_windows_as_fractions() -> None:
+    seven_day = {"utilization": 0.82, "resetsAt": SEVEN_DAY_RESET, "status": "allowed"}
+    assert parse_rate_limit_event(rate_limit_event({"seven_day": seven_day}), CAPTURED) == [
+        Reading("seven_day", 0.82, SEVEN_DAY_RESET, CAPTURED)]
+    both = {"seven_day": seven_day, "five_hour": {"utilization": 0, "resetsAt": FIVE_HOUR_RESET}}
+    assert parse_rate_limit_event(rate_limit_event(both), CAPTURED) == [
+        Reading("five_hour", 0.0, FIVE_HOUR_RESET, CAPTURED), Reading("seven_day", 0.82, SEVEN_DAY_RESET, CAPTURED)]
+
+
+@pytest.mark.parametrize(
+    "five_hour",
+    [
+        {"utilization": 1.5, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": -0.1, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": True, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": math.nan, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": "0.5", "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": None, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": 0.5, "resetsAt": CAPTURED + usage_readings.RESET_HORIZON_SECONDS + 1},
+        {"utilization": 0.5, "resetsAt": "2026-11-14T19:25:32+00:00"},
+        {"utilization": 0.5, "resetsAt": FIVE_HOUR_RESET + 0.5},
+        {"utilization": 0.5},
+        {"utilization": 10**400, "resetsAt": FIVE_HOUR_RESET},
+        {"utilization": 0.5, "resetsAt": 10**400},
+        None,
+    ],
+)
+def test_an_invalid_event_window_gives_nothing_so_it_never_clears_a_reading(five_hour: object) -> None:
+    seven_day = {"utilization": 0.82, "resetsAt": SEVEN_DAY_RESET}
+    assert parse_rate_limit_event(rate_limit_event({"five_hour": five_hour, "seven_day": seven_day}), CAPTURED) == [
+        Reading("seven_day", 0.82, SEVEN_DAY_RESET, CAPTURED)]
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": SEVEN_DAY_RESET,
+                                                         "rateLimitType": "seven_day", "utilization": 0.82}},
+        rate_limit_event(None),
+        {"type": "rate_limit_event", "rate_limit_info": "x"},
+        {"type": "rate_limit_event"},
+        {**rate_limit_event({"seven_day": {"utilization": 0.82, "resetsAt": SEVEN_DAY_RESET}}), "type": "result"},
+        [],
+    ],
+)
+def test_an_event_without_unified_windows_gives_no_reading(event: object) -> None:
+    assert parse_rate_limit_event(event, CAPTURED) == []
+
+
+def test_a_streamed_rate_limit_event_is_stored_on_flush(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    session = _session(db)
+    event = rate_limit_event({"seven_day": {"utilization": 0.82, "resetsAt": SEVEN_DAY_RESET}})
+    session.consume(io.BytesIO(b'{"type": "rate_limit_event", "rate_limit_info": 7}\n'
+                               + json.dumps(event).encode() + b"\n"))
+    session.flush()
+    assert _stored(db) == [("claude", "claude-bot", "box", "seven_day", 0.82, SEVEN_DAY_RESET, CAPTURED, "job-1")]
 
 
 # --- Codex: the session rollout ----------------------------------------------------------
@@ -243,7 +324,7 @@ def _start(tmp_path: Path, command: list[str], bot: str, environ: dict, worker_e
 def test_a_box_codex_job_stores_its_rollout_readings_on_flush(tmp_path: Path) -> None:
     home = codex_home(tmp_path)
     session = _start(tmp_path, WRAPPER, "codex-bot", {"CODEX_HOME": str(home)})
-    assert session.harness == "codex" and "--json" in session.argv
+    assert session.harness == "codex" and "--json" in session.flags.argv
     session.clock = lambda: CAPTURED
     session.consume(io.BytesIO(CODEX_EXEC))
     assert session.summary.thread_id == THREAD and session.summary.tokens_in == 1200
@@ -369,13 +450,29 @@ def test_the_local_probe_sends_only_get_usage_and_never_the_proof() -> None:
     def slow(argv, **kwargs):
         raise subprocess.TimeoutExpired(argv, 1)
 
-    assert usage_probe.claude_local("claude", {}, run=slow) == b""
+    with pytest.raises(usage_probe.ProbeFailed, match=r"^timed out after 30s$"):
+        usage_probe.claude_local("claude", {}, run=slow)
 
 
-def test_only_a_claude_command_is_probed() -> None:
-    assert usage_probe.claude_binary(["/usr/local/bin/claude", "-p"]) == "/usr/local/bin/claude"
-    assert usage_probe.claude_binary(["fake-harness", "--from-config"]) is None
-    assert usage_probe.claude_binary([]) is None
+@pytest.mark.parametrize(
+    ("command", "bot", "probed"),
+    [
+        (["/usr/local/bin/claude", "-p"], "claude-bot", True),
+        (["claude-harness", *CLAUDE_BOT], "claude-bot", True),
+        (["/home/claude-bot/.local/bin/claude-harness", *CLAUDE_BOT], "claude-bot", True),
+        (["fake-harness", "--from-config"], "claude-bot", False),
+        (["claude-harness", "run", *CLAUDE_BOT], "claude-bot", False),
+        (["codex", "exec", "-"], "codex-bot", False),
+        ([], "claude-bot", False),
+    ],
+    ids=["claude", "wrapper", "wrapper-path", "not-print-mode", "wrapper-not-passing-options", "codex", "empty"],
+)
+def test_the_probe_gate_is_the_jobs_own_stream_flags(
+    tmp_path: Path, command: list[str], bot: str, probed: bool
+) -> None:
+    session = _start(tmp_path, command, bot, {})
+    assert session.flags == stream_flags(command, telemetry.HARNESS_BY_BOT[bot])
+    assert (session.flags.harness == "claude") is probed
 
 
 def test_the_remote_probe_runs_claude_under_the_bots_login_shell() -> None:
@@ -384,7 +481,10 @@ def test_the_remote_probe_runs_claude_under_the_bots_login_shell() -> None:
     [(argv, data)] = transport.calls
     assert argv == ssh_argv(TARGET, usage_probe.claude_remote_script())
     assert argv[-1].startswith("exec bash -lc ") and data == usage_probe.REQUEST
-    assert usage_probe.claude_remote(FakeTransport(Exchanged(255, GET_USAGE, "down")), TARGET) == b""
+    with pytest.raises(usage_probe.ProbeFailed, match=r"^ssh exit 255$"):
+        usage_probe.claude_remote(FakeTransport(Exchanged(255, GET_USAGE, "down")), TARGET)
+    with pytest.raises(usage_probe.ProbeFailed, match=r"^no byte transport$"):
+        usage_probe.claude_remote(object(), TARGET)
 
 
 def test_a_remote_codex_read_sends_the_reader_and_parses_its_line(tmp_path: Path) -> None:
@@ -403,10 +503,251 @@ def test_a_remote_codex_read_sends_the_reader_and_parses_its_line(tmp_path: Path
 def test_the_claude_probe_thread_hands_its_readings_to_the_session(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     session = _session(db)
-    usage_probe.start_claude(session.add_usage, lambda: CAPTURED, lambda: GET_USAGE).join(5)
-    usage_probe.start_claude(session.add_usage, lambda: CAPTURED, lambda: 1 / 0).join(5)
+    lines: list[str] = []
+    usage_probe.start_claude(session.add_usage, lambda: CAPTURED, lambda: GET_USAGE, lines.append).join(5)
+    assert lines == []
+    usage_probe.start_claude(session.add_usage, lambda: CAPTURED, lambda: 1 / 0, lines.append).join(5)
+    assert lines == ["usage probe: failed (ZeroDivisionError)"]
     session.finish(0)
     assert [row[3:5] for row in _stored(db)] == [("five_hour", 0.125), ("seven_day", 0.345)]
+
+
+def test_the_probe_reading_is_observed_when_it_was_asked_so_the_stream_stays_newer(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    session = _session(db)
+    now = [CAPTURED]
+
+    def probe() -> bytes:
+        event = rate_limit_event({"seven_day": {"utilization": 0.82, "resetsAt": SEVEN_DAY_RESET}})
+        now[0] = CAPTURED + 5
+        session.add_usage(parse_rate_limit_event(event, now[0]))
+        now[0] = CAPTURED + 10
+        return UNAVAILABLE
+
+    usage_probe.start_claude(session.add_usage, lambda: now[0], probe, lambda _line: None).join(5)
+    session.finish(0)
+    assert [row[3:6] for row in _stored(db)] == [
+        ("five_hour", None, None), ("seven_day", 0.82, SEVEN_DAY_RESET)]
+
+
+PROBE_MARKER = "PROBE-OUTPUT-MARKER"
+TAG_VALUE = "worker-tag-value-7c1"
+ENV_VALUE = "plain-env-value-3f9"
+
+HANGING_CLAUDE = f"""#!{sys.executable}
+import os, sys, time
+print({PROBE_MARKER!r}, *os.environ.values(), flush=True)
+print({PROBE_MARKER!r}, *os.environ.values(), file=sys.stderr, flush=True)
+time.sleep(60)
+"""
+
+
+def _hanging_claude(tmp_path: Path, name: str = "claude") -> str:
+    path = tmp_path / name
+    path.write_text(HANGING_CLAUDE, encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("binary", "timeout", "line"),
+    [
+        ("hang", 0.5, "usage probe: failed (timed out after 0.5s)"),
+        ("missing", 30.0, "usage probe: failed (could not start (FileNotFoundError))"),
+    ],
+)
+def test_a_local_probe_failure_logs_one_fixed_line(tmp_path: Path, binary: str, timeout: float, line: str) -> None:
+    path = _hanging_claude(tmp_path) if binary == "hang" else str(tmp_path / "nowhere" / "claude")
+    environ = {"PATH": os.environ["PATH"], PROOF_ENV: CLAIM_PROOF, TAG_ENV: TAG_VALUE, "PROBE_TEST": ENV_VALUE}
+    lines: list[str] = []
+    added: list[list[Reading]] = []
+    usage_probe.start_claude(
+        added.append, lambda: CAPTURED,
+        lambda: usage_probe.claude_local(path, environ, timeout=timeout), lines.append,
+    ).join(10)
+    assert lines == [line] and added == []
+
+
+def test_a_remote_probe_timeout_logs_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _hanging_claude(tmp_path, "ssh")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("ORCH_SSH_MUX", "off")
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
+    monkeypatch.setenv(TAG_ENV, TAG_VALUE)
+    monkeypatch.setenv("PROBE_TEST", ENV_VALUE)
+    lines: list[str] = []
+    added: list[list[Reading]] = []
+    usage_probe.start_claude(
+        added.append, lambda: CAPTURED,
+        lambda: usage_probe.claude_remote(SshTransport(), TARGET, timeout=0.5), lines.append,
+    ).join(10)
+    assert lines == ["usage probe: failed (timed out after 0.5s)"] and added == []
+    assert not any(secret in lines[0] for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE))
+
+
+@pytest.mark.parametrize(
+    ("out", "line"),
+    [
+        (b"", "usage probe: no reply"),
+        (reply(None, subtype="error"), "usage probe: no reply"),
+        (OBSERVED_UNAVAILABLE, "usage probe: no rate limits for this login"),
+        (UNAVAILABLE, "usage probe: no rate limits for this login"),
+    ],
+)
+def test_a_reply_without_numbers_logs_why(out: bytes, line: str) -> None:
+    lines: list[str] = []
+    usage_probe.start_claude(lambda _r: None, lambda: CAPTURED, lambda: out, lines.append).join(5)
+    assert lines == [line]
+
+
+PROBE_CLAUDE = """#!{python}
+import datetime, json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+argv = sys.argv[1:]
+if "--input-format" in argv:
+    request = sys.stdin.read()
+    with open(os.path.join(here, "probe-stdin"), "a", encoding="utf-8") as seen:
+        seen.write(request)
+    print({marker!r}, *os.environ.values(), flush=True)
+    print({marker!r}, *os.environ.values(), file=sys.stderr, flush=True)
+    mode = open(os.path.join(here, "probe-mode"), encoding="utf-8").read().strip()
+    asked = [json.loads(line) for line in request.splitlines() if line.strip()]
+    asked = [r for r in asked if r.get("request", {{}}).get("subtype") == "get_usage"]
+
+    def at(seconds):
+        return datetime.datetime.fromtimestamp(time.time() + seconds, datetime.timezone.utc).isoformat()
+
+    if mode == "reply" and asked:
+        limits = {{"five_hour": {{"utilization": 12.5, "resets_at": at(3600)}},
+                   "seven_day": {{"utilization": 34.5, "resets_at": at(86400)}}}}
+        print(json.dumps({{"type": "control_response", "response": {{
+            "subtype": "success", "request_id": asked[0]["request_id"],
+            "response": {{"rate_limits_available": True, "rate_limits": limits}}}}}}))
+    elif mode == "unavailable" and asked:
+        print(json.dumps({{"type": "control_response", "response": {{
+            "subtype": "success", "request_id": asked[0]["request_id"],
+            "response": {{"rate_limits_available": False, "rate_limits": {{}}}}}}}}))
+    sys.exit({{"exit": 1, "ssh": 255}}.get(mode, 0))
+if argv[:3] != ["--output-format", "stream-json", "--verbose"]:
+    print("text mode: no events")
+    sys.exit(0)
+for line in open({fixture!r}, encoding="utf-8"):
+    sys.stdout.write(line.replace("@@GH_TOKEN@@", "x").replace("@@API_KEY@@", ""))
+print("ORCH-HANDOFF: done")
+"""
+
+
+def _probe_bin(directory: Path, mode: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    claude = directory / "claude"
+    fixture = ROOT / "tests" / "fixtures" / "telemetry" / "claude_stream.jsonl"
+    claude.write_text(
+        PROBE_CLAUDE.format(python=sys.executable, marker=PROBE_MARKER, fixture=str(fixture)), encoding="utf-8")
+    claude.chmod(0o755)
+    (directory / "probe-mode").write_text(mode, encoding="utf-8")
+    wrapper = directory / "claude-harness"
+    wrapper.write_text(test_telemetry_argv.WRAPPER.format(claude=shlex.quote(str(claude))), encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def _box_run(tmp_path: Path, mode: str, command: list[str] | None = None, env: dict | None = None):
+    _, job = _running_job(tmp_path)
+    wrapper = _probe_bin(tmp_path / "bin", mode)
+    run = _orch(
+        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
+        "--", *(command or [str(wrapper), *CLAUDE_BOT]),
+        env={"ORCH_JOB_STATE_DIR": str(tmp_path / "state"), TAG_ENV: TAG_VALUE, "PROBE_TEST": ENV_VALUE,
+             **(env or {})},
+    )
+    assert run.returncode == 0, run.stderr
+    return run, tmp_path / "bin", tmp_path / "orch.db"
+
+
+def _remote_run(tmp_path: Path, mode: str):
+    from tests.test_remote_start import remote_setup
+
+    machines, queue, _, job_id, ssh = remote_setup(tmp_path, "claude")
+    home = tmp_path / "worker-home"
+    home.mkdir()
+    worker_bin = tmp_path / "worker-bin"
+    _probe_bin(worker_bin, mode)
+    (home / ".bash_profile").write_text(f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n", encoding="utf-8")
+    run = _orch(
+        "job", "run", "claude-bot", job_id, "--db", str(queue.path), "--machines", str(machines),
+        "--", "claude-harness", *CLAUDE_BOT,
+        env={"HOME": str(tmp_path), **ssh.env(), "FAKE_SSH_HOME": str(home), TAG_ENV: TAG_VALUE,
+             "PROBE_TEST": ENV_VALUE},
+    )
+    assert run.returncode == 0, run.stderr
+    return run, worker_bin, queue.path
+
+
+def _probe_lines(run: subprocess.CompletedProcess) -> list[str]:
+    for secret in (PROBE_MARKER, CLAIM_PROOF, TAG_VALUE, ENV_VALUE):
+        assert secret not in run.stderr and secret not in run.stdout
+    return [line for line in run.stderr.splitlines() if "usage probe:" in line]
+
+
+def _usage_rows(db: Path) -> list[tuple]:
+    with sqlite3.connect(db) as connection:
+        return connection.execute(
+            "SELECT harness, bot, device, window, used FROM usage_readings ORDER BY window").fetchall()
+
+
+def test_a_box_claude_bot_wrapper_job_is_probed_through_its_wrapper(tmp_path: Path) -> None:
+    run, bin_dir, db = _box_run(tmp_path, "reply")
+    assert (bin_dir / "probe-stdin").read_bytes() == usage_probe.REQUEST
+    assert _probe_lines(run) == []
+    assert _usage_rows(db) == [
+        ("claude", "claude-bot", "box", "five_hour", 0.125), ("claude", "claude-bot", "box", "seven_day", 0.345)]
+
+
+def test_a_remote_claude_bot_job_is_probed_on_its_device(tmp_path: Path) -> None:
+    run, worker_bin, db = _remote_run(tmp_path, "reply")
+    assert (worker_bin / "probe-stdin").read_bytes() == usage_probe.REQUEST
+    assert _probe_lines(run) == []
+    assert _usage_rows(db) == [
+        ("claude", "claude-bot", "pc", "five_hour", 0.125), ("claude", "claude-bot", "pc", "seven_day", 0.345)]
+
+
+@pytest.mark.parametrize(
+    ("mode", "line", "rows"),
+    [
+        ("exit", "usage probe: failed (exit 1)", []),
+        ("silent", "usage probe: no reply", []),
+        ("unavailable", "usage probe: no rate limits for this login",
+         [("claude", "claude-bot", "box", "five_hour", None), ("claude", "claude-bot", "box", "seven_day", None)]),
+    ],
+)
+def test_a_box_probe_without_numbers_logs_one_line_and_nothing_it_printed(
+    tmp_path: Path, mode: str, line: str, rows: list[tuple]
+) -> None:
+    run, bin_dir, db = _box_run(tmp_path, mode)
+    assert (bin_dir / "probe-stdin").read_bytes() == usage_probe.REQUEST
+    assert _probe_lines(run) == [f"orch job run: {line}"]
+    assert (_usage_rows(db) if rows else []) == rows
+
+
+def test_a_remote_probe_whose_ssh_fails_logs_its_exit(tmp_path: Path) -> None:
+    run, worker_bin, _ = _remote_run(tmp_path, "ssh")
+    assert (worker_bin / "probe-stdin").read_bytes() == usage_probe.REQUEST
+    assert _probe_lines(run) == ["orch job run: usage probe: failed (ssh exit 255)"]
+
+
+@pytest.mark.parametrize(
+    ("not_claude", "env", "reason"),
+    [
+        (True, {}, "wrapper does not pass harness options"),
+        (False, {"ORCH_TELEMETRY": "off"}, "telemetry off"),
+    ],
+    ids=["not-claude", "telemetry-off"],
+)
+def test_a_job_that_is_not_probed_says_why_once(tmp_path: Path, not_claude: bool, env: dict, reason: str) -> None:
+    command = [sys.executable, str(tmp_path / "bin" / "claude"), "-p"] if not_claude else None
+    run, bin_dir, _ = _box_run(tmp_path, "reply", command, env)
+    assert not (bin_dir / "probe-stdin").exists()
+    assert _probe_lines(run) == [f"orch job run: usage probe: skipped ({reason})"]
 
 
 # --- storing on the telemetry flush ------------------------------------------------------
@@ -415,8 +756,8 @@ def test_the_claude_probe_thread_hands_its_readings_to_the_session(tmp_path: Pat
 def _session(db: Path, *, job_id: str = "job-1", device: str = "box", at: float = CAPTURED) -> Session:
     return Session(
         connect=lambda: sqlite3.connect(db), job_id=job_id, bot="claude-bot", repo="acme/widgets",
-        harness="claude", argv=["claude"], raw_log=None, scrub=Scrubber({}), log=lambda _m: None,
-        stdout=io.BytesIO(), clock=lambda: at, device=device,
+        harness="claude", flags=stream_flags(["claude", "-p"]), raw_log=None, scrub=Scrubber({}),
+        log=lambda _m: None, stdout=io.BytesIO(), clock=lambda: at, device=device,
     )
 
 
@@ -748,15 +1089,32 @@ def test_one_future_stamped_event_polled_three_times_is_one_omission(tmp_path: P
         assert codex["five_hour"]["state"] == "no reading", parsed_at
 
 
-def test_a_claude_window_null_in_three_replies_is_not_on_the_plan(tmp_path: Path) -> None:
+@pytest.mark.parametrize("replies", [3, 5])
+def test_a_claude_window_null_in_every_reply_stays_no_reading(tmp_path: Path, replies: int) -> None:
     db = tmp_path / "orch.db"
     limits = {"five_hour": None, "seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
     with sqlite3.connect(db) as connection:
-        for offset in (0, 600, 1200):
+        for offset in range(0, 600 * replies, 600):
             usage_readings.store(connection, harness="claude", bot="claude-bot", device="box", job_id="j",
                                  readings=parse_get_usage(reply(limits), CAPTURED + offset))
-        claude = _accounts(read_usage(connection, CAPTURED + 1260, BOX))["claude"]
-    assert claude["five_hour"]["state"] == "not on plan" and claude["headroom"] == 0.76
+        claude = _accounts(read_usage(connection, CAPTURED + 600 * replies, BOX))["claude"]
+    assert claude["five_hour"] == {
+        "used": None, "resets_at": None, "observed_at": CAPTURED + 600 * (replies - 1), "state": "no reading"}
+    assert claude["seven_day"]["used"] == 0.24 and claude["headroom"] == 0.76
+
+
+def test_a_claude_streak_stored_before_the_fix_reads_as_no_reading(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        usage_readings.ensure_table(connection)
+        connection.executemany(
+            "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id, absent)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(harness, f"{harness}-bot", "box", "five_hour", None, None, CAPTURED, "j", 3)
+             for harness in ("claude", "codex")])
+        accounts = _accounts(read_usage(connection, CAPTURED + 60, BOX))
+    assert accounts["claude"]["five_hour"]["state"] == "no reading"
+    assert accounts["codex"]["five_hour"]["state"] == "not on plan"
 
 
 def test_a_late_reading_that_reported_the_window_before_three_newer_omissions_keeps_not_on_the_plan(
@@ -817,6 +1175,55 @@ def test_an_older_table_gets_the_absent_count_on_store(tmp_path: Path) -> None:
         connection.execute(OLD_DDL)
     codex = _codex_reads(db, THREE_READINGS, CAPTURED + 1260)
     assert codex["five_hour"]["state"] == "not on plan"
+
+
+@pytest.mark.parametrize("omissions_first", [0, 1])
+def test_a_report_kept_in_an_older_table_interrupts_the_omissions_stored_after_migration(
+    tmp_path: Path, omissions_first: int
+) -> None:
+    db = tmp_path / "orch.db"
+    omissions = [("box", _seven_day_only(CAPTURED + offset), CAPTURED + 610) for offset in (600, 100, 200)]
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    _codex_polls(db, omissions[:omissions_first], CAPTURED + 610)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO usage_readings"
+            " (harness, bot, device, window, used, resets_at, observed_at, job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("codex", "codex-bot", "laptop", "five_hour", 0.1, FIVE_HOUR_RESET, CAPTURED + 500, "j"))
+    codex = _codex_polls(db, omissions[omissions_first:], CAPTURED + 610)
+    assert codex["five_hour"]["state"] == "no reading"
+
+
+HISTORICAL_UPSERT = (
+    "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    " ON CONFLICT (harness, bot, device, window) DO UPDATE SET used = excluded.used,"
+    " resets_at = excluded.resets_at, observed_at = excluded.observed_at, job_id = excluded.job_id"
+    " WHERE excluded.observed_at > usage_readings.observed_at"
+)
+
+
+def _historical_report(db: Path, device: str, at: float) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.executemany(HISTORICAL_UPSERT, [
+            ("codex", "codex-bot", device, "five_hour", 0.1, FIVE_HOUR_RESET, at, "j"),
+            ("codex", "codex-bot", device, "seven_day", 0.68, SEVEN_DAY_RESET, at, "j"),
+        ])
+
+
+def test_a_historical_writers_report_over_a_migrated_omission_interrupts_the_streak(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    _historical_report(db, "laptop", CAPTURED)
+    _codex_polls(db, [("laptop", _seven_day_only(CAPTURED + 100), CAPTURED + 100),
+                      ("box", _seven_day_only(CAPTURED + 200), CAPTURED + 200)], CAPTURED + 200)
+    _historical_report(db, "laptop", CAPTURED + 500)
+    polls = _polled_at_its_time([("box", _seven_day_only, 600), ("box", _seven_day_only, 700)])
+    assert _codex_polls(db, polls, CAPTURED + 710)["five_hour"]["state"] == "no reading"
+    third = _polled_at_its_time([("box", _seven_day_only, 800)])
+    assert _codex_polls(db, third, CAPTURED + 810)["five_hour"]["state"] == "not on plan"
 
 
 def test_an_older_table_read_only_is_no_reading_not_no_telemetry(tmp_path: Path) -> None:

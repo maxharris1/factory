@@ -33,6 +33,8 @@ from lib.dispatch.types import (
     GrokDelivery,
     Hook,
     HoldCarry,
+    PoolRunner,
+    QaDiff,
     RebaseClassifier,
     Registration,
     RetryableStateError,
@@ -71,7 +73,9 @@ class DispatcherBase:
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
+        ci_pool: Callable[[str], Sequence[PoolRunner]] | None = None,
         hold_carry: HoldCarry | None = None,
+        qa_diff: QaDiff | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -99,11 +103,13 @@ class DispatcherBase:
         self.update_classifier = update_classifier
         self.rebase_classifier = rebase_classifier
         self.hold_carry = hold_carry
+        self.qa_diff = qa_diff
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
         self.ci_runs = ci_runs
         self.ci_job_log = ci_job_log
+        self.ci_pool = ci_pool
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
@@ -435,13 +441,16 @@ class DispatcherBase:
                 ) from exc
         return self.review_actions
 
-    def _is_abandoned(self, repo: str, ticket_id: str) -> bool:
+    def _workflow_state(self, repo: str, ticket_id: str) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
                 (repo.lower(), ticket_id),
             ).fetchone()
-        return row is not None and row["workflow_state"] == "abandoned"
+        return None if row is None else row["workflow_state"]
+
+    def _is_abandoned(self, repo: str, ticket_id: str) -> bool:
+        return self._workflow_state(repo, ticket_id) == "abandoned"
 
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)

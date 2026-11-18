@@ -88,8 +88,8 @@ def test_ship_column_holds_five_states_above_the_stop_rail():
 
 def _chart_with(state, group, edges):
     text = flow.CHART_PATH.read_text(encoding="utf-8")
-    text = text.replace("  s21: capped\n", f"  s21: capped\n  s22: {state}\n")
-    text = text.replace("  class s21 yellow\n", f"  class s21 yellow\n  class s22 {group}\n")
+    text = text.replace("  s22: capped\n", f"  s22: capped\n  s23: {state}\n")
+    text = text.replace("  class s22 yellow\n", f"  class s22 yellow\n  class s23 {group}\n")
     text = text.replace("  s3 --> s3: CI red, fix\n", "  s3 --> s3: CI red, fix\n" + "".join(f"  {e}: go\n" for e in edges))
     chart = flow.parse_chart(text)
     assert state in {s["name"] for s in chart["states"]}
@@ -97,7 +97,7 @@ def _chart_with(state, group, edges):
 
 
 def test_a_sixth_live_ship_state_grows_the_grid_and_the_rail_moves_down():
-    layout = _chart_with("launch-pad", "teal", ["s14 --> s22", "s22 --> s7"])
+    layout = _chart_with("launch-pad", "teal", ["s14 --> s23", "s23 --> s8"])
     nodes = {node["name"]: node for node in layout["nodes"]}
     assert _place(nodes["launch-pad"]) == (4, 5)
     assert not nodes["launch-pad"]["stop"]
@@ -112,7 +112,7 @@ def test_a_sixth_live_ship_state_grows_the_grid_and_the_rail_moves_down():
 
 
 def test_an_unknown_stop_state_with_no_exit_goes_on_the_rail():
-    layout = _chart_with("parked", "tan", ["s9 --> s22"])
+    layout = _chart_with("parked", "tan", ["s10 --> s23"])
     parked = next(node for node in layout["nodes"] if node["name"] == "parked")
     assert _place(parked) == (4, 5)
     assert parked["stop"] and parked["end"]

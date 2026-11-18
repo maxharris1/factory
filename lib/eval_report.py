@@ -136,6 +136,17 @@ list. The rest are lifetime counts:
 - merged PRs with follow-ups: followup_filings filed or commented on a PR
   merged in the window, with the issue link
 
+render_qa prints the QA section (#794) after the metrics, for the current
+snapshot only, from qa_runs rows started in the window with a scope in
+QA_SCOPES. Each figure is split by runner: runs by
+scope (any state), PASS, FAIL and BLOCKED among reported runs, the median
+minutes from started_at to finished_at, FAILs on a head a trusted
+reviewer APPROVEd, whatever CI did, and wrong FAILs and wrong PASSes
+from the ruling column. A runner with no ruled run, or a snapshot
+without the column, prints not ruled. A head with a reported primary
+and a reported shootout run is a pair, and each disagreeing pair lists
+both QA comment links. A window with no run prints one line.
+
 This module does not correct, reflect, run blinded evals, or maintain.
 """
 
@@ -148,7 +159,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, assert_never
+from typing import Literal, NamedTuple, assert_never
 
 from lib.factory_md import FactoryConfig, load_factory_md
 from lib.handoff import STATES, HandoffError, matching_head, parse_comment
@@ -230,6 +241,13 @@ CHART_TRANSITIONS = frozenset(
         ("updating", "merge-queue"),
         ("updating", "review"),
         ("updating", "stuck"),
+        ("capped", "handed-off-externally"),
+        ("stuck", "handed-off-externally"),
+        ("handed-off-externally", "capped"),
+        ("handed-off-externally", "stuck"),
+        ("handed-off-externally", "merged"),
+        ("handed-off-externally", "done"),
+        ("handed-off-externally", "abandoned"),
     }
 )
 
@@ -364,11 +382,50 @@ class MetricWindow:
         return f"window {start} to {end}"
 
 
+QA_SCOPES = ("full", "targeted", "smoke")
+QA_RESULTS = ("PASS", "FAIL", "BLOCKED")
+
+
+@dataclass(frozen=True)
+class QaRunner:
+    name: str
+    runs: tuple[int, ...]
+    results: tuple[int, ...]
+    median_minutes: float | NoRatio
+    fail_on_approved: MetricValue
+    wrong_fail: int | None
+    wrong_pass: int | None
+
+
+@dataclass(frozen=True)
+class QaReported:
+    runner: str
+    result: str
+    link: str
+
+
+@dataclass(frozen=True)
+class QaDisagreement:
+    repo: str
+    ticket_id: str
+    head: str
+    primary: QaReported
+    shootout: QaReported
+
+
+@dataclass(frozen=True)
+class Qa:
+    runners: tuple[QaRunner, ...]
+    agreed: int
+    disagreed: tuple[QaDisagreement, ...]
+
+
 @dataclass(frozen=True)
 class Metrics:
     values: tuple[tuple[str, MetricValue], ...]
     followups: tuple[FollowUp, ...] | Unrecorded = ()
     window: MetricWindow = MetricWindow()
+    qa: Qa | Unrecorded = Qa((), 0, ())
 
 
 @dataclass(frozen=True)
@@ -1173,6 +1230,7 @@ def build_metrics(db: Path, *, since: str | None = None, until: str | None = Non
             values=_metric_values(connection, tables, window),
             followups=_followups(connection, tables, window),
             window=window,
+            qa=_qa(connection, tables, window),
         )
     except sqlite3.DatabaseError as exc:
         raise EvalError(f"{db} is not a readable SQLite database: {exc}") from exc
@@ -1198,6 +1256,38 @@ def render_metrics(current: Metrics, baseline: Metrics) -> str:
         if not current.followups:
             lines.append("none")
     return "\n".join(lines) + "\n"
+
+
+def render_qa(metrics: Metrics) -> str:
+    qa = metrics.qa
+    if isinstance(qa, Unrecorded):
+        return f"qa {_metric_text(qa)}\n"
+    if not qa.runners:
+        return "qa no runs in the window\n"
+    lines = ["qa by runner", metrics.window.text()]
+    for runner in qa.runners:
+        lines += [
+            f"runner {runner.name}",
+            "runs " + " ".join(f"{scope} {count}" for scope, count in zip(QA_SCOPES, runner.runs)),
+            "results "
+            + " ".join(f"{result} {count}" for result, count in zip(QA_RESULTS, runner.results)),
+            f"median-minutes {_metric_text(runner.median_minutes)}",
+            f"fail-on-approved-head {_metric_text(runner.fail_on_approved)}",
+            f"wrong-fail {_ruled_text(runner.wrong_fail)}",
+            f"wrong-pass {_ruled_text(runner.wrong_pass)}",
+        ]
+    lines.append(f"qa pairs agreed {qa.agreed} disagreed {len(qa.disagreed)}")
+    lines.extend(
+        f"disagreed {row.repo} {row.ticket_id} {row.head[:12]} "
+        f"{row.primary.runner} {row.primary.result} {row.primary.link} "
+        f"{row.shootout.runner} {row.shootout.result} {row.shootout.link}"
+        for row in qa.disagreed
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _ruled_text(value: int | None) -> str:
+    return "not ruled" if value is None else str(value)
 
 
 def _metric_text(value: MetricValue) -> str:
@@ -1813,3 +1903,195 @@ def _tool_metrics(
 
 def _count(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+class _QaRow(NamedTuple):
+    repo: str
+    ticket_id: str
+    head: str
+    runner: str
+    arm: str
+    scope: str
+    state: str
+    result: str | None
+    comment_id: str | None
+    started_at: float
+    finished_at: float | None
+    ruling: str | None
+    link: str | None
+    job_pr: str | None
+
+    @property
+    def reported(self) -> bool:
+        return self.state == "reported" and self.result in QA_RESULTS
+
+
+def _qa(connection: sqlite3.Connection, tables: set[str], window: MetricWindow) -> Qa | Unrecorded:
+    if "qa_runs" not in tables:
+        return _missing("qa_runs")
+    ruling = "q.ruling" if "ruling" in _columns(connection, "qa_runs") else "NULL"
+    clause, bounds = window.sql("q.started_at")
+    link = (
+        """(SELECT l.link FROM comment_links l WHERE l.repo = lower(q.repo)
+            AND l.ticket_id = q.ticket_id AND l.comment_id = q.comment_id)"""
+        if "comment_links" in tables
+        else "NULL"
+    )
+    job_pr = (
+        """(SELECT json_extract(j.detail, '$.pr_number') FROM jobs j
+            WHERE j.id = q.job_id AND json_valid(j.detail))"""
+        if "jobs" in tables
+        else "NULL"
+    )
+    rows = [
+        _QaRow(*row)
+        for row in connection.execute(
+            f"""
+            SELECT lower(q.repo), q.ticket_id, q.head, q.runner, q.arm, q.scope, q.state,
+                   q.result, q.comment_id, q.started_at, q.finished_at, {ruling},
+                   {link}, {job_pr}
+            FROM qa_runs q WHERE q.scope IN {QA_SCOPES} AND {clause}
+            ORDER BY q.started_at, q.rowid
+            """,
+            bounds,
+        )
+    ]
+    approved = _approved_heads(connection, tables)
+    by_runner: dict[str, list[_QaRow]] = defaultdict(list)
+    for row in rows:
+        by_runner[row.runner].append(row)
+    agreed, disagreed = _qa_pairs(rows, _qa_pr_numbers(connection, tables))
+    return Qa(
+        runners=tuple(_qa_runner(name, by_runner[name], approved) for name in sorted(by_runner)),
+        agreed=agreed,
+        disagreed=disagreed,
+    )
+
+
+def _qa_runner(
+    name: str,
+    rows: list[_QaRow],
+    approved: dict[tuple[str, str], list[str]] | Unrecorded,
+) -> QaRunner:
+    reported = [row for row in rows if row.reported]
+    ruled = [row for row in reported if row.ruling in ("right", "wrong")]
+    return QaRunner(
+        name=name,
+        runs=tuple(sum(row.scope == scope for row in rows) for scope in QA_SCOPES),
+        results=tuple(sum(row.result == result for row in reported) for result in QA_RESULTS),
+        median_minutes=_median(
+            [
+                (row.finished_at - row.started_at) / 60
+                for row in reported
+                if row.finished_at is not None
+            ]
+        ),
+        fail_on_approved=_fails_on_approved(reported, approved),
+        wrong_fail=_wrong(ruled, "FAIL"),
+        wrong_pass=_wrong(ruled, "PASS"),
+    )
+
+
+def _fails_on_approved(
+    reported: list[_QaRow], approved: dict[tuple[str, str], list[str]] | Unrecorded
+) -> MetricValue:
+    if isinstance(approved, Unrecorded):
+        return approved
+    return sum(
+        row.result == "FAIL"
+        and any(
+            matching_head(head, row.head) is not None
+            for head in approved.get((row.repo, row.ticket_id), ())
+        )
+        for row in reported
+    )
+
+
+def _wrong(ruled: list[_QaRow], result: str) -> int | None:
+    if not ruled:
+        return None
+    return sum(row.result == result and row.ruling == "wrong" for row in ruled)
+
+
+def _median(values: list[float]) -> float | NoRatio:
+    if not values:
+        return NO_RATIO
+    values = sorted(values)
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) / 2
+
+
+def _approved_heads(
+    connection: sqlite3.Connection, tables: set[str]
+) -> dict[tuple[str, str], list[str]] | Unrecorded:
+    for table in ("verdict_heads", "ship_intents", "review_events"):
+        if table not in tables:
+            return _missing(table)
+    approve = (
+        "v.verdict = 'APPROVE' OR (v.verdict IS NULL AND a.comment_id IS NOT NULL)"
+        if "verdict" in _columns(connection, "verdict_heads")
+        else "a.comment_id IS NOT NULL"
+    )
+    heads: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for repo, ticket_id, head in connection.execute(
+        f"""
+        SELECT DISTINCT lower(v.repo), v.ticket_id, v.head FROM verdict_heads v
+        LEFT JOIN ({_approvals_sql(tables)}) a ON a.comment_id = v.comment_id
+        WHERE {approve}
+        """
+    ):
+        heads[(str(repo), str(ticket_id))].append(str(head))
+    return heads
+
+
+def _qa_pairs(
+    rows: list[_QaRow], pr_numbers: dict[tuple[str, str], str]
+) -> tuple[int, tuple[QaDisagreement, ...]]:
+    arms: dict[tuple[str, str, str], dict[str, _QaRow]] = defaultdict(dict)
+    for row in rows:
+        if row.reported:
+            arms[(row.repo, row.ticket_id, row.head)][row.arm] = row
+    agreed = 0
+    disagreed: list[QaDisagreement] = []
+    for (repo, ticket_id, head), pair in arms.items():
+        primary, shootout = pair.get("primary"), pair.get("shootout")
+        if primary is None or shootout is None:
+            continue
+        if primary.result == shootout.result:
+            agreed += 1
+            continue
+        pr = pr_numbers.get((repo, ticket_id), ticket_id)
+        disagreed.append(
+            QaDisagreement(
+                repo,
+                ticket_id,
+                head,
+                *(
+                    QaReported(row.runner, str(row.result), _qa_link(row, pr))
+                    for row in (primary, shootout)
+                ),
+            )
+        )
+    disagreed.sort(key=lambda row: _run_key(row.repo, row.ticket_id))
+    return agreed, tuple(disagreed)
+
+
+def _qa_pr_numbers(connection: sqlite3.Connection, tables: set[str]) -> dict[tuple[str, str], str]:
+    if "ticket_sources" not in tables:
+        return {}
+    return {
+        (str(repo), str(ticket_id)): str(pr)
+        for repo, ticket_id, pr in connection.execute(
+            "SELECT lower(repo), ticket_id, pr_number FROM ticket_sources WHERE pr_number IS NOT NULL"
+        )
+    }
+
+
+def _qa_link(row: _QaRow, pr: str) -> str:
+    if row.comment_id is None:
+        return "no-comment"
+    if row.link:
+        return row.link
+    return f"https://github.com/{row.repo}/pull/{row.job_pr or pr}#issuecomment-{row.comment_id}"

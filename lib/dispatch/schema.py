@@ -154,7 +154,9 @@ class SchemaMixin:
             )
             connection.commit()
             _add_missing_columns(
-                connection, "verdict_heads", {"posted_at": "REAL", "changed_lines": "INTEGER"}
+                connection,
+                "verdict_heads",
+                {"posted_at": "REAL", "changed_lines": "INTEGER", "verdict": "TEXT"},
             )
             _add_missing_columns(
                 connection,
@@ -179,7 +181,23 @@ class SchemaMixin:
                     "update_failures": "INTEGER NOT NULL DEFAULT 0",
                     "update_from_head": "TEXT",
                     "update_failed_job": "TEXT",
+                    "external_from_state": "TEXT",
+                    "external_from_stuck": "INTEGER",
+                    "external_at": "REAL",
                 },
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS linear_states (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    state_name TEXT,
+                    state_type TEXT,
+                    read_at REAL,
+                    read_error TEXT,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
             )
             connection.execute(
                 """
@@ -516,6 +534,20 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_runners (
+                    repo TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    os TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    busy INTEGER NOT NULL,
+                    labels TEXT NOT NULL,
+                    seen_at REAL NOT NULL,
+                    PRIMARY KEY (repo, name)
+                )
+                """
+            )
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
@@ -560,6 +592,55 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS qa_runs (
+                    run_id TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    patch_id TEXT,
+                    round INTEGER NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    scope TEXT NOT NULL
+                        CHECK (scope IN ('full', 'targeted', 'smoke', 'none')),
+                    runner TEXT NOT NULL,
+                    arm TEXT NOT NULL CHECK (arm IN ('primary', 'shootout')),
+                    job_id TEXT,
+                    state TEXT NOT NULL CHECK (
+                        state IN ('queued', 'running', 'reported', 'cancelled', 'stale')
+                    ),
+                    result TEXT CHECK (result IS NULL OR result IN ('PASS', 'FAIL', 'BLOCKED')),
+                    reason TEXT,
+                    comment_id TEXT,
+                    started_at REAL NOT NULL,
+                    finished_at REAL,
+                    ruling TEXT CHECK (ruling IS NULL OR ruling IN ('right', 'wrong')),
+                    ruled_by TEXT,
+                    ruled_at REAL,
+                    ruling_reason TEXT,
+                    CHECK ((scope = 'none') = (job_id IS NULL))
+                )
+                """
+            )
+            _add_missing_columns(
+                connection,
+                "qa_runs",
+                {
+                    "ruling": "TEXT CHECK (ruling IS NULL OR ruling IN ('right', 'wrong'))",
+                    "ruled_by": "TEXT",
+                    "ruled_at": "REAL",
+                    "ruling_reason": "TEXT",
+                },
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS qa_runs_live
+                ON qa_runs (repo, ticket_id, head, runner, arm)
+                WHERE state IN ('queued', 'running', 'reported')
+                """
+            )
+            ensure_qa_lanes(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS eval_log_cursor (
@@ -610,3 +691,42 @@ def _add_missing_columns(
         if name not in present:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
     connection.commit()
+
+
+QA_LANE_STATES = ("launching", "running", "reported", "dropped", "gap", "cancelled", "timed-out")
+
+
+def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
+    states = ", ".join(f"'{state}'" for state in QA_LANE_STATES)
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS qa_lanes (
+            lane_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            slice INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('head', 'regression', 'base-check')),
+            lane_no INTEGER NOT NULL CHECK (lane_no BETWEEN 1 AND 3),
+            scenarios TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            base_commit TEXT NOT NULL,
+            runner TEXT NOT NULL,
+            agent_id TEXT,
+            agent_url TEXT,
+            state TEXT NOT NULL CHECK (state IN ({states})),
+            attempt INTEGER NOT NULL CHECK (attempt IN (1, 2)),
+            reason TEXT,
+            result TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL,
+            launch_called_at REAL,
+            UNIQUE (run_id, slice, attempt)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS qa_lanes_open ON qa_lanes (runner)
+        WHERE state IN ('launching', 'running')
+        """
+    )

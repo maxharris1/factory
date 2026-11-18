@@ -312,7 +312,7 @@ def test_page_keeps_a_no_script_fallback(tmp_path: Path) -> None:
 def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
     pages = dashboard.render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))
     where = {
-        "index.html": ("lanes", "queue", "ci-runs", "just-happened", "intake"),
+        "index.html": ("lanes", "queue", "just-happened", "intake"),
         "activity.html": ("attention", "relay"),
         "efficiency.html": ("savings",),
         "health.html": ("components", "drift", "health", "log", "rules", "no-waiter"),
@@ -321,6 +321,7 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
     for name, panels in where.items():
         for panel in panels:
             assert f'id="{panel}"' in pages[name], (name, panel)
+    assert 'data-device="ci"' in pages["index.html"] and 'id="ci-runs"' not in pages["index.html"]
 
 
 def test_page_has_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:

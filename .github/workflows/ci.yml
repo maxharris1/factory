@@ -35,6 +35,17 @@ jobs:
           ln -sf "$(uv python find 3.11)" "$RUNNER_TEMP/py311/python3.11"
           echo "$RUNNER_TEMP/py311" >> "$GITHUB_PATH"
       - run: uv pip install -r requirements-dev.txt
+      - name: Start a lingering systemd user manager for the run scope tests
+        run: |
+          user=$(id -un)
+          sudo -n loginctl enable-linger "$user" 2>/dev/null || loginctl enable-linger "$user" 2>/dev/null || true
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for _ in $(seq 20); do
+            systemd-run --user --scope --quiet --collect true 2>/dev/null && exit 0
+            sleep 0.5
+          done
+          echo "::warning::no systemd user manager for $user; the run scope tests skip"
       - run: pytest -n 4 -m "not serial" --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   changes:
@@ -61,6 +72,8 @@ jobs:
             -e lib/job_run.py \
             -e lib/remote.py \
             -e tests/test_process_discovery.py \
+            -e tests/test_remote_start.py \
+            -e tests/test_remote_tree.py \
             -e requirements.txt \
             -e requirements-dev.txt \
             <<<"$changed"; then
@@ -83,7 +96,7 @@ jobs:
           python-version: "3.12"
           activate-environment: true
       - run: uv pip install -r requirements-dev.txt
-      - run: pytest tests/test_process_discovery.py -p no:xdist -s -rs
+      - run: pytest tests/test_process_discovery.py tests/test_remote_tree.py -p no:xdist -s -rs
 
   macos-pickup:
     needs: changes

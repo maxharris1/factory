@@ -83,7 +83,10 @@ _TOP_KEYS = {
     "approver_linear_users",
     "approver_gh_config_dir",
     "github_app",
+    "qa",
 }
+_QA_KEYS = {"max_cloud_lanes"}
+DEFAULT_MAX_CLOUD_LANES = 10
 _GITHUB_APP_KEYS = {"enabled", "apps"}
 _APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
 _MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
@@ -103,6 +106,7 @@ _PROJECT_KEYS = {
     "linear_project_ids",
     "grok_bot",
     "linear_ready_for_review",
+    "linear_handoff_states",
     "ready_starts_review",
     "intake",
     "driver_inbox",
@@ -163,6 +167,9 @@ class DriverInbox:
     number: int
 
 
+DEFAULT_LINEAR_HANDOFF_STATES = ("Ready for Review", "In Review")
+
+
 @dataclass(frozen=True)
 class QaStorage:
     bucket: str
@@ -181,6 +188,7 @@ class Project:
     linear_project_ids: frozenset[str] = frozenset()
     grok_bot: str = "grok-bot"
     linear_ready_for_review: bool = False
+    linear_handoff_states: tuple[str, ...] = DEFAULT_LINEAR_HANDOFF_STATES
     # A trusted ready from factory.md's builder starts review even with no
     # factory-queued build job (PRs built outside the queue). Default off.
     ready_starts_review: bool = False
@@ -281,6 +289,11 @@ class Approvals:
 
 
 @dataclass(frozen=True)
+class QaWorkerConfig:
+    max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
+
+
+@dataclass(frozen=True)
 class OrchConfig:
     poll_seconds: int
     projects: tuple[Project, ...]
@@ -305,6 +318,7 @@ class OrchConfig:
     approver_logins: frozenset[str] | None = None
     approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
+    qa: QaWorkerConfig = field(default_factory=QaWorkerConfig)
 
     @property
     def secret_env_names(self) -> tuple[str, ...]:
@@ -547,6 +561,7 @@ def _validate(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
     github_app = _github_app(data, findings)
+    qa = _qa(data, findings)
     if github_app is not None and github_app.enabled:
         _app_switch(github_app, approver_logins, trusted_logins, projects, findings)
     if (
@@ -593,6 +608,7 @@ def _validate(
             approver_logins=approver_logins,
             approver_linear_users=approver_linear_users,
             approver_gh_config_dir=approver_gh_config_dir,
+            qa=qa,
         ),
         findings,
     )
@@ -740,6 +756,29 @@ def _projects(
             )
             ok = False
             continue
+        handoff_states = item.get("linear_handoff_states", list(DEFAULT_LINEAR_HANDOFF_STATES))
+        if not (
+            isinstance(handoff_states, list)
+            and handoff_states
+            and all(isinstance(name, str) and name.strip() for name in handoff_states)
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_handoff_states must be a list of Linear state names",
+                )
+            )
+            ok = False
+            continue
+        if "linear_handoff_states" in item and not linear_project_ids:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_handoff_states requires linear_project_id",
+                )
+            )
+            ok = False
+            continue
         ready_starts_review = item.get("ready_starts_review", False)
         if not isinstance(ready_starts_review, bool):
             findings.append(
@@ -801,6 +840,7 @@ def _projects(
                 linear_project_ids=linear_project_ids,
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
+                linear_handoff_states=tuple(handoff_states),
                 ready_starts_review=ready_starts_review,
                 intake=intake,
                 driver_inbox=driver_inbox,
@@ -1164,6 +1204,21 @@ def _public_url_ok(url: object, path: object) -> bool:
     if not isinstance(url, str) or _PUBLIC_URL.fullmatch(url) is None:
         return False
     return urlsplit(url).path == path
+
+
+def _qa(data: dict, findings: list[Finding]) -> QaWorkerConfig:
+    if "qa" not in data:
+        return QaWorkerConfig()
+    value = data["qa"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "qa must be a mapping"))
+        return QaWorkerConfig()
+    _unknown_keys(value, _QA_KEYS, "qa", findings)
+    lanes = value.get("max_cloud_lanes", DEFAULT_MAX_CLOUD_LANES)
+    if not is_strict_int(lanes) or lanes < 1:
+        findings.append(Finding("error", "qa.max_cloud_lanes must be an integer of at least 1"))
+        return QaWorkerConfig()
+    return QaWorkerConfig(max_cloud_lanes=int(lanes))
 
 
 def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:

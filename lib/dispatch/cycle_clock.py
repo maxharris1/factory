@@ -10,16 +10,19 @@ from dataclasses import dataclass, field
 from lib.health import et
 
 PHASES = (
+    "linear-states",
     "feed",
     "github-candidates",
     "linear-candidates",
     "tracked-read",
     "process",
+    "linear-moves",
     "ci-board",
     "merge-queue",
     "verify-handoffs",
     "reconcile-jobs",
     "factory-reads",
+    "ci-pool",
     "after-poll",
 )
 AFTER_POLL_STEPS = ("backup", "dashboard-push", "self-deploy")

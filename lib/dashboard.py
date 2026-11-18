@@ -63,10 +63,24 @@ started_at, completed_at, elapsed_seconds, queue_seconds}; runner_kind None mean
 `failures` is the newest RECENT_CI_FAILURES failed jobs that completed in
 the last CI_FAILURE_WINDOW on any head: the ticket reference, head_short,
 name, conclusion, run_id, job_id, tests (the first CI_TESTS_SHOWN failing
-test names), more_tests and age_seconds since the job completed. No URL
+test names), more_tests, age_seconds since the job completed, and
+run_checks, the {status, conclusion} of every job at that head. No URL
 is stored, since redaction
 hides every URL: the pages build the github.com PR, commit, job log and
 issue-search links from these parts.
+
+CI pool (#823): `ci_pool` is {state, age_seconds, runners} from the
+ci_runners table: the self-hosted runners of each project whose factory.md
+sets ci_runner, as the poller last read them. A runner is {repo, name, os,
+status, busy, labels}, ordered by repo then name; status is online or
+offline. age_seconds is the age of the oldest repo's read. state is unread
+with no rows, live while age_seconds is at most CI_POOL_STALE_SECONDS,
+else stale.
+
+CI lane (#823): `ci_lane` is lib/ci_lane.ci_lane(snapshot): the runner
+slots, the GitHub-hosted, queued and failed groups and one card per ticket
+with its progress counts. The script draws it; the server render works it
+out again from ci_pool, ci_runs and tickets.
 
 Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
@@ -138,7 +152,8 @@ from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
-from lib.dispatch.constants import CI_WAIT_REASONS
+from lib.dispatch.constants import CI_WAIT_REASONS, HANDED_OFF_EXTERNALLY
+from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
@@ -702,6 +717,7 @@ _VERDICT_TIMES = (
     ("verdict_heads", "MAX", "posted_at", "comment_id"),
     ("handled_times", "MAX", "handled_at", "comment_id"),
     ("verdict_acceptances", "MAX", "accepted_at", "comment_id"),
+    ("qa_runs", "MAX", "finished_at", "comment_id"),
 )
 
 
@@ -869,6 +885,7 @@ def collect_snapshot(
         "handoff_savings": db["handoff_savings"],
         "relay": db["relay"],
         "ci_runs": db["ci_runs"],
+        "ci_pool": db["ci_pool"],
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
             report,
@@ -884,6 +901,7 @@ def collect_snapshot(
         "usage": usage,
         RECORDS: records,
     }
+    snapshot["ci_lane"] = ci_lane(snapshot)
     return _scrub(snapshot)  # type: ignore[return-value]
 
 
@@ -965,6 +983,8 @@ CI_CONCLUSIONS = (
     "startup_failure", "stale",
 )
 CI_RUNNER_KINDS = ("self-hosted", "github-hosted", "none")
+CI_RUNNER_STATUSES = ("online", "offline")
+CI_POOL_STALE_SECONDS = 300
 CI_FAILURE_WINDOW = 86400
 RECENT_CI_FAILURES = 10
 CI_TESTS_SHOWN = 5
@@ -997,6 +1017,36 @@ def _ci_tests(text: object) -> tuple[list[str], int]:
         names = []
     names = [_clean(name, 200) for name in names if isinstance(name, str)] if isinstance(names, list) else []
     return names[:CI_TESTS_SHOWN], max(0, len(names) - CI_TESTS_SHOWN)
+
+
+def _ci_labels(text: object) -> list[str]:
+    try:
+        labels = json.loads(str(text))
+    except ValueError:
+        labels = []
+    return [_clean(label, 64) for label in labels if isinstance(label, str)] if isinstance(labels, list) else []
+
+
+def _ci_pool(connection: sqlite3.Connection, now: float) -> dict:
+    rows = connection.execute("SELECT * FROM ci_runners ORDER BY repo, name").fetchall()
+    if not rows:
+        return {"state": "unread", "age_seconds": None, "runners": []}
+    age = _age(now, min(float(row["seen_at"]) for row in rows))
+    return {
+        "state": "live" if age is not None and age <= CI_POOL_STALE_SECONDS else "stale",
+        "age_seconds": age,
+        "runners": [
+            {
+                "repo": _clean(row["repo"], 100),
+                "name": _clean(row["name"], 64),
+                "os": _clean(row["os"], 32),
+                "status": _enum(row["status"], CI_RUNNER_STATUSES),
+                "busy": bool(row["busy"]),
+                "labels": _ci_labels(row["labels"]),
+            }
+            for row in rows
+        ],
+    }
 
 
 def _ci_runs(
@@ -1059,6 +1109,7 @@ def _ci_runs(
                 "tests": tests,
                 "more_tests": more,
                 "at": completed,
+                "run": (*key, head),
             })
     runs = []
     for run_key, jobs in grouped.items():
@@ -1072,7 +1123,8 @@ def _ci_runs(
     return {
         "runs": runs,
         "failures": [
-            {**{k: v for k, v in item.items() if k != "at"}, "age_seconds": _age(now, item["at"])}
+            {**{k: v for k, v in item.items() if k not in ("at", "run")}, "age_seconds": _age(now, item["at"]),
+             "run_checks": [{"status": job["status"], "conclusion": job["conclusion"]} for job in grouped[item["run"]]]}
             for item in failures[:RECENT_CI_FAILURES]
         ],
     }
@@ -1586,6 +1638,8 @@ def _read_db(
             *(["wake.created_at"] if jobs else []),
             "NULL",
         ])
+        external_at = "state.external_at" if "external_at" in state_columns else "NULL"
+        linear = "linear_states" in tables
         for row in connection.execute(
             f"""
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -1594,11 +1648,16 @@ def _read_db(
                    COALESCE(state.gate_count, 0) AS gate_count,
                    COALESCE(state.stuck, 0) AS stuck,
                    state.stuck_reason, state.paused_action,
-                   COALESCE({stuck_at}, NULL) AS stuck_at
+                   COALESCE({stuck_at}, NULL) AS stuck_at,
+                   {external_at} AS external_at,
+                   {"linear.state_name" if linear else "NULL"} AS linear_state
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
             {"LEFT JOIN jobs AS wake ON wake.id = state.stuck_wake_job_id" if jobs else ""}
+            {'''LEFT JOIN linear_states AS linear
+              ON linear.repo = lower(tracked.repo) AND linear.ticket_id = tracked.ticket_id'''
+             if linear else ""}
             """
         ):
             ref = _ticket_ref(sources, row["repo"], row["ticket_id"])
@@ -1642,6 +1701,8 @@ def _read_db(
                     **waiting,
                     **({"ci_wait": ci_wait} if ci_wait else {}),
                     **({"no_ci": no_ci} if no_ci else {}),
+                    **({"external_at": row["external_at"]} if row["external_at"] is not None else {}),
+                    **({"linear_state": _clean(row["linear_state"], 64)} if row["linear_state"] else {}),
                 }
             )
             ticket_rows.append((tickets[-1], key))
@@ -1673,6 +1734,8 @@ def _read_db(
     for row, key in ticket_rows:
         row["state_age_seconds"] = flows[key]["state_age_seconds"]
         shipped = shipped_facts(chart, flows[key]) or {"at": None, "how": None}
+        if row["state"] == HANDED_OFF_EXTERNALLY:
+            shipped = {"at": row.get("external_at"), "how": "handed-off"}
         row["shipped_at"], row["shipped_how"] = shipped["at"], shipped["how"]
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
@@ -1691,6 +1754,10 @@ def _read_db(
     ci_runs = (
         _ci_runs(connection, now, sources, {key: info.tracker for key, info in ticket_info.items()})
         if "ci_jobs" in tables else {"runs": [], "failures": []}
+    )
+    ci_pool = (
+        _ci_pool(connection, now)
+        if "ci_runners" in tables else {"state": "unread", "age_seconds": None, "runners": []}
     )
     ticket_of = {id(item): (repo.casefold(), ticket_id) for item, repo, ticket_id in active}
     ticket_jobs: dict[tuple[str, str], list[dict]] = {}
@@ -1909,6 +1976,7 @@ def _read_db(
         "verdicts": verdicts,
         "relay": _relay(connection, tables, sources, handled, ticket_records, waiting_on, len(tickets), now),
         "ci_runs": ci_runs,
+        "ci_pool": ci_pool,
         "linear_budget": {
             "state": budget_state,
             "deferrals_last_hour": budget["deferrals"],

@@ -92,6 +92,7 @@ from lib.job_state import (
     requeue_unstarted,
 )
 from lib.machines_yml import Device, MachinesConfig
+from lib.process_tree import run_tag, scope_of, scope_unit
 from lib.queue import SLOTS_TABLE, Proof, QueueError, SQLiteJobQueue, require_proof
 from lib.remote import (
     ENV_FILE,
@@ -349,12 +350,17 @@ class PlacedRun:
         start = process_start(pid)
         self._worker.append((pid, start))
         self.spawned = True
+        tag = run_tag(pid)
+        scope = scope_of(pid)
+        run_scope = scope if tag is not None and scope == scope_unit(tag) else None
         retry_locked(
             lambda: self.pool.attach_worker(
                 self.placement.job_id,
                 owner=self.owner,
                 pid=pid,
                 start=start,
+                run_tag=tag,
+                run_scope=run_scope,
                 runner=self.runner,
                 proof=self.proof,
             )

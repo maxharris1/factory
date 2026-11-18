@@ -43,7 +43,12 @@ WRITERS = {
     "blocked-resume": "lib/dispatch/caps/resume.py",
     "unsat-fix": "lib/dispatch/caps/resume.py",
     "t-blocked": "lib/dispatch/verdict/blocked.py",
+    "waiting-max-qa": "lib/dispatch/qa.py",
     "retry": "lib/dispatch/retry.py",
+    "linear-handoff": "lib/dispatch/linear_states.py",
+    "linear-resume": "lib/dispatch/linear_states.py",
+    "linear-done": "lib/dispatch/linear_states.py",
+    "linear-canceled": "lib/dispatch/linear_states.py",
 }
 
 RAW_WRITE = re.compile(

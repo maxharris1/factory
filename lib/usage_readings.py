@@ -7,7 +7,11 @@ Sources, chosen by Max (PR #234, 2026-11-14):
   with no model turn. `parse_get_usage` keeps `rate_limits.five_hour` and
   `rate_limits.seven_day`: `utilization` (0-100) and `resets_at`. While
   the login cannot report limits (`rate_limits_available` false) there is
-  no reading.
+  no reading. Each `rate_limit_event` in the job's own stream-json output
+  (lib/telemetry.py) is read too: `parse_rate_limit_event` keeps
+  `rate_limit_info.unifiedWindows.{five_hour,seven_day}`, with
+  `utilization` as a fraction (0-1) and `resetsAt`. A window that event
+  leaves out or reports invalid gives nothing, so it never clears a reading.
 * Codex: the `rate_limits` of the last `token_count` event in that job's
   own session rollout (lib/codex_rollout.py). `parse_codex` maps each of
   `primary` and `secondary` to a window by `window_minutes` (300, 10080),
@@ -23,9 +27,10 @@ reading is observed at its event's own time, so rereading the same event
 never makes it fresher. A window the account's readings, on any of its
 devices, leave out of its newest NOT_ON_PLAN_READINGS distinct source
 observations, ordered by source time (fresh readings that report other
-limits: a null or missing window in a reply with limits), is `not on plan`:
-the plan has no such limit. A Codex event read again is the same
-observation, and any reading that reports the window ends the streak.
+limits: a window the event leaves out), is `not on plan`: the plan has no
+such limit. Only harnesses in PLAN_INFERRED (Codex) are read this way. A
+Codex event read again is the same observation, and any reading that
+reports the window ends the streak.
 `Session._write` (lib/telemetry.py) stores them in `usage_readings` in the
 same transaction as the job's telemetry row, on the existing heartbeat
 flush. A reading is keyed by harness, bot (the account's
@@ -64,6 +69,7 @@ RESET_HORIZON_SECONDS = 30 * 24 * 3600
 CLOCK_SKEW_SECONDS = 300
 STALE_SECONDS = 24 * 3600
 NOT_ON_PLAN_READINGS = 3
+PLAN_INFERRED = frozenset({"codex"})
 MAX_REPLY_BYTES = 256 * 1024
 
 DDL = f"""
@@ -114,6 +120,18 @@ INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent) VALUES (?, 
 ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
 """
 
+_ADOPT_PRE_SOURCE_AT_WRITES = f"""
+UPDATE {TABLE} SET source_at = observed_at, absent = 0
+WHERE harness = ? AND bot = ? AND window = ? AND observed_at > source_at
+"""
+
+_RETAINED = f"""
+INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent)
+SELECT harness, bot, window, COALESCE(source_at, observed_at), absent > 0 FROM {TABLE}
+WHERE harness = ? AND bot = ? AND window = ?
+ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
+"""
+
 _NEWEST = f"""
 SELECT source_at, absent FROM {OBSERVATIONS}
 WHERE harness = ? AND bot = ? AND window = ?
@@ -160,7 +178,11 @@ def ensure_table(connection: sqlite3.Connection) -> None:
 def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def used_fraction(value: object) -> float | None:
@@ -193,8 +215,8 @@ def iso_time(value: object) -> float | None:
 def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
     """The 5-hour and 7-day readings in Claude Code's `get_usage` reply.
 
-    A null window (counted as absent) or a bad reset gives that window a
-    no-reading, and a login without limits (`rate_limits_available` not true) gives both.
+    A null window or a bad reset gives that window a no-reading, and a
+    login without limits (`rate_limits_available` not true) gives both.
     An error reply, or no reply, is no observation at all."""
     for line in stdout[:MAX_REPLY_BYTES].splitlines():
         try:
@@ -215,9 +237,6 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
         found = []
         for window in WINDOWS:
             info = limits.get(window)
-            if info is None:
-                found.append(missing(window, now, 1, now))
-                continue
             resets = iso_time(info.get("resets_at")) if isinstance(info, dict) else None
             resets_at = reset_time(int(resets), now) if resets is not None else None
             if resets_at is None:
@@ -226,6 +245,24 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
                 found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now, 0, now))
         return found
     return []
+
+
+def parse_rate_limit_event(event: object, now: float) -> list[Reading]:
+    if not isinstance(event, dict) or event.get("type") != "rate_limit_event":
+        return []
+    info = event.get("rate_limit_info")
+    windows = info.get("unifiedWindows") if isinstance(info, dict) else None
+    if not isinstance(windows, dict):
+        return []
+    found = []
+    for window in WINDOWS:
+        entry = windows.get(window)
+        if not isinstance(entry, dict):
+            continue
+        used, resets_at = used_fraction(entry.get("utilization")), reset_time(entry.get("resetsAt"), now)
+        if used is not None and resets_at is not None:
+            found.append(Reading(window, used, resets_at, now))
+    return found
 
 
 def parse_codex(found: object, now: float) -> list[Reading]:
@@ -285,6 +322,8 @@ def store(
         source = r.observed_at if r.source_at is None else r.source_at
         absent = 1 if r.absent else 0
         account = (harness, bot, r.window)
+        connection.execute(_ADOPT_PRE_SOURCE_AT_WRITES, account)
+        connection.execute(_RETAINED, account)
         connection.execute(_OBSERVE, (*account, source, absent))
         newest = connection.execute(_NEWEST, account).fetchall()
         connection.execute(_PRUNE, (*account, newest[-1][0]))
@@ -322,16 +361,17 @@ def from_row(
     return Reading(str(window), used_fraction(used), resets_at, observed)
 
 
-def window_state(reading: Reading, now: float) -> str:
+def window_state(reading: Reading, now: float, harness: str | None = None) -> str:
     """`stale` once the window has reset or the reading is old; else `ok`;
-    `not on plan` once absent from NOT_ON_PLAN_READINGS readings; else `no reading`."""
+    `not on plan` for a PLAN_INFERRED harness once absent from
+    NOT_ON_PLAN_READINGS readings; else `no reading`."""
     if (reading.resets_at is not None and reading.resets_at <= now) or (
         now - reading.observed_at > STALE_SECONDS
     ):
         return "stale"
     if reading.used is not None:
         return "ok"
-    if reading.resets_at is None and reading.absent >= NOT_ON_PLAN_READINGS:
+    if harness in PLAN_INFERRED and reading.resets_at is None and reading.absent >= NOT_ON_PLAN_READINGS:
         return "not on plan"
     return "no reading"
 

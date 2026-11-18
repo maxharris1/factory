@@ -6,6 +6,7 @@ import re
 from collections import Counter
 
 from lib.dashboard_flow import PHASE_OVERRIDES, PHASES, PIPELINE, ticket_phase, ticket_phases
+from lib.dispatch.constants import HANDED_OFF_EXTERNALLY
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.lanes import TILE_STATE
 from lib.dashboard_pages.common import (
@@ -605,16 +606,18 @@ SCRIPT_TICKETS = r"""
   function tkTiles(parent, cards) {
     var row = add(parent, el('div', 'tk-tiles'));
     cards.forEach(function (c) {
-      var t = c.ticket, name = ticketOf(t), handed = t.shipped_how === 'handed-off';
+      var t = c.ticket, name = ticketOf(t), external = t.state === 'handed-off-externally';
+      var how = external ? 'handed off in Linear' : t.shipped_how === 'handed-off' ? 'handed off' : 'merged';
+      var where = external && t.linear_state ? ' · ' + t.linear_state : '';
       var rounds = t.round === 1 ? '1 revise round' : t.round + ' revise rounds';
       var tile = add(row, link('tk-tile', ticketPageHref(t)));
       tile.setAttribute('data-ticket', ticketKey(t));
-      if (known(c.ago)) ticking(tile, c.ago, name + (handed ? ' · handed off ' : ' · merged '), ' ago · ' + rounds, 'title');
-      else tile.setAttribute('title', name + ' · ' + rounds);
+      if (known(c.ago)) ticking(tile, c.ago, name + ' · ' + how + ' ', ' ago' + where + ' · ' + rounds, 'title');
+      else tile.setAttribute('title', name + where + ' · ' + rounds);
       add(tile, el('span', 'tk-blk')).setAttribute('aria-hidden', 'true');
       add(tile, el('span', 'tk-tn', name));
       add(tile, el('span', 'tk-r', 'r' + t.round));
-      if (known(c.ago)) ticking(add(tile, el('span', 'tk-ago')), c.ago, handed ? 'handed off ' : '', ' ago');
+      if (known(c.ago)) ticking(add(tile, el('span', 'tk-ago')), c.ago, how === 'merged' ? '' : how + ' ', ' ago');
     });
   }
 
@@ -944,14 +947,18 @@ def _tiles(cards: list[dict]) -> str:
     tiles = ""
     for card in cards:
         ticket, ago = card["ticket"], card["ago"]
-        name, handed = _ticket(ticket), ticket.get("shipped_how") == "handed-off"
+        name, external = _ticket(ticket), ticket["state"] == HANDED_OFF_EXTERNALLY
+        how = "handed off in Linear" if external else (
+            "handed off" if ticket.get("shipped_how") == "handed-off" else "merged"
+        )
+        where = f" · {ticket['linear_state']}" if external and ticket.get("linear_state") else ""
         rnd = ticket["round"]
         rounds = "1 revise round" if rnd == 1 else f"{rnd} revise rounds"
-        when = "" if ago is None else f" · {'handed off' if handed else 'merged'} {duration(ago)} ago"
-        age = "" if ago is None else _span("tk-ago", ("handed off " if handed else "") + f"{duration(ago)} ago")
+        when = "" if ago is None else f" · {how} {duration(ago)} ago"
+        age = "" if ago is None else _span("tk-ago", ("" if how == "merged" else f"{how} ") + f"{duration(ago)} ago")
         tiles += (
             f'<a class="tk-tile" href="{_e(ticket_page_href(ticket))}" data-ticket="{_e(_key(ticket))}" '
-            f'title="{_e(f"{name}{when} · {rounds}")}"><span class="tk-blk" aria-hidden="true"></span>'
+            f'title="{_e(f"{name}{when}{where} · {rounds}")}"><span class="tk-blk" aria-hidden="true"></span>'
             f'{_span("tk-tn", name)}{_span("tk-r", f"r{rnd}")}{age}</a>'
         )
     return f'<div class="tk-tiles">{tiles}</div>'

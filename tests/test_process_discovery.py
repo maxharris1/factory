@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import cli, job_run
+from lib import cli, job_run, process_tree
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.machines_yml import load_machines_yml
@@ -75,7 +75,7 @@ def test_no_retry_starts_while_process_discovery_fails_after_the_budget(
     ending = threading.Event()
     denied: list[int] = []
     held: list[tuple[str, bool, bool]] = []
-    real_popen, real_end = subprocess.Popen, job_run.Tree.end
+    real_popen, real_end = subprocess.Popen, process_tree.Tree.end
 
     def ps_denied_while_ending(args, *rest, **kwargs):
         if args[0] == "ps" and ending.is_set() and len(denied) < 3:
@@ -90,14 +90,14 @@ def test_no_retry_starts_while_process_discovery_fails_after_the_budget(
         with queue.connect() as connection:
             return connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
 
-    def end(tree: job_run.Tree, log: job_run.Log) -> None:
+    def end(tree: process_tree.Tree, log: process_tree.Log) -> None:
         ending.set()
         real_end(tree, log)
 
     monkeypatch.delenv("ORCH_DB", raising=False)
-    monkeypatch.setattr(job_run, "_proc_processes", lambda _tag: job_run._ps_processes())
-    monkeypatch.setattr(job_run.subprocess, "Popen", ps_denied_while_ending)
-    monkeypatch.setattr(job_run.Tree, "end", end)
+    monkeypatch.setattr(process_tree, "_proc_processes", lambda _tag: process_tree._ps_processes())
+    monkeypatch.setattr(process_tree.subprocess, "Popen", ps_denied_while_ending)
+    monkeypatch.setattr(process_tree.Tree, "end", end)
     try:
         code = cli.main([
             "job", "run", "codex-bot", job_id, "--db", str(queue.path),
@@ -142,25 +142,25 @@ def test_a_ps_that_fails_or_exits_nonzero_is_unknown_not_empty(
         def kill(self) -> None:
             pass
 
-    monkeypatch.setattr(job_run.subprocess, "Popen", Ps)
-    with pytest.raises(job_run.ProcessesUnknown):
-        job_run._ps_processes()
+    monkeypatch.setattr(process_tree.subprocess, "Popen", Ps)
+    with pytest.raises(process_tree.ProcessesUnknown):
+        process_tree._ps_processes()
 
 
 def test_an_unreadable_proc_is_unknown_not_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     def denied(_path: str) -> list[str]:
         raise PermissionError("/proc")
 
-    monkeypatch.setattr(job_run.os, "listdir", denied)
-    with pytest.raises(job_run.ProcessesUnknown):
-        job_run._proc_processes("tag")
+    monkeypatch.setattr(process_tree.os, "listdir", denied)
+    with pytest.raises(process_tree.ProcessesUnknown):
+        process_tree._proc_processes("tag")
 
 
 def test_a_command_never_starts_when_processes_cannot_be_listed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def unknown(_tag: str) -> dict[int, job_run.Process]:
-        raise job_run.ProcessesUnknown("cannot run ps: denied")
+    def unknown(_tag: str) -> dict[int, process_tree.Process]:
+        raise process_tree.ProcessesUnknown("cannot run ps: denied")
 
     monkeypatch.setattr(job_run, "processes", unknown)
     ran = tmp_path / "ran"
@@ -176,14 +176,14 @@ def test_a_command_never_starts_when_processes_cannot_be_listed(
 def test_cleanup_returns_only_after_a_look_that_succeeds_and_finds_none() -> None:
     looks: list[str] = []
 
-    def scan(_tag: str) -> dict[int, job_run.Process]:
+    def scan(_tag: str) -> dict[int, process_tree.Process]:
         looks.append("look")
         if len(looks) <= 3:
-            raise job_run.ProcessesUnknown("cannot run ps: denied")
+            raise process_tree.ProcessesUnknown("cannot run ps: denied")
         return {}
 
     lines: list[str] = []
-    job_run.Tree(-1, "tag", scan=scan).end(lines.append)
+    process_tree.Tree(-1, "tag", scan=scan).end(lines.append)
     assert len(looks) == 4
     assert lines == [
         "cannot run ps: denied; holding the job until the run's processes are confirmed gone"
@@ -194,19 +194,19 @@ def test_cleanup_by_ps_never_counts_the_ps_it_ran_as_a_run_process() -> None:
     me = os.getpid()
     before = frozenset(
         (pid, process.start)
-        for pid, process in job_run._ps_processes().items()
+        for pid, process in process_tree._ps_processes().items()
         if process.ppid == me
     )
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
     looks: list[int] = []
 
-    def scan(_tag: str) -> dict[int, job_run.Process]:
+    def scan(_tag: str) -> dict[int, process_tree.Process]:
         looks.append(1)
         assert len(looks) <= 50, "each look found the ps that made it, so cleanup never settled"
-        return job_run._ps_processes()
+        return process_tree._ps_processes()
 
     try:
-        job_run.Tree(child.pid, "tag", scan=scan, adopts=True, others=before).end(lambda _line: None)
+        process_tree.Tree(child.pid, "tag", scan=scan, adopts=True, others=before).end(lambda _line: None)
         assert child.wait(5) == -signal.SIGKILL
     finally:
         child.kill()
@@ -214,12 +214,12 @@ def test_cleanup_by_ps_never_counts_the_ps_it_ran_as_a_run_process() -> None:
 
 
 class FakeProcessTable:
-    def __init__(self, *processes: job_run.Process, responsible: dict[int, int]):
+    def __init__(self, *processes: process_tree.Process, responsible: dict[int, int]):
         self.listing = {process.pid: process for process in processes}
         self.responsible_for = responsible
         self.killed: list[int] = []
 
-    def scan(self, _tag: str) -> dict[int, job_run.Process]:
+    def scan(self, _tag: str) -> dict[int, process_tree.Process]:
         return dict(self.listing)
 
     def signal(self, pid: int, signum: int) -> None:
@@ -231,15 +231,15 @@ class FakeProcessTable:
 
 
 ROOT = 4000
-BEFORE = job_run.Process(300, 1, "before", False)
-STRANGER = job_run.Process(301, 1, "stranger", False)
-ORPHAN = job_run.Process(302, 1, "orphan", False)
-ORPHANS_CHILD = job_run.Process(303, 302, "orphan's child", False)
+BEFORE = process_tree.Process(300, 1, "before", False)
+STRANGER = process_tree.Process(301, 1, "stranger", False)
+ORPHAN = process_tree.Process(302, 1, "orphan", False)
+ORPHANS_CHILD = process_tree.Process(303, 302, "orphan's child", False)
 
 
 def _end(machine: FakeProcessTable, **kwargs: object) -> list[str]:
     lines: list[str] = []
-    job_run.Tree(
+    process_tree.Tree(
         ROOT, "tag", scan=machine.scan, signal_pid=machine.signal,
         others=frozenset({(BEFORE.pid, BEFORE.start)}), **kwargs,
     ).end(lines.append)
@@ -263,6 +263,72 @@ def test_without_responsibility_an_unseen_orphan_is_left_alone() -> None:
     assert machine.killed == []
 
 
+ORPHANS_ITS_WRITER = (
+    "import os, subprocess, sys; "
+    "p = subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[2]], "
+    "env={'PATH': os.environ['PATH']}, stdin=subprocess.DEVNULL, "
+    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+    "q = subprocess.Popen(['sleep', '120'], stdin=subprocess.DEVNULL); "
+    "open(sys.argv[1], 'w').write(f'{p.pid} {q.pid}')"
+)
+
+
+def test_an_untagged_orphan_left_in_the_runs_session_dies_only_beside_a_member(
+    tmp_path: Path,
+) -> None:
+    ticks, other = tmp_path / "ticks", tmp_path / "other"
+    pid_file = tmp_path / "writer.pid"
+    leader = subprocess.Popen(
+        [sys.executable, "-c", ORPHANS_ITS_WRITER, str(pid_file), str(ticks), WRITER],
+        start_new_session=True,
+    )
+    assert leader.wait(timeout=10) == 0
+    writer, member = map(int, pid_file.read_text().split())
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", WRITER, str(other)], start_new_session=True
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (ticks.exists() and other.exists()):
+            assert time.monotonic() < deadline, "the writers started"
+            time.sleep(0.02)
+        assert _still_writes(ticks)
+
+        process_tree.Tree(leader.pid, None, known={}).end(lambda _line: None)
+        assert _still_writes(ticks), "without the session nothing names the orphan"
+
+        process_tree.Tree(leader.pid, None, known={}, session=leader.pid).end(
+            lambda _line: None
+        )
+        assert _still_writes(ticks), "a session with no member of the run in it may be reused"
+
+        listing = process_tree.processes(None)
+        process_tree.Tree(
+            leader.pid, None, known={member: listing[member].start}, session=leader.pid
+        ).end(lambda _line: None)
+        assert not _alive(writer) or not _still_writes(ticks), "the orphan outlived the run"
+        assert _still_writes(other), "a process outside the run is never signalled"
+    finally:
+        for pid in (writer, member, unrelated.pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        unrelated.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_a_process_scope_is_the_last_component_of_its_cgroup_v2_path() -> None:
+    lines = Path("/proc/self/cgroup").read_text().splitlines()
+    unified = [line[3:] for line in lines if line.startswith("0::")]
+    if not unified or unified[0].rstrip("/") == "":
+        pytest.skip("no cgroup v2 path for this process")
+    expected = unified[0].rstrip("/").rsplit("/", 1)[-1]
+
+    assert process_tree.processes(None)[os.getpid()].scope == expected
+    assert process_tree.scope_of(os.getpid()) == expected
+
+
 def test_cleanup_holds_while_responsibility_cannot_be_read() -> None:
     machine = FakeProcessTable(ORPHAN, responsible={ORPHAN.pid: ROOT})
     reads: list[int] = []
@@ -270,7 +336,7 @@ def test_cleanup_holds_while_responsibility_cannot_be_read() -> None:
     def responsible(pid: int) -> int | None:
         reads.append(pid)
         if len(reads) <= 2:
-            raise job_run.ProcessesUnknown("cannot read the responsible process of pid 302")
+            raise process_tree.ProcessesUnknown("cannot read the responsible process of pid 302")
         return machine.responsible(pid)
 
     lines = _end(machine, responsible=responsible)
@@ -281,7 +347,7 @@ def test_cleanup_holds_while_responsibility_cannot_be_read() -> None:
     ]
 
 
-def _libproc_scan() -> dict[int, job_run.Process]:
+def _libproc_scan() -> dict[int, process_tree.Process]:
     import ctypes
     import struct
 
@@ -289,7 +355,7 @@ def _libproc_scan() -> dict[int, job_run.Process]:
     ids = (ctypes.c_int * 8192)()
     n = lib.proc_listpids(1, 0, ids, ctypes.sizeof(ids))
     if n <= 0:
-        raise job_run.ProcessesUnknown("proc_listpids failed")
+        raise process_tree.ProcessesUnknown("proc_listpids failed")
     found = {}
     for pid in ids[: n // 4]:
         buf = ctypes.create_string_buffer(136)
@@ -299,7 +365,7 @@ def _libproc_scan() -> dict[int, job_run.Process]:
         if fields[1] == 5:
             continue
         start = struct.unpack_from("QQ", buf.raw, 120)
-        found[pid] = job_run.Process(pid, fields[4], str(start), False)
+        found[pid] = process_tree.Process(pid, fields[4], str(start), False)
     return found
 
 
@@ -366,7 +432,7 @@ def test_a_macos_writer_reparented_to_init_dies_before_the_retry(
         ])
 
     monkeypatch.delenv("ORCH_DB", raising=False)
-    monkeypatch.setattr(job_run, "_ps_processes", _libproc_scan)
+    monkeypatch.setattr(process_tree, "_ps_processes", _libproc_scan)
     try:
         code = run(
             job_id, sys.executable, "-c", HARNESS, INTERMEDIATE, REPARENTED_WRITER,

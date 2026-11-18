@@ -21,6 +21,18 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # #108 (#42 N4): states where no bot is working and no person is waiting on
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
+HANDED_OFF_EXTERNALLY = "handed-off-externally"
+SETTLE_CLEARS = {
+    "stuck": 0,
+    "stuck_reason": None,
+    "stuck_source_comment_id": None,
+    "stuck_wake_job_id": None,
+    "paused_action": None,
+    "paused_recipient": None,
+    "paused_head": None,
+    "paused_generation": None,
+    "paused_question_id": None,
+}
 # #130: an approved ticket on a finish_line: merge project stays watched,
 # polled every cycle, until its PR merges or closes.
 WATCHED_STATES = ("merge-queue", "updating")
@@ -32,6 +44,8 @@ BASE_UPDATE_GRACE_SECONDS = 120.0
 STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
+REVISE_ROUND_STATES = ("review", "awaiting-ok")
+APPROVE_ROUND_STATES = (*REVISE_ROUND_STATES, "fixing", "merge-queue", "waiting-external")
 GROK_WAKE_REASONS = (
     "blocked",
     "capped",
@@ -44,6 +58,8 @@ GROK_WAKE_REASONS = (
     "done",
     "awaiting-ok",
     "go-not-from-approver",
+    "qa-failed",
+    "qa-env-failed",
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})
 CORE_KINDS = ("go", "plan", "ready", "retry")
@@ -87,8 +103,9 @@ SHIP_ERROR_LIMIT = 240
 POLL_ERROR_LIMIT = 500
 POLL_ERROR_STREAK = 3
 POLL_ERROR_RETENTION_SECONDS = 7 * 86400
-_UNVERIFIED_HANDOFF = """
-    jobs.state = 'done' AND jobs.recipient != 'grok'
+HARNESS_WORK = "recipient NOT IN ('grok', 'qa')"
+_UNVERIFIED_HANDOFF = f"""
+    jobs.state = 'done' AND jobs.{HARNESS_WORK}
     AND jobs.handoff_comment_id IS NOT NULL
     AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?
     AND NOT EXISTS (

@@ -147,6 +147,7 @@ from lib.dispatch.poll import (
     PollMixin,
     _after_poll,
 )
+from lib.dispatch.qa import QaMixin
 from lib.dispatch.questions import (
     QuestionsMixin,
 )
@@ -164,6 +165,7 @@ from lib.dispatch.ship import (
     ReviewShipper,
     ShipMixin,
 )
+from lib.dispatch.linear_states import LinearStatesMixin
 from lib.dispatch.tracking import (
     TrackingMixin,
 )
@@ -232,6 +234,7 @@ from lib.update_check import UpdateClass
 class Dispatcher(
     CommentsMixin,
     ReadyMixin,
+    QaMixin,
     VerdictMixin,
     CapsMixin,
     MergeQueueMixin,
@@ -245,6 +248,7 @@ class Dispatcher(
     InboxMixin,
     FollowupsMixin,
     TrackingMixin,
+    LinearStatesMixin,
     PollMixin,
     EvalLogMixin,
     SchemaMixin,

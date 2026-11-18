@@ -9,7 +9,7 @@ import math
 
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    _bot, checks_link, checks_named, _chip, duration, _e, github_links, _job_label, _panel,
+    _bot, _chip, duration, _e, github_links, _job_label, _panel,
     _short, _span, _ticket, _tile_label, _when, ticket_page_href,
 )
 
@@ -73,10 +73,6 @@ a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
 .hbar.warn i{background:var(--warn)}.hbar.bad i{background:var(--bad)}
 .tile-l4 .hbt{white-space:nowrap;color:var(--muted)}
 .tile-l4 .hbt.warn{color:var(--warn)}.tile-l4 .hbt.bad{color:var(--bad)}
-.tile.ci{min-height:0}
-.tile.ci .tile-l1 .gh{flex:none}
-.tile.ci .tile-l4{flex-wrap:wrap;gap:2px 8px;color:var(--text-2)}
-.tile.ci .tile-l4 .what{min-width:0;overflow-wrap:anywhere}
 .tile.empty{display:flex;flex-direction:column;background:transparent}
 .tile.empty .lbl{flex:1 0 auto;display:flex;align-items:center;justify-content:center;
 font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--warn)}
@@ -128,18 +124,18 @@ TILE_STATE: dict[str, dict] = {
     "overdue": {"text": "overdue", "tone": "bad", "hb": "bad", "bad": True},
     "stuck": {"text": "ticket stuck", "tone": "bad", "chip": ["stuck", "bad"], "hb": "bad", "bad": True},
     "unknown": {"text": None, "tone": "", "hb": "live"},
+    "ci-running": {"verbs": ["Testing", "Checking", "Linting"], "tone": "live", "hb": "none"},
+    "ci-queued": {"verbs": ["Queueing", "Waiting", "Lining up"], "tone": "warn", "hb": "none"},
+    "ci-failed": {"text": "CI failed", "tone": "bad", "hb": "none", "bad": True},
 }
 
 GLYPH_ORDER = [2, 0, 1, 3]
-
-STEP_AFTER_CI = {"ci-pending": "review", "approved-ci-pending": "merge"}
 
 # Queue speed by wait age, through the Bits rail's anchors (0:40 → 1, 6:10 → 2.5, 22:05 → 5).
 QUEUE_SPEED = [[40, 1.0], [370, 2.5], [1325, 5.0]]
 
 QUEUE_TINT = "#8b93b8"
 BELT_TINT = "#9ece6a"
-CI_TINT = "#ff9e64"
 _BAD = "#f7768e"
 
 INTAKE_GROUP = {
@@ -153,7 +149,7 @@ FED_TODAY_SECONDS = 86400
 
 def lanes_table() -> dict:
     return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
-            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT, "step_after_ci": STEP_AFTER_CI, "ci_tint": CI_TINT,
+            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT,
             "intake_group": INTAKE_GROUP, "fed_today": FED_TODAY_SECONDS}
 
 
@@ -313,9 +309,9 @@ SCRIPT = r"""
     return tile;
   }
 
-  function idleTile(key, off, seed) {
+  function idleTile(key, off, seed, height) {
     var tile = el('div', 'tile empty free');
-    add(tile, PX.strip(key, {state: off ? 'held' : 'idle', seed: seed, height: 16}));
+    add(tile, PX.strip(key, {state: off ? 'held' : 'idle', seed: seed, height: height || 16}));
     add(tile, el('div', 'lbl', off ? 'off' : 'idle'));
     return tile;
   }
@@ -350,38 +346,6 @@ SCRIPT = r"""
                                                  speed: queueSpeed(r.age_seconds)}));
       mark('queue', r.job, li);
     });
-    return lane;
-  }
-
-  function ciCard(r) {
-    var ci = r.ci_wait;
-    var step = LANES.step_after_ci.hasOwnProperty(ci.reason) ? LANES.step_after_ci[ci.reason] : null;
-    var card = el('div', 'tile ci');
-    add(card, PX.strip('ci-' + r.repo + '#' + r.ticket_id, {effect: 'static', tint: LANES.ci_tint, height: 8}));
-    var bodyEl = add(card, el('div', 'tile-body'));
-    var l1 = add(bodyEl, el('div', 'tile-l1'));
-    add(l1, el('span', 'ticket', ticketOf(r)));
-    addGh(l1, r);
-    add(add(bodyEl, el('div', 'tile-l2')), el('span', 'verb warn', 'waiting on CI'));
-    var l3 = add(bodyEl, el('div', 'tile-l3'));
-    if (step) add(l3, el('span', 'action', 'then ' + step));
-    if (step === 'review' && ci.round != null) add(l3, el('span', 'round', 'round ' + ci.round));
-    ticking(add(l3, el('span', 't')), ci.waiting_seconds, 'waiting ');
-    var l4 = add(bodyEl, el('div', 'tile-l4'));
-    add(l4, el('span', 'what', checksNamed(ci)));
-    var href = checksHref(r);
-    if (href) add(l4, link(null, href)).textContent = 'checks';
-    return card;
-  }
-
-  function ciLane(rows) {
-    var lane = el('div', 'lane');
-    lane.setAttribute('data-device', 'ci-wait');
-    var head = add(lane, el('div', 'lane-head'));
-    add(head, el('div', 'name', 'waiting on CI'));
-    add(head, el('div', 'sub', rows.length + (rows.length === 1 ? ' ticket' : ' tickets')));
-    var grid = add(lane, el('div', 'tiles'));
-    rows.forEach(function (r) { add(grid, ciCard(r)); });
     return lane;
   }
 
@@ -434,8 +398,7 @@ SCRIPT = r"""
       var grid = add(row, el('div', 'tiles'));
       lanes.wakes.forEach(function (r, i) { add(grid, slotTile(r, i + 1)); });
     }
-    var waiting = (d.tickets || []).filter(function (t) { return t.ci_wait; });
-    if (waiting.length) add(box, ciLane(waiting));
+    add(box, ciLaneEl(d.ci_lane));
     [[running.length, 'ok', ' running · '], [heldTiles, heldTiles ? 'warn' : null, ' held · '],
      [idleTiles, null, ' idle · '], [(d.queued || []).length, null, ' queued']].forEach(function (c) {
       add(count, el('b', c[1], c[0]));
@@ -705,10 +668,10 @@ def _held_tile(key: str, seed: int) -> str:
     return f'<div class="tile empty px-held">{strip}<div class="lbl">held</div></div>'
 
 
-def _idle_tile(key: str, off: bool, seed: int) -> str:
+def _idle_tile(key: str, off: bool, seed: int, height: int = 16) -> str:
     from lib.dashboard_pages.shell import px_strip
 
-    strip = px_strip(key, state="held" if off else "idle", seed=seed, height=16)
+    strip = px_strip(key, state="held" if off else "idle", seed=seed, height=height)
     return f'<div class="tile empty free">{strip}<div class="lbl">{"off" if off else "idle"}</div></div>'
 
 
@@ -749,38 +712,8 @@ def _queue_lane(snapshot: dict) -> str:
     )
 
 
-def _ci_card(row: dict) -> str:
-    from lib.dashboard_pages.shell import px_strip
-
-    ci = row["ci_wait"]
-    step = STEP_AFTER_CI.get(ci["reason"])
-    strip = px_strip(f"ci-{row['repo']}#{row['ticket_id']}", effect="static", tint=CI_TINT, height=8)
-    line3 = (
-        (_span("action", f"then {step}") if step else "")
-        + (_span("round", f"round {ci['round']}") if step == "review" and ci.get("round") is not None else "")
-        + _span("t", "waiting " + duration(ci["waiting_seconds"]))
-    )
-    return (
-        f'<div class="tile ci">{strip}<div class="tile-body">'
-        f'<div class="tile-l1">{_span("ticket", _ticket(row))}{github_links(row)}</div>'
-        '<div class="tile-l2"><span class="verb warn">waiting on CI</span></div>'
-        f'<div class="tile-l3">{line3}</div>'
-        f'<div class="tile-l4">{_span("what", checks_named(ci))}{checks_link(row)}</div></div></div>'
-    )
-
-
-def _ci_lane(snapshot: dict) -> list[str]:
-    rows = [row for row in snapshot["tickets"] if row.get("ci_wait")]
-    if not rows:
-        return []
-    return [
-        '<div class="lane" data-device="ci-wait"><div class="lane-head"><div class="name">waiting on CI</div>'
-        f'<div class="sub">{len(rows)} ticket{"" if len(rows) == 1 else "s"}</div></div>'
-        f'<div class="tiles">{"".join(_ci_card(row) for row in rows)}</div></div>'
-    ]
-
-
 def _lanes(snapshot: dict) -> str:
+    from lib.dashboard_pages.ci import ci_lane_html
     from lib.dashboard_pages.shell import px_strip
 
     devices, wakes = lane_devices(snapshot)
@@ -831,7 +764,7 @@ def _lanes(snapshot: dict) -> str:
             f'<div class="name">grok wakes</div>{_chip("BOT-TO-BOT", "accent")}</div>'
             f'<div class="tiles">{"".join(_slot(row, i + 1) for i, row in enumerate(wakes))}</div></div>'
         )
-    rows.extend(_ci_lane(snapshot))
+    rows.append(ci_lane_html(snapshot))
     warn = ' class="warn"' if held_tiles else ""
     count = (
         f'<b class="ok">{len(snapshot["running"])}</b> running · <b{warn}>{held_tiles}</b> held · '

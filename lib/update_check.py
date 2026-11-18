@@ -34,6 +34,12 @@ _TREE_ID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
+class HeadDiff:
+    patch_id: str | None
+    files: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
 class UpdateScope:
     last_reviewed_head: str
     merge: str
@@ -105,6 +111,30 @@ def merge_update(clone: Path, approved_head: str, head: str, base_ref: str) -> M
         _own_files(clone, approved, base_ref),
         _own_files(clone, new, base_ref),
     )
+
+
+def head_diff(clone: Path, since: str | None, head: str, base_ref: str) -> HeadDiff:
+    """What QA scope needs to know about head (#763): the stable patch id of
+    head's own change from base_ref, and each path changed since `since`
+    (head's fork from base_ref when None) with its added plus deleted lines.
+    Raises ValueError when the clone cannot list the paths."""
+    fork = _merge_base(clone, head, base_ref)
+    listed = _output(clone, "diff", "--numstat", "--no-renames", "-z", since or fork, head)
+    files = []
+    for record in listed.split(b"\0"):
+        if record:
+            added, deleted, path = record.decode("utf-8").split("\t", 2)
+            files.append((path, 1 if added == "-" else int(added) + int(deleted)))
+    return HeadDiff(_patch_id(clone, fork, head), tuple(files))
+
+
+def _patch_id(clone: Path, fork: str, head: str) -> str | None:
+    diff = _run(clone, "diff", fork, head)
+    if diff.returncode != 0 or not diff.stdout:
+        return None
+    result = _run(clone, "patch-id", "--stable", stdin=diff.stdout)
+    words = result.stdout.split()
+    return words[0].decode("ascii") if result.returncode == 0 and words else None
 
 
 def _on_base(clone: Path, commit: str, base_ref: str) -> bool:
@@ -426,9 +456,17 @@ def _git(clone: Path, *args: str) -> str:
     return result.stdout.decode("utf-8")
 
 
-def _run(clone: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+def merge_base(clone: Path, head: str, base_ref: str) -> str:
+    result = _run(clone, "merge-base", head, base_ref)
+    if result.returncode != 0:
+        raise ValueError("git merge-base failed")
+    return result.stdout.decode().strip()
+
+
+def _run(clone: Path, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         ["git", "--git-dir", str(clone), *args],
+        input=stdin,
         env=_environment(),
         capture_output=True,
         timeout=TIMEOUT_SECONDS,

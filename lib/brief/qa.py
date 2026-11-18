@@ -159,7 +159,7 @@ def _check(facts: LaneFacts, runner: str) -> None:
 
 
 def _check_uploads(facts: LaneFacts) -> None:
-    expected = _expected_paths(facts)
+    expected = expected_paths(facts.scenarios)
     paths = [upload.path for upload in facts.uploads]
     if len(set(paths)) != len(paths):
         raise BriefError("each upload path must appear once")
@@ -175,8 +175,8 @@ def _check_uploads(facts: LaneFacts) -> None:
             raise BriefError(f"no upload for {path!r}")
 
 
-def _expected_paths(facts: LaneFacts) -> list[str]:
-    return [f"{scenario.id}/{name}" for scenario in facts.scenarios for name in scenario.save] + [RESULT]
+def expected_paths(scenarios: tuple[Scenario, ...]) -> list[str]:
+    return [f"{scenario.id}/{name}" for scenario in scenarios for name in scenario.save] + [RESULT]
 
 
 def _tested(facts: LaneFacts, kind: _Kind) -> str:
@@ -398,7 +398,7 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
 def _handover(facts: LaneFacts) -> str:
     urls = {upload.path: upload.url for upload in facts.uploads}
     commands = "\n".join(
-        f"curl --fail --upload-file {_folder(facts)}/{path} {shlex.quote(urls[path])}" for path in _expected_paths(facts)
+        f"curl --fail --upload-file {_folder(facts)}/{path} {shlex.quote(urls[path])}" for path in expected_paths(facts.scenarios)
     )
     return (
         "## Hand-over\n"

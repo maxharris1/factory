@@ -168,6 +168,12 @@ class ResumeMixin:
             self._wake_comment_problem(ticket, comment, outcome, outcome)
             return True, outcome
         self._write_state_label(ticket, "review")
+        self._queue_qa(
+            ticket,
+            comment,
+            head=ticket.current_head,
+            review_round=self._review_context(ticket)[1] + 1,
+        )
         return True, outcome
 
     def _queue_blocked_review(

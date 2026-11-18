@@ -7,6 +7,8 @@ from collections.abc import Mapping
 
 from lib.dispatch.constants import (
     _NOT_FINISHED,
+    HANDED_OFF_EXTERNALLY,
+    SETTLE_CLEARS,
     STOPPED_POLL_SECONDS,
     STOPPED_STATES,
     WATCHED_STATES,
@@ -122,17 +124,7 @@ class TrackingMixin:
             "merged",
             source="enter-merged",
             at=self.queue.now(),
-            also={
-                "stuck": 0,
-                "stuck_reason": None,
-                "stuck_source_comment_id": None,
-                "stuck_wake_job_id": None,
-                "paused_action": None,
-                "paused_recipient": None,
-                "paused_head": None,
-                "paused_generation": None,
-                "paused_question_id": None,
-            },
+            also=SETTLE_CLEARS,
             insert={"gate_count": 0, "stuck": 0},
         )
         connection.execute(
@@ -327,7 +319,7 @@ class TrackingMixin:
             rows = connection.execute(
                 """
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled, outbox, read_at
+                       unsettled, outbox, qa_open, read_at
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                            state.workflow_state, reads.read_at,
@@ -374,7 +366,25 @@ class TrackingMixin:
                                WHERE skipped.repo = LOWER(tracked.repo)
                                  AND skipped.ticket_id = tracked.ticket_id
                                  AND skipped.status = 'pending'
-                           ) AS outbox
+                           ) AS outbox,
+                           EXISTS (
+                               SELECT 1
+                               FROM qa_runs AS run
+                               JOIN jobs AS job ON job.id = run.job_id
+                               WHERE run.repo = LOWER(tracked.repo)
+                                 AND run.ticket_id = tracked.ticket_id
+                                 AND run.state IN ('queued', 'running')
+                                 AND NOT (
+                                     job.state = 'done'
+                                     AND EXISTS (
+                                         SELECT 1
+                                         FROM handled_comments AS handled
+                                         WHERE handled.repo = run.repo
+                                           AND handled.ticket_id = run.ticket_id
+                                           AND handled.comment_id = job.handoff_comment_id
+                                     )
+                                 )
+                           ) AS qa_open
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
@@ -383,12 +393,17 @@ class TrackingMixin:
                       ON reads.repo = LOWER(tracked.repo)
                      AND reads.ticket_id = tracked.ticket_id
                 )
-                WHERE workflow_state IS NULL
-                   OR workflow_state NOT IN ('merged', 'done', 'abandoned')
-                   OR (workflow_state = 'merged' AND (replay OR unsettled))
-                   OR outbox
+                WHERE COALESCE(workflow_state, '') != ?
+                  AND (
+                      workflow_state IS NULL
+                      OR workflow_state NOT IN ('merged', 'done', 'abandoned')
+                      OR (workflow_state = 'merged' AND (replay OR unsettled))
+                      OR (workflow_state IN ('merged', 'done') AND qa_open)
+                      OR outbox
+                  )
                 ORDER BY repo, ticket_id
-                """
+                """,
+                (HANDED_OFF_EXTERNALLY,),
             ).fetchall()
         refs: list[TicketRef] = []
         first_reads: list[tuple[str, str, float]] = []
@@ -413,6 +428,7 @@ class TrackingMixin:
                     tracker=str(row["tracker"]),
                     allow_merged=state == "merged"
                     or bool(row["outbox"])
+                    or (state == "done" and bool(row["qa_open"]))
                     or (
                         state in ("handed-off", *WATCHED_STATES)
                         and bool(row["replay"])

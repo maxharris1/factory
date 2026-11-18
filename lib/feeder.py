@@ -46,6 +46,9 @@ It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
 is reused, and a brief or go already on the ticket is not posted again. A
 ticket that was fed is never fed again, so a re-poll never opens a second PR.
+Nor is a ticket that `ticket_state` (read-only) shows past `questions` with
+no feed in flight, so one started by a go comment and moved back to the
+intake state by hand is not fed as new (#749).
 A feed that resumes on a recorded PR first checks that PR is still open; one
 closed or merged meanwhile ends the feed (`closed`) with nothing posted.
 
@@ -137,7 +140,7 @@ from lib.feeder_gates import (
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
-from lib.pr_title import prefixed
+from lib.pr_title import prefixed, read_sources
 from lib.queue import (
     JobRequest,
     SQLiteJobQueue,
@@ -429,7 +432,9 @@ class GitHubIntake(Protocol):
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
-    def commit_pulls(self, repo: str, sha: str) -> Collection[int]: ...
+    def commit_pulls(self, repo: str, sha: str) -> Mapping[int, str]: ...
+
+    def branch_has(self, repo: str, branch: str, sha: str) -> bool: ...
 
     def pull_state(self, repo: str, number: int) -> str: ...
 
@@ -807,6 +812,7 @@ class Feeder:
         found: list[_Candidate] = []
         read: set[str] = set()
         errors = 0
+        started = self._started()
         for project in self.projects:
             intake = project.intake
             assert intake is not None
@@ -830,6 +836,8 @@ class Feeder:
             trusted = intake_trusted(self.config, project)
             for issue in issues:
                 if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
+                    continue
+                if (issue.repo.lower(), issue.key) in started:
                     continue
                 if not assignee_allowed(project, issue):
                     continue
@@ -1019,6 +1027,31 @@ class Feeder:
                 capped_release=bool(row["capped_release"]),
             )
         return found
+
+    def _started(self) -> set[tuple[str, str]]:
+        """The (repo, ticket_id) of tickets the dispatcher took past
+        questions whose feed is not in flight; read-only."""
+        with self.queue.connect() as connection:
+            if not _has_table(connection, "ticket_state"):
+                return set()
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+            if not {"repo", "ticket_id", "workflow_state"} <= columns:
+                return set()
+            return {
+                (str(repo).lower(), str(ticket_id))
+                for repo, ticket_id in connection.execute(
+                    f"""
+                    SELECT ticket.repo, ticket.ticket_id FROM ticket_state AS ticket
+                    WHERE COALESCE(ticket.workflow_state, 'intake') NOT IN ('intake', 'refused', 'questions')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {FEEDER_TABLE} AS feed
+                        WHERE feed.repo = lower(ticket.repo) AND feed.issue = ticket.ticket_id
+                          AND feed.state IN ({",".join("?" * len(IN_FLIGHT))})
+                      )
+                    """,
+                    IN_FLIGHT,
+                )
+            }
 
     def _capped(self, tickets: set[tuple[str, str]]) -> set[tuple[str, str]]:
         """The (repo, ticket_id) of tickets whose round is capped and not
@@ -1274,7 +1307,10 @@ class Feeder:
                 return None
             branch_found = True
         else:
-            number = self.github.find_pull(repo, branch)
+            tracked = row["ticket_id"] or (issue.key if issue.tracker == "linear" else None)
+            number = self._tracked_open_pull(repo, tracked)
+            if number is None:
+                number = self.github.find_pull(repo, branch)
             if number is not None:
                 wait = holds.collision(candidate.ref, candidate.lines, (github_ref(repo, number),))
                 if wait is not None:
@@ -1350,6 +1386,16 @@ class Feeder:
             go_id = post(_go(issue, state=state, risk=risk, number=number, visible=linear))
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
+
+    def _tracked_open_pull(self, repo: str, ticket_id: str | None) -> int | None:
+        if ticket_id is None:
+            return None
+        with self.queue.connect() as connection:
+            _, recorded = read_sources(connection).get((repo.casefold(), ticket_id), ("", None))
+        if recorded is None or not recorded.isdigit():
+            return None
+        number = int(recorded)
+        return number if self.github.pull_state(repo, number) == "open" else None
 
     def review_base_unless_stacked(self, ticket: TrackedTicket, head: str) -> str | None:
         number = int(ticket.pr_number) if ticket.pr_number else None

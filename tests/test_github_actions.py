@@ -22,7 +22,7 @@ from lib.dispatcher import (
     TrackedTicket,
     _comment_order,
 )
-from lib.dispatch.types import CheckRow, RunJob
+from lib.dispatch.types import CheckRow, PoolRunner, RunJob
 from lib.github_actions import (
     GH,
     GhResult,
@@ -1562,6 +1562,36 @@ def test_run_jobs_refuses_a_page_without_a_jobs_list() -> None:
         actions.run_jobs("owner/repo", "123456")
 
 
+RUNNERS = ("--cache", "60s", f"{REPO}/actions/runners?per_page=100")
+
+
+def test_list_runners_reads_the_repos_self_hosted_pool_in_one_cached_read() -> None:
+    actions, gh = adapter()
+    gh.route(RUNNERS, served("runners.json"))
+
+    runners = actions.list_runners("owner/repo")
+
+    linux = ("self-hosted", "Linux", "X64")
+    assert runners == (
+        PoolRunner("pc-wsl-bots-1", "Linux", "online", False, linux),
+        PoolRunner("pc-wsl-bots-2", "Linux", "online", True, linux),
+        PoolRunner("box-1", "Linux", "offline", False, linux),
+        PoolRunner(
+            "maxs-macbook-pro", "macOS", "online", False,
+            ("self-hosted", "macOS", "ARM64", "factory-mac"),
+        ),
+    )
+    assert gh.keys() == [RUNNERS]
+
+
+def test_list_runners_refuses_a_page_without_a_runners_list() -> None:
+    actions, gh = adapter()
+    gh.route(RUNNERS, GhResult(0, json.dumps({"total_count": 0}), ""))
+
+    with pytest.raises(GitHubAdapterError):
+        actions.list_runners("owner/repo")
+
+
 JOB_LOG = (f"{REPO}/actions/jobs/31000000004/logs", "--allow-escape-sequences")
 
 
@@ -2197,3 +2227,22 @@ def test_comment_on_issue_once_posts_on_the_issue_only_once() -> None:
     gh.route(ISSUE_COMMENTS, GhResult(0, json.dumps([pr_comment(1, ADDITION)]), ""))
     actions.comment_on_issue_once(pr(), 307, ADDITION, ADDITION_MARKER)
     assert gh.keys() == [ISSUE_COMMENTS, USER]
+
+
+QA_MARKER = "<!-- qa-run run-1 -->"
+QA_BODY = f"<!-- orch:v1 kind=qa -->\n\n{QA_MARKER}"
+POST_QA = ("-X", "POST", f"{REPO}/issues/42/comments", "-f", f"body={QA_BODY}")
+
+
+def test_post_issue_comment_once_returns_the_new_or_existing_comment_id() -> None:
+    actions, gh = adapter_as_own_login()
+    forged = pr_comment(1, QA_BODY, login="untrusted-contributor")
+    gh.route(COMMENTS, GhResult(0, json.dumps([forged]), ""))
+    gh.route(POST_QA, GhResult(0, json.dumps({"id": 555}), ""))
+    assert actions.post_issue_comment_once("owner/repo", 42, QA_BODY, QA_MARKER) == "555"
+    assert gh.count(POST_QA) == 1
+
+    actions, gh = adapter_as_own_login()
+    gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(9, QA_BODY)]), ""))
+    assert actions.post_issue_comment_once("owner/repo", 42, QA_BODY, QA_MARKER) == "9"
+    assert gh.count(POST_QA) == 0

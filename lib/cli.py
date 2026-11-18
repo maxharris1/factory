@@ -37,6 +37,7 @@ from lib import (
 )
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dispatch.constants import HARNESS_WORK
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
 from lib.dispatch.poll import sleep_on_either_clock
@@ -49,8 +50,10 @@ from lib.eval_report import (
     render,
     render_json,
     render_metrics,
+    render_qa,
 )
-from lib.factory_md import EXAMPLE_PATHS, load_factory_md
+from lib import qa_runners
+from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
@@ -78,6 +81,7 @@ from lib.orch_yml import (
     parse_bind,
 )
 from lib.poll_source import FedPulls, IntakeRisks, LivePollSource, PollSourceError
+from lib.qa_cloud import QaWorker
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import (
@@ -120,9 +124,12 @@ from lib.state_backup import (
 )
 from lib.status import main as status_main
 from lib.update_check import (
+    HeadDiff,
     RebaseScope,
     UpdateClass,
     classify as classify_update,
+    head_diff,
+    merge_base,
     merge_update,
     rebase_scope,
 )
@@ -156,6 +163,7 @@ commands:
   eval-report      weekly eval report from a local log directory
   log-message      log one manual bot-to-bot message to dispatcher.log
   poll             poll configured trackers and dispatch work
+  qa-worker        claim qa jobs and run their cloud QA lanes
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
   db-backup        labelled backup to take before a manual write to orch.db
@@ -207,7 +215,8 @@ eval-report --db PATH --baseline PATH
   collected logs. It does not contact GitHub or Linear. --json prints
   the --input report as JSON.
   --db prints the #209 metrics of a backed-up orch.db, opened read-only,
-  beside those of the --baseline snapshot (O4's).
+  beside those of the --baseline snapshot (O4's), then the --db
+  snapshot's QA section, split by runner.
 
 log-message --repo OWNER/NAME [--pr N] --from BOT --to BOT [--kind KIND]
             [--log PATH]
@@ -215,6 +224,12 @@ log-message --repo OWNER/NAME [--pr N] --from BOT --to BOT [--kind KIND]
   instead of a scripted handoff. eval-report counts these lines. --log
   defaults to dispatcher.log beside $ORCH_DB; --kind defaults to handoff.
   Exits 2 and writes nothing on a bad repo, pr, bot or kind.
+
+qa-worker [--db PATH] [--orch PATH] [--once] [--tick-seconds N]
+  Claim queued qa jobs and coordinate their cloud lanes (docs/SPEC.md 4.2.2).
+  Holds no build slot and makes no model call. --once runs one tick.
+  Only one worker may hold the database's qa-worker lock. With no QA runner
+  registered it claims nothing.
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -512,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_log_message, argv[1:])
     if argv[0] == "poll":
         return _call(_poll, argv[1:])
+    if argv[0] == "qa-worker":
+        return _call(_qa_worker, argv[1:])
     if argv[0] == "init-db":
         return _call(_init_db, argv[1:])
     if argv[0] == "backup-db":
@@ -664,6 +681,7 @@ def _eval_report(argv: list[str]) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         print(render_metrics(current, baseline), end="")
+        print(render_qa(current), end="")
         return 0
     if args.baseline is not None:
         parser.error("--baseline needs --db")
@@ -842,6 +860,65 @@ def _wait_autostart(
     except WaitError as exc:
         log(str(exc))
         return 1
+
+
+def _qa_worker(argv: list[str]) -> int:
+    parser = _Parser(prog="orch qa-worker", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--orch", type=Path)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--tick-seconds", type=int, default=15)
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        config = _runtime_config(args.orch)
+        with open(path.with_name(f"{path.name}.qa-worker.lock"), "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("orch qa-worker: another qa worker holds this database", file=sys.stderr)
+                return 1
+            worker = _qa_runtime(path, config)
+            while True:
+                worker.tick()
+                if args.once:
+                    return 0
+                time.sleep(args.tick_seconds)
+    except (QueueError, WaitError, OSError, sqlite3.Error, ValueError) as exc:
+        print(f"orch qa-worker: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
+    source = LivePollSource(config)
+    projects = {project.repo.lower(): project for project in config.projects}
+    actions = source.review_actions_by_repo()
+
+    def factory(repo: str) -> FactoryConfig:
+        project = projects[repo.lower()]
+        if project.factory_ref is None:
+            raise ValueError(f"{repo} has no projects[].factory_ref in orch.yml")
+        return source._factory_at(project.repo, project.factory_ref)
+
+    def post(repo: str, pr: int, body: str, marker: str) -> str:
+        return actions[projects[repo.lower()].repo].post_issue_comment_once(repo, pr, body, marker)
+
+    return QaWorker(
+        open_queue(path),
+        runners={name: qa_runners.create(name) for name in QA_RUNNERS if name in qa_runners.registered()},
+        factory=factory,
+        base_commit=_qa_base_commit,
+        post=post,
+        max_cloud_lanes=config.qa.max_cloud_lanes,
+        log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
+    )
+
+
+def _qa_base_commit(repo: str, base: str, head: str) -> str:
+    clone = worktrees.fetched_clone(worktrees.work_root(None), repo, (head,), worktrees.url_template(None))
+    return merge_base(clone, head, f"refs/remotes/origin/{base}")
 
 
 def _poll(argv: list[str]) -> int:
@@ -1186,7 +1263,9 @@ def _runtime(
         ci_logs=source.github.failed_run_logs,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
+        ci_pool=source.github.list_runners,
         hold_carry=_hold_carry,
+        qa_diff=_qa_diff,
     )
     source.error_sink = dispatcher.record_poll_error
     source.warning_sink = lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True)
@@ -1218,6 +1297,14 @@ def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | N
         worktrees.work_root(None), repo, (last, head), worktrees.url_template(None)
     )
     return rebase_scope(clone, last, head, f"refs/remotes/origin/{base}")
+
+
+def _qa_diff(repo: str, base: str, since: str | None, head: str) -> HeadDiff:
+    heads = (head,) if since is None else (since, head)
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, heads, worktrees.url_template(None)
+    )
+    return head_diff(clone, since, head, f"refs/remotes/origin/{base}")
 
 
 def _hold_carry(repo: str, base: str, approved: str, head: str) -> MergeUpdate:
@@ -1300,7 +1387,7 @@ def _retired() -> str | None:
 
 
 def _lock_path(database: Path) -> Path:
-    return database.with_name(database.name + ".lock")
+    return Path(f"{database.resolve()}.lock")
 
 
 def _held_locks(database: Path) -> list[Path]:
@@ -1334,7 +1421,7 @@ def _poll_lock(path: Path, pidfile: Path | None = None):
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
-    lock_path = Path(f"{path.resolve()}.lock")
+    lock_path = _lock_path(path)
     handle = lock_path.open("a+", encoding="utf-8")
     written = False
     try:
@@ -1704,7 +1791,7 @@ def _retry_refusal(
                 connection.execute(
                     "SELECT id, action, recipient, state FROM jobs "
                     "WHERE lower(repo) = ? AND ticket_id = ? "
-                    "AND state IN ('queued', 'running') AND recipient != 'grok' "
+                    f"AND state IN ('queued', 'running') AND {HARNESS_WORK} "
                     "ORDER BY created_at LIMIT 1",
                     (repo.lower(), str(number)),
                 ).fetchone()
@@ -1715,7 +1802,7 @@ def _retry_refusal(
                 connection.execute(
                     "SELECT 1 FROM jobs JOIN job_events ON job_events.job_id = jobs.id "
                     "WHERE jobs.id = (SELECT id FROM jobs "
-                    "WHERE lower(repo) = ? AND ticket_id = ? AND recipient != 'grok' "
+                    f"WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK} "
                     "AND action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1) "
                     "AND jobs.action = 'plan' AND jobs.state = 'done' "
@@ -1732,7 +1819,7 @@ def _retry_refusal(
                     "JOIN device_slots AS slots ON slots.job_id = jobs.id "
                     "LEFT JOIN device_health AS health ON health.device = slots.device "
                     "WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? "
-                    "AND jobs.recipient != 'grok' AND jobs.state = 'running' "
+                    f"AND jobs.{HARNESS_WORK} AND jobs.state = 'running' "
                     "AND jobs.action IN ('plan', 'build', 'review', 'fix', 'update-from-main') "
                     "ORDER BY jobs.created_at LIMIT 1",
                     (repo.lower(), str(number)),
@@ -2052,17 +2139,24 @@ def _job_run_command(argv: list[str]) -> int:
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
-    if session is not None:
+    usage_read = None
+    if session is None:
+        log("usage probe: skipped (telemetry off)")
+    else:
         sessions.append(session)
-        command = session.argv
-        target, binary = placed.target, usage_probe.claude_binary(command)
-        if binary is not None:  # #151: the account's usage, once per job
-            usage_probe.start_claude(
+        command = session.flags.argv
+        binary = usage_probe.claude_binary(session.flags)
+        if binary is None:
+            log(f"usage probe: skipped ({session.flags.reason})")
+        else:
+            target, probe_env = placed.target, dict(environment)
+            usage_read = usage_probe.start_claude(
                 session.add_usage,
                 session.clock,
                 (lambda: usage_probe.claude_remote(placed.transport, target))
                 if target is not None
-                else (lambda: usage_probe.claude_local(binary, dict(environment))),
+                else (lambda: usage_probe.claude_local(binary, probe_env)),
+                log,
             )
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
@@ -2217,6 +2311,8 @@ def _job_run_command(argv: list[str]) -> int:
             _record_wall_clock(queue, args.job_id, budget, placed.device.name, log, claim_proof)
             if session is not None:
                 session.wall_clock(budget.elapsed())
+        if usage_read is not None:
+            usage_read.join(usage_probe.TIMEOUT_SECONDS)
         if session is not None:
             if placed.target is not None:  # #151: a remote Codex job's rollout rate limits
                 session.add_usage(usage_probe.remote_codex(

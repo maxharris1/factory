@@ -20,6 +20,7 @@ from lib.dashboard import (
     render_html,
     write_snapshot,
 )
+from lib.dashboard_pages import tickets as tickets_page
 from lib.dashboard_pages.ticket_detail import ticket_view
 from lib.dispatcher import Dispatcher
 from lib.queue import SQLiteJobQueue
@@ -599,6 +600,8 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "handoff_savings",
         "relay",
         "ci_runs",
+        "ci_pool",
+        "ci_lane",
         "attention",
         "health",  # component heartbeats (#92)
         "feeder",
@@ -1553,3 +1556,97 @@ def test_cli_has_no_live_server(tmp_path: Path) -> None:
     help_text = run_orch("--help").stdout
     assert "dashboard snapshot" in help_text
     assert "--port" not in help_text
+
+
+AUT0 = "maxharris1/aut0"
+
+
+def _linear_db(tmp_path: Path) -> tuple[Path, Path]:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+    return db, log
+
+
+def _hand_off_in_linear(connection: sqlite3.Connection, ticket_id: str, linear_state: str) -> None:
+    connection.execute(
+        """
+        UPDATE ticket_state SET external_from_state = workflow_state, external_from_stuck = stuck,
+               workflow_state = 'handed-off-externally', stuck = 0, external_at = ?
+        WHERE repo = ? AND ticket_id = ?
+        """,
+        (NOW - 7200, AUT0, ticket_id),
+    )
+    connection.execute(
+        "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ?", (AUT0, ticket_id)
+    )
+    connection.execute(
+        "INSERT INTO linear_states (repo, ticket_id, state_name, state_type, read_at) "
+        "VALUES (?, ?, ?, 'started', ?)",
+        (AUT0, ticket_id, linear_state, NOW - 60),
+    )
+
+
+def _attention_tickets(snapshot: dict) -> list[str]:
+    return [item["ticket_id"] for item in snapshot["attention"]["items"] if item["ticket_id"]]
+
+
+def test_handed_off_externally_leaves_needs_attention(tmp_path: Path) -> None:
+    db, log = _linear_db(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, AUT0, "AUT-2282", tracker="linear", state="capped", review_round=6)
+        add_ticket(connection, AUT0, "AUT-2283", tracker="linear", state="building",
+                   stuck=1, stuck_reason="job died twice")
+        connection.execute(
+            "INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at) "
+            "VALUES (?, 'AUT-2282', 'ship-failed', 'round cap reached', ?)",
+            (AUT0, NOW - 600),
+        )
+    before = collect_snapshot(db, log, now=NOW)
+    assert {"AUT-2282", "AUT-2283"} <= set(_attention_tickets(before))
+
+    with sqlite3.connect(db) as connection:
+        _hand_off_in_linear(connection, "AUT-2282", "Ready for Review")
+        _hand_off_in_linear(connection, "AUT-2283", "In Review")
+    after = collect_snapshot(db, log, now=NOW)
+
+    assert after["attention"]["count"] == before["attention"]["count"] - 2
+    assert not {"AUT-2282", "AUT-2283"} & set(_attention_tickets(after))
+    assert after["stuck"]["tickets"] == []
+
+
+def test_card_says_handed_off_in_linear_with_time(tmp_path: Path) -> None:
+    db, log = _linear_db(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, AUT0, "AUT-2282", tracker="linear", state="capped", review_round=6)
+        _hand_off_in_linear(connection, "AUT-2282", "In Review")
+    snapshot = collect_snapshot(db, log, now=NOW)
+
+    [row] = snapshot["tickets"]
+    assert (row["external_at"], row["linear_state"]) == (NOW - 7200, "In Review")
+    found = tickets_page.board(snapshot)
+    assert [tile["ticket"]["ticket_id"] for tile in found["shelf"]["tiles"]] == ["AUT-2282"]
+    assert (found["shelf"]["merged"], found["shelf"]["handed"]) == (0, 1)
+    assert all(not col["cards"] for col in found["columns"])
+    page = dashboard.render_pages(snapshot)["job.html"]
+    tile = re.search(r'<a class="tk-tile"[^>]*data-ticket="[^"]*AUT-2282"[^>]*>.*?</a>', page).group(0)
+    assert '<span class="tk-ago">handed off in Linear 2h 00m ago</span>' in tile
+    assert "handed off in Linear 2h 00m ago · In Review · 6 revise rounds" in tile
+
+
+def test_linear_settled_ticket_shows_merged_done_abandoned(tmp_path: Path) -> None:
+    db, log = _linear_db(tmp_path)
+    with sqlite3.connect(db) as connection:
+        for ticket_id, state in (("AUT-1", "merged"), ("AUT-2", "done"), ("AUT-3", "abandoned")):
+            add_ticket(connection, AUT0, ticket_id, tracker="linear", state=state, review_round=1)
+    snapshot = collect_snapshot(db, log, now=NOW)
+
+    assert {row["ticket_id"]: row["state"] for row in snapshot["tickets"]} == {
+        "AUT-1": "merged", "AUT-2": "done", "AUT-3": "abandoned",
+    }
+    assert _attention_tickets(snapshot) == []
+    found = tickets_page.board(snapshot)
+    assert {tile["ticket"]["ticket_id"] for tile in found["shelf"]["tiles"]} == {"AUT-1", "AUT-2"}
+    [stopped] = [col for col in found["columns"] if col["phase"] == "Stop"]
+    assert [card["ticket"]["ticket_id"] for card in stopped["cards"]] == ["AUT-3"]

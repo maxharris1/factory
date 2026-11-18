@@ -28,7 +28,18 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   pid stays the start's.
   sshd runs the command in a new session, so that process group is the
   job's. The record is never removed: deleting bookkeeping is not
-  evidence the processes are gone;
+  evidence the processes are gone. #817: when the bot's user manager
+  lingers (`loginctl ... -p Linger` says yes) and starts a process in a
+  scope of its own on the unified cgroup hierarchy, the start writes the
+  scope record `.orch-worker-<tag>.scope` naming `orch-run-<tag>.scope`
+  and execs the login shell under `systemd-run --user --scope` in that
+  unit, so the run is contained: every process it starts stays in the
+  scope, whatever its session or environment. Otherwise it runs as above,
+  uncontained. Before either, when it leads its session, the start leaves
+  the keeper (KEEPER, #827) there and waits until the keeper ignores TERM,
+  HUP and INT: tagged, and there until it is the session's last process,
+  so the session holds a tagged member while any process of the start is
+  in it;
 * preflight (#94, `orch job run --worktree`): under `bash -lc`, exit 0 when
   git, gh and the harness binary are all found, else name the missing ones;
 * checkout (#94): under `bash -lc`, clone (git init + fetch, so a job
@@ -38,18 +49,38 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   are passed as quoted positional arguments, never spliced into the script;
 * launched: exit 0 when the launch record holds this start's tag (it
   reached the harness), 1 when it does not, else unsure;
-* check: exit 1 while any process of this user carries the job's tag
-  (wherever its group or session now is); otherwise exit 3 ("cannot tell")
-  while the recorded group, from this boot, still has a process (one that
-  dropped the tag, or an unrelated group that reused the number), and exit
-  0 (gone) when it has none, the record is from an earlier boot, or no
-  record was ever written. A malformed record (empty, not digits, a
-  leading zero, 0 or 1) is 3. ssh itself exits 255 when the device cannot
-  be reached;
-* stop: send SIGTERM to every process carrying the tag and to each process
-  group that holds one (a group with a tagged process is in the start's
-  own session, or was made by one of its processes). A stored number is
-  never signalled on its own;
+* check: exit 1 while any process of the run lives (wherever its group or
+  session now is): one of this user's that carries the job's tag, one the
+  tree record `.orch-worker-<tag>.tree.pid` from this boot names with the
+  start time it has now, one in the run's scope (#817: the last component
+  of its `0::` cgroup line is the unit the scope record names, and that
+  is `orch-run-<tag>.scope`), one in the start's session while that
+  session still holds one of those (its record from this boot names it;
+  only for an uncontained run, one with no scope record), or a child of
+  any of them (#722). The check rewrites
+  the tree record with them (the boot id, then `<pid> <start time>` each,
+  zombies left out), so a descendant that dropped the tag and left the
+  session stays the run's after its parent exits; a number alone never
+  names one, so a reused pid never joins. In a contained run such a
+  descendant is the run's even when no check saw it before its parent
+  exited, and a reused session number never names a process outside it.
+  Each rewrite holds `flock` on the record's lock file, so a check never
+  replaces a newer record with an older view; a device without `flock`,
+  or a lock not taken in 10 seconds, is 3.
+  The run's deadline (`ORCH_WORKER_DEADLINE`) is never the run's, nor its
+  children. With none of them, exit 3 ("cannot tell") while the recorded
+  group, from this boot, still has a live process (one that dropped the
+  tag, or an unrelated group that reused the number), and exit 0 (gone)
+  when it has none, the record is from an earlier boot, or no record was
+  ever written. A malformed record (empty, not digits, a leading zero, 0 or 1)
+  is 3. ssh itself exits 255 when the device cannot be reached;
+* stop: send SIGTERM to every process of the run, as check finds and
+  records them, and to each process group that holds a tagged one (a group
+  with a tagged process is in the start's own session, or was made by one
+  of its processes); in a contained run, every process in its scope. The
+  stop that kills first sends each SIGSTOP, finding
+  them again until no new one appears, so none forks a process that
+  escapes, then SIGKILL. A stored number is never signalled on its own;
 * probe: `exit 0`, the health check for a device whose slots need no
   worker check this poll.
 
@@ -156,6 +187,7 @@ PREFLIGHT_TOOLS = ("git", "gh")
 _PREFLIGHT_MARK = "orch-preflight: missing"
 _CHECKOUT_MARK = "orch-checkout:"
 TAG_ENV = "ORCH_WORKER_TAG"
+DEADLINE_ENV = "ORCH_WORKER_DEADLINE"
 # #100 r5: with telemetry on, the start reports the harness's own
 # environment (after the login profile) as one line just before the exec:
 # WORKER_ENV_MARK, a space, then hex of NUL-separated NAME=value entries
@@ -225,8 +257,82 @@ _TAG = re.compile(r"^[0-9a-f]{32}$")
 # Shell fragments shared by the scripts. NUL-separated environments are read
 # with `grep -z`; a device whose grep cannot do that cannot check a worker.
 _CAN_SCAN = "printf 'x\\000' | grep -qzxF x"
-_TAGGED = 'grep -lzxsF -e "ORCH_WORKER_TAG=$t" /proc/[0-9]*/environ'
+_TAGGED = f'grep -lzxsF -e "{TAG_ENV}=$t" /proc/[0-9]*/environ'
 _BAD_GROUP = '""|0*|1|*[!0-9]*'
+
+# #722: from lines `B <boot id>` (this boot), `T <pid>` (carries the tag),
+# `X <pid>` (the run's deadline), `K ...` (the tree record: its boot id,
+# then `<pid> <start time>` per process), `S <pid> <boot id> <tag>` (the
+# start's record), `R` (#817: the run is contained in its scope), `C <pid>`
+# (in the run's scope) and `P <pid> <ppid> <start time> <session>` (every
+# live process), prints the tree record anew when the run has a member: a
+# tagged process, a record entry from this boot whose pid has that start
+# time now, a process in the run's scope, a process in the start's session
+# (only for a run with no scope), or a process whose parent is a member.
+# A session number is not reused while a process is in it, but a record
+# outlives the session, so its number alone never names the run's session.
+# The deadline is never a member, so neither are the checks and stops it runs.
+_TREE_AWK = (
+    '$1 == "B" { b = $2 } $1 == "K" && NF == 2 { r = $2 } '
+    '$1 == "T" { t[$2] = 1 } $1 == "X" { x[$2] = 1 } '
+    '$1 == "R" { sc = 1 } $1 == "C" { c[$2] = 1 } '
+    '$1 == "S" && NF == 4 { q = $2; qb = $3 } '
+    '$1 == "K" && NF == 3 { k[$2] = $3 } '
+    '$1 == "P" && NF == 5 { u[$2] = $3; s[$2] = $4; g[$2] = $5 } '
+    'END { if (r == "" || r != b) split("", k); '
+    "for (p in u) if (!(p in x) && ((p in t) || (p in c) || ((p in k) && k[p] == s[p]))) m[p] = 1; "
+    'if (sc || qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 || ((q in u) && !(q in m))) q = ""; '
+    'if (q != "") { v = 0; for (p in m) if (g[p] == q) v = 1; if (!v) q = "" } '
+    'if (q != "") for (p in u) if (!(p in x) && g[p] == q) m[p] = 1; '
+    "do { n = 0; for (p in u) if (!(p in m) && !(p in x) && (u[p] in m)) { m[p] = 1; n = 1 } } "
+    "while (n); for (p in m) n++; if (n) { print b; for (p in m) print p, s[p] } }"
+)
+
+
+def _members(directory: str) -> str:
+    """Define `members`: rewrite the tree record of tag $t, then print its members' pids.
+
+    The read, scan and rewrite hold `flock` on the record's lock file, so a
+    writer that read the record earlier never replaces a newer one (#827).
+    The kernel drops the lock when its holder dies. `members` fails, printing
+    nothing, when the lock cannot be taken in 10 seconds.
+
+    The listing is its own function, so no `)` of its case pattern sits
+    inside a command substitution: macOS's sh (bash 3.2) closes the
+    substitution there and cannot parse the script (#722 f-4).
+    """
+    record = f"{directory}/{tree_record('$t')}"
+    start = f"{directory}/{start_record('$t')}"
+    scope = f"{directory}/{scope_record('$t')}"
+    return (
+        f"k={record}; listed() {{ "
+        'b=; { read -r b < /proc/sys/kernel/random/boot_id; } 2>/dev/null; echo "B $b"; '
+        'for e in $g; do e=${e#/proc/}; echo "T ${e%/environ}"; done; '
+        'for e in $x; do e=${e#/proc/}; echo "X ${e%/environ}"; done; '
+        "sed 's/^/K /' \"$k\" 2>/dev/null; "
+        f"sed 's/^/S /' {start} 2>/dev/null; "
+        f'c=; {{ read -r c < {scope}; }} 2>/dev/null; '
+        'case "$c" in "orch-run-$t.scope") echo R;; *) c=;; esac; '
+        "for e in /proc/[0-9]*; do "
+        '{ read -r s < "$e/stat"; } 2>/dev/null || continue; '
+        "set -- ${s##*) }; "
+        'case "$1" in Z|X) continue;; esac; '
+        'echo "P ${e#/proc/} $2 ${20} $4"; '
+        '[ -z "$c" ] || { while read -r l; do case "$l" in 0::*) '
+        '[ "${l##*/}" != "$c" ] || echo "C ${e#/proc/}"; break;; esac; '
+        'done < "$e/cgroup"; } 2>/dev/null; '
+        "done; }; tracked() { "
+        f"g=$({_TAGGED}); "
+        f'x=$(grep -lzxsF -e "{DEADLINE_ENV}=$t" /proc/[0-9]*/environ); '
+        f"o=$(listed | awk {shlex.quote(_TREE_AWK)}); "
+        'if [ -n "$o" ] || [ -e "$k" ]; then '
+        '{ { [ -z "$o" ] || printf \'%s\\n\' "$o"; } > "$k.$$" '
+        '&& mv -f -- "$k.$$" "$k"; } 2>/dev/null || rm -f -- "$k.$$"; fi; '
+        "[ -z \"$o\" ] || printf '%s\\n' \"$o\" | sed -n 's/ .*//p'; }; "
+        'members() { if [ -d "${k%/*}" ]; then '
+        '{ flock -w 10 9 && tracked; } 9>>"$k.lock"; else tracked; fi; }; '
+    )
+
 
 # macOS (Darwin) has no /proc and no way to read another process's
 # environment, so there the worker is named by its record instead: the
@@ -291,15 +397,40 @@ _DARWIN_MEMBER = (
 # to the file $2, so ps is the keeper's own child, never a grandchild. The
 # start forks it from a subshell that exits at once, so it is not the
 # harness's child: a harness that waits for all its children never waits
-# on it.
+# on it. It prints its pid once it ignores those signals, then closes its
+# output, so the start reads the pid only from a keeper a TERM can no longer
+# end (#827 f-6).
 _DARWIN_KEEPER = (
-    'trap "" TERM INT HUP; '
+    'trap "" TERM INT HUP; echo "$$"; exec > /dev/null 2>&1; '
     "while sleep 1; do "
     'ps -A -o pgid= -o pid= -o ppid= > "$2" 2>/dev/null || continue; '
     '[ "$(awk -v p="$1" -v k="$$" '
     "'$2 == k { s = 1 } $1 == p && $2 != k && $3 != k { n = 1 } END { print s + 0, n + 0 }' "
     '"$2")" = "1 0" ] && break; '
     'done; rm -f -- "$2"'
+)
+# #827: the Linux counterpart of _DARWIN_KEEPER, for the start's session. Run
+# it as `sh -c "$KEEPER" orch-keeper` with the run's tag. It ignores TERM,
+# HUP and INT and exits once two scans in a row, 0.2 s apart, find no other
+# live process in its session, so the session holds a tagged process for as
+# long as anything else is in it: a session number proves the run only while
+# a proven member is in it. One scan is not enough: a process listed in it
+# can fork and exit before the scan reads it, and its child, born after the
+# listing, is missed. Only builtins run during a scan, so no child of its own
+# is listed. It prints its pid once it ignores those signals, then closes its
+# output: whoever starts it reads that line before the worker runs, so a TERM
+# sent once the worker runs never finds the keeper unprotected (#827 f-6).
+KEEPER = (
+    'trap "" TERM HUP INT; echo "$$"; exec > /dev/null 2>&1; '
+    'read -r s < /proc/self/stat || exit 0; set -- ${s##*) }; q=$4; z=; '
+    "while :; do n=; for e in /proc/[0-9]*; do "
+    '[ "${e#/proc/}" = "$$" ] && continue; '
+    '{ read -r s < "$e/stat"; } 2>/dev/null || continue; '
+    "set -- ${s##*) }; "
+    'case "$1" in Z|X) continue;; esac; '
+    '[ "$4" = "$q" ] && { n=1; break; }; '
+    'done; if [ -n "$n" ]; then z=; elif [ -n "$z" ]; then exit 0; else z=1; fi; '
+    "sleep 0.2 || sleep 1; done"
 )
 # What a check or stop writes as the record of a start that has written none:
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
@@ -310,6 +441,16 @@ _FENCE = "fenced"
 def start_record(tag: str) -> str:
     """The start's record file name in the job directory: one per start."""
     return f".orch-worker-{tag}.pid"
+
+
+def tree_record(tag: str) -> str:
+    """Linux: the run's tree record in the job directory, `<pid> <start time>` per process."""
+    return f".orch-worker-{tag}.tree.pid"
+
+
+def scope_record(tag: str) -> str:
+    """Linux: names the systemd user scope the run is contained in, when it is (#817)."""
+    return f".orch-worker-{tag}.scope"
 
 
 def _darwin_worker(
@@ -462,6 +603,29 @@ def ssh_argv(target: RemoteTarget, script: str) -> list[str]:
     ]
 
 
+def _contain(tag: str) -> str:
+    """Linux (#817): set "$@" to the systemd-run words that exec the run in its own user scope.
+
+    Only on a device whose user manager lingers and puts a process it
+    starts in a scope of its own on the unified cgroup hierarchy (the
+    probe's `0::` line), and only once the scope record names the unit;
+    otherwise "$@" is empty and the run starts uncontained, as before.
+    XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager, is
+    the lingering user's runtime directory when the session gave none.
+    """
+    unit = f"orch-run-{tag}.scope"
+    return (
+        'set --; u=$(id -u 2>/dev/null) && '
+        '[ "$(loginctl show-user "$u" -p Linger --value 2>/dev/null)" = yes ] && '
+        "x=${XDG_RUNTIME_DIR:-/run/user/$u} && "
+        'XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect '
+        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1 && "
+        f"echo {unit} > {shlex.quote(scope_record(tag))} && "
+        'export XDG_RUNTIME_DIR="$x" && '
+        f"set -- systemd-run --user --scope --quiet --collect --unit={unit} --; "
+    )
+
+
 def start_script(
     target: RemoteTarget,
     command: Sequence[str],
@@ -525,7 +689,7 @@ def start_script(
         + f'"${{@: -{count}}}" /bin/sh -c \'exec "$@"\' sh "${{@:1:$#-{count}}}"'
     )
     login = (
-        f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
+        f"{LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
         f'"$d" {" ".join(assignments)} {guard}{argv}'
         + (" 3>&1 1>&2" if report_env else "")
     )
@@ -540,12 +704,12 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f"k=$(sh -c {shlex.quote(_DARWIN_KEEPER)} orch-keeper $$ "
         f"{shlex.quote(f'.orch-worker-{tag}.keeper.pid')} "
-        "< /dev/null > /dev/null 2>&1 & echo $!); "
+        "< /dev/null 2> /dev/null &); "
         f'p=$k; {_LSTART}; [ -n "$k" ] && [ -n "$*" ] '
         f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
         f'&& (set -C; echo "$$ $c {tag} $s" > {record_file}) 2>/dev/null '
         f'|| {{ kill -KILL "$k"; exit {START_REFUSED}; }}; '
-        f"{login}"
+        f"exec {login}"
     )
     inner = (
         f"d={directory}; "
@@ -556,7 +720,12 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'(set -C; echo "$$ $b {tag}" > {record_file}) 2>/dev/null || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
-        f"{login}"
+        f"read -r s < /proc/self/stat || exit {START_REFUSED}; "
+        's=${s##*) }; s=${s#* }; s=${s#* }; s=${s#* }; '
+        f'if [ "${{s%% *}}" = "$$" ]; then k=$(sh -c {shlex.quote(KEEPER)} orch-keeper '
+        f'< /dev/null 2> /dev/null &); [ -n "$k" ] || exit {START_REFUSED}; fi; '
+        f"{_contain(tag)}"
+        f'exec "$@" {login}'
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
 
@@ -591,7 +760,9 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
         f"{record}"
         f"{_CAN_SCAN} || exit 3; "
         "[ -r /proc/self/stat ] || exit 3; "
-        f'[ -z "$({_TAGGED})" ] || exit 1; '
+        "command -v flock >/dev/null 2>&1 || exit 3; "
+        f"{_members(directory)}"
+        'o=$(members) || exit 3; [ -z "$o" ] || exit 1; '
         '[ -e "$f" ] || exit 0; '
         '{ read -r p b < "$f"; } 2>/dev/null || exit 3; '
         f'case "$p" in {_BAD_GROUP}) exit 3;; esac; '
@@ -601,6 +772,7 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
         "for d in /proc/[0-9]*; do "
         '{ read -r s < "$d/stat"; } 2>/dev/null || continue; '
         "set -- ${s##*) }; "
+        'case "$1" in Z|X) continue;; esac; '
         '[ "$3" = "$p" ] && exit 3; '
         "done; "
         "exit 0"
@@ -623,10 +795,24 @@ def fenced_check_script(target: RemoteTarget) -> str:
 
 
 def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
-    """SIGTERM (SIGKILL with kill) each process carrying the job's tag, and its group."""
+    """SIGTERM (SIGKILL with kill) each process of the run, and each tagged one's group.
+
+    With kill, every member is stopped (SIGSTOP) first, tracking again until
+    no new one appears, so none forks a process that escapes the SIGKILL.
+    """
     tag = target.require_tag()
     sig = "KILL" if kill else "TERM"
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
+    halt = (
+        'a=; n=1; while [ -n "$n" ]; do n=; '
+        'm=$(members) || { for q in $a; do kill -CONT "$q" 2>/dev/null; done; exit 3; }; '
+        "for q in $m; do "
+        'case " $a " in *" $q "*) ;; *) kill -STOP "$q" 2>/dev/null; a="$a $q"; n=1;; esac; '
+        "done; done; "
+        if kill
+        else "m=$(members) || exit 3; "
+    )
+    resume = 'for q in $a; do kill -CONT "$q" 2>/dev/null; done; ' if kill else ""
     darwin = _darwin_worker(
         target,
         gone="exit 0",
@@ -639,6 +825,9 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
         f"t={tag}; f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
         f"{_CAN_SCAN} || exit 3; "
+        "command -v flock >/dev/null 2>&1 || exit 3; "
+        f"{_members(shlex.quote(target.job_dir))}"
+        f"{halt}"
         f"for e in $({_TAGGED}); do "
         "q=${e#/proc/}; q=${q%/environ}; "
         '{ read -r s < "/proc/$q/stat"; } 2>/dev/null || continue; '
@@ -646,6 +835,8 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
         f'case "$3" in {_BAD_GROUP}) ;; *) kill -{sig} -"$3" 2>/dev/null;; esac; '
         f'kill -{sig} "$q" 2>/dev/null; '
         "done; "
+        f'for q in $m; do kill -{sig} "$q" 2>/dev/null; done; '
+        f"{resume}"
         "exit 0"
     )
 
@@ -740,11 +931,13 @@ _DETACH = (
 # runner dies. $1 the wrapper's pid, $2 the budget and $3 the grace (whole
 # seconds), $4 and $5 the stop and kill scripts (stop_script), $6 the check
 # script (check_script). It runs in a session of its own, without the tag
-# (no check counts it, no stop of the start's groups reaches it). The run
-# lives while the wrapper does or (#199 r2) the check finds a process of it,
-# so a worker the wrapper left behind keeps the deadline going. Past the
-# budget it runs the stop script; past the grace after that, the kill
-# script, again each second until the run is gone.
+# and with ORCH_WORKER_DEADLINE=<tag> (#722: the wrapper is its parent, and
+# that marks it as never a process of the run, so no check counts it or the
+# checks it runs, and no stop reaches it). The run lives while the wrapper
+# does or (#199 r2) the check finds a process of it, so a worker the
+# wrapper left behind keeps the deadline going. Past the budget it runs the
+# stop script; past the grace after that, the kill script, again each
+# second until the run is gone.
 _DEADLINE = (
     'W=$1; B=$2; G=$3; C=$6; trap "" TERM INT HUP; '
     'late() { [ "$(date +%s)" -ge "$1" ]; }; '
@@ -766,8 +959,8 @@ _WRITE_RESULT_PAST_STOPS = (
 
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
 # directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
-# budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop
-# and kill scripts, $8 the check script. It starts the start (lib/remote.py start_script, which
+# budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop and
+# kill scripts, $8 the check script. It starts the start (start_script, which
 # records the worker and execs the harness) in a session of its own with
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again
@@ -780,9 +973,10 @@ _WRAPPER = (
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
     'if [ -n "$4" ]; then '
     f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7" "$8"; '
-    'if [ "$S" = setsid ]; then env -u ORCH_WORKER_TAG setsid "$@" '
+    f'if [ "$S" = setsid ]; then env -u {TAG_ENV} "{DEADLINE_ENV}=$t" setsid "$@" '
     '< /dev/null > /dev/null 2>&1 & '
-    'else env -u ORCH_WORKER_TAG perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@" '
+    f'else env -u {TAG_ENV} "{DEADLINE_ENV}=$t" '
+    'perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@" '
     '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
@@ -888,8 +1082,9 @@ def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
     `exit` is read before and after the worker check, so a run that ends in
     between reads as exited. The start's `env` report, when there is one,
     comes on stderr too, read after the log's size: a log that holds the
-    harness's output holds no byte the report did not precede. Never starts or signals anything, and never
-    writes: on Darwin a start not yet recorded is unsure, never fenced.
+    harness's output holds no byte the report did not precede. Never starts or signals anything, and
+    writes only the Linux tree record (as check does, so each poll tracks the run's processes while
+    it lives): on Darwin a start not yet recorded is unsure, never fenced.
     """
     tag = target.require_tag()
     if offset < 0 or chunk <= 0:
@@ -951,7 +1146,12 @@ _CHECKOUT = (
     'mkdir -p -- "$d" || fail "cannot make $d"; '
     'cd -- "$d" || fail "cannot enter $d"; '
     'if [ -n "$b" ]; then (umask 077 && cat > "$b") || fail "cannot write the brief $b"; fi; '
+    "exclude() { mkdir -p .git/info && for p in "
+    + " ".join(shlex.quote(f"/{name}") for name in (PID_FILE, start_record("*"), scope_record("*")))
+    + '; do grep -qxF -- "$p" .git/info/exclude 2>/dev/null '
+    '|| printf \'%s\\n\' "$p" >> .git/info/exclude || return 1; done; }; '
     "if [ -d .git ] && t=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
+    'exclude || fail "cannot write .git/info/exclude"; '
     f"printf '{_CHECKOUT_MARK} ok %s reused\\n' \"$t\"; exit 0; fi; "
     'git init -q . >/dev/null || fail "git init failed"; '
     "git remote remove origin >/dev/null 2>&1; "
@@ -976,9 +1176,7 @@ _CHECKOUT = (
     "else "
     'git checkout -q --detach "$t" || fail "git checkout failed"; '
     "fi; "
-    "{ mkdir -p .git/info && "
-    "printf '%s\\n' /.orch-worker.pid '/.orch-worker-*.pid' >> .git/info/exclude; } "
-    '|| fail "cannot write .git/info/exclude"; '
+    'exclude || fail "cannot write .git/info/exclude"; '
     f"printf '{_CHECKOUT_MARK} ok %s new\\n' \"$t\""
 )
 
@@ -1132,6 +1330,7 @@ class Exchanged:
     code: int
     stdout: bytes
     stderr: str
+    timed_out: bool = False
 
 
 @runtime_checkable
@@ -1180,7 +1379,7 @@ class SshTransport:
         try:
             completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
-            return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
+            return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds", timed_out=True)
         except OSError as exc:
             return Exchanged(SSH_UNREACHABLE, b"", type(exc).__name__)
         return Exchanged(

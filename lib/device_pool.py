@@ -31,7 +31,10 @@ F2-02 records on the slot row who runs the job: `runner_pid` and
 `worker_start` (its local command), `remote_started` (a remote start
 was attempted, so the device must confirm the worker gone) and
 `worker_tag` (the random tag every process of that remote start carries,
-lib/remote.py, so a check never trusts a stored process number). #80 adds
+lib/remote.py, so a check never trusts a stored process number). #722
+adds `run_tag`: the tag every process of a box job's run carries, and #817
+`run_scope`: the systemd user scope the run was moved into on Linux (NULL
+for an uncontained run, lib/process_tree.py contain). #80 adds
 `autostart_pid` and `autostart_start`: the autostart waiter that claimed
 the job, if one did. #96 adds `run_token_hash`: the hash of the secret
 token the job's current `orch job run` holds (never the token itself). The
@@ -42,7 +45,10 @@ takes no new placement, for any harness, until its `until` time. #662
 adds `device_orphans`: the slot of a job lost with its device, moved there
 so the slot is free while its worker may still run. #679 reads it back:
 the monitor stops that worker once its device answers and forgets the row
-once the worker is gone.
+once the worker is gone. #722 keeps a lost box job's `run_tag` (and #817
+its `run_scope`) there, and `members`, every process of its run seen so
+far (pid and start time), so the monitor finds the run again after it
+restarts.
 
 This module starts nothing and contacts no device.
 """
@@ -51,7 +57,8 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, replace
+import json
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
 from lib.device_sync import NOTHING_BLOCKED, Blocked
@@ -94,6 +101,10 @@ _SLOT_COLUMNS = (
     # autostart run (lib/job_token.py). Only that run, which holds the
     # token, may `orch job done` the job. The token itself is never stored.
     ("run_token_hash", "TEXT"),
+    # #722: the RUN_TAG_ENV value every process of a box job's run carries
+    # (lib/process_tree.py), so a lost run is found after its parents exit.
+    ("run_tag", "TEXT"),
+    ("run_scope", "TEXT"),
 )
 
 
@@ -112,6 +123,7 @@ class Placement:
     worker_tag: str | None = None
     autostart_pid: int | None = None
     autostart_start: str | None = None
+    run_scope: str | None = None
 
     @property
     def autostarted(self) -> bool:
@@ -140,6 +152,9 @@ class Orphan:
     runner_start: str | None = None
     worker_pid: int | None = None
     worker_start: str | None = None
+    run_tag: str | None = None
+    members: Mapping[int, str] = field(default_factory=dict)
+    run_scope: str | None = None
 
 
 def choose_device(
@@ -492,6 +507,8 @@ class DevicePool:
         start: str | None = None,
         remote: bool = False,
         tag: str | None = None,
+        run_tag: str | None = None,
+        run_scope: str | None = None,
         runner: int | None = None,
         proof: Proof | None = None,
     ) -> str | None:
@@ -535,8 +552,8 @@ class DevicePool:
         self._update_slot(
             job_id,
             owner,
-            "worker_pid = ?, worker_start = ?",
-            (pid, start),
+            "worker_pid = ?, worker_start = ?, run_tag = ?, run_scope = ?",
+            (pid, start, run_tag, run_scope),
             guard=checked,
             proof=proof,
         )
@@ -573,7 +590,8 @@ class DevicePool:
         self._update_slot(
             job_id,
             owner,
-            "worker_pid = NULL, worker_start = NULL, remote_started = 0, worker_tag = NULL",
+            "worker_pid = NULL, worker_start = NULL, remote_started = 0, worker_tag = NULL, "
+            "run_tag = NULL, run_scope = NULL",
             (),
             guard=guard,
             proof=proof,
@@ -664,6 +682,16 @@ class DevicePool:
                 f"SELECT * FROM {ORPHANS_TABLE} ORDER BY lost_at, job_id"
             ).fetchall()
         return [_orphan(row) for row in rows]
+
+    def remember_run(self, job_id: str, tag: str | None, members: Mapping[int, str]) -> None:
+        """Keep a lost box job's run tag and every process of it seen so far (pid -> start)."""
+        with self.queue.connect() as connection:
+            if _has_table(connection, ORPHANS_TABLE):
+                _orphan_columns(connection)
+                connection.execute(
+                    f"UPDATE {ORPHANS_TABLE} SET run_tag = ?, members = ? WHERE job_id = ?",
+                    (tag, json.dumps({str(pid): start for pid, start in members.items()}), job_id),
+                )
 
     def forget_orphan(self, job_id: str) -> None:
         with self.queue.connect() as connection:
@@ -757,6 +785,13 @@ def _orphan(row: sqlite3.Row) -> Orphan:
         runner_start=_text(row["runner_start"]) if "runner_start" in keys else None,
         worker_pid=_int(row["worker_pid"]) if "worker_pid" in keys else None,
         worker_start=_text(row["worker_start"]) if "worker_start" in keys else None,
+        run_tag=_text(row["run_tag"]) if "run_tag" in keys else None,
+        members={
+            int(pid): start for pid, start in json.loads(row["members"] or "{}").items()
+        }
+        if "members" in keys
+        else {},
+        run_scope=_text(row["run_scope"]) if "run_scope" in keys else None,
     )
 
 
@@ -775,6 +810,7 @@ def _placement(row: sqlite3.Row) -> Placement:
         worker_tag=_text(row["worker_tag"]),
         autostart_pid=_int(row["autostart_pid"]),
         autostart_start=_text(row["autostart_start"]),
+        run_scope=_text(row["run_scope"]),
     )
 
 
@@ -815,7 +851,16 @@ _ORPHAN_PIDS = (
     ("runner_start", "TEXT"),
     ("worker_pid", "INTEGER"),
     ("worker_start", "TEXT"),
+    ("run_tag", "TEXT"),
+    ("run_scope", "TEXT"),
 )
+
+
+def _orphan_columns(connection: sqlite3.Connection) -> None:
+    present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({ORPHANS_TABLE})")}
+    for name, kind in (*_ORPHAN_PIDS, ("members", "TEXT")):
+        if name not in present:
+            connection.execute(f"ALTER TABLE {ORPHANS_TABLE} ADD COLUMN {name} {kind}")
 
 
 def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None:
@@ -831,10 +876,7 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
         )
         """
     )
-    present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({ORPHANS_TABLE})")}
-    for name, kind in _ORPHAN_PIDS:
-        if name not in present:
-            connection.execute(f"ALTER TABLE {ORPHANS_TABLE} ADD COLUMN {name} {kind}")
+    _orphan_columns(connection)
     pids = ", ".join(name for name, _ in _ORPHAN_PIDS)
     connection.execute(
         f"""
