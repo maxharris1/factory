@@ -124,7 +124,7 @@ class Lab:
 
     def enqueue(self, *, ids: int = 5, regression: tuple[str, ...] = (), ticket: str = "784",
                 runner: str = "claude-cloud", arm: str = "primary",
-                packs: dict[str, str | None] | None = None) -> str:
+                packs: dict[str, str | None] | None = None, repo: str = REPO) -> str:
         detail = {
             "action": "qa", "head": HEAD_A, "scope": "full", "runner": runner, "arm": arm,
             "scenarios": [f"qa-{n}" for n in range(1, ids + 1)], "live": live(ids, packs),
@@ -132,7 +132,7 @@ class Lab:
         }
         job = self.run.queue.enqueue(
             JobRequest(
-                repo=REPO, ticket_id=ticket, action="qa", recipient="qa", source_comment_id=f"c-{ticket}",
+                repo=repo, ticket_id=ticket, action="qa", recipient="qa", source_comment_id=f"c-{ticket}",
                 timeout_seconds=300, head=HEAD_A, detail=json.dumps(detail),
             ),
             dedupe_key=f"qa:{ticket}:{runner}:{arm}",
@@ -739,7 +739,30 @@ def test_low_disk_claims_nothing_and_logs_once(tmp_path: Path, unreadable: bool)
 
     assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("running",)]
     assert len(lab.lanes()) == 1
-    assert [line for line in lines if line.startswith("qa claim")] == [paused[0], f"qa claim resumed: {root}"]
+    assert [line for line in lines if line.startswith("qa claim")] == [
+        paused[0], f"qa claim resumed for {REPO.lower()}: {root}",
+    ]
+
+
+def test_a_low_floor_project_on_the_same_root_keeps_the_other_paused(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    root = (tmp_path / "evidence").resolve()
+    other = "owner/other"
+    lines: list[str] = []
+    lab.worker.evidence = {
+        **evidence(root, min_free_gib=5),
+        other: QaStorage("factory-qa", "us-east-1", None, "QA_KEY", "QA_SECRET", root, min_free_gib=1),
+    }
+    lab.worker.free_bytes = lambda path: 2 * GIB
+    lab.worker.log = lines.append
+    lab.worker._backoff["claude-cloud"] = float("inf")
+    jobs = [lab.enqueue(ids=1, ticket="784"), lab.enqueue(ids=1, ticket="785", repo=other)]
+    lab.tick(3)
+
+    assert [lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) for job in jobs] == [[("queued",)]] * 2
+    assert [line for line in lines if line.startswith("qa claim")] == [
+        f"qa claim paused for {REPO.lower()}: {root} has 2 GiB free, below 5 GiB",
+    ]
 
 
 def test_accepted_result_records_evidence_dir(tmp_path: Path) -> None:

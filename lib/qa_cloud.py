@@ -325,7 +325,7 @@ class QaWorker:
     free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
     _plans: dict[str, RunPlan] = field(default_factory=dict)
     _backoff: dict[str, float] = field(default_factory=dict)
-    _low_disk: set[Path] = field(default_factory=set)
+    _low_disk: set[str] = field(default_factory=set)
     _skips_logged: set[tuple[str, str]] = field(default_factory=set)
 
     def __post_init__(self) -> None:
@@ -374,7 +374,7 @@ class QaWorker:
                     self.log(f"qa recycle {repo}: skipped run {run_id}: {reason}")
 
     def _disk_low(self, repo: str) -> bool:
-        entry = self.evidence.get(repo.lower())
+        entry = self.evidence.get(repo)
         if entry is None or entry.min_free_gib is None:
             return False
         root = entry.evidence_root
@@ -385,14 +385,14 @@ class QaWorker:
             reason = f"cannot read free space ({exc.strerror or exc})"
         else:
             if free >= entry.min_free_gib * GIB:
-                if root in self._low_disk:
-                    self._low_disk.discard(root)
-                    self.log(f"qa claim resumed: {root}")
+                if repo in self._low_disk:
+                    self._low_disk.discard(repo)
+                    self.log(f"qa claim resumed for {repo}: {root}")
                 return False
             reason = f"has {free // GIB} GiB free, below {entry.min_free_gib} GiB"
-        if root not in self._low_disk:
-            self._low_disk.add(root)
-            self.log(f"qa claim paused: {root} {reason}")
+        if repo not in self._low_disk:
+            self._low_disk.add(repo)
+            self.log(f"qa claim paused for {repo}: {root} {reason}")
         return True
 
     def _claim(self) -> Counter[str]:

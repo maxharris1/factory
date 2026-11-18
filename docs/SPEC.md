@@ -1216,9 +1216,11 @@ removed run and the count of deleted files. It logs each skip once per
 worker process. An error is logged and the tick goes on. Before the worker
 claims a job, it checks free space on the repo's `evidence_root`. Below
 `min_free_gib`, the job stays `queued` with its wait clock restarted. The
-worker logs `qa claim paused` once when a root drops below its floor and
-`qa claim resumed` once when it recovers. A root whose free space cannot be
-read counts as below the floor. When the worker accepts a lane's result,
+worker logs `qa claim paused for <repo>` once when the repo's root drops
+below that repo's floor and `qa claim resumed for <repo>` once when it
+recovers. Pause state is per repo, so repos that share a root with different
+floors pause and resume apart. A root whose free space cannot be read counts
+as below the floor. When the worker accepts a lane's result,
 it records the run's `run_dir` as `evidence_dir`, in the transaction that
 closes the lane.
 
