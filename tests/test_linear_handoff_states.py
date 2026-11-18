@@ -319,3 +319,114 @@ def test_a_re_drive_on_a_team_with_no_rfr_state_reports_it_in_the_done_wake(
     assert state == "handed-off"
     assert [action for action, _ in wakes] == ["ship-failed", "done"]
     assert wakes[1][1]["note"] == NO_READY_NOTE
+
+
+# #895: a reviewer's rework state (linear_rework_states) is moved back to
+# the project's ready state by the next approved handoff.
+
+CHANGES_REQUESTED = {
+    "id": "cr",
+    "name": "Changes Requested",
+    "type": "started",
+    "position": 3.5,
+}
+QA_REVIEW = {"id": "qar", "name": "QA Review", "type": "started", "position": 3.0}
+REWORK = frozenset({"Changes Requested"})
+RFR_NAME = RFR["name"]
+
+
+def rework_issue(state: dict, *, ready: dict | None = RFR, extra: dict = CHANGES_REQUESTED) -> dict:
+    issue = phase_issue(state, ready=ready)
+    issue["team"]["states"]["nodes"].append(extra)
+    return issue
+
+
+@pytest.mark.parametrize(
+    ("issue", "ready_name", "phase"),
+    [
+        (rework_issue({"id": "cr", "type": "started", "position": 3.5}), RFR_NAME, "rework"),
+        (rework_issue({"id": "qa", "type": "started", "position": 4.0}), RFR_NAME, "moved-on"),
+        (rework_issue({"id": "done", "type": "completed", "position": 5.0}), RFR_NAME, "moved-on"),
+        (rework_issue({"id": "x", "type": "canceled", "position": 6.0}), RFR_NAME, "moved-on"),
+        (
+            rework_issue({"id": "rfr", "type": "started", "position": 3.0}),
+            RFR_NAME,
+            "ready-for-review",
+        ),
+        (
+            rework_issue(
+                {"id": "cr", "type": "completed", "position": 5.5},
+                extra={**CHANGES_REQUESTED, "type": "completed", "position": 5.5},
+            ),
+            RFR_NAME,
+            "moved-on",
+        ),
+        (
+            rework_issue({"id": "cr", "type": "started", "position": 3.5}, ready=None),
+            RFR_NAME,
+            "no-ready-state",
+        ),
+        (
+            rework_issue({"id": "qar", "type": "started", "position": 3.0}, ready=QA_REVIEW),
+            "QA Review",
+            "ready-for-review",
+        ),
+        (
+            rework_issue({"id": "doing", "type": "started", "position": 2.0}, ready=QA_REVIEW),
+            "QA Review",
+            "before-review",
+        ),
+        (
+            rework_issue({"id": "qa", "type": "started", "position": 4.0}, ready=QA_REVIEW),
+            "QA Review",
+            "moved-on",
+        ),
+    ],
+    ids=[
+        "changes-requested",
+        "in-qa-after-rfr",
+        "done",
+        "canceled",
+        "ready-for-review",
+        "rework-name-of-completed-type",
+        "team-without-the-ready-state",
+        "custom-ready-state",
+        "before-custom-ready-state",
+        "after-custom-ready-state",
+    ],
+)
+def test_a_rework_state_is_its_own_phase_and_the_ready_state_is_configurable(
+    issue: dict,
+    ready_name: str,
+    phase: str,
+) -> None:
+    assert _linear_state_phase(issue, ready_name, REWORK) == phase
+
+
+def test_the_ready_state_id_follows_the_configured_name() -> None:
+    issue = rework_issue({"id": "doing", "type": "started", "position": 2.0}, ready=QA_REVIEW)
+    issue["team"]["states"]["nodes"].append(RFR)
+
+    assert _linear_ready_state_id(issue, "QA Review") == "qar"
+    assert _linear_ready_state_id(issue) == "rfr"
+
+
+def test_an_approved_rework_issue_moves_back_to_ready_for_review(tmp_path: Path) -> None:
+    issue = {"id": "issue-id", **rework_issue({"id": "cr", "type": "started", "position": 3.5})}
+    dispatcher, queue, gh, requests, snapshot = t4_setup(tmp_path, issue)
+    snapshot = replace(
+        snapshot, linear_state_phase=_linear_state_phase(issue, rework=REWORK)
+    )
+    assert snapshot.linear_state_phase == "rework"
+    dispatcher.review_actions.fresh_ticket = lambda ref: snapshot
+
+    dispatcher.process(snapshot)
+
+    assert [request["variables"] for request in requests] == [
+        {"issue": "issue-id", "state": "rfr"}
+    ]
+    assert gh.keys() == [PULL, MARK_READY]
+    intent, state, wakes = ship_rows(queue)
+    assert intent == ("completed", None)
+    assert state == "handed-off"
+    assert [action for action, _ in wakes] == ["done"]

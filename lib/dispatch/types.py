@@ -163,6 +163,7 @@ LINEAR_STATE_PHASES = (
     "ready-for-review",
     "moved-on",
     "no-ready-state",
+    "rework",
 )
 
 

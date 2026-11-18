@@ -672,6 +672,7 @@ projects:
     # grok_bot: project-bot
     # linear_ready_for_review: false
     # linear_handoff_states: [Ready for Review, In Review]  # Linear projects; default shown (issue #749)
+    # linear_rework_states: [Changes Requested]  # Linear projects; default none (issue #895)
     # ready_starts_review: false
     # driver_inbox: owner/name#123    # optional: copy each Grok wake to this issue
     # grok_webhook: true              # false only with driver_inbox
@@ -953,7 +954,13 @@ Linear project, and must be a non-empty list of state names; the default is
 `[Ready for Review, In Review]`. A ticket the factory is still working that
 Max moves to one of them is `handed-off-externally` until Linear moves it
 again (TL, section 4.2). The factory never writes these states, except the
-Ready for Review move above.
+Ready for Review move above, whose target is the first name in this list.
+`linear_rework_states` (issue #895) names the Linear states a reviewer uses
+to send an issue back for rework, such as `Changes Requested`. It needs a
+Linear project, must be a list of state names, and may not share a name
+with `linear_handoff_states`; the default is none. The Ready for Review move
+also moves an issue in one of these states, wherever it sits in the team's
+order.
 `intake` (issue #85) turns on the backlog feeder for a project (section 4).
 A GitHub project names `label` (default `factory:ready`); a Linear project
 must name `linear_state` and may not name a label. `trusted` lists the

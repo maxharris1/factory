@@ -1952,6 +1952,8 @@ def test_gh_failure_safe_detail_keeps_status_but_no_output() -> None:
         ("ready-for-review", False, []),
         ("moved-on", True, []),
         ("moved-on", False, []),
+        ("rework", True, ["AUT-42"]),
+        ("rework", False, ["AUT-42"]),
     ],
     ids=[
         "before-review-draft",
@@ -1960,6 +1962,8 @@ def test_gh_failure_safe_detail_keeps_status_but_no_output() -> None:
         "already-rfr-no-op",
         "moved-on-draft",
         "moved-on-ready-pr",
+        "rework-draft",
+        "rework-ready-pr",
     ],
 )
 def test_linear_handoff_moves_only_an_issue_still_before_review(
