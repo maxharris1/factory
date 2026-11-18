@@ -17,7 +17,7 @@ import stat
 import tarfile
 import tempfile
 import zlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Literal, get_args
@@ -48,6 +48,9 @@ RETENTION = 7 * 86400.0
 CLOSED_STATES = ("merged", "done", "abandoned")
 _LANE = re.compile(r"lane-[1-9][0-9]*")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_SEARCH_DIR_FLAGS = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY)) | os.O_DIRECTORY | os.O_NOFOLLOW
+_NOFOLLOW_ANY = getattr(os, "O_NOFOLLOW_ANY", 0)
+_NO_LINK_PATH_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW_ANY
 
 Standing = Literal["latest", "superseded", "expired"]
 Kind = Literal["screenshot", "video", "trace", "log", "manifest", "other"]
@@ -528,18 +531,22 @@ def _resolve(run_id: str, evidence_dir: object, real_root: str) -> tuple[str, ..
 
 
 def _open_root(real_root: str) -> int:
-    top = os.open("/", _DIR_FLAGS)
+    if _NOFOLLOW_ANY:
+        return os.open(real_root, _NO_LINK_PATH_FLAGS)
+    top = os.open("/", _SEARCH_DIR_FLAGS)
     try:
         return _open_unlinked(top, PurePath(real_root).parts[1:])
     finally:
         os.close(top)
 
 
-def _open_unlinked(start_fd: int, parts: Iterable[str]) -> int:
+def _open_unlinked(start_fd: int, parts: tuple[str, ...]) -> int:
+    if _NOFOLLOW_ANY:
+        return os.open(os.path.join(".", *parts), _NO_LINK_PATH_FLAGS, dir_fd=start_fd)
     fd = os.dup(start_fd)
     try:
-        for part in parts:
-            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+        for depth, part in enumerate(parts, 1):
+            child = os.open(part, _DIR_FLAGS if depth == len(parts) else _SEARCH_DIR_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
     except BaseException:
