@@ -21,6 +21,16 @@ empty. This server:
   records), the files `orch dashboard push` writes. Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
   encoded slash, is 404, and no directory is ever listed;
+- also answers GET and HEAD for a QA run's evidence (qa/<run_id>/ under the
+  directory, as qa_evidence.collect() lays out lanes): /qa/runs/<run_id>
+  serves that run's index.html, and /qa/runs/<run_id>/lane-<n>/<path>
+  serves one file of lane n. The raw path is split on / before each part is
+  decoded, and a part that is empty, starts with a dot, or decodes to hold
+  /, a backslash or NUL is 404, as is a run id outside [A-Za-z0-9._-]{1,64}.
+  Only .png .jpg .jpeg .webp .webm .mp4 .json get their own type; any other
+  file is text/plain with Content-Disposition: attachment, so an uploaded
+  page never renders. Evidence is streamed whole, past the snapshot size cap, and
+  those 200s alone add img-src and media-src 'self' to the policy;
 - opens the directory once at startup (O_NOFOLLOW) and keeps that
   descriptor, so swapping the directory or an ancestor for a symlink later
   changes nothing;
@@ -125,6 +135,19 @@ SECURITY_HEADERS = {
         "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
 }
+QA_RUNS = "/qa/runs/"
+RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+LANE = re.compile(r"lane-[1-9][0-9]*")
+QA_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".webm": "video/webm", ".mp4": "video/mp4", ".json": "application/json",
+}
+QA_HEADERS = {
+    **SECURITY_HEADERS,
+    "Content-Security-Policy": SECURITY_HEADERS["Content-Security-Policy"] + "; img-src 'self'; media-src 'self'",
+}
+QA_DOWNLOAD = ("text/plain; charset=utf-8", {**QA_HEADERS, "Content-Disposition": "attachment"})
+QA_CHUNK = 1024 * 1024
 
 
 class ConfigError(ValueError):
@@ -314,20 +337,56 @@ def open_root(root: Path) -> int:
     return fd
 
 
-def read_snapshot_file(root_fd: int, name: str) -> bytes | None:
-    """The file's bytes if `name` is a regular, singly linked file directly in
-    the pinned root directory, reached without following any symlink;
-    otherwise None."""
+class QaRoute(NamedTuple):
+    parts: tuple[str, ...]
+    content_type: str
+    headers: dict[str, str]
+
+
+def qa_route(path: str) -> QaRoute | None:
+    parts = [urllib.parse.unquote(part) for part in path[len(QA_RUNS):].split("/")]
+    if any(not part or part.startswith(".") or any(c in part for c in "/\\\0") for part in parts):
+        return None
+    run_id, *rest = parts
+    if RUN_ID.fullmatch(run_id) is None:
+        return None
+    if not rest:
+        return QaRoute(("qa", run_id, "index.html"), "text/html; charset=utf-8", QA_HEADERS)
+    if len(rest) < 2 or LANE.fullmatch(rest[0]) is None:
+        return None
+    suffix = os.path.splitext(rest[-1])[1].lower()
+    content_type, headers = (QA_TYPES[suffix], QA_HEADERS) if suffix in QA_TYPES else QA_DOWNLOAD
+    return QaRoute(("qa", run_id, *rest), content_type, headers)
+
+
+def open_under(root_fd: int, parts: tuple[str, ...]) -> int | None:
+    fd = root_fd
     try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=fd)
+            if fd != root_fd:
+                os.close(fd)
+            fd = child
         # O_NONBLOCK so a FIFO planted under the name cannot hang the open.
-        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | NOFOLLOW, dir_fd=root_fd)
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | NOFOLLOW, dir_fd=fd)
     except OSError:
         return None
+    finally:
+        if fd != root_fd:
+            os.close(fd)
+    info = os.fstat(leaf)
+    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+        return leaf
+    os.close(leaf)
+    return None
+
+
+def read_snapshot_file(root_fd: int, name: str) -> bytes | None:
+    fd = open_under(root_fd, (name,))
+    if fd is None:
+        return None
     with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return None
-        if info.st_size > MAX_BYTES:
+        if os.fstat(handle.fileno()).st_size > MAX_BYTES:
             return None
         return handle.read(MAX_BYTES + 1)[:MAX_BYTES]
 
@@ -1071,22 +1130,42 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _serve(self, *, body: bool) -> None:
-        name = ROUTES.get(urlsplit(self.path).path)
+        path = urlsplit(self.path).path
+        if path.startswith(QA_RUNS):
+            self._serve_qa(path, body=body)
+            return
+        name = ROUTES.get(path)
         data = read_snapshot_file(self.server.root_fd, name) if name else None  # type: ignore[attr-defined]
         if name is None or data is None:
             self._send(404, b"not found\n", "text/plain; charset=utf-8", body=body)
             return
         self._send(200, data, CONTENT_TYPES[name], body=body)
 
+    def _serve_qa(self, path: str, *, body: bool) -> None:
+        route = qa_route(path)
+        fd = open_under(self.server.root_fd, route.parts) if route else None  # type: ignore[attr-defined]
+        if route is None or fd is None:
+            self._send(404, b"not found\n", "text/plain; charset=utf-8", body=body)
+            return
+        with os.fdopen(fd, "rb") as handle:
+            remaining = os.fstat(handle.fileno()).st_size
+            self._send_head(200, route.content_type, remaining, route.headers)
+            while body and remaining > 0 and (chunk := handle.read(min(QA_CHUNK, remaining))):
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
     def _send(self, code: int, data: bytes, content_type: str, *, body: bool) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        for key, value in SECURITY_HEADERS.items():
-            self.send_header(key, value)
-        self.end_headers()
+        self._send_head(code, content_type, len(data), SECURITY_HEADERS)
         if body:
             self.wfile.write(data)
+
+    def _send_head(self, code: int, content_type: str, length: int, headers: dict[str, str]) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.end_headers()
 
 
 POST_ROUTES = {
