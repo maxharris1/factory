@@ -45,7 +45,7 @@ verified-report rule. `orchestrate.choose_route` does not use it yet.
 
 Nothing here opens a file or runs a process: readings come from parsed
 CLI output and orch.db rows only. The one exception is `migrate`, which has
-lib/state_backup.py copy the database before it rewrites the table.
+lib/state_backup.py copy the database before any write.
 """
 
 from __future__ import annotations
@@ -253,25 +253,22 @@ def migrate(
     """Key db's usage readings on the account; True when it wrote.
 
     Already migrated (the column, no unnamed row, the three account tables):
-    no backup and no write. A database with no usage_readings yet gets the
-    tables with no backup, since no reading is rewritten. Otherwise it first
-    takes the BACKUP_LABEL labelled backup into directory (default manual/
-    beside the rolling backup); a failed backup raises before any write.
-    Then one transaction adds the column, names every unnamed row
+    no backup and no write. Otherwise it first takes the BACKUP_LABEL
+    labelled backup into directory (default manual/ beside the rolling
+    backup); a failed backup raises before any write. Then one transaction
+    creates any missing table, adds the column, names every unnamed row
     `<harness>-default`, creates the account tables and seeds them from the
     harness-keyed ones. Rows written meanwhile by older code are named by
     the next run."""
     with closing(connect()) as connection:
         if _migrated(connection):
             return False
-        rewrites = TABLE in _tables(connection)
-    if rewrites:
-        state_backup.labelled_backup(
-            db,
-            directory or state_backup.default_backup_path().parent / "manual",
-            BACKUP_LABEL,
-            datetime.now(UTC),
-        )
+    state_backup.labelled_backup(
+        db,
+        directory or state_backup.default_backup_path().parent / "manual",
+        BACKUP_LABEL,
+        datetime.now(UTC),
+    )
     with closing(connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         with connection:

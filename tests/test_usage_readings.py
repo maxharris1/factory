@@ -32,6 +32,7 @@ from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import Device, MachinesConfig
+from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import TAG_ENV, Exchanged, RemoteTarget, SshTransport, ssh_argv
 from lib.telemetry import Scrubber, Session, harness_argv, stream_flags
 from lib.usage import reserve_check
@@ -1411,14 +1412,22 @@ def test_a_failed_backup_leaves_the_database_unmigrated(tmp_path: Path) -> None:
     assert _dump(db) == dump
 
 
-def test_a_database_without_readings_gets_the_tables_without_a_backup(tmp_path: Path) -> None:
+def test_a_database_without_readings_is_backed_up_before_it_gets_the_tables(tmp_path: Path) -> None:
     db, backups = tmp_path / "state" / "orch.db", tmp_path / "manual"
     db.parent.mkdir()
-    sqlite3.connect(db).close()
+    queue = SQLiteJobQueue(db, clock=lambda: 160.0)
+    job = queue.enqueue(JobRequest("owner/repo", "1", "build", "claude", "go", 3600), dedupe_key="j")
     assert _migrate(db, backups) is True
-    assert not backups.exists()
+    copies = list(backups.iterdir())
+    assert [copy.name.endswith("-usage-accounts.db") for copy in copies] == [True]
+    with closing(sqlite3.connect(copies[0])) as connection:
+        assert connection.execute("SELECT id FROM jobs").fetchall() == [(job.id,)]
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'usage_readings'"
+        ).fetchone() is None, "the backup is the database before any write"
     assert "account" in _columns(db)
     assert _migrate(db, backups) is False
+    assert list(backups.iterdir()) == copies
 
 
 def test_before_the_migration_a_job_writes_the_old_row_shape(tmp_path: Path) -> None:
