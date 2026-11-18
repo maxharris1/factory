@@ -19,9 +19,10 @@ reset. An older reading never replaces a window's newer evidence, and a
 no-reading is no evidence. Once any window's evidence is newer than a limit,
 `until` moves to when every window is free, so a healthy reading of one
 window never clears another window still full, and one account's reading
-never moves another account's limit. A later limit replaces the row with
-its own reset. Nothing deletes a row, so recording and reading are
-idempotent.
+never moves another account's limit. An older binary's lane_limits row is
+the limit of its harness's default account, so that account's readings
+move it the same way. A later limit replaces the row with its own reset.
+Nothing deletes a row, so recording and reading are idempotent.
 
 Only a fixed source label and a reset time are stored, never the message
 (SPEC section 10).
@@ -279,8 +280,9 @@ def reevaluate(
     incoming: list[usage_readings.Reading],
 ) -> None:
     """Fold the incoming and stored readings into the account's per-window
-    evidence, then move its limit, when that evidence is newer, to when
-    every window is free, in the caller's transaction."""
+    evidence, then move its limit, and an older binary's lane_limits row
+    when account is its harness's default, when that evidence is newer, to
+    when every window is free, in the caller's transaction."""
     connection.execute(ACCOUNT_EVIDENCE_DDL)
     connection.executemany(
         f"""
@@ -296,8 +298,6 @@ def reevaluate(
             if r.used is not None
         ],
     )
-    if not _has_table(connection, ACCOUNT_TABLE):
-        return
     evidence = connection.execute(
         f"SELECT observed_at, free_at FROM {ACCOUNT_EVIDENCE_TABLE} WHERE account = ?",
         (account,),
@@ -308,10 +308,12 @@ def reevaluate(
     free = max(free_at for _, free_at in evidence)
     all_free = free <= newest
     until_sql = "MIN(until, ?)" if all_free else "?"
-    connection.execute(
-        f"UPDATE {ACCOUNT_TABLE} SET until = {until_sql} WHERE account = ? AND limited_at < ?",
-        (math.ceil(free), account, newest),
-    )
+    for table, owner in ((ACCOUNT_TABLE, "account"), (TABLE, usage_readings.DEFAULT_ACCOUNT_SQL)):
+        if _has_table(connection, table):
+            connection.execute(
+                f"UPDATE {table} SET until = {until_sql} WHERE {owner} = ? AND limited_at < ?",
+                (math.ceil(free), account, newest),
+            )
 
 
 def active(connection: sqlite3.Connection, recipient: str, now: float) -> LaneLimit | None:

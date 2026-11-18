@@ -26,12 +26,13 @@ from lib.job_state import REQUEUED_USAGE_LIMIT, USAGE_LIMIT, link_drop_requeues,
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.status import JobRow, SQLiteStatusReader, Status, render
 from lib.telemetry import EventLog, Scrubber, Session, stream_flags
-from lib.usage_readings import Reading, parse_get_usage, store
+from lib.usage_readings import Reading, migrate, parse_get_usage, store
 from tests.pool_helpers import ROOT
 from tests.test_hooks import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions, say, setup, ticket
 from tests.test_job_state import Poller
 from tests.test_link_drop_requeue import BACKOFF, dropped_run, poll, retries
 from tests.test_remote_start import FakeTransport
+from tests.test_usage_readings import PRE_ACCOUNT_DDL
 
 START = 1_800_000_000.0
 RESET = int(START) + 5 * 3600
@@ -640,6 +641,50 @@ def test_an_older_binarys_harness_wide_pause_still_holds_every_account(tmp_path:
     assert [_job(db, job_id)[0] for job_id in jobs] == ["queued", "queued"]
     now[0] = RESET + 1
     assert pool.claim("claude") is not None
+
+
+def _legacy_pause(tmp_path: Path, migrated: bool) -> tuple[Path, SQLiteJobQueue]:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    queue = SQLiteJobQueue(db, clock=lambda: 160.0)
+    job = queue.enqueue(JobRequest("owner/repo", "1", "build", "claude", "go", 3600), dedupe_key="j")
+    with sqlite3.connect(db) as connection:
+        connection.execute(PRE_ACCOUNT_DDL)
+        connection.execute(lane_limit.DDL)
+        connection.execute(
+            "INSERT INTO lane_limits VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("claude", "claude", "claude-bot", 100, 18100, "message", job.id),
+        )
+    if migrated:
+        migrate(db, lambda: sqlite3.connect(db), directory=tmp_path / "manual")
+    return db, queue
+
+
+def _legacy_until(db: Path, reading: Reading, account: str | None = None) -> int:
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
+              readings=[reading], account=account)
+        return connection.execute("SELECT until FROM lane_limits WHERE recipient = 'claude'").fetchone()[0]
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_a_healthy_default_account_reading_lifts_an_older_binarys_pause(tmp_path: Path, migrated: bool) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated)
+    assert queue.claim("claude") is None
+    assert _legacy_until(db, Reading("five_hour", 0.2, 18100, 150)) == 150
+    assert queue.claim("claude") is not None
+
+
+def test_another_accounts_healthy_reading_never_moves_an_older_binarys_pause(tmp_path: Path) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated=True)
+    assert _legacy_until(db, Reading("five_hour", 0.2, 18100, 150), account="claude-work") == 18100
+    assert queue.claim("claude") is None
+
+
+def test_a_full_default_account_reading_moves_an_older_binarys_pause_to_its_reset(tmp_path: Path) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated=True)
+    assert _legacy_until(db, Reading("five_hour", 1.0, 20000, 150)) == 20000
+    assert queue.claim("claude") is None
 
 
 def test_status_names_the_account_of_each_pause(tmp_path: Path) -> None:
