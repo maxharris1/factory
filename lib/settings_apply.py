@@ -19,13 +19,10 @@ not seen:
   and it does not disable a device that holds a running job (drain it first).
   That check, the backup and the replace below run inside one BEGIN IMMEDIATE
   on orch.db, the write lock every DevicePool.claim takes, and a claim reads
-  the file under it: no job lands between the check and the write. The file
-  only narrows a claim live (disable, drain, a lower slot_max); enabling or
-  raising slot_max takes effect when the process restarts on the new file
-  (fast live enable is #852). The new text is a line edit inside that
-  device's block, so comments and other devices stay byte-for-byte; both
-  texts are parsed with load_machines_yml and must differ in exactly that
-  one field.
+  the file under it: no job lands between the check and the write. The new
+  text is a line edit inside that device's block, so comments and other
+  devices stay byte-for-byte; both texts are parsed with load_machines_yml
+  and must differ in exactly that one field.
 * machines.yml is copied to `machines.yml.bak-settings-<UTC stamp>` beside
   it, then replaced atomically. The poller and then each waiter this account
   owns and has not held stopped are restarted through their service scripts

@@ -15,7 +15,7 @@ disables a device, drains it or lowers its slot_max, so a settings change
 written under the same lock (lib/settings_apply.py) stops the next claim
 even in a process that loaded the file earlier (#777). Enabling a device,
 clearing drain or raising slot_max takes effect when the process restarts
-on the new file (fast live enable is #852).
+on the new file.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
