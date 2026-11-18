@@ -132,6 +132,17 @@ class AttentionRow:
 
 
 @dataclass(frozen=True)
+class QaRunRow:
+    repo: str
+    ticket_id: str
+    runner: str
+    scope: str
+    arm: str
+    lanes: int
+    started_at: float
+
+
+@dataclass(frozen=True)
 class Status:
     observed_at: float
     queued: tuple[JobRow, ...]
@@ -155,6 +166,7 @@ class Status:
     # #130: approved tickets watched until merge, oldest approval first.
     merge_queue: tuple[TrackerRow, ...] = ()
     lane_limits: Mapping[str, str] = field(default_factory=dict)
+    qa_runs: tuple[QaRunRow, ...] = ()
 
 
 class TrackerReader(Protocol):
@@ -264,6 +276,37 @@ class SQLiteStatusReader:
                 reason=str(row["reason"]),
                 detail=str(row["detail"]) if row["detail"] is not None else None,
                 **_source(sources, row),
+            )
+            for row in rows
+        )
+
+    def qa_runs(self) -> tuple[QaRunRow, ...]:
+        connection = self._connect()
+        try:
+            if not (_has_table(connection, "qa_runs") and _has_table(connection, "qa_lanes")):
+                return ()
+            rows = connection.execute(
+                """
+                SELECT run.repo, run.ticket_id, run.runner, run.scope, run.arm, run.started_at,
+                       COUNT(DISTINCT lane.slice) AS lanes
+                FROM qa_runs AS run
+                LEFT JOIN qa_lanes AS lane
+                  ON lane.run_id = run.run_id AND lane.kind != 'base-check'
+                WHERE run.state = 'running'
+                GROUP BY run.run_id
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(
+            QaRunRow(
+                repo=str(row["repo"]),
+                ticket_id=str(row["ticket_id"]),
+                runner=str(row["runner"]),
+                scope=str(row["scope"]),
+                arm=str(row["arm"]),
+                lanes=int(row["lanes"]),
+                started_at=float(row["started_at"]),
             )
             for row in rows
         )
@@ -502,6 +545,7 @@ def build_status(
     alive: Alive | None = None,
     feeder: FeederState | None = None,
     attention: Sequence[AttentionRow] = (),
+    qa_runs: Sequence[QaRunRow] = (),
     health: Callable[[float, list[tuple[str, str]]], component_health.HealthReport]
     | None = None,
     lane_limits: Callable[[float], Mapping[str, str]] | None = None,
@@ -588,6 +632,12 @@ def build_status(
         webhook=webhook,
         feeder=feeder,
         attention=tuple(attention),
+        qa_runs=tuple(
+            sorted(
+                qa_runs,
+                key=lambda row: (row.repo.casefold(), _ticket_key(row.ticket_id), row.runner),
+            )
+        ),
         health=report,
         wakes=tuple(
             row for row in running if row.id not in placed and row.recipient == "grok"
@@ -650,6 +700,14 @@ def render(status: Status) -> str:
         lines.extend(("", f"Lanes ({len(status.lane_limits)})"))
         lines.extend(
             f"  {recipient}: {label}" for recipient, label in sorted(status.lane_limits.items())
+        )
+    if status.qa_runs:
+        lines.extend(("", f"QA runs ({len(status.qa_runs)})"))
+        lines.extend(
+            f"  {run.repo}#{run.ticket_id} {run.runner} {run.scope} lanes={run.lanes} "
+            f"{_age(status.observed_at, run.started_at)}"
+            + (" arm=shootout" if run.arm == "shootout" else "")
+            for run in status.qa_runs
         )
 
     lines.extend(("", f"Devices ({len(status.devices)})"))
@@ -825,6 +883,7 @@ def main(
                 alive=pid_alive,
                 feeder=reader.feeder(),
                 attention=reader.attention(),
+                qa_runs=reader.qa_runs(),
                 lane_limits=reader.lane_limits,
                 host=orch_host(machines),
                 health=lambda now, queued: component_health.load_report(

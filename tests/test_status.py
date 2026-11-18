@@ -9,7 +9,9 @@ from types import MappingProxyType
 import pytest
 
 from lib.cli import main as cli_main
+from lib.dispatcher import Dispatcher
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
+from lib.queue import SQLiteJobQueue
 from lib.status import (
     JobRow,
     SQLiteStatusReader,
@@ -757,3 +759,72 @@ def test_cli_routes_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert cli_main(["status", "--db", str(path), "--machines", str(LOCAL_BOX_MACHINES)]) == 0
     assert "Queue (1)" in capsys.readouterr().out
     assert "status_main" not in (ROOT / "bin" / "orch").read_text(encoding="utf-8")
+
+
+def test_status_lists_each_running_qa_run_before_devices(tmp_path: Path) -> None:
+    path = tmp_path / "orch.db"
+    Dispatcher(
+        path,
+        SQLiteJobQueue(path, clock=lambda: 0),
+        trusted_logins={"github": {"owner": {"grok-bot"}}},
+        review_actions=object(),
+        grok_delivery=object(),
+    )
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO qa_runs (run_id, repo, ticket_id, head, round, scope, runner, arm,
+                                 job_id, state, started_at)
+            VALUES (?, 'owner/repo', ?, 'h', 1, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("done", "7", "full", "claude-cloud", "primary", "j-done", "reported", 100),
+                ("waiting", "8", "full", "claude-cloud", "primary", "j-wait", "queued", 100),
+            ],
+        )
+    stdout = io.StringIO()
+    assert status_main(["--db", str(path), "--machines", str(LOCAL_BOX_MACHINES)],
+                       stdout=stdout, clock=lambda: 1000) == 0
+    assert "QA runs" not in stdout.getvalue()
+
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO qa_runs (run_id, repo, ticket_id, head, round, scope, runner, arm,
+                                 job_id, state, started_at)
+            VALUES (?, 'owner/repo', ?, 'h', 1, ?, ?, ?, ?, 'running', ?)
+            """,
+            [
+                ("main", "123", "full", "claude-cloud", "primary", "j-main", 870),
+                ("rival", "9", "targeted", "cursor-cloud", "shootout", "j-rival", 700),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO qa_lanes (lane_id, run_id, job_id, slice, kind, lane_no, scenarios,
+                                  commit_sha, base_commit, runner, state, attempt, started_at)
+            VALUES (?, ?, 'j', ?, ?, 1, '[]', 'c', 'b', 'claude-cloud', 'running', ?, 870)
+            """,
+            [
+                ("m1", "main", 1, "head", 1),
+                ("m2", "main", 2, "head", 1),
+                ("m2-retry", "main", 2, "head", 2),
+                ("m3", "main", 3, "regression", 1),
+                ("m-base", "main", 4, "base-check", 1),
+                ("r1", "rival", 1, "head", 1),
+            ],
+        )
+    stdout = io.StringIO()
+    assert status_main(["--db", str(path), "--machines", str(LOCAL_BOX_MACHINES)],
+                       stdout=stdout, clock=lambda: 1000) == 0
+
+    assert (
+        "Queue (0)\n"
+        "  empty\n"
+        "\n"
+        "QA runs (2)\n"
+        "  owner/repo#9 cursor-cloud targeted lanes=1 5m arm=shootout\n"
+        "  owner/repo#123 claude-cloud full lanes=3 2m\n"
+        "\n"
+        "Devices ("
+    ) in stdout.getvalue()
