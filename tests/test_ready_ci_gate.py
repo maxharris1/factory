@@ -601,8 +601,6 @@ def needs_attention(board) -> list[tuple[str, str]]:
 def after_a_ci_fix(
     tmp_path: Path, *, steps: int | None, log: str | None = None
 ) -> tuple[RerunBoard, PR, str]:
-    """A red ready at H, its red rerun, a finished CI fix, then the fix's ready
-    at the same H while CI there is still red on job 31."""
     board, pr = built(tmp_path)
     if log is not None:
         board.dispatcher.ci_logs = lambda repo, run_id: {

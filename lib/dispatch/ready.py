@@ -717,7 +717,6 @@ class ReadyMixin:
     def _unlogged_job_steps(
         self, repo: str, result: CIResult, logs: Mapping[str, str | None]
     ) -> dict[str, int | None]:
-        """Step counts for failed jobs no log classified, so a job that never started reads infra."""
         steps: dict[str, int | None] = {}
         if self.ci_runs is None:
             return steps
