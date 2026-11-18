@@ -11,11 +11,14 @@ from lib.dashboard_pages import tickets
 from lib.dashboard_pages.ci import ci_lane_html
 from lib.dispatch.constants import (
     BASE_UPDATE_GRACE_SECONDS,
+    CI_INFRA_BLOCKED_REASON,
+    CI_INFRA_WAIT_SECONDS,
     CI_SILENT_REASON,
     CI_SILENT_SECONDS,
 )
-from lib.dispatch.types import ci_on_base
-from tests.merge_queue_support import APPROVE, READY, sha
+from lib.dispatch.types import RunJob, ci_on_base
+from tests.merge_queue_support import APPROVE, PR, READY, sha
+from tests.test_ci_rerun import RerunBoard, built
 from tests.test_ready_after_approve import approved_on_red_ci
 from tests.test_review_before_ci import (
     board_with,
@@ -585,3 +588,106 @@ def test_ci_silent_restarts_its_clock_on_a_new_head(tmp_path: Path) -> None:
     assert ci_silent(board) == [
         ("42", f"no check run or status on {sha(2)[:12]} after 10 minutes on CI base dev")
     ]
+
+
+def needs_attention(board) -> list[tuple[str, str]]:
+    with board.queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT reason, detail FROM needs_attention WHERE reason != 'unverified-handoff'"
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def after_a_ci_fix(
+    tmp_path: Path, *, steps: int | None, log: str | None = None
+) -> tuple[RerunBoard, PR, str]:
+    board, pr = built(tmp_path)
+    if log is not None:
+        board.dispatcher.ci_logs = lambda repo, run_id: {
+            f"pytest-{job}": log for job in ("11", "21", "31")
+        }
+    board.dispatcher.ci_runs = lambda repo, run_id: (
+        RunJob("31", "pytest-31", "completed", steps=steps),
+    )
+    board.red(pr, pr.head, "11")
+    board.ready(pr, pr.head, "ready-red")
+    board.poll()
+    board.red(pr, pr.head, "21")
+    board.poll()
+    assert board.outcome("ready-red") == "queued-ci-fix"
+    fix = board.claim("claude")
+    board.red(pr, pr.head, "31")
+    ready = board.ready(pr, pr.head, "ready-after-ci-fix")
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+    return board, pr, ready
+
+
+def test_a_same_head_ready_after_a_ci_fix_on_an_infra_red_waits_then_reviews_on_green(
+    tmp_path: Path,
+) -> None:
+    board, pr, ready = after_a_ci_fix(tmp_path, steps=0)
+    board.poll()
+    jobs = [(job["action"], job["state"]) for job in board.jobs()]
+
+    assert jobs == [("build", "done"), ("fix", "done")]
+    assert needs_attention(board) == []
+    assert board.outcome(ready) is None
+    assert [(row["head"], row["reason"]) for row in ci_waits(board)] == [
+        (pr.head, "ci-infra-wait")
+    ]
+
+    comments = list(pr.comments)
+    pr.ci[pr.head] = "success"
+    board.poll()
+    board.poll()
+
+    assert [(job["action"], job["head"]) for job in board.jobs("review")] == [("review", pr.head)]
+    assert board.outcome(ready) == "queued-review"
+    assert pr.comments == comments
+    assert board.actions.notices == []
+    assert ci_waits(board) == []
+
+
+def test_an_infra_wait_past_its_limit_raises_one_flag_naming_the_cause_and_head(
+    tmp_path: Path,
+) -> None:
+    board, pr, ready = after_a_ci_fix(tmp_path, steps=0)
+    board.now[0] += CI_INFRA_WAIT_SECONDS - 60
+    board.poll()
+    assert needs_attention(board) == []
+
+    board.now[0] += 60
+    board.poll()
+    board.poll()
+    [(reason, detail)] = needs_attention(board)
+
+    assert reason == CI_INFRA_BLOCKED_REASON
+    assert pr.head in detail and "job not started" in detail
+    assert board.outcome(ready) is None
+    assert [job["action"] for job in board.jobs()] == ["build", "fix"]
+    assert [row["reason"] for row in ci_waits(board)] == ["ci-infra-wait"]
+
+    pr.ci[pr.head] = "success"
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    assert [job["head"] for job in board.jobs("review")] == [pr.head]
+    assert needs_attention(board) == []
+
+
+@pytest.mark.parametrize(
+    ("steps", "log"),
+    [(3, "test\tRun tests\t2026-11-18T10:00:00.0000000Z FAILED tests/test_x.py::test_y - assert 1\n"),
+     (None, None)],
+    ids=["code", "unknown"],
+)
+def test_a_same_head_ready_after_a_ci_fix_on_a_non_infra_red_is_dedupe_dropped_as_before(
+    tmp_path: Path, steps: int | None, log: str | None
+) -> None:
+    board, pr, ready = after_a_ci_fix(tmp_path, steps=steps, log=log)
+
+    assert board.outcome(ready) == "queued-ci-fix"
+    assert [job["action"] for job in board.jobs()] == ["build", "fix"]
+    assert [reason for reason, _ in needs_attention(board)] == ["dedupe-dropped"]
+    assert ci_waits(board) == []

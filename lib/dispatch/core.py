@@ -115,6 +115,8 @@ class DispatcherBase:
         self.ci_logs = ci_logs
         self._ci_log_reads: dict[tuple[str, str, tuple[str | None, ...]], Mapping[str, str]] = {}
         self._ci_log_failures: set[tuple[str, str, tuple[str | None, ...]]] = set()
+        self._ci_step_reads: dict[tuple[str, str, tuple[str, ...]], dict[str, int | None]] = {}
+        self._ci_step_failures: set[tuple[str, str, tuple[str, ...]]] = set()
         self.ci_rerun = ci_rerun
         self.ci_runs = ci_runs
         self.ci_job_log = ci_job_log

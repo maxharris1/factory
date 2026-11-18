@@ -98,6 +98,7 @@ class RunJob:
     completed_at: float | None = None
     runner_name: str | None = None
     runner_kind: RunnerKind | None = None
+    steps: int | None = None
 
 
 @dataclass(frozen=True)
