@@ -562,14 +562,17 @@ class MergeQueueMixin:
                     f"{head[:12]}, its update job gone: {verdict.reason}"
                 )
             return True
-        _status, count = self._record_ci_result(ticket, head, ci.status)
+        settled = self._settled_red(ticket, head, ci)
+        if settled is None:
+            return False
+        _status, count = self._record_ci_result(ticket, head, settled.status)
         if self._mark_stuck_on_third_red(ticket, source, head, count):
             return True
         self._queue_ci_fix(
             ticket,
             source,
             head,
-            ci,
+            settled,
             int(row["review_round"]),
             generation,
             dedupe_key=self._ci_fix_dedupe_key(ticket, head, generation),
