@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from tests.child_reaper import TAG
+from tests.fake_path import link_path_without
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -377,12 +378,7 @@ def test_a_failed_health_pass_still_starts_the_device_deploy(home: Path) -> None
 
 
 def test_once_starts_the_device_deploy_where_setsid_is_missing(home: Path, tmp_path: Path) -> None:
-    tools = tmp_path / "no-setsid-bin"
-    tools.mkdir()
-    for directory in (Path("/usr/bin"), Path("/bin")):
-        for tool in directory.iterdir():
-            if tool.name != "setsid" and not (tools / tool.name).exists():
-                (tools / tool.name).symlink_to(tool)
+    tools = link_path_without(tmp_path / "no-setsid-bin", ["/usr/bin", "/bin"], {"setsid"})
 
     result = _run(home, "once", PATH=str(tools))
 
