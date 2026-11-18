@@ -302,7 +302,7 @@ Only a project whose `factory.md` has `qa.enabled: true` gets QA runs. With QA a
 
 The queue has the action `qa` and the recipient `qa`, the factory's own QA worker (section 4.2.2). A `qa` job's `detail` carries `head`, `scope`, `runner`, `arm`, `scenarios` (the scenario ids to run), `live` (each of those scenarios as the plan wrote it: `id`, `criterion`, `steps`, `passes`, `pack` and `saves`), `regression` (the plan's regression-lane ids among them), `run_id` and `pr_number`. The worker reads its scenarios from `live` alone, so it reads no comment thread and repeats no trust check. Its dedupe key is `qa:<ticket scope>:<scope>:<head>:<runner>:<arm>`, and its timeout is `qa.timeout_minutes`.
 
-The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at`, `finished_at`, and Max's `/qa` ruling (section 5) in `ruling` (`right` or `wrong`), `ruled_by`, `ruled_at` and `ruling_reason`, all null until he rules. A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) is its only writer. QA adds no workflow state.
+The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at`, `finished_at`, and Max's `/qa` ruling (section 5) in `ruling` (`right` or `wrong`), `ruled_by`, `ruled_at` and `ruling_reason`, all null until he rules, and `evidence_dir`, the run's evidence folder (section 7, Recycling). A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) writes every column but `evidence_dir`, which only `lib/qa_evidence.py` sets. QA adds no workflow state.
 
 Wherever the dispatcher queues a review for a head (T2, the patch review, the merge-queue re-review, and an approver's go on a BLOCKED ticket), it also decides QA for that head, once. A head with a `qa_runs` row is never decided again, so a T6 retry or a resume at the same head queues no second run. The live scenario ids come from `lib/evidence/scenarios.py`, read over the trusted builder's `plan` and `ready` comments. The scope is decided by `decide_scope`, a pure function of facts the dispatcher gathers; the first match wins:
 
@@ -1141,7 +1141,62 @@ Any other failure while unpacking, checking or scrubbing becomes an
 `EvidenceRefused` that names only the exception type, with no chained
 exception, so lane data never reaches error text. Intake
 deletes only the staging folder it made. It does not judge whether a
-result is acceptable, delete old evidence, or serve it to people.
+result is acceptable or serve evidence to people. Recycling, below,
+deletes old evidence.
+
+**Recycling (issue #789).** `run_dir(root, repo, ticket, run_id)` is the
+one place that builds a run's folder, `<root>/<owner>/<repo>/<ticket>/<run_id>`,
+and `collect` uses it. `qa_runs.evidence_dir` holds that folder as an
+absolute path with no link in it. `record_evidence_dir(connection, run_id,
+folder)` sets it only while it is empty. A run with no folder recorded is
+never recycled.
+
+`recycle(connection, *, root, repo, now)` looks at every run of `repo` that
+has a folder and is not `queued` or `running`. It gives each run a standing:
+
+- `expired`: the ticket's workflow state is `merged`, `done` or
+  `abandoned`, and its latest move into one of them is more than 7 days old.
+- `superseded`: a newer `reported` run exists on the same ticket and arm.
+  The primary and shootout arms are kept apart.
+- `latest`: any other run.
+
+Each file in a `lane-<n>` folder has a kind, taken from its name.
+
+| Kind | Names |
+| --- | --- |
+| manifest | `manifest.json` or `result.json` at the lane root |
+| log | `*.log` or `network.json` |
+| screenshot | `*.png`, `*.jpg`, `*.jpeg`, `*.webp` |
+| video | `*.webm`, `*.mp4` |
+| trace | `*.zip`, or any other name that starts with `trace` |
+| other | anything else |
+
+A file's scenario is its top folder, read against the scenario ids in the
+lane's `result.json`. The keep table decides what stays.
+
+| Standing | Scenario result | Kept | Deleted |
+| --- | --- | --- | --- |
+| latest | `verified` | screenshot, video, manifest, other | trace, log |
+| latest | `failed`, `needs-human`, `inconclusive`, or no scenario | everything | nothing |
+| superseded | `failed` | everything | nothing |
+| superseded | anything else, or no scenario | manifest | everything else |
+| expired | any | manifest | everything else |
+
+`inconclusive` counts as failed because a gap is never a pass. Both
+`manifest.json` and `result.json` count as manifests, because the run's
+scenario results live in `result.json`.
+
+Recycling deletes by run id only, never by a path pattern. It reads the
+run's folder from `evidence_dir` and skips the run, deleting nothing,
+unless the folder is absolute, equals its own real path, sits exactly four
+levels below the real evidence root and ends in the run's id. It then
+opens each level with `O_NOFOLLOW`, walks the lanes by directory handle,
+and unlinks only regular files. A symlink is never followed or deleted.
+`recycle` returns `Recycled(deleted, skipped)`: the removed paths relative
+to the root, and a `(run_id, reason)` pair for each skipped run and each
+symlink it left in place. Nothing calls `recycle` yet. The QA worker runs
+it once per poll, with a per-repo disk budget and a free-disk floor, in
+issue #874.
 
 ### QA receipts audit
 
