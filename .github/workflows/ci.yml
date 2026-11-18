@@ -69,7 +69,9 @@ jobs:
           changed=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
           if grep -qxF \
             -e .github/workflows/ci.yml \
+            -e lib/device_monitor.py \
             -e lib/job_run.py \
+            -e lib/process_tree.py \
             -e lib/remote.py \
             -e tests/test_process_discovery.py \
             -e tests/test_remote_start.py \
@@ -96,7 +98,7 @@ jobs:
           python-version: "3.12"
           activate-environment: true
       - run: uv pip install -r requirements-dev.txt
-      - run: pytest tests/test_process_discovery.py tests/test_remote_tree.py -p no:xdist -s -rs
+      - run: pytest tests/test_process_discovery.py tests/test_remote_tree.py tests/test_remote_start.py::test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed -p no:xdist -s -rs
 
   macos-pickup:
     needs: changes

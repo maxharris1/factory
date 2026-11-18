@@ -454,3 +454,99 @@ def test_a_macos_writer_reparented_to_init_dies_before_the_retry(
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+RESPONSIBILITY_PROBE = """\
+import os, subprocess, sys, time
+role, here = sys.argv[1], sys.argv[2]
+
+def spawn_leaf():
+    subprocess.Popen([sys.executable, __file__, "leaf", here],
+        env={"PATH": os.environ.get("PATH", "")}, start_new_session=True)
+
+if role == "leaf":
+    open(os.path.join(here, "leaf.tmp"), "w").write(str(os.getpid()))
+    os.replace(os.path.join(here, "leaf.tmp"), os.path.join(here, "leaf.pid"))
+    time.sleep(60)
+elif role == "middle":
+    spawn_leaf()
+else:
+    if sys.argv[3] == "anchor":
+        subprocess.run([sys.executable, __file__, "middle", here])
+    else:
+        spawn_leaf()
+    sys.stdin.read()
+"""
+
+
+def _ppid(pid: int) -> int | None:
+    out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True)
+    return int(out.stdout) if out.stdout.strip().isdigit() else None
+
+
+def _start_probe_worker(script: Path, here: Path, mode: str, gated: bool) -> subprocess.Popen[bytes]:
+    command = [sys.executable, str(script), "worker", str(here), mode]
+    if not gated:
+        return subprocess.Popen(command, stdin=subprocess.PIPE)
+    read_end, write_end = os.pipe()
+    report_read, report_write = os.pipe()
+    worker = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-c", job_run._GATE, str(read_end), str(report_write), *command],
+        stdin=subprocess.PIPE, pass_fds=(read_end, report_write),
+    )
+    os.close(read_end)
+    os.close(report_write)
+    os.write(write_end, b"go\n")
+    os.close(write_end)
+    os.close(report_read)
+    return worker
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS responsible processes")
+@pytest.mark.parametrize(
+    ("gated", "mode"),
+    [(True, "exit"), (True, "anchor"), (False, "exit")],
+    ids=["disclaimed", "disclaimed-anchor", "undisclaimed"],
+)
+def test_responsibility_probe_a_setsid_grandchild_names_its_disclaimed_ancestor(
+    tmp_path: Path, gated: bool, mode: str
+) -> None:
+    script = tmp_path / "probe.py"
+    script.write_text(RESPONSIBILITY_PROBE)
+    leaf_file = tmp_path / "leaf.pid"
+    worker = _start_probe_worker(script, tmp_path, mode, gated)
+    leaf = None
+    try:
+        deadline = time.monotonic() + 10
+        while not leaf_file.exists():
+            assert time.monotonic() < deadline and worker.poll() is None
+            time.sleep(0.02)
+        leaf = int(leaf_file.read_text())
+        w = worker.pid
+        resp_w = process_tree._responsible_pid(w)
+        live = (process_tree._responsible_pid(leaf), _ppid(leaf))
+        assert worker.stdin is not None
+        worker.stdin.close()
+        worker.wait(timeout=10)
+        time.sleep(0.2)
+        gone = (process_tree._responsible_pid(leaf), _ppid(leaf))
+        print(
+            f"PROBE gated={gated} mode={mode} test={os.getpid()} W={w} L={leaf} "
+            f"resp(W)={resp_w} W-alive resp(L)={live[0]} ppid(L)={live[1]} "
+            f"W-gone resp(L)={gone[0]} ppid(L)={gone[1]}"
+        )
+        assert _alive(leaf)
+        if gated:
+            assert resp_w == w
+            assert live[0] == w
+        else:
+            assert live[0] != w
+    finally:
+        if leaf is not None:
+            try:
+                os.kill(leaf, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()

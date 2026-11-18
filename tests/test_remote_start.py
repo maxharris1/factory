@@ -1402,6 +1402,7 @@ if sys.argv[2] == "worker":
             env={"PATH": os.environ["PATH"]}, start_new_session=sys.argv[3] == "setsid")
         os._exit(0)
     signal.signal(signal.SIGTERM, end)
+    (here / "command.pid").write_text(str(os.getpid()))
     (here / "ready").touch()
     time.sleep(120)
 from lib.job_run import run
@@ -1410,7 +1411,8 @@ from lib.process_tree import run_tag
 def started(pid):
     tag = run_tag(pid) or ""
     unit = f"orch-run-{tag}.scope"
-    cgroup = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+    cgroup_file = Path(f"/proc/{pid}/cgroup")
+    cgroup = cgroup_file.read_text().splitlines() if cgroup_file.exists() else []
     (here / "worker.pid").write_text(str(pid))
     (here / "run.tag").write_text(tag)
     scopes = [line.rsplit("/", 1)[-1] for line in cgroup if line.startswith("0::")]
@@ -1450,8 +1452,8 @@ def fake_linger(tmp_path: Path, linger: str, *, busctl_fails: bool = False) -> s
 def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
     tmp_path: Path, leaf_session: str
 ) -> None:
-    if not systemd_scopes():
-        pytest.skip("needs Linux with a working systemd user manager")
+    if sys.platform != "darwin" and not systemd_scopes():
+        pytest.skip("Linux without a user manager")
     script = tmp_path / "unrecorded_orphan.py"
     script.write_text(UNRECORDED_ORPHAN)
     runner = subprocess.Popen(
@@ -1476,7 +1478,8 @@ def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
 
         poll_at(now, dispatcher, 0.0)
         deadline = time.monotonic() + 10
-        while not (tmp_path / "tick").exists() or pid_alive(worker, None):
+        command = int((tmp_path / "command.pid").read_text())
+        while not (tmp_path / "tick").exists() or pid_alive(command, None):
             assert time.monotonic() < deadline, "the worker did not hand off to its leaf"
             time.sleep(0.02)
         leaf = int((tmp_path / "leaf.pid").read_text())
