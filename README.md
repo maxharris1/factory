@@ -784,6 +784,14 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   `~/.config/factory/linear-webhook.port` (this device's setting), else 8787.
   `LINEAR_WEBHOOK_TUNNEL_HOST` defaults to `pc-wsl-cursor-bot`; an empty host
   runs no tunnel. The Funnel on the tunnel host must point at the same port.
+- The tunnel host may be this machine, as on the PC. The script reads the
+  host's `hostname` from `ssh -G`, resolves it with `getent ahosts`, and
+  checks each address. A loopback address, or one of this machine's own
+  addresses from `ip -o addr`, means the host is this machine. Then `start`,
+  `restart` and `ensure` run the listener only. `status` prints
+  `tunnel: not needed (HOST is this host)` and exits 0 while the listener
+  runs. Any `linear-webhook-tunnel.held` record is removed. If a check
+  fails, the script runs the tunnel as before.
 
 Each loop is a singleton per state directory: it holds an exclusive `flock`
 on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its

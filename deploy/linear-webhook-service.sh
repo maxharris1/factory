@@ -2,7 +2,9 @@
 # Keep the Linear webhook listener (`orch linear-webhook serve`, README
 # "Linear webhook") and its reverse SSH tunnel up on a host without a systemd
 # user session. deploy/install.sh installs this script to
-# ~/.local/share/factory/linear-webhook-service.sh.
+# ~/.local/share/factory/linear-webhook-service.sh. When the tunnel host is
+# this machine (see LINEAR_WEBHOOK_TUNNEL_HOST below) only the listener runs,
+# and status says the tunnel is "not needed".
 #
 #   linear-webhook-service.sh start              start both loops unless running;
 #                                                clears a stop and a held port
@@ -109,7 +111,10 @@
 #   LINEAR_WEBHOOK_HELD_RETRY_SEC whole seconds between a held tunnel's
 #                                reclaim and probe runs (default 300)
 #   LINEAR_WEBHOOK_TUNNEL_HOST   ssh alias for the tunnel (default
-#                                pc-wsl-cursor-bot; empty runs no tunnel)
+#                                pc-wsl-cursor-bot; empty runs no tunnel, and
+#                                so does a host whose `ssh -G` hostname
+#                                resolves to a loopback or own address, which
+#                                also removes the held record)
 #   LINEAR_WEBHOOK_RETRY_SEC, LINEAR_WEBHOOK_RETRY_MAX_SEC   backoff (above)
 #   ORCH_STATE_DIR               state directory (default ~/.local/state/factory)
 #   ORCH_DB                      default: the state directory's orch.db
@@ -182,9 +187,38 @@ lock_file() { printf '%s/linear-webhook-%s.lock' "$STATE" "$1"; }
 pid_file() { printf '%s/linear-webhook-%s.pid' "$STATE" "$1"; }
 log_file() { printf '%s/linear-webhook-%s.log' "$STATE" "$1"; }
 
+tunnel_target() {
+    local name addresses own address
+    if [[ -z "$TUNNEL_HOST" ]]; then
+        echo none
+        return 0
+    fi
+    name="$(ssh -G "$TUNNEL_HOST" </dev/null 2>/dev/null | awk '$1 == "hostname" && !seen++ { print $2 }')" || name=""
+    if [[ -z "$name" ]]; then
+        echo remote
+        return 0
+    fi
+    addresses="$(getent ahosts "$name" 2>/dev/null | awk '{ print $1 }' | sort -u)" || addresses=""
+    own="$(ip -o addr show 2>/dev/null | awk '{ sub("/.*", "", $4); print $4 }')" || own=""
+    for address in $addresses; do
+        if [[ "$address" == 127.* || "$address" == ::1 ]] || grep -qxF -- "$address" <<<"$own"; then
+            echo local
+            return 0
+        fi
+    done
+    echo remote
+}
+
+tunnel_not_needed_why() {
+    case "$1" in
+        none) echo "no tunnel host" ;;
+        local) echo "${TUNNEL_HOST} is this host" ;;
+    esac
+}
+
 modes() {
     echo listener
-    [[ -z "$TUNNEL_HOST" ]] || echo tunnel
+    [[ "$1" != remote ]] || echo tunnel
 }
 
 need_flock() {
@@ -435,11 +469,13 @@ held_wait() {
 }
 
 tunnel_loop() {
-    local delay="$RETRY" started errors refused=0
-    [[ -n "$TUNNEL_HOST" ]] || {
-        say "LINEAR_WEBHOOK_TUNNEL_HOST is empty; no tunnel" >&2
-        exit 1
-    }
+    local delay="$RETRY" started errors refused=0 target
+    target="$(tunnel_target)"
+    if [[ "$target" != remote ]]; then
+        rm -f "$HELD"
+        say "$(tunnel_not_needed_why "$target"); no tunnel"
+        exit 0
+    fi
     become_loop tunnel
     errors="${STATE}/linear-webhook-tunnel.stderr"
     load_tunnel_id
@@ -521,9 +557,11 @@ launch_one() {
 }
 
 launch() {
-    local mode status=0
+    local mode status=0 target
     mkdir -p "$STATE"
-    for mode in $(modes); do
+    target="$(tunnel_target)"
+    [[ "$target" == remote ]] || rm -f "$HELD"
+    for mode in $(modes "$target"); do
         launch_one "$mode" "${1:-}" || status=1
     done
     return "$status"
@@ -778,8 +816,9 @@ restart() {
 }
 
 status() {
-    local mode pid status=0
-    for mode in $(modes); do
+    local mode pid status=0 target
+    target="$(tunnel_target)"
+    for mode in $(modes "$target"); do
         pid="$(head -n 1 "$(pid_file "$mode")" 2>/dev/null || true)"
         if lock_held "$mode"; then
             echo "${mode}: running (lock held; pidfile names ${pid:-nothing})"
@@ -792,6 +831,7 @@ status() {
             status=3
         fi
     done
+    [[ "$target" == remote ]] || echo "tunnel: not needed ($(tunnel_not_needed_why "$target"))"
     [[ ! -e "$STOPPED" ]] || echo "held stopped by ${STOPPED}; run start to clear"
     return "$status"
 }

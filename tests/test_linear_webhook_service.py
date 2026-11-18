@@ -44,6 +44,10 @@ time.sleep(300)
 # on $HOME/remote-forward.lock; its holder's pid is in $HOME/forward-owner.
 FAKE_SSH = """#!/usr/bin/env python3
 import fcntl, os, subprocess, sys, time
+if "-G" in sys.argv:
+    print("hostname " + (os.environ.get("FAKE_SSH_G_HOSTNAME") or sys.argv[-1]))
+    print("port 22")
+    raise SystemExit(0)
 os.closerange(3, 1024)
 home = os.environ["HOME"]
 tunnel = "-R" in sys.argv and sys.argv[-1] != "true"
@@ -961,6 +965,96 @@ def test_the_held_record_lands_where_health_reads_it_under_an_orch_db_override(
     assert health.read_tunnel_held(db) == f"{_port_of(home)} on test-host"
     assert _service(home, "start", **settings).returncode == 0
     _wait_for(lambda: len(_calls(home, "ssh")) > 1, timeout=20, what="ssh after start")
+
+
+def _own_address() -> str | None:
+    try:
+        shown = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True, text=True,
+                               check=False).stdout
+    except FileNotFoundError:
+        return None
+    for line in shown.splitlines():
+        fields = line.split()
+        if len(fields) > 3 and fields[1] != "lo" and fields[2] == "inet":
+            return fields[3].partition("/")[0]
+    return None
+
+
+def _same_host(target: str) -> dict[str, str]:
+    hostname = "127.0.0.1" if target == "loopback" else _own_address()
+    if hostname is None:
+        pytest.skip("this host has no non-loopback IPv4 address")
+    return {"FAKE_SSH_G_HOSTNAME": hostname}
+
+
+@pytest.mark.parametrize("target", ["loopback", "own address"])
+def test_a_tunnel_host_that_is_this_host_runs_the_listener_only(home: Path, target: str) -> None:
+    same = _same_host(target)
+    for command in ["ensure", "stop", "start", "restart"]:
+        served = len(_calls(home, "orch"))
+        result = _service(home, command, **same)
+        assert result.returncode == 0, command + result.stdout + result.stderr
+        if command == "stop":
+            continue
+        _wait_for(lambda: len(_calls(home, "orch")) == served + 1, what=f"serve after {command}")
+        time.sleep(0.5)
+        assert _calls(home, "ssh") == [], command
+        assert _loops(home, "_tunnel-loop") == [], command
+
+    status = _service(home, "status", **same)
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "listener: running" in status.stdout
+    assert "tunnel: not needed (test-host is this host)" in status.stdout
+
+
+@pytest.mark.parametrize("command", ["start", "ensure"])
+def test_a_same_host_tunnel_removes_a_stale_held_record_beside_orch_db(
+    home: Path, tmp_path: Path, command: str,
+) -> None:
+    db = tmp_path / "database" / "orch.db"
+    db.parent.mkdir()
+    (db.parent / "linear-webhook-tunnel.held").write_text(f"{_port_of(home)} test-host\n")
+    assert health.read_tunnel_held(db) is not None
+
+    result = _service(home, command, ORCH_DB=str(db), FAKE_SSH_FORWARD_FAIL="1",
+                      **_same_host("loopback"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert health.read_tunnel_held(db) is None
+
+
+def test_an_empty_tunnel_host_reports_the_tunnel_not_needed(home: Path) -> None:
+    assert _service(home, "ensure", LINEAR_WEBHOOK_TUNNEL_HOST="").returncode == 0
+
+    status = _service(home, "status", LINEAR_WEBHOOK_TUNNEL_HOST="")
+
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "listener: running" in status.stdout
+    assert "tunnel: not needed (no tunnel host)" in status.stdout
+
+
+def test_a_tunnel_host_elsewhere_still_runs_the_tunnel(home: Path) -> None:
+    elsewhere = {"FAKE_SSH_G_HOSTNAME": "192.0.2.1"}
+    assert _service(home, "ensure", **elsewhere).returncode == 0
+    _wait_for(lambda: _calls(home, "ssh"), what="the tunnel's ssh")
+    port = _port_of(home)
+    assert f"-R 127.0.0.1:{port}:127.0.0.1:{port} test-host" in _calls(home, "ssh")[0]
+    status = _service(home, "status", **elsewhere)
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "tunnel: running" in status.stdout
+
+
+def test_a_tunnel_loop_for_this_host_drops_the_held_record_and_exits(home: Path) -> None:
+    held = _state(home) / "linear-webhook-tunnel.held"
+    held.parent.mkdir(parents=True)
+    held.write_text(f"{_port_of(home)} test-host\n")
+
+    result = _service(home, "_tunnel-loop", **_same_host("loopback"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test-host is this host; no tunnel" in result.stdout
+    assert not held.exists()
+    assert _calls(home, "ssh") == []
 
 
 HELD_RETRY = 1
