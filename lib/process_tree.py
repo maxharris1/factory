@@ -22,7 +22,6 @@ from lib.job_state import KILL_GRACE_SECONDS
 
 # #199 r1: every process of a local run carries this tag in its environment.
 RUN_TAG_ENV = "ORCH_RUN_TAG"
-# How long contain waits on loginctl, on busctl, and for the pid to enter its scope.
 CONTAIN_SECONDS = 2.0
 
 Log = Callable[[str], None]

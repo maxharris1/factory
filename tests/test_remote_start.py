@@ -1435,7 +1435,6 @@ def systemd_scopes() -> bool:
 
 
 def fake_linger(tmp_path: Path, linger: str, *, busctl_fails: bool = False) -> str:
-    """A PATH whose `loginctl` reports Linger as `linger` (and whose busctl fails, if asked)."""
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
     fakes = {"loginctl": f"#!/bin/sh\necho {linger}\n"}

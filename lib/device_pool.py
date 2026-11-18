@@ -104,7 +104,6 @@ _SLOT_COLUMNS = (
     # #722: the RUN_TAG_ENV value every process of a box job's run carries
     # (lib/process_tree.py), so a lost run is found after its parents exit.
     ("run_tag", "TEXT"),
-    # #817: the systemd user scope every process of a box job's run is in.
     ("run_scope", "TEXT"),
 )
 

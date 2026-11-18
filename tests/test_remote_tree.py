@@ -295,10 +295,6 @@ RECORDED_SESSION = 456789
 
 
 class SyntheticDevice:
-    """A Linux device replayed from a synthetic /proc: only the processes a
-    test shows exist, and no environment carries the tag. The job directory
-    holds a start record from this boot naming RECORDED_SESSION."""
-
     def __init__(self, tmp_path: Path):
         self.proc = tmp_path / "proc"
         (self.proc / "sys/kernel/random").mkdir(parents=True)
