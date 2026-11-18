@@ -1656,3 +1656,78 @@ def test_linear_settled_ticket_shows_merged_done_abandoned(tmp_path: Path) -> No
     assert {tile["ticket"]["ticket_id"] for tile in found["shelf"]["tiles"]} == {"AUT-1", "AUT-2"}
     [stopped] = [col for col in found["columns"] if col["phase"] == "Stop"]
     assert [card["ticket"]["ticket_id"] for card in stopped["cards"]] == ["AUT-3"]
+
+
+def _wait_rows(tmp_path: Path) -> dict[str, dict]:
+    db, log = seeded(tmp_path)
+    repo = "maxharris1/factory"
+    with sqlite3.connect(db) as connection:
+        for ticket_id, state in (
+            ("1", "awaiting-ok"), ("2", "waiting-max"), ("3", "waiting-max"),
+            ("4", "waiting-max"), ("5", "waiting-max"), ("6", "capped"), ("7", "blocked"),
+            ("8", "waiting-external"), ("9", "building"),
+        ):
+            add_ticket(connection, repo, ticket_id, state=state)
+        add_ticket(connection, repo, "10", state="building", stuck=1, stuck_reason="job-failed-2")
+        connection.executemany(
+            "UPDATE ticket_state SET paused_question_id = ? WHERE repo = ? AND ticket_id = ?",
+            [(f"60{n}", repo, str(n)) for n in (2, 3, 4, 5, 6)],
+        )
+        connection.execute(
+            "UPDATE ticket_state SET stuck_source_comment_id = '6010' "
+            "WHERE repo = ? AND ticket_id = '10'",
+            (repo,),
+        )
+        connection.execute(
+            "INSERT INTO plan_events (repo, ticket_id, comment_id, outcome) VALUES (?, '2', '602', ?)",
+            (repo, "waiting-max-size"),
+        )
+        connection.executemany(
+            "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, ?)",
+            [(repo, "3", "603", "waiting-max-repeat"), (repo, "4", "604", "waiting-max-unsat"),
+             (repo, "5", "605", "queued-fix")],
+        )
+        connection.execute(
+            "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, "
+            "held_at) VALUES (?, '1', ?, 'maxharris1', 'label', '601', ?)",
+            (repo, "a" * 40, NOW - 60),
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    return {
+        "tickets": {row["ticket_id"]: row for row in snapshot["tickets"] if row["repo"] == repo},
+        "attention": {
+            row["ticket_id"]: row for row in snapshot["attention"]["items"] if row.get("repo") == repo
+        },
+    }
+
+
+def test_each_waiting_ticket_says_why_it_waits_and_which_actions_apply(tmp_path: Path) -> None:
+    rows = _wait_rows(tmp_path)
+    found = {
+        ticket_id: (row["wait"] and (row["wait"]["why"], row["wait"]["comment_id"]), row["actions"])
+        for ticket_id, row in rows["tickets"].items()
+    }
+    assert found == {
+        "1": (("awaiting-ok", "601"), ["ok", "close"]),
+        "2": (("plan-size", "602"), ["approve-plan", "split", "close"]),
+        "3": (("repeat-stop", "603"), ["another-round", "close"]),
+        "4": (("unsat", "604"), ["another-round", "close"]),
+        "5": (("question", "605"), ["answer", "close"]),
+        "6": (("capped", "606"), ["another-round", "close"]),
+        "7": (("blocked", None), ["resume", "close"]),
+        "8": (("waiting-external", None), ["close"]),
+        "9": (None, []),
+        "10": (("stuck", "6010"), ["retry", "close"]),
+    }
+    assert rows["tickets"]["10"]["wait"]["detail"] == "job-failed-2"
+
+
+def test_attention_items_carry_the_ticket_wait_and_actions(tmp_path: Path) -> None:
+    rows = _wait_rows(tmp_path)
+    attention = rows["attention"]
+    assert set(attention) == {"1", "2", "3", "4", "5", "6", "7", "8", "10"}
+    for ticket_id, item in attention.items():
+        ticket = rows["tickets"][ticket_id]
+        assert (item["state"], item["wait"], item["actions"]) == (
+            ticket["state"], ticket["wait"], ticket["actions"]
+        )
