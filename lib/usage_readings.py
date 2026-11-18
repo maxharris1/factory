@@ -470,7 +470,7 @@ def store(
         else:
             connection.execute(_UPSERT, row)
         connection.execute(statements.mark, (_omissions(newest), *scope))
-    lane_limit.reevaluate(connection, harness, bot, readings)
+    lane_limit.reevaluate(connection, account, readings)
 
 
 def _omissions(newest: list[tuple[float, int]]) -> int:

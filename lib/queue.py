@@ -847,11 +847,16 @@ def plan_round(detail: str | None) -> int:
 
 
 def claim_order(
-    connection: sqlite3.Connection, recipient: str, *, now: float
+    connection: sqlite3.Connection,
+    recipient: str,
+    *,
+    now: float,
+    serving: frozenset[str] | None = None,
 ) -> list[sqlite3.Row]:
     """Queued jobs for recipient in claim order (see the module doc); none
-    while recipient's lane is at its usage limit (#367)."""
-    if lane_limit.active(connection, recipient, now) is not None:
+    while recipient's lane is paused by usage limits (#367): every account
+    in `serving` is limited, or, with serving unknown (None), any is (#772)."""
+    if lane_limit.recipient_paused(connection, recipient, now, serving) is not None:
         return []
     abandoned = (
         """

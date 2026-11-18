@@ -1,19 +1,27 @@
-"""A harness account's usage limit pauses its recipient's lane (#367).
+"""A usage account's limit pauses that account, and its recipient's lane
+once every account serving it is paused (#367, #772).
 
 When a run's stream reports the account's usage limit, telemetry records
-the lane as limited until the reset. claim_order (lib/queue.py) claims
-nothing for that recipient while the limit is active, on every device,
-because every claim reads the box's orch.db. T6 requeues the dead job as
-itself with nothing charged.
+the account as limited until the reset (lane_account_limits). Placement
+(lib/device_pool.py) skips each device whose account for the harness is
+limited, so another account of that harness keeps taking jobs. A
+recipient's lane is paused (`recipient_paused`) while an older binary's
+harness-wide lane_limits row holds, or while every account serving it is
+limited; claim_order (lib/queue.py) claims nothing then, on every device,
+because every claim reads the box's orch.db. Without the accounts serving
+it (no machines.yml), any account limit pauses the lane. T6 requeues the
+dead job as itself with nothing charged.
 
 A limit lifts at `until`. Storing readings (usage_readings.store) keeps
 the account's evidence per window: the newest reading of that window on any
-device, free at its observation when it shows room, else at its own reset.
-An older reading never replaces a window's newer evidence, and a no-reading
-is no evidence. Once any window's evidence is newer than a limit, `until`
-moves to when every window is free, so a healthy reading of one window never
-clears another window still full. A later limit replaces the row with its
-own reset. Nothing deletes a row, so recording and reading are idempotent.
+of its devices, free at its observation when it shows room, else at its own
+reset. An older reading never replaces a window's newer evidence, and a
+no-reading is no evidence. Once any window's evidence is newer than a limit,
+`until` moves to when every window is free, so a healthy reading of one
+window never clears another window still full, and one account's reading
+never moves another account's limit. A later limit replaces the row with
+its own reset. Nothing deletes a row, so recording and reading are
+idempotent.
 
 Only a fixed source label and a reset time are stored, never the message
 (SPEC section 10).
@@ -24,6 +32,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -219,15 +228,15 @@ def _valid(found: list[usage_readings.Reading]) -> list[usage_readings.Reading]:
     return [r for r in checked if r is not None]
 
 
-def readings(connection: sqlite3.Connection, harness: str, bot: str) -> list[usage_readings.Reading]:
+def readings(connection: sqlite3.Connection, account: str) -> list[usage_readings.Reading]:
     if not _has_table(connection, usage_readings.TABLE):
         return []
     rows = connection.execute(
         f"""
         SELECT window, used, resets_at, observed_at FROM {usage_readings.TABLE}
-        WHERE harness = ? AND bot = ?
+        WHERE {usage_readings.account_sql(connection)} = ?
         """,
-        (harness, bot),
+        (account,),
     ).fetchall()
     return _valid([usage_readings.Reading(*row) for row in rows])
 
@@ -238,61 +247,60 @@ def record(
     job_id: str,
     harness: str,
     bot: str,
+    account: str,
     limit: UsageLimit,
     now: float,
 ) -> LaneLimit | None:
-    """Mark job_id's recipient lane limited in the caller's transaction,
-    keeping the later `until` while an earlier limit still holds. None when
-    the job row is missing."""
+    """Mark account limited in the caller's transaction, keeping the later
+    `until` while an earlier limit still holds. None when the job row is
+    missing."""
     job = connection.execute("SELECT recipient FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if job is None:
         return None
-    recipient = str(job[0])
-    reset, source = until(limit, readings(connection, harness, bot), now)
-    held = active(connection, recipient, now)
+    reset, source = until(limit, readings(connection, account), now)
+    held = account_limits(connection, now).get(account)
     if held is not None and held.until > reset:
         reset, source = held.until, held.source
-    connection.execute(DDL)
+    connection.execute(ACCOUNT_DDL)
     connection.execute(
         f"""
-        INSERT OR REPLACE INTO {TABLE}
-            (recipient, harness, bot, limited_at, until, source, job_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO {ACCOUNT_TABLE}
+            (account, harness, bot, recipient, limited_at, until, source, job_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (recipient, harness, bot, now, reset, source, job_id),
+        (account, harness, bot, str(job[0]), now, reset, source, job_id),
     )
-    return active(connection, recipient, now)
+    return account_limits(connection, now).get(account)
 
 
 def reevaluate(
     connection: sqlite3.Connection,
-    harness: str,
-    bot: str,
+    account: str,
     incoming: list[usage_readings.Reading],
 ) -> None:
     """Fold the incoming and stored readings into the account's per-window
-    evidence, then move each of its limits that has newer evidence to when
+    evidence, then move its limit, when that evidence is newer, to when
     every window is free, in the caller's transaction."""
-    connection.execute(EVIDENCE_DDL)
+    connection.execute(ACCOUNT_EVIDENCE_DDL)
     connection.executemany(
         f"""
-        INSERT INTO {EVIDENCE_TABLE} (harness, bot, window, observed_at, free_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (harness, bot, window) DO UPDATE SET
+        INSERT INTO {ACCOUNT_EVIDENCE_TABLE} (account, window, observed_at, free_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (account, window) DO UPDATE SET
             observed_at = excluded.observed_at, free_at = excluded.free_at
-        WHERE excluded.observed_at > {EVIDENCE_TABLE}.observed_at
+        WHERE excluded.observed_at > {ACCOUNT_EVIDENCE_TABLE}.observed_at
         """,
         [
-            (harness, bot, r.window, r.observed_at, r.observed_at if r.used < 1.0 else r.resets_at)
-            for r in [*_valid(incoming), *readings(connection, harness, bot)]
+            (account, r.window, r.observed_at, r.observed_at if r.used < 1.0 else r.resets_at)
+            for r in [*_valid(incoming), *readings(connection, account)]
             if r.used is not None
         ],
     )
-    if not _has_table(connection, TABLE):
+    if not _has_table(connection, ACCOUNT_TABLE):
         return
     evidence = connection.execute(
-        f"SELECT observed_at, free_at FROM {EVIDENCE_TABLE} WHERE harness = ? AND bot = ?",
-        (harness, bot),
+        f"SELECT observed_at, free_at FROM {ACCOUNT_EVIDENCE_TABLE} WHERE account = ?",
+        (account,),
     ).fetchall()
     if not evidence:
         return
@@ -301,8 +309,8 @@ def reevaluate(
     all_free = free <= newest
     until_sql = "MIN(until, ?)" if all_free else "?"
     connection.execute(
-        f"UPDATE {TABLE} SET until = {until_sql} WHERE harness = ? AND bot = ? AND limited_at < ?",
-        (math.ceil(free), harness, bot, newest),
+        f"UPDATE {ACCOUNT_TABLE} SET until = {until_sql} WHERE account = ? AND limited_at < ?",
+        (math.ceil(free), account, newest),
     )
 
 
@@ -348,12 +356,60 @@ def account_limits(connection: sqlite3.Connection, now: float) -> dict[str, Lane
     }
 
 
-def paused_through(connection: sqlite3.Connection, now: float) -> dict[str, float]:
-    """Time up to each recipient's value is lane-limit waiting, never lag."""
-    if not _has_table(connection, TABLE):
-        return {}
-    rows = connection.execute(f"SELECT recipient, until FROM {TABLE}").fetchall()
-    return {str(recipient): min(float(until), now) for recipient, until in rows}
+def recipient_paused(
+    connection: sqlite3.Connection, recipient: str, now: float, serving: frozenset[str] | None
+) -> LaneLimit | None:
+    """The limit that pauses recipient's whole lane now, or None.
+
+    An older binary's harness-wide row pauses it. So does a limit on every
+    account in `serving` (the accounts on devices that take new work), until
+    the first of them lifts. `serving` None means they are not known (no
+    machines.yml): then any account limit for the recipient pauses its lane
+    until the last one lifts. An empty `serving` pauses nothing by account."""
+    legacy = active(connection, recipient, now)
+    if legacy is not None:
+        return legacy
+    limits = account_limits(connection, now)
+    if serving is None:
+        held = [limit for limit in limits.values() if limit.recipient == recipient]
+        return max(held, key=lambda limit: limit.until, default=None)
+    if serving and serving <= limits.keys():
+        return min((limits[account] for account in serving), key=lambda limit: limit.until)
+    return None
+
+
+def paused_through(
+    connection: sqlite3.Connection, now: float, serving: Mapping[str, frozenset[str]]
+) -> dict[str, float]:
+    """Time up to each recipient's value is lane-limit waiting, never lag:
+    the end, at most now, of its latest whole-lane pause, as
+    `recipient_paused` decides it. A recipient missing from `serving` has
+    its serving accounts unknown."""
+    through: dict[str, float] = {}
+    if _has_table(connection, TABLE):
+        for recipient, until in connection.execute(f"SELECT recipient, until FROM {TABLE}"):
+            through[str(recipient)] = min(float(until), now)
+    if not _has_table(connection, ACCOUNT_TABLE):
+        return through
+    spans = {
+        str(account): (str(recipient), float(limited_at), float(until))
+        for account, recipient, limited_at, until in connection.execute(
+            f"SELECT account, recipient, limited_at, until FROM {ACCOUNT_TABLE}"
+        )
+    }
+    for recipient in {span[0] for span in spans.values()} | serving.keys():
+        accounts = serving.get(recipient)
+        if accounts is None:
+            ends = [until for owner, _, until in spans.values() if owner == recipient]
+        elif accounts and accounts <= spans.keys():
+            start = max(spans[account][1] for account in accounts)
+            end = min(spans[account][2] for account in accounts)
+            ends = [end] if start < end else []
+        else:
+            ends = []
+        if ends:
+            through[recipient] = max(through.get(recipient, 0.0), min(max(ends), now))
+    return through
 
 
 def label(limit: LaneLimit) -> str:

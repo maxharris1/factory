@@ -69,6 +69,7 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
+from lib import lane_limit
 from lib.config_overlay import overlay_path
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.device_sync import blocked as sync_blocked
@@ -336,6 +337,10 @@ class DevicePool:
             for d in self.config.devices
         ))
 
+    def serving(self, harness: str) -> frozenset[str]:
+        """The accounts of harness on devices placement may use (#772)."""
+        return self._narrowed_by_file().serving(harness)
+
     def claim(
         self,
         harness: str,
@@ -362,17 +367,17 @@ class DevicePool:
                 WHERE job_id IN (SELECT id FROM jobs WHERE state = 'queued')
                 """
             )
-            device = choose_device(
-                config, harness, _used(connection, config),
-                placement_blocked(connection, now),
-            )
+            blocked = placement_blocked(connection, now, config)
+            device = choose_device(config, harness, _used(connection, config), blocked)
             if device is None:
                 connection.commit()
                 return None
             row = next(
                 (
                     item
-                    for item in claim_order(connection, harness, now=now)
+                    for item in claim_order(
+                        connection, harness, now=now, serving=config.serving(harness)
+                    )
                     if str(item["id"]) not in excluded
                 ),
                 None,
@@ -383,11 +388,7 @@ class DevicePool:
             dropped = _lost_on(connection, str(row["id"]))
             if dropped == device.name:
                 device = choose_device(
-                    config,
-                    harness,
-                    _used(connection, config),
-                    placement_blocked(connection, now),
-                    avoid={dropped},
+                    config, harness, _used(connection, config), blocked, avoid={dropped}
                 )
                 assert device is not None
             changed = connection.execute(
@@ -964,23 +965,33 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
     connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
 
 
-def placement_blocked(connection: sqlite3.Connection, now: float) -> Blocked:
-    """Where a claim must not go now: device_sync's blocks plus every backed-off device."""
+def placement_blocked(
+    connection: sqlite3.Connection, now: float, config: MachinesConfig | None
+) -> Blocked:
+    """Where a claim must not go now: device_sync's blocks, every backed-off
+    device, and each device's harness whose account is usage-limited (#772)."""
     blocked = sync_blocked(connection)
-    if not _has_table(connection, BACKOFF_TABLE):
-        return blocked
-    backed_off = {
-        str(row[0])
-        for row in connection.execute(
-            f"SELECT device FROM {BACKOFF_TABLE} WHERE until > ?", (now,)
-        )
+    limited = lane_limit.account_limits(connection, now)
+    pairs = {
+        (device.name, harness)
+        for device in (config.devices if config is not None else ())
+        for harness in device.harnesses
+        if device.account_for(harness) in limited
     }
-    return replace(blocked, devices=blocked.devices | backed_off)
+    backed_off: set[str] = set()
+    if _has_table(connection, BACKOFF_TABLE):
+        backed_off = {
+            str(row[0])
+            for row in connection.execute(
+                f"SELECT device FROM {BACKOFF_TABLE} WHERE until > ?", (now,)
+            )
+        }
+    return replace(blocked, pairs=blocked.pairs | pairs, devices=blocked.devices | backed_off)
 
 
-def placement_blocks(queue: SQLiteJobQueue) -> Blocked:
+def placement_blocks(queue: SQLiteJobQueue, config: MachinesConfig | None) -> Blocked:
     with queue.connect() as connection:
-        return placement_blocked(connection, queue.now())
+        return placement_blocked(connection, queue.now(), config)
 
 
 def backed_off_through(queue: SQLiteJobQueue, config: MachinesConfig) -> dict[str, float]:

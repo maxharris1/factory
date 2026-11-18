@@ -29,6 +29,8 @@ from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import DEFAULT_ORCH_HOST, MachinesConfig, load_machines_yml, orch_host
 from lib.orch_yml import load_orch_yml
 from lib.pr_title import label, read_sources
+from lib.queue import RECIPIENTS
+from lib.schema import HARNESSES
 from lib.worktrees import pid_alive
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -181,8 +183,9 @@ class JobReader(Protocol):
 class SQLiteStatusReader:
     """Read the existing dispatcher database without initializing or mutating it."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, serving: Mapping[str, frozenset[str]] | None = None):
         self.path = path
+        self.serving = serving or {}
         self._snapshot: (
             tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, str]] | None
         ) = None
@@ -210,15 +213,26 @@ class SQLiteStatusReader:
         return counts
 
     def lane_limits(self, now: float) -> dict[str, str]:
-        """#367: recipient -> `usage limit until <time>` for each paused lane."""
+        """#367: `usage limit until <time>` for each paused lane, keyed by
+        recipient, and for each limited account, keyed `recipient (account)`
+        (#772). A lane pauses as lane_limit.recipient_paused decides, with
+        the serving accounts this reader was given."""
         connection = self._connect()
         try:
-            return {
-                limit.recipient: lane_limit.label(limit)
-                for limit in lane_limit.all_active(connection, now)
-            }
+            paused = [
+                lane_limit.recipient_paused(connection, recipient, now, self.serving.get(recipient))
+                for recipient in RECIPIENTS
+            ]
+            accounts = lane_limit.account_limits(connection, now)
         finally:
             connection.close()
+        return {
+            **{limit.recipient: lane_limit.label(limit) for limit in paused if limit is not None},
+            **{
+                f"{limit.recipient} ({account})": lane_limit.label(limit)
+                for account, limit in accounts.items()
+            },
+        }
 
     def feeder(self) -> FeederState | None:
         """The feeder's last poll, or None when no feeder has run here."""
@@ -870,7 +884,9 @@ def main(
                 "using the default job_states",
                 file=sys.stderr,
             )
-    reader = SQLiteStatusReader(path)
+    reader = SQLiteStatusReader(
+        path, serving={harness: machines.serving(harness) for harness in HARNESSES}
+    )
     try:
         report = render(
             build_status(

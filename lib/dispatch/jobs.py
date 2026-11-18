@@ -88,6 +88,7 @@ from lib.queue import (
     PRE_READY_FAILED,
     PRE_READY_PASSED,
     QA_RECIPIENT,
+    RECIPIENTS,
     SLOTS_TABLE,
     Job,
     JobRequest,
@@ -161,13 +162,22 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
-        blocked = placement_blocks(self.queue)
+        blocked = placement_blocks(self.queue, config)
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
             and free_slots(config, harness, used, blocked) == 0
         )
+
+    def _serving(self) -> dict[str, frozenset[str]]:
+        """#772: each harness's accounts the pool may place on, from the
+        pool's own view of machines.yml; empty with no pool, so no
+        recipient's serving accounts are known."""
+        pool = getattr(self.devices, "pool", None)
+        if pool is None:
+            return {}
+        return {harness: pool.serving(harness) for harness in HARNESSES}
 
     def _backed_off_through(self) -> dict[str, float]:
         config = getattr(self.devices, "config", None)
@@ -238,9 +248,14 @@ class JobsMixin:
         now = self.queue.now()
         busy = self._busy_recipients()
         lag_blocked = self._lag_blocked_recipients()
+        serving = self._serving()
         with self._connect() as connection:
-            limited = {limit.recipient for limit in lane_limit.all_active(connection, now)}
-            paused = lane_limit.paused_through(connection, now)
+            limited = {
+                recipient
+                for recipient in RECIPIENTS
+                if lane_limit.recipient_paused(connection, recipient, now, serving.get(recipient))
+            }
+            paused = lane_limit.paused_through(connection, now, serving)
         backed_off = self._backed_off_through()
         for job in self.queue.outstanding():
             if job.state == "queued" and job.request.recipient in limited:
@@ -869,9 +884,10 @@ class JobsMixin:
         after a backoff, and sticks the ticket device-lagging if it still lags
         past the wait. True when T6 handled the job."""
         now = self.queue.now()
+        serving = self._serving()
         with self._connect() as connection:
             lagging = lagging_end(connection, job.id)
-            paused = lane_limit.paused_through(connection, now).get(job.request.recipient, 0.0)
+            paused = lane_limit.paused_through(connection, now, serving).get(job.request.recipient, 0.0)
         if lagging is None:
             return False
         if job.request.action == "review" and self._review_retry_waits(job):
@@ -920,11 +936,15 @@ class JobsMixin:
 
     def _usage_limit_handled(self, job: Job) -> bool:
         """#367: a run that hit its account's usage limit requeues the same
-        row at once with nothing charged; the lane gate in claim_order holds
-        it until the limit lifts. True when T6 handled the job."""
+        row at once with nothing charged; placement skips that account's
+        devices, and the lane gate in claim_order holds it while every
+        account serving the lane is limited (#772). True when T6 handled the job."""
+        serving = self._serving().get(job.request.recipient)
         with self._connect() as connection:
             detail = usage_limit_end(connection, job.id)
-            limit = lane_limit.active(connection, job.request.recipient, self.queue.now())
+            limit = lane_limit.recipient_paused(
+                connection, job.request.recipient, self.queue.now(), serving
+            )
         if detail is None:
             return False
         if job.request.action == "review" and self._review_retry_waits(job):

@@ -131,7 +131,7 @@ from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
 from lib import lane_limit
 from lib.job_state import USAGE_LIMIT, record_job_event
-from lib.machines_yml import DEFAULT_ORCH_HOST
+from lib.machines_yml import DEFAULT_ORCH_HOST, default_account
 from lib.usage_readings import Reading, parse_codex, parse_rate_limit_event, store
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.pstack_pin import Pin, load_pin
@@ -1769,7 +1769,7 @@ class Session:
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
 
     def _record_limit(self, connection: sqlite3.Connection) -> None:
-        """#367: pause the job's lane once, in the summary's transaction."""
+        """#367, #772: pause the job's account once, in the summary's transaction."""
         if self._limit is None or self._limit_recorded:
             return
         now = self.clock()
@@ -1778,6 +1778,7 @@ class Session:
             job_id=self.job_id,
             harness=self.harness,
             bot=self.bot,
+            account=self.account or default_account(self.harness),
             limit=self._limit,
             now=now,
         )

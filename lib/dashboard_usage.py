@@ -137,7 +137,13 @@ def read_usage(
     accounts = _accounts(machines)
     for account in sorted(stored or {}):
         accounts.setdefault(account, stored[account][0])
-    limits = {(limit.harness, limit.bot): limit for limit in lane_limit.all_active(connection, now)}
+    limits = {
+        (limit.harness, limit.bot): limit
+        for limit in [
+            *lane_limit.all_active(connection, now),
+            *lane_limit.account_limits(connection, now).values(),
+        ]
+    }
     entries = [
         _limited(
             _entry(
