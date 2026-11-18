@@ -819,6 +819,18 @@ def test_cli_push_refuses_invalid_orch_yml(tmp_path: Path) -> None:
 # --- QA evidence (#910) ---------------------------------------------------------
 
 
+def test_remote_runs_one_ssh_with_the_feed_and_timeout() -> None:
+    runner = Recorder()
+    feed = object()
+    SshTransport(TARGET, "factory-dashboard", runner=runner).remote("true", feed=feed, timeout=42)
+    SshTransport(TARGET, "d", ssh_config="/home/box/.ssh/config", runner=runner).remote("true")
+    (first, first_kwargs), (second, second_kwargs) = runner.calls
+    assert first == ["ssh", *OPTIONS, "--", TARGET, "true"]
+    assert (first_kwargs["stdin"], first_kwargs["timeout"]) == (feed, 42)
+    assert second == ["ssh", *CONFIG_OPTIONS, "--", TARGET, "true"]
+    assert (second_kwargs["stdin"], second_kwargs["timeout"]) == (subprocess.DEVNULL, 20)
+
+
 LANE_FILES = ["s-1/after-screenshot.png", "s-1/console.log"]
 
 
@@ -834,3 +846,31 @@ def test_a_file_that_changed_after_the_walk_is_refused(root: Path, tmp_path: Pat
             write_run_tar(out, root_fd, parts, (grown, *rest), b"<p>")
     finally:
         os.close(root_fd)
+
+
+def test_an_evidence_failure_is_one_redacted_line_and_never_fails_the_push(tmp_path: Path) -> None:
+    secret = "gh" + "p_" + "A1b2C3d4E5" * 4
+    transport, lines = FakeTransport(), []
+    snapshot, _ = snapshotter(tmp_path)
+
+    def evidence() -> None:
+        raise PushError(f"ssh to pc failed (exit 1): {secret}")
+
+    code = run_push(
+        transport=transport, snapshot=snapshot, interval=20, once=True,
+        sleep=lambda _: None, log=lines.append, evidence=evidence,
+    )
+    assert code == 0
+    assert len(transport.sent) == 1
+    assert len(lines) == 1 and lines[0].startswith("dashboard push: qa ssh to pc failed") and secret not in lines[0]
+
+
+@pytest.mark.parametrize("transport", [NoopTransport(), FakeTransport(fail_on={1})])
+def test_evidence_waits_for_a_sent_snapshot(tmp_path: Path, transport) -> None:
+    calls: list[int] = []
+    snapshot, _ = snapshotter(tmp_path)
+    run_push(
+        transport=transport, snapshot=snapshot, interval=20, once=True,
+        sleep=lambda _: None, log=lambda _: None, evidence=lambda: calls.append(1),
+    )
+    assert calls == []

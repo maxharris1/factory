@@ -48,6 +48,13 @@ started, with one log line per failure; a success clears it. A live
 pusher's pending change is kept, so it goes out once the backoff ends.
 With `record`, each push's outcome goes to the `dashboard-push` Health
 component (lib/health.py `push_result`).
+
+#910: a full push over ssh (never `--status-only`) then copies each settled
+QA run's evidence folder and its rendered index.html to
+`<remote_dir>/qa/<run_id>/` (lib/qa_evidence_push.py). `SshTransport.remote`
+streams one tar per run into one ssh that unpacks it beside the live folder
+and moves it into place. An evidence failure is one `dashboard push: qa`
+line and never fails the push.
 """
 
 from __future__ import annotations
@@ -62,7 +69,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol
 
 from lib.dashboard import redact
 from lib.dashboard_config import (
@@ -217,21 +224,30 @@ class SshTransport:
         for argv in self.commands(paths):
             self._run(argv)
 
-    def _run(self, argv: list[str]) -> None:
+    def remote(self, script: str, *, feed: IO[bytes] | None = None, timeout: int | None = None) -> None:
+        """Run `script` on the host with `feed` as its stdin."""
+        self._run(
+            ["ssh", *self._ssh_options(), "--", self.host, script],
+            stdin=subprocess.DEVNULL if feed is None else feed,
+            timeout=timeout,
+        )
+
+    def _run(self, argv: list[str], *, stdin: object = subprocess.DEVNULL, timeout: int | None = None) -> None:
         program = argv[0]
+        timeout = self.timeout if timeout is None else timeout
         try:
             result = self.runner(
                 argv,
                 shell=False,
-                stdin=subprocess.DEVNULL,
+                stdin=stdin,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             raise PushError(
-                f"{program} to {self.host} timed out after {self.timeout}s"
+                f"{program} to {self.host} timed out after {timeout}s"
             ) from None
         except FileNotFoundError:
             raise PushError(f"{program} is not installed") from None
@@ -269,11 +285,14 @@ def run_push(
     once: bool,
     sleep: Callable[[float], None],
     log: Callable[[str], None],
+    evidence: Callable[[], None] | None = None,
 ) -> int:
     """Snapshot then send, every `interval` seconds (15 to 30), or once.
 
     A failed snapshot or send logs one redacted line; the loop keeps going.
-    With --once the exit status is 1 after a failure.
+    With --once the exit status is 1 after a failure. After each successful
+    send, `evidence` runs; its failure is one redacted line and leaves the
+    exit status alone.
     """
     if isinstance(transport, NoopTransport):
         log(NOT_CONFIGURED)
@@ -288,6 +307,12 @@ def run_push(
             text = " ".join(str(exc).split()) or type(exc).__name__
             log(f"dashboard push: {redact(text)}")
             ok = False
+        if ok and evidence is not None:
+            try:
+                evidence()
+            except Exception as exc:  # the snapshot went out; evidence retries next push
+                text = " ".join(str(exc).split()) or type(exc).__name__
+                log(f"dashboard push: qa {redact(text)}")
         if once:
             return 0 if ok else 1
         sleep(interval)
