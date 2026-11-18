@@ -1,5 +1,5 @@
 """A usage account's limit pauses that account, and its recipient's lane
-once every account serving it is paused (#367, #772).
+once every account serving it is paused (#367).
 
 When a run's stream reports the account's usage limit, telemetry records
 the account as limited until the reset (lane_account_limits). Placement
@@ -338,7 +338,7 @@ def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
 
 
 def account_limits(connection: sqlite3.Connection, now: float) -> dict[str, LaneLimit]:
-    """Each account's lane limit while it holds (#772), keyed by account id."""
+    """Each account's lane limit while it holds, keyed by account id."""
     if not _has_table(connection, ACCOUNT_TABLE):
         return {}
     rows = connection.execute(

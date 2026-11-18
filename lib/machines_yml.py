@@ -41,7 +41,7 @@ local device is the orch host; with no local device it is required. A
 remote device may name an ssh_user: the login (`ssh -l`) the box uses for
 it in place of the job's bot user, which stays the job's identity.
 
-The top-level accounts list names each subscription (#772): an id
+The top-level accounts list names each subscription: an id
 ([A-Za-z0-9._-]{1,64}, never an email, org ID or token), its harness (a
 factory harness, or `external` for a plan no factory process runs, such
 as Grok's), and optional free-text plan and label. A device's harness
@@ -393,7 +393,6 @@ def _harness_value(
     accounts: Mapping[str, Account],
     findings: list[Finding],
 ) -> tuple[str, str] | None:
-    """The bot user and account id a device's harness value names."""
     qualified = f"{prefix}.harnesses.{harness}"
     account_id = default_account(harness)
     user = raw

@@ -544,8 +544,6 @@ def test_the_dashboard_shows_a_limit_before_any_reading(tmp_path: Path) -> None:
     assert entry["limit_label"] in page.split("<script>")[0]
 
 
-# --- #772: each account pauses on its own -----------------------------------------
-
 TWO_CLAUDE_ACCOUNTS = """
 accounts:
   - {{id: claude-a, harness: claude}}

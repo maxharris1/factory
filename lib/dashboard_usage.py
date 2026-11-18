@@ -1,4 +1,4 @@
-"""Subscription headroom on the dashboard (issues #151 and #772, SPEC 3.5 item 5).
+"""Subscription headroom on the dashboard (issue #151, SPEC 3.5 item 5).
 
 `read_usage` reads `usage_readings` (written by `orch job run` and `orch
 usage record`, lib/usage_readings.py) inside the dashboard's read-only
@@ -198,7 +198,6 @@ def read_usage(
 
 
 def _limited(entry: dict, limit: lane_limit.LaneLimit | None) -> dict:
-    """#367, #772: the account's lane pause, as its reset time and display label."""
     return {
         **entry,
         "limited_until": None if limit is None else limit.until,

@@ -338,7 +338,7 @@ class DevicePool:
         ))
 
     def serving(self, harness: str) -> frozenset[str]:
-        """The accounts of harness on devices placement may use (#772)."""
+        """The accounts of harness on devices placement may use."""
         return self._narrowed_by_file().serving(harness)
 
     def claim(
@@ -969,7 +969,7 @@ def placement_blocked(
     connection: sqlite3.Connection, now: float, config: MachinesConfig | None
 ) -> Blocked:
     """Where a claim must not go now: device_sync's blocks, every backed-off
-    device, and each device's harness whose account is usage-limited (#772)."""
+    device, and each device's harness whose account is usage-limited."""
     blocked = sync_blocked(connection)
     limited = lane_limit.account_limits(connection, now)
     pairs = {

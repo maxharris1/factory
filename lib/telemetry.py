@@ -65,7 +65,7 @@ stdout on a pipe and hands the pipe to a `Session` here:
   `thread.started` thread id and read on each flush (lib/codex_rollout.py).
   They are written to `usage_readings` in the same transaction as the
   telemetry row, per harness, bot and device, with the placed device's
-  usage account (#772).
+  usage account.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each
@@ -1769,7 +1769,6 @@ class Session:
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
 
     def _record_limit(self, connection: sqlite3.Connection) -> None:
-        """#367, #772: pause the job's account once, in the summary's transaction."""
         if self._limit is None or self._limit_recorded:
             return
         now = self.clock()
@@ -1850,7 +1849,7 @@ def start_session(
     the harness's environment first (lib/remote.py `start_script`); until
     that report is read, every text is hidden.
 
-    account: the usage account the placed device's login uses (#772);
+    account: the usage account the placed device's login uses;
     None is the harness's default account.
 
     guard: runs in each summary write's transaction and refuses it by

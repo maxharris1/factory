@@ -171,9 +171,6 @@ class JobsMixin:
         )
 
     def _serving(self) -> dict[str, frozenset[str]]:
-        """#772: each harness's accounts the pool may place on, from the
-        pool's own view of machines.yml; empty with no pool, so no
-        recipient's serving accounts are known."""
         pool = getattr(self.devices, "pool", None)
         if pool is None:
             return {}

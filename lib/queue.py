@@ -855,7 +855,7 @@ def claim_order(
 ) -> list[sqlite3.Row]:
     """Queued jobs for recipient in claim order (see the module doc); none
     while recipient's lane is paused by usage limits (#367): every account
-    in `serving` is limited, or, with serving unknown (None), any is (#772)."""
+    in `serving` is limited, or, with serving unknown (None), any is."""
     if lane_limit.recipient_paused(connection, recipient, now, serving) is not None:
         return []
     abandoned = (

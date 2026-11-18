@@ -214,8 +214,8 @@ class SQLiteStatusReader:
 
     def lane_limits(self, now: float) -> dict[str, str]:
         """#367: `usage limit until <time>` for each paused lane, keyed by
-        recipient, and for each limited account, keyed `recipient (account)`
-        (#772). A lane pauses as lane_limit.recipient_paused decides, with
+        recipient, and for each limited account, keyed `recipient (account)`.
+        A lane pauses as lane_limit.recipient_paused decides, with
         the serving accounts this reader was given."""
         connection = self._connect()
         try:

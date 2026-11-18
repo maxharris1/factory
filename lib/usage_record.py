@@ -1,4 +1,4 @@
-"""`orch usage record`: one usage reading for an external account (#772).
+"""`orch usage record`: one usage reading for an external account.
 
 No factory process can read Grok's or Cursor's usage, so an operator or a
 Grok Bot routine reports it by hand. Only accounts machines.yml declares

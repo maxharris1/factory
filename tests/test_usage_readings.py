@@ -1303,8 +1303,6 @@ def test_an_older_table_read_only_is_no_reading_not_no_telemetry(tmp_path: Path)
     assert codex["state"] == "no reading" and codex["five_hour"]["state"] == "no reading"
 
 
-# --- the account migration (#772) -----------------------------------------------------------
-
 PRE_ACCOUNT_DDL = (
     "CREATE TABLE usage_readings (harness TEXT NOT NULL, bot TEXT NOT NULL, device TEXT NOT NULL,"
     " window TEXT NOT NULL, used REAL, resets_at INTEGER, observed_at REAL NOT NULL, job_id TEXT NOT NULL,"

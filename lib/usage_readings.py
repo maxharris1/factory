@@ -35,7 +35,7 @@ reports the window ends the streak.
 same transaction as the job's telemetry row, on the existing heartbeat
 flush. A reading is keyed by harness, bot (the login's OS user) and
 device, and replaces one only when its source time is newer. Its `account`
-(#772) is the subscription the placed device's login uses, and readers and
+is the subscription the placed device's login uses, and readers and
 the not-on-plan streak key on it; a NULL account, written by older code, is
 `<harness>-default`. Cursor is not tracked.
 
@@ -159,9 +159,6 @@ WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.sour
 
 @dataclass(frozen=True)
 class _Keyed:
-    """The streak statements over one observations table, keyed by `key`
-    there and by `row_key` in usage_readings; each binds the key, then the window."""
-
     adopt: str
     retained: str
     observe: str
@@ -253,7 +250,7 @@ def migrate(
     *,
     directory: Path | None = None,
 ) -> bool:
-    """Key db's usage readings on the account (#772); True when it wrote.
+    """Key db's usage readings on the account; True when it wrote.
 
     Already migrated (the column, no unnamed row, the three account tables):
     no backup and no write. A database with no usage_readings yet gets the
