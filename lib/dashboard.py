@@ -79,7 +79,7 @@ else stale.
 CI lane (#823): `ci_lane` is lib/ci_lane.ci_lane(snapshot): the runner
 slots, the GitHub-hosted, queued and failed groups and one card per ticket
 with its progress counts. The script draws it; the server render works it
-out again from ci_pool, ci_runs and tickets, so the two never disagree.
+out again from ci_pool, ci_runs and tickets.
 
 Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
