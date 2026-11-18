@@ -314,20 +314,39 @@ def open_root(root: Path) -> int:
     return fd
 
 
-def read_snapshot_file(root_fd: int, name: str) -> bytes | None:
-    """The file's bytes if `name` is a regular, singly linked file directly in
-    the pinned root directory, reached without following any symlink;
-    otherwise None."""
+def open_under(root_fd: int, parts: tuple[str, ...]) -> int | None:
+    """A descriptor for root/<parts...> if every directory on the way and the
+    file itself are reached without following a symlink and the file is
+    regular with one link; otherwise None. The caller closes it."""
+    fd = root_fd
     try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=fd)
+            if fd != root_fd:
+                os.close(fd)
+            fd = child
         # O_NONBLOCK so a FIFO planted under the name cannot hang the open.
-        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | NOFOLLOW, dir_fd=root_fd)
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | NOFOLLOW, dir_fd=fd)
     except OSError:
         return None
+    finally:
+        if fd != root_fd:
+            os.close(fd)
+    info = os.fstat(leaf)
+    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+        return leaf
+    os.close(leaf)
+    return None
+
+
+def read_snapshot_file(root_fd: int, name: str) -> bytes | None:
+    """The bytes of `name` directly in the pinned root if open_under allows
+    it and it is at most MAX_BYTES; otherwise None."""
+    fd = open_under(root_fd, (name,))
+    if fd is None:
+        return None
     with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return None
-        if info.st_size > MAX_BYTES:
+        if os.fstat(handle.fileno()).st_size > MAX_BYTES:
             return None
         return handle.read(MAX_BYTES + 1)[:MAX_BYTES]
 
