@@ -534,6 +534,20 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_runners (
+                    repo TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    os TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    busy INTEGER NOT NULL,
+                    labels TEXT NOT NULL,
+                    seen_at REAL NOT NULL,
+                    PRIMARY KEY (repo, name)
+                )
+                """
+            )
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.

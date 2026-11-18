@@ -22,6 +22,7 @@ PHASES = (
     "verify-handoffs",
     "reconcile-jobs",
     "factory-reads",
+    "ci-pool",
     "after-poll",
 )
 AFTER_POLL_STEPS = ("backup", "dashboard-push", "self-deploy")

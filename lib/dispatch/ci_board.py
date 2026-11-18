@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Sequence
 
-from lib.dispatch.types import CHECK_FAILED, CheckRow, RunJob, TrackedTicket
+from lib.dispatch.types import CHECK_FAILED, CheckRow, PoolRunner, RunJob, TrackedTicket
 
 RETAIN_SECONDS = 24 * 60 * 60
 RUN_READS = 3
@@ -204,6 +204,42 @@ def _read_failures(
                 """,
                 (json.dumps(failing_tests(text)), repo, ticket_id, head, workflow, name, job_id),
             )
+
+
+def read_pool(
+    connect: Callable[[], sqlite3.Connection],
+    repos: Sequence[str],
+    runners: Callable[[str], Sequence[PoolRunner]],
+    now: float,
+    log: Callable[[str], None] | None,
+) -> None:
+    for repo in repos:
+        try:
+            pool = runners(repo)
+        except Exception as exc:
+            _say(log, f"ci board: {repo} runners unavailable: {type(exc).__name__}")
+            continue
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM ci_runners WHERE repo = ?", (repo,))
+            connection.executemany(
+                "INSERT OR REPLACE INTO ci_runners VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        repo,
+                        runner.name,
+                        runner.os,
+                        runner.status,
+                        int(runner.busy),
+                        json.dumps(list(runner.labels)),
+                        now,
+                    )
+                    for runner in pool
+                ],
+            )
+            connection.commit()
+    with connect() as connection:
+        connection.execute("DELETE FROM ci_runners WHERE seen_at < ?", (now - RETAIN_SECONDS,))
 
 
 def _say(log: Callable[[str], None] | None, line: str) -> None:

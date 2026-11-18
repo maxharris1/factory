@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from lib.dashboard import collect_snapshot
-from lib.dashboard_pages import lanes, tickets
+from lib.dashboard_pages import tickets
+from lib.dashboard_pages.ci import ci_lane_html
 from lib.dispatch.constants import (
     BASE_UPDATE_GRACE_SECONDS,
     CI_SILENT_REASON,
@@ -253,11 +254,14 @@ def test_the_wait_clock_runs_from_the_first_ready_on_a_head_and_restarts_on_a_ne
     ]
 
 
+CI_CARD = '<div class="tile ci'
+
+
 def board_cards(board, tmp_path: Path) -> tuple[dict, str]:
     snapshot = collect_snapshot(board.queue.path, tmp_path / "log", now=board.now[0])
     model = tickets.board(snapshot)
     markup = "".join(tickets._card(card) for column in model["columns"] for card in column["cards"])
-    return snapshot, markup + "".join(lanes._ci_lane(snapshot))
+    return snapshot, markup + ci_lane_html(snapshot)
 
 
 def test_a_green_ready_held_for_its_stack_is_no_longer_waiting_on_ci(tmp_path: Path) -> None:
@@ -282,7 +286,7 @@ def test_a_green_ready_held_for_its_stack_is_no_longer_waiting_on_ci(tmp_path: P
     assert board.outcome(ready) is None
     assert ci_waits(board) == []
     assert not snapshot["running"] and not snapshot["queued"]
-    assert "waiting on CI" not in markup
+    assert "waiting on CI" not in markup and CI_CARD not in markup
 
 
 def test_a_deleted_ready_leaves_no_ci_wait(tmp_path: Path) -> None:
@@ -297,6 +301,7 @@ def test_a_deleted_ready_leaves_no_ci_wait(tmp_path: Path) -> None:
 
     assert ci_waits(board) == []
     assert "waiting on CI" not in board_cards(board, tmp_path)[1]
+    assert CI_CARD not in board_cards(board, tmp_path)[1]
 
 
 def test_a_merged_ticket_leaves_no_ci_wait(tmp_path: Path) -> None:
@@ -313,6 +318,7 @@ def test_a_merged_ticket_leaves_no_ci_wait(tmp_path: Path) -> None:
     assert board.state("42")["workflow_state"] == "merged"
     assert ci_waits(board) == []
     assert "waiting on CI" not in board_cards(board, tmp_path)[1]
+    assert CI_CARD not in board_cards(board, tmp_path)[1]
 
 
 def test_a_conflicting_ready_in_its_base_update_grace_is_waiting_on_ci(tmp_path: Path) -> None:
@@ -334,7 +340,7 @@ def test_a_conflicting_ready_in_its_base_update_grace_is_waiting_on_ci(tmp_path:
     assert board.outcome(ready) is None
     assert [(w["comment_id"], w["reason"]) for w in ci_waits(board)] == [(ready, "ci-pending")]
     assert not shown["running"] and not shown["queued"]
-    assert "waiting on CI" in markup
+    assert "waiting on CI" in markup and CI_CARD in markup
     assert "no job running" not in markup
 
     board.now[0] += BASE_UPDATE_GRACE_SECONDS
@@ -380,7 +386,7 @@ def test_a_handled_ready_does_not_hide_another_pending_ready(
     snapshot = collect_snapshot(board.queue.path, tmp_path / "log", now=board.now[0])
     model = tickets.board(snapshot)
     cards = "".join(tickets._card(c) for col in model["columns"] for c in col["cards"])
-    lane = "".join(lanes._ci_lane(snapshot))
+    lane = ci_lane_html(snapshot)
     assert outcomes == [
         ("ready-current", (False, "ci-pending")),
         ("ready-other", (True, other_outcome)),
@@ -389,7 +395,7 @@ def test_a_handled_ready_does_not_hide_another_pending_ready(
     assert not snapshot["running"] and not snapshot["queued"]
     assert "waiting on CI" in cards
     assert "no job running" not in cards
-    assert "waiting on CI" in lane
+    assert CI_CARD in lane and "then review" in lane
 
 
 NO_CI_BASE = "feature/upload-only-intake"
