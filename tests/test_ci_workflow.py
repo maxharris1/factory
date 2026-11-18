@@ -648,3 +648,13 @@ def test_no_runner_registration_token_is_committed() -> None:
         for match in TOKEN_SHAPE.finditer(text)
     ]
     assert hits == []
+
+
+def test_the_test_shards_start_a_lingering_user_manager_before_pytest() -> None:
+    steps = _workflow()["jobs"]["test"]["steps"]
+    runs = [step.get("run", "") for step in steps]
+    linger = next(i for i, run in enumerate(runs) if "enable-linger" in run)
+    pytest_step = next(i for i, run in enumerate(runs) if run.startswith("pytest"))
+    assert linger < pytest_step
+    assert "XDG_RUNTIME_DIR" in runs[linger]
+    assert "systemd-run --user --scope" in runs[linger]
