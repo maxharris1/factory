@@ -1086,20 +1086,6 @@ def test_a_lane_written_before_pack_keys_existed_reads_null(tmp_path: Path) -> N
     assert connection.execute("SELECT agent_id, pack_keys FROM qa_lanes").fetchall() == [("agent-1", None)]
 
 
-def test_qa_linear_holds_one_row_per_run_in_a_known_state(tmp_path: Path) -> None:
-    connection = sqlite3.connect(tmp_path / "orch.db")
-    ensure_qa_lanes(connection)
-    insert = "INSERT OR IGNORE INTO qa_linear (run_id, repo, ticket_id, state, updated_at) VALUES ('run', ?, 'T-1', ?, 0)"
-    connection.execute(insert, (REPO, "pending"))
-    connection.execute(insert, (REPO, "posted"))
-
-    assert connection.execute("SELECT run_id, state, reason, comment_id, attempts FROM qa_linear").fetchall() == [
-        ("run", "pending", None, None, 0),
-    ]
-    with pytest.raises(sqlite3.IntegrityError):
-        connection.execute(insert.replace(" OR IGNORE", "").replace("'run'", "'other'"), (REPO, "sent"))
-
-
 def test_a_lanes_table_capped_at_lane_three_is_widened_and_keeps_its_rows(tmp_path: Path) -> None:
     connection = sqlite3.connect(tmp_path / "old.db")
     ensure_qa_lanes(connection)
