@@ -607,6 +607,31 @@ def test_usage_limit_requeue_outlasts_the_backoff_and_retries(tmp_path: Path) ->
     assert lab.run.rows("SELECT event FROM job_events WHERE job_id = ? AND event = 'qa-no-retry'", job) == []
 
 
+def test_a_restarted_worker_keeps_the_runner_backoff(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    job = lab.enqueue(ids=2)
+    fake = lab.fakes["claude-cloud"]
+    launch = fake.launch
+    called_at: list[float] = []
+
+    def timed_launch(lane):
+        called_at.append(lab.run.now[0])
+        return launch(lane)
+
+    fake.launch = timed_launch
+    fake.launch_errors.append(UsageLimit("at limit"))
+    while lab.run.now[0] < 1300:
+        lab.worker = lab.new_worker()
+        lab.tick()
+    assert called_at == [1000.0]
+
+    lab.run.dispatcher.reconcile_jobs()
+    lab.worker = lab.new_worker()
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(fake.launched) == 1
+
+
 def _cancel_by_new_head(lab: Lab) -> None:
     lab.run.finish("codex", "v1")
     lab.run.post("v1", verdict(HEAD_A, "REVISE"))
@@ -656,6 +681,33 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
 
     assert [row[3] for row in lab.lanes()] == ["cancelled"]
     assert fake.stopped == ["claude-cloud-1"]
+    assert len(fake.launched) == 1
+
+
+def test_a_restarted_worker_adopts_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    fake = lab.fakes["claude-cloud"]
+    launch = fake.launch
+
+    def launch_then_crash(lane):
+        launch(lane)
+        raise SystemExit("worker killed")
+
+    fake.launch = launch_then_crash
+    with pytest.raises(SystemExit):
+        lab.tick()
+    fake.launch = launch
+    lab.silent.add((0, 1))
+    lab.worker = lab.new_worker()
+    lab.tick()
+
+    assert lab.run.rows("SELECT state, agent_id FROM qa_lanes") == [("running", "claude-cloud-1")]
+    assert len(fake.launched) == 1
+
+    lab.silent.clear()
+    lab.tick()
+    assert lab.header()["result"] == "PASS"
     assert len(fake.launched) == 1
 
 
@@ -1045,7 +1097,8 @@ def test_a_low_floor_project_on_the_same_root_keeps_the_other_paused(tmp_path: P
     }
     lab.worker.free_bytes = lambda path: 2 * GIB
     lab.worker.log = lines.append
-    lab.worker._backoff["claude-cloud"] = float("inf")
+    with lab.worker.queue.connect() as connection:
+        connection.execute("INSERT INTO qa_runner_backoff (runner, until) VALUES ('claude-cloud', 1e300)")
     jobs = [lab.enqueue(ids=1, ticket="784"), lab.enqueue(ids=1, ticket="785", repo=other)]
     lab.tick(3)
 
