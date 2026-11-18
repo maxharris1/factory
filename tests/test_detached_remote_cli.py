@@ -491,7 +491,7 @@ def test_a_remote_runs_teardown_removes_its_labelled_containers_on_the_device(tm
     docker = Docker(tmp_path)
     docker.start(app="web")
     proc = run(poller, job_id, ssh, "--", sys.executable, "-c", START_CONTAINER,
-               env={"PATH": docker.path(ssh.env()["PATH"]), "ORCH_TELEMETRY": "off"})
+               env={"FAKE_SSH_HOME": str(docker.login_home()), "ORCH_TELEMETRY": "off"})
     try:
         _, err = proc.communicate(timeout=60)
     finally:

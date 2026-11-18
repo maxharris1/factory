@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import secrets
+import shlex
 import sys
 from pathlib import Path
 
@@ -63,6 +64,12 @@ class Docker:
             encoding="utf-8",
         )
         wrapper.chmod(0o755)
+
+    def login_home(self) -> Path:
+        home = self.bin.parent / "home"
+        home.mkdir(exist_ok=True)
+        (home / ".bash_profile").write_text(f"export PATH={shlex.quote(str(self.bin))}:$PATH\n")
+        return home
 
     def path(self, path: str | None = None) -> str:
         return f"{self.bin}{os.pathsep}{path if path is not None else os.environ['PATH']}"

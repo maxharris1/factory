@@ -504,7 +504,7 @@ def test_the_sweep_reaches_a_remote_device_over_the_bots_own_login(
     for name, value in ssh.env().items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}/usr/bin:/bin")
-    monkeypatch.setenv("FAKE_SSH_PATH", docker.path("/usr/bin:/bin"))
+    monkeypatch.setenv("FAKE_SSH_HOME", str(docker.login_home()))
     db, queue = make_queue(tmp_path)
     config, findings = load_machines_yml(remote_machines(tmp_path))
     assert config is not None, findings
