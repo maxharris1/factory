@@ -439,10 +439,7 @@ time.sleep(60)
         assert result.returncode == 0, result.stderr
         wrapper = int(Path(remote.run_file(target, "pid")).read_text().split()[0])
         wait_until(held.exists, "the keeper is held before its first instruction")
-        try:
-            wait_until(worker_pid.exists, "the worker runs beside an unprotected keeper", 1.0)
-        except AssertionError:
-            pass
+        time.sleep(1.0)
 
         assert remote.stop_worker(shell, target)
         wait_until(exit_file.exists, "the run ended after the TERM")

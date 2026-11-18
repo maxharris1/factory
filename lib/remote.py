@@ -71,8 +71,8 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   children. With none of them, exit 3 ("cannot tell") while the recorded
   group, from this boot, still has a live process (one that dropped the
   tag, or an unrelated group that reused the number), and exit 0 (gone)
-  when it has none, zombies left out, the record is from an earlier boot, or no record was ever
-  written. A malformed record (empty, not digits, a leading zero, 0 or 1)
+  when it has none, the record is from an earlier boot, or no record was
+  ever written. A malformed record (empty, not digits, a leading zero, 0 or 1)
   is 3. ssh itself exits 255 when the device cannot be reached;
 * stop: send SIGTERM to every process of the run, as check finds and
   records them, and to each process group that holds a tagged one (a group
@@ -409,9 +409,8 @@ _DARWIN_KEEPER = (
     '"$2")" = "1 0" ] && break; '
     'done; rm -f -- "$2"'
 )
-# #827: the Linux counterpart of _DARWIN_KEEPER, for the start's session. The
-# start (and lib/job_run.py, for a local run whose runner leads its session)
-# runs it as `sh -c "$KEEPER" orch-keeper` with the run's tag. It ignores TERM,
+# #827: the Linux counterpart of _DARWIN_KEEPER, for the start's session. Run
+# it as `sh -c "$KEEPER" orch-keeper` with the run's tag. It ignores TERM,
 # HUP and INT and exits once two scans in a row, 0.2 s apart, find no other
 # live process in its session, so the session holds a tagged process for as
 # long as anything else is in it: a session number proves the run only while
@@ -961,7 +960,7 @@ _WRITE_RESULT_PAST_STOPS = (
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
 # directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
 # budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop and
-# kill scripts, $8 the check script. It starts the start (lib/remote.py start_script, which
+# kill scripts, $8 the check script. It starts the start (start_script, which
 # records the worker and execs the harness) in a session of its own with
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again

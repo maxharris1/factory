@@ -419,12 +419,8 @@ def run(
 
 
 def _session_keeper(env: Mapping[str, str]) -> subprocess.Popen[bytes] | None:
-    """lib/remote.py KEEPER in this runner's session, with the run's tag, when the
-    runner leads that session (the waiter starts it so) on Linux; None otherwise.
-
-    It returns once the keeper has printed its pid, so it already ignores the
-    TERM a stop sends the run once the command starts (#827 f-6).
-    """
+    """Returns once the keeper has printed its pid, so it already ignores the
+    TERM a stop sends the run once the command starts (#827 f-6)."""
     if not sys.platform.startswith("linux") or os.getsid(0) != os.getpid():
         return None
     keeper = subprocess.Popen(
