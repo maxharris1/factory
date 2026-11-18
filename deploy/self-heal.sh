@@ -347,7 +347,7 @@ launch() {
         say "self-heal loop already running (pid ${pid})"
         return 0
     fi
-    nohup bash "$SELF" _loop "$STATE" >>"$LOG" 2>&1 </dev/null 9>&- &
+    factory_detach bash "$SELF" _loop "$STATE" >>"$LOG" 2>&1 </dev/null 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then

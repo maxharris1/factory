@@ -17,7 +17,12 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
 if [ "${1:-}" = ensure ]; then
   [ -e "$HOME/.config/factory/runner-pool-sync-hold" ] && exit 0
   flock -n "$LOCK" true || exit 0
-  nohup "$0" loop >>"$LOG" 2>&1 </dev/null & exit 0
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup "$0" loop >>"$LOG" 2>&1 </dev/null &
+  else
+    nohup "$0" loop >>"$LOG" 2>&1 </dev/null &
+  fi
+  exit 0
 fi
 exec 9>>"$LOCK"
 flock -n 9 || exit 0
