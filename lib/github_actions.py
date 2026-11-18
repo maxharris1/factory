@@ -611,9 +611,6 @@ class GitHubReviewActions:
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
 
     def pull_fingerprints(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
-        """#870: what a full read of each open PR depends on, as canonical
-        JSON, one GraphQL query per 25 PRs. A PR GitHub did not return, or
-        whose labels or CI contexts run past one page, gets no entry."""
         owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
         wanted = list(dict.fromkeys(_number(number) for number in numbers))
         found: dict[str, str] = {}

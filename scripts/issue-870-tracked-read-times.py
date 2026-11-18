@@ -1,9 +1,3 @@
-"""Median and p90 of the tracked-read phase over poller.log cycle-end lines.
-
-Usage: python scripts/issue-870-tracked-read-times.py [--last N] [poller.log]
-The log defaults to $ORCH_POLL_LOG, else ~/.local/state/factory/poller.log.
-"""
-
 import argparse
 import math
 import os

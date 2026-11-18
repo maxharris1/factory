@@ -453,9 +453,6 @@ def test_a_pr_whose_ci_contexts_run_past_one_page_is_read_in_full_every_cycle() 
 
 
 class CachingGitHub(GitHub):
-    """gh api --cache 60s replays a response it stored for the same route
-    within 60 s, whatever If-None-Match the call sends."""
-
     def __init__(self, *pulls: Pull):
         super().__init__(*pulls)
         self.now = lambda: 0.0

@@ -463,9 +463,7 @@ class FedPulls:
 
 
 class LastRead(NamedTuple):
-    """#870: one open PR's last full read, and the probe taken before it."""
-
-    fingerprint: str | None
+    probe_before_read: str | None
     read_at: float
     pull: dict[str, Any]
     comments: tuple[Comment, ...]
@@ -477,7 +475,7 @@ def reusable(last: LastRead | None, probed: str | None, now: float) -> bool:
     return (
         last is not None
         and probed is not None
-        and probed == last.fingerprint
+        and probed == last.probe_before_read
         and now - last.read_at < FULL_READ_SECONDS
     )
 
@@ -1046,8 +1044,6 @@ class LivePollSource:
         refs: Sequence[TicketRef],
         projects: Mapping[str, Project],
     ) -> dict[tuple[str, str], str]:
-        """#870: probe the GitHub PRs this source has read before and not
-        yet this cycle. A repo whose probe fails gets full reads."""
         wanted: dict[str, list[str]] = {}
         for ref in refs:
             repo = ref.repo.lower()
