@@ -6,7 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from lib import job_detail
+from lib.dispatch.constants import APPROVE_ROUND_STATES, REVISE_ROUND_STATES
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope, red_checks
+from lib.dispatch.qa import QaFix, ReviewFix, Wait
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.queue import JobRequest
@@ -40,7 +42,14 @@ class T3Mixin:
             return True, "stale-revise"
         if "unsat" in fields:
             return self._t3_unsat(ticket, comment, fields["unsat"], reported_round)
-        repeat = self._repeat_trigger(ticket, comment, reported_round)
+        qa = None
+        match self._qa_gate(ticket, "REVISE", ticket.current_head, since=comment.created_at):
+            case Wait(outcome):
+                return False, outcome
+            case ReviewFix(report_id) if report_id is not None:
+                qa = self._qa_fix(ticket, report_id)
+        qa_ids = frozenset(qa.failed) if qa is not None else frozenset()
+        repeat = self._repeat_trigger(ticket, comment, reported_round, qa_ids)
         if repeat is not None:
             return self._t3_repeat(ticket, comment, repeat, reported_round)
         ci_failure: tuple[str, ...] = ()
@@ -49,8 +58,22 @@ class T3Mixin:
             if gate.outcome is not None:
                 return gate.outcome
             ci_failure = gate.ci_failure
+        return self._spend_review_round(
+            ticket, comment, reported_round, ci_failure=ci_failure, qa=qa
+        )
+
+    def _spend_review_round(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        reported_round: int | None,
+        *,
+        ci_failure: tuple[str, ...] = (),
+        qa: QaFix | None = None,
+        from_approve: bool = False,
+    ) -> tuple[bool, str]:
         outcome, state = self._record_revise(
-            ticket, comment, fields, reported_round, ci_failure
+            ticket, comment, reported_round, ci_failure, qa, from_approve
         )
         if state is None:
             self._wake_comment_problem(ticket, comment, "stale", outcome)
@@ -64,9 +87,10 @@ class T3Mixin:
         self,
         ticket: TrackedTicket,
         comment: Comment,
-        fields: Mapping[str, str],
         reported_round: int | None,
         ci_failure: tuple[str, ...],
+        qa: QaFix | None = None,
+        from_approve: bool = False,
     ) -> tuple[str, str | None]:
         ticket = self._fresh_issue(ticket)
         with self._connect() as connection:
@@ -103,8 +127,9 @@ class T3Mixin:
             assert state is not None
             round_number = int(state["review_round"]) + 1
             cap = self._effective_cap(ticket, connection)
+            allowed = APPROVE_ROUND_STATES if from_approve else REVISE_ROUND_STATES
             if (
-                state["workflow_state"] not in ("review", "awaiting-ok")
+                state["workflow_state"] not in allowed
                 or reported_round != round_number
             ):
                 connection.commit()
@@ -125,8 +150,9 @@ class T3Mixin:
                     head=ticket.current_head,
                     round_number=round_number + 1,
                     cap=cap,
-                    instruction=_comment_link(comment),
+                    instruction=qa.link if from_approve and qa is not None else _comment_link(comment),
                     ci_failure=ci_failure,
+                    qa_findings=qa,
                 )
                 request = JobRequest(
                     repo=ticket.repo,

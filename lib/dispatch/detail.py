@@ -33,6 +33,7 @@ from lib.queue import plan_round as _plan_round
 from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
+    from lib.dispatch.qa import QaFix
     from lib.evidence.ci import CIEvidence
 
 
@@ -510,6 +511,7 @@ class DetailMixin:
         plan_round: int | None = None,
         ci_failure: tuple[str, ...] = (),
         unmapped: str | None = None,
+        qa_findings: QaFix | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -563,6 +565,8 @@ class DetailMixin:
             context["rebase"] = asdict(rebase)
         if ci_failure:
             context["ci_failure"] = {"failed_checks": list(ci_failure)}
+        if qa_findings is not None:
+            context["qa_findings"] = asdict(qa_findings)
         if (no_ci_base := ticket.no_ci_base) is not None:
             context.update(no_ci_base=no_ci_base, local_checks=list(ticket.factory.ci_local_checks))
         if resume:

@@ -102,11 +102,11 @@ def _replay(
             polls += 1
             if actions.handoffs and not shipped_at:
                 shipped_at = (last, polls)
+        later = answers[answers.index(last) + 1 :]
         for recipient in ("claude", "codex"):
-            job = queue.claim(recipient)
+            job = queue.claim(recipient) if later and comments[shown - 1].id == last else None
             if job is not None:
-                answer = answers[answers.index(comments[shown - 1].id) + 1]
-                queue.finish(job.id, owner=recipient, handoff_comment_id=answer)
+                queue.finish(job.id, owner=recipient, handoff_comment_id=later[0])
     for _ in range(11):
         dispatcher.poll_once(source)
         now[0] += 30
