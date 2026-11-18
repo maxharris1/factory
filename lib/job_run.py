@@ -424,7 +424,7 @@ def _session_keeper(env: Mapping[str, str]) -> subprocess.Popen[bytes] | None:
     if not sys.platform.startswith("linux") or os.getsid(0) != os.getpid():
         return None
     keeper = subprocess.Popen(
-        ["sh", "-c", KEEPER, "orch-keeper"], env=env,
+        ["sh", "-c", KEEPER, "orch-keeper"], env={**env, "PATH": os.environ.get("PATH", os.defpath)},
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     assert keeper.stdout is not None
