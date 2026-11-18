@@ -43,7 +43,7 @@ from tests.test_dashboard import (
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "model" / "chart.mmd"
 MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
-NAV = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")  # nav order (#78, #92)
+NAV = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html", "settings.html")  # nav order (#78, #92, #777)
 PAGES = (*NAV, "ticket.html")
 
 

@@ -3,6 +3,7 @@
 # are down or run stale code, with no LLM and no tokens.
 #
 #   self-heal.sh once              one pass: `orch heal deploy`, then
+#                                  `orch settings apply` (#777), then
 #                                  `orch health --json | orch heal`, then
 #                                  `orch heal devices` detached (#297)
 #   self-heal.sh kick              start one pass now, detached, and return
@@ -31,6 +32,10 @@
 # the checkout owner fast-forwards the checkout to origin/main, keeping
 # local edits to machines.yml, orch.yml and deploy/install.sh; see
 # lib/self_deploy.py; a failure is logged and never blocks healing), then
+# runs `orch settings apply --state <state dir>` (#777: applies the device
+# settings Max asked for in Mission Control, with a machines.yml backup, an
+# audit line and the poller and waiter restarts; see lib/settings_apply.py;
+# a failure is logged and never blocks healing), then
 # pipes `orch health --json` into
 # `orch heal --health-json - --state <state dir>`, which decides and runs each
 # restart through the component's own service script and writes
@@ -261,6 +266,8 @@ once() {
     "$ORCH" heal deploy --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
         say "orch heal deploy exited $?; healing anyway" >>"$LOG"
     after="$(head_sha)"
+    "$ORCH" settings apply --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
+        say "orch settings apply exited $?; healing anyway" >>"$LOG"
     "$ORCH" health --json 2>>"$LOG" 8>&- | "$ORCH" heal --health-json - --state "$STATE" 8>&-
     statuses=("${PIPESTATUS[@]}")
     factory_detach "$ORCH" heal devices --state "$STATE" >>"$LOG" 2>&1 </dev/null 8>&- 9>&-

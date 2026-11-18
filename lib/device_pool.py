@@ -5,11 +5,17 @@ A slot is one row in `device_slots`, in the dispatcher database next to
 claim order (lib/queue.py claim_order), to running
 and holds a slot for it on the least-loaded device (lowest utilization,
 slots held over slot_max; a tie goes to a remote before the local box,
-remotes in machines.yml order; issue #223) that is schedulable and lists
-that harness (issue #85). Both writes happen
+remotes in machines.yml order; issue #223) that is schedulable, not
+draining, and lists that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
-any harness.
+any harness. Inside that transaction a pool given `machines_path` reads
+machines.yml as it is now, and the file can only narrow placement live: it
+disables a device, drains it or lowers its slot_max, so a settings change
+written under the same lock (lib/settings_apply.py) stops the next claim
+even in a process that loaded the file earlier (#777). The pool keeps the
+strictest setting it has seen for each device until the process restarts,
+so enabling a device, clearing drain or raising slot_max waits for a restart.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -55,15 +61,24 @@ This module starts nothing and contacts no device.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
 import json
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
+from pathlib import Path
 
+from lib.config_overlay import overlay_path
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.device_sync import blocked as sync_blocked
-from lib.machines_yml import Device, MachinesConfig, orch_host, shared_tailscale_names
+from lib.machines_yml import (
+    Device,
+    MachinesConfig,
+    load_machines_yml,
+    orch_host,
+    shared_tailscale_names,
+)
 from lib.queue import (
     SLOTS_TABLE,
     Job,
@@ -164,7 +179,7 @@ def choose_device(
     blocked: Blocked = NOTHING_BLOCKED,
     avoid: Collection[str] = frozenset(),
 ) -> Device | None:
-    """The schedulable device listing harness with the lowest utilization, or None.
+    """The schedulable, non-draining device listing harness with the lowest utilization, or None.
 
     Utilization is slots held over slot_max, compared exactly. A tie goes to
     a remote device before the local box, remotes in machines.yml order
@@ -174,7 +189,7 @@ def choose_device(
     """
     candidates = []
     for index, device in enumerate(config.devices):
-        if not device.eligible(harness) or blocked.blocks(device.name, harness):
+        if not device.takes_new(harness) or blocked.blocks(device.name, harness):
             continue
         assert device.slot_max is not None
         held = used.get(device.name, 0)
@@ -192,17 +207,53 @@ def free_slots(
     used: Mapping[str, int],
     blocked: Blocked = NOTHING_BLOCKED,
 ) -> int:
-    """Free slots, summed over every schedulable device listing harness that choose_device may pick."""
+    """Free slots, summed over every device listing harness that choose_device may pick."""
     total = 0
     for device in config.devices:
-        if device.eligible(harness) and not blocked.blocks(device.name, harness):
+        if device.takes_new(harness) and not blocked.blocks(device.name, harness):
             assert device.slot_max is not None
             total += max(0, device.slot_max - used.get(device.name, 0))
     return total
 
 
+FileKey = tuple[int, int, int] | None
+
+
+def _file_key(path: Path) -> FileKey:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_ino, info.st_mtime_ns, info.st_size
+
+
+Settings = tuple[bool, bool, int | None]
+
+
+def _stricter(seen: Settings | None, device: Device) -> Settings:
+    if seen is None:
+        return device.enabled, device.drain, device.slot_max
+    limits = [s for s in (seen[2], device.slot_max) if s is not None]
+    return seen[0] and device.enabled, seen[1] or device.drain, min(limits, default=None)
+
+
+def _narrowed(device: Device, enabled: bool, drain: bool, slot_max: int | None) -> Device:
+    if device.slot_max is not None and slot_max is not None:
+        slot_max = min(device.slot_max, slot_max)
+    else:
+        slot_max = device.slot_max
+    return replace(device, enabled=device.enabled and enabled,
+                   drain=device.drain or drain, slot_max=slot_max)
+
+
 class DevicePool:
-    def __init__(self, queue: SQLiteJobQueue, config: MachinesConfig):
+    def __init__(
+        self,
+        queue: SQLiteJobQueue,
+        config: MachinesConfig,
+        *,
+        machines_path: Path | None = None,
+    ):
         shared = shared_tailscale_names(config.devices)
         if shared:
             raise QueueError(
@@ -211,6 +262,9 @@ class DevicePool:
             )
         self.queue = queue
         self.config = config
+        self.machines_path = machines_path
+        self._file_key: tuple[FileKey, FileKey] | None = None
+        self._strictest: dict[str, Settings] = {}
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -263,6 +317,25 @@ class DevicePool:
             ).fetchone()
         return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
 
+    def _narrowed_by_file(self) -> MachinesConfig:
+        if self.machines_path is None:
+            return self.config
+        key = (_file_key(self.machines_path), _file_key(overlay_path(self.machines_path)))
+        if self._file_key != key:
+            self._file_key = key
+            try:
+                current, findings = load_machines_yml(self.machines_path)
+            except (OSError, ValueError):
+                current, findings = None, []
+            if current is not None and not any(f.severity == "error" for f in findings):
+                for d in current.devices:
+                    self._strictest[d.name] = _stricter(self._strictest.get(d.name), d)
+        settings = self._strictest
+        return replace(self.config, devices=tuple(
+            _narrowed(d, *settings[d.name]) if d.name in settings else d
+            for d in self.config.devices
+        ))
+
     def claim(
         self,
         harness: str,
@@ -282,6 +355,7 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            config = self._narrowed_by_file()
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}
@@ -289,7 +363,7 @@ class DevicePool:
                 """
             )
             device = choose_device(
-                self.config, harness, _used(connection, self.config),
+                config, harness, _used(connection, config),
                 placement_blocked(connection, now),
             )
             if device is None:
@@ -309,9 +383,9 @@ class DevicePool:
             dropped = _lost_on(connection, str(row["id"]))
             if dropped == device.name:
                 device = choose_device(
-                    self.config,
+                    config,
                     harness,
-                    _used(connection, self.config),
+                    _used(connection, config),
                     placement_blocked(connection, now),
                     avoid={dropped},
                 )

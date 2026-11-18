@@ -709,3 +709,37 @@ def test_qa_max_cloud_lanes_default_and_bounds(tmp_path: Path, block: str, lanes
     else:
         assert config is None
         assert any(error in finding.message for finding in findings), findings
+
+
+def test_qa_shares_usage_with_loads_and_defaults_empty(tmp_path: Path) -> None:
+    config, findings = _driver_config(tmp_path, "")
+    assert findings == []
+    assert config is not None and dict(config.qa.shares_usage_with) == {}
+
+    config, findings = _driver_config(tmp_path, "qa:\n  shares_usage_with:\n    claude-cloud: claude\n")
+    assert findings == []
+    assert config is not None and dict(config.qa.shares_usage_with) == {"claude-cloud": "claude"}
+
+
+@pytest.mark.parametrize(
+    ("block", "error"),
+    [
+        ("qa:\n  shares_usage_with: [claude-cloud]\n", "qa.shares_usage_with must be a mapping"),
+        (
+            "qa:\n  shares_usage_with:\n    gpu-cloud: claude\n",
+            "qa.shares_usage_with has unknown runner 'gpu-cloud'; expected one of claude-cloud, cursor-cloud",
+        ),
+    ],
+)
+def test_qa_shares_usage_with_refuses_an_unknown_runner(tmp_path: Path, block: str, error: str) -> None:
+    config, findings = _driver_config(tmp_path, block)
+    assert config is None
+    assert error in [finding.message for finding in findings if finding.severity == "error"]
+
+
+def test_qa_shares_usage_with_refuses_an_unknown_recipient(tmp_path: Path) -> None:
+    config, findings = _driver_config(tmp_path, "qa:\n  shares_usage_with:\n    claude-cloud: grok\n")
+    assert config is None
+    assert "qa.shares_usage_with.claude-cloud has unknown harness 'grok'; expected one of claude, codex, cursor" in [
+        finding.message for finding in findings if finding.severity == "error"
+    ]

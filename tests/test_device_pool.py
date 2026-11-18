@@ -21,6 +21,7 @@ def device(
     slot_max: int | None,
     *harnesses: str,
     enabled: bool = True,
+    drain: bool = False,
     placeholders: tuple[str, ...] = (),
 ) -> Device:
     return Device(
@@ -29,6 +30,7 @@ def device(
         harnesses=MappingProxyType({harness: f"{harness}-bot" for harness in harnesses}),
         tailscale_name=f"{name}.example.ts.net",
         enabled=enabled,
+        drain=drain,
         workdir_root="/home/work",
         placeholders=placeholders,
     )
@@ -153,6 +155,140 @@ def test_choose_device_skips_full_ineligible_placeholder_and_disabled() -> None:
     chosen = choose_device(config, "claude", {"full": 1, "free": 1})
     assert chosen is not None and chosen.name == "free"
     assert choose_device(config, "claude", {"full": 1, "free": 2}) is None
+
+
+def test_choose_device_and_free_slots_skip_a_draining_device() -> None:
+    config = MachinesConfig(
+        devices=(
+            device("pc", 4, "claude"),
+            device("box", 6, "claude", drain=True),
+        )
+    )
+
+    chosen = choose_device(config, "claude", {"pc": 3})
+    assert chosen is not None and chosen.name == "pc", "the emptier draining box is skipped"
+    assert choose_device(config, "claude", {"pc": 4}) is None
+    assert device_pool.free_slots(config, "claude", {"pc": 3, "box": 2}) == 1
+
+
+def test_a_claim_with_every_device_draining_leaves_the_job_queued(tmp_path: Path) -> None:
+    pool, queue = make_pool(
+        tmp_path,
+        device("box", 6, "claude", drain=True),
+        device("pc", 4, "claude", "codex", drain=True),
+    )
+    enqueue(queue, "claude", "1")
+
+    assert pool.claim("claude") is None
+    assert pool.used() == {}
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+
+
+BOX_FILE = """\
+devices:
+  - name: box
+    local: true
+    enabled: true
+    drain: false
+    slot_max: 2
+    harnesses: {claude: claude-bot}
+"""
+
+
+def file_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue, Path]:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(BOX_FILE, encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    enqueue(queue, "claude", "1")
+    return DevicePool(queue, config, machines_path=machines), queue, machines
+
+
+@pytest.mark.parametrize("edit", [("drain: false", "drain: true"), ("enabled: true", "enabled: false")])
+def test_a_claim_reads_drain_and_enabled_from_the_file_as_it_is_now(
+    tmp_path: Path, edit: tuple[str, str]
+) -> None:
+    pool, queue, machines = file_pool(tmp_path)
+    machines.write_text(BOX_FILE.replace(*edit), encoding="utf-8")
+
+    assert pool.claim("claude") is None, "the file changed after the pool loaded it"
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+
+
+def test_a_claim_places_while_the_file_is_unchanged(tmp_path: Path) -> None:
+    pool, _, _ = file_pool(tmp_path)
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None and claimed[1].device == "box"
+
+
+def test_an_invalid_file_leaves_the_loaded_settings_in_force(tmp_path: Path) -> None:
+    pool, _, machines = file_pool(tmp_path)
+    machines.write_text(BOX_FILE.replace("drain: false", "drain: maybe"), encoding="utf-8")
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None and claimed[1].device == "box"
+
+
+def edited_after_load(
+    tmp_path: Path, loaded: str, edited: str, jobs: int
+) -> tuple[DevicePool, SQLiteJobQueue, Path]:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(loaded, encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(jobs):
+        enqueue(queue, "claude", str(n))
+    machines.write_text(edited, encoding="utf-8")
+    return DevicePool(queue, config, machines_path=machines), queue, machines
+
+
+def restarted(queue: SQLiteJobQueue, machines: Path) -> DevicePool:
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    return DevicePool(queue, config, machines_path=machines)
+
+
+def placements(pool: DevicePool, attempts: int) -> int:
+    return sum(pool.claim("claude") is not None for _ in range(attempts))
+
+
+@pytest.mark.parametrize("edit", [("enabled: true", "enabled: false"), ("drain: false", "drain: true")])
+def test_a_file_that_enables_or_undrains_waits_for_a_restart(
+    tmp_path: Path, edit: tuple[str, str]
+) -> None:
+    loaded = BOX_FILE.replace(*edit)
+    pool, queue, machines = edited_after_load(tmp_path, loaded, BOX_FILE, jobs=1)
+
+    assert pool.claim("claude") is None, "the live file never widens placement"
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+    claimed = restarted(queue, machines).claim("claude")
+    assert claimed is not None and claimed[1].device == "box", "a restart loads the file"
+
+
+def test_a_lower_slot_max_in_the_file_caps_placement_live(tmp_path: Path) -> None:
+    pool, _, _ = edited_after_load(
+        tmp_path, BOX_FILE.replace("slot_max: 2", "slot_max: 3"),
+        BOX_FILE.replace("slot_max: 2", "slot_max: 1"), jobs=3,
+    )
+
+    assert placements(pool, 3) == 1
+    assert pool.used() == {"box": 1}
+
+
+def test_a_higher_slot_max_in_the_file_waits_for_a_restart(tmp_path: Path) -> None:
+    pool, queue, machines = edited_after_load(
+        tmp_path, BOX_FILE.replace("slot_max: 2", "slot_max: 1"),
+        BOX_FILE.replace("slot_max: 2", "slot_max: 3"), jobs=3,
+    )
+
+    assert placements(pool, 3) == 1, "the loaded slot_max still caps the box"
+    assert placements(restarted(queue, machines), 3) == 2, "a restart raises it to 3"
+    assert pool.used() == {"box": 3}
 
 
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:

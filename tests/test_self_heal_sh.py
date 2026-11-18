@@ -42,6 +42,10 @@ if sys.argv[1:3] == ["heal", "deploy"]:
         (home / "head").write_text("b" * 40)
     print("deploy output")
     raise SystemExit(int(os.environ.get("FAKE_DEPLOY_EXIT", "0")))
+if sys.argv[1:3] == ["settings", "apply"]:
+    with (home / "settings-calls").open("a") as handle:
+        handle.write(json.dumps({{"argv": sys.argv[1:], "db": os.environ.get("ORCH_DB")}}) + "\\n")
+    raise SystemExit(int(os.environ.get("FAKE_SETTINGS_EXIT", "0")))
 if sys.argv[1:3] in (["heal", "devices"], ["dashboard", "push"]):
     with (home / "detached-calls").open("a") as handle:
         handle.write(json.dumps({{"argv": sys.argv[1:], "sid": os.getsid(0) == os.getpid(),
@@ -155,6 +159,26 @@ def test_once_pipes_the_health_report_into_heal_and_restarts_through_the_service
     assert json.loads(call["stdin"]) == REPORT
     assert call["db"] == str(home / STATE / "orch.db")
     assert (home / "service-calls").read_text() == "waiter-service.sh codex-bot restart\n"
+
+
+def test_once_applies_settings_after_the_deploy_and_before_health(home: Path) -> None:
+    result = _run(home, "once")
+
+    assert result.returncode == 0, result.stderr
+    (call,) = [json.loads(line) for line in (home / "settings-calls").read_text().splitlines()]
+    assert call["argv"] == ["settings", "apply", "--state", str(home / STATE)]
+    assert call["db"] == str(home / STATE / "orch.db")
+    assert _wait_for(lambda: "heal devices" in (home / "orch-order").read_text())
+    order = (home / "orch-order").read_text().splitlines()
+    assert order.index("heal deploy") < order.index("settings apply") < order.index("health --json")
+
+
+def test_a_failed_settings_apply_never_fails_the_pass(home: Path) -> None:
+    result = _run(home, "once", FAKE_SETTINGS_EXIT="1")
+
+    assert result.returncode == 0, result.stderr
+    assert len(_calls(home)) == 1, "healing ran anyway"
+    assert "orch settings apply exited 1; healing anyway" in _service_log(home)
 
 
 def test_once_never_signals_a_running_job(home: Path) -> None:

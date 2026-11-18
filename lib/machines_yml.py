@@ -29,7 +29,8 @@ tailscale_name (compared case-insensitively): that would give one host
 two slot budgets.
 
 A device schedules only when it is enabled (the default), has no
-REPLACE_WITH_ placeholder, and lists the harness. Unknown fields are
+REPLACE_WITH_ placeholder, and lists the harness. A device with
+`drain: true` takes no new placements and leaves its running jobs be. Unknown fields are
 refused so v1 stays closed. Nothing here checks that a device is reachable. A gitignored
 machines.local.yml beside the file is merged in before validation
 (lib/config_overlay.py).
@@ -71,6 +72,7 @@ _DEVICE_KEYS = {
     "tailscale_name",
     "local",
     "enabled",
+    "drain",
     "slot_max",
     "harnesses",
     "workdir_root",
@@ -92,6 +94,7 @@ class Device:
     tailscale_name: str | None = None
     local: bool = False
     enabled: bool = True
+    drain: bool = False
     workdir_root: str | None = None
     placeholders: tuple[str, ...] = ()
     ssh_alias: str | None = None
@@ -108,6 +111,9 @@ class Device:
 
     def eligible(self, harness: str) -> bool:
         return self.schedulable and harness in self.harnesses
+
+    def takes_new(self, harness: str) -> bool:
+        return self.eligible(harness) and not self.drain
 
     def workdir_for(self, harness: str) -> str | None:
         """workdir_root with {bot} resolved to the harness's bot user.
@@ -323,6 +329,15 @@ def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None
                 "it will not be scheduled",
             )
         )
+    drain = _bool(item, "drain", False, prefix, findings)
+    if drain:
+        findings.append(
+            Finding(
+                "warning",
+                f"device {name!r} is draining (drain: true); "
+                "it takes no new jobs and its running jobs finish",
+            )
+        )
 
     tailscale_name: str | None = None
     raw_tailscale = item.get("tailscale_name")
@@ -522,6 +537,7 @@ def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None
         tailscale_name=tailscale_name,
         local=local,
         enabled=enabled,
+        drain=drain,
         workdir_root=workdir_root,
         placeholders=tuple(placeholders),
         ssh_alias=ssh_alias,

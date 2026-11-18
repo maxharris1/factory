@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from lib import lane_limit
 from lib.brief.qa import AFTER_SCREENSHOT, PASS_OUTPUT, LaneFacts, Scenario, pack_ids, render_qa_brief
 from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.qa import record_runner_moved
@@ -320,6 +321,7 @@ class QaWorker:
     collect: Collect | None = None
     storage: Callable[[str], Storage] | None = None
     max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
+    shares_usage_with: Mapping[str, str] = field(default_factory=dict)
     log: Callable[[str], None] = lambda line: None
     evidence: Mapping[str, QaStorage] = field(default_factory=dict)
     free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
@@ -415,6 +417,13 @@ class QaWorker:
             if low[repo] or self._backoff.get(runner, 0.0) > now:
                 self._restart_wait(job)
                 continue
+            with self.queue.connect() as connection:
+                reason = self._yields(connection, job.id, runner, now)
+                if reason is not None:
+                    _restart_wait(connection, job.id, now)
+                    if _note_yield(connection, job, reason, now):
+                        self.log(f"qa job {job.id}: waits, {reason}")
+                    continue
             if self._open_count(runner) >= self.max_cloud_lanes:
                 waiting[runner] += 1
                 self._restart_wait(job)
@@ -439,6 +448,9 @@ class QaWorker:
         if not any(row.agent_id for row in rows):
             return
         runner = rows[0].runner
+        with self.queue.connect() as connection:
+            if self._paused(connection, runner, self.queue.now()) is not None:
+                return
         taken = {row.slice for row in rows}
         for item in plan.slices:
             if item.index in taken:
@@ -481,15 +493,18 @@ class QaWorker:
             return
         self._finish(job, plan, rows)
 
-    def _launch(self, job: Job, plan: RunPlan, row: LaneRow) -> Literal["launched", "gap", "requeued"]:
+    def _launch(self, job: Job, plan: RunPlan, row: LaneRow) -> Literal["launched", "gap", "requeued", "deferred"]:
         first = row.slice == 0 and row.attempt == 1 and row.kind != "base-check" and not any(
             other.agent_id for other in self._lanes(row.run_id)
         )
         runner = row.runner
         with self.queue.connect() as connection:
+            if self._yields(connection, job.id, runner, self.queue.now()) is not None:
+                return "deferred"
             connection.execute(
                 "UPDATE qa_lanes SET launch_called_at = ? WHERE lane_id = ?", (self.queue.now(), row.lane_id)
             )
+        limited: list[str] = []
         while True:
             try:
                 launched = self.runners[runner].launch(self._lane(plan, row, runner))
@@ -498,9 +513,11 @@ class QaWorker:
                     self._close(row, "gap", f"launch-failed:{type(exc).__name__}")
                     return "gap"
                 self._backoff[runner] = self.queue.now() + BACKOFF_SECONDS
-                following = self._next_runner(plan, runner)
+                if isinstance(exc, UsageLimit) and runner in self.shares_usage_with:
+                    limited.append(runner)
+                following = self._next_runner(job, plan, runner, {self.shares_usage_with[name] for name in limited})
                 if following is None or not self._move(row, following):
-                    self._requeue(job, plan, runner, exc)
+                    self._requeue(job, plan, runner, exc, limited)
                     return "requeued"
                 runner = following
                 continue
@@ -632,8 +649,9 @@ class QaWorker:
             return False
         return True
 
-    def _requeue(self, job: Job, plan: RunPlan, runner: str, exc: Exception) -> None:
+    def _requeue(self, job: Job, plan: RunPlan, runner: str, exc: Exception, limited: Sequence[str]) -> None:
         now = self.queue.now()
+        causes = [f"{name}:{UsageLimit.__name__}" for name in limited if name != runner]
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM qa_lanes WHERE run_id = ? AND agent_id IS NULL", (plan.detail.run_id,))
@@ -651,7 +669,7 @@ class QaWorker:
                     """,
                     (
                         job.id, job.request.repo.lower(), job.request.ticket_id, job.request.action,
-                        QA_RECIPIENT, f"{runner}:{type(exc).__name__}", now,
+                        QA_RECIPIENT, ",".join([*causes, f"{runner}:{type(exc).__name__}"]), now,
                     ),
                 )
             connection.commit()
@@ -669,12 +687,48 @@ class QaWorker:
             connection.commit()
         return moved
 
-    def _next_runner(self, plan: RunPlan, runner: str) -> str | None:
+    def _next_runner(self, job: Job, plan: RunPlan, runner: str, spent: set[str]) -> str | None:
         if plan.detail.arm != "primary" or plan.qa.shootout:
             return None
         names = [item.name for item in plan.qa.runners]
         following = names[names.index(runner) + 1 :] if runner in names else []
-        return next((name for name in following if name in self.runners), None)
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            return next(
+                (
+                    name for name in following
+                    if name in self.runners
+                    and self.shares_usage_with.get(name) not in spent
+                    and self._yields(connection, job.id, name, now) is None
+                ),
+                None,
+            )
+
+    def _paused(self, connection: sqlite3.Connection, runner: str, now: float) -> lane_limit.LaneLimit | None:
+        recipient = self.shares_usage_with.get(runner)
+        return None if recipient is None else lane_limit.active(connection, recipient, now)
+
+    def _yields(self, connection: sqlite3.Connection, job_id: str, runner: str, now: float) -> str | None:
+        recipient = self.shares_usage_with.get(runner)
+        if recipient is None:
+            return None
+        limit = self._paused(connection, runner, now)
+        if limit is not None:
+            return f"{recipient}: {lane_limit.label(limit)}"
+        if recipient in self._owed(connection, job_id) and claim_order(connection, recipient, now=now):
+            return f"behind queued {recipient} jobs"
+        return None
+
+    def _owed(self, connection: sqlite3.Connection, job_id: str) -> set[str]:
+        rows = connection.execute(
+            "SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-requeued'", (job_id,)
+        ).fetchall()
+        return {
+            self.shares_usage_with[name]
+            for row in rows
+            for name, _, cause in (entry.partition(":") for entry in row["detail"].split(","))
+            if cause == UsageLimit.__name__ and name in self.shares_usage_with
+        }
 
     def _plan(self, job: Job) -> RunPlan:
         detail = Detail.of(json.loads(job.request.detail or "{}"))
@@ -773,6 +827,18 @@ def _restart_wait(connection: sqlite3.Connection, job_id: str, now: float) -> No
     connection.execute(
         "UPDATE jobs SET last_activity_at = ? WHERE id = ? AND state = 'queued'", (now, job_id)
     )
+
+
+def _note_yield(connection: sqlite3.Connection, job: Job, reason: str, now: float) -> bool:
+    return connection.execute(
+        """
+        INSERT INTO job_events (job_id, repo, ticket_id, action, recipient, event, detail, recorded_at)
+        SELECT ?, ?, ?, ?, ?, 'qa-yielded', ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM job_events WHERE job_id = ? AND event = 'qa-yielded' AND detail = ?)
+        """,
+        (job.id, job.request.repo.lower(), job.request.ticket_id, job.request.action, QA_RECIPIENT, reason, now,
+         job.id, reason),
+    ).rowcount == 1
 
 
 def _take(connection: sqlite3.Connection, job_id: str, now: float) -> bool:

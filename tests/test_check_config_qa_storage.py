@@ -179,3 +179,16 @@ def test_a_bad_budget_or_floor_is_refused(tmp_path: Path, key: str, value: str) 
 
     assert config is None
     assert f"qa_storage.{key} must be a positive integer (GiB)" in [finding.message for finding in findings]
+
+
+def test_an_unknown_shared_account_runner_fails_check_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    orch = write_orch(tmp_path, ENTRY)
+    orch.write_text(ORCH + "qa:\n  shares_usage_with:\n    gpu-cloud: claude\n", encoding="utf-8")
+    factory = qa_factory_md(tmp_path)
+
+    status = cli.main(["check-config", "--orch", str(orch), "--factory", f"owner/repo={factory}"])
+
+    assert status != 0
+    assert "qa.shares_usage_with has unknown runner 'gpu-cloud'" in capsys.readouterr().err

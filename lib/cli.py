@@ -178,6 +178,7 @@ commands:
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report or forget (issue #92)
   heal             restart down or stale-code components (issue #107)
+  settings         apply device settings asked for in Mission Control (#777)
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
 
@@ -484,6 +485,16 @@ heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
   once). --dry-run prints each target's state and writes nothing.
   deploy/self-heal.sh starts it detached after each heal pass.
 
+settings apply [--state DIR] [--orch PATH] [--machines PATH] [--deploy DIR]
+               [--config DIR]
+  Apply each new request in orch.yml dashboard.settings.spool (enabled,
+  slot_max or drain of one device, asked for by the approver on the
+  Settings page): back up machines.yml, edit that one line, restart the
+  poller and this account's waiters, and append to settings-audit.jsonl in
+  the state dir. Without dashboard.settings it does nothing. Exits 1 when a
+  restart failed (the backup is restored) or the spool cannot be read.
+  deploy/self-heal.sh runs it before each health step.
+
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
   paused and stuck tickets, the feeder, the webhook and component health,
@@ -558,6 +569,10 @@ def main(argv: list[str] | None = None) -> int:
         from lib import heal
 
         return heal.main(argv[1:])
+    if argv[0] == "settings":
+        from lib import settings_apply
+
+        return settings_apply.main(argv[1:])
     if argv[0] == "status":
         return _call(status_main, argv[1:])
     if argv[0] == "retry":
@@ -755,7 +770,7 @@ def _wait(argv: list[str]) -> int:
         queue = open_queue(_db_path(args.db))
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
-        pool = _device_pool(queue, machines)
+        pool = _device_pool(queue, machines, args.machines)
     except (WaitError, waiter.WaiterError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
@@ -920,6 +935,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         post=post,
         storage=storage,
         max_cloud_lanes=config.qa.max_cloud_lanes,
+        shares_usage_with=config.qa.shares_usage_with,
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
         evidence={p.repo.lower(): p.qa_storage for p in config.projects if p.qa_storage},
     )
@@ -1244,12 +1260,10 @@ def _runtime(
         machines = _machines_config(machines_path, required=False)
         if machines is not None:
             devices = DeviceMonitor(
-                _device_pool(queue, machines),
+                _device_pool(queue, machines, machines_path),
                 machines,
                 SshTransport(),
-                machines_path=(
-                    machines_path if machines_path is not None else ROOT / "machines.yml"
-                ),
+                machines_path=_machines_path(machines_path),
             )
     feeder = None
     if not create and any(project.intake is not None for project in config.projects):
@@ -1360,7 +1374,7 @@ def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | N
     With no --machines the checkout's machines.yml is used. A missing file
     is an error only when required; an invalid one always is.
     """
-    machines_path = path if path is not None else ROOT / "machines.yml"
+    machines_path = _machines_path(path)
     if not machines_path.is_file() and not required and path is None:
         return None
     config, findings = load_machines_yml(machines_path)
@@ -1371,9 +1385,17 @@ def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | N
     return config
 
 
-def _device_pool(queue: SQLiteJobQueue, machines: MachinesConfig) -> DevicePool:
+def _machines_path(path: Path | None) -> Path:
+    return path if path is not None else ROOT / "machines.yml"
+
+
+def _device_pool(
+    queue: SQLiteJobQueue, machines: MachinesConfig, path: Path | None
+) -> DevicePool:
     try:
-        return retry_locked(lambda: DevicePool(queue, machines))
+        return retry_locked(
+            lambda: DevicePool(queue, machines, machines_path=_machines_path(path))
+        )
     except (QueueError, sqlite3.Error, OSError) as exc:
         raise WaitError(f"cannot open the device pool: {' '.join(str(exc).split())}") from exc
 
@@ -2099,7 +2121,7 @@ def _job_run_command(argv: list[str]) -> int:
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
         placed = placed_run.prepare(
-            _device_pool(queue, machines),
+            _device_pool(queue, machines, args.machines),
             machines,
             job_id=args.job_id,
             bot=args.bot,

@@ -150,17 +150,19 @@ def test_status_empty_state() -> None:
     )
 
 
-def test_device_rows_show_harnesses_slots_and_placeholders(tmp_path: Path) -> None:
+def test_device_rows_show_harnesses_slots_drain_and_placeholders(tmp_path: Path) -> None:
     machines = tmp_path / "machines.yml"
     machines.write_text(
         """
 devices:
   - name: box
     local: true
+    drain: true
     slot_max: 3
     harnesses: {claude: claude-bot, codex: codex-bot}
   - name: pc
     enabled: false
+    drain: true
     tailscale_name: pc.example.ts.net
     slot_max: 2
     harnesses: {cursor: cursor-bot}
@@ -192,8 +194,8 @@ devices:
 
     assert (
         "Devices (4)\n"
-        "  box [claude,codex] 2/3 slots\n"
-        "  pc [cursor] 0/2 slots disabled\n"
+        "  box [claude,codex] 2/3 slots draining\n"
+        "  pc [cursor] 0/2 slots disabled draining\n"
         "  mac [?] 0/? slots placeholder\n"
         "  retired [?] 1/? slots not-in-machines.yml\n"
         "\n"

@@ -16,7 +16,15 @@ dashboard:
                                        #   also push status.json whenever
                                        #   orch.db changes, about once a second
     interval_seconds: 20               # `orch dashboard push` loop, 15 to 30
+  settings:                            # optional: Mission Control device settings
+    spool: /home/dash/settings-spool   # absolute: the :8090 server's request
+                                       #   spool, on dashboard.push.host when
+                                       #   push is ssh, else on this host
+    spool_owner: dash                  # the OS user the server runs as; only
+                                       #   request files it owns are read
+    approver: maxharris1               # the GitHub login whose requests apply
 
+Without `settings`, `orch settings apply` does nothing (lib/settings_apply.py).
 The section holds no secrets. The ssh transport relies on the SSH login
 Max provisioned; `ssh_config` names his ssh_config file, never a key, and
 nothing here names a key or password.
@@ -48,7 +56,11 @@ PLACEHOLDER = "REPLACE_WITH_"
 DEFAULT_REMOTE_DIR = "factory-dashboard"
 EVERY_MINUTES_MAX = 1440
 
-_DASHBOARD_KEYS = {"refresh_seconds", "push"}
+_DASHBOARD_KEYS = {"refresh_seconds", "push", "settings"}
+_SETTINGS_KEYS = {"spool", "spool_owner", "approver"}
+OS_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+BOT_LOGINS = frozenset({"claude-bot", "codex-bot", "cursor-bot", "grok", "grok-bot"})
 _PUSH_KEYS = {
     "transport",
     "host",
@@ -77,9 +89,21 @@ class PushConfig:
 
 
 @dataclass(frozen=True)
+class SettingsConfig:
+    spool: str
+    spool_owner: str
+    approver: str
+
+
+@dataclass(frozen=True)
 class DashboardConfig:
     refresh_seconds: int = REFRESH_DEFAULT
     push: PushConfig = field(default_factory=PushConfig)
+    settings: SettingsConfig | None = None
+
+
+def is_bot_login(login: str) -> bool:
+    return login.endswith("[bot]") or login.casefold() in BOT_LOGINS
 
 
 def in_range(value: object) -> bool:
@@ -141,12 +165,55 @@ def parse_dashboard(
             )
         )
     push = _push(value.get("push"), findings)
+    settings = _settings(value.get("settings"), findings)
     if len(findings) > start and any(
         item.severity == "error" for item in findings[start:]
     ):
         return None
     assert push is not None
-    return DashboardConfig(refresh_seconds=int(refresh), push=push)
+    return DashboardConfig(refresh_seconds=int(refresh), push=push, settings=settings)
+
+
+def _settings(value: object, findings: list[Finding]) -> SettingsConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "dashboard.settings must be a mapping"))
+        return None
+    start = len(findings)
+    _unknown(value, _SETTINGS_KEYS, "dashboard.settings", findings)
+    spool = value.get("spool")
+    owner = value.get("spool_owner")
+    approver = value.get("approver")
+    for key in ("spool", "spool_owner", "approver"):
+        item = value.get(key)
+        if item is None:
+            findings.append(Finding("error", f"dashboard.settings.{key} is required"))
+        elif isinstance(item, str) and PLACEHOLDER in item:
+            findings.append(
+                Finding("error", f"dashboard.settings.{key} is a REPLACE_WITH_ placeholder")
+            )
+    if len(findings) > start:
+        return None
+    if not valid_ssh_config(spool):
+        findings.append(
+            Finding(
+                "error",
+                "dashboard.settings.spool must be an absolute path "
+                "of letters, digits, '.', '_', '-' and '/'",
+            )
+        )
+    if not isinstance(owner, str) or OS_USER.fullmatch(owner) is None:
+        findings.append(Finding("error", "dashboard.settings.spool_owner must be an OS user name"))
+    if not isinstance(approver, str) or GITHUB_LOGIN.fullmatch(approver) is None:
+        findings.append(Finding("error", "dashboard.settings.approver must be a GitHub login"))
+    elif is_bot_login(approver):
+        findings.append(
+            Finding("error", "dashboard.settings.approver must be a person, not a bot login")
+        )
+    if len(findings) > start:
+        return None
+    return SettingsConfig(spool=spool, spool_owner=owner, approver=approver)
 
 
 def _push(value: object, findings: list[Finding]) -> PushConfig | None:
