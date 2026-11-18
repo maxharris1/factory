@@ -64,6 +64,7 @@ class JobRow:
     ticket_id: str
     state: str
     finished_at: float | None
+    failure_handled: bool = True
 
 
 def keep_reason(job: JobRow, ticket_active: bool, cutoff: float) -> str | None:
@@ -71,7 +72,7 @@ def keep_reason(job: JobRow, ticket_active: bool, cutoff: float) -> str | None:
         return LIVE
     if job.finished_at is None or job.finished_at >= cutoff:
         return RECENT
-    if job.state == "failed" and ticket_active:
+    if job.state == "failed" and (ticket_active or not job.failure_handled):
         return RETRY_HELD
     return None
 
@@ -89,9 +90,9 @@ def read_jobs(db: Path) -> list[JobRow]:
     connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         return [
-            JobRow(*row)
-            for row in connection.execute(
-                "SELECT id, repo, ticket_id, state, finished_at FROM jobs"
+            JobRow(id, repo, ticket, state, finished_at, bool(handled))
+            for id, repo, ticket, state, finished_at, handled in connection.execute(
+                "SELECT id, repo, ticket_id, state, finished_at, failure_handled FROM jobs"
             )
         ]
     finally:
@@ -171,7 +172,7 @@ def disk_bytes(paths: Iterable[Path]) -> int:
 
 
 def jobs_held_open(jobs: Path) -> set[str] | None:
-    prefix = f"{jobs}/"
+    prefix = f"{os.path.realpath(jobs)}/"
     proc = Path("/proc")
     if (proc / "self" / "cwd").exists():
         paths = []
@@ -185,7 +186,7 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
                 pass
             for link in links:
                 try:
-                    paths.append(os.readlink(link))
+                    paths.append(os.readlink(link).removesuffix(" (deleted)"))
                 except OSError:
                     continue
     else:
@@ -209,13 +210,14 @@ def _newer(path: Path, cutoff: float) -> bool:
         return False
 
 
-def _device_reason(folder: Path, cutoff: float, held: set[str] | None) -> str | None:
+def _device_reason(folder: Path, cutoff: float, scan: Callable[[Path], set[str] | None]) -> str | None:
     jobs = folder.parent
     if (jobs / f"{folder.name}.json").exists():
         return WORKTREE_RECORD
     records = [path for path in folder.iterdir() if path.name.startswith(WORKER_RECORD)]
     if any(_newer(path, cutoff) for path in (folder, jobs / f"{folder.name}.launched", *records)):
         return RECENT
+    held = scan(jobs)
     if held is None:
         return CANNOT_SCAN
     if folder.name in held:
@@ -249,20 +251,22 @@ def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | Non
         path for path in (jobs.iterdir() if jobs.is_dir() else ())
         if path.is_dir() and not path.is_symlink() and _JOB_ID.fullmatch(path.name)
     )
-    held = scan(jobs) if any(path.name in plan.finished for path in folders) else set()
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
     for folder in folders:
         if folder.name not in plan.finished:
             kept[folder.name] = NOT_NAMED
             continue
-        reason = _device_reason(folder, plan.cutoff, held)
-        if reason is not None:
-            kept[folder.name] = reason
-            continue
-        entries = _removable(folder)
-        size = disk_bytes(entries)
-        failed = None if plan.dry_run else _empty(entries)
+        try:
+            reason = _device_reason(folder, plan.cutoff, scan)
+            if reason is not None:
+                kept[folder.name] = reason
+                continue
+            entries = _removable(folder)
+            size = disk_bytes(entries)
+            failed = None if plan.dry_run else _empty(entries)
+        except OSError as exc:
+            failed = f"could not read {folder}: {exc}"
         if failed is None:
             removed[folder.name] = size
         else:
@@ -327,7 +331,7 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
     cutoff = now - grace_hours * 3600
     reasons = keep_reasons(read_jobs(db), cutoff)
     plan = Plan(frozenset(i for i, r in reasons.items() if r is None), cutoff, dry_run)
-    found = {(t.device, t.remote.user, t.remote.workdir_root): t for t in targets(machines)}
+    found = {(t.device, t.remote.workdir_root): t for t in targets(machines)}
     work = list(found.values())
     if not work:
         return []

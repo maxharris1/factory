@@ -76,7 +76,8 @@ def work_root(tmp_path: Path, name: str = "pc") -> Path:
     return tmp_path / name / "claude-bot" / "work"
 
 
-def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]]) -> Path:
+def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]],
+             unhandled: frozenset[str] = frozenset()) -> Path:
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=lambda: NOW)
     with SQLiteJobQueue(db, clock=lambda: NOW).connect() as connection:
@@ -85,10 +86,11 @@ def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]]) -> 
                 """
                 INSERT INTO jobs (id, dedupe_key, repo, ticket_id, action, recipient,
                     source_comment_id, timeout_seconds, generation, attempt, state,
-                    created_at, last_activity_at, finished_at)
-                VALUES (?, ?, 'Owner/Repo', ?, 'build', 'claude', 'c1', 60, 1, 1, ?, ?, ?, ?)
+                    created_at, last_activity_at, finished_at, failure_handled)
+                VALUES (?, ?, 'Owner/Repo', ?, 'build', 'claude', 'c1', 60, 1, 1, ?, ?, ?, ?, ?)
                 """,
-                (job_id, job_id, ticket, state, OLD, OLD, finished_at),
+                (job_id, job_id, ticket, state, OLD, OLD, finished_at,
+                 0 if job_id in unhandled else 1),
             )
     return db
 
@@ -203,12 +205,14 @@ LIVE_CASES = {
     "retry-held by a running retry": (
         [("j", "t1", "failed", OLD), ("retry", "t1", "running", None)], "retry-held"),
     "cancelled then requeued": ([("j", "t1", "queued", None)], "live"),
+    "failed, not yet handled by T6": ([("j", "t1", "failed", OLD)], "retry-held"),
 }
 
 
 @pytest.mark.parametrize("case", LIVE_CASES, ids=list(LIVE_CASES))
 def test_live_or_retry_held_folder_is_never_removed(tmp_path: Path, case: str) -> None:
     rows, reason = LIVE_CASES[case]
+    unhandled = frozenset({"j"}) if case.startswith("failed, not yet") else frozenset()
     root = work_root(tmp_path)
     folder = job_folder(root, "j")
     if case == "claimed":
@@ -216,7 +220,7 @@ def test_live_or_retry_held_folder_is_never_removed(tmp_path: Path, case: str) -
             record.unlink()
         age(folder, OLD)
     contents = sorted(path.relative_to(folder) for path in folder.rglob("*"))
-    db = database(tmp_path, rows)
+    db = database(tmp_path, rows, unhandled)
 
     [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
                                     now=NOW, grace_hours=6, dry_run=False)
@@ -261,6 +265,22 @@ def test_device_guards_keep_recent_held_and_unscannable_folders(tmp_path: Path) 
                                     scan=lambda _: None)
     assert blind.kept["free2"] == "cannot-scan" and blind.removed == {}
     assert (jobs / "free2" / "repo" / "README").exists()
+
+
+def test_held_open_scan_sees_through_a_symlinked_work_root(tmp_path: Path) -> None:
+    real = work_root(tmp_path)
+    job_folder(real, "held")
+    linked = tmp_path / "linked-work"
+    linked.symlink_to(real)
+    sleeper = subprocess.Popen(["sleep", "60"], cwd=real / "jobs" / "held" / "repo")
+    try:
+        report = job_cleanup.device_step(
+            linked, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+    assert report.kept == {"held": "held-open"} and report.removed == {}
 
 
 def test_backlog_sweep_of_mixed_folders_removes_only_finished_checkouts(
