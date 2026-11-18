@@ -562,3 +562,155 @@ def test_orch_host_and_ssh_user_errors(tmp_path: Path, text: str, message: str) 
 
     assert config is None
     assert any(message in item for item in errors(findings)), findings
+
+
+ACCOUNTS = """
+orch_host: pc
+accounts:
+  - {id: codex-a, harness: codex, plan: pro, label: "Codex Pro (A)"}
+  - {id: codex-b, harness: codex}
+  - {id: cursor-grok-ultra, harness: external, plan: ultra}
+"""
+
+
+def test_shipped_machines_yml_maps_every_bot_to_its_default_account() -> None:
+    config, findings = load_machines_yml(ROOT / "machines.yml", overlay=False)
+
+    assert config is not None, findings
+    for device in config.devices:
+        assert {h: device.account_for(h) for h in device.harnesses} == {
+            h: f"{h}-default" for h in device.harnesses
+        }
+    assert config.serving("codex") == frozenset({"codex-default"})
+
+
+def test_bot_and_account_value_resolves_to_the_named_account(tmp_path: Path) -> None:
+    text = (
+        ACCOUNTS
+        + "devices:\n"
+        + remote(harnesses="{codex: {bot: codex-bot, account: codex-a}}")
+        + remote(
+            name="mac",
+            tailscale_name="mac.example.ts.net",
+            harnesses="{codex: {bot: codex-bot, account: codex-b}}",
+        )
+    )
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is not None, findings
+    pc, mac = config.device("pc"), config.device("mac")
+    assert (pc.harnesses["codex"], pc.account_for("codex")) == ("codex-bot", "codex-a")
+    assert (mac.harnesses["codex"], mac.account_for("codex")) == ("codex-bot", "codex-b")
+    assert config.account("codex-a").plan == "pro"
+    assert config.account("codex-a").label == "Codex Pro (A)"
+    assert config.serving("codex") == frozenset({"codex-a", "codex-b"})
+    assert [a.id for a in config.external_accounts()] == ["cursor-grok-ultra"]
+
+
+def test_bare_bot_value_beside_accounts_is_the_default_account(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(write(tmp_path, ACCOUNTS + "devices:\n" + remote()))
+
+    assert config is not None, findings
+    assert config.device("pc").account_for("codex") == "codex-default"
+    assert config.account("codex-default").harness == "codex"
+
+
+def test_draining_device_account_does_not_serve(tmp_path: Path) -> None:
+    text = ACCOUNTS + "devices:\n" + remote(
+        drain="true", harnesses="{codex: {bot: codex-bot, account: codex-a}}"
+    )
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is not None, findings
+    assert config.serving("codex") == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            "accounts:\n  - {id: codex-a, harness: codex}\n  - {id: codex-a, harness: codex}\n"
+            "devices:\n" + remote(),
+            "duplicate account 'codex-a'",
+        ),
+        (
+            "accounts:\n  - {id: max@example.com, harness: codex}\ndevices:\n" + remote(),
+            "accounts[0].id must be 1-64 letters, digits, '.', '_' or '-'",
+        ),
+        (
+            "accounts:\n  - {id: codex-a, harness: grok}\ndevices:\n" + remote(),
+            "accounts[0].harness must be one of claude, codex, cursor, external",
+        ),
+        (
+            "accounts:\n  - {id: codex-a, harness: codex, token: x}\ndevices:\n" + remote(),
+            "unknown field 'accounts[0].token'",
+        ),
+        (
+            "accounts:\n  - {id: codex-a, harness: codex, plan: 7}\ndevices:\n" + remote(),
+            "accounts[0].plan must be text",
+        ),
+        ("accounts: {codex-a: codex}\ndevices:\n" + remote(), "accounts must be a list"),
+        (
+            "devices:\n" + remote(harnesses="{codex: {bot: codex-bot, account: codex-z}}"),
+            "devices[0].harnesses.codex names unknown account 'codex-z'",
+        ),
+        (
+            "accounts:\n  - {id: claude-a, harness: claude}\ndevices:\n"
+            + remote(harnesses="{codex: {bot: codex-bot, account: claude-a}}"),
+            "devices[0].harnesses.codex names account 'claude-a' of harness 'claude'",
+        ),
+        (
+            ACCOUNTS + "devices:\n"
+            + remote(harnesses="{codex: {bot: codex-bot, account: cursor-grok-ultra}}"),
+            "devices[0].harnesses.codex names account 'cursor-grok-ultra' of harness 'external'",
+        ),
+        (
+            "devices:\n" + remote(harnesses="{codex: {bot: codex-bot, account: claude-default}}"),
+            "devices[0].harnesses.codex names account 'claude-default' of harness 'claude'",
+        ),
+        (
+            "accounts:\n  - {id: codex-default, harness: claude}\ndevices:\n" + remote(),
+            "devices[0].harnesses.codex names account 'codex-default' of harness 'claude'",
+        ),
+        (
+            ACCOUNTS + "devices:\n"
+            + remote(harnesses="{codex: {bot: codex-bot, account: codex-a, token: x}}"),
+            "unknown field 'devices[0].harnesses.codex.token'",
+        ),
+        (
+            ACCOUNTS + "devices:\n" + remote(harnesses="{codex: {account: codex-a}}"),
+            "devices[0].harnesses.codex must be 'codex-bot'",
+        ),
+        (
+            ACCOUNTS + "devices:\n"
+            + remote(harnesses="{codex: {bot: claude-bot, account: codex-a}}"),
+            "devices[0].harnesses.codex must be 'codex-bot'",
+        ),
+        (
+            "devices:\n" + remote(name="external"),
+            "devices[0].name 'external' is reserved for external usage readings",
+        ),
+    ],
+)
+def test_account_errors(tmp_path: Path, text: str, message: str) -> None:
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is None
+    assert any(message in item for item in errors(findings)), findings
+
+
+def test_overlay_adds_an_account_by_id(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY")
+    path = write(tmp_path, ACCOUNTS + "devices:\n" + remote())
+    (tmp_path / "machines.local.yml").write_text(
+        "accounts:\n  - {id: codex-a, plan: plus}\n  - {id: claude-a, harness: claude}\n",
+        encoding="utf-8",
+    )
+
+    config, findings = load_machines_yml(path)
+
+    assert config is not None, findings
+    assert config.account("codex-a").plan == "plus"
+    assert config.account("claude-a").harness == "claude"
