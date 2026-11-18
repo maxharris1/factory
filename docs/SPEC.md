@@ -1253,7 +1253,7 @@ People open a QA run's evidence from one link on the PC dashboard server
 **Layout on the PC.** A run lives at `<DASHBOARD_DIR>/qa/<run_id>/`. It holds
 the run's `lane-<n>/` folders exactly as `collect()` writes them
 (`result.json`, `manifest.json`, `<scenario-id>/<file>`), plus one
-`index.html`. #875b (#910) pushes this layout and recycles it on the PC.
+`index.html`. #910 pushes this layout and removes runs from it (below).
 
 **Page.** `lib/dashboard_pages/qa_evidence.py`, `run_page(run_folder,
 run_id)`, builds `index.html` on the box before the push. It reads each
@@ -1300,6 +1300,63 @@ Every response carries the snapshot's security headers. A `200` under
 Content-Security-Policy so the page can show its images and videos. Video
 seeking needs HTTP range requests, which the server does not answer, so a
 video plays from the start.
+
+**Pushing evidence to the PC (issue #910).** A full `orch dashboard push`
+with `transport: ssh` sends the snapshot first, then QA evidence over the
+same login, BatchMode and `-F` (`lib/qa_evidence_push.py`). `--status-only`
+pushes and an unconfigured transport send no evidence. A run is sent when its
+`qa_runs` row has an `evidence_dir`, its state is not `queued` or `running`,
+and its repo has a `qa_storage` entry. Runs go newest first. The folder must
+pass recycling's checks against that entry's `evidence_root` (absolute, its
+own real path, exactly `<owner>/<name>/<ticket>/<run_id>` below the root).
+The box walks each `lane-<n>/` folder by directory handle with `O_NOFOLLOW`
+and accepts only folders and regular files with one link. A symlink, a hard
+link or a folder outside the root refuses the run: the push logs
+`dashboard push: qa run <run_id> refused: <reason>` and sends nothing of it.
+A refusal is not a push failure.
+
+The box renders the run's `index.html` with `run_page` and writes the files
+into a tar spooled to a temporary file, reopening each file `O_NOFOLLOW` and
+checking that it is still the file it walked. `index.html` is the last
+member. One ssh step per run extracts the tar into `qa/.<run_id>.push-tmp`,
+checks that `index.html` arrived, moves the live copy aside, renames the
+temp folder to `qa/<run_id>` and removes the old copy. The server refuses
+dot-named parts, so it never serves a half-written run. Each send may take
+`SEND_TIMEOUT_SECONDS` plus one second per MiB. No new send starts after the
+evidence step has run 120 seconds; the rest go out on the next push.
+
+`<out>/.qa-push.json` on the box records one destination,
+`<user>@<hostname>:<port>:<remote_dir>`, where user, hostname and port are what
+`ssh -G` (with `-F <ssh_config>` when set) resolves `host` to, so a change of
+ssh_config that points the alias at another PC is a new destination.
+For each run sent there it keeps a sha256 over each file's relative path,
+size and `mtime_ns`, and the size of the tar sent. It also lists the runs
+removed for budget. The box rewrites it after each send and each removal. A
+run whose fingerprint has not changed is not sent again. A changed run, such
+as one the box's recycling trimmed, is sent whole again, so the files
+recycling deleted disappear from the PC too. A store for another destination,
+or a lost or unreadable one, loads empty. Every run is then
+sent to the current destination, and nothing is removed from the old one.
+
+After the sends, the push removes from the PC each recorded run whose
+`qa_runs` row is gone or no longer settled, and each run whose box folder it
+found gone this push. A refused run, a run held because its repo has no
+`qa_storage` or its root cannot be opened, and a run the 120-second limit
+left unvisited stay on the PC. Each removal is one ssh step,
+`cd -- <remote_dir> && rm -rf -- qa/<run_id>`, for a `check_id`-valid run id
+only.
+
+`dashboard.push.qa_budget_gib` (ssh only, a positive integer, unset by
+default) caps the evidence on the PC, counted as the recorded tar sizes.
+While the total is over the cap, the push removes the oldest run (by
+`started_at`) of a ticket whose `ticket_state` is `merged`, `done` or
+`abandoned`, the same way. A run of an open ticket is never removed for
+budget, even when the total stays over. A run removed for budget is not sent
+again while the box lists it. Unset, nothing is removed for budget.
+
+Any evidence error, such as a failed ssh, logs one redacted
+`dashboard push: qa ...` line and ends the evidence step. The exit status
+and the `dashboard-push` Health record stay the snapshot's.
 
 ### QA receipts audit
 

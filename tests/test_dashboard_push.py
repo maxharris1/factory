@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,8 +14,12 @@ from lib.dashboard_push import (
     run_push,
     transport_for,
 )
+import lib.dashboard_cli
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
+from lib.qa_evidence import EvidenceRefused, RunFile, run_dir, walk_run, write_run_tar
+from lib.qa_evidence_push import push_evidence
+from tests.test_qa_evidence_recycle import DAY, NOW, REPO, TICKET, _closed, _lane, _run, db, root  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "pc-wsl-bots.tail68624b.ts.net"
@@ -812,3 +817,307 @@ def test_cli_push_refuses_invalid_orch_yml(tmp_path: Path) -> None:
     result = run_orch("dashboard", "push", "--orch", str(orch), "--db", str(tmp_path / "x.db"))
     assert result.returncode == 1
     assert "dashboard.push.host is required for ssh" in result.stderr
+
+
+def test_remote_runs_one_ssh_with_the_feed_and_timeout() -> None:
+    runner = Recorder()
+    feed = object()
+    SshTransport(TARGET, "factory-dashboard", runner=runner).remote("true", feed=feed, timeout=42)
+    SshTransport(TARGET, "d", ssh_config="/home/box/.ssh/config", runner=runner).remote("true")
+    (first, first_kwargs), (second, second_kwargs) = runner.calls
+    assert first == ["ssh", *OPTIONS, "--", TARGET, "true"]
+    assert (first_kwargs["stdin"], first_kwargs["timeout"]) == (feed, 42)
+    assert second == ["ssh", *CONFIG_OPTIONS, "--", TARGET, "true"]
+    assert (second_kwargs["stdin"], second_kwargs["timeout"]) == (subprocess.DEVNULL, 20)
+
+
+class FakePC:
+    def __init__(self, home_by_ssh_config: dict[str | None, Path]):
+        self.home_by_ssh_config = home_by_ssh_config
+        self.scripts: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        assert argv[0] == "ssh", argv
+        config = argv[argv.index("-F") + 1] if "-F" in argv else None
+        home = self.home_by_ssh_config[config]
+        if "-G" in argv:
+            resolved = f"user factory\nhostname {home.name}\nport 22\n"
+            return subprocess.CompletedProcess(argv, 0, resolved, "")
+        script = argv[argv.index("--") + 2]
+        self.scripts.append(script)
+        return subprocess.run(
+            ["sh", "-c", script], cwd=home, stdin=kwargs["stdin"], capture_output=True, text=True
+        )
+
+
+LANE_FILES = ["s-1/after-screenshot.png", "s-1/console.log"]
+
+
+def _settled(
+    db, root: Path, run_id: str, state: str = "reported", *, ticket: str = TICKET, started_at: float = NOW - DAY
+) -> Path:
+    folder = run_dir(root, REPO, ticket, run_id)
+    _lane(folder, 1, {"s-1": "pass"}, LANE_FILES)
+    _run(db, run_id, folder, state=state, ticket=ticket, started_at=started_at)
+    return folder
+
+
+def _push_evidence(
+    db,
+    root: Path,
+    tmp_path: Path,
+    *,
+    remote_dir: str = "factory-dashboard",
+    budget_bytes: int | None = None,
+    roots: dict[str, Path] | None = None,
+    ssh_config: str | None = None,
+) -> tuple[FakePC, list[str]]:
+    homes = {
+        None: tmp_path / "pc",
+        "/home/box/.ssh/config-a": tmp_path / "pc",
+        "/home/box/.ssh/config-b": tmp_path / "pc-b",
+    }
+    (homes[ssh_config] / remote_dir).mkdir(parents=True, exist_ok=True)
+    pc, lines = FakePC(homes), []
+    transport = SshTransport(TARGET, remote_dir, ssh_config=ssh_config, runner=pc)
+    push_evidence(
+        transport,
+        connection=db,
+        roots={REPO.lower(): root} if roots is None else roots,
+        store=tmp_path / ".qa-push.json",
+        log=lines.append,
+        budget_bytes=budget_bytes,
+    )
+    return pc, lines
+
+
+def _on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard", pc: str = "pc") -> dict[str, bytes]:
+    qa = tmp_path / pc / remote_dir / "qa"
+    assert not [path for path in qa.rglob("*") if path.is_symlink()]
+    return {path.relative_to(qa).as_posix(): path.read_bytes() for path in qa.rglob("*") if path.is_file()}
+
+
+def test_full_push_copies_each_settled_run_once_and_tracks_box_recycling(db, root: Path, tmp_path: Path) -> None:
+    folder = _settled(db, root, "run-1")
+    _settled(db, root, "run-q", state="queued")
+    _settled(db, root, "run-r", state="running")
+    pc, lines = _push_evidence(db, root, tmp_path)
+    on_pc = _on_pc(tmp_path)
+    lane = {
+        f"run-1/lane-1/{name}": (folder / "lane-1" / name).read_bytes()
+        for name in ("result.json", "manifest.json", *LANE_FILES)
+    }
+    assert {path: data for path, data in on_pc.items() if path != "run-1/index.html"} == lane
+    assert b"QA run run-1" in on_pc["run-1/index.html"]
+    assert lines == []
+    (script,) = pc.scripts
+    assert ".run-1.push-tmp" in script and script.count("mv -- .run-1.push-tmp run-1") == 1
+    assert sorted(os.listdir(tmp_path / "pc" / "factory-dashboard" / "qa")) == ["run-1"]
+
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+    (folder / "lane-1" / LANE_FILES[1]).unlink()
+    pc, _ = _push_evidence(db, root, tmp_path)
+    assert len(pc.scripts) == 1
+    assert "run-1/lane-1/s-1/console.log" not in _on_pc(tmp_path)
+    assert "run-1/lane-1/s-1/after-screenshot.png" in _on_pc(tmp_path)
+
+
+def _runs_on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard") -> set[str]:
+    return {path.split("/")[0] for path in _on_pc(tmp_path, remote_dir)}
+
+
+@pytest.mark.parametrize("gone", ["folder", "row"])
+def test_a_run_gone_from_the_box_is_removed_from_the_pc(db, root: Path, tmp_path: Path, gone: str) -> None:
+    folder = _settled(db, root, "run-1")
+    _settled(db, root, "run-2")
+    _push_evidence(db, root, tmp_path)
+    if gone == "folder":
+        shutil.rmtree(folder)
+    else:
+        db.execute("DELETE FROM qa_runs WHERE run_id = 'run-1'")
+        db.commit()
+    pc, lines = _push_evidence(db, root, tmp_path)
+    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-1"]
+    assert lines == []
+    assert _runs_on_pc(tmp_path) == {"run-2"}
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+
+def test_over_budget_the_oldest_closed_runs_leave_the_pc_and_open_runs_stay(
+    db, root: Path, tmp_path: Path
+) -> None:
+    big = _settled(db, root, "run-old", started_at=NOW - 3 * DAY)
+    (big / "lane-1" / "s-1" / "video.webm").write_bytes(b"v" * 1024 * 1024)
+    _settled(db, root, "run-mid", started_at=NOW - 2 * DAY)
+    _settled(db, root, "run-open", ticket="13", started_at=NOW - 4 * DAY)
+    _closed(db, TICKET, "merged", NOW)
+    pc, _ = _push_evidence(db, root, tmp_path)
+    assert len(pc.scripts) == 3 and not [script for script in pc.scripts if "rm -rf -- qa/" in script]
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=512 * 1024)
+    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-old"]
+    assert _runs_on_pc(tmp_path) == {"run-mid", "run-open"}
+
+    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=1)
+    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-mid"]
+    assert _runs_on_pc(tmp_path) == {"run-open"}
+
+    (big / "lane-1" / "s-1" / "video.webm").write_bytes(b"w" * 1024)
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+    assert _runs_on_pc(tmp_path) == {"run-open"}
+
+
+def test_a_new_remote_dir_gets_every_run(db, root: Path, tmp_path: Path) -> None:
+    _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path)
+    pc, _ = _push_evidence(db, root, tmp_path, remote_dir="dashboard-b")
+    assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
+    assert b"QA run run-1" in _on_pc(tmp_path, "dashboard-b")["run-1/index.html"]
+    assert _runs_on_pc(tmp_path) == {"run-1"}
+
+
+def test_an_ssh_config_that_resolves_the_alias_to_another_pc_gets_every_run(
+    db, root: Path, tmp_path: Path
+) -> None:
+    _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-a")
+    assert _runs_on_pc(tmp_path) == {"run-1"}
+    pc, _ = _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-b")
+    assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
+    assert b"QA run run-1" in _on_pc(tmp_path, pc="pc-b")["run-1/index.html"]
+    assert _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-b")[0].scripts == []
+
+
+@pytest.mark.parametrize("why", ["refused", "held"])
+def test_a_refused_or_held_run_stays_on_the_pc(db, root: Path, tmp_path: Path, why: str) -> None:
+    folder = _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path)
+    roots = None
+    if why == "refused":
+        os.symlink(tmp_path, folder / "lane-1" / "s-1" / "leak.png")
+    else:
+        roots = {}
+    pc, lines = _push_evidence(db, root, tmp_path, roots=roots, budget_bytes=1)
+    assert pc.scripts == []
+    assert len(lines) == 1 and f"qa run run-1 {why}" in lines[0]
+    assert _runs_on_pc(tmp_path) == {"run-1"}
+
+
+def test_a_folder_outside_the_evidence_root_is_refused(db, root: Path, tmp_path: Path) -> None:
+    outside = run_dir((tmp_path / "elsewhere").resolve(), REPO, TICKET, "run-out")
+    _lane(outside, 1, {"s-1": "pass"}, LANE_FILES)
+    _run(db, "run-out", outside)
+    _settled(db, root, "run-ok")
+    pc, lines = _push_evidence(db, root, tmp_path)
+    assert {path.split("/")[0] for path in _on_pc(tmp_path)} == {"run-ok"}
+    assert lines == ["dashboard push: qa run run-out refused: evidence folder is outside the evidence root"]
+
+
+@pytest.mark.parametrize("reason, plant", [("symlink", os.symlink), ("hard-linked file", os.link)])
+def test_a_run_holding_a_link_is_never_sent(db, root: Path, tmp_path: Path, reason: str, plant) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("box secret", encoding="utf-8")
+    folder = _settled(db, root, "run-link")
+    plant(secret, folder / "lane-1" / "s-1" / "leak.png")
+    _settled(db, root, "run-ok")
+    pc, lines = _push_evidence(db, root, tmp_path)
+    assert [script for script in pc.scripts if "run-link" in script] == []
+    assert len(pc.scripts) == 1
+    on_pc = _on_pc(tmp_path)
+    assert {path.split("/")[0] for path in on_pc} == {"run-ok"}
+    assert all(b"box secret" not in data for data in on_pc.values())
+    assert lines == [f"dashboard push: qa run run-link refused: {reason}: lane-1/s-1/leak.png"]
+
+
+def test_a_file_that_changed_after_the_walk_is_refused(root: Path, tmp_path: Path) -> None:
+    folder = run_dir(root, REPO, TICKET, "run-1")
+    _lane(folder, 1, {"s-1": "pass"}, LANE_FILES)
+    parts = folder.relative_to(root).parts
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        first, *rest = walk_run(root_fd, parts)
+        grown = RunFile(first.path, first.size + 1, first.mtime_ns)
+        with (tmp_path / "out.tar").open("wb") as out, pytest.raises(EvidenceRefused, match="changed since"):
+            write_run_tar(out, root_fd, parts, (grown, *rest), b"<p>")
+    finally:
+        os.close(root_fd)
+
+
+def test_an_evidence_failure_is_one_redacted_line_and_never_fails_the_push(tmp_path: Path) -> None:
+    secret = "gh" + "p_" + "A1b2C3d4E5" * 4
+    transport, lines = FakeTransport(), []
+    snapshot, _ = snapshotter(tmp_path)
+
+    def evidence() -> None:
+        raise PushError(f"ssh to pc failed (exit 1): {secret}")
+
+    code = run_push(
+        transport=transport, snapshot=snapshot, interval=20, once=True,
+        sleep=lambda _: None, log=lines.append, evidence=evidence,
+    )
+    assert code == 0
+    assert len(transport.sent) == 1
+    assert len(lines) == 1 and lines[0].startswith("dashboard push: qa ssh to pc failed") and secret not in lines[0]
+
+
+@pytest.mark.parametrize("transport", [NoopTransport(), FakeTransport(fail_on={1})])
+def test_evidence_waits_for_a_sent_snapshot(tmp_path: Path, transport) -> None:
+    calls: list[int] = []
+    snapshot, _ = snapshotter(tmp_path)
+    run_push(
+        transport=transport, snapshot=snapshot, interval=20, once=True,
+        sleep=lambda _: None, log=lambda _: None, evidence=lambda: calls.append(1),
+    )
+    assert calls == []
+
+
+QA_ORCH = f"""\
+poll_seconds: 60
+projects:
+  - repo: {REPO}
+    qa_storage:
+      bucket: factory-qa-owner
+      region: us-east-1
+      access_key_env: QA_S3_KEY_ID
+      secret_key_env: QA_S3_SECRET
+      evidence_root: /srv/factory/qa-evidence
+dashboard:
+  push:
+    transport: ssh
+    host: {TARGET}
+    method: scp
+"""
+
+
+@pytest.mark.parametrize("status_only, pushes", [(True, 0), (False, 1)])
+def test_cli_status_only_push_never_sends_evidence(
+    db, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_only: bool, pushes: int
+) -> None:
+    orch = tmp_path / "orch.yml"
+    orch.write_text(QA_ORCH, encoding="utf-8")
+    evidence: list[object] = []
+    transport = SshTransport(TARGET, "factory-dashboard", method="scp", runner=Recorder())
+    monkeypatch.setattr(lib.dashboard_cli, "transport_for", lambda config: transport)
+    monkeypatch.setattr(lib.dashboard_cli, "push_evidence", lambda *a, **kwargs: evidence.append(kwargs["roots"]))
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
+    argv = ["push", "--once", "--orch", str(orch), "--db", db_path, "--out", str(tmp_path / "out")]
+    assert lib.dashboard_cli.main(argv + (["--status-only"] if status_only else [])) == 0
+    assert evidence == [{REPO.lower(): Path("/srv/factory/qa-evidence")}] * pushes
+
+
+@pytest.mark.parametrize("line, budget", [("", None), ("    qa_budget_gib: 2\n", 2 * 1024**3)])
+def test_cli_push_passes_the_qa_budget_in_bytes(
+    db, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str, budget: int | None
+) -> None:
+    orch = tmp_path / "orch.yml"
+    orch.write_text(QA_ORCH + line, encoding="utf-8")
+    budgets: list[object] = []
+    transport = SshTransport(TARGET, "factory-dashboard", method="scp", runner=Recorder())
+    monkeypatch.setattr(lib.dashboard_cli, "transport_for", lambda config: transport)
+    monkeypatch.setattr(lib.dashboard_cli, "push_evidence", lambda *a, **kwargs: budgets.append(kwargs["budget_bytes"]))
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
+    argv = ["push", "--once", "--orch", str(orch), "--db", db_path, "--out", str(tmp_path / "out")]
+    assert lib.dashboard_cli.main(argv) == 0
+    assert budgets == [budget]

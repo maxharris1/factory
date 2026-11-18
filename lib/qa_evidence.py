@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -16,11 +17,12 @@ import sqlite3
 import stat
 import tarfile
 import tempfile
+import time
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
-from typing import Any, Literal, get_args
+from typing import Any, BinaryIO, Literal, get_args
 
 from lib.dispatch.errors_text import scrub_detail
 from lib.qa_storage import (
@@ -91,6 +93,15 @@ class Recycled:
     deleted: tuple[str, ...]
     skipped: tuple[tuple[str, str], ...]
     removed: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunFile:
+    """`path` is posix and relative to the run folder: lane-1/s-1/shot.png."""
+
+    path: str
+    size: int
+    mtime_ns: int
 
 
 def run_dir(root: Path, repo: str, ticket: str, run_id: str) -> Path:
@@ -640,3 +651,86 @@ def _scenario_results(lane_fd: int) -> dict[str, str] | None:
     ]
     results = dict(entries)
     return results if len(results) == len(entries) else None
+
+
+def walk_run(root_fd: int, parts: tuple[str, ...]) -> tuple[RunFile, ...]:
+    """Every file in the run folder's lane-N folders, sorted. Anything but a
+    directory or a regular file with one link is refused."""
+    run_fd = _open_unlinked(root_fd, parts)
+    try:
+        return tuple(sorted(_walk(run_fd, PurePosixPath(), top=True), key=lambda file: file.path))
+    finally:
+        os.close(run_fd)
+
+
+def _walk(fd: int, rel: PurePosixPath, top: bool = False) -> Iterator[RunFile]:
+    with os.scandir(fd) as scan:
+        entries = list(scan)
+    for entry in entries:
+        if top and not _LANE.fullmatch(entry.name):
+            continue
+        path = rel / entry.name
+        info = entry.stat(follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(entry.name, _DIR_FLAGS, dir_fd=fd)
+            try:
+                yield from _walk(child, path)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+            yield RunFile(path.as_posix(), info.st_size, info.st_mtime_ns)
+        else:
+            raise EvidenceRefused(f"{_not_plain(info)}: {_shown(path.as_posix())}")
+
+
+def _not_plain(info: os.stat_result) -> str:
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    if stat.S_ISREG(info.st_mode):
+        return "hard-linked file"
+    return "not a regular file"
+
+
+def write_run_tar(
+    out: BinaryIO, root_fd: int, parts: tuple[str, ...], files: tuple[RunFile, ...], index_html: bytes
+) -> None:
+    """An uncompressed tar of `files` as walked, then `index.html` last.
+    A file that is no longer the one walked is refused."""
+    run_fd = _open_unlinked(root_fd, parts)
+    try:
+        with tarfile.open(fileobj=out, mode="w|") as tar:
+            for file in files:
+                with _reopen(run_fd, file) as handle:
+                    tar.addfile(_member(file.path, file.size, file.mtime_ns // 1_000_000_000), handle)
+            tar.addfile(_member("index.html", len(index_html), int(time.time())), io.BytesIO(index_html))
+    finally:
+        os.close(run_fd)
+
+
+def _reopen(run_fd: int, file: RunFile) -> BinaryIO:
+    *folders, name = file.path.split("/")
+    try:
+        dir_fd = _open_unlinked(run_fd, tuple(folders))
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as exc:
+        raise EvidenceRefused(f"cannot reopen ({exc.strerror}): {_shown(file.path)}") from None
+    info = os.fstat(fd)
+    if not (
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and (info.st_size, info.st_mtime_ns) == (file.size, file.mtime_ns)
+    ):
+        os.close(fd)
+        raise EvidenceRefused(f"changed since it was listed: {_shown(file.path)}")
+    return open(fd, "rb")
+
+
+def _member(name: str, size: int, mtime: int) -> tarfile.TarInfo:
+    member = tarfile.TarInfo(name)
+    member.size = size
+    member.mode = 0o644
+    member.mtime = mtime
+    return member

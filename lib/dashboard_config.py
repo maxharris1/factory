@@ -15,6 +15,10 @@ dashboard:
     live: true                         # ssh only, optional (default false):
                                        #   also push status.json whenever
                                        #   orch.db changes, about once a second
+    qa_budget_gib: 5                   # ssh only, optional: past this many GiB
+                                       #   of QA evidence on the PC, the oldest
+                                       #   closed tickets' runs are removed;
+                                       #   omitted, none are removed for budget
     interval_seconds: 20               # `orch dashboard push` loop, 15 to 30
   settings:                            # optional: Mission Control device settings
     spool: /home/dash/settings-spool   # absolute: the :8090 server's request
@@ -70,8 +74,9 @@ _PUSH_KEYS = {
     "every_minutes",
     "interval_seconds",
     "live",
+    "qa_budget_gib",
 }
-_SSH_ONLY = ("host", "ssh_config", "remote_dir", "method", "every_minutes", "live")
+_SSH_ONLY = ("host", "ssh_config", "remote_dir", "method", "every_minutes", "live", "qa_budget_gib")
 
 
 @dataclass(frozen=True)
@@ -86,6 +91,7 @@ class PushConfig:
     every_minutes: int | None = None
     # True: `orch poll` also pushes status.json whenever orch.db changes.
     live: bool = False
+    qa_budget_gib: int | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +148,10 @@ def looks_like_key(value: str) -> bool:
 
 def valid_every_minutes(value: object) -> bool:
     return is_strict_int(value) and 1 <= value <= EVERY_MINUTES_MAX
+
+
+def valid_qa_budget(value: object) -> bool:
+    return is_strict_int(value) and value >= 1
 
 
 def parse_dashboard(
@@ -254,6 +264,11 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
     every_minutes = value.get("every_minutes")
     method = value.get("method", "rsync")
     live = value.get("live", False)
+    qa_budget_gib = value.get("qa_budget_gib")
+    if qa_budget_gib is not None and not valid_qa_budget(qa_budget_gib):
+        findings.append(
+            Finding("error", "dashboard.push.qa_budget_gib must be a positive integer")
+        )
     if not isinstance(live, bool):
         findings.append(
             Finding("error", "dashboard.push.live must be true or false")
@@ -332,6 +347,7 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
         ssh_config=ssh_config if isinstance(ssh_config, str) else None,
         every_minutes=every_minutes if valid_every_minutes(every_minutes) else None,
         live=live is True,
+        qa_budget_gib=qa_budget_gib if valid_qa_budget(qa_budget_gib) else None,
     )
 
 

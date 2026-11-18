@@ -62,7 +62,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol
 
 from lib.dashboard import redact
 from lib.dashboard_config import (
@@ -217,21 +217,40 @@ class SshTransport:
         for argv in self.commands(paths):
             self._run(argv)
 
-    def _run(self, argv: list[str]) -> None:
+    def destination(self) -> str:
+        """`user@hostname:port` that this config resolves the host alias to,
+        read from `ssh -G` (local; it opens no connection)."""
+        result = self._run(["ssh", *self._ssh_options(), "-G", "--", self.host])
+        resolved = dict(line.split(" ", 1) for line in result.stdout.splitlines() if " " in line)
+        if not {"user", "hostname", "port"} <= resolved.keys():
+            raise PushError(f"ssh -G did not resolve {self.host}")
+        return f"{resolved['user']}@{resolved['hostname']}:{resolved['port']}"
+
+    def remote(self, script: str, *, feed: IO[bytes] | None = None, timeout: int | None = None) -> None:
+        self._run(
+            ["ssh", *self._ssh_options(), "--", self.host, script],
+            stdin=subprocess.DEVNULL if feed is None else feed,
+            timeout=timeout,
+        )
+
+    def _run(
+        self, argv: list[str], *, stdin: object = subprocess.DEVNULL, timeout: int | None = None
+    ) -> subprocess.CompletedProcess:
         program = argv[0]
+        timeout = self.timeout if timeout is None else timeout
         try:
             result = self.runner(
                 argv,
                 shell=False,
-                stdin=subprocess.DEVNULL,
+                stdin=stdin,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             raise PushError(
-                f"{program} to {self.host} timed out after {self.timeout}s"
+                f"{program} to {self.host} timed out after {timeout}s"
             ) from None
         except FileNotFoundError:
             raise PushError(f"{program} is not installed") from None
@@ -244,6 +263,7 @@ class SshTransport:
             if detail:
                 message += f": {redact(detail)[:200]}"
             raise PushError(message)
+        return result
 
 
 def transport_for(config: PushConfig, *, runner: Runner = run_in_own_group) -> Transport:
@@ -269,11 +289,14 @@ def run_push(
     once: bool,
     sleep: Callable[[float], None],
     log: Callable[[str], None],
+    evidence: Callable[[], None] | None = None,
 ) -> int:
     """Snapshot then send, every `interval` seconds (15 to 30), or once.
 
     A failed snapshot or send logs one redacted line; the loop keeps going.
-    With --once the exit status is 1 after a failure.
+    With --once the exit status is 1 after a failure. After each successful
+    send, `evidence` runs; its failure is one redacted line and leaves the
+    exit status alone.
     """
     if isinstance(transport, NoopTransport):
         log(NOT_CONFIGURED)
@@ -288,6 +311,12 @@ def run_push(
             text = " ".join(str(exc).split()) or type(exc).__name__
             log(f"dashboard push: {redact(text)}")
             ok = False
+        if ok and evidence is not None:
+            try:
+                evidence()
+            except Exception as exc:
+                text = " ".join(str(exc).split()) or type(exc).__name__
+                log(f"dashboard push: qa {redact(text)}")
         if once:
             return 0 if ok else 1
         sleep(interval)
