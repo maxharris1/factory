@@ -25,6 +25,7 @@ from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, BinaryIO, Literal, get_args
 
 from lib.dispatch.errors_text import scrub_detail
+from lib.qa_audit import canonical_path
 from lib.qa_storage import (
     BUNDLE_CAP,
     BUNDLE_NAME,
@@ -273,9 +274,9 @@ def _check_artifacts(artifacts: list[Any], unpack: Path) -> list[dict[str, str]]
         path = entry.get("path") if isinstance(entry, dict) else None
         parts = _safe_parts(path)
         if parts is None:
-            mismatches.append({"path": path if isinstance(path, str) else "", "reason": "bad path"})
+            mismatches.append({"path": canonical_path(path) if isinstance(path, str) else "", "reason": "bad path"})
             continue
-        canonical = "/".join(parts)
+        canonical = canonical_path(path)
         file = unpack.joinpath(*parts)
         if not file.is_file():
             mismatches.append({"path": canonical, "reason": "missing"})
