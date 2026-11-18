@@ -1,6 +1,8 @@
+import fcntl
 import json
 import os
-import select
+import resource
+import selectors
 import signal
 import sqlite3
 import subprocess
@@ -318,11 +320,24 @@ exec(anchor)
 """
 
 
+def above_select_range(fd: int) -> int:
+    """Move fd past select()'s FD_SETSIZE, as on a test worker with many files open."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft <= 1100:
+        if hard != resource.RLIM_INFINITY and hard <= 1100:
+            pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot reach fd 1024")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (1100, hard))
+    high = fcntl.fcntl(fd, fcntl.F_DUPFD, 1024)
+    os.close(fd)
+    return high
+
+
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_the_anchor_sends_a_group_signal_from_before_its_command_existed_to_it(
     signum: int,
 ) -> None:
     report_read, report_write = os.pipe()
+    report_read = above_select_range(report_read)
     anchor = subprocess.Popen(
         [
             sys.executable, "-I", "-S", "-c", ANCHOR_SIGNALLED_BEFORE_ITS_COMMAND,
@@ -333,10 +348,12 @@ def test_the_anchor_sends_a_group_signal_from_before_its_command_existed_to_it(
     )
     os.close(report_write)
     said = b""
+    ready = selectors.DefaultSelector()
+    ready.register(report_read, selectors.EVENT_READ)
     try:
         deadline = time.monotonic() + 10
         while not said.endswith(b"\n") and time.monotonic() < deadline:
-            if select.select([report_read], [], [], 0.1)[0]:
+            if ready.select(0.1):
                 chunk = os.read(report_read, 64)
                 if not chunk:
                     break
@@ -344,6 +361,7 @@ def test_the_anchor_sends_a_group_signal_from_before_its_command_existed_to_it(
     finally:
         os.killpg(anchor.pid, signal.SIGKILL)
         anchor.wait()
+        ready.close()
         os.close(report_read)
     assert said == b"s%d\n" % -signum, "the command started, then died of the signal"
 
