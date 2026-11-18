@@ -1,8 +1,3 @@
-"""#765: the QA gate table under qa.gate: block, driven through poll_once.
-
-Slice #765a covers the APPROVE row and the APPROVE with no QA row at all.
-"""
-
 from __future__ import annotations
 
 import json

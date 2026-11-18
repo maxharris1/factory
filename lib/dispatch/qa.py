@@ -130,7 +130,6 @@ class QaFix:
 
 
 def decide_gate(verdict: str, status: QaStatus) -> GateAction:
-    """What a verdict does under qa.gate: block, given the head's QA status (#765)."""
     if verdict != "APPROVE":
         raise ValueError(f"no QA gate row for {verdict!r}")
     match status:

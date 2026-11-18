@@ -15,6 +15,9 @@ from lib.queue import JobRequest
 if TYPE_CHECKING:
     from lib.dispatch.qa import QaFix
 
+REVISE_ROUND_STATES = ("review", "awaiting-ok")
+APPROVE_ROUND_STATES = (*REVISE_ROUND_STATES, "fixing")
+
 
 @dataclass(frozen=True)
 class ReviseCIGate:
@@ -120,9 +123,7 @@ class T3Mixin:
             assert state is not None
             round_number = int(state["review_round"]) + 1
             cap = self._effective_cap(ticket, connection)
-            # A QA FAIL spends the round of an APPROVE, which T4 and T2 also
-            # run in `fixing` behind a held CI fix.
-            allowed = ("review", "awaiting-ok") if qa is None else ("review", "awaiting-ok", "fixing")
+            allowed = REVISE_ROUND_STATES if qa is None else APPROVE_ROUND_STATES
             if (
                 state["workflow_state"] not in allowed
                 or reported_round != round_number

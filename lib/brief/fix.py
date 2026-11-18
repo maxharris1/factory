@@ -1,11 +1,3 @@
-"""The fix job: a REVISE verdict, a QA FAIL or a red CI run, fixed as a class.
-
-A fix with `qa_findings` is a QA-fix: the failed scenarios of the QA report it
-links. A fix whose `instruction` links a comment is a review-fix: the open
-findings from the evidence bundle are inlined, each fixed by its rule. Any
-other instruction is a CI-fix.
-"""
-
 from __future__ import annotations
 
 from lib.brief.build import base_step, builder_notes
