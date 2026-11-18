@@ -714,3 +714,18 @@ def test_overlay_adds_an_account_by_id(tmp_path: Path, monkeypatch) -> None:
     assert config is not None, findings
     assert config.account("codex-a").plan == "plus"
     assert config.account("claude-a").harness == "claude"
+
+
+@pytest.mark.parametrize("doc", ["README.md", "docs/SPEC.md"])
+def test_docs_describe_usage_accounts_and_the_grok_routine_approval(doc: str) -> None:
+    text = (ROOT / doc).read_text(encoding="utf-8")
+
+    for phrase in (
+        "accounts:" if doc == "README.md" else "`accounts`",
+        "orch usage migrate",
+        "orch usage record",
+        "lane_account_limits",
+        "A scheduled Grok Bot routine that calls `orch usage record` is a separate step "
+        "that needs Max's approval.",
+    ):
+        assert phrase in " ".join(text.split()), phrase
