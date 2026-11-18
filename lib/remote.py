@@ -612,17 +612,21 @@ def _contain(tag: str) -> str:
     otherwise "$@" is empty and the run starts uncontained, as before.
     XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager, is
     the lingering user's runtime directory when the session gave none.
+    A systemd-run that can expand `$NAME` in the command it runs is told
+    not to, since newer ones do so by default; one too old for the option
+    never expands it.
     """
     unit = f"orch-run-{tag}.scope"
     return (
-        'set --; u=$(id -u 2>/dev/null) && '
+        'set --; scoped() { XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect "$@" '
+        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1; }; "
+        'u=$(id -u 2>/dev/null) && '
         '[ "$(loginctl show-user "$u" -p Linger --value 2>/dev/null)" = yes ] && '
         "x=${XDG_RUNTIME_DIR:-/run/user/$u} && "
-        'XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect '
-        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1 && "
+        "{ set -- --expand-environment=no; scoped \"$@\" || { set --; scoped; }; } && "
         f"echo {unit} > {shlex.quote(scope_record(tag))} && "
         'export XDG_RUNTIME_DIR="$x" && '
-        f"set -- systemd-run --user --scope --quiet --collect --unit={unit} --; "
+        f'set -- systemd-run --user --scope --quiet --collect "$@" --unit={unit} -- || set --; '
     )
 
 

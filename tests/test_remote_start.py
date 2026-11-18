@@ -11,6 +11,7 @@ import functools
 import io
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -2707,7 +2708,7 @@ def test_r1_gap_hostile_workdir_and_environment_values_reach_the_command_verbati
         user="codex-bot",
         workdir_root=str(root),
         job_id="abc123",
-        tag="0123456789abcdef0123456789abcdef",
+        tag=uuid.uuid4().hex,
     )
     values = {
         "ORCH_JOB_ID": "abc123",
@@ -2734,6 +2735,55 @@ def test_r1_gap_hostile_workdir_and_environment_values_reach_the_command_verbati
     assert seen["cwd"] == target.job_dir
     assert seen["argv"] == ["a b", "$(touch pwn6)", "'"]
     assert seen["env"] == {**values, "ORCH_JOB_WORKDIR": target.job_dir}
+    assert not any(tmp_path.rglob("pwn*"))
+
+
+@pytest.mark.parametrize(
+    "systemd_run",
+    [
+        '#!/bin/sh\nexec {real} --expand-environment=yes "$@"\n',
+        '#!/bin/sh\ncase "$*" in *--expand-environment*) exit 1;; esac\nexec {real} "$@"\n',
+    ],
+    ids=["expands-by-default", "too-old-for-the-option"],
+)
+def test_a_contained_start_reaches_the_command_verbatim_whatever_systemd_run_expands(
+    tmp_path: Path, systemd_run: str
+) -> None:
+    real = shutil.which("systemd-run")
+    if real is None or not systemd_scopes():
+        pytest.skip("needs Linux with a working systemd user manager")
+    if subprocess.run(
+        [real, "--user", "--scope", "--quiet", "--collect", "--expand-environment=yes", "true"],
+        capture_output=True, timeout=10,
+    ).returncode != 0:
+        pytest.skip("this systemd-run cannot expand variables")
+    path = fake_linger(tmp_path, "yes")
+    wrapper = tmp_path / "fake-bin" / "systemd-run"
+    wrapper.write_text(systemd_run.format(real=real))
+    wrapper.chmod(0o755)
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag=uuid.uuid4().hex,
+    )
+    report = tmp_path / "report.json"
+    dump = f"import json, sys\njson.dump(sys.argv[1:], open({str(report)!r}, 'w'))\n"
+    script = remote.start_script(
+        target, [sys.executable, "-c", dump, "a b", "$(touch pwn6)", "$HOME", "'"],
+        {"ORCH_JOB_ID": "abc123"}, guarded_dirs=[str(tmp_path)], insert_at=3,
+    )
+    result = subprocess.run(
+        ["setsid", "sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={"PATH": path, "HOME": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists(), "the run is contained"
+    assert json.loads(report.read_text(encoding="utf-8")) == [
+        "--add-dir", str(tmp_path), "a b", "$(touch pwn6)", "$HOME", "'"
+    ]
     assert not any(tmp_path.rglob("pwn*"))
 
 
@@ -2835,7 +2885,7 @@ def test_remote_start_drops_profile_tokens_and_keeps_only_the_jobs_own(
         user="codex-bot",
         workdir_root=str(tmp_path / "work"),
         job_id="abc123",
-        tag="0123456789abcdef0123456789abcdef",
+        tag=uuid.uuid4().hex,
     )
     report = tmp_path / "report.json"
     dump = (
@@ -2883,7 +2933,7 @@ def test_remote_harness_never_sees_a_profile_token_however_declared(
         user="codex-bot",
         workdir_root=str(tmp_path / "work"),
         job_id="abc123",
-        tag="0123456789abcdef0123456789abcdef",
+        tag=uuid.uuid4().hex,
     )
     report = tmp_path / "report.json"
     dump = f"import json, os\njson.dump(dict(os.environ), open({str(report)!r}, 'w'))\n"
@@ -2910,7 +2960,7 @@ def test_remote_start_refuses_when_a_profile_token_cannot_be_dropped(tmp_path: P
         user="codex-bot",
         workdir_root=str(tmp_path / "work"),
         job_id="abc123",
-        tag="0123456789abcdef0123456789abcdef",
+        tag=uuid.uuid4().hex,
     )
     ran = tmp_path / "ran"
     script = remote.start_script(target, [sys.executable, "-c", f"open({str(ran)!r}, 'w')"], {})
@@ -2932,7 +2982,7 @@ def _token_target(tmp_path: Path) -> remote.RemoteTarget:
         user="codex-bot",
         workdir_root=str(tmp_path / "work"),
         job_id="abc123",
-        tag="0123456789abcdef0123456789abcdef",
+        tag=uuid.uuid4().hex,
     )
 
 
