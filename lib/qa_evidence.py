@@ -353,12 +353,16 @@ def keeps(standing: Standing, scenario_result: str | None, kind: Kind) -> bool:
     return kind in _KEPT.get((standing, scenario_result), _KEPT_OTHERWISE[standing])
 
 
-def recycle(connection: sqlite3.Connection, *, root: Path, repo: str, now: float) -> Recycled:
+def recycle(
+    connection: sqlite3.Connection, *, root: Path, repo: str, now: float, budget_bytes: int | None = None
+) -> Recycled:
     """Delete what the keep table rejects from each finished run's folder.
 
-    A run is found by its recorded folder only. A folder that is not
-    exactly root/<owner>/<name>/<ticket>/<run_id>, with no link on the way,
-    is skipped and reported."""
+    Then, while the repo's run folders total more than `budget_bytes`,
+    remove whole runs of closed tickets, oldest first. A run is found by its
+    recorded folder only. A folder that is not exactly
+    root/<owner>/<name>/<ticket>/<run_id>, with no link on the way, is
+    skipped and reported. A missing folder is nothing to do."""
     closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
     rows = connection.execute(
         f"""
@@ -396,6 +400,8 @@ def recycle(connection: sqlite3.Connection, *, root: Path, repo: str, now: float
             continue
         try:
             run_fd = _open_below(real_root, parts)
+        except FileNotFoundError:
+            continue
         except OSError as exc:
             skipped.append((run_id, f"cannot open evidence folder ({exc.strerror})"))
             continue
@@ -410,7 +416,86 @@ def recycle(connection: sqlite3.Connection, *, root: Path, repo: str, now: float
             skipped.append((run_id, f"stopped partway ({exc.strerror})"))
         finally:
             os.close(run_fd)
-    return Recycled(deleted=tuple(deleted), skipped=tuple(skipped))
+    if budget_bytes is not None:
+        _over_budget(connection, repo, real_root, budget_bytes, deleted, skipped)
+    return Recycled(deleted=tuple(deleted), skipped=tuple(dict.fromkeys(skipped)))
+
+
+def _over_budget(
+    connection: sqlite3.Connection,
+    repo: str,
+    real_root: str,
+    budget: int,
+    deleted: list[str],
+    skipped: list[tuple[str, str]],
+) -> None:
+    closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
+    rows = connection.execute(
+        f"""
+        SELECT r.run_id, r.evidence_dir, r.state NOT IN ('queued', 'running') AND EXISTS (
+            SELECT 1 FROM ticket_state s
+            WHERE lower(s.repo) = r.repo AND s.ticket_id = r.ticket_id
+                AND s.workflow_state IN ({closed})
+        )
+        FROM qa_runs r
+        WHERE r.repo = ? AND r.evidence_dir IS NOT NULL
+        ORDER BY r.started_at, r.rowid
+        """,
+        (repo.lower(),),
+    ).fetchall()
+    runs = [(run_id, _resolve(run_id, folder, real_root), candidate) for run_id, folder, candidate in rows]
+    sizes = {run_id: _size(real_root, parts) for run_id, parts, _ in runs if not isinstance(parts, str)}
+    usage = sum(sizes.values())
+    for run_id, parts, candidate in runs:
+        if usage <= budget:
+            return
+        if not candidate:
+            continue
+        if isinstance(parts, str):
+            skipped.append((run_id, parts))
+            continue
+        try:
+            ticket_fd = _open_below(real_root, parts[:-1])
+            try:
+                shutil.rmtree(run_id, dir_fd=ticket_fd)
+            finally:
+                os.close(ticket_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            skipped.append((run_id, f"cannot remove evidence folder ({exc.strerror or exc})"))
+            continue
+        usage -= sizes[run_id]
+        deleted.append(PurePosixPath(*parts).as_posix())
+
+
+def _size(real_root: str, parts: tuple[str, ...]) -> int:
+    try:
+        fd = _open_below(real_root, parts)
+    except OSError:
+        return 0
+    try:
+        return _tree_bytes(fd)
+    except OSError:
+        return 0
+    finally:
+        os.close(fd)
+
+
+def _tree_bytes(fd: int) -> int:
+    total = 0
+    with os.scandir(fd) as scan:
+        entries = list(scan)
+    for entry in entries:
+        if entry.is_dir(follow_symlinks=False):
+            child = os.open(entry.name, _DIR_FLAGS, dir_fd=fd)
+            try:
+                total += _tree_bytes(child)
+            finally:
+                os.close(child)
+        elif entry.is_file(follow_symlinks=False):
+            total += entry.stat(follow_symlinks=False).st_size
+    return total
 
 
 def _resolve(run_id: str, evidence_dir: object, real_root: str) -> tuple[str, ...] | str:
