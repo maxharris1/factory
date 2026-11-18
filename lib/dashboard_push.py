@@ -226,12 +226,12 @@ class SshTransport:
             raise PushError(f"ssh -G did not resolve {self.host}")
         return f"{resolved['user']}@{resolved['hostname']}:{resolved['port']}"
 
-    def remote(self, script: str, *, feed: IO[bytes] | None = None, timeout: int | None = None) -> None:
-        self._run(
+    def remote(self, script: str, *, feed: IO[bytes] | None = None, timeout: int | None = None) -> str:
+        return self._run(
             ["ssh", *self._ssh_options(), "--", self.host, script],
             stdin=subprocess.DEVNULL if feed is None else feed,
             timeout=timeout,
-        )
+        ).stdout
 
     def _run(
         self, argv: list[str], *, stdin: object = subprocess.DEVNULL, timeout: int | None = None
