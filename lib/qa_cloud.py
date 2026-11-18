@@ -706,7 +706,7 @@ class QaWorker:
 
     def _paused(self, connection: sqlite3.Connection, runner: str, now: float) -> lane_limit.LaneLimit | None:
         recipient = self.shares_usage_with.get(runner)
-        return None if recipient is None else lane_limit.active(connection, recipient, now)
+        return None if recipient is None else lane_limit.recipient_paused(connection, recipient, now, None)
 
     def _yields(self, connection: sqlite3.Connection, job_id: str, runner: str, now: float) -> str | None:
         recipient = self.shares_usage_with.get(runner)
