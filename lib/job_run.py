@@ -183,8 +183,7 @@ except OSError as exc:
     sys.exit(127)
 say(b"s")
 for signum in pending:
-    if signum != signal.SIGINT:
-        child.send_signal(signum)
+    child.send_signal(signum)
 say(b"%d\\n" % child.wait())
 while True:
     time.sleep(3600)
@@ -301,8 +300,9 @@ def run(
     are Python handlers, never SIG_IGN, so the command starts with default
     dispositions (a disposition the caller already set to SIG_IGN is left
     alone and inherited, as for any command). A signal that arrives before
-    the command starts is not dropped: during setup it means the command
-    never runs (exit 128 + the signal); during the spawn it is sent to the
+    the command starts is not dropped: during setup, or before a gated
+    command's gate opens, it means the command never runs (exit 128 + the
+    signal); during the spawn of an ungated command it is sent to the
     command once it exists. `started` gets the command's pid before the
     command may run (the device pool records it as the job's worker): the
     process waits at a gate until `started` returns, so a command never runs
@@ -332,9 +332,10 @@ def run(
     status: int | None = None
     pending: list[int] = []
     previous: dict[int, object] = {}
+    at_gate = False
 
     def on_signal(signum: int, _frame: FrameType | None) -> None:
-        if child is None:
+        if child is None or at_gate:
             pending.append(signum)
         elif signum != signal.SIGINT and child.poll() is None:
             child.send_signal(signum)
@@ -370,6 +371,7 @@ def run(
             spawn = [
                 sys.executable, "-I", "-S", "-c", _GATE, str(read_end), str(report_write), *spawn
             ]
+        at_gate = gated
         try:
             child = subprocess.Popen(
                 spawn,
@@ -398,6 +400,10 @@ def run(
             gate = write_end
 
             def go() -> None:
+                nonlocal at_gate
+                at_gate = False
+                if pending:
+                    return
                 try:
                     os.write(gate, b"go\n")
                 except BrokenPipeError:
@@ -423,6 +429,11 @@ def run(
                 os.close(report_read)
                 raise
             os.close(write_end)
+            if pending:
+                os.close(report_read)
+                log(f"not starting {argv[0]}: got signal {pending[0]}")
+                child.wait()
+                return 128 + pending[0]
             try:
                 said = os.read(report_read, 1)
             except BaseException:

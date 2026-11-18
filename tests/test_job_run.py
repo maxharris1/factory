@@ -1,5 +1,6 @@
 import json
 import os
+import select
 import signal
 import sqlite3
 import subprocess
@@ -303,6 +304,50 @@ def test_macos_a_command_that_cannot_start_is_127_and_never_execed() -> None:
     assert len(workers) == 1 and not _alive(workers[0]), "nothing of the run is left"
 
 
+ANCHOR_SIGNALLED_BEFORE_ITS_COMMAND = """\
+import functools, os, subprocess, sys
+
+def signal_the_group_then_popen(group_signal, real_popen, *args, **kwargs):
+    os.killpg(0, group_signal)
+    return real_popen(*args, **kwargs)
+
+subprocess.Popen = functools.partial(signal_the_group_then_popen, int(sys.argv[1]), subprocess.Popen)
+anchor = sys.argv[2]
+sys.argv = [sys.argv[0], *sys.argv[3:]]
+exec(anchor)
+"""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_the_anchor_sends_a_group_signal_from_before_its_command_existed_to_it(
+    signum: int,
+) -> None:
+    report_read, report_write = os.pipe()
+    anchor = subprocess.Popen(
+        [
+            sys.executable, "-I", "-S", "-c", ANCHOR_SIGNALLED_BEFORE_ITS_COMMAND,
+            str(signum), job_run._ANCHOR, str(report_write), "sleep", "20",
+        ],
+        pass_fds=(report_write,),
+        start_new_session=True,
+    )
+    os.close(report_write)
+    said = b""
+    try:
+        deadline = time.monotonic() + 10
+        while not said.endswith(b"\n") and time.monotonic() < deadline:
+            if select.select([report_read], [], [], 0.1)[0]:
+                chunk = os.read(report_read, 64)
+                if not chunk:
+                    break
+                said += chunk
+    finally:
+        os.killpg(anchor.pid, signal.SIGKILL)
+        anchor.wait()
+        os.close(report_read)
+    assert said == b"s%d\n" % -signum, "the command started, then died of the signal"
+
+
 SETSID_GRANDCHILD = """\
 import os, signal, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -600,6 +645,25 @@ def test_a_signal_during_setup_is_not_dropped_and_the_command_never_runs(
     assert code == 128 + signum
     assert not marker.exists()
     assert torn_down == [True]
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_a_signal_before_the_gate_opens_means_the_command_never_runs(
+    tmp_path: Path, signum: int
+) -> None:
+    marker = tmp_path / "ran"
+    execed: list[bool] = []
+    code = job_run.run(
+        [sys.executable, "-c", f"open({str(marker)!r}, 'w')"],
+        beat=lambda: None,
+        interval=1,
+        log=lambda _m: None,
+        started=lambda _pid: os.kill(os.getpid(), signum),
+        execed=lambda: execed.append(True),
+    )
+    assert code == 128 + signum
+    assert not marker.exists(), "the command never ran"
+    assert execed == [], "execed is never called for a command that did not start"
 
 
 def test_a_signal_while_the_command_is_spawning_is_forwarded(monkeypatch) -> None:
