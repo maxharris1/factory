@@ -71,11 +71,11 @@ Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. Yo
 2. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
 3. Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a `[closed]` item in the form below. Then review the delta from the last reviewed head (`git range-diff` when the branch was rebased). A new finding in code the delta did not change is `[minor]` unless it fails a criterion.
 4. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius, and say which checks did not run. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
-5. You may run code in a throwaway copy, as the Rules say. Mark a finding `[blocking]` only when you have run it and seen it fail, with the repro.
+5. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
 6. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
 7. When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, and count it as unmet for `ac`.
 8. Mark a finding `[follow-up]` instead of `[blocking]` when it breaks a rule an earlier round already raised (a variant of it), sits in code this PR did not change in the last round, or is an edge case outside the acceptance criteria. Each finding names the rule it breaks.
-9. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not push to the PR.
+9. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
@@ -238,10 +238,10 @@ Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. Yo
 2. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
 3. Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a `[closed]` item in the form below. Then review the delta from the last reviewed head (`git range-diff` when the branch was rebased). A new finding in code the delta did not change is `[minor]` unless it fails a criterion.
 4. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius, and say which checks did not run. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
-5. You may run code in a throwaway copy, as the Rules say. Mark a finding `[blocking]` only when you have run it and seen it fail, with the repro.
+5. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
 6. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line. When a blocker breaks the same rule as an earlier round's blocker, set `repeat=<id>` in the header with that earlier id, ask Max what to do, and stop.
 7. When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, and count it as unmet for `ac`.
-8. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not push to the PR.
+8. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:

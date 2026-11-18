@@ -236,8 +236,8 @@ def task_lines(facts: dict) -> list[str]:
             ]
         ),
         *([] if fix_round else [gate]),
-        "You may run code in a throwaway copy, as the Rules say. "
-        "Mark a finding `[blocking]` only when you have run it and seen it fail, with the repro.",
+        "You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
+        "and seen it fail, and give the repro.",
         *([_bar_step(variant)] if user_impact else []),
         "Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same "
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "
@@ -261,7 +261,7 @@ def task_lines(facts: dict) -> list[str]:
         ),
         "Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` "
         "out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. "
-        "Do not push to the PR.",
+        "Do not merge. Do not push to the PR.",
     ]
     return [
         f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer. "
