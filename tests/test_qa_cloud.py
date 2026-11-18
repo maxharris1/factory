@@ -520,3 +520,71 @@ def test_a_failed_fallback_requeues_and_restores_the_run_runner(tmp_path: Path) 
     assert lab.run.rows("SELECT runner FROM qa_runs") == [("claude-cloud",)]
     assert lab.lanes() == []
     assert lab.posted == {}
+
+
+def test_usage_limit_requeue_outlasts_the_backoff_and_retries(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+    while lab.run.now[0] < 1300:
+        lab.tick()
+    lab.run.dispatcher.reconcile_jobs()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.launched()) == 1
+    assert lab.run.rows("SELECT event FROM job_events WHERE job_id = ? AND event = 'qa-no-retry'", job) == []
+
+
+def _cancel_by_new_head(lab: Lab) -> None:
+    lab.run.finish("codex", "v1")
+    lab.run.post("v1", verdict(HEAD_A, "REVISE"))
+    lab.run.poll()
+    lab.run.finish("claude", "r2")
+    lab.run.post("r2", ready(HEAD_B, "2/3"), head=HEAD_B)
+    lab.run.poll()
+
+
+def test_cancel_keeps_a_lane_open_until_its_stop_succeeds(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    _ready_thread(lab)
+    lab.silent.add((0, 1))
+    lab.tick(2)
+    _cancel_by_new_head(lab)
+    lab.fakes["claude-cloud"].stop_errors.append(ConnectionError("reset"))
+    lab.tick()
+
+    assert [row[3] for row in lab.lanes()] == ["running"]
+    assert lab.run.rows("SELECT state FROM jobs WHERE action = 'qa' AND head = ?", HEAD_A) == [("failed",)]
+
+    lab.tick()
+    assert [row[3] for row in lab.lanes()] == ["cancelled"]
+    assert lab.fakes["claude-cloud"].stopped == ["claude-cloud-1"]
+    assert lab.fakes["claude-cloud"].agents == {"claude-cloud-1": "ended"}
+
+
+def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    _ready_thread(lab)
+    fake = lab.fakes["claude-cloud"]
+    launch = fake.launch
+
+    def launch_then_crash(lane):
+        launch(lane)
+        raise SystemExit("worker killed")
+
+    fake.launch = launch_then_crash
+    with pytest.raises(SystemExit):
+        lab.tick()
+    fake.launch = launch
+    assert [(row[3], row[1]) for row in lab.lanes()] == [("launching", "head")]
+
+    _cancel_by_new_head(lab)
+    lab.worker = lab.new_worker()
+    lab.tick()
+
+    assert [row[3] for row in lab.lanes()] == ["cancelled"]
+    assert fake.stopped == ["claude-cloud-1"]
+    assert len(fake.launched) == 1

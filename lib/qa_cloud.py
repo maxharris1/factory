@@ -77,6 +77,7 @@ class LaneRow:
     reason: str | None
     result: dict | None
     started_at: float
+    launch_called_at: float | None
 
     @classmethod
     def of(cls, row: sqlite3.Row) -> LaneRow:
@@ -98,6 +99,7 @@ class LaneRow:
             reason=row["reason"],
             result=None if row["result"] is None else json.loads(row["result"]),
             started_at=row["started_at"],
+            launch_called_at=row["launch_called_at"],
         )
 
 
@@ -351,7 +353,10 @@ class QaWorker:
                 self._fail_old(job)
                 continue
             runner = raw["runner"]
-            if runner not in self.runners or self._backoff.get(runner, 0.0) > now:
+            if runner not in self.runners:
+                continue
+            if self._backoff.get(runner, 0.0) > now:
+                self._restart_wait(job)
                 continue
             if self._open_count(runner) >= self.max_cloud_lanes:
                 waiting[runner] += 1
@@ -429,6 +434,10 @@ class QaWorker:
             other.agent_id for other in self._lanes(row.run_id)
         )
         runner = row.runner
+        with self.queue.connect() as connection:
+            connection.execute(
+                "UPDATE qa_lanes SET launch_called_at = ? WHERE lane_id = ?", (self.queue.now(), row.lane_id)
+            )
         while True:
             try:
                 launched = self.runners[runner].launch(self._lane(plan, row, runner))
@@ -532,22 +541,34 @@ class QaWorker:
 
     def _cancel(self, job: Job, detail: Detail) -> None:
         for row in self._lanes(detail.run_id):
-            if row.state in OPEN and row.agent_id and row.runner not in self.runners:
-                self.log(f"qa lane {row.lane_id}: runner {row.runner} is not registered; agent not stopped")
-            elif row.state in OPEN and row.agent_id:
-                try:
-                    self.runners[row.runner].stop(row.agent_id)
-                except Exception as exc:
-                    self.log(f"qa lane {row.lane_id}: stop failed: {type(exc).__name__}")
-        now = self.queue.now()
-        with self.queue.connect() as connection:
-            connection.execute(
-                "UPDATE qa_lanes SET state = 'cancelled', finished_at = ? WHERE run_id = ? AND state IN (?, ?)",
-                (now, detail.run_id, *OPEN),
-            )
+            if row.state in OPEN and self._stopped(job, row):
+                self._close(row, "cancelled", None)
         if job.state == "running":
             self.queue.finish(job.id, owner=QA_RECIPIENT, handoff_comment_id=None)
         self._plans.pop(detail.run_id, None)
+
+    def _stopped(self, job: Job, row: LaneRow) -> bool:
+        if row.agent_id is None and row.launch_called_at is None:
+            return True
+        if row.runner not in self.runners:
+            self.log(f"qa lane {row.lane_id}: runner {row.runner} is not registered; cleanup kept")
+            return False
+        runner = self.runners[row.runner]
+        try:
+            agent_id = row.agent_id
+            if agent_id is None:
+                launched = runner.launch(self._lane(self._plan(job), row, row.runner))
+                agent_id = launched.agent_id
+                with self.queue.connect() as connection:
+                    connection.execute(
+                        "UPDATE qa_lanes SET agent_id = ?, agent_url = ? WHERE lane_id = ? AND agent_id IS NULL",
+                        (agent_id, launched.url, row.lane_id),
+                    )
+            runner.stop(agent_id)
+        except Exception as exc:
+            self.log(f"qa lane {row.lane_id}: stop failed: {type(exc).__name__}; retrying")
+            return False
+        return True
 
     def _requeue(self, job: Job, plan: RunPlan, runner: str, exc: Exception) -> None:
         now = self.queue.now()

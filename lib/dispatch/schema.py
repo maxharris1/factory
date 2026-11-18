@@ -719,6 +719,7 @@ def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
             result TEXT,
             started_at REAL NOT NULL,
             finished_at REAL,
+            launch_called_at REAL,
             UNIQUE (run_id, slice, attempt)
         )
         """

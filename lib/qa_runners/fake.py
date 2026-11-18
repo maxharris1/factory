@@ -12,19 +12,26 @@ class FakeRunner:
         self.agents: dict[str, AgentStatus] = {}
         self.stopped: list[str] = []
         self.launch_errors: list[LaunchError] = []
+        self.stop_errors: list[Exception] = []
+        self._by_lane: dict[str, Launched] = {}
 
     def launch(self, lane: Lane) -> Launched:
+        if lane.lane_id in self._by_lane:
+            return self._by_lane[lane.lane_id]
         if self.launch_errors:
             raise self.launch_errors.pop(0)
         self.launched.append(lane)
         agent_id = f"{self.name}-{len(self.launched)}"
         self.agents[agent_id] = "running"
-        return Launched(agent_id, f"https://agents.invalid/{self.name}/{agent_id}")
+        self._by_lane[lane.lane_id] = Launched(agent_id, f"https://agents.invalid/{self.name}/{agent_id}")
+        return self._by_lane[lane.lane_id]
 
     def status(self, agent_id: str) -> AgentStatus:
         return self.agents[agent_id]
 
     def stop(self, agent_id: str) -> None:
+        if self.stop_errors:
+            raise self.stop_errors.pop(0)
         if self.agents.get(agent_id) == "running":
             self.stopped.append(agent_id)
         self.agents[agent_id] = "ended"
