@@ -34,9 +34,7 @@ factory_host_pidns_or_refuse() {
 }
 
 # A background child of a non-interactive shell does not lead its group, so
-# setsid and perl exec in place and $! stays the service pid. Return only once
-# that pid leads its own group: a caller whose group is killed the moment this
-# returns must not take the launch down with it.
+# setsid and perl exec in place and $! stays the service pid.
 factory_detach() {
     if command -v setsid >/dev/null 2>&1; then
         setsid nohup "$@" &
