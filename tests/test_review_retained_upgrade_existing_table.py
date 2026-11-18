@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import subprocess
 import types
 from pathlib import Path
@@ -15,7 +16,7 @@ from tests.test_review_before_ci import board_with, built_with_ci_pending, revie
 PRE_FLOOR_MAIN = "eb2b606e70d9509435281ed76e460c8fb35bf6d7"
 
 
-def _pre_floor_methods(*names: str) -> dict:
+def _pre_floor_methods():
     try:
         source = subprocess.run(
             ["git", "show", f"{PRE_FLOOR_MAIN}:lib/dispatch/comments.py"],
@@ -26,23 +27,41 @@ def _pre_floor_methods(*names: str) -> dict:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip(f"needs {PRE_FLOOR_MAIN[:7]} in the git history (a shallow checkout lacks it)")
-    methods = [
+    mixin = next(
         node
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef) and node.name in names
+        if isinstance(node, ast.ClassDef) and node.name == "CommentsMixin"
+    )
+    methods = [
+        node
+        for node in mixin.body
+        if isinstance(node, ast.FunctionDef)
+        and (node.name == "_process_comments" or _signature_changed(node))
     ]
     namespace = vars(comments_module).copy()
     exec(
         compile(ast.Module(body=methods, type_ignores=[]), f"{PRE_FLOOR_MAIN}:comments.py", "exec"),
         namespace,
     )
-    return {name: namespace[name] for name in names}
+    return {node.name: namespace[node.name] for node in methods}
+
+
+def _signature_changed(node: ast.FunctionDef) -> bool:
+    current = getattr(comments_module.CommentsMixin, node.name, None)
+    if current is None:
+        return False
+    return [arg.arg for arg in node.args.args] != list(inspect.signature(current).parameters)
+
+
+def _bind_old_methods(dispatcher: Dispatcher, methods: dict) -> None:
+    for name, method in methods.items():
+        setattr(dispatcher, name, types.MethodType(method, dispatcher))
 
 
 def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     tmp_path: Path,
 ) -> None:
-    old_methods = _pre_floor_methods("_process_comments", "_after_finish")
+    old_methods = _pre_floor_methods()
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
@@ -50,8 +69,7 @@ def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     with board.queue.connect() as connection:
         connection.execute("ALTER TABLE verdict_heads DROP COLUMN posted_at")
         connection.execute("DROP TABLE verdict_heads_floor")
-    for name, method in old_methods.items():
-        setattr(board.dispatcher, name, types.MethodType(method, board.dispatcher))
+    _bind_old_methods(board.dispatcher, old_methods)
     mark = board.dispatcher._mark_handled
 
     def interrupted(ticket, comment_id, outcome):

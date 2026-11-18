@@ -1073,7 +1073,8 @@ def test_a_re_driven_approval_stays_accepted_from_its_first_handling(tmp_path: P
     dispatcher.process(snapshot)
     with sqlite3.connect(queue.path) as connection:
         connection.execute(
-            "INSERT INTO verdict_heads VALUES ('owner/repo', '42', 'later', ?, 1, 150, NULL)",
+            "INSERT INTO verdict_heads (repo, ticket_id, comment_id, head, review_round, posted_at)"
+            " VALUES ('owner/repo', '42', 'later', ?, 1, 150)",
             (HEAD,),
         )
     now[0] = 200.0

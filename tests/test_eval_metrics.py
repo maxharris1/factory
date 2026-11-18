@@ -600,7 +600,8 @@ def _head_verdict(
     head: str | None = None,
 ) -> None:
     connection.execute(
-        "INSERT INTO verdict_heads VALUES ('owner/repo', ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO verdict_heads (repo, ticket_id, comment_id, head, review_round, posted_at,"
+        " changed_lines) VALUES ('owner/repo', ?, ?, ?, ?, ?, ?)",
         (ticket_id, comment_id, head or comment_id, review_round, _day(day), lines),
     )
     if outcome in ("A", "R"):
