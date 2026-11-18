@@ -108,7 +108,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -540,6 +540,21 @@ class _Holder:
     capped_release: bool
 
 
+class _StateWrite(NamedTuple):
+    # Field order is the parameter order of the UPDATE in Feeder._set_states.
+    state: str
+    error: str | None
+    reason: str | None
+    repo: str
+    issue: str
+
+
+def _state_write(
+    candidate: _Candidate, state: str, *, error: str | None = None, reason: str | None = None
+) -> _StateWrite:
+    return _StateWrite(state, error, reason, candidate.issue.repo.lower(), candidate.issue.key)
+
+
 class _Held(Exception):
     def __init__(self, wait: Wait):
         super().__init__(wait.reason)
@@ -732,9 +747,7 @@ class Feeder:
             for candidate in candidates
             if states[candidate.ref] in UNSTARTED and candidate.template.defects
         }
-        for candidate in candidates:
-            if candidate.ref in refused:
-                self._refuse(candidate)
+        writes = [self._refuse(candidate) for candidate in candidates if candidate.ref in refused]
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
@@ -760,12 +773,12 @@ class Feeder:
             if state in UNSTARTED:
                 wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
                 if wait is not None:
-                    self._set_state(candidate, "waiting-blocked", reason=wait.reason)
+                    writes.append(_state_write(candidate, "waiting-blocked", reason=wait.reason))
                     blocked += 1
                     continue
             if room.get(candidate.harness, 0) <= 0:
                 if state not in IN_FLIGHT:
-                    self._set_state(candidate, "waiting-capacity")
+                    writes.append(_state_write(candidate, "waiting-capacity"))
                 waiting += 1
                 continue
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
@@ -776,12 +789,12 @@ class Feeder:
             except _Held as held:
                 holds.drop(candidate.ref)
                 room[candidate.harness] += 1
-                self._set_state(candidate, "waiting-blocked", reason=held.wait.reason)
+                writes.append(_state_write(candidate, "waiting-blocked", reason=held.wait.reason))
                 blocked += 1
                 continue
             except Exception as exc:  # one ticket's failure never stops the poll
                 errors += 1
-                self._set_state(candidate, "error", error=safe_ship_error(exc))
+                writes.append(_state_write(candidate, "error", error=safe_ship_error(exc)))
                 self.log(
                     f"feeder: {candidate.issue.repo}#{candidate.issue.key} "
                     f"not fed yet: {safe_ship_error(exc)}"
@@ -803,6 +816,7 @@ class Feeder:
                     for path, holders in sharing.items()
                 )
                 self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} shares {shares}")
+        self._set_states(writes)
         return FeedReport(
             fed=tuple(fed),
             eligible=len(candidates),
@@ -860,12 +874,12 @@ class Feeder:
 
     # -- intake template (#204) ------------------------------------------------------
 
-    def _refuse(self, candidate: _Candidate) -> None:
-        """Mark a ticket refused-intake and wake Grok once per defect set."""
+    def _refuse(self, candidate: _Candidate) -> _StateWrite:
+        """Wake Grok once per defect set; the refused-intake state is the
+        caller's to write."""
         issue = candidate.issue
         defects = candidate.template.defects
         reason = "; ".join(defect.reason for defect in defects)
-        self._set_state(candidate, "refused-intake", reason=reason)
         repo = candidate.project.repo
         codes = sorted({defect.code for defect in defects})
         detail = (
@@ -894,6 +908,7 @@ class Feeder:
             dedupe_key=f"feeder-intake:{repo.lower()}:{issue.key}:{','.join(codes)}",
         )
         self.log(f"feeder: {issue.repo}#{issue.key} refused at intake: {reason}")
+        return _state_write(candidate, "refused-intake", reason=reason)
 
     def _sync_intake_attention(
         self, refused: Sequence[_Candidate], repos: set[str], now: float
@@ -1267,16 +1282,23 @@ class Feeder:
         error: str | None = None,
         reason: str | None = None,
     ) -> bool:
+        return self._set_states(
+            [_state_write(candidate, state, error=error, reason=reason)], site="_set_state"
+        )
+
+    def _set_states(self, writes: Sequence[_StateWrite], *, site: str = "_set_states") -> bool:
+        if not writes:
+            return True
         return bookkeeping_write(
             self.queue.connect,
-            lambda connection: connection.execute(
+            lambda connection: connection.executemany(
                 f"""
                 UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ?
                 WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')
                 """,
-                (state, error, reason, candidate.issue.repo.lower(), candidate.issue.key),
+                writes,
             ),
-            site="_set_state",
+            site=site,
             ledger=self.ledger,
         )
 
