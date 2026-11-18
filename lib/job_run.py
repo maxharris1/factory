@@ -34,6 +34,11 @@ same process that runs the command:
   so a descendant orphaned between two looks, even one that dropped the tag
   and left the session, is reparented to run rather than to init, and is
   killed with the rest;
+* on Linux, a gated command is moved into its own systemd user scope
+  (lib/process_tree.py contain) before `started` records it, so every
+  descendant, even one that left the session and dropped the tag, stays
+  findable by the scope; a user with no usable user manager or Linger off
+  gets a log line saying the run is uncontained, and the command still runs;
 * on macOS the command runs as its own responsible process (#329), which
   every descendant inherits, so a descendant reparented to launchd before
   any look saw its parent is killed with the rest.
@@ -65,6 +70,7 @@ from lib.process_tree import (
     Tree,
     _one_line,
     _responsible_pid,
+    contain,
     processes,
 )
 from lib.queue import QueueError
@@ -338,6 +344,7 @@ def run(
                 target=output, args=(child.stdout,), name="orch-output", daemon=True
             )
             reader.start()
+        scope = contain(child.pid, tag, log) if started is not None else None
         if gated:
             gate = write_end
 
@@ -381,6 +388,7 @@ def run(
         tree = Tree(
             child.pid, tag, adopts=reaper is not None, others=others,
             responsible=_responsible_pid if sys.platform == "darwin" else None,
+            scope=scope,
         )
         try:
             code = _wait(child, budget, argv[0], log, tree)

@@ -7,6 +7,7 @@ the CLI, or FakeTransport in process. No test reaches a real host.
 from __future__ import annotations
 
 import concurrent.futures
+import functools
 import io
 import json
 import os
@@ -1089,6 +1090,60 @@ def test_a_lost_box_job_stops_its_descendants_and_never_a_reused_pid(tmp_path: P
     assert kills == [(13, signal.SIGSTOP), (13, signal.SIGKILL)]
 
 
+def test_an_uncontained_lost_box_job_never_signals_a_process_in_its_reused_session(
+    tmp_path: Path,
+) -> None:
+    listing = {
+        11: process_tree.Process(11, 1, "r", False, 11),
+        12: process_tree.Process(12, 11, "w", False, 11),
+        13: process_tree.Process(13, 12, "leaf", False, 13),
+    }
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True, 12: True})
+    dispatcher.devices.scan = lambda _tag: dict(listing)
+    disable_box(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert kills == [(11, signal.SIGTERM)]
+
+    del listing[11], listing[12]
+    listing[13] = process_tree.Process(13, 1, "leaf", False, 13)
+    listing[20] = process_tree.Process(20, 1, "reuser", False, 11)
+    kills.clear()
+    poll_at(now, dispatcher, 60.0)
+    assert kills == [(13, signal.SIGSTOP), (13, signal.SIGKILL)]
+    assert orphans(queue) == [(job.id, "box", "None")]
+
+
+def test_a_contained_lost_box_job_kills_its_scope_and_spares_its_session(
+    tmp_path: Path,
+) -> None:
+    scope = process_tree.scope_unit(TAG)
+    listing = {
+        11: process_tree.Process(11, 1, "r", False, 11),
+        12: process_tree.Process(12, 11, "w", False, 11, scope),
+        20: process_tree.Process(20, 1, "neighbour", False, 11),
+    }
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True, 12: True})
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE device_slots SET run_scope = ? WHERE job_id = ?", (scope, job.id)
+        )
+        connection.commit()
+    dispatcher.devices.scan = lambda _tag: dict(listing)
+    disable_box(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert kills == [(11, signal.SIGTERM)]
+
+    listing[14] = process_tree.Process(14, 1, "setsid-leaf", False, 14, scope)
+    kills.clear()
+    poll_at(now, dispatcher, 60.0)
+    assert sorted(pid for pid, sig in kills if sig == signal.SIGKILL) == [11, 12, 14]
+    assert all(pid != 20 for pid, _ in kills), "a same-session process outside the scope"
+
+    listing = {20: listing[20]}
+    poll_at(now, dispatcher, 120.0)
+    assert orphans(queue) == []
+
+
 LOST_TREE = """\
 import os, signal, subprocess, sys, time
 from pathlib import Path
@@ -1213,7 +1268,13 @@ def start_crashed_run(tmp_path: Path) -> tuple[subprocess.Popen[bytes], int, int
     return runner, int((tmp_path / "worker.pid").read_text()), int((tmp_path / "leaf.pid").read_text())
 
 
-def real_box_job(tmp_path: Path, runner: subprocess.Popen[bytes], worker: int, tag: str | None):
+def real_box_job(
+    tmp_path: Path,
+    runner: subprocess.Popen[bytes],
+    worker: int,
+    tag: str | None,
+    scope: str | None = None,
+):
     now, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
     monitor = dispatcher.devices
     monitor.alive = pid_alive
@@ -1222,8 +1283,11 @@ def real_box_job(tmp_path: Path, runner: subprocess.Popen[bytes], worker: int, t
     with queue.connect() as connection:
         connection.execute(
             "UPDATE device_slots SET runner_pid = ?, runner_start = ?, "
-            "worker_pid = ?, worker_start = ?, run_tag = ? WHERE job_id = ?",
-            (runner.pid, process_start(runner.pid), worker, process_start(worker), tag, job.id),
+            "worker_pid = ?, worker_start = ?, run_tag = ?, run_scope = ? WHERE job_id = ?",
+            (
+                runner.pid, process_start(runner.pid), worker, process_start(worker), tag,
+                scope, job.id,
+            ),
         )
         connection.commit()
     return now, queue, pool, dispatcher, job
@@ -1335,7 +1399,7 @@ if sys.argv[2] == "leaf":
 if sys.argv[2] == "worker":
     def end(signum, frame):
         subprocess.Popen([sys.executable, __file__, str(here), "leaf"],
-            env={"PATH": os.environ["PATH"]})
+            env={"PATH": os.environ["PATH"]}, start_new_session=sys.argv[3] == "setsid")
         os._exit(0)
     signal.signal(signal.SIGTERM, end)
     (here / "ready").touch()
@@ -1344,23 +1408,56 @@ from lib.job_run import run
 from lib.process_tree import run_tag
 
 def started(pid):
+    tag = run_tag(pid) or ""
+    unit = f"orch-run-{tag}.scope"
+    cgroup = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
     (here / "worker.pid").write_text(str(pid))
-    (here / "run.tag").write_text(run_tag(pid) or "")
+    (here / "run.tag").write_text(tag)
+    scopes = [line.rsplit("/", 1)[-1] for line in cgroup if line.startswith("0::")]
+    (here / "run.scope").write_text(unit if unit in scopes else "")
 
-sys.exit(run([sys.executable, __file__, str(here), "worker"], beat=lambda: None,
+sys.exit(run([sys.executable, __file__, str(here), "worker", sys.argv[3]], beat=lambda: None,
     interval=60, log=print, started=started))
 """
 
 
+@functools.cache
+def systemd_scopes() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return subprocess.run(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"],
+            capture_output=True, timeout=10,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def fake_linger(tmp_path: Path, linger: str, *, busctl_fails: bool = False) -> str:
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(exist_ok=True)
+    fakes = {"loginctl": f"#!/bin/sh\necho {linger}\n"}
+    if busctl_fails:
+        fakes["busctl"] = "#!/bin/sh\necho 'no user bus' >&2\nexit 1\n"
+    for name, body in fakes.items():
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+
+@pytest.mark.parametrize("leaf_session", ["same", "setsid"])
 def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
-    tmp_path: Path,
+    tmp_path: Path, leaf_session: str
 ) -> None:
+    if not systemd_scopes():
+        pytest.skip("needs Linux with a working systemd user manager")
     script = tmp_path / "unrecorded_orphan.py"
     script.write_text(UNRECORDED_ORPHAN)
     runner = subprocess.Popen(
-        [sys.executable, str(script), str(tmp_path), "runner"],
+        [sys.executable, str(script), str(tmp_path), "runner", leaf_session],
         cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        env={**os.environ, "PYTHONPATH": str(ROOT), "PATH": fake_linger(tmp_path, "yes")},
         start_new_session=True,
     )
     worker = leaf = None
@@ -1371,7 +1468,8 @@ def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
             time.sleep(0.02)
         worker = int((tmp_path / "worker.pid").read_text())
         tag = (tmp_path / "run.tag").read_text() or None
-        now, queue, pool, dispatcher, job = real_box_job(tmp_path, runner, worker, tag)
+        scope = (tmp_path / "run.scope").read_text() or None
+        now, queue, pool, dispatcher, job = real_box_job(tmp_path, runner, worker, tag, scope)
         runner.kill()
         runner.wait(timeout=10)
         disable_box(tmp_path)
@@ -1436,6 +1534,61 @@ def test_a_box_jobs_slot_records_the_run_tag_its_command_carries(tmp_path: Path)
             "SELECT run_tag FROM device_slots WHERE job_id = ?", (job.id,)
         ).fetchone()[0]
     assert recorded == seen.read_text() and len(recorded) == 32
+
+
+@pytest.mark.parametrize(
+    ("linger", "busctl_fails"),
+    [("yes", False), ("no", False), ("yes", True)],
+    ids=["contained", "linger-off", "no-user-bus"],
+)
+def test_a_box_jobs_slot_records_its_scope_or_says_the_run_is_uncontained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linger: str, busctl_fails: bool
+) -> None:
+    from lib import placed_run
+
+    contained = linger == "yes" and not busctl_fails
+    if contained and not systemd_scopes():
+        pytest.skip("needs Linux with a working systemd user manager")
+    if not sys.platform.startswith("linux"):
+        pytest.skip("systemd scopes are Linux only")
+    monkeypatch.setenv("PATH", fake_linger(tmp_path, linger, busctl_fails=busctl_fails))
+    _, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE device_slots SET worker_pid = NULL, worker_start = NULL WHERE job_id = ?",
+            (job.id,),
+        )
+        connection.commit()
+    placed = placed_run.PlacedRun(
+        pool=pool,
+        placement=pool.placement(job.id),
+        device=dispatcher.devices.config.device("box"),
+        owner="claude",
+        log=lambda _m: None,
+        transport=FakeTransport(),
+        runner=11,
+    )
+    ran = tmp_path / "ran"
+    lines: list[str] = []
+    code = job_run.run(
+        ["sh", "-c", f"touch {ran}"],
+        beat=lambda: None,
+        interval=60,
+        log=lines.append,
+        started=placed.started,
+    )
+    assert code == 0 and ran.exists(), "the command runs either way"
+    with queue.connect() as connection:
+        tag, scope = connection.execute(
+            "SELECT run_tag, run_scope FROM device_slots WHERE job_id = ?", (job.id,)
+        ).fetchone()
+    uncontained = [line for line in lines if "the run is uncontained" in line]
+    if contained:
+        assert scope == process_tree.scope_unit(tag)
+        assert uncontained == []
+    else:
+        assert scope is None
+        assert len(uncontained) == 1, lines
 
 
 def test_an_enabled_box_keeps_its_running_job(tmp_path: Path) -> None:

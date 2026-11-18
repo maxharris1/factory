@@ -268,11 +268,12 @@ ORPHANS_ITS_WRITER = (
     "p = subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[2]], "
     "env={'PATH': os.environ['PATH']}, stdin=subprocess.DEVNULL, "
     "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
-    "open(sys.argv[1], 'w').write(str(p.pid))"
+    "q = subprocess.Popen(['sleep', '120'], stdin=subprocess.DEVNULL); "
+    "open(sys.argv[1], 'w').write(f'{p.pid} {q.pid}')"
 )
 
 
-def test_an_untagged_orphan_left_in_the_runs_session_dies_though_never_seen(
+def test_an_untagged_orphan_left_in_the_runs_session_dies_only_beside_a_member(
     tmp_path: Path,
 ) -> None:
     ticks, other = tmp_path / "ticks", tmp_path / "other"
@@ -282,7 +283,7 @@ def test_an_untagged_orphan_left_in_the_runs_session_dies_though_never_seen(
         start_new_session=True,
     )
     assert leader.wait(timeout=10) == 0
-    writer = int(pid_file.read_text())
+    writer, member = map(int, pid_file.read_text().split())
     unrelated = subprocess.Popen(
         [sys.executable, "-c", WRITER, str(other)], start_new_session=True
     )
@@ -299,15 +300,33 @@ def test_an_untagged_orphan_left_in_the_runs_session_dies_though_never_seen(
         process_tree.Tree(leader.pid, None, known={}, session=leader.pid).end(
             lambda _line: None
         )
+        assert _still_writes(ticks), "a session with no member of the run in it may be reused"
+
+        listing = process_tree.processes(None)
+        process_tree.Tree(
+            leader.pid, None, known={member: listing[member].start}, session=leader.pid
+        ).end(lambda _line: None)
         assert not _alive(writer) or not _still_writes(ticks), "the orphan outlived the run"
         assert _still_writes(other), "a process outside the run is never signalled"
     finally:
-        for pid in (writer, unrelated.pid):
+        for pid in (writer, member, unrelated.pid):
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         unrelated.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_a_process_scope_is_the_last_component_of_its_cgroup_v2_path() -> None:
+    lines = Path("/proc/self/cgroup").read_text().splitlines()
+    unified = [line[3:] for line in lines if line.startswith("0::")]
+    if not unified or unified[0].rstrip("/") == "":
+        pytest.skip("no cgroup v2 path for this process")
+    expected = unified[0].rstrip("/").rsplit("/", 1)[-1]
+
+    assert process_tree.processes(None)[os.getpid()].scope == expected
+    assert process_tree.scope_of(os.getpid()) == expected
 
 
 def test_cleanup_holds_while_responsibility_cannot_be_read() -> None:
