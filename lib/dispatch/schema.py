@@ -731,7 +731,7 @@ def _qa_lanes_capped_at_three(connection: sqlite3.Connection) -> bool:
 
 def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
     connection.execute(_qa_lanes_table("qa_lanes"))
-    # #801: every row of a run takes its own lane number, up to 8. SQLite cannot widen a CHECK in place.
+    # SQLite cannot widen a CHECK in place.
     if _qa_lanes_capped_at_three(connection):
         connection.execute("BEGIN IMMEDIATE")
         if _qa_lanes_capped_at_three(connection):

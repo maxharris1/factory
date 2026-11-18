@@ -24,8 +24,6 @@ STORE = "https://store.invalid"
 
 
 class SigningStorage:
-    """Signs links whose every URL and form carries SIGNATURE, so a test can look for a leak."""
-
     def __init__(self) -> None:
         self.signed: list[tuple[str, str, int]] = []
 
