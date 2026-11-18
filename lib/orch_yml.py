@@ -25,7 +25,7 @@ import yaml
 
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import DashboardConfig, parse_dashboard
-from lib.factory_md import HoldConfig, QaConfig
+from lib.factory_md import QA_RUNNERS, HoldConfig, QaConfig
 from lib.job_state import (
     DEFAULT_RELEASE_CLAIMED_MINUTES,
     DEFAULT_STALE_MINUTES,
@@ -85,7 +85,7 @@ _TOP_KEYS = {
     "github_app",
     "qa",
 }
-_QA_KEYS = {"max_cloud_lanes"}
+_QA_KEYS = {"max_cloud_lanes", "shares_usage_with"}
 DEFAULT_MAX_CLOUD_LANES = 10
 _GITHUB_APP_KEYS = {"enabled", "apps"}
 _APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
@@ -291,6 +291,7 @@ class Approvals:
 @dataclass(frozen=True)
 class QaWorkerConfig:
     max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
+    shares_usage_with: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True)
@@ -1218,7 +1219,27 @@ def _qa(data: dict, findings: list[Finding]) -> QaWorkerConfig:
     if not is_strict_int(lanes) or lanes < 1:
         findings.append(Finding("error", "qa.max_cloud_lanes must be an integer of at least 1"))
         return QaWorkerConfig()
-    return QaWorkerConfig(max_cloud_lanes=int(lanes))
+    shares = value.get("shares_usage_with", {})
+    if not isinstance(shares, dict):
+        findings.append(Finding("error", "qa.shares_usage_with must be a mapping"))
+        return QaWorkerConfig()
+    for runner, recipient in shares.items():
+        if runner not in QA_RUNNERS:
+            findings.append(
+                Finding(
+                    "error",
+                    f"qa.shares_usage_with has unknown runner {runner!r}; expected one of {', '.join(QA_RUNNERS)}",
+                )
+            )
+        elif recipient not in HARNESSES:
+            findings.append(
+                Finding(
+                    "error",
+                    f"qa.shares_usage_with.{runner} has unknown harness {recipient!r}; "
+                    f"expected one of {', '.join(HARNESSES)}",
+                )
+            )
+    return QaWorkerConfig(max_cloud_lanes=int(lanes), shares_usage_with=MappingProxyType(dict(shares)))
 
 
 def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:

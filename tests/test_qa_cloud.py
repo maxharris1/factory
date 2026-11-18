@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import lane_limit
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
 from lib.qa_cloud import LaneRow, QaWorker, plan_slices, qa_id, s_id, save_name
@@ -61,9 +62,10 @@ class Lab:
         runners: tuple[str, ...] = ("claude-cloud",),
         cap: int = 10,
         shootout: bool = False,
+        shares_usage_with: dict[str, str] | None = None,
     ):
         qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5)
-        qa = replace(qa, runners=tuple(item for item in qa.runners if item.name in runners))
+        qa = replace(qa, runners=tuple(item for name in runners for item in qa.runners if item.name == name))
         self.run = Harness(tmp_path, qa)
         self.fakes = {name: FakeRunner(name) for name in ("claude-cloud", "cursor-cloud")}
         self.head_outcome: dict[str, str] = {}
@@ -74,6 +76,7 @@ class Lab:
         self.storage = SigningStorage()
         self.logs: list[str] = []
         self.cap = cap
+        self.shares_usage_with = shares_usage_with or {}
         self.worker = self.new_worker()
 
     def new_worker(self) -> QaWorker:
@@ -86,6 +89,7 @@ class Lab:
             collect=self.collect,
             storage=lambda repo: self.storage,
             max_cloud_lanes=self.cap,
+            shares_usage_with=self.shares_usage_with,
             log=self.logs.append,
         )
 
@@ -578,6 +582,7 @@ def test_a_failed_fallback_requeues_and_restores_the_run_runner(tmp_path: Path) 
 
     assert lab.run.rows("SELECT state, attempt FROM jobs WHERE action = 'qa'") == [("queued", 1)]
     assert lab.run.rows("SELECT runner FROM qa_runs") == [("claude-cloud",)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE event = 'qa-requeued'") == [("cursor-cloud:RunnerOutage",)]
     assert lab.lanes() == []
     assert lab.posted == {}
 
@@ -648,6 +653,290 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
     assert [row[3] for row in lab.lanes()] == ["cancelled"]
     assert fake.stopped == ["claude-cloud-1"]
     assert len(fake.launched) == 1
+
+
+SHARED = {"claude-cloud": "claude"}
+
+
+def _build(lab: Lab, recipient: str = "claude") -> str:
+    return lab.run.queue.enqueue(
+        JobRequest(repo=REPO, ticket_id="9", action="build", recipient=recipient, source_comment_id="go-9",
+                   timeout_seconds=3600),
+        dedupe_key=f"build:9:{recipient}",
+    ).id
+
+
+def _pause(lab: Lab, recipient: str, seconds: int) -> lane_limit.LaneLimit:
+    now = lab.run.now[0]
+    with lab.run.queue.connect() as connection:
+        limit = lane_limit.record(connection, job_id=_build(lab, recipient), harness=recipient,
+                                  bot=f"{recipient}-bot", limit=lane_limit.UsageLimit(int(now) + seconds), now=now)
+    assert limit is not None
+    return limit
+
+
+def _paused_pair(lab: Lab) -> tuple[str, str, lane_limit.LaneLimit]:
+    held = lab.enqueue(ids=2, ticket="1", runner="claude-cloud")
+    free = lab.enqueue(ids=2, ticket="2", runner="cursor-cloud")
+    limit = _pause(lab, "claude", 3600)
+    lab.silent.add((0, 1))
+    lab.tick(3)
+    return held, free, limit
+
+
+def test_paused_recipient_holds_its_sharing_runner_and_not_another(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=SHARED)
+    held, free, limit = _paused_pair(lab)
+
+    last_tick = lab.run.now[0] - 30
+    assert lab.run.rows("SELECT state, last_activity_at FROM jobs WHERE id = ?", held) == [("queued", last_tick)]
+    assert lab.run.rows("SELECT event, detail FROM job_events WHERE job_id = ?", held) == [
+        ("qa-yielded", f"claude: {lane_limit.label(limit)}")
+    ]
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", free) == [("running",)]
+    assert lab.fakes["claude-cloud"].launched == []
+    assert len(lab.fakes["cursor-cloud"].launched) == 1
+
+
+def test_waiting_job_is_claimed_when_the_pause_ends(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=SHARED)
+    held, _, limit = _paused_pair(lab)
+    lab.run.now[0] = limit.until + 1
+    lab.tick()
+
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", held) == [("running",)]
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+
+def test_paused_recipient_grants_no_extra_lane(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=3, shares_usage_with=SHARED)
+    lab.enqueue(ids=5)
+    lab.silent.add((0, 1))
+    fake = lab.fakes["claude-cloud"]
+    launch = fake.launch
+    paused: list[lane_limit.LaneLimit] = []
+
+    def launch_then_pause(lane):
+        launched = launch(lane)
+        paused.append(_pause(lab, "claude", 90))
+        return launched
+
+    fake.launch = launch_then_pause
+    lab.tick()
+    fake.launch = launch
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+    limit = paused[0]
+    lab.tick(2)
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+    assert [row[3] for row in lab.lanes()] == ["running"]
+
+    lab.run.now[0] = limit.until
+    lab.tick(2)
+    assert len(lab.fakes["claude-cloud"].launched) == 3
+
+
+def test_sharing_runner_usage_limit_requeues_behind_recipient_builds(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, shares_usage_with=SHARED)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    build = _build(lab)
+    while lab.run.now[0] < 1400:
+        lab.tick()
+    lab.run.dispatcher.reconcile_jobs()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-yielded'", job) == [
+        ("behind queued claude jobs",)
+    ]
+    assert lab.fakes["claude-cloud"].launched == []
+
+    claimed = lab.run.queue.claim("claude")
+    assert claimed is not None and claimed.id == build
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+
+@pytest.mark.parametrize(
+    ("shares", "moved"),
+    [
+        ({"claude-cloud": "claude", "cursor-cloud": "claude"}, False),
+        ({"claude-cloud": "claude", "cursor-cloud": "cursor"}, True),
+    ],
+)
+def test_usage_limit_falls_back_only_to_another_account(
+    tmp_path: Path, shares: dict[str, str], moved: bool
+) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=shares)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+
+    assert len(lab.fakes["cursor-cloud"].launched) == int(moved)
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done" if moved else "queued", 1)]
+
+
+BOTH = {"claude-cloud": "claude", "cursor-cloud": "cursor"}
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["queue", "queue-restart"])
+def test_usage_limit_before_a_failed_fallback_still_waits_behind_recipient_builds(
+    tmp_path: Path, restart: bool
+) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.fakes["cursor-cloud"].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.run.rows("SELECT event, detail FROM job_events WHERE job_id = ?", job) == [
+        ("qa-requeued", "claude-cloud:UsageLimit,cursor-cloud:RunnerOutage")
+    ]
+
+    build = _build(lab)
+    lab.run.now[0] = 1301
+    if restart:
+        lab.worker = lab.new_worker()
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-yielded'", job) == [
+        ("behind queued claude jobs",)
+    ]
+    assert lab.launched() == []
+
+    claimed = lab.run.queue.claim("claude")
+    assert claimed is not None and claimed.id == build
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+
+@pytest.mark.parametrize("error", [RunnerOutage("down"), UsageLimit("at limit")], ids=["outage", "usage-limit"])
+def test_a_runner_whose_account_is_paused_is_not_a_fallback(tmp_path: Path, error: Exception) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2)
+    _pause(lab, "cursor", 3600)
+    lab.fakes["claude-cloud"].launch_errors.append(error)
+    lab.tick()
+
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-requeued'", job) == [
+        (f"claude-cloud:{type(error).__name__}",)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("setup", "result"),
+    [
+        (lambda lab: lab.head_outcome.update({"qa-2": "failed"}), "FAIL"),
+        (lambda lab: lab.broken.update({(0, 1): lambda result: result.pop("commit")}), "PASS"),
+    ],
+    ids=["base-check", "retry"],
+)
+def test_paused_account_launches_no_new_lane_until_the_pause_ends(
+    tmp_path: Path, setup: Callable, result: str
+) -> None:
+    lab = Lab(tmp_path, lanes=1, shares_usage_with=SHARED)
+    job = lab.enqueue(ids=2)
+    setup(lab)
+    lab.silent.add((0, 1))
+    lab.tick()
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+    limit = _pause(lab, "claude", 3600)
+    lab.silent.clear()
+    lab.tick(3)
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("running",)]
+    assert lab.posted == {}
+
+    lab.run.now[0] = limit.until
+    lab.tick()
+    assert len(lab.fakes["claude-cloud"].launched) == 2
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("done",)]
+    assert lab.header()["result"] == result
+
+
+class _Crash(BaseException):
+    pass
+
+
+OWED_ORDERS = [
+    pytest.param(("claude-cloud", "cursor-cloud"), RunnerOutage("down"), "cursor", id="fallback-limited"),
+    pytest.param(("cursor-cloud", "claude-cloud"), RunnerOutage("down"), "claude", id="reversed-fallback-limited"),
+    pytest.param(("claude-cloud", "cursor-cloud"), UsageLimit("at limit"), "cursor", id="both-limited"),
+]
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["queue", "queue-restart"])
+@pytest.mark.parametrize(("order", "first_error", "owed"), OWED_ORDERS)
+def test_a_limited_fallback_is_not_launched_until_its_recipient_jobs_are_claimed(
+    tmp_path: Path, order: tuple[str, str], first_error: Exception, owed: str, restart: bool
+) -> None:
+    original, fallback = order
+    lab = Lab(tmp_path, lanes=1, runners=order, shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2, runner=original)
+    lab.fakes[original].launch_errors.append(first_error)
+    lab.fakes[fallback].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    build = _build(lab, owed)
+    lab.run.now[0] = 1301
+    if restart:
+        lab.worker = lab.new_worker()
+    lab.fakes[original].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", build) == [("queued",)]
+
+    lab.run.now[0] = 1700
+    if restart:
+        lab.worker = lab.new_worker()
+    lab.fakes[original].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    claimed = lab.run.queue.claim(owed)
+    assert claimed is not None and claimed.id == build
+    lab.run.now[0] = 2100
+    lab.fakes[original].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes[fallback].launched) == 1
+    assert lab.fakes[original].launched == []
+
+
+def test_a_lane_moved_to_a_limited_fallback_before_a_crash_waits_after_restart(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(RunnerOutage("down"))
+    lab.fakes["cursor-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+
+    lab.run.now[0] = 1301
+    lab.fakes["claude-cloud"].launch_errors.append(RunnerOutage("down"))
+    lab.fakes["cursor-cloud"].launch_errors.append(_Crash())
+    with pytest.raises(_Crash):
+        lab.worker.tick()
+    assert [row[5] for row in lab.lanes()] == ["cursor-cloud"]
+
+    build = _build(lab, "cursor")
+    lab.worker = lab.new_worker()
+    lab.tick(2)
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("running",)]
+
+    claimed = lab.run.queue.claim("cursor")
+    assert claimed is not None and claimed.id == build
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes["cursor-cloud"].launched) == 1
 
 
 def test_a_lanes_table_capped_at_lane_three_is_widened_and_keeps_its_rows(tmp_path: Path) -> None:

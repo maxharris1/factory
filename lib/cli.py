@@ -935,6 +935,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         post=post,
         storage=storage,
         max_cloud_lanes=config.qa.max_cloud_lanes,
+        shares_usage_with=config.qa.shares_usage_with,
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
     )
 
