@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Literal
 
 from lib.health import et
 
@@ -27,6 +28,13 @@ PHASES = (
 )
 AFTER_POLL_STEPS = ("backup", "dashboard-push", "self-deploy")
 SLOW_STEP_SECONDS = 10.0
+SLOW_CYCLE_SECONDS = 300.0
+LOCKED_CYCLES = 3
+CALM_CYCLES = 3
+POLLER_REPO = "orch"
+POLLER_TICKET = "poller"
+SLOW_CYCLE = "slow-cycle"
+LOCK_ERRORS = "lock-errors"
 
 
 @dataclass
@@ -122,5 +130,34 @@ class CycleClock:
             detail += f", clock stepped back {monotonic - wall:.1f}s"
         return f"orch poll: between cycles {elapsed:.1f}s: sleep {elapsed:.1f}s ({detail})"
 
+    def slowest(self) -> tuple[str, float] | None:
+        return max(((name, seconds) for name, seconds, _ in self._rows),
+                   key=lambda row: row[1], default=None)
+
     def state(self) -> tuple[float | None, float | None]:
         return self.started_at, self.last_cycle_seconds
+
+
+@dataclass
+class CycleAlarm:
+    raise_after: int
+    bad: int = 0
+    good: int = 0
+    may_be_up: bool = True
+
+    def observe(self, bad: bool) -> Literal["raise", "clear"] | None:
+        if bad:
+            self.bad, self.good = self.bad + 1, 0
+            if self.bad >= self.raise_after:
+                self.may_be_up = True
+                return "raise"
+            return None
+        self.bad, self.good = 0, self.good + 1
+        if self.may_be_up and self.good >= CALM_CYCLES:
+            self.may_be_up = False
+            return "clear"
+        return None
+
+
+def cycle_alarms() -> dict[str, CycleAlarm]:
+    return {SLOW_CYCLE: CycleAlarm(raise_after=1), LOCK_ERRORS: CycleAlarm(raise_after=LOCKED_CYCLES)}

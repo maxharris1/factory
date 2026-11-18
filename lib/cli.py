@@ -36,7 +36,7 @@ from lib import (
     worktrees,
 )
 from lib.dashboard_cli import main as dashboard_main
-from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for, push_timer_tick
 from lib.dispatch.constants import HARNESS_WORK
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
@@ -999,7 +999,7 @@ def _poll(argv: list[str]) -> int:
                 # SSH reachability probe, each in its own daemon thread.
                 beats = health.poller_beats(path, args.machines, cycle=loop.cycle_state).start()
                 push_timer = (
-                    health._Loop("dashboard-push-timer", push_seconds,
+                    health._Loop("dashboard-push-timer", push_timer_tick(push_seconds),
                                  lambda: pusher.on_timer(push_seconds), block_signals=False)
                     if pusher is not None else None
                 )

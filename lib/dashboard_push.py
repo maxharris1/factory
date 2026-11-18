@@ -23,9 +23,10 @@ poll cycle, at most every `every_minutes`, it starts `orch dashboard push
 --once` as a separate process with a scrubbed environment and does not wait
 for it. A push failure is that child's redacted log line; it never reaches
 the poll loop. `orch poll` also calls `on_timer` from its own thread every
-push interval (#440): it settles a finished push's exit status and starts a
-push when none started within the interval, so a long cycle neither leaves
-the dashboard stale nor holds back the `dashboard-push` record.
+`push_timer_tick(interval)` seconds (#440): it settles a finished push's exit
+status and starts a push once the interval less one tick has passed since the
+last, so a long cycle neither leaves the dashboard stale for more than the
+interval nor holds back the `dashboard-push` record.
 
 `LivePusher` (`dashboard.push.live: true`) adds real-time pushes on top. A
 watcher thread stats orch.db and its WAL every WATCH_SECONDS; any committed
@@ -317,9 +318,15 @@ STILL_RUNNING = "dashboard push: previous push still running; skipped this cycle
 BACKOFF_FIRST_SECONDS = 30.0
 BACKOFF_MAX_SECONDS = 60.0
 BACKOFF_MAX_DOUBLINGS = math.ceil(math.log2(BACKOFF_MAX_SECONDS / BACKOFF_FIRST_SECONDS))
+PUSH_TIMER_TICK = 5.0
 
 Spawn = Callable[..., object]
 Record = Callable[[bool], None]
+
+
+def push_timer_tick(every: float) -> float:
+    """How often `orch poll` calls `on_timer(every)`."""
+    return min(PUSH_TIMER_TICK, every)
 
 
 def backoff_seconds(failures: int) -> float:
@@ -366,25 +373,27 @@ class PollPusher:
     def __call__(self) -> None:
         with self._lock:
             try:
-                self._tick()
+                self._tick(self.every_seconds)
             except Exception as exc:  # a push never breaks polling
                 self._error(exc)
 
     def on_timer(self, every: float) -> None:
-        """`orch poll`'s push timer: settle a finished push, then start one
-        unless one started within `every` seconds."""
+        """`orch poll`'s push timer, called every `push_timer_tick(every)`:
+        settle a finished push, then start one once `every` less one tick has
+        passed since the last, so the next tick never lands past `every`."""
         with self._lock:
             try:
                 if self._running():
                     return
-                if self._last is not None and self.clock() - self._last < every:
+                wait = every - push_timer_tick(every)
+                if self._last is not None and self.clock() - self._last < wait:
                     return
                 self._due()
             except Exception as exc:  # a push never breaks polling
                 self._error(exc)
 
     def _due(self) -> None:
-        self._tick()
+        self._tick(0.0)
 
     def _error(self, exc: BaseException) -> None:
         text = " ".join(str(exc).split()) or type(exc).__name__
@@ -418,14 +427,14 @@ class PollPusher:
     def _backing_off(self, now: float) -> bool:
         return self._retry_at is not None and now < self._retry_at
 
-    def _tick(self) -> None:
+    def _tick(self, wait: float) -> None:
         if self._running():
             self.log(STILL_RUNNING)
             return
         now = self.clock()
         if self._backing_off(now):
             return
-        if self._last is not None and now - self._last < self.every_seconds:
+        if self._last is not None and now - self._last < wait:
             return
         self._last = now
         self._child = self.spawn(

@@ -5,13 +5,14 @@ from __future__ import annotations
 import sqlite3
 import sys
 import time
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from itertools import islice
 from typing import TYPE_CHECKING
 
 from lib import project_rules
 from lib.dispatch import ci_board
+from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write
 from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     HANDED_OFF_EXTERNALLY,
@@ -23,13 +24,21 @@ from lib.dispatch.constants import (
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
 )
-from lib.dispatch.cycle_clock import CycleClock
+from lib.dispatch.cycle_clock import (
+    LOCK_ERRORS,
+    POLLER_REPO,
+    POLLER_TICKET,
+    SLOW_CYCLE,
+    SLOW_CYCLE_SECONDS,
+    CycleClock,
+)
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
 from lib.dispatch.helpers import _matching_head
 from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import POLL_SECONDS
 from lib.queue import Job, _job
+from lib.wait import is_locked
 
 if TYPE_CHECKING:
     from lib.dispatcher import Dispatcher
@@ -38,8 +47,18 @@ if TYPE_CHECKING:
 class PollMixin:
     cycle_clock: CycleClock | None = None
 
-    def _phase(self, name: str) -> AbstractContextManager[None]:
-        return nullcontext() if self.cycle_clock is None else self.cycle_clock.phase(name)
+    @contextmanager
+    def _phase(self, name: str) -> Iterator[None]:
+        """A lock error ends only its own phase; the next phase still runs (#839)."""
+        self.lock_ledger.phase = name
+        try:
+            with nullcontext() if self.cycle_clock is None else self.cycle_clock.phase(name):
+                yield
+        except sqlite3.OperationalError as exc:
+            if not is_locked(exc):
+                raise
+            self.lock_ledger.missed("phase")
+            self.record_poll_exception(name, "-", exc)
 
     def poll_once(self, source: PollSource) -> None:
         begin = getattr(source, "begin_cycle", None)
@@ -55,6 +74,11 @@ class PollMixin:
         self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._cycle_failures: list[str] = []
+        self.lock_ledger.reset()
+        if self.feeder is not None:
+            self.feeder.ledger = self.lock_ledger
+        self._send_attention(self.lock_ledger)
+        tracked: tuple[TrackedTicket, ...] = ()
         read_from = self.queue.now()
         with self._phase("linear-states"):
             self._read_linear_states(source)
@@ -153,6 +177,10 @@ class PollMixin:
             self._read_ci_pool(reads)
         self._export_eval_log()
         self._prune_poll_errors()
+        if not self._send_attention(None):
+            self.lock_ledger.missed("attention")
+        if self.lock_ledger.misses and self.log is not None:
+            self.log(f"lock misses: {self.lock_ledger.summary()}")
         failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
         try:
             if end is not None:
@@ -210,14 +238,15 @@ class PollMixin:
                     self._record_job_event(
                         connection, job, event, detail, self.queue.now()
                     )
+                    if problem:
+                        self.flag_attention(
+                            ticket.repo,
+                            ticket.ticket_id,
+                            "unverified-handoff",
+                            f"job {job.id[:8]} {job.request.action}: {problem}",
+                            connection=connection,
+                        )
                 self._log_job_event(job, event, detail)
-                if problem:
-                    self.flag_attention(
-                        ticket.repo,
-                        ticket.ticket_id,
-                        "unverified-handoff",
-                        f"job {job.id[:8]} {job.request.action}: {problem}",
-                    )
 
     def _unpolled_handoff_refs(self, read_from: float) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
@@ -303,14 +332,12 @@ class PollMixin:
             self.record_poll_error("prune", "-", type(exc).__name__)
 
     def _record_reads(self, keys: set[tuple[str, str]], at: float) -> None:
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO ticket_reads (repo, ticket_id, read_at) VALUES (?, ?, ?)
-                ON CONFLICT (repo, ticket_id) DO UPDATE SET read_at = excluded.read_at
-                """,
-                [(repo, ticket_id, at) for repo, ticket_id in keys],
-            )
+        bookkeeping_write(
+            self._connect,
+            lambda connection: _write_reads(connection, keys, at),
+            site="_record_reads",
+            ledger=self.lock_ledger,
+        )
 
     def record_poll_error(
         self,
@@ -321,23 +348,26 @@ class PollMixin:
         *,
         prefix: str = "",
     ) -> None:
-        self._record_reads({(repo.lower(), ticket_id)}, self.queue.now())
-        self._source_errors[(repo.lower(), ticket_id)] = poll_error_text(error)
-        with self._connect() as connection:
+        identity = (repo.lower(), ticket_id)
+        text = prefix + poll_error_text(error)
+        now = self.queue.now()
+        self._source_errors[identity] = poll_error_text(error)
+
+        def work(connection: sqlite3.Connection) -> None:
+            _write_reads(connection, {identity}, now)
             connection.execute(
                 """
                 INSERT INTO poll_errors (
                     repo, ticket_id, error, detail, recorded_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (
-                    repo.lower(),
-                    ticket_id,
-                    prefix + poll_error_text(error),
-                    detail,
-                    self.queue.now(),
-                ),
+                (*identity, text, detail, now),
             )
+
+        if not bookkeeping_write(
+            self._connect, work, site="record_poll_error", ledger=self.lock_ledger
+        ):
+            _print_deferred(repo, ticket_id, text)
 
     def record_poll_exception(
         self,
@@ -369,18 +399,12 @@ class PollMixin:
         ticket_id: str,
         reason: str,
         detail: str,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         """Show a ticket as needs-attention in orch status and the dashboard."""
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(repo, ticket_id, reason) DO UPDATE SET
-                    detail = excluded.detail, raised_at = excluded.raised_at
-                """,
-                (repo.lower(), ticket_id, reason, detail[:SHIP_ERROR_LIMIT], self.queue.now()),
-            )
+        flag = (detail[:SHIP_ERROR_LIMIT], self.queue.now())
+        self._note_attention((repo.lower(), ticket_id, reason), flag, connection)
         if self.log is not None:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
@@ -403,15 +427,82 @@ class PollMixin:
         if added and self.log is not None:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
-    def clear_attention(self, repo: str, ticket_id: str, reason: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                DELETE FROM needs_attention
-                WHERE repo = ? AND ticket_id = ? AND reason = ?
-                """,
-                (repo.lower(), ticket_id, reason),
-            )
+    def clear_attention(
+        self,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        self._note_attention((repo.lower(), ticket_id, reason), None, connection)
+
+    def _note_attention(
+        self,
+        key: tuple[str, str, str],
+        flag: tuple[str, float] | None,
+        connection: sqlite3.Connection | None,
+    ) -> None:
+        if connection is None:
+            self.attention_outbox[key] = flag
+            self._send_attention(self.lock_ledger)
+            return
+        self.attention_outbox.pop(key, None)
+        _put_attention(connection, {key: flag})
+
+    def _write_attention_outbox(
+        self, connection: sqlite3.Connection
+    ) -> dict[tuple[str, str, str], tuple[str, float] | None]:
+        """Write every queued flag and clear in connection's transaction; pass
+        the result to _settle_attention once that transaction commits."""
+        pending = dict(self.attention_outbox)
+        _put_attention(connection, pending)
+        return pending
+
+    def _settle_attention(
+        self, sent: Mapping[tuple[str, str, str], tuple[str, float] | None]
+    ) -> None:
+        for key, flag in sent.items():
+            if self.attention_outbox.get(key) == flag:
+                del self.attention_outbox[key]
+
+    def _send_attention(self, ledger: LockLedger | None) -> bool:
+        if not self.attention_outbox:
+            return True
+        pending = dict(self.attention_outbox)
+        if not bookkeeping_write(
+            self._connect,
+            lambda connection: _put_attention(connection, pending),
+            site="attention",
+            ledger=ledger,
+        ):
+            return False
+        self._settle_attention(pending)
+        return True
+
+    def watch_cycle(self, clock: CycleClock) -> None:
+        seconds = clock.last_cycle_seconds or 0.0
+        phase, spent = clock.slowest() or ("-", 0.0)
+        locked = self.cycle_alarms[LOCK_ERRORS]
+        self._sound(
+            SLOW_CYCLE,
+            seconds > SLOW_CYCLE_SECONDS,
+            lambda: f"poll cycle took {seconds:.0f}s (over {SLOW_CYCLE_SECONDS:g}s); "
+            f"slowest phase {phase} {spent:.0f}s",
+        )
+        self._sound(
+            LOCK_ERRORS,
+            self.lock_ledger.misses > 0,
+            lambda: f"{locked.bad} poll cycles in a row hit orch.db lock errors; "
+            f"most in phase {self.lock_ledger.worst_phase()} ({self.lock_ledger.summary()})",
+        )
+
+    def _sound(self, reason: str, bad: bool, detail: Callable[[], str]) -> None:
+        change = self.cycle_alarms[reason].observe(bad)
+        if change == "raise":
+            self.flag_attention(POLLER_REPO, POLLER_TICKET, reason, detail())
+        elif change == "clear":
+            self.clear_attention(POLLER_REPO, POLLER_TICKET, reason)
 
     def _record_poll_error(self, ticket: TrackedTicket, exc: BaseException) -> None:
         """Record a ticket's failed poll; the POLL_ERROR_STREAK-th failure
@@ -423,7 +514,10 @@ class PollMixin:
 
     def _advance_poll_error_streak(self, repo: str, ticket_id: str, error: str) -> None:
         identity = (repo, ticket_id)
-        with self._connect() as connection:
+        now = self.queue.now()
+        flagged = [False]
+
+        def work(connection: sqlite3.Connection) -> None:
             count = connection.execute(
                 """
                 INSERT INTO poll_error_streaks (repo, ticket_id, count)
@@ -433,10 +527,18 @@ class PollMixin:
                 """,
                 identity,
             ).fetchone()[0]
-        if count == POLL_ERROR_STREAK:
-            self.flag_attention(
-                *identity, "poll-errors", f"{count} polls in a row failed: {error}"
-            )
+            flagged[0] = count == POLL_ERROR_STREAK
+            if flagged[0]:
+                detail = f"{count} polls in a row failed: {error}"
+                _write_attention(
+                    connection, (*identity, "poll-errors", detail[:SHIP_ERROR_LIMIT], now)
+                )
+
+        written = bookkeeping_write(
+            self._connect, work, site="_advance_poll_error_streak", ledger=self.lock_ledger
+        )
+        if written and flagged[0] and self.log is not None:
+            self.log(f"needs attention: {repo}#{ticket_id} poll-errors")
 
     def _clear_poll_error_streak(self, ticket: TrackedTicket) -> None:
         identity = (ticket.repo.lower(), ticket.ticket_id)
@@ -445,32 +547,40 @@ class PollMixin:
                 "SELECT count FROM poll_error_streaks WHERE repo = ? AND ticket_id = ?",
                 identity,
             ).fetchone()
-            if row is None:
-                return
+        if row is None:
+            return
+
+        def work(connection: sqlite3.Connection) -> None:
             connection.execute(
                 "DELETE FROM poll_error_streaks WHERE repo = ? AND ticket_id = ?",
                 identity,
             )
-        if row[0] >= POLL_ERROR_STREAK:
-            self.clear_attention(*identity, "poll-errors")
+            if row[0] >= POLL_ERROR_STREAK:
+                _delete_attention(connection, *identity, "poll-errors")
+
+        bookkeeping_write(
+            self._connect, work, site="_clear_poll_error_streak", ledger=self.lock_ledger
+        )
 
     def _record_job_error(
         self, job: Job, error: str | BaseException, *, prefix: str = ""
     ) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        text = prefix + poll_error_text(error)
+        values = (job.request.repo.lower(), job.request.ticket_id, text, self.queue.now())
+        if not bookkeeping_write(
+            self._connect,
+            lambda connection: connection.execute(
                 """
                 INSERT INTO poll_errors (
                     repo, ticket_id, error, recorded_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                (
-                    job.request.repo.lower(),
-                    job.request.ticket_id,
-                    prefix + poll_error_text(error),
-                    self.queue.now(),
-                ),
-            )
+                values,
+            ),
+            site="_record_job_error",
+            ledger=self.lock_ledger,
+        ):
+            _print_deferred(job.request.repo, job.request.ticket_id, text)
 
     def _emptied_by_running_job(self, ticket: TrackedTicket) -> bool:
         if not (ticket.pr_commits == 0 and ticket.git_branch_name and ticket.pr_base):
@@ -572,10 +682,63 @@ class PollLoop:
                         _after_poll(after_poll)
             finally:
                 print(self.clock.end(), flush=True)
+            watch = getattr(self.dispatcher, "watch_cycle", None)
+            if watch is not None:
+                watch(self.clock)
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return
             self.sleep(self.interval_seconds)
+
+
+def _write_reads(
+    connection: sqlite3.Connection, keys: set[tuple[str, str]], at: float
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO ticket_reads (repo, ticket_id, read_at) VALUES (?, ?, ?)
+        ON CONFLICT (repo, ticket_id) DO UPDATE SET read_at = excluded.read_at
+        """,
+        [(repo, ticket_id, at) for repo, ticket_id in keys],
+    )
+
+
+def _write_attention(
+    connection: sqlite3.Connection, values: tuple[str, str, str, str, float]
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(repo, ticket_id, reason) DO UPDATE SET
+            detail = excluded.detail, raised_at = excluded.raised_at
+        """,
+        values,
+    )
+
+
+def _delete_attention(
+    connection: sqlite3.Connection, repo: str, ticket_id: str, reason: str
+) -> None:
+    connection.execute(
+        "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+        (repo.lower(), ticket_id, reason),
+    )
+
+
+def _put_attention(
+    connection: sqlite3.Connection,
+    flags: Mapping[tuple[str, str, str], tuple[str, float] | None],
+) -> None:
+    for (repo, ticket_id, reason), flag in flags.items():
+        if flag is None:
+            _delete_attention(connection, repo, ticket_id, reason)
+        else:
+            _write_attention(connection, (repo, ticket_id, reason, *flag))
+
+
+def _print_deferred(repo: str, ticket_id: str, error: str) -> None:
+    print(f"orch poll: deferred poll error {repo} {ticket_id} {error}", file=sys.stderr, flush=True)
 
 
 def sleep_on_either_clock(
