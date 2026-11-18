@@ -8,14 +8,16 @@ from dataclasses import replace
 import pytest
 
 from lib.brief import BriefError, render_qa_brief
-from lib.brief.qa import LaneFacts, Scenario, Upload
+from lib.brief.qa import LaneFacts, Scenario, pack_ids
 from lib.factory_md import QaLane
+from lib.qa_storage import DownloadLink
 from tests.regenerate_brief_snapshots import (
     BASE_COMMIT,
     HEAD,
     QA_CASES,
     QA_FACTS,
     QA_SNAPSHOTS,
+    download_link,
     render_qa_snapshot,
 )
 
@@ -26,6 +28,7 @@ HEADINGS = [
     "Health check",
     "Driving",
     "Scenarios are fixed",
+    "Fixture packs",
     "One repeat",
     "Blocking bar",
     "What cannot be driven",
@@ -56,7 +59,7 @@ def test_one_qa_snapshot_per_case_and_no_strays() -> None:
     assert {path.stem for path in QA_SNAPSHOTS.glob("*.txt")} == set(QA_CASES)
 
 
-def test_brief_has_the_thirteen_sections_in_order() -> None:
+def test_brief_has_the_fourteen_sections_in_order() -> None:
     assert list(sections(render_qa_brief(QA_FACTS, "claude-cloud"))) == HEADINGS
 
 
@@ -71,7 +74,6 @@ def test_brief_carries_every_point() -> None:
     brief = sections(render_qa_brief(QA_FACTS, "claude-cloud"))
     result = fenced_json(brief["Result file"])
     handover = brief["Hand-over"]
-    curls = [line for line in handover.splitlines() if line.startswith("curl --fail --upload-file ")]
 
     assert all(phrase in brief["Goal and slice"] for phrase in (
         "head commit", "s-1, for ac-1", "s-2, for ac-2", "owns no other scenario",
@@ -116,7 +118,8 @@ def test_brief_carries_every_point() -> None:
     assert all(phrase in brief["Evidence"] for phrase in (
         "/tmp/swarm-42/worker-1/<flow-id>/", "/tmp/swarm-42/worker-1/s-1/", "settle",
         "Never delete evidence", "video of each scenario that has more than one step",
-        "trace of each scenario that fails",
+        "trace of each scenario that fails", "`after-screenshot.png`, a screenshot of the page after its last step",
+        "`pass-test-output.txt`, the text of what its pass test observed",
     ))
     assert (
         list(result) == [
@@ -134,16 +137,46 @@ def test_brief_carries_every_point() -> None:
         and set(result["scenarios"][0]["artifacts"][0]) == {"path", "sha256", "size"}
         and set(result["scenarios"][0]["findings"][0]) >= {"steps", "expected", "observed"}
     )
-    assert (
-        "then `result.json`" in handover
-        and "did not finish" in handover
-        and [shlex.split(line)[-1] for line in curls] == [upload.url for upload in QA_FACTS.uploads]
-        and curls[-1].startswith("curl --fail --upload-file /tmp/swarm-42/worker-1/result.json ")
-    )
+    assert "then post `result.json`" in handover and "did not finish" in handover
     assert all(phrase in brief["What a lane never does"] for phrase in (
         "Never edit, commit or push", "Never fix what you find", "Never post an `orch:v1` comment",
         "ordinary comment on pull request #42", "gh pr comment 42",
     ))
+
+
+def _commands(section: str) -> list[list[str]]:
+    block = re.search(r"\n(`{4,})\n(.*?)\n\1", section, re.S).group(2)
+    return [shlex.split(line) for line in block.splitlines()]
+
+
+def _form_post(link: object, path: str) -> list[str]:
+    fields = [part for name, value in link.fields.items() for part in ("--form-string", f"{name}={value}")]
+    return ["curl", "--fail", *fields, "-F", f"file=@{path}", link.url]
+
+
+def test_hand_over_packs_the_bundle_then_posts_it_then_the_result() -> None:
+    handover = sections(render_qa_brief(QA_FACTS, "claude-cloud"))["Hand-over"]
+    assert _commands(handover) == [
+        ["tar", "-czf", "/tmp/swarm-42/bundle-1.tar.gz", "-C", "/tmp/swarm-42/worker-1", "."],
+        _form_post(QA_FACTS.links.bundle, "/tmp/swarm-42/bundle-1.tar.gz"),
+        _form_post(QA_FACTS.links.result, "/tmp/swarm-42/worker-1/result.json"),
+    ]
+
+
+def test_fixture_packs_downloads_each_named_pack_once() -> None:
+    packs = sections(render_qa_brief(QA_FACTS, "claude-cloud"))["Fixture packs"]
+    assert _commands(packs) == [
+        ["curl", "--fail", "--create-dirs", "-o", f"/tmp/swarm-42/packs/{link.key.removeprefix('packs/')}", link.url]
+        for link in QA_FACTS.links.packs
+    ]
+    assert "before the first scenario that uses it" in packs
+
+
+def test_lane_without_packs_downloads_nothing() -> None:
+    facts = facts_with_fitted_links(scenarios=tuple(replace(s, pack="none") for s in QA_FACTS.scenarios))
+    packs = sections(render_qa_brief(facts, "claude-cloud"))["Fixture packs"]
+    assert "No scenario names a fixture pack, so there is nothing to download." in packs
+    assert "curl" not in packs
 
 
 @pytest.mark.parametrize("case", ["regression", "base-check"])
@@ -174,46 +207,53 @@ def test_unknown_runner_is_refused() -> None:
         render_qa_brief(QA_FACTS, "codex-cloud")
 
 
-def facts_with_fitted_uploads(**changes: object) -> LaneFacts:
+def facts_with_fitted_links(**changes: object) -> LaneFacts:
     facts = replace(QA_FACTS, **changes)
-    if "uploads" in changes:
-        return facts
-    paths = [f"{s.id}/{name}" for s in facts.scenarios for name in s.save] + ["result.json"]
-    return replace(facts, uploads=tuple(Upload(path, f"https://uploads.example.com/{path}") for path in paths))
+    packs = tuple(download_link(pack) for pack in pack_ids(facts.scenarios))
+    return replace(facts, links=replace(facts.links, packs=packs))
 
 
-def _without(path: str) -> tuple[Upload, ...]:
-    return tuple(upload for upload in QA_FACTS.uploads if upload.path != path)
+def _with_packs(*packs: DownloadLink) -> LaneFacts:
+    return replace(QA_FACTS, links=replace(QA_FACTS.links, packs=packs))
 
 
 def _first_scenario(**changes: object) -> tuple[Scenario, ...]:
     return (replace(QA_FACTS.scenarios[0], **changes), *QA_FACTS.scenarios[1:])
 
 
+_SAVED = QA_FACTS.scenarios[0].save
+
 BAD_FACTS = {
-    "short commit": facts_with_fitted_uploads(commit=HEAD[:12]),
-    "uppercase base commit": facts_with_fitted_uploads(base_commit=BASE_COMMIT.upper()),
-    "http upload": facts_with_fitted_uploads(
-        uploads=(replace(QA_FACTS.uploads[0], url="http://uploads.example.com/a"), *QA_FACTS.uploads[1:])
+    "short commit": facts_with_fitted_links(commit=HEAD[:12]),
+    "uppercase base commit": facts_with_fitted_links(base_commit=BASE_COMMIT.upper()),
+    "http result link": replace(QA_FACTS, links=replace(
+        QA_FACTS.links, result=replace(QA_FACTS.links.result, url="http://uploads.example.com/a")
+    )),
+    "missing pack link": _with_packs(download_link("pricing-visitor")),
+    "extra pack link": _with_packs(*QA_FACTS.links.packs, download_link("other")),
+    "duplicate pack link": _with_packs(*QA_FACTS.links.packs, download_link("new-visitor")),
+    "empty scenarios": facts_with_fitted_links(scenarios=()),
+    "bad scenario id": facts_with_fitted_links(scenarios=_first_scenario(id="scenario-1")),
+    "bad criterion id": facts_with_fitted_links(scenarios=_first_scenario(criterion="ac-0")),
+    "bad save file name": facts_with_fitted_links(scenarios=_first_scenario(save=(*_SAVED, "../escape.png"))),
+    "scenario without after screenshot": facts_with_fitted_links(
+        scenarios=_first_scenario(save=tuple(name for name in _SAVED if name != "after-screenshot.png"))
     ),
-    "missing upload": facts_with_fitted_uploads(uploads=_without("s-1/start-free.png")),
-    "missing result upload": facts_with_fitted_uploads(uploads=_without("result.json")),
-    "upload matching no file": facts_with_fitted_uploads(uploads=(*QA_FACTS.uploads, replace(QA_FACTS.uploads[0], path="s-9/extra.png"))),
-    "empty scenarios": facts_with_fitted_uploads(scenarios=()),
-    "bad scenario id": facts_with_fitted_uploads(scenarios=_first_scenario(id="scenario-1")),
-    "bad criterion id": facts_with_fitted_uploads(scenarios=_first_scenario(criterion="ac-0")),
-    "bad save file name": facts_with_fitted_uploads(scenarios=_first_scenario(save=("../escape.png",))),
-    "lane four": facts_with_fitted_uploads(lane=4),
-    "unknown kind": facts_with_fitted_uploads(kind="smoke"),
-    "bad repo": facts_with_fitted_uploads(repo="not a repo"),
-    "bad run id": facts_with_fitted_uploads(run_id="run 7; rm -rf /"),
-    "bad verify": facts_with_fitted_uploads(verify="Verify Live"),
-    "pr zero": facts_with_fitted_uploads(pr=0),
+    "scenario without pass test output": facts_with_fitted_links(
+        scenarios=_first_scenario(save=tuple(name for name in _SAVED if name != "pass-test-output.txt"))
+    ),
+    "lane zero": facts_with_fitted_links(lane=0),
+    "lane nine": facts_with_fitted_links(lane=9),
+    "unknown kind": facts_with_fitted_links(kind="smoke"),
+    "bad repo": facts_with_fitted_links(repo="not a repo"),
+    "bad run id": facts_with_fitted_links(run_id="run 7; rm -rf /"),
+    "bad verify": facts_with_fitted_links(verify="Verify Live"),
+    "pr zero": facts_with_fitted_links(pr=0),
 }
 
 
 def test_every_bad_fact_case_differs_from_a_valid_lane_in_one_fact() -> None:
-    render_qa_brief(facts_with_fitted_uploads(), "claude-cloud")
+    render_qa_brief(facts_with_fitted_links(), "claude-cloud")
 
 
 @pytest.mark.parametrize("case", sorted(BAD_FACTS))

@@ -697,17 +697,16 @@ def _add_missing_columns(
 QA_LANE_STATES = ("launching", "running", "reported", "dropped", "gap", "cancelled", "timed-out")
 
 
-def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
+def _qa_lanes_table(name: str) -> str:
     states = ", ".join(f"'{state}'" for state in QA_LANE_STATES)
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS qa_lanes (
+    return f"""
+        CREATE TABLE IF NOT EXISTS {name} (
             lane_id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
             job_id TEXT NOT NULL,
             slice INTEGER NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('head', 'regression', 'base-check')),
-            lane_no INTEGER NOT NULL CHECK (lane_no BETWEEN 1 AND 3),
+            lane_no INTEGER NOT NULL CHECK (lane_no BETWEEN 1 AND 8),
             scenarios TEXT NOT NULL,
             commit_sha TEXT NOT NULL,
             base_commit TEXT NOT NULL,
@@ -724,7 +723,25 @@ def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
             UNIQUE (run_id, slice, attempt)
         )
         """
-    )
+
+
+def _qa_lanes_capped_at_three(connection: sqlite3.Connection) -> bool:
+    row = connection.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'qa_lanes'").fetchone()
+    return "lane_no BETWEEN 1 AND 3" in row[0]
+
+
+def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
+    connection.execute(_qa_lanes_table("qa_lanes"))
+    # SQLite cannot widen a CHECK in place.
+    if _qa_lanes_capped_at_three(connection):
+        connection.execute("BEGIN IMMEDIATE")
+        if _qa_lanes_capped_at_three(connection):
+            connection.execute("DROP TABLE IF EXISTS qa_lanes_next")
+            connection.execute(_qa_lanes_table("qa_lanes_next"))
+            connection.execute("INSERT INTO qa_lanes_next SELECT * FROM qa_lanes")
+            connection.execute("DROP TABLE qa_lanes")
+            connection.execute("ALTER TABLE qa_lanes_next RENAME TO qa_lanes")
+        connection.commit()
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS qa_lanes_open ON qa_lanes (runner)

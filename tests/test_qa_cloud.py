@@ -4,19 +4,32 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from lib.brief.qa import Upload
+from lib.dispatch.schema import ensure_qa_lanes
 from lib.handoff import parse_comment
 from lib.qa_cloud import LaneRow, QaWorker, plan_slices, qa_id, s_id, save_name
 from lib.qa_runners import LaunchFailed, RunnerOutage, UsageLimit
 from lib.qa_runners.fake import FakeRunner
 from lib.queue import JobRequest
-from tests.qa_support import HEAD_A, HEAD_B, REPO, Harness, qa_config, ready, scenarios, verdict
+from tests.qa_support import (
+    HEAD_A,
+    HEAD_B,
+    REPO,
+    SIGNATURE,
+    STORE,
+    Harness,
+    SigningStorage,
+    qa_config,
+    ready,
+    scenarios,
+    verdict,
+)
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
@@ -24,14 +37,15 @@ BASE = "d" * 40
 _BRIEF_IDS = re.compile(r'"id": "(s-[0-9]+)"')
 
 
-def live(count: int) -> list[dict]:
+def live(count: int, packs: dict[str, str | None] | None = None) -> list[dict]:
+    packs = packs or {}
     return [
         {
             "id": f"qa-{n}",
             "criterion": f"ac-{n}",
             "steps": f"Open page {n} with pack demo.",
             "passes": "the page shows its title",
-            "pack": "demo",
+            "pack": packs.get(f"qa-{n}", "demo"),
             "saves": ["after screenshot"],
         }
         for n in range(1, count + 1)
@@ -57,6 +71,8 @@ class Lab:
         self.broken: dict[tuple[int, int], Callable[[dict], None]] = {}
         self.silent: set[tuple[int, int]] = set()
         self.posted: dict[str, tuple[int, str]] = {}
+        self.storage = SigningStorage()
+        self.logs: list[str] = []
         self.cap = cap
         self.worker = self.new_worker()
 
@@ -68,10 +84,9 @@ class Lab:
             base_commit=lambda repo, branch, head: BASE,
             post=self.post,
             collect=self.collect,
-            uploads=lambda row, paths: tuple(
-                Upload(path, f"https://uploads.invalid/{row.lane_id}/{path}") for path in paths
-            ),
+            storage=lambda repo: self.storage,
             max_cloud_lanes=self.cap,
+            log=self.logs.append,
         )
 
     def post(self, repo: str, pr: int, body: str, marker: str) -> str:
@@ -104,10 +119,11 @@ class Lab:
         return result
 
     def enqueue(self, *, ids: int = 5, regression: tuple[str, ...] = (), ticket: str = "784",
-                runner: str = "claude-cloud", arm: str = "primary") -> str:
+                runner: str = "claude-cloud", arm: str = "primary",
+                packs: dict[str, str | None] | None = None) -> str:
         detail = {
             "action": "qa", "head": HEAD_A, "scope": "full", "runner": runner, "arm": arm,
-            "scenarios": [f"qa-{n}" for n in range(1, ids + 1)], "live": live(ids),
+            "scenarios": [f"qa-{n}" for n in range(1, ids + 1)], "live": live(ids, packs),
             "regression": list(regression), "run_id": f"run-{ticket}-{runner}", "pr_number": "833",
         }
         job = self.run.queue.enqueue(
@@ -202,6 +218,50 @@ def test_result_without_commit_is_dropped_and_relaunched_once(tmp_path: Path) ->
     ]
     assert len(lab.launched()) == 2
     assert lab.header()["result"] == "PASS"
+
+
+def test_every_lane_row_has_its_own_lane_number(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    lab.enqueue(ids=3)
+    lab.broken[(0, 1)] = lambda result: result.pop("commit")
+    lab.head_outcome["qa-3"] = "failed"
+    lab.tick(10)
+
+    assert lab.run.rows("SELECT slice, attempt, kind, lane_no, state FROM qa_lanes ORDER BY lane_no") == [
+        (0, 1, "head", 1, "dropped"),
+        (1, 1, "head", 2, "reported"),
+        (0, 2, "head", 3, "reported"),
+        (2, 1, "base-check", 4, "reported"),
+    ]
+    assert [lane.brief.split("\n", 1)[0] for lane in lab.launched()] == [
+        f"# QA lane {n} brief" for n in (1, 2, 3, 4)
+    ]
+    assert lab.header()["result"] == "FAIL"
+    assert "lane 4 (base-check)" in lab.only_comment()
+
+
+def test_lane_brief_carries_signed_links(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=2)
+    lab.enqueue(ids=4, packs={"qa-1": "demo", "qa-2": "demo", "qa-3": "other", "qa-4": None})
+    lab.tick(4)
+
+    lane_nos = dict(lab.run.rows("SELECT lane_id, lane_no FROM qa_lanes"))
+    packs = {1: {"demo"}, 2: {"other"}}
+    assert len(lab.launched()) == 2
+    for lane in lab.launched():
+        n = lane_nos[lane.lane_id]
+        prefix = f"{STORE}/qa/factory/run-784-claude-cloud/lane-{n}/"
+        assert f"{prefix}result.json?up={SIGNATURE}" in lane.brief
+        assert f"{prefix}bundle.tar.gz?up={SIGNATURE}" in lane.brief
+        uploads = set(re.findall(rf"{re.escape(STORE)}/qa/[^?]+\?up=", lane.brief))
+        assert uploads == {f"{prefix}result.json?up=", f"{prefix}bundle.tar.gz?up="}
+        downloads = re.findall(rf"{re.escape(STORE)}/packs/([^?]+)\?down={SIGNATURE}", lane.brief)
+        assert sorted(downloads) == sorted(packs[n])
+        assert SIGNATURE not in repr(lane)
+    assert {expires for _, _, expires in lab.storage.signed} == {5 * 60}
+    assert lab.header()["result"] == "PASS"
+    assert all(SIGNATURE not in line for line in lab.logs)
+    assert all(SIGNATURE not in body for _, body in lab.posted.values())
 
 
 def test_second_miss_makes_the_run_blocked(tmp_path: Path) -> None:
@@ -588,3 +648,24 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
     assert [row[3] for row in lab.lanes()] == ["cancelled"]
     assert fake.stopped == ["claude-cloud-1"]
     assert len(fake.launched) == 1
+
+
+def test_a_lanes_table_capped_at_lane_three_is_widened_and_keeps_its_rows(tmp_path: Path) -> None:
+    connection = sqlite3.connect(tmp_path / "old.db")
+    ensure_qa_lanes(connection)
+    old = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'qa_lanes'").fetchone()[0]
+    connection.execute("DROP TABLE qa_lanes")
+    connection.execute(old.replace("BETWEEN 1 AND 8", "BETWEEN 1 AND 3"))
+    insert = (
+        "INSERT INTO qa_lanes (lane_id, run_id, job_id, slice, kind, lane_no, scenarios, commit_sha, base_commit,"
+        " runner, state, attempt, started_at) VALUES (?, 'run', 'job', ?, 'head', ?, '[]', ?, ?, 'r', 'reported', 1, 0)"
+    )
+    connection.execute(insert, ("lane-3", 2, 3, HEAD_A, BASE))
+    connection.commit()
+
+    ensure_qa_lanes(connection)
+    connection.execute(insert, ("lane-4", 3, 4, HEAD_A, BASE))
+
+    assert connection.execute("SELECT lane_id, lane_no FROM qa_lanes ORDER BY lane_no").fetchall() == [
+        ("lane-3", 3), ("lane-4", 4),
+    ]
