@@ -1253,7 +1253,7 @@ People open a QA run's evidence from one link on the PC dashboard server
 **Layout on the PC.** A run lives at `<DASHBOARD_DIR>/qa/<run_id>/`. It holds
 the run's `lane-<n>/` folders exactly as `collect()` writes them
 (`result.json`, `manifest.json`, `<scenario-id>/<file>`), plus one
-`index.html`. #875b (#910) pushes this layout and recycles it on the PC.
+`index.html`. #910 pushes this layout (below); #921 recycles it on the PC.
 
 **Page.** `lib/dashboard_pages/qa_evidence.py`, `run_page(run_folder,
 run_id)`, builds `index.html` on the box before the push. It reads each
@@ -1300,6 +1300,40 @@ Every response carries the snapshot's security headers. A `200` under
 Content-Security-Policy so the page can show its images and videos. Video
 seeking needs HTTP range requests, which the server does not answer, so a
 video plays from the start.
+
+**Pushing evidence to the PC (issue #910).** A full `orch dashboard push`
+with `transport: ssh` sends the snapshot first, then QA evidence over the
+same login, BatchMode and `-F` (`lib/qa_evidence_push.py`). `--status-only`
+pushes and an unconfigured transport send no evidence. A run is sent when its
+`qa_runs` row has an `evidence_dir`, its state is not `queued` or `running`,
+and its repo has a `qa_storage` entry. Runs go newest first. The folder must
+pass recycling's checks against that entry's `evidence_root` (absolute, its
+own real path, exactly `<owner>/<name>/<ticket>/<run_id>` below the root).
+The box walks each `lane-<n>/` folder by directory handle with `O_NOFOLLOW`
+and accepts only folders and regular files with one link. A symlink, a hard
+link or a folder outside the root refuses the run: the push logs
+`dashboard push: qa run <run_id> refused: <reason>` and sends nothing of it.
+A refusal is not a push failure.
+
+The box renders the run's `index.html` with `run_page` and writes the files
+into a tar spooled to a temporary file, reopening each file `O_NOFOLLOW` and
+checking that it is still the file it walked. `index.html` is the last
+member. One ssh step per run extracts the tar into `qa/.<run_id>.push-tmp`,
+checks that `index.html` arrived, moves the live copy aside, renames the
+temp folder to `qa/<run_id>` and removes the old copy. The server refuses
+dot-named parts, so it never serves a half-written run. Each send may take
+`SEND_TIMEOUT_SECONDS` plus one second per MiB. No new send starts after the
+evidence step has run 120 seconds; the rest go out on the next push.
+
+`<out>/.qa-push.json` on the box keeps, per run id, a sha256 over each file's
+relative path, size and `mtime_ns`, written after each run is sent. A run
+whose fingerprint has not changed is not sent again. A changed run, such as
+one the box's recycling trimmed, is sent whole again, so the files recycling
+deleted disappear from the PC too. A lost or unreadable store only causes
+re-sends. Any evidence error, such as a failed ssh, logs one redacted
+`dashboard push: qa ...` line. The exit status and the `dashboard-push`
+Health record stay the snapshot's. Until #921, a run the box removed whole
+stays on the PC.
 
 ### QA receipts audit
 
