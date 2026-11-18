@@ -23,6 +23,9 @@
 #   DASHBOARD_GITHUB_CLIENT_ID=<the OAuth App's client id>
 #   DASHBOARD_APPROVER=maxharris1
 #   DASHBOARD_ACTION_CLIENTS=<Max's phone and laptop tailnet IPv4s, comma list>
+#   DASHBOARD_ACTIONS_AUDIT=<absolute path of the JSONL audit file for /api/act>
+# The audit file's directory must be writable through the sandbox: add a
+# drop-in with ReadWritePaths=<that directory> (README "Dashboard").
 # With actions on, install and run this unit as a dedicated user (e.g.
 # factory-dash) that can only read DASHBOARD_DIR (group read on
 # /home/cursor-bot/factory-dashboard), never as cursor-bot or another bot:
