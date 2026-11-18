@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 
 from lib.dashboard_pages.common import (
-    _BOTS, _chip, _e, github_links, _panel, _span, _thread_key, _ticket, duration, ticket_page_href,
+    _BOTS, _chip, _e, github_links, github_refs, _panel, _span, _thread_key, _ticket, duration, ticket_page_href,
 )
+from lib.max_actions import ACTIONS, Why
 
 
 CSS = """\
@@ -78,10 +80,26 @@ background:color-mix(in srgb,var(--muted) 9%,transparent)}
 .rl-legend{gap:6px 16px}
 .rl-find{margin-left:0}
 }
+.at-why,.at-acts,.at-box{flex:1 0 100%;padding-left:22px;font-size:12px}
+.at-why{order:1;display:flex;flex-wrap:wrap;gap:4px 10px;color:var(--text-2)}
+.at-why a{color:var(--accent)}
+.at-acts{order:2;display:flex;flex-wrap:wrap;gap:6px}
+.at-box,.at-form{display:flex;flex-direction:column;gap:6px}
+.at-box{order:3;font-family:var(--mono)}
+.at-box[hidden],.at-form[hidden]{display:none}
+.at-acts button,.at-box button,.at-box textarea{font:12px var(--mono);color:var(--text);background:var(--field);
+border:1px solid var(--line-hi)}
+.at-acts button,.at-box button{min-height:28px;padding:0 12px;cursor:pointer;align-self:flex-start}
+.at-acts button[aria-expanded=true]{border-color:var(--ok);color:var(--ok)}
+.at-box button:disabled{cursor:default;opacity:.5}
+.at-box textarea{width:100%;min-height:64px;padding:6px 8px;resize:vertical}
+.at-acts button:focus-visible,.at-box button:focus-visible,.at-box textarea:focus-visible{outline:2px solid var(--brand);
+outline-offset:2px}
+.at-out{color:var(--text-2)}.at-out a{color:var(--accent)}
 """
 
 
-SCRIPT = r"""
+_SCRIPT = r"""
   // --- activity page ---------------------------------------------------------
 
   var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', 'needs-attention': 'bad', stale: 'warn', paused: 'warn',
@@ -337,6 +355,7 @@ SCRIPT = r"""
   }
 
   function renderAttention(d) {
+    if (!GH.started) { GH.started = true; ghStart(); }
     var items = attentionItems(d).sort(function (a, b) { return toneRank(a.kind) - toneRank(b.kind); });
     var root = panel('attention', 'Needs attention',
                      items.length + (items.length === 1 ? ' item' : ' items') + (items.length ? ' · worst first' : ''));
@@ -354,10 +373,106 @@ SCRIPT = r"""
       add(row, chip(x.kind, tone));
       add(row, el('span', 'at-subj', x.component || ticketOf(x)));
       add(row, el('span', 'at-what', x.detail));
+      if (x.wait) atWhy(row, x);
       add(row, link('at-go', x.component ? healthLink(x.link) : ticketPageHref(x))).textContent =
         x.component ? 'open in System' : 'open ticket';
       if (!x.component) addGh(row, x);
+      if (x.wait && GH.on && GH.login) atActs(row, x, key);
       mark('attention', key, row);
+    });
+  }
+
+  var ACT = __ACT__;
+  var FORMS_BY_ATTENTION_KEY = {};
+
+  function commentHref(x) {
+    var refs = ghRefs(x);
+    var id = String(x.wait.comment_id);
+    if (!refs || !/^[0-9]+$/.test(id)) return null;
+    return 'https://github.com/' + refs.repo + '/issues/' + (refs.pr || refs.issue) + '#issuecomment-' + id;
+  }
+  function atWhy(row, x) {
+    var why = add(row, el('span', 'at-why'));
+    add(why, el('span', null, (ACT.why[x.wait.why] || x.wait.why) + (x.wait.detail ? ': ' + x.wait.detail : '')));
+    var href = commentHref(x);
+    if (!href) return;
+    var a = add(why, link(null, href));
+    a.setAttribute('rel', 'noopener noreferrer');
+    a.setAttribute('target', '_blank');
+    a.textContent = 'comment ↗';
+  }
+  function atBuild() {
+    var p = {x: null, action: null, head: null, busy: false};
+    p.root = el('div', 'at-box');
+    p.form = add(p.root, el('div', 'at-form'));
+    p.text = add(p.form, el('textarea'));
+    p.text.addEventListener('input', function () { atDraw(p); });
+    p.send = ghButton(p.form, 'Send', function () { atSend(p); });
+    p.out = add(p.root, el('span', 'at-out'));
+    p.out.setAttribute('role', 'status');
+    return p;
+  }
+  function atDraw(p) {
+    var ok = p.action === 'ok';
+    p.form.hidden = !p.action;
+    p.root.hidden = !p.action && !p.out.textContent;
+    if (p.action) p.text.setAttribute('aria-label', 'Your words for ' + ACT.label[p.action]);
+    p.send.textContent = !ok ? 'Send ' + (ACT.label[p.action] || '') : p.head ? 'OK ' + p.head : 'OK (reading head…)';
+    p.send.disabled = p.busy || !p.text.value.trim() || (ok && !p.head);
+  }
+  function atActs(row, x, key) {
+    var names = Object.keys(ACT.label).filter(function (name) { return (x.actions || []).indexOf(name) >= 0; });
+    var p = FORMS_BY_ATTENTION_KEY[key] || (FORMS_BY_ATTENTION_KEY[key] = atBuild());
+    p.x = x;
+    if (names.indexOf(p.action) < 0) p.action = null;
+    if (names.length) {
+      var bar = add(row, el('span', 'at-acts'));
+      names.forEach(function (name) {
+        var b = ghButton(bar, ACT.label[name], function () { atOpen(p, name); });
+        b.setAttribute('data-act', name);
+        b.setAttribute('aria-expanded', p.action === name ? 'true' : 'false');
+      });
+    }
+    atDraw(p);
+    add(row, p.root);
+  }
+  function atOpen(p, name) {
+    p.action = p.action === name ? null : name;
+    p.out.textContent = '';
+    p.head = null;
+    if (p.action === 'ok') atHead(p);
+    if (latest) render(latest);
+    if (p.action) p.text.focus();
+  }
+  function atHead(p) {
+    var refs = ghRefs(p.x);
+    if (!refs || !refs.pr) { p.out.textContent = 'error: no-pr'; return; }
+    p.busy = true;
+    ghPost('/api/head', {repo: refs.repo, pr: Number(refs.pr)}, true).then(function (res) {
+      p.busy = false;
+      var head = String(res.data.head || '');
+      if (res.ok && SHA.test(head)) p.head = head;
+      else p.out.textContent = 'error: ' + (res.error || 'bad-head');
+      atDraw(p);
+    });
+  }
+  function atSend(p) {
+    var x = p.x;
+    var body = {repo: x.repo, ticket_id: x.ticket_id, action: p.action, expect_state: x.state,
+                expect_why: x.wait.why, words: p.text.value};
+    if (p.action === 'ok') body.head = p.head;
+    p.busy = true;
+    atDraw(p);
+    ghPost('/api/act', body, true).then(function (res) {
+      p.busy = false;
+      ghResult(p.out, res, 'sent');
+      var head = String(res.data.head || '');
+      if (res.error === 'head-changed' && SHA.test(head)) {
+        p.head = head;
+        p.out.textContent = 'error: head-changed, the PR head is now ' + head;
+      }
+      if (res.ok) { p.text.value = ''; p.action = null; }
+      if (latest) render(latest);
     });
   }
 """
@@ -633,6 +748,38 @@ def _attention_key(row: dict) -> str:
     return f"{row['kind']}:{row.get('component') or str(row['repo']) + '#' + str(row['ticket_id'])}"
 
 
+_WHY: dict[Why, str] = {
+    "awaiting-ok": "waits for your merge OK",
+    "plan-size": "plan is over the size limit",
+    "question": "asks you a question",
+    "repeat-stop": "review repeated an earlier finding",
+    "unsat": "review calls a criterion unsatisfiable",
+    "capped": "hit the review round cap",
+    "blocked": "blocked",
+    "stuck": "stuck",
+    "waiting-external": "waits on someone outside the factory",
+}
+
+
+def _comment_href(row: dict) -> str | None:
+    """The comment that explains the wait (commentHref in the script)."""
+    refs = github_refs(row)
+    comment_id = str(row["wait"].get("comment_id"))
+    if refs is None or not re.fullmatch(r"[0-9]+", comment_id):
+        return None
+    return f"https://github.com/{refs['repo']}/issues/{refs['pr'] or refs['issue']}#issuecomment-{comment_id}"
+
+
+def _wait(row: dict) -> str:
+    wait = row["wait"]
+    href = _comment_href(row)
+    link = "" if href is None else (
+        f'<a href="{_e(href)}" rel="noopener noreferrer" target="_blank">comment ↗</a>'
+    )
+    text = _WHY.get(wait["why"], wait["why"]) + (f": {wait['detail']}" if wait.get("detail") else "")
+    return f'<span class="at-why">{_span(None, text)}{link}</span>'
+
+
 def _attention(snapshot: dict) -> str:
     attention = snapshot["attention"]
 
@@ -647,6 +794,7 @@ def _attention(snapshot: dict) -> str:
             + _chip(row["kind"], tone)
             + _span("at-subj", component or _ticket(row))
             + _span("at-what", row["detail"])
+            + (_wait(row) if row.get("wait") else "")
             + f'<a class="at-go" href="{_e(href)}">{"open in System" if component else "open ticket"}</a>'
             + ("" if component else github_links(row))
             + "</div>"
@@ -659,3 +807,8 @@ def _attention(snapshot: dict) -> str:
     )
     label = f"{count} item" + ("" if count == 1 else "s") + (" · worst first" if items else "")
     return _panel("attention", "Needs attention", inner, count=label)
+
+
+SCRIPT = _SCRIPT.replace("__ACT__", json.dumps(
+    {"label": {name: spec.label for name, spec in ACTIONS.items()}, "why": _WHY},
+))

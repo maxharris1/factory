@@ -17,7 +17,7 @@ import stat
 import tarfile
 import tempfile
 import zlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Literal, get_args
@@ -48,6 +48,9 @@ RETENTION = 7 * 86400.0
 CLOSED_STATES = ("merged", "done", "abandoned")
 _LANE = re.compile(r"lane-[1-9][0-9]*")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_SEARCH_DIR_FLAGS = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY)) | os.O_DIRECTORY | os.O_NOFOLLOW
+_NOFOLLOW_ANY = getattr(os, "O_NOFOLLOW_ANY", 0)
+_NO_LINK_PATH_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW_ANY
 
 Standing = Literal["latest", "superseded", "expired"]
 Kind = Literal["screenshot", "video", "trace", "log", "manifest", "other"]
@@ -103,6 +106,16 @@ def run_dir(root: Path, repo: str, ticket: str, run_id: str) -> Path:
     return root / owner / name / ticket / run_id
 
 
+def lane_dir(root: Path, repo: str, ticket: str, run_id: str, lane: int) -> Path:
+    return run_dir(root, repo, ticket, run_id) / PurePosixPath(lane_prefix(repo, run_id, lane)).name
+
+
+def stored(folder: Path) -> dict[str, Any]:
+    result = json.loads((folder / RESULT_NAME).read_bytes())
+    manifest = json.loads((folder / MANIFEST_NAME).read_bytes())
+    return {**result, "mismatches": manifest["mismatches"]}
+
+
 def record_evidence_dir(connection: sqlite3.Connection, run_id: str, folder: Path) -> None:
     connection.execute(
         "UPDATE qa_runs SET evidence_dir = ? WHERE run_id = ? AND evidence_dir IS NULL",
@@ -117,7 +130,7 @@ def collect(
 
     None when the lane uploaded no result.json. Returns the parsed result
     with "mismatches" set to the artifact and scrub findings."""
-    dest = run_dir(root, repo, ticket, run_id) / f"lane-{lane}"
+    dest = lane_dir(root, repo, ticket, run_id, lane)
     prefix = lane_prefix(repo, run_id, lane)
 
     staging_root = root / ".staging"
@@ -456,7 +469,14 @@ def _remove_oldest_closed_runs(
         (repo.lower(),),
     ).fetchall()
     runs = [(run_id, _resolve(run_id, folder, real_root), removable) for run_id, folder, removable in rows]
-    sizes = {run_id: _size(root_fd, parts) for run_id, parts, _ in runs if not isinstance(parts, str)}
+    sizes: dict[str, int] = {}
+    for run_id, parts, _ in runs:
+        if isinstance(parts, str):
+            continue
+        try:
+            sizes[run_id] = _size(root_fd, parts)
+        except OSError as exc:
+            skipped.append((run_id, f"cannot measure evidence folder ({exc.strerror or exc})"))
     usage = sum(sizes.values())
     for run_id, parts, removable in runs:
         if usage <= budget:
@@ -465,6 +485,8 @@ def _remove_oldest_closed_runs(
             continue
         if isinstance(parts, str):
             skipped.append((run_id, parts))
+            continue
+        if run_id not in sizes:
             continue
         try:
             ticket_fd = _open_unlinked(root_fd, parts[:-1])
@@ -476,6 +498,11 @@ def _remove_oldest_closed_runs(
             continue
         except OSError as exc:
             skipped.append((run_id, f"cannot remove evidence folder ({exc.strerror or exc})"))
+            try:
+                remaining = _size(root_fd, parts)
+            except OSError:
+                remaining = 0
+            usage -= sizes[run_id] - remaining
             continue
         usage -= sizes[run_id]
         removed.append(PurePosixPath(*parts).as_posix())
@@ -485,12 +512,10 @@ def _remove_oldest_closed_runs(
 def _size(root_fd: int, parts: tuple[str, ...]) -> int:
     try:
         fd = _open_unlinked(root_fd, parts)
-    except OSError:
+    except FileNotFoundError:
         return 0
     try:
         return _tree_bytes(fd)
-    except OSError:
-        return 0
     finally:
         os.close(fd)
 
@@ -528,18 +553,22 @@ def _resolve(run_id: str, evidence_dir: object, real_root: str) -> tuple[str, ..
 
 
 def _open_root(real_root: str) -> int:
-    top = os.open("/", _DIR_FLAGS)
+    if _NOFOLLOW_ANY:
+        return os.open(real_root, _NO_LINK_PATH_FLAGS)
+    top = os.open("/", _SEARCH_DIR_FLAGS)
     try:
         return _open_unlinked(top, PurePath(real_root).parts[1:])
     finally:
         os.close(top)
 
 
-def _open_unlinked(start_fd: int, parts: Iterable[str]) -> int:
+def _open_unlinked(start_fd: int, parts: tuple[str, ...]) -> int:
+    if _NOFOLLOW_ANY:
+        return os.open(os.path.join(".", *parts), _NO_LINK_PATH_FLAGS, dir_fd=start_fd)
     fd = os.dup(start_fd)
     try:
-        for part in parts:
-            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+        for depth, part in enumerate(parts, 1):
+            child = os.open(part, _DIR_FLAGS if depth == len(parts) else _SEARCH_DIR_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
     except BaseException:

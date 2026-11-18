@@ -98,6 +98,7 @@ class RunJob:
     completed_at: float | None = None
     runner_name: str | None = None
     runner_kind: RunnerKind | None = None
+    steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -152,17 +153,20 @@ def ci_on_base(result: CIResult, base_without_ci: str | None) -> CIResult:
     return CIResult("not-run", reported=False)
 
 
-# Where a Linear issue stands relative to Ready for Review, read with the
-# ticket: still before review (backlog, triage, unstarted, or started before
-# Ready for Review; the only phase the handoff moves), already in Ready for
-# Review, moved on by a human (completed, canceled, or a started state after
-# Ready for Review), or on a team with no Ready for Review state at all (the
-# PR is still marked ready and the done wake reports the unmoved issue).
+# Where a Linear issue stands relative to the project's ready state (the
+# first linear_handoff_states name), read with the ticket: still before review
+# (backlog, triage, unstarted, or started before the ready state), already in
+# the ready state, moved on by a human (completed, canceled, or a started
+# state after the ready state), on a team with no ready state at all (the PR
+# is still marked ready and the done wake reports the unmoved issue), or sent
+# back by a reviewer to one of the project's linear_rework_states. The handoff
+# moves only before-review and rework issues.
 LINEAR_STATE_PHASES = (
     "before-review",
     "ready-for-review",
     "moved-on",
     "no-ready-state",
+    "rework",
 )
 
 

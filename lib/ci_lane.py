@@ -19,7 +19,12 @@ from __future__ import annotations
 from lib.dispatch.types import CHECK_FAILED
 
 SEGMENTS = ("passed", "failed", "running", "queued", "skipped")
-STEP_AFTER_CI = {"ci-pending": "review", "approved-ci-pending": "merge", "ci-rerun": "review"}
+STEP_AFTER_CI = {
+    "ci-pending": "review",
+    "approved-ci-pending": "merge",
+    "ci-rerun": "review",
+    "ci-infra-wait": "review",
+}
 LOCAL_POOL = "factory-linux"
 _REF = ("repo", "ticket_id", "source", "tracker", "pr", "head_short")
 

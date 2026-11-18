@@ -72,9 +72,11 @@ jobs:
             -e lib/device_monitor.py \
             -e lib/job_run.py \
             -e lib/process_tree.py \
+            -e lib/qa_evidence.py \
             -e lib/remote.py \
             -e tests/test_job_run.py \
             -e tests/test_process_discovery.py \
+            -e tests/test_qa_evidence_recycle.py \
             -e tests/test_remote_start.py \
             -e tests/test_remote_tree.py \
             -e requirements.txt \
@@ -101,6 +103,7 @@ jobs:
       - run: uv pip install -r requirements-dev.txt
       - run: pytest tests/test_process_discovery.py tests/test_remote_tree.py tests/test_remote_start.py::test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed -p no:xdist -s -rs
       - run: pytest tests/test_job_run.py -k macos -p no:xdist -s -rs -v
+      - run: pytest tests/test_qa_evidence_recycle.py -p no:xdist -rs
 
   macos-pickup:
     needs: changes

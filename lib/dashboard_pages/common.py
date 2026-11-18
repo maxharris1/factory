@@ -329,6 +329,18 @@ SCRIPT_GITHUB = r"""
     GH.csrf = signedIn ? String(data.csrf || '') : null;
     if (latest) render(latest);
   }
+  var SHA = /^[0-9a-f]{40}$/;
+  function ghResult(out, res, text) {
+    out.replaceChildren();
+    var url = res.ok ? String(res.data.url || '') : '';
+    if (/^https:\/\/github\.com\//.test(url)) {
+      add(out, document.createTextNode(text + ' '));
+      var a = add(out, link(null, url));
+      a.setAttribute('rel', 'noopener noreferrer');
+      a.setAttribute('target', '_blank');
+      a.textContent = url;
+    } else out.textContent = res.ok ? text : 'error: ' + res.error;
+  }
   function ghStart() {
     var request;
     try { request = fetch('/api/session', {cache: 'no-store', credentials: 'same-origin'}); } catch (err) { return; }

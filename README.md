@@ -470,6 +470,19 @@ feeder recorded, else the newest PR on the issue's own branch, open first. A
 PR that only names the key or is linked from Linear is never bound (#600).
 `ready`, `verdict`, and `stuck` go on PR issue comments, never reviews or
 inline comments.
+
+A tracked GitHub PR that the poller has read before is first probed, with one
+GraphQL query per repo per 25 PRs. The probe returns the PR's state, head,
+base, mergeability, labels, newest 100 comments, review count and the head's
+CI contexts. When that matches the probe taken before the PR's last full read,
+and that read is less than 10 minutes old (`FULL_READ_SECONDS`), the poller
+reuses the read and makes no per-PR call (#870). A changed probe, a PR missing
+from the probe, a GraphQL error under the PR or under no single PR, a failed probe (a `GitHub probe failed` deferral) or an older
+read gets the full read: the PR, its comments, CI, and the hold's labels,
+files and label events. A caller's fresh read never reuses. The probe's time
+is the `github-graphql` source of the `tracked-read` phase on the `cycle end`
+line, and `scripts/issue-870-tracked-read-times.py` prints that phase's median
+and p90 over `poller.log`.
 `projects[].grok_bot` routes stop and terminal results. When a webhook wake's
 `target_bot` is set, only that project bot handles it; when it is `null`, Grok
 Bot handles it for the repo's project.
@@ -480,8 +493,13 @@ unstarted, or started and before Ready for Review in the team's order), per
 Max's standing rule that the factory may move approved Aut0 tickets to Ready
 for Review. An issue already in Ready for Review, or moved on by a human (Done,
 Canceled, or a started state after Ready for Review), is left where it is; an
-unknown state fails the handoff before any write. On a team with no Ready for
-Review state the PR is still marked ready and the handoff completes; the
+unknown state fails the handoff before any write. The target is the first
+`linear_handoff_states` name (default Ready for Review).
+`projects[].linear_rework_states` (default none) names the states a reviewer
+uses to send an issue back, such as `[Changes Requested]`; the approved fix
+round moves an issue in one of them back to the target, wherever the state
+sits in the team's order. A name may not also be a handoff state. On a team
+with no Ready for Review state the PR is still marked ready and the handoff completes; the
 `done` wake's detail carries `note: "linear-not-moved: team has no Ready for
 Review state"` so the project bot can move the issue by hand. No other
 dispatcher state writes Linear, and `ship: handoff` never merges.
@@ -2183,8 +2201,8 @@ Threat model, in short:
   it right before posting `/ok <40-char sha>`: if it moved, nothing is
   posted and the page is told the new head. The OK is refused unless the
   snapshot row is `awaiting-ok`.
-- The server writes nothing but settings request files (below) and has no
-  chat path. Residual risk: someone who gets Max to type their device code on
+- The server writes nothing but settings request files and the actions
+  audit (both below) and has no chat path. Residual risk: someone who gets Max to type their device code on
   github.com gets a session as Max; only his own devices can start a sign-in.
 
 **Device settings (issue #777).** The Settings page (`settings.html`, in
@@ -2249,6 +2267,49 @@ dashboard:
 ```
 
 Without this block, `orch settings apply` does nothing.
+
+**Max's actions (issue #822).** A ticket that waits on Max carries a
+`wait` (why it waits and the comment that explains it) and an `actions`
+list in `status.json`. Signed in as the approver, Max acts on it from the
+dashboard: merge OK, approve an oversize plan or split it, another round,
+answer a question, requeue a failed job, resume a blocked ticket, or close.
+The server posts the comment as Max; no bot posts on his behalf.
+
+1. With GitHub actions on, set `DASHBOARD_ACTIONS_AUDIT` in `http.env` to
+   an absolute file path. If the file exists it must be a regular file, not
+   a symlink, and not group- or world-writable; its directory must exist and
+   not be group- or world-writable. The server opens it once at startup
+   (append only, mode 0600). The unit's sandbox makes the home directory
+   read-only, so add a drop-in (`systemctl --user edit
+   factory-dashboard-http.service`) with `ReadWritePaths=` naming that
+   directory. Without the variable, `/api/act` is 404; setting it without
+   `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error.
+2. `POST /api/act` `{repo, ticket_id, action, expect_state, expect_why,
+   words, head}` checks the session, CSRF and approver login (403
+   `not-approver`), the action name (400 `bad-action`), the words (400
+   `bad-words`: non-empty, at most 32768 characters) and, for the merge OK,
+   a full 40-character `head` (400 `bad-head`). It then finds the ticket's
+   row in the served `status.json` (404 `not-in-snapshot`) and refuses with
+   409 `changed` if the row's state or wait reason is no longer what the
+   page showed, `not-applicable` if the row no longer lists the action, and
+   `no-target` if the row has neither a PR nor a GitHub issue. The comment
+   goes on the row's PR, else its issue, so a Linear ticket's goes on its
+   PR. A merge OK re-reads the PR head and answers 409 `head-changed` with
+   the new head, posting nothing, if it moved. Otherwise the server builds
+   the comment itself and answers 201 with its URL.
+3. Each comment is an `orch:v1` header the server chooses (`kind=ok
+   head=<sha>`; a `kind=go` for approve, resume and another round;
+   `kind=answers` for an answer; `kind=retry` for requeue; `kind=answers
+   state=abandoned` for close and split), then Max's words under
+   `**Max's words** (Max <date> <time> ET)`, every line quoted with `> `
+   and `<!--`/`-->` escaped. Nothing he types can become a first line, a
+   `/ok` or a header.
+4. Every request that reaches `/api/act` with a valid session and CSRF,
+   posted or refused, appends one JSON line to the audit file: time (UTC),
+   login, repo, ticket id, action, expected state, head, result (`posted`
+   or the error code) and the comment URL. The words, token, cookie and
+   CSRF are never written. Requests refused before that (no session, a bad
+   CSRF, origin or content type) write no line.
 
 ## Local config overlay
 

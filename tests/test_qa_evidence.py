@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import tarfile
 import traceback
@@ -12,27 +11,14 @@ import pytest
 from lib import qa_evidence
 from lib.dispatch.errors_text import scrub_detail
 from lib.qa_evidence import EvidenceRefused, collect
-from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, StorageError, lane_prefix
+from lib.qa_storage import BUNDLE_NAME, RESULT_NAME, lane_prefix
+from tests.qa_support import FakeStorage, bundle as _bundle
 
 REPO = "acme/shop"
 RUN = "run-7"
 TICKET = "787"
 PREFIX = lane_prefix(REPO, RUN, 1)
 SIGNED_LOG_LINE = "GET https://bucket.example/x?X-Amz-Signature=abc123 failed"
-
-
-class FakeStorage:
-    def __init__(self, objects: dict[str, bytes]) -> None:
-        self.objects = objects
-
-    def fetch(self, key: str, dest: Path, max_bytes: int) -> bool:
-        data = self.objects.get(key)
-        if data is None:
-            return False
-        if len(data) > max_bytes:
-            raise StorageError(f"fetch {key}: over {max_bytes} bytes")
-        dest.write_bytes(data)
-        return True
 
 
 def _file(name: str, data: bytes) -> tuple[tarfile.TarInfo, bytes]:
@@ -46,14 +32,6 @@ def _special(name: str, kind: bytes, linkname: str = "") -> tuple[tarfile.TarInf
     info.type = kind
     info.linkname = linkname
     return info, None
-
-
-def _bundle(*members: tuple[tarfile.TarInfo, bytes | None]) -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for info, data in members:
-            tar.addfile(info, None if data is None else io.BytesIO(data))
-    return buf.getvalue()
 
 
 def _result(**fields: object) -> dict[str, object]:
@@ -119,6 +97,8 @@ def test_happy_path_stores_evidence_with_manifest(root: Path) -> None:
     assert returned["status"] == "pass"
     assert returned["mismatches"] == [], "artifact checks ran on the uploaded bytes, before scrubbing"
     lane = _lane_dir(root)
+    assert qa_evidence.lane_dir(root, REPO, TICKET, RUN, 1) == lane
+    assert qa_evidence.stored(lane) == returned
     assert (lane / "screens" / "home.png").read_bytes() == shot
     assert json.loads((lane / RESULT_NAME).read_text())["artifacts"] == artifacts
     manifest = json.loads((lane / "manifest.json").read_text())

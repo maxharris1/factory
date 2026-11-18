@@ -23,6 +23,7 @@ from typing import Any
 
 from lib import (
     codex_sandbox,
+    containers,
     health,
     job_detail,
     job_run,
@@ -2301,7 +2302,24 @@ def _job_run_command(argv: list[str]) -> int:
         log(f"job worktree {made.path}")
         return made.path
 
+    def remove_containers() -> None:
+        if placed.target is not None:
+            if placed.follow_end is None or not placed.follow_end.worker_ended:
+                log(f"job {args.job_id}: its worker on {placed.device.name} may still run, "
+                    f"so its {containers.LABEL} containers are left to the waiter's sweep")
+                return
+            runner = containers.remote_runner(placed.transport, placed.target)
+        elif placed.live_worker() is not None:
+            log(f"job {args.job_id}: its worker still runs, "
+                f"so its {containers.LABEL} containers are left to the waiter's sweep")
+            return
+        else:
+            runner = containers.local_runner()
+        if (failure := containers.remove(args.job_id, runner, placed.device.name)) is not None:
+            log(failure)
+
     def teardown() -> None:
+        remove_containers()
         if (failure := remove_scratch(scratch)) is not None:
             log(failure)
         for path in reversed(created):

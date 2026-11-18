@@ -139,7 +139,8 @@ from lib.device_pool import UNREACHABLE_BACKOFF_SECONDS, DevicePool, Placement
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig, orch_host
-from lib import device_deploy, job_token
+from lib import containers, device_deploy, job_token
+from lib.device_monitor import remote_target
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import (
     SERVER_ERROR,
@@ -169,6 +170,7 @@ from lib.queue import (
     job_from_row,
     require_proof,
 )
+from lib.remote import CaptureTransport, SshTransport
 from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
@@ -217,6 +219,7 @@ REMOTE_RECORD = "remote.json"
 STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
 HOME_RETRY_SECONDS = 60.0
+CONTAINER_SWEEP_SECONDS = 600.0
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
     "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
@@ -609,6 +612,7 @@ class Waiter:
         orch_yml: Path = FACTORY_CHECKOUT / "orch.yml",
         home: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        transport: CaptureTransport | None = None,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -639,6 +643,9 @@ class Waiter:
         # for runs placed on a remote device
         self._remote: dict[str, tuple[Path, int]] = {}
         self._scratch_failures: dict[str, str] = {}
+        self.transport = transport if transport is not None else SshTransport()
+        self._containers_swept_at = clock()
+        self._container_lines: set[str] = set()
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
@@ -1148,6 +1155,33 @@ class Waiter:
                 else:
                     self._settle(job_id, child.pid, code, proof)
         self._remove_scratch_once_workers_exit()
+        self._sweep_containers()
+
+    def _sweep_containers(self) -> None:
+        now = self.clock()
+        if now - self._containers_swept_at < CONTAINER_SWEEP_SECONDS:
+            return
+        self._containers_swept_at = now
+        runners = [(orch_host(self.pool.config), containers.local_runner())]
+        for device in self.pool.config.devices:
+            target = remote_target(device, self.recipient, "containers")
+            if target is not None:
+                runners.append((device.name, containers.remote_runner(self.transport, target)))
+        lines: set[str] = set()
+        for name, runner in runners:
+            for line in containers.sweep(runner, self._job_state_name, name):
+                if line not in self._container_lines:
+                    self.log(line)
+                lines.add(line)
+        self._container_lines = lines
+
+    def _job_state_name(self, job_id: str) -> str | None:
+        try:
+            state = retry_locked(lambda: self._job_state(job_id))
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"job {job_id}: containers kept, its state is unreadable ({_one_line(exc)})")
+            return "unreadable"
+        return None if state is None else state[0]
 
     def _remove_scratch_once_workers_exit(self) -> None:
         jobs = self.state_dir / "jobs"

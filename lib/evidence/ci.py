@@ -30,6 +30,7 @@ INFRA_LINE_PREFIXES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
             "billing or spending limit",
         ),
         (r"The job was not started because your account is locked", "billing or spending limit"),
+        (r"The job was not started\b", "job not started"),
         (r"The (?:self-hosted |hosted )?runner\b.* lost communication with the server", "runner lost"),
         (r"The runner has received a shutdown signal", "runner lost"),
         (r"No hosted runner found", "hosted runner unavailable"),
@@ -90,13 +91,22 @@ def ci_evidence(
     )
 
 
-def classify_logged(result: CIResult, logs: Mapping[str, str | None]) -> CIResult:
+def classify_logged(
+    result: CIResult,
+    logs: Mapping[str, str | None],
+    steps: Mapping[str, int | None] | None = None,
+) -> CIResult:
     if result.status != "failure":
         return result
     checks = []
     for check in failed_checks(result):
         text = logs.get(check.job_id) if check.job_id is not None else None
-        signal = None if text is None or failing_tests(text) else _infra_signal((text,))
+        if text is not None:
+            signal = None if failing_tests(text) else _infra_signal((text,))
+        elif steps is not None and check.job_id is not None and steps.get(check.job_id) == 0:
+            signal = "job not started"
+        else:
+            signal = None
         checks.append(check if signal is None else replace(check, cause="infra", signal=signal))
     return replace(result, failed=tuple(checks))
 

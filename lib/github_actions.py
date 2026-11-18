@@ -137,6 +137,23 @@ MARK_READY_QUERY = (
     "{ pullRequest { id isDraft headRefOid } } }"
 )
 
+PULL_FINGERPRINT_FIELDS = """
+    state merged isDraft updatedAt title
+    headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus
+    labels(first: 100) { totalCount pageInfo { hasNextPage } nodes { name } }
+    comments(last: 100) { totalCount nodes { databaseId updatedAt } }
+    reviews { totalCount }
+    commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) {
+      totalCount pageInfo { hasNextPage }
+      nodes {
+        __typename
+        ... on CheckRun { databaseId status conclusion }
+        ... on StatusContext { context state }
+      }
+    } } } } }
+"""
+PULL_FINGERPRINT_CHUNK = 25
+
 _CHECK_NOT_RUN = ("neutral", "skipped")
 
 
@@ -593,6 +610,39 @@ class GitHubReviewActions:
                 comments.append(comment)
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
 
+    def pull_fingerprints(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
+        owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
+        wanted = list(dict.fromkeys(_number(number) for number in numbers))
+        found: dict[str, str] = {}
+        for start in range(0, len(wanted), PULL_FINGERPRINT_CHUNK):
+            chunk = wanted[start : start + PULL_FINGERPRINT_CHUNK]
+            fields = " ".join(
+                f"p{number}: pullRequest(number: {number}) {{ ...pull }}" for number in chunk
+            )
+            query = (
+                "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) "
+                f"{{ {fields} }} }} fragment pull on PullRequest {{ {PULL_FINGERPRINT_FIELDS} }}"
+            )
+            document = _object(
+                self._json(
+                    "-X", "POST", "graphql",
+                    "-f", f"query={query}",
+                    "-f", f"owner={owner}",
+                    "-f", f"name={name}",
+                    partial_graphql=True,
+                )
+            )
+            pulls = _object(document.get("data")).get("repository")
+            broken = _error_aliases(document)
+            if not isinstance(pulls, dict) or None in broken:
+                continue
+            for number in chunk:
+                pull = pulls.get(f"p{number}")
+                whole = isinstance(pull, dict) and _whole_fingerprint(pull)
+                if whole and f"p{number}" not in broken:
+                    found[number] = json.dumps(pull, sort_keys=True, separators=(",", ":"))
+        return found
+
     def pull_labels(self, repo: str, number: str) -> tuple[str, ...]:
         """The PR's labels, all pages (issue #86 hold label)."""
         endpoint = f"{_repo_path(repo)}/issues/{_number(number)}/labels?per_page=100"
@@ -955,9 +1005,6 @@ class LinearReviewActions(GitHubReviewActions):
         raise GitHubAdapterError("Linear tickets can only use handoff")
 
     def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
-        """Mark the PR ready, then move a before-review issue to Ready for
-        Review. Returns a note for the done wake when the move was skipped
-        because the team has no Ready for Review state, else None."""
         if self.fresh_ticket is not None:
             try:
                 fresh = self.fresh_ticket(
@@ -989,18 +1036,15 @@ class LinearReviewActions(GitHubReviewActions):
             error.write_confirmed = False
             raise error
         marked = self._mark_ready(ticket, head)
-        # Move only an issue still before review (Backlog, Triage, Todo, or
-        # started before Ready for Review). One already in Ready for Review
-        # (a no-op re-drive) or moved on by a human (Done, Canceled, or past
-        # Ready for Review) is left where it is. A team with no Ready for
-        # Review state has nowhere to move it: the handoff still completes,
-        # and the note tells the project bot the issue was not moved.
         if (
             self.move_ready_for_review
             and ticket.linear_state_phase == "no-ready-state"
         ):
             return LINEAR_NO_READY_STATE_NOTE
-        if self.move_ready_for_review and ticket.linear_state_phase == "before-review":
+        if self.move_ready_for_review and ticket.linear_state_phase in (
+            "before-review",
+            "rework",
+        ):
             try:
                 self.linear_ready(ticket)
             except RetryableStateError as exc:
@@ -1108,6 +1152,7 @@ def _run_job(job: dict[str, Any]) -> RunJob:
         completed_at=_display_time(job.get("completed_at")) if status == "completed" else None,
         runner_name=runner,
         runner_kind=kind,
+        steps=len(steps) if isinstance(steps := job.get("steps"), list) else None,
     )
 
 
@@ -1207,6 +1252,32 @@ def _route(args: Sequence[str]) -> str:
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         method = "<method>"
     return f"{method} {route or '<route>'}"
+
+
+def _whole_fingerprint(pull: dict[str, Any]) -> bool:
+    commits = pull.get("commits") or {}
+    rollups = [
+        ((node or {}).get("commit") or {}).get("statusCheckRollup")
+        for node in commits.get("nodes") or ()
+    ]
+    connections = [pull.get("labels"), *(rollup.get("contexts") for rollup in rollups if rollup)]
+    return all(
+        isinstance(connection, dict)
+        and (connection.get("pageInfo") or {}).get("hasNextPage") is False
+        for connection in connections
+    )
+
+
+def _error_aliases(document: dict[str, Any]) -> set[str | None]:
+    """The repository field each GraphQL error sits under; None for an
+    error that names no single field, which spoils the whole response."""
+    errors = document.get("errors")
+    aliases: set[str | None] = set()
+    for error in errors if isinstance(errors, list) else ():
+        path = error.get("path") if isinstance(error, dict) else None
+        named = isinstance(path, list) and len(path) > 1 and path[0] == "repository"
+        aliases.add(path[1] if named and isinstance(path[1], str) else None)
+    return aliases
 
 
 def _has_graphql_data(text: str) -> bool:

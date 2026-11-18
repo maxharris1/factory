@@ -1432,19 +1432,6 @@ _SCRIPT = r"""
     tiles.forEach(function (name) { TILES[name](box, r, m); });
     return sec;
   }
-  var SHA = /^[0-9a-f]{40}$/;
-
-  function ghResult(out, res, text) {
-    out.replaceChildren();
-    var url = res.ok ? String(res.data.url || '') : '';
-    if (/^https:\/\/github\.com\//.test(url)) {
-      add(out, document.createTextNode(text + ' '));
-      var a = add(out, link(null, url));
-      a.setAttribute('rel', 'noopener noreferrer');
-      a.setAttribute('target', '_blank');
-      a.textContent = url;
-    } else out.textContent = res.ok ? text : 'error: ' + res.error;
-  }
   function ghBuild() {
     var p = {root: el('div', 'jd-gh'), head: null, busy: false, sent: false};
     p.auth = add(p.root, el('div', 'gh-row'));
@@ -1487,7 +1474,7 @@ _SCRIPT = r"""
     p.ok.hidden = !eligible;
     if (!eligible) { p.ok.open = false; p.head = null; p.okOut.textContent = ''; }
     p.okButton.disabled = !p.head || p.busy;
-    p.okButton.textContent = p.sent ? 'OK sent' : p.head ? 'OK ' + p.head.slice(0, 7) : 'OK (reading head…)';
+    p.okButton.textContent = p.sent ? 'OK sent' : p.head ? 'OK ' + p.head : 'OK (reading head…)';
   }
   function ghPanel(r, t) {
     var key = threadKey(r);
@@ -1533,7 +1520,7 @@ _SCRIPT = r"""
     ghPost('/api/ok', {repo: refs.repo, pr: Number(refs.pr), head: head}, true).then(function (res) {
       p.busy = false;
       if (res.status === 409 && res.data.error === 'head-changed') {
-        p.okOut.textContent = 'head changed to ' + String(res.data.head || '').slice(0, 7);
+        p.okOut.textContent = 'head changed to ' + String(res.data.head || '');
         ghHead(p);
         return;
       }

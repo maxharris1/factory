@@ -10,7 +10,6 @@ import socket
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote_to_bytes, urlsplit
 
@@ -19,14 +18,13 @@ import pytest
 from lib.qa_storage import (
     BUNDLE_CAP,
     RESULT_CAP,
-    DownloadLink,
     LaneLinks,
     S3Storage,
     StorageError,
-    UploadLink,
     _presign_query,
     links_for_lane,
 )
+from tests.qa_support import FakeStorage
 
 AWS_ACCESS = "AKIAIOSFODNN7EXAMPLE"
 AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
@@ -68,22 +66,6 @@ def _expected_get_signature(url: str, secret: str) -> str:
 
 def _signature(url: str) -> str:
     return dict(parse_qsl(urlsplit(url).query))["X-Amz-Signature"]
-
-
-class FakeStorage:
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def sign_upload(self, key: str, max_bytes: int, expires_s: int) -> UploadLink:
-        self.calls.append(("upload", key))
-        return UploadLink(key, max_bytes, expires_s, url=f"mem://{key}", fields={"key": key})
-
-    def sign_download(self, key: str, expires_s: int) -> DownloadLink:
-        self.calls.append(("download", key))
-        return DownloadLink(key, expires_s, url=f"mem://{key}")
-
-    def fetch(self, key: str, dest: Path, max_bytes: int) -> bool:
-        raise AssertionError("not used")
 
 
 class FakeResponse:
@@ -147,7 +129,7 @@ def test_ac1_bad_ids_raise_before_anything_is_signed(bad, which):
 
     with pytest.raises(ValueError):
         links_for_lane(run_id, 1, packs, 600, storage=storage, repo="acme/widgets")
-    assert storage.calls == []
+    assert storage.signed == []
 
 
 def test_presign_matches_aws_published_example():

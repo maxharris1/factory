@@ -2743,6 +2743,38 @@ def test_linear_ticket_carries_the_issue_state_phase() -> None:
     assert ticket.linear_ready_state_id == "rfr"
 
 
+def test_a_linear_ticket_follows_the_projects_handoff_and_rework_states() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    issue = {
+        **linear_issue(),
+        **phase_issue(
+            {"id": "cr", "type": "started", "position": 4.5},
+            ready={"id": "qar", "name": "QA Review", "type": "started", "position": 3.0},
+        ),
+    }
+    issue["team"]["states"]["nodes"] += [
+        RFR,
+        {"id": "cr", "name": "Changes Requested", "type": "started", "position": 4.5},
+    ]
+    base = config(linear=True)
+    project = replace(
+        base.projects[0],
+        linear_handoff_states=("QA Review", "In Review"),
+        linear_rework_states=("Changes Requested",),
+    )
+    source = LivePollSource(
+        replace(base, projects=(project,)),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=linear_transport_for(issue),
+    )
+
+    ticket = source._linear_ticket(project, issue)
+
+    assert ticket.linear_ready_state_id == "qar"
+    assert ticket.linear_state_phase == "rework"
+
+
 def test_a_github_ticket_carries_its_source_issue_and_open_title() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
     gh.pull = {"state": "open", "title": "Do it", "body": "Fixes #11", "head": {"ref": "x"}}

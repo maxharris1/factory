@@ -71,6 +71,7 @@ from lib.hold import FACTORY_MD
 from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
 from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
+    DEFAULT_LINEAR_HANDOFF_STATES,
     LINEAR_POLL_SECONDS,
     OrchConfig,
     Project,
@@ -167,6 +168,7 @@ SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
 BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 LINEAR_PROCESS_HEADROOM = 2
 HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
+FULL_READ_SECONDS = 600.0
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
@@ -460,6 +462,24 @@ class FedPulls:
         return None if row is None or row[0] is None else str(row[0])
 
 
+class LastRead(NamedTuple):
+    probe_before_read: str | None
+    read_at: float
+    pull: dict[str, Any]
+    comments: tuple[Comment, ...]
+    ci: CIResult
+    hold_inputs: dict[str, Any]
+
+
+def reusable(last: LastRead | None, probed: str | None, now: float) -> bool:
+    return (
+        last is not None
+        and probed is not None
+        and probed == last.probe_before_read
+        and now - last.read_at < FULL_READ_SECONDS
+    )
+
+
 class LivePollSource:
     def __init__(
         self,
@@ -513,6 +533,7 @@ class LivePollSource:
         self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
+        self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._backoff_until = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
@@ -685,6 +706,11 @@ class LivePollSource:
             key: value
             for key, value in self._head_reads.items()
             if key in self._head_read_last_used
+        }
+        self._last_reads = {
+            key: last
+            for key, last in self._last_reads.items()
+            if now - last.read_at < 2 * FULL_READ_SECONDS
         }
         if self._dirty_fetched and self.linear_dirty is not None:
             fetched = tuple(self._dirty_fetched.values())
@@ -978,6 +1004,7 @@ class LivePollSource:
                 key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
             )
         )
+        probes = self._pull_fingerprints(ordered, projects)
         spent: dict[str, float] = {}
         for ref in ordered:
             project = projects.get(ref.repo.lower())
@@ -995,7 +1022,7 @@ class LivePollSource:
             self._budget_deadline = started + left
             self._budget_spent = False
             try:
-                ticket = self._tracked_ticket(ref, project)
+                ticket = self._tracked_ticket(ref, project, probes.get((repo, ref.ticket_id)))
             except Exception as exc:
                 if not isinstance(exc, _TerminalTicket):
                     self._record(ref.repo, ref.ticket_id, exc)
@@ -1011,6 +1038,31 @@ class LivePollSource:
             self._tracked_turn += 1
             self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
+
+    def _pull_fingerprints(
+        self,
+        refs: Sequence[TicketRef],
+        projects: Mapping[str, Project],
+    ) -> dict[tuple[str, str], str]:
+        wanted: dict[str, list[str]] = {}
+        for ref in refs:
+            repo = ref.repo.lower()
+            if (
+                ref.tracker == "github"
+                and repo in projects
+                and (repo, ref.ticket_id) in self._last_reads
+                and ("github", repo, ref.ticket_id) not in self._ticket_cache
+            ):
+                wanted.setdefault(repo, []).append(ref.ticket_id)
+        probes: dict[tuple[str, str], str] = {}
+        for repo, numbers in wanted.items():
+            try:
+                found = self.github.pull_fingerprints(projects[repo].repo, numbers)
+            except Exception:
+                self._defer(f"GitHub probe failed for {projects[repo].repo}, read in full")
+                continue
+            probes.update({(repo, number): fingerprint for number, fingerprint in found.items()})
+        return probes
 
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
         if not self._linear_due:
@@ -1103,6 +1155,7 @@ class LivePollSource:
         self,
         ref: TicketRef,
         project: Project,
+        probed: str | None = None,
     ) -> TrackedTicket | None:
         if ref.tracker == "linear":
             cached = ref.ticket_id in self._linear_issue_cache
@@ -1136,6 +1189,7 @@ class LivePollSource:
             self._factory(project),
             ref.ticket_id,
             allow_merged=ref.allow_merged,
+            probed=probed,
         )
 
     def _reusable_linear_issue(self, ref: TicketRef) -> dict[str, Any] | None:
@@ -1621,12 +1675,22 @@ class LivePollSource:
         fresh: bool = False,
         allow_merged: bool = False,
         comments: tuple[Comment, ...] | None = None,
+        probed: str | None = None,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
         cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
             return cached
-        pull = self._github_pull(project.repo, number, fresh=fresh)
+        read_at = self.clock()
+        last = None if fresh else self._last_reads.get((project.repo.lower(), number))
+        if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.hold_applies:
+            last = None
+        if last is None:
+            # gh's --cache could serve a body older than the probe, which
+            # would then be stored under the probe's fingerprint.
+            pull = self._github_pull(project.repo, number, fresh=fresh or probed is not None)
+        else:
+            pull = last.pull
         merged = pull.get("merged") is True
         head = _pr_head(pull, project.repo, number)
         if merged and not fresh:
@@ -1641,23 +1705,27 @@ class LivePollSource:
                 )
             if not allow_merged:
                 raise _TerminalTicket()
-        if comments is None:
-            comments = self.github.list_comments(project.repo, number)
+        if last is not None:
+            comments, ci, hold_inputs = last.comments, last.ci, last.hold_inputs
+        else:
+            if comments is None:
+                comments = self.github.list_comments(project.repo, number)
+            hold_inputs = self._hold_inputs(project.repo, number, factory, pull)
+            ci = self.github.ci_status(project.repo, head)
+            if not fresh and None not in hold_inputs.values():
+                self._last_reads[(project.repo.lower(), number)] = LastRead(
+                    probed, read_at, pull, comments, ci, hold_inputs
+                )
         brief = canonical_brief(comments, self._trusted)
         source_issue = github_source(pull, project.repo, number)
         ticket = TrackedTicket(
-            **self._hold_inputs(project.repo, number, factory, pull),
+            **hold_inputs,
             repo=project.repo,
             ticket_id=number,
             factory=factory,
             comments=comments,
             current_head=head,
-            ci={
-                head: ci_on_base(
-                    self.github.ci_status(project.repo, head),
-                    no_ci_base(factory, _pr_base(pull)),
-                )
-            },
+            ci={head: ci_on_base(ci, no_ci_base(factory, _pr_base(pull)))},
             risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
@@ -1953,9 +2021,15 @@ class LivePollSource:
             pr_body=_optional_string(pull.get("body")),
             grok_bot=project.grok_bot,
             linear_issue_id=_optional_string(issue.get("id")),
-            linear_ready_state_id=_linear_ready_state_id(issue),
+            linear_ready_state_id=_linear_ready_state_id(
+                issue, project.linear_handoff_states[0]
+            ),
             linear_ready_for_review=project.linear_ready_for_review,
-            linear_state_phase=_linear_state_phase(issue),
+            linear_state_phase=_linear_state_phase(
+                issue,
+                project.linear_handoff_states[0],
+                frozenset(project.linear_rework_states),
+            ),
             ready_starts_review=project.ready_starts_review,
             source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
             pr_title=pr_title,
@@ -2329,6 +2403,8 @@ def _is_gh_read(args: Sequence[str]) -> bool:
 
 
 def _gh_source(argv: Sequence[str]) -> str:
+    if "graphql" in argv:
+        return "github-graphql"
     for index, part in enumerate(argv):
         match = _REPO_ROUTE.match(part)
         if match:
@@ -2583,33 +2659,36 @@ def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _linear_ready_state(issue: Mapping[str, Any]) -> dict[str, Any] | None:
+def _linear_team_state(issue: Mapping[str, Any], key: str, value: object) -> dict[str, Any] | None:
     team = issue.get("team")
     if team is None:
         return None
     states = _object(_object(team, "Linear team").get("states"), "Linear states")
     for raw in _array(states.get("nodes"), "Linear state nodes"):
         state = _object(raw, "Linear state")
-        if state.get("name") == "Ready for Review":
+        if state.get(key) == value:
             return state
     return None
 
 
-def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
-    state = _linear_ready_state(issue)
+def _linear_ready_state(
+    issue: Mapping[str, Any], name: str = DEFAULT_LINEAR_HANDOFF_STATES[0]
+) -> dict[str, Any] | None:
+    return _linear_team_state(issue, "name", name)
+
+
+def _linear_ready_state_id(
+    issue: Mapping[str, Any], name: str = DEFAULT_LINEAR_HANDOFF_STATES[0]
+) -> str | None:
+    state = _linear_ready_state(issue, name)
     return _optional_string(state.get("id")) if state is not None else None
 
 
-def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
-    """Where the issue stands relative to Ready for Review, or None if unknown.
-
-    before-review: backlog, triage, unstarted, or started and not after
-    Ready for Review in the team's order. ready-for-review: in that state.
-    moved-on: completed, canceled, or a started state after Ready for
-    Review. no-ready-state: not completed or canceled, on a team that has
-    no Ready for Review state, so there is nothing to move it to.
-    The handoff moves only a before-review issue and fails closed on None.
-    """
+def _linear_state_phase(
+    issue: Mapping[str, Any],
+    ready_name: str = DEFAULT_LINEAR_HANDOFF_STATES[0],
+    rework: frozenset[str] = frozenset(),
+) -> str | None:
     state = issue.get("state")
     if not isinstance(state, dict):
         return None
@@ -2619,7 +2698,7 @@ def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
         return None
     if not isinstance(issue.get("team"), dict):
         return None
-    ready = _linear_ready_state(issue)
+    ready = _linear_ready_state(issue, ready_name)
     if ready is not None and ready.get("id") == state_id:
         return "ready-for-review"
     if kind in ("completed", "canceled"):
@@ -2628,6 +2707,9 @@ def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
         return None
     if ready is None:
         return "no-ready-state"
+    current = _linear_team_state(issue, "id", state_id)
+    if current is not None and current.get("name") in rework:
+        return "rework"
     if kind != "started" or ready.get("type") != "started":
         return "before-review"
     here, there = state.get("position"), ready.get("position")

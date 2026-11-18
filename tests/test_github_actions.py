@@ -1686,6 +1686,23 @@ def test_run_jobs_names_each_jobs_runner_in_one_read() -> None:
     assert gh.keys() == [RUN_JOBS]
 
 
+def test_run_jobs_counts_each_jobs_steps_and_a_job_that_never_started_has_none() -> None:
+    actions, gh = adapter()
+    page = json.loads((FIXTURES / "run-jobs.json").read_text())
+    page["jobs"][0]["steps"] = [{"name": "Set up job"}, {"name": "Run tests"}]
+    page["jobs"][3]["steps"] = []
+    gh.route(RUN_JOBS, GhResult(0, json.dumps(page), ""))
+
+    jobs = actions.run_jobs("owner/repo", "123456")
+
+    assert [(job.name, job.steps) for job in jobs] == [
+        ("pytest", 2),
+        ("e2e", None),
+        ("lint", None),
+        ("deploy", 0),
+    ]
+
+
 def test_run_jobs_refuses_a_run_id_that_is_not_a_number() -> None:
     actions, gh = adapter()
 
@@ -1952,6 +1969,8 @@ def test_gh_failure_safe_detail_keeps_status_but_no_output() -> None:
         ("ready-for-review", False, []),
         ("moved-on", True, []),
         ("moved-on", False, []),
+        ("rework", True, ["AUT-42"]),
+        ("rework", False, ["AUT-42"]),
     ],
     ids=[
         "before-review-draft",
@@ -1960,6 +1979,8 @@ def test_gh_failure_safe_detail_keeps_status_but_no_output() -> None:
         "already-rfr-no-op",
         "moved-on-draft",
         "moved-on-ready-pr",
+        "rework-draft",
+        "rework-ready-pr",
     ],
 )
 def test_linear_handoff_moves_only_an_issue_still_before_review(

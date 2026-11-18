@@ -3085,9 +3085,10 @@ def test_remote_start_runs_a_harness_whose_path_holds_an_equals_sign(tmp_path: P
         encoding="utf-8",
     )
     tool.chmod(0o755)
-    script = remote.start_script(_token_target(tmp_path), [str(tool), "x=1"], {"GH_TOKEN": JOB_SECRET})
+    target = _token_target(tmp_path)
+    script = remote.start_script(target, [str(tool), "x=1"], {"GH_TOKEN": JOB_SECRET})
     result = subprocess.run(
-        remote.ssh_argv(_token_target(tmp_path), script), capture_output=True, text=True, timeout=30,
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
         env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
     )
     assert result.returncode == 0, result.stderr
