@@ -10,7 +10,7 @@ import pytest
 
 from lib.ci_lane import ci_lane
 from lib.dashboard import collect_snapshot, render_pages, tickets_json, write_snapshot
-from lib.dashboard_pages.ci import ci_popup
+from lib.dashboard_pages.ci import ci_lane_html, ci_popup
 from lib.dashboard_pages.ticket_detail import ticket_view
 from tests import test_dashboard_activity as activity
 from tests.test_dashboard import NOW, seeded
@@ -175,6 +175,30 @@ def test_recent_failures_name_the_failing_tests_with_a_flake_search(tmp_path: Pa
             'test_waiting_on_capacity%22"') in failed
     assert ">tests/test_feeder.py::test_waiting_on_capacity</a>" in failed
     assert "timed out" not in _text(failed) and "timed out" in _text(_popup(snapshot, "12"))
+
+
+def test_a_failed_card_counts_every_check_of_the_failed_head(tmp_path: Path) -> None:
+    def seed(connection: sqlite3.Connection) -> None:
+        for name, conclusion in (("lint", "success"), ("pytest", "failure"), ("docs", "skipped")):
+            add_ci(connection, "12", HEAD_A, name, "completed", conclusion, completed_at=NOW - 10)
+
+    card = ci_lane(snapshot_with(tmp_path, seed))["cards"][f"{REPO}#12"]
+    assert card["progress_text"] == "1/3 passed, 0 running, 1 failed, 1 skipped"
+    assert card["progress"]["total"] == 3
+
+
+def test_a_completed_job_on_a_runner_gone_from_the_pool_makes_no_busy_slot(tmp_path: Path) -> None:
+    def seed(connection: sqlite3.Connection) -> None:
+        connection.execute("INSERT INTO ci_runners VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (REPO, "current-linux", "Linux", "online", 0, '["self-hosted","factory-linux"]', NOW))
+        add_ci(connection, "12", HEAD_A, "lint", "completed", "success", started_at=NOW - 100,
+               completed_at=NOW - 10, runner_kind="self-hosted", runner_name="retired-linux")
+        add_ci(connection, "12", HEAD_A, "pytest", "in_progress", started_at=NOW - 100,
+               runner_kind="github-hosted", runner_name="GitHub Actions 1")
+
+    snapshot = snapshot_with(tmp_path, seed)
+    assert [(s["runner"], s["state"]) for s in ci_lane(snapshot)["slots"]] == [("current-linux", "idle")]
+    assert '<div class="lbl">busy</div>' not in ci_lane_html(snapshot)
 
 
 def test_failures_keep_a_day_newest_first_and_at_most_ten(tmp_path: Path) -> None:

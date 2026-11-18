@@ -94,6 +94,12 @@ def test_a_ticket_on_three_runners_is_one_card_and_two_continuations() -> None:
         "↳ cleffy#13 · pytest (2/3)", "↳ cleffy#13 · pytest (3/3)"]
 
 
+def test_a_runner_off_the_pool_list_gets_a_slot_only_while_it_runs_a_job() -> None:
+    done = run("13", job("lint", "completed", "success", on="retired-linux"), job("pytest", hosted=True))
+    lane = ci_lane(snapshot(pool(runner("current-linux", ["self-hosted", "factory-linux"])), [done]))
+    assert [(s["runner"], s["state"]) for s in lane["slots"]] == [("current-linux", "idle")]
+
+
 def test_a_runner_seen_on_a_job_but_not_in_the_pool_list_still_gets_a_slot() -> None:
     html = ci_lane_html(snapshot(pool(), [run("13", job("pytest", on="new-runner"))]))
     assert slots(html) == ["new-runner"] and "pool live" in html
@@ -163,7 +169,8 @@ def test_a_ticket_waiting_with_no_jobs_is_queued_and_a_recent_failure_with_nothi
                "ci_wait": {"reason": "approved-ci-pending", "checks": [], "waiting_seconds": 3700}}
     failure = {"repo": REPO, "ticket_id": "15", "source": None, "pr": "115", "tracker": "github",
                "head_short": "c3d4e5f", "name": "pytest", "conclusion": "failure", "run_id": "8800",
-               "job_id": "8802", "tests": [], "more_tests": 0, "age_seconds": 600}
+               "job_id": "8802", "tests": [], "more_tests": 0, "age_seconds": 600,
+               "run_checks": [{"status": "completed", "conclusion": "failure"}]}
     html = ci_lane_html(snapshot(full_pool(), failures=[failure], tickets=[waiting]))
     queued = group(html, "queued")
     assert "then merge" in queued and "checks pending" in queued and "waiting 1h 01m" in queued
@@ -195,7 +202,8 @@ def test_a_waiting_ticket_stays_queued_even_after_an_older_failure() -> None:
                "ci_wait": {"reason": "ci-pending", "checks": ["pytest"], "waiting_seconds": 30, "round": 2}}
     failure = {"repo": REPO, "ticket_id": "15", "source": None, "pr": "115", "tracker": "github",
                "head_short": "c3d4e5f", "name": "pytest", "conclusion": "failure", "run_id": "8800",
-               "job_id": "8802", "tests": [], "more_tests": 0, "age_seconds": 600}
+               "job_id": "8802", "tests": [], "more_tests": 0, "age_seconds": 600,
+               "run_checks": [{"status": "completed", "conclusion": "failure"}]}
     lane = ci_lane(snapshot(full_pool(), failures=[failure], tickets=[waiting]))
     assert lane["groups"] == [{"name": "queued", "cards": ["maxharris1/cleffy#15"]}]
     assert lane["cards"]["maxharris1/cleffy#15"]["status"] == "queued" and lane["failed_24h"] == 0
@@ -207,3 +215,12 @@ def test_a_queued_card_with_no_jobs_still_opens_the_ci_popup() -> None:
     assert ci_extras(shot, f"{REPO}#14", row, False) == ""
     opened = ci_extras(shot, f"{REPO}#14", row, True)
     assert 'id="ci-pop"' in opened and "no CI queued or running" in opened
+
+
+def test_a_failed_card_counts_every_check_of_its_run() -> None:
+    failure = {"repo": REPO, "ticket_id": "15", "source": None, "pr": "115", "tracker": "github",
+               "head_short": "c3d4e5f", "name": "pytest", "conclusion": "failure", "run_id": "8800",
+               "job_id": "8802", "tests": [], "more_tests": 0, "age_seconds": 600,
+               "run_checks": [{"status": "completed", "conclusion": c} for c in ("success", "failure", "skipped")]}
+    card = ci_lane(snapshot(full_pool(), failures=[failure]))["cards"][f"{REPO}#15"]
+    assert card["progress_text"] == "1/3 passed, 0 running, 1 failed, 1 skipped"

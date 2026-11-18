@@ -63,7 +63,8 @@ started_at, completed_at, elapsed_seconds, queue_seconds}; runner_kind None mean
 `failures` is the newest RECENT_CI_FAILURES failed jobs that completed in
 the last CI_FAILURE_WINDOW on any head: the ticket reference, head_short,
 name, conclusion, run_id, job_id, tests (the first CI_TESTS_SHOWN failing
-test names), more_tests and age_seconds since the job completed. No URL
+test names), more_tests, age_seconds since the job completed, and
+run_checks, the {status, conclusion} of every job at that head. No URL
 is stored, since redaction
 hides every URL: the pages build the github.com PR, commit, job log and
 issue-search links from these parts.
@@ -1108,6 +1109,7 @@ def _ci_runs(
                 "tests": tests,
                 "more_tests": more,
                 "at": completed,
+                "run": (*key, head),
             })
     runs = []
     for run_key, jobs in grouped.items():
@@ -1121,7 +1123,8 @@ def _ci_runs(
     return {
         "runs": runs,
         "failures": [
-            {**{k: v for k, v in item.items() if k != "at"}, "age_seconds": _age(now, item["at"])}
+            {**{k: v for k, v in item.items() if k not in ("at", "run")}, "age_seconds": _age(now, item["at"]),
+             "run_checks": [{"status": job["status"], "conclusion": job["conclusion"]} for job in grouped[item["run"]]]}
             for item in failures[:RECENT_CI_FAILURES]
         ],
     }

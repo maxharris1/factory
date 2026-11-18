@@ -8,7 +8,7 @@
                    progress: {passed, failed, running, queued, skipped, total}, progress_text}}}
 
 One slot per self-hosted runner: the pool's runners (factory-linux first, then by name), then any
-runner a job ran on that the pool list does not have yet. A ticket's card sits in the first slot it
+runner running a job now that the pool list does not have yet. A ticket's card sits in the first slot it
 holds; every other runner it holds is a `cont` slot naming that job, so no ticket is drawn twice.
 After the slots come the GitHub-hosted overflow (#711), tickets with no runner yet, and tickets that
 failed in the last day with nothing running now.
@@ -72,7 +72,7 @@ def _card(row: dict, status: str, age: object, wait: dict | None, p: dict) -> di
             "progress": p, "progress_text": progress_text(p)}
 
 
-def _runners(pool: dict, runs: list[dict]) -> list[dict]:
+def _runners(pool: dict, holding: dict[str, tuple[str, dict]]) -> list[dict]:
     found: dict[str, dict] = {}
     for runner in pool.get("runners") or []:
         seen = found.setdefault(runner["name"], {"runner": runner["name"], "os": runner["os"], "local": False,
@@ -81,12 +81,8 @@ def _runners(pool: dict, runs: list[dict]) -> list[dict]:
         seen["online"] |= runner["status"] == "online"
         seen["busy"] |= runner["busy"]
     ordered = sorted(found.values(), key=lambda r: (not r["local"], r["runner"]))
-    for run in runs:
-        for job in run["jobs"]:
-            name = job["runner_name"]
-            if job["runner_kind"] == "self-hosted" and name and name not in found:
-                found[name] = {"runner": name, "os": None, "local": False, "online": True, "busy": True}
-                ordered.append(found[name])
+    ordered += [{"runner": name, "os": None, "local": False, "online": True, "busy": False}
+                for name in holding if name not in found]
     return ordered
 
 
@@ -111,7 +107,7 @@ def ci_lane(snapshot: dict) -> dict:
             elif job["runner_kind"] == "github-hosted" and key not in hosted:
                 hosted.append(key)
     slots, led = [], set()
-    for runner in _runners(pool, ci["runs"]):
+    for runner in _runners(pool, holds):
         slot = {"runner": runner["runner"], "os": runner["os"], "state": "idle", "card": None, "job": None}
         if runner["runner"] in holds:
             key, job = holds[runner["runner"]]
@@ -130,19 +126,13 @@ def ci_lane(snapshot: dict) -> dict:
     for ticket in waits:
         cards[card_key(ticket)] = _card(ticket, "queued", None, _wait(ticket), progress([]))
         queued.append(card_key(ticket))
-    failed_heads: dict[str, list[dict]] = {}
+    failed = []
     for row in ci["failures"]:
         key = card_key(row)
-        if key in cards:
-            continue
-        rows = failed_heads.setdefault(key, [])
-        if not rows or rows[0]["head_short"] == row["head_short"]:
-            rows.append(row)
-    failed = []
-    for key, rows in failed_heads.items():
-        p = {**dict.fromkeys(SEGMENTS, 0), "failed": len(rows), "total": len(rows)}
-        cards[key] = _card(rows[0], "failed", rows[0]["age_seconds"], _wait(tickets.get(_same(rows[0]))), p)
-        failed.append(key)
+        if key not in cards:
+            cards[key] = _card(row, "failed", row["age_seconds"], _wait(tickets.get(_same(row))),
+                               progress(row["run_checks"]))
+            failed.append(key)
     groups = [{"name": name, "cards": keys} for name, keys in
               (("hosted", hosted), ("queued", queued), ("failed", failed)) if keys]
     return {
