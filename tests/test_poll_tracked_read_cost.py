@@ -22,6 +22,7 @@ PER_PR = ("pull", "comments", "check-runs", "status", "labels", "events")
 FULL_READ = dict.fromkeys(PER_PR, 1)
 NO_READ = dict.fromkeys(PER_PR, 0)
 ALIAS = re.compile(r"\bp(\d+): pullRequest\(number: (\d+)\)")
+CHECK_RUN_FIELDS = re.compile(r"\.\.\. on CheckRun \{ ([^}]*) \}")
 
 
 def comment(number: int, body: str, at: str = "2026-11-18T09:00:00Z") -> dict:
@@ -102,13 +103,19 @@ class Pull:
             "statuses": self.statuses,
         }
 
-    def node(self) -> dict:
+    def node(self, check_run_fields: list[str]) -> dict:
         contexts = [
             {
-                "__typename": "CheckRun",
-                "databaseId": run["id"],
-                "status": run["status"].upper(),
-                "conclusion": run["conclusion"] and run["conclusion"].upper(),
+                key: value
+                for key, value in {
+                    "__typename": "CheckRun",
+                    "databaseId": run["id"],
+                    "status": run["status"].upper(),
+                    "conclusion": run["conclusion"] and run["conclusion"].upper(),
+                    "title": (run.get("output") or {}).get("title"),
+                    "summary": (run.get("output") or {}).get("summary"),
+                }.items()
+                if key == "__typename" or key in check_run_fields
             }
             for run in self.check_runs
         ] + [
@@ -222,9 +229,10 @@ class GitHub:
         )
         assert f"{fields['owner']}/{fields['name']}" == REPO
         aliases = ALIAS.findall(fields["query"])
+        check_run_fields = CHECK_RUN_FIELDS.search(fields["query"]).group(1).split()
         assert aliases and all(alias == number for alias, number in aliases)
         repository = {
-            f"p{number}": None if number in self.unprobed else self.pulls[number].node()
+            f"p{number}": None if number in self.unprobed else self.pulls[number].node(check_run_fields)
             for _, number in aliases
         }
         document = {"data": {"repository": repository}}
@@ -373,6 +381,53 @@ def test_a_change_on_a_pr_brings_a_full_read_of_that_pr_alone(
 
     assert poller.cycle()["12"] == after
     assert github.reads("12") == NO_READ
+
+
+def test_a_new_check_run_summary_at_the_same_result_is_read_and_reclassified() -> None:
+    pull = Pull(12, head="a" * 40)
+    pull.check_runs[0].update(
+        conclusion="failure",
+        output={"title": "Failed", "summary": "The hosted runner encountered an error while running your job"},
+    )
+    github = GitHub(pull)
+    poller = Poller(github, "12")
+    poller.cycle()
+    before = poller.cycle()["12"]
+
+    pull.check_runs[0]["output"] = {"title": "Failed", "summary": "AssertionError: wrong widget"}
+    after = poller.cycle()["12"]
+
+    assert github.reads("12") == FULL_READ
+    assert before.ci[before.current_head].failed[0].cause == "infra"
+    assert after.ci[after.current_head].failed[0].cause == "code"
+
+
+class SlowGitHub(GitHub):
+    def __init__(self, *pulls: Pull):
+        super().__init__(*pulls)
+        self.poller: Poller | None = None
+
+    def __call__(self, argv, timeout) -> GhResult:
+        if self.poller is not None:
+            self.poller.now += min(19 if "graphql" in argv else 3, timeout)
+        return super().__call__(argv, timeout)
+
+
+def test_the_probe_is_charged_to_its_repos_tracked_read_budget() -> None:
+    numbers = [str(number) for number in range(12, 19)]
+    github = SlowGitHub(*(Pull(int(number), head=f"{int(number):040x}") for number in numbers))
+    poller = Poller(github, *numbers)
+    poller.cycle(at=0)
+    poller.cycle(at=30)
+    for pull in github.pulls.values():
+        add_comment(pull)
+    github.poller = poller
+
+    tickets = poller.cycle(at=60)
+
+    assert poller.now - 60 <= poller.source.tracked_read_budget_seconds
+    assert len(tickets) < len(numbers)
+    assert poller.deferrals
 
 
 def test_a_reopened_pr_is_read_in_full_and_open() -> None:

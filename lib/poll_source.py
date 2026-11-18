@@ -1014,8 +1014,7 @@ class LivePollSource:
                 key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
             )
         )
-        probes = self._pull_fingerprints(ordered, projects)
-        spent: dict[str, float] = {}
+        probes, spent = self._pull_fingerprints(ordered, projects)
         for ref in ordered:
             project = projects.get(ref.repo.lower())
             if project is None:
@@ -1065,7 +1064,7 @@ class LivePollSource:
         self,
         refs: Sequence[TicketRef],
         projects: Mapping[str, Project],
-    ) -> dict[tuple[str, str], str]:
+    ) -> tuple[dict[tuple[str, str], str], dict[str, float]]:
         wanted: dict[str, list[str]] = {}
         for ref in refs:
             repo = ref.repo.lower()
@@ -1077,14 +1076,18 @@ class LivePollSource:
             ):
                 wanted.setdefault(repo, []).append(ref.ticket_id)
         probes: dict[tuple[str, str], str] = {}
+        spent: dict[str, float] = {}
         for repo, numbers in wanted.items():
+            started = self.clock()
             try:
                 found = self.github.pull_fingerprints(projects[repo].repo, numbers)
             except Exception:
                 self._defer(f"GitHub probe failed for {projects[repo].repo}, read in full")
                 continue
+            finally:
+                spent[repo] = self.clock() - started
             probes.update({(repo, number): fingerprint for number, fingerprint in found.items()})
-        return probes
+        return probes, spent
 
     def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
         projects = {project.repo.lower(): project for project in self.config.projects}
