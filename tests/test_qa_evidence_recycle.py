@@ -397,6 +397,27 @@ def test_ancestor_swapped_before_root_is_opened_skips_every_run(
     assert _snapshot(outside) == outside_before
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_execute_only_ancestor_still_recycles(db: sqlite3.Connection, tmp_path: Path) -> None:
+    locked = tmp_path.resolve() / "locked"
+    root = locked / "evidence"
+    kept = run_dir(root, REPO, TICKET, "run-1")
+    _lane(kept, 1, {"s-1": "verified"}, ["s-1/trace.zip"])
+    _run(db, "run-1", kept)
+    _failed_run(db, root, "m-1", "13", NOW - 3 * DAY, 5000)
+    _closed(db, "13", "merged", NOW - DAY)
+    locked.chmod(0o111)
+    try:
+        report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1)
+    finally:
+        locked.chmod(0o755)
+
+    assert report == Recycled(
+        deleted=("Acme/Shop/12/run-1/lane-1/s-1/trace.zip",), skipped=(), removed=("Acme/Shop/13/m-1",)
+    )
+    assert _remaining(kept) == {"lane-1/result.json", "lane-1/manifest.json"}
+
+
 def test_repeated_scenario_id_leaves_that_lane_alone(db: sqlite3.Connection, root: Path) -> None:
     folder = run_dir(root, REPO, TICKET, "run-1")
     _lane(folder, 1, {"s-1": "failed"}, _files("s-1"))
