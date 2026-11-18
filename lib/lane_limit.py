@@ -20,8 +20,9 @@ no-reading is no evidence. Once any window's evidence is newer than a limit,
 `until` moves to when every window is free, so a healthy reading of one
 window never clears another window still full, and one account's reading
 never moves another account's limit. An older binary's lane_limits row is
-the limit of its harness's default account, so that account's readings
-move it the same way. A later limit replaces the row with its own reset.
+the limit of its harness's default account, and its lane_limit_evidence
+is part of that account's evidence, so that account's readings move it the
+same way. A later limit replaces the row with its own reset.
 Nothing deletes a row, so recording and reading are idempotent.
 
 Only a fixed source label and a reset time are stored, never the message
@@ -280,9 +281,11 @@ def reevaluate(
     incoming: list[usage_readings.Reading],
 ) -> None:
     """Fold the incoming and stored readings into the account's per-window
-    evidence, in the caller's transaction. Each limit older than that
-    evidence moves to when every window is free: the account's own, and an
-    older binary's lane_limits row when account is its harness's default."""
+    evidence, in the caller's transaction. A default account's evidence also
+    holds an older binary's lane_limit_evidence, the newest of each window
+    winning. Each limit older than that evidence moves to when every window
+    is free: the account's own, and an older binary's lane_limits row when
+    account is its harness's default."""
     connection.execute(ACCOUNT_EVIDENCE_DDL)
     connection.executemany(
         f"""
@@ -298,14 +301,25 @@ def reevaluate(
             if r.used is not None
         ],
     )
-    evidence = connection.execute(
-        f"SELECT observed_at, free_at FROM {ACCOUNT_EVIDENCE_TABLE} WHERE account = ?",
-        (account,),
-    ).fetchall()
+    legacy = (
+        f"""UNION ALL SELECT window, observed_at, free_at FROM {EVIDENCE_TABLE}
+        WHERE {usage_readings.DEFAULT_ACCOUNT_SQL} = :account"""
+        if _has_table(connection, EVIDENCE_TABLE)
+        else ""
+    )
+    evidence: dict[str, tuple[float, float]] = {}
+    for window, observed_at, free_at in connection.execute(
+        f"""
+        SELECT window, observed_at, free_at FROM {ACCOUNT_EVIDENCE_TABLE} WHERE account = :account
+        {legacy}
+        """,
+        {"account": account},
+    ):
+        evidence[window] = max(evidence.get(window, (observed_at, free_at)), (observed_at, free_at))
     if not evidence:
         return
-    newest = max(observed for observed, _ in evidence)
-    free = max(free_at for _, free_at in evidence)
+    newest = max(observed for observed, _ in evidence.values())
+    free = max(free_at for _, free_at in evidence.values())
     all_free = free <= newest
     until_sql = "MIN(until, ?)" if all_free else "?"
     for table, owner in ((ACCOUNT_TABLE, "account"), (TABLE, usage_readings.DEFAULT_ACCOUNT_SQL)):

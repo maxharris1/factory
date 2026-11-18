@@ -675,6 +675,61 @@ def test_a_healthy_default_account_reading_lifts_an_older_binarys_pause(tmp_path
     assert queue.claim("claude") is not None
 
 
+def _legacy_full_seven_day(db: Path) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.execute(lane_limit.EVIDENCE_DDL)
+        connection.execute(
+            "INSERT INTO lane_limit_evidence VALUES (?, ?, ?, ?, ?)", ("claude", "claude-bot", "seven_day", 120, 70000)
+        )
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_an_older_binarys_full_window_holds_its_pause_past_a_healthy_reading_of_another(
+    tmp_path: Path, migrated: bool
+) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated)
+    _legacy_full_seven_day(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE lane_limits SET until = 70000")
+        connection.execute(
+            "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id, absent,"
+            " source_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("claude", "claude-bot", "box", "seven_day", None, None, 130, "old", 0, 130),
+        )
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="new",
+              readings=[Reading("five_hour", 0.2, 18100, 150), Reading("seven_day", None, None, 150)])
+        assert connection.execute("SELECT until FROM lane_limits").fetchone()[0] == 70000
+    assert queue.claim("claude") is None
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_a_newer_healthy_reading_of_an_older_binarys_full_window_lifts_its_pause(
+    tmp_path: Path, migrated: bool
+) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated)
+    _legacy_full_seven_day(db)
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="new",
+              readings=[Reading("five_hour", 0.2, 18100, 150), Reading("seven_day", 0.3, 70000, 150)])
+        assert connection.execute("SELECT until FROM lane_limits").fetchone()[0] == 150
+    assert queue.claim("claude") is not None
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_an_older_binarys_full_window_holds_the_default_accounts_own_limit(tmp_path: Path, migrated: bool) -> None:
+    db, _ = _legacy_pause(tmp_path, migrated)
+    _legacy_full_seven_day(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute(lane_limit.ACCOUNT_DDL)
+        connection.execute(
+            "INSERT INTO lane_account_limits VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("claude-default", "claude", "claude-bot", "claude", 100, 70000, "message", "j"),
+        )
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="new",
+              readings=[Reading("five_hour", 0.2, 18100, 150)])
+        assert lane_limit.account_limits(connection, 160)["claude-default"].until == 70000
+
+
 def test_another_accounts_healthy_reading_never_moves_an_older_binarys_pause(tmp_path: Path) -> None:
     db, queue = _legacy_pause(tmp_path, migrated=True)
     assert _legacy_until(db, Reading("five_hour", 0.2, 18100, 150), account="claude-work") == 18100
