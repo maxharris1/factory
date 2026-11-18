@@ -114,7 +114,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from lib import attention
-from lib.branch_stack import stack_wait, stacked_pulls
+from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
@@ -433,9 +433,9 @@ class GitHubIntake(Protocol):
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
-    def commit_pulls(self, repo: str, sha: str) -> Mapping[int, str]: ...
+    def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
 
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool: ...
+    def pull_commits(self, repo: str, base: str, head: str) -> Collection[str]: ...
 
     def pull_state(self, repo: str, number: int) -> str: ...
 
