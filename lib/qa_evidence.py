@@ -50,6 +50,7 @@ _LANE = re.compile(r"lane-[1-9][0-9]*")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _SEARCH_DIR_FLAGS = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY)) | os.O_DIRECTORY | os.O_NOFOLLOW
 _NOFOLLOW_ANY = getattr(os, "O_NOFOLLOW_ANY", 0)
+_NO_LINK_PATH_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW_ANY
 
 Standing = Literal["latest", "superseded", "expired"]
 Kind = Literal["screenshot", "video", "trace", "log", "manifest", "other"]
@@ -531,7 +532,7 @@ def _resolve(run_id: str, evidence_dir: object, real_root: str) -> tuple[str, ..
 
 def _open_root(real_root: str) -> int:
     if _NOFOLLOW_ANY:
-        return os.open(real_root, _DIR_FLAGS | _NOFOLLOW_ANY)
+        return os.open(real_root, _NO_LINK_PATH_FLAGS)
     top = os.open("/", _SEARCH_DIR_FLAGS)
     try:
         return _open_unlinked(top, PurePath(real_root).parts[1:])
@@ -541,7 +542,7 @@ def _open_root(real_root: str) -> int:
 
 def _open_unlinked(start_fd: int, parts: tuple[str, ...]) -> int:
     if _NOFOLLOW_ANY:
-        return os.open(os.path.join(".", *parts), _DIR_FLAGS | _NOFOLLOW_ANY, dir_fd=start_fd)
+        return os.open(os.path.join(".", *parts), _NO_LINK_PATH_FLAGS, dir_fd=start_fd)
     fd = os.dup(start_fd)
     try:
         for depth, part in enumerate(parts, 1):
