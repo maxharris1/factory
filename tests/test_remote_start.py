@@ -2171,6 +2171,13 @@ def boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
+def past_uncontained(log: bytes) -> bytes:
+    said = remote.UNCONTAINED.encode() + b"\n"
+    rest = log.removeprefix(said)
+    assert said not in rest, log
+    return rest
+
+
 def gone(pid: int) -> bool:
     """True once pid has exited (a zombie waiting to be reaped counts as gone)."""
     try:
@@ -2794,6 +2801,27 @@ def test_r1_gap_hostile_workdir_and_environment_values_reach_the_command_verbati
     assert not any(tmp_path.rglob("pwn*"))
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the Linux start only")
+def test_an_uncontained_start_says_so_in_the_run_log_and_still_runs(tmp_path: Path) -> None:
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(tmp_path / "work"),
+        job_id="abc123",
+        tag=uuid.uuid4().hex,
+    )
+    script = remote.start_script(target, ["/bin/echo", "HARNESS_RAN"], {})
+    result = subprocess.run(
+        ["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={"PATH": fake_linger(tmp_path, "no")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "HARNESS_RAN\n"
+    assert result.stderr == remote.UNCONTAINED + "\n"
+    assert not (Path(target.job_dir) / remote.scope_record(target.tag)).exists()
+
+
 @pytest.mark.parametrize(
     "systemd_run",
     [
@@ -2838,6 +2866,7 @@ def test_a_contained_start_reaches_the_command_verbatim_whatever_systemd_run_exp
     )
     assert result.returncode == 0, result.stderr
     assert (Path(target.job_dir) / remote.scope_record(target.tag)).exists(), "the run is contained"
+    assert "uncontained" not in result.stderr
     assert json.loads(report.read_text(encoding="utf-8")) == [
         "--add-dir", str(tmp_path), "a b", "$(touch pwn6)", "$HOME", "'"
     ]

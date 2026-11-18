@@ -64,7 +64,8 @@ stdout on a pipe and hands the pipe to a `Session` here:
   a box Codex run's come from its own session rollout, found by the
   `thread.started` thread id and read on each flush (lib/codex_rollout.py).
   They are written to `usage_readings` in the same transaction as the
-  telemetry row, per harness, bot and device.
+  telemetry row, per harness, bot and device, with the placed device's
+  usage account.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each
@@ -130,7 +131,7 @@ from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
 from lib import lane_limit
 from lib.job_state import USAGE_LIMIT, record_job_event
-from lib.machines_yml import DEFAULT_ORCH_HOST
+from lib.machines_yml import DEFAULT_ORCH_HOST, default_account
 from lib.usage_readings import Reading, parse_codex, parse_rate_limit_event, store
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.pstack_pin import Pin, load_pin
@@ -1570,6 +1571,7 @@ class Session:
         monotonic: Callable[[], float] = time.monotonic,
         worker_env: bool = False,
         device: str = DEFAULT_ORCH_HOST,
+        account: str | None = None,
         rollout_home: str | None = None,
         text: bool = True,
         guard: Guard | None = None,
@@ -1578,6 +1580,7 @@ class Session:
         self.connect = connect
         self.guard = guard
         self.device = device
+        self.account = account
         self.rollout_home = rollout_home  # a box Codex run's CODEX_HOME (#151)
         self.usage: dict[str, Reading] = {}
         self.job_id = job_id
@@ -1759,13 +1762,13 @@ class Session:
                         device=self.device,
                         job_id=self.job_id,
                         readings=readings,
+                        account=self.account,
                     )
                     self._record_limit(connection)
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
 
     def _record_limit(self, connection: sqlite3.Connection) -> None:
-        """#367: pause the job's lane once, in the summary's transaction."""
         if self._limit is None or self._limit_recorded:
             return
         now = self.clock()
@@ -1774,6 +1777,7 @@ class Session:
             job_id=self.job_id,
             harness=self.harness,
             bot=self.bot,
+            account=self.account or default_account(self.harness),
             limit=self._limit,
             now=now,
         )
@@ -1835,6 +1839,7 @@ def start_session(
     max_log_bytes: int = MAX_LOG_BYTES,
     worker_env: bool = False,
     device: str = DEFAULT_ORCH_HOST,
+    account: str | None = None,
     guard: Guard | None = None,
     skills_root: str | None = None,
 ) -> Session | None:
@@ -1843,6 +1848,9 @@ def start_session(
     worker_env: the command runs on a remote device, whose start reports
     the harness's environment first (lib/remote.py `start_script`); until
     that report is read, every text is hidden.
+
+    account: the usage account the placed device's login uses;
+    None is the harness's default account.
 
     guard: runs in each summary write's transaction and refuses it by
     raising.
@@ -1875,6 +1883,7 @@ def start_session(
         stdout=stdout if stdout is not None else getattr(sys.stdout, "buffer", None),
         worker_env=worker_env,
         device=device,
+        account=account,
         rollout_home=codex_home(dict(env)) if harness == "codex" and not worker_env else None,
         text=text_enabled(env),
         guard=guard,

@@ -40,6 +40,16 @@ listed device, and a `local: true` device must be it. Without it, the one
 local device is the orch host; with no local device it is required. A
 remote device may name an ssh_user: the login (`ssh -l`) the box uses for
 it in place of the job's bot user, which stays the job's identity.
+
+The top-level accounts list names each subscription: an id
+([A-Za-z0-9._-]{1,64}, never an email, org ID or token), its harness (a
+factory harness, or `external` for a plan no factory process runs, such
+as Grok's), and optional free-text plan and label. A device's harness
+value is its bot user, or {bot, account} to name the account that login
+uses. A bare bot user means the account `<harness>-default`, which needs
+no entry, so a file without accounts loads unchanged. A device may not
+use an undeclared account, another harness's account or an external one.
+The device name `external` is reserved for external readings.
 """
 
 from __future__ import annotations
@@ -66,7 +76,13 @@ DEFAULT_ORCH_HOST = "box"
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-_TOP_KEYS = {"devices", "orch_host"}
+_TOP_KEYS = {"devices", "orch_host", "accounts"}
+EXTERNAL = "external"
+ACCOUNT_HARNESSES = (*HARNESSES, EXTERNAL)
+_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_ACCOUNT_KEYS = {"id", "harness", "plan", "label"}
+_ACCOUNT_TEXT_MAX = 100
+_HARNESS_VALUE_KEYS = {"bot", "account"}
 _DEVICE_KEYS = {
     "name",
     "tailscale_name",
@@ -86,6 +102,19 @@ _SSH_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SSH_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
+def default_account(harness: str) -> str:
+    """The account a bare bot-user value means."""
+    return f"{harness}-default"
+
+
+@dataclass(frozen=True)
+class Account:
+    id: str
+    harness: str
+    plan: str | None = None
+    label: str | None = None
+
+
 @dataclass(frozen=True)
 class Device:
     name: str
@@ -100,6 +129,7 @@ class Device:
     ssh_alias: str | None = None
     factory_root: str | None = None
     ssh_user: str | None = None
+    accounts: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def placeholder(self) -> bool:
@@ -114,6 +144,12 @@ class Device:
 
     def takes_new(self, harness: str) -> bool:
         return self.eligible(harness) and not self.drain
+
+    def account_for(self, harness: str) -> str | None:
+        """The account harness's login uses here; None when not listed."""
+        if harness not in self.harnesses:
+            return None
+        return self.accounts.get(harness, default_account(harness))
 
     def workdir_for(self, harness: str) -> str | None:
         """workdir_root with {bot} resolved to the harness's bot user.
@@ -170,9 +206,32 @@ def shared_tailscale_names(devices: Sequence[Device]) -> list[tuple[str, ...]]:
 class MachinesConfig:
     devices: tuple[Device, ...] = field(default_factory=tuple)
     orch_host: str = DEFAULT_ORCH_HOST
+    accounts: tuple[Account, ...] = field(default_factory=tuple)
 
     def device(self, name: str) -> Device | None:
         return next((item for item in self.devices if item.name == name), None)
+
+    def account(self, account_id: str) -> Account | None:
+        """A declared account, else the implicit `<harness>-default` one."""
+        found = next((item for item in self.accounts if item.id == account_id), None)
+        if found is not None:
+            return found
+        for harness in HARNESSES:
+            if account_id == default_account(harness):
+                return Account(account_id, harness)
+        return None
+
+    def serving(self, harness: str) -> frozenset[str]:
+        """The accounts of harness on devices that take new work."""
+        return frozenset(
+            account
+            for device in self.devices
+            if device.takes_new(harness)
+            and (account := device.account_for(harness)) is not None
+        )
+
+    def external_accounts(self) -> tuple[Account, ...]:
+        return tuple(item for item in self.accounts if item.harness == EXTERNAL)
 
     def factory_root(self, device_name: str, harness: str) -> str | None:
         """The deployed factory checkout for harness on the named device."""
@@ -224,11 +283,12 @@ def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
         findings.append(Finding("error", "devices must list at least one device"))
         return None, findings
 
+    accounts = _accounts(data.get("accounts", []), findings)
     devices: list[Device] = []
     seen: set[str] = set()
     local_names: list[str] = []
     for index, item in enumerate(value):
-        device = _device(item, f"devices[{index}]", findings)
+        device = _device(item, f"devices[{index}]", findings, accounts)
         if device is None:
             continue
         if device.name in seen:
@@ -258,7 +318,123 @@ def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
     host = _orch_host(data, seen, local_names, findings)
     if host is None or any(item.severity == "error" for item in findings):
         return None, findings
-    return MachinesConfig(devices=tuple(devices), orch_host=host), findings
+    return (
+        MachinesConfig(
+            devices=tuple(devices), orch_host=host, accounts=tuple(accounts.values())
+        ),
+        findings,
+    )
+
+
+def _accounts(value: object, findings: list[Finding]) -> dict[str, Account]:
+    if not isinstance(value, list):
+        findings.append(Finding("error", "accounts must be a list of accounts"))
+        return {}
+    accounts: dict[str, Account] = {}
+    for index, item in enumerate(value):
+        prefix = f"accounts[{index}]"
+        if not isinstance(item, dict):
+            findings.append(Finding("error", f"{prefix} must be a mapping"))
+            continue
+        errors_before = _error_count(findings)
+        for key in sorted(item, key=lambda entry: str(entry)):
+            if key not in _ACCOUNT_KEYS:
+                findings.append(Finding("error", f"unknown field '{prefix}.{key}'"))
+        account_id = item.get("id")
+        if not isinstance(account_id, str) or _ACCOUNT_ID.fullmatch(account_id) is None:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{prefix}.id must be 1-64 letters, digits, '.', '_' or '-' "
+                    "(a stable name, never an email, org ID or token)",
+                )
+            )
+        harness = item.get("harness")
+        if harness not in ACCOUNT_HARNESSES:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{prefix}.harness must be one of {', '.join(ACCOUNT_HARNESSES)}",
+                )
+            )
+        for key in ("plan", "label"):
+            text = item.get(key)
+            if text is not None and not _account_text(text):
+                findings.append(
+                    Finding(
+                        "error",
+                        f"{prefix}.{key} must be text of at most "
+                        f"{_ACCOUNT_TEXT_MAX} printable characters",
+                    )
+                )
+        if _error_count(findings) > errors_before:
+            continue
+        if account_id in accounts:
+            findings.append(Finding("error", f"duplicate account {account_id!r}"))
+            continue
+        accounts[account_id] = Account(
+            account_id, harness, item.get("plan"), item.get("label")
+        )
+    return accounts
+
+
+def _account_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= _ACCOUNT_TEXT_MAX
+        and all(unicodedata.category(char)[0] != "C" for char in value)
+    )
+
+
+def _harness_value(
+    harness: str,
+    raw: object,
+    prefix: str,
+    accounts: Mapping[str, Account],
+    findings: list[Finding],
+) -> tuple[str, str] | None:
+    qualified = f"{prefix}.harnesses.{harness}"
+    account_id = default_account(harness)
+    user = raw
+    if isinstance(raw, dict):
+        for key in sorted(raw, key=lambda entry: str(entry)):
+            if key not in _HARNESS_VALUE_KEYS:
+                findings.append(Finding("error", f"unknown field '{qualified}.{key}'"))
+                return None
+        user = raw.get("bot")
+        account_id = raw.get("account", account_id)
+    expected = BOT_USERS[harness]
+    if user != expected:
+        findings.append(
+            Finding(
+                "error",
+                f"{qualified} must be {expected!r}, "
+                "the bot user Max provisioned for that harness",
+            )
+        )
+        return None
+    account = accounts.get(account_id) if isinstance(account_id, str) else None
+    if account is None and account_id in {default_account(name) for name in HARNESSES}:
+        account = Account(account_id, account_id.removesuffix("-default"))
+    if account is None:
+        findings.append(
+            Finding(
+                "error",
+                f"{qualified} names unknown account {str(account_id)!r}; "
+                "declare it under accounts",
+            )
+        )
+        return None
+    if account.harness != harness:
+        findings.append(
+            Finding(
+                "error",
+                f"{qualified} names account {account.id!r} of harness "
+                f"{account.harness!r}; a device uses only its own harness's accounts",
+            )
+        )
+        return None
+    return user, account.id
 
 
 def _orch_host(
@@ -287,7 +463,12 @@ def _orch_host(
     return host
 
 
-def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None:
+def _device(
+    item: object,
+    prefix: str,
+    findings: list[Finding],
+    accounts: Mapping[str, Account],
+) -> Device | None:
     if not isinstance(item, dict):
         findings.append(Finding("error", f"{prefix} must be a mapping"))
         return None
@@ -303,6 +484,14 @@ def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None
                 "error",
                 f"{prefix}.name must be a lowercase device name "
                 "(letters, digits and '-')",
+            )
+        )
+        return None
+    if name == EXTERNAL:
+        findings.append(
+            Finding(
+                "error",
+                f"{prefix}.name {EXTERNAL!r} is reserved for external usage readings",
             )
         )
         return None
@@ -469,6 +658,7 @@ def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None
         )
 
     harnesses: dict[str, str] = {}
+    device_accounts: dict[str, str] = {}
     raw_harnesses = item.get("harnesses")
     if "harnesses" not in item:
         findings.append(
@@ -495,17 +685,10 @@ def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None
                     )
                 )
                 continue
-            expected = BOT_USERS[harness]
-            if user != expected:
-                findings.append(
-                    Finding(
-                        "error",
-                        f"{prefix}.harnesses.{harness} must be {expected!r}, "
-                        "the bot user Max provisioned for that harness",
-                    )
-                )
+            resolved = _harness_value(harness, user, prefix, accounts, findings)
+            if resolved is None:
                 continue
-            harnesses[harness] = user
+            harnesses[harness], device_accounts[harness] = resolved
         if not raw_harnesses and enabled:
             findings.append(
                 Finding(
@@ -543,6 +726,7 @@ def _device(item: object, prefix: str, findings: list[Finding]) -> Device | None
         ssh_alias=ssh_alias,
         factory_root=factory_root,
         ssh_user=ssh_user,
+        accounts=MappingProxyType(device_accounts),
     )
 
 

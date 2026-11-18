@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 import lib.dashboard as dashboard
-from lib import usage_readings
+from lib import lane_limit, usage_readings
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages import efficiency
+from lib.machines_yml import load_machines_yml
 from lib.usage_readings import Reading
 from tests.test_dashboard import NOW, add_ticket, make_db, seeded
 from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
@@ -172,14 +173,16 @@ def _usage_snapshot(tmp_path: Path, machines: str = MACHINES, **used: float | No
     return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path, machines))
 
 
-CLAUDE = "claude claude-bot used on box · pc"
-CODEX = "codex codex-bot used on box"
+CLAUDE = "claude claude-default via get_usage · read 1m 00s ago · used on box, pc"
+CODEX = "codex codex-default via rollout · read 1m 00s ago · used on box"
+CLAUDE_UNREAD = "claude claude-default via get_usage · never read · used on box, pc"
+CODEX_UNREAD = "codex codex-default via rollout · never read · used on box"
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 def test_headroom_has_one_row_per_account(tmp_path: Path, render: str) -> None:
     rows = _rows(_render(tmp_path, _snapshot(tmp_path), render, "headroom"))
-    assert list(rows) == [CLAUDE, CODEX, "cursor", "grok"]
+    assert list(rows) == [CLAUDE, CODEX, "cursor"]
     assert rows[CLAUDE] == ["41% used", "26% used", "in 2h 05m", "59%"]
     assert rows[CODEX] == ["10% used", "stale", "in 1h 00m", "90% (5-hour only)"]
 
@@ -188,8 +191,8 @@ def test_headroom_has_one_row_per_account(tmp_path: Path, render: str) -> None:
 def test_headroom_meter_lights_5_percent_per_cell(tmp_path: Path, render: str) -> None:
     table = _render(tmp_path, _snapshot(tmp_path), render, "headroom").split("</table>")[0]
     assert _meters(table) == [
-        ("claude headroom 59 percent: 12 of 20 cells lit", ["ok"] * 12 + [None] * 8),
-        ("codex headroom 90 percent, from the 5-hour window only: 18 of 20 cells lit",
+        ("claude-default headroom 59 percent: 12 of 20 cells lit", ["ok"] * 12 + [None] * 8),
+        ("codex-default headroom 90 percent, from the 5-hour window only: 18 of 20 cells lit",
          ["neutral"] * 18 + [None] * 2),
     ]
     assert '<span class="ef-hn ok">59%</span>' in table
@@ -209,7 +212,7 @@ def test_headroom_colours_follow_the_page_thresholds(
     assert f'<span class="ef-hn {tone}">{pct}%</span>' in table
     label, cells = _meters(table)[0]
     assert cells == [tone] * lit + [None] * (20 - lit)
-    assert label == f"claude headroom {pct} percent: {lit} of 20 cells lit"
+    assert label == f"claude-default headroom {pct} percent: {lit} of 20 cells lit"
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
@@ -225,26 +228,24 @@ def test_headroom_header_has_no_proposed_chip(tmp_path: Path, render: str) -> No
 def test_headroom_notes_replace_the_lede(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _snapshot(tmp_path), render, "headroom")
     assert "ef-lede" not in headroom and "read at the start of every job" not in headroom
-    assert ('</table></div><p class="ef-hnote">Headroom is what is left in the fullest window. '
-            "One account is shared by every device that runs that harness, "
-            "so the reading is per account, not per device.</p>") in headroom
-    assert headroom.endswith('<p class="ef-hnote-ph">Headroom is what is left in the fullest window. '
-                             "One account is shared by every device that runs that harness.</p>")
+    assert ('</table></div><p class="ef-hnote">Headroom is what is left in the fullest window.</p>') in headroom
+    assert headroom.endswith('<p class="ef-hnote-ph">Headroom is what is left in the fullest window.</p>')
+    assert "One account is shared" not in headroom
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
 @pytest.mark.parametrize(("used", "cells", "number", "label"), [
     ({"seven_day": 0.26}, ["no reading", "26% used", "in 1d 0h", "74% (7-day only)"], "74%",
-     "claude headroom 74 percent, from the 7-day window only: 15 of 20 cells lit"),
+     "claude-default headroom 74 percent, from the 7-day window only: 15 of 20 cells lit"),
     ({"five_hour": 0.41}, ["41% used", "no reading", "in 2h 05m", "59% (5-hour only)"], "59%",
-     "claude headroom 59 percent, from the 5-hour window only: 12 of 20 cells lit"),
+     "claude-default headroom 59 percent, from the 5-hour window only: 12 of 20 cells lit"),
 ])
 def test_headroom_on_one_window_is_neutral_and_names_it(
     tmp_path: Path, render: str, used: dict, cells: list[str], number: str, label: str
 ) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path, **used), render, "headroom")
     table = headroom.split("</table>")[0]
-    assert _rows(headroom)["claude claude-bot used on box · pc"] == cells
+    assert _rows(headroom)[CLAUDE] == cells
     only = cells[3].split(" ", 1)[1]
     assert (f'<span class="ef-hn neutral">{number}</span>' in table
             and f'<span class="ef-tag">{only}</span>' in table)
@@ -283,7 +284,7 @@ def test_a_window_not_on_the_plan_leaves_the_other_as_the_whole_plan(tmp_path: P
     assert _rows(headroom)[CODEX] == ["not on this plan", "68% used", "in 1d 0h", "32%"]
     assert '<td class="ef-v muted">not on this plan</td>' in table
     assert '<span class="ef-hn warn">32%</span>' in table
-    assert _meters(table)[1] == ("codex headroom 32 percent: 6 of 20 cells lit", ["warn"] * 6 + [None] * 14)
+    assert _meters(table)[1] == ("codex-default headroom 32 percent: 6 of 20 cells lit", ["warn"] * 6 + [None] * 14)
     assert "7-day only" not in headroom
 
 
@@ -291,8 +292,8 @@ def test_a_window_not_on_the_plan_leaves_the_other_as_the_whole_plan(tmp_path: P
 def test_headroom_with_no_window_shows_no_number(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path), render, "headroom")
     table = headroom.split("</table>")[0]
-    assert _rows(headroom)["claude claude-bot used on box · pc"] == ["no reading"] * 3 + [""]
-    assert _meters(table)[0] == ("claude headroom: no reading", [None] * 20)
+    assert _rows(headroom)[CLAUDE_UNREAD] == ["no reading"] * 3 + [""]
+    assert _meters(table)[0] == ("claude-default headroom: no reading", [None] * 20)
     room = re.findall(r'<td><div class="ef-room">(.*?)</div></td>', table)
     assert room and not any("%" in cell for cell in room)
 
@@ -306,7 +307,7 @@ def test_a_lane_limit_replaces_the_number_and_leaves_the_meter_unlit(tmp_path: P
     table = headroom.split("</table>")[0]
     assert _rows(headroom)[CLAUDE][3] == limit
     assert f'<span class="ef-lim bad">{limit}</span>' in table
-    assert _meters(table)[0] == (f"claude headroom: {limit}", [None] * 20)
+    assert _meters(table)[0] == (f"claude-default headroom: {limit}", [None] * 20)
     assert f'<span class="ef-lim bad">{limit}</span>' in _blocks(headroom)[0]
 
 
@@ -316,7 +317,7 @@ def test_untracked_harness_is_one_muted_line(tmp_path: Path, render: str) -> Non
     table = headroom.split("</table>")[0]
     assert re.findall(r'<tr class="ef-un">(.*?)</tr>', table) == [
         f'<td><span class="bot {h}">{h}</span></td><td class="ef-v muted" colspan="4">not tracked</td>'
-        for h in ("cursor", "grok")
+        for h in ("cursor",)
     ]
     assert table.count("bot cursor") == 1 and "cursor-bot" not in headroom
 
@@ -325,8 +326,8 @@ def test_untracked_harness_is_one_muted_line(tmp_path: Path, render: str) -> Non
 def test_harness_without_account_is_not_listed(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _usage_snapshot(tmp_path, CLAUDE_ONLY, five_hour=0.4, seven_day=0.2),
                        render, "headroom")
-    assert list(_rows(headroom)) == ["claude claude-bot used on box", "grok"]
-    assert [_text(block).split()[0] for block in _blocks(headroom)] == ["claude", "grok"]
+    assert list(_rows(headroom)) == ["claude claude-default via get_usage · read 1m 00s ago · used on box"]
+    assert [_text(block).split()[0] for block in _blocks(headroom)] == ["claude"]
     assert "codex" not in headroom and "cursor" not in headroom
 
 
@@ -337,11 +338,10 @@ def test_headroom_phone_block_per_account(tmp_path: Path, render: str) -> None:
         f"{CLAUDE} 59% headroom 5-hour 41% used 7-day 26% used resets in 2h 05m",
         f"{CODEX} 90% headroom (5-hour only) 5-hour 10% used 7-day stale resets in 1h 00m",
         "cursor not tracked",
-        "grok not tracked",
     ]
     assert [block[: block.index(">") + 1] for block in blocks] == ['<div class="ef-acct">'] * 2 + [
-        '<div class="ef-un">'] * 2
-    assert [len(_meters(block)) for block in blocks] == [1, 1, 0, 0]
+        '<div class="ef-un">']
+    assert [len(_meters(block)) for block in blocks] == [1, 1, 0]
     assert '<span class="ef-hn ok">59%</span>' in blocks[0]
     assert '<div class="ef-hl">headroom (5-hour only)</div>' in blocks[1]
     assert re.findall(r'<div class="ef-wk">([^<]*)</div>', blocks[0]) == ["5-hour", "7-day", "resets"]
@@ -351,12 +351,126 @@ def test_headroom_phone_block_per_account(tmp_path: Path, render: str) -> None:
 def test_headroom_without_the_table_says_no_telemetry(tmp_path: Path, render: str) -> None:
     headroom = _render(tmp_path, _snapshot(tmp_path, readings=False), render, "headroom")
     rows = _rows(headroom)
-    assert rows[CLAUDE] == rows[CODEX] == ["no telemetry"] * 3 + [""]
-    assert rows["cursor"] == rows["grok"] == ["not tracked"]
+    assert rows[CLAUDE_UNREAD] == rows[CODEX_UNREAD] == ["no telemetry"] * 3 + [""]
+    assert rows["cursor"] == ["not tracked"]
     assert _meters(headroom.split("</table>")[0]) == [
-        (f"{h} headroom: no telemetry", [None] * 20) for h in ("claude", "codex")
+        (f"{h}-default headroom: no telemetry", [None] * 20) for h in ("claude", "codex")
     ]
     assert "%" not in _text(headroom)
+
+
+ACCOUNTS = (
+    "orch_host: box\n"
+    "accounts:\n"
+    "  - {id: codex-a, harness: codex, plan: pro}\n"
+    "  - {id: codex-b, harness: codex}\n"
+    "  - {id: cursor-grok-ultra, harness: external, plan: ultra, label: Cursor Grok Ultra}\n"
+    "devices:\n"
+    "  - name: box\n    local: true\n    slot_max: 3\n    harnesses:\n"
+    "      claude: claude-bot\n      codex: {bot: codex-bot, account: codex-a}\n      cursor: cursor-bot\n"
+    "  - name: pc\n    slot_max: 2\n    tailscale_name: pc\n    workdir_root: /w\n    factory_root: /f\n"
+    "    ssh_alias: pc-{bot}\n    harnesses:\n      codex: {bot: codex-bot, account: codex-b}\n"
+)
+CODEX_A_RESET = int(NOW + 1800)
+CODEX_B_RESET = int(NOW + 9000)
+CODEX_A = "codex codex-a pro · via rollout · read 2m 00s ago · used on box"
+CODEX_B = "codex codex-b via rollout · read 5m 00s ago · used on pc"
+GROK = "external Cursor Grok Ultra ultra · via external · never read"
+
+
+def _accounts_snapshot(tmp_path: Path, machines: str = ACCOUNTS, limit: str | None = None) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _store(connection, "codex", "codex-bot", "box",
+               Reading("five_hour", 0.9, CODEX_A_RESET, NOW - 120),
+               Reading("seven_day", 0.3, int(NOW + 2 * 86400), NOW - 120))
+        _store(connection, "codex", "codex-bot", "pc",
+               Reading("five_hour", 0.2, CODEX_B_RESET, NOW - 300),
+               Reading("seven_day", 0.15, int(NOW + 5 * 86400), NOW - 300))
+        for device, account in (("box", "codex-a"), ("pc", "codex-b")):
+            connection.execute("UPDATE usage_readings SET account = ? WHERE device = ?", (account, device))
+        if limit is not None:
+            connection.execute(lane_limit.ACCOUNT_DDL)
+            connection.execute(
+                f"INSERT INTO {lane_limit.ACCOUNT_TABLE} VALUES (?, 'codex', 'codex-bot', 'codex', ?, ?, 'stream', 'j')",
+                (limit, NOW - 60, int(NOW + 3600)),
+            )
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path, machines))
+
+
+def _values(value: object) -> list[object]:
+    if isinstance(value, dict):
+        return [item for nested in value.values() for item in _values(nested)]
+    if isinstance(value, list):
+        return [item for nested in value for item in _values(nested)]
+    return [value]
+
+
+def test_machines_fixture_names_two_codex_accounts(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(_machines(tmp_path, ACCOUNTS))
+    assert config is not None and not [f for f in findings if f.level == "error"], findings
+    assert [device.account_for("codex") for device in config.devices] == ["codex-a", "codex-b"]
+
+
+def test_two_accounts_on_one_bot_never_mix_readings(tmp_path: Path) -> None:
+    usage = _accounts_snapshot(tmp_path)["usage"]
+    entries = {e["account"]: e for e in usage["accounts"]}
+    assert list(entries) == ["claude-default", "codex-a", "cursor-default", "codex-b", "cursor-grok-ultra"]
+    a, b = entries["codex-a"], entries["codex-b"]
+    assert (a["five_hour"]["used"], a["five_hour"]["resets_at"], a["headroom"]) == (0.9, CODEX_A_RESET, 0.1)
+    assert (b["five_hour"]["used"], b["five_hour"]["resets_at"], b["headroom"]) == (0.2, CODEX_B_RESET, 0.8)
+    assert not {0.9, CODEX_A_RESET, 0.1} & set(_values(b))
+    assert not {0.2, CODEX_B_RESET, 0.8} & set(_values(a))
+    assert {k: a[k] for k in ("harness", "bot", "bots", "devices", "plan", "label", "source")} == {
+        "harness": "codex", "bot": "codex-bot", "bots": ["codex-bot"], "devices": ["box"],
+        "plan": "pro", "label": None, "source": "rollout"}
+    assert (b["bots"], b["devices"], b["plan"]) == (["codex-bot"], ["pc"], None)
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_two_accounts_on_one_bot_render_their_own_rows(tmp_path: Path, render: str) -> None:
+    headroom = _render(tmp_path, _accounts_snapshot(tmp_path), render, "headroom")
+    rows = _rows(headroom)
+    assert rows[CODEX_A] == ["90% used", "30% used", "in 30m 00s", "10%"]
+    assert rows[CODEX_B] == ["20% used", "15% used", "in 2h 30m", "80%"]
+    a, b = " ".join([CODEX_A, *rows[CODEX_A]]), " ".join([CODEX_B, *rows[CODEX_B]])
+    assert not [text for text in ("90%", "30m 00s", "10%") if text in b]
+    assert not [text for text in ("20%", "2h 30m", "80%") if text in a]
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_headroom_has_one_row_per_account_with_plan_source_age_and_devices(tmp_path: Path, render: str) -> None:
+    headroom = _render(tmp_path, _accounts_snapshot(tmp_path), render, "headroom")
+    rows = _rows(headroom)
+    assert list(rows) == ["claude claude-default via get_usage · never read · used on box",
+                          CODEX_A, CODEX_B, GROK, "cursor"]
+    assert rows[GROK] == ["no reading"] * 3 + [""]
+    assert rows["cursor"] == ["not tracked"]
+    assert "One account is shared" not in headroom and "bot grok" not in headroom
+    blocks = _blocks(headroom)
+    assert len(blocks) == len(rows) and all(_text(block).startswith(key) for block, key in zip(blocks, rows))
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_a_declared_cursor_account_is_tracked(tmp_path: Path, render: str) -> None:
+    machines = ACCOUNTS.replace("accounts:\n", "accounts:\n  - {id: cursor-pro, harness: cursor}\n").replace(
+        "cursor: cursor-bot", "cursor: {bot: cursor-bot, account: cursor-pro}")
+    rows = _rows(_render(tmp_path, _accounts_snapshot(tmp_path, machines), render, "headroom"))
+    assert rows["cursor cursor-pro never read · used on box"] == ["no reading"] * 3 + [""]
+    assert "cursor" not in rows
+
+
+@pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])
+def test_an_account_limit_shows_only_on_its_own_row(tmp_path: Path, render: str) -> None:
+    snapshot = _accounts_snapshot(tmp_path, limit="codex-a")
+    entries = {e["account"]: e for e in snapshot["usage"]["accounts"]}
+    assert entries["codex-a"]["limited_until"] == int(NOW + 3600)
+    assert entries["codex-b"]["limited_until"] is None and entries["codex-b"]["limit_label"] is None
+    rows = _rows(_render(tmp_path, snapshot, render, "headroom"))
+    assert rows[CODEX_A][3] == entries["codex-a"]["limit_label"]
+    assert rows[CODEX_A][3].startswith("usage limit until ")
+    assert rows[CODEX_B][3] == "80%"
+    assert [cells[3] for cells in rows.values() if "usage limit" in " ".join(cells)] == [rows[CODEX_A][3]]
 
 
 @pytest.mark.parametrize("render", ["server", pytest.param("script", marks=needs_node)])

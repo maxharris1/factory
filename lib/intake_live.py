@@ -9,9 +9,9 @@ budget and its rate-limit backoff, and the API key is only read from the
 configured environment variable at request time.
 
 Reads:
-* ahead_commits, commit_pulls and branch_has: a branch's commits past the
-  base, the open PRs that carry a commit with each PR's base, and whether a
-  branch already contains a commit, for the stacked-branch hold (#205);
+* ahead_commits, open_pull_commits and pull_commits: for the
+  stacked-branch hold (#205), a branch's commits past its base, every open
+  PR's first 100 commits, and all of one PR's commits;
 * github_intake: open issues carrying the label (`issues?labels=`), and for
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
@@ -29,11 +29,13 @@ the branch ref, the draft PR, the PR labels, PR comments, Linear comments.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Mapping, Sequence
+import time
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import quote
 
+from lib.branch_stack import OpenPull
 from lib.dispatcher import Comment
 from lib.feeder import IntakeIssue
 from lib.feeder_gates import Progress, Ref, RefStatus
@@ -104,6 +106,16 @@ LINKED_PULLS_QUERY = (
     "{ repository(owner: $owner, name: $name) { issue(number: $number) { "
     + _LINKED_PULLS.replace("{after}", ", after: $after") + " } } }"
 )
+OPEN_PULLS_MAX_PAGES = 20
+OPEN_PULL_COMMITS_QUERY = (
+    "query($owner: String!, $name: String!, $after: String) "
+    "{ repository(owner: $owner, name: $name) { pullRequests(states: OPEN, first: 50, after: $after) "
+    "{ nodes { number baseRefName headRefOid commits(first: 100) { totalCount nodes { commit { oid } } } } "
+    "pageInfo { hasNextPage endCursor } } } }"
+)
+OPEN_PULLS_TTL = 60.0
+PULL_COMMITS_PAGE = 250
+PULL_COMMITS_MAX_PAGES = 40
 _ISSUE_UNFINISHED = {"NOT_PLANNED": "closed as not planned", "DUPLICATE": "closed as duplicate"}
 # 40 pages of 50: past that the read fails, rather than feed from a partial
 # list that could hide an urgent ticket.
@@ -147,6 +159,11 @@ class GitHubIntakeClient(GitHubReviewActions):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._applied: dict[tuple[str, int, str, str], str | None] = {}
+        self.clock: Callable[[], float] = time.monotonic
+        self._open_pull_pages: dict[
+            tuple[str, str | None], tuple[float, dict[int, OpenPull], str | None]
+        ] = {}
+        self._compare_pages: dict[tuple[str, str, str, int], tuple[float, int, tuple[str, ...]]] = {}
 
     def github_intake(self, repo: str, label: str) -> list[IntakeIssue]:
         path = _repo_path(repo)
@@ -363,40 +380,82 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError(f"{tip} has {total} commits past {base}; read {len(shas)}")
         return shas
 
-    def commit_pulls(self, repo: str, sha: str) -> dict[int, str]:
-        if not _SHA.fullmatch(sha):
-            raise GitHubAdapterError("commit sha is not a full sha")
-        pulls = self._json(
-            f"{_repo_path(repo)}/commits/{sha}/pulls?per_page=100", cache_ttl=REF_STATUS_CACHE
-        )
-        if not isinstance(pulls, list):
-            raise GitHubAdapterError("commit pulls list is not a list")
-        found: dict[int, str] = {}
-        for item in pulls:
-            if not isinstance(item, dict) or item.get("state") != "open":
-                continue
-            number = item.get("number")
-            if not isinstance(number, int) or isinstance(number, bool):
-                continue
-            base = item.get("base")
-            ref = base.get("ref") if isinstance(base, dict) else None
-            if not _github_branch(ref):
-                raise GitHubAdapterError(f"open PR #{number} base branch is not readable")
-            found[number] = ref
-        return found
+    def open_pull_commits(self, repo: str) -> dict[int, OpenPull]:
+        found: dict[int, OpenPull] = {}
+        after: str | None = None
+        for _ in range(OPEN_PULLS_MAX_PAGES):
+            pulls, after = self._open_pull_page(repo, after)
+            found.update(pulls)
+            if after is None:
+                return found
+        raise GitHubAdapterError("open pull requests exceed the page cap")
 
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool:
-        path = _branch_path(branch)
-        if not _SHA.fullmatch(sha):
-            raise GitHubAdapterError("commit sha is not a full sha")
-        compared = self._json(
-            f"{_repo_path(repo)}/compare/{path}...{sha}",
-            cache_ttl=REF_STATUS_CACHE,
+    def _open_pull_page(
+        self, repo: str, after: str | None
+    ) -> tuple[dict[int, OpenPull], str | None]:
+        key, now = (repo.lower(), after), self.clock()
+        held = self._open_pull_pages.get(key)
+        if held is not None and now - held[0] < OPEN_PULLS_TTL:
+            return held[1], held[2]
+        owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
+        document = self._json(
+            "graphql", "-f", f"query={OPEN_PULL_COMMITS_QUERY}",
+            "-f", f"owner={owner}", "-f", f"name={name}",
+            *(("-f", f"after={after}") if after is not None else ()),
         )
-        status = compared.get("status") if isinstance(compared, dict) else None
-        if status not in ("ahead", "behind", "identical", "diverged"):
-            raise GitHubAdapterError("compare status is not readable")
-        return status in ("behind", "identical")
+        listed = _graphql_repository(document).get("pullRequests")
+        if not isinstance(listed, dict) or not isinstance(listed.get("nodes"), list):
+            raise GitHubAdapterError("open pull request read returned no pull requests")
+        pulls = dict(_open_pull(node) for node in listed["nodes"])
+        page = listed.get("pageInfo")
+        following = None
+        if isinstance(page, dict) and page.get("hasNextPage") is True:
+            following = page.get("endCursor")
+            if not isinstance(following, str) or not following:
+                raise GitHubAdapterError("open pull request page has no cursor")
+        self._open_pull_pages = _unexpired(self._open_pull_pages, now)
+        self._open_pull_pages[key] = (now, pulls, following)
+        return pulls, following
+
+    def pull_commits(self, repo: str, base: str, head: str) -> frozenset[str]:
+        total, shas = self._compare_page(repo, base, head, 1)
+        pages = max(1, -(-total // PULL_COMMITS_PAGE))
+        if pages > PULL_COMMITS_MAX_PAGES:
+            raise GitHubAdapterError(f"{head} has {total} commits past {base}; past the page cap")
+        found = set(shas)
+        for number in range(2, pages + 1):
+            page_total, shas = self._compare_page(repo, base, head, number)
+            if page_total != total:
+                raise GitHubAdapterError(f"{head} compare total changed from {total} to {page_total}")
+            found.update(shas)
+        if len(found) != total:
+            raise GitHubAdapterError(f"{head} has {total} commits past {base}; read {len(found)}")
+        return frozenset(found)
+
+    def _compare_page(self, repo: str, base: str, head: str, page: int) -> tuple[int, tuple[str, ...]]:
+        key, now = (repo.lower(), base, head, page), self.clock()
+        held = self._compare_pages.get(key)
+        if held is not None and now - held[0] < OPEN_PULLS_TTL:
+            return held[1], held[2]
+        compared = self._json(
+            f"{_repo_path(repo)}/compare/{_branch_path(base)}...{_branch_path(head)}"
+            f"?per_page={PULL_COMMITS_PAGE}&page={page}"
+        )
+        commits = compared.get("commits") if isinstance(compared, dict) else None
+        total = compared.get("total_commits") if isinstance(compared, dict) else None
+        if not isinstance(commits, list) or not isinstance(total, int) or isinstance(total, bool):
+            raise GitHubAdapterError("compare read has no commits")
+        shas = tuple(item.get("sha") if isinstance(item, dict) else None for item in commits)
+        if any(not isinstance(sha, str) or not _SHA.fullmatch(sha) for sha in shas):
+            raise GitHubAdapterError("compare read has a commit without a sha")
+        expected = max(0, min(PULL_COMMITS_PAGE, total - PULL_COMMITS_PAGE * (page - 1)))
+        if len(shas) != expected:
+            raise GitHubAdapterError(
+                f"compare page {page} of {head} lists {len(shas)} commits; expected {expected}"
+            )
+        self._compare_pages = _unexpired(self._compare_pages, now)
+        self._compare_pages[key] = (now, total, shas)
+        return total, shas
 
     def pull_state(self, repo: str, number: int) -> str:
         """open, closed or merged: a recorded PR is rechecked before a feed resumes."""
@@ -463,6 +522,45 @@ def _linear_blockers(relations: Sequence[object]) -> tuple[tuple[str, str | None
         state = (blocker.get("state") or {}).get("type")
         found.append((identifier, state if isinstance(state, str) else None))
     return tuple(found)
+
+
+_Held = TypeVar("_Held", bound=tuple)
+
+
+def _unexpired(cache: dict[Any, _Held], now: float) -> dict[Any, _Held]:
+    return {key: held for key, held in cache.items() if now - held[0] < OPEN_PULLS_TTL}
+
+
+def _graphql_repository(document: object) -> dict[str, Any]:
+    data = document.get("data") if isinstance(document, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    if not isinstance(repository, dict) or document.get("errors"):
+        raise GitHubAdapterError("open pull request read returned no repository")
+    return repository
+
+
+def _open_pull(node: object) -> tuple[int, OpenPull]:
+    number = node.get("number") if isinstance(node, dict) else None
+    if not isinstance(number, int) or isinstance(number, bool):
+        raise GitHubAdapterError("open pull request has no number")
+    base, head = node.get("baseRefName"), node.get("headRefOid")
+    if not _github_branch(base) or not isinstance(head, str) or not _SHA.fullmatch(head):
+        raise GitHubAdapterError(f"open PR #{number} base or head is not readable")
+    commits = node.get("commits")
+    nodes = commits.get("nodes") if isinstance(commits, dict) else None
+    total = commits.get("totalCount") if isinstance(commits, dict) else None
+    if not isinstance(nodes, list) or not isinstance(total, int) or isinstance(total, bool):
+        raise GitHubAdapterError(f"open PR #{number} commits are not readable")
+    shas = [
+        item["commit"].get("oid")
+        if isinstance(item, dict) and isinstance(item.get("commit"), dict) else None
+        for item in nodes
+    ]
+    if any(not isinstance(sha, str) or not _SHA.fullmatch(sha) for sha in shas) or total < len(shas):
+        raise GitHubAdapterError(f"open PR #{number} commits are not readable")
+    return number, OpenPull(
+        commits=frozenset(shas), complete=total == len(shas), base=base, head=head
+    )
 
 
 def _linked_page(node: object) -> tuple[bool, str | None]:

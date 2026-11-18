@@ -108,15 +108,16 @@ import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from lib import attention, live_settings
-from lib.branch_stack import stack_wait, stacked_pulls
+from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
+from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
@@ -432,9 +433,9 @@ class GitHubIntake(Protocol):
 
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
-    def commit_pulls(self, repo: str, sha: str) -> Mapping[int, str]: ...
+    def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
 
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool: ...
+    def pull_commits(self, repo: str, base: str, head: str) -> Collection[str]: ...
 
     def pull_state(self, repo: str, number: int) -> str: ...
 
@@ -537,6 +538,21 @@ class _Holder:
     released: bool
     ticket: tuple[str, str] | None
     capped_release: bool
+
+
+class _StateWrite(NamedTuple):
+    # Field order is the parameter order of the UPDATE in Feeder._set_states.
+    state: str
+    error: str | None
+    reason: str | None
+    repo: str
+    issue: str
+
+
+def _state_write(
+    candidate: _Candidate, state: str, *, error: str | None = None, reason: str | None = None
+) -> _StateWrite:
+    return _StateWrite(state, error, reason, candidate.issue.repo.lower(), candidate.issue.key)
 
 
 class _Held(Exception):
@@ -708,6 +724,7 @@ class Feeder:
         self.factory_for = factory_for
         self.log = log or (lambda line: None)
         self._base_notes: set[tuple[str, int, str, str, str]] = set()
+        self.ledger: LockLedger | None = None
         with self.queue.connect() as connection:
             ensure_tables(connection)
 
@@ -720,7 +737,9 @@ class Feeder:
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
         candidates, read_repos, read_errors = self._candidates()
-        self._record_seen(candidates, now)
+        if not self._record_seen(candidates, now):
+            self.log("feeder: intake not recorded, orch.db is locked; feeding next poll")
+            return FeedReport(eligible=len(candidates), errors=read_errors + 1)
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         refused = {
@@ -728,9 +747,7 @@ class Feeder:
             for candidate in candidates
             if states[candidate.ref] in UNSTARTED and candidate.template.defects
         }
-        for candidate in candidates:
-            if candidate.ref in refused:
-                self._refuse(candidate)
+        writes = [self._refuse(candidate) for candidate in candidates if candidate.ref in refused]
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
@@ -756,12 +773,12 @@ class Feeder:
             if state in UNSTARTED:
                 wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
                 if wait is not None:
-                    self._set_state(candidate, "waiting-blocked", reason=wait.reason)
+                    writes.append(_state_write(candidate, "waiting-blocked", reason=wait.reason))
                     blocked += 1
                     continue
             if room.get(candidate.harness, 0) <= 0:
                 if state not in IN_FLIGHT:
-                    self._set_state(candidate, "waiting-capacity")
+                    writes.append(_state_write(candidate, "waiting-capacity"))
                 waiting += 1
                 continue
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
@@ -772,12 +789,12 @@ class Feeder:
             except _Held as held:
                 holds.drop(candidate.ref)
                 room[candidate.harness] += 1
-                self._set_state(candidate, "waiting-blocked", reason=held.wait.reason)
+                writes.append(_state_write(candidate, "waiting-blocked", reason=held.wait.reason))
                 blocked += 1
                 continue
             except Exception as exc:  # one ticket's failure never stops the poll
                 errors += 1
-                self._set_state(candidate, "error", error=safe_ship_error(exc))
+                writes.append(_state_write(candidate, "error", error=safe_ship_error(exc)))
                 self.log(
                     f"feeder: {candidate.issue.repo}#{candidate.issue.key} "
                     f"not fed yet: {safe_ship_error(exc)}"
@@ -799,6 +816,7 @@ class Feeder:
                     for path, holders in sharing.items()
                 )
                 self.log(f"feeder: {candidate.issue.repo}#{candidate.issue.key} shares {shares}")
+        self._set_states(writes)
         return FeedReport(
             fed=tuple(fed),
             eligible=len(candidates),
@@ -856,12 +874,12 @@ class Feeder:
 
     # -- intake template (#204) ------------------------------------------------------
 
-    def _refuse(self, candidate: _Candidate) -> None:
-        """Mark a ticket refused-intake and wake Grok once per defect set."""
+    def _refuse(self, candidate: _Candidate) -> _StateWrite:
+        """Wake Grok once per defect set; the refused-intake state is the
+        caller's to write."""
         issue = candidate.issue
         defects = candidate.template.defects
         reason = "; ".join(defect.reason for defect in defects)
-        self._set_state(candidate, "refused-intake", reason=reason)
         repo = candidate.project.repo
         codes = sorted({defect.code for defect in defects})
         detail = (
@@ -890,6 +908,7 @@ class Feeder:
             dedupe_key=f"feeder-intake:{repo.lower()}:{issue.key}:{','.join(codes)}",
         )
         self.log(f"feeder: {issue.repo}#{issue.key} refused at intake: {reason}")
+        return _state_write(candidate, "refused-intake", reason=reason)
 
     def _sync_intake_attention(
         self, refused: Sequence[_Candidate], repos: set[str], now: float
@@ -1118,7 +1137,7 @@ class Feeder:
             if live is not None and machines is not None:
                 machines = live.placement_config(machines)
             used = slots_in_use(connection, machines)
-            blocked = placement_blocked(connection, now)
+            blocked = placement_blocked(connection, now, machines)
             for harness in harnesses:
                 free = free_slots(machines, harness, used, blocked) if machines else 0
                 queued = connection.execute(
@@ -1143,10 +1162,10 @@ class Feeder:
 
     # -- bookkeeping -------------------------------------------------------------
 
-    def _record_seen(self, candidates: Sequence[_Candidate], now: float) -> None:
+    def _record_seen(self, candidates: Sequence[_Candidate], now: float) -> bool:
         unstarted = ", ".join(f"'{state}'" for state in UNSTARTED)
-        with self.queue.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+
+        def work(connection: sqlite3.Connection) -> None:
             for candidate in candidates:
                 issue = candidate.issue
                 connection.execute(
@@ -1203,14 +1222,17 @@ class Feeder:
                 f"AND {FEED_NOT_BEGUN}",
                 (now,),
             )
-            connection.commit()
+
+        return bookkeeping_write(
+            self.queue.connect, work, site="_record_seen", ledger=self.ledger
+        )
 
     def _record_priority(self, candidates: Sequence[_Candidate], now: float) -> None:
         """Each ticket's unblocks count, and the claim order of every ticket
         with a ticket id, so a label or blocker change after the feed still
         moves its queued job."""
-        with self.queue.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+
+        def work(connection: sqlite3.Connection) -> None:
             for candidate in candidates:
                 issue = candidate.issue
                 where = (issue.repo.lower(), issue.key)
@@ -1226,7 +1248,8 @@ class Feeder:
                         connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
                         tier=candidate.tier, unblocks=candidate.unblocks, at=now,
                     )
-            connection.commit()
+
+        bookkeeping_write(self.queue.connect, work, site="_record_priority", ledger=self.ledger)
 
     def _mark_done(self) -> None:
         with self.queue.connect() as connection:
@@ -1262,15 +1285,26 @@ class Feeder:
         *,
         error: str | None = None,
         reason: str | None = None,
-    ) -> None:
-        with self.queue.connect() as connection:
-            connection.execute(
+    ) -> bool:
+        return self._set_states(
+            [_state_write(candidate, state, error=error, reason=reason)], site="_set_state"
+        )
+
+    def _set_states(self, writes: Sequence[_StateWrite], *, site: str = "_set_states") -> bool:
+        if not writes:
+            return True
+        return bookkeeping_write(
+            self.queue.connect,
+            lambda connection: connection.executemany(
                 f"""
                 UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ?
                 WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')
                 """,
-                (state, error, reason, candidate.issue.repo.lower(), candidate.issue.key),
-            )
+                writes,
+            ),
+            site=site,
+            ledger=self.ledger,
+        )
 
     def _record(self, candidate: _Candidate, **values: object) -> None:
         assignments = ", ".join(f"{name} = ?" for name in values)
@@ -1335,7 +1369,7 @@ class Feeder:
             )
             if wait is not None:
                 raise _Held(wait)
-        self._set_state(candidate, "feeding")
+        must_write(self._set_state(candidate, "feeding"))
         risk = str(row["risk"])
         if risk not in ("low", "high"):
             raise ValueError(f"ticket risk {risk!r} is not low or high")

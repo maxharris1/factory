@@ -33,16 +33,19 @@ Codex event read again is the same observation, and any reading that
 reports the window ends the streak.
 `Session._write` (lib/telemetry.py) stores them in `usage_readings` in the
 same transaction as the job's telemetry row, on the existing heartbeat
-flush. A reading is keyed by harness, bot (the account's
-OS user) and device, and replaces one only when its source time is newer.
-Cursor is not tracked.
+flush. A reading is keyed by harness, bot (the login's OS user) and
+device, and replaces one only when its source time is newer. Its `account`
+is the subscription the placed device's login uses, and readers and
+the not-on-plan streak key on it; a NULL account, written by older code, is
+`<harness>-default`. Cursor is not tracked.
 
 `TelemetryUsage` is a `lib.usage.UsageSource` over the table. Its report is
 verified only when both windows are fresh, so routing keeps the existing
 verified-report rule. `orchestrate.choose_route` does not use it yet.
 
 Nothing here opens a file or runs a process: readings come from parsed
-CLI output and orch.db rows only.
+CLI output and orch.db rows only. The one exception is `migrate`, which has
+lib/state_backup.py copy the database before any write.
 """
 
 from __future__ import annotations
@@ -54,14 +57,19 @@ import time
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from lib import lane_limit
+from lib import lane_limit, state_backup
+from lib.machines_yml import default_account
 from lib.usage import UsageReport
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
-SOURCES = {"claude": "get_usage", "codex": "rollout"}
+SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
 NOT_TRACKED = frozenset({"cursor"})
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 GET_USAGE_ID = "orch-usage"
@@ -84,11 +92,19 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     job_id TEXT NOT NULL,
     absent INTEGER NOT NULL DEFAULT 0,
     source_at REAL,
+    account TEXT,
     PRIMARY KEY (harness, bot, device, window)
 )
 """
 
+DEFAULT_ACCOUNT_SQL = "harness || '-default'"
+ACCOUNT_SQL = f"COALESCE(account, {DEFAULT_ACCOUNT_SQL})"
+EXTERNAL = "external"
+EXTERNAL_DEVICE = "external"
+EXTERNAL_JOB = "orch-usage-record"
+
 ADDED_COLUMNS = {"absent": "INTEGER NOT NULL DEFAULT 0", "source_at": "REAL"}
+BACKUP_LABEL = "usage-accounts"
 
 OBSERVATIONS = "usage_observations"
 OBSERVATIONS_DDL = f"""
@@ -99,6 +115,17 @@ CREATE TABLE IF NOT EXISTS {OBSERVATIONS} (
     source_at REAL NOT NULL,
     absent INTEGER NOT NULL,
     PRIMARY KEY (harness, bot, window, source_at)
+)
+"""
+
+ACCOUNT_OBSERVATIONS = "usage_account_observations"
+ACCOUNT_OBSERVATIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {ACCOUNT_OBSERVATIONS} (
+    account TEXT NOT NULL,
+    window TEXT NOT NULL,
+    source_at REAL NOT NULL,
+    absent INTEGER NOT NULL,
+    PRIMARY KEY (account, window, source_at)
 )
 """
 
@@ -115,36 +142,55 @@ ON CONFLICT (harness, bot, device, window) DO UPDATE SET
 WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.source_at, {TABLE}.observed_at)
 """
 
-_OBSERVE = f"""
-INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
+_ACCOUNT_UPSERT = f"""
+INSERT INTO {TABLE} (harness, bot, device, window, used, resets_at, observed_at, job_id, absent, source_at, account)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (harness, bot, device, window) DO UPDATE SET
+    used = excluded.used,
+    resets_at = excluded.resets_at,
+    observed_at = excluded.observed_at,
+    job_id = excluded.job_id,
+    absent = excluded.absent,
+    source_at = excluded.source_at,
+    account = excluded.account
+WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE({TABLE}.source_at, {TABLE}.observed_at)
 """
 
-_ADOPT_PRE_SOURCE_AT_WRITES = f"""
-UPDATE {TABLE} SET source_at = observed_at, absent = 0
-WHERE harness = ? AND bot = ? AND window = ? AND observed_at > source_at
-"""
 
-_RETAINED = f"""
-INSERT INTO {OBSERVATIONS} (harness, bot, window, source_at, absent)
-SELECT harness, bot, window, COALESCE(source_at, observed_at), absent > 0 FROM {TABLE}
-WHERE harness = ? AND bot = ? AND window = ?
-ON CONFLICT (harness, bot, window, source_at) DO UPDATE SET absent = MIN({OBSERVATIONS}.absent, excluded.absent)
-"""
+@dataclass(frozen=True)
+class _Keyed:
+    adopt: str
+    retained: str
+    observe: str
+    newest: str
+    prune: str
+    mark: str
 
-_NEWEST = f"""
-SELECT source_at, absent FROM {OBSERVATIONS}
-WHERE harness = ? AND bot = ? AND window = ?
-ORDER BY source_at DESC LIMIT {NOT_ON_PLAN_READINGS}
-"""
 
-_PRUNE = f"""
-DELETE FROM {OBSERVATIONS} WHERE harness = ? AND bot = ? AND window = ? AND source_at < ?
-"""
+def _keyed(observations: str, key: str, row_key: str) -> _Keyed:
+    marks = ", ".join("?" for _ in key.split(","))
+    match = f"({row_key}) = ({marks}) AND window = ?"
+    conflict = f"ON CONFLICT ({key}, window, source_at) DO UPDATE SET absent = MIN({observations}.absent, excluded.absent)"
+    return _Keyed(
+        adopt=f"UPDATE {TABLE} SET source_at = observed_at, absent = 0 WHERE {match} AND observed_at > source_at",
+        retained=f"""
+            INSERT INTO {observations} ({key}, window, source_at, absent)
+            SELECT {row_key}, window, COALESCE(source_at, observed_at), absent > 0 FROM {TABLE}
+            WHERE {match}
+            {conflict}
+        """,
+        observe=f"INSERT INTO {observations} ({key}, window, source_at, absent) VALUES ({marks}, ?, ?, ?) {conflict}",
+        newest=f"""
+            SELECT source_at, absent FROM {observations} WHERE ({key}) = ({marks}) AND window = ?
+            ORDER BY source_at DESC LIMIT {NOT_ON_PLAN_READINGS}
+        """,
+        prune=f"DELETE FROM {observations} WHERE ({key}) = ({marks}) AND window = ? AND source_at < ?",
+        mark=f"UPDATE {TABLE} SET absent = MAX(?, 1) WHERE {match} AND absent > 0",
+    )
 
-_MARK = f"""
-UPDATE {TABLE} SET absent = MAX(?, 1) WHERE harness = ? AND bot = ? AND window = ? AND absent > 0
-"""
+
+_BY_HARNESS = _keyed(OBSERVATIONS, "harness, bot", "harness, bot")
+_BY_ACCOUNT = _keyed(ACCOUNT_OBSERVATIONS, "account", ACCOUNT_SQL)
 
 
 @dataclass(frozen=True)
@@ -173,6 +219,82 @@ def ensure_table(connection: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc):
                 raise
+
+
+def _columns(connection: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+
+
+def account_sql(connection: sqlite3.Connection) -> str:
+    """A row's account in SQL. Before the migration adds the column, every
+    row is its harness's default account."""
+    return ACCOUNT_SQL if "account" in _columns(connection) else DEFAULT_ACCOUNT_SQL
+
+
+def _tables(connection: sqlite3.Connection) -> set[str]:
+    return {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def _migrated(connection: sqlite3.Connection) -> bool:
+    successors = {ACCOUNT_OBSERVATIONS, lane_limit.ACCOUNT_EVIDENCE_TABLE, lane_limit.ACCOUNT_TABLE}
+    return (
+        "account" in _columns(connection)
+        and successors <= _tables(connection)
+        and connection.execute(f"SELECT 1 FROM {TABLE} WHERE account IS NULL LIMIT 1").fetchone() is None
+    )
+
+
+def migrate(
+    db: Path,
+    connect: Callable[[], sqlite3.Connection],
+    *,
+    directory: Path | None = None,
+) -> bool:
+    """Key db's usage readings on the account; True when it wrote.
+
+    Already migrated (the column, no unnamed row, the three account tables):
+    no backup and no write. Otherwise it first takes the BACKUP_LABEL
+    labelled backup into directory (default manual/ beside the rolling
+    backup); a failed backup raises before any write. Then one transaction
+    creates any missing table, adds the column, names every unnamed row
+    `<harness>-default`, creates the account tables and seeds them from the
+    harness-keyed ones. Rows written meanwhile by older code are named by
+    the next run."""
+    with closing(connect()) as connection:
+        if _migrated(connection):
+            return False
+    state_backup.labelled_backup(
+        db,
+        directory or state_backup.default_backup_path().parent / "manual",
+        BACKUP_LABEL,
+        datetime.now(UTC),
+    )
+    with closing(connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            ensure_table(connection)
+            try:
+                connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN account TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
+            for ddl in (ACCOUNT_OBSERVATIONS_DDL, lane_limit.ACCOUNT_EVIDENCE_DDL, lane_limit.ACCOUNT_DDL):
+                connection.execute(ddl)
+            connection.execute(f"UPDATE {TABLE} SET account = {DEFAULT_ACCOUNT_SQL} WHERE account IS NULL")
+            connection.execute(
+                f"""
+                INSERT OR IGNORE INTO {ACCOUNT_OBSERVATIONS} (account, window, source_at, absent)
+                SELECT {DEFAULT_ACCOUNT_SQL}, window, source_at, absent FROM {OBSERVATIONS}
+                """
+            )
+            if lane_limit.EVIDENCE_TABLE in _tables(connection):
+                connection.execute(
+                    f"""
+                    INSERT OR IGNORE INTO {lane_limit.ACCOUNT_EVIDENCE_TABLE} (account, window, observed_at, free_at)
+                    SELECT {DEFAULT_ACCOUNT_SQL}, window, observed_at, free_at FROM {lane_limit.EVIDENCE_TABLE}
+                    """
+                )
+    return True
 
 
 def _number(value: object) -> float | None:
@@ -314,25 +436,35 @@ def store(
     device: str,
     job_id: str,
     readings: list[Reading],
+    account: str | None = None,
 ) -> None:
+    """Store readings for account (None: `<harness>-default`). Before the
+    migration adds the account column, the row and its streak keep the
+    harness-and-bot shape; this never adds the column."""
     if not readings:
         return
+    account = account or default_account(harness)
     ensure_table(connection)
+    keyed = "account" in _columns(connection)
+    if keyed:
+        connection.execute(ACCOUNT_OBSERVATIONS_DDL)
+    statements, key = (_BY_ACCOUNT, (account,)) if keyed else (_BY_HARNESS, (harness, bot))
     for r in readings:
         source = r.observed_at if r.source_at is None else r.source_at
         absent = 1 if r.absent else 0
-        account = (harness, bot, r.window)
-        connection.execute(_ADOPT_PRE_SOURCE_AT_WRITES, account)
-        connection.execute(_RETAINED, account)
-        connection.execute(_OBSERVE, (*account, source, absent))
-        newest = connection.execute(_NEWEST, account).fetchall()
-        connection.execute(_PRUNE, (*account, newest[-1][0]))
-        connection.execute(
-            _UPSERT,
-            (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, absent, source),
-        )
-        connection.execute(_MARK, (_omissions(newest), *account))
-    lane_limit.reevaluate(connection, harness, bot, readings)
+        scope = (*key, r.window)
+        connection.execute(statements.adopt, scope)
+        connection.execute(statements.retained, scope)
+        connection.execute(statements.observe, (*scope, source, absent))
+        newest = connection.execute(statements.newest, scope).fetchall()
+        connection.execute(statements.prune, (*scope, newest[-1][0]))
+        row = (harness, bot, device, r.window, r.used, r.resets_at, r.observed_at, job_id, absent, source)
+        if keyed:
+            connection.execute(_ACCOUNT_UPSERT, (*row, account))
+        else:
+            connection.execute(_UPSERT, row)
+        connection.execute(statements.mark, (_omissions(newest), *scope))
+    lane_limit.reevaluate(connection, account, readings)
 
 
 def _omissions(newest: list[tuple[float, int]]) -> int:
@@ -383,31 +515,30 @@ def headroom(readings: list[Reading], now: float) -> float | None:
 
 
 class TelemetryUsage:
-    """`UsageSource` over `usage_readings` for one bot account on one device."""
+    """`UsageSource` over `usage_readings` for the account each harness uses,
+    on any of its devices: each window's newest reading."""
 
     def __init__(
         self,
         connect: Callable[[], sqlite3.Connection],
         *,
-        bot_for: Callable[[str], str | None],
-        device: str,
+        account_for: Callable[[str], str | None],
         clock: Callable[[], float] = time.time,
     ):
         self.connect = connect
-        self.bot_for = bot_for
-        self.device = device
+        self.account_for = account_for
         self.clock = clock
 
     def read(self, harness: str) -> UsageReport | None:
-        bot = self.bot_for(harness)
-        if harness not in SOURCES or bot is None:
+        account = self.account_for(harness)
+        if harness not in SOURCES or account is None:
             return None
         try:
             with closing(self.connect()) as connection:
                 rows = connection.execute(
                     f"SELECT window, used, resets_at, observed_at FROM {TABLE}"
-                    " WHERE harness = ? AND bot = ? AND device = ?",
-                    (harness, bot, self.device),
+                    f" WHERE harness = ? AND {account_sql(connection)} = ? ORDER BY observed_at",
+                    (harness, account),
                 ).fetchall()
         except sqlite3.Error:
             return None

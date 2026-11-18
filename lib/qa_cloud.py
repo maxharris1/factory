@@ -326,7 +326,6 @@ class QaWorker:
     evidence: Mapping[str, QaStorage] = field(default_factory=dict)
     free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
     _plans: dict[str, RunPlan] = field(default_factory=dict)
-    _backoff: dict[str, float] = field(default_factory=dict)
     _low_disk: set[str] = field(default_factory=set)
     _skips_logged: set[tuple[str, str]] = field(default_factory=set)
 
@@ -414,10 +413,15 @@ class QaWorker:
             repo = job.request.repo.lower()
             if repo not in low:
                 low[repo] = self._disk_low(repo)
-            if low[repo] or self._backoff.get(runner, 0.0) > now:
+            if low[repo]:
                 self._restart_wait(job)
                 continue
             with self.queue.connect() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM qa_runner_backoff WHERE runner = ? AND until > ?", (runner, now)
+                ).fetchone() is not None:
+                    _restart_wait(connection, job.id, now)
+                    continue
                 reason = self._yields(connection, job.id, runner, now)
                 if reason is not None:
                     _restart_wait(connection, job.id, now)
@@ -512,7 +516,14 @@ class QaWorker:
                 if not first:
                     self._close(row, "gap", f"launch-failed:{type(exc).__name__}")
                     return "gap"
-                self._backoff[runner] = self.queue.now() + BACKOFF_SECONDS
+                with self.queue.connect() as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO qa_runner_backoff (runner, until) VALUES (?, ?)
+                        ON CONFLICT(runner) DO UPDATE SET until = MAX(until, excluded.until)
+                        """,
+                        (runner, self.queue.now() + BACKOFF_SECONDS),
+                    )
                 if isinstance(exc, UsageLimit) and runner in self.shares_usage_with:
                     limited.append(runner)
                 following = self._next_runner(job, plan, runner, {self.shares_usage_with[name] for name in limited})
@@ -706,7 +717,7 @@ class QaWorker:
 
     def _paused(self, connection: sqlite3.Connection, runner: str, now: float) -> lane_limit.LaneLimit | None:
         recipient = self.shares_usage_with.get(runner)
-        return None if recipient is None else lane_limit.active(connection, recipient, now)
+        return None if recipient is None else lane_limit.recipient_paused(connection, recipient, now, None)
 
     def _yields(self, connection: sqlite3.Connection, job_id: str, runner: str, now: float) -> str | None:
         recipient = self.shares_usage_with.get(runner)

@@ -39,6 +39,7 @@ from lib.telemetry import (
     stream_flags,
 )
 from tests.pool_helpers import LOCAL_BOX_MACHINES, pool_claim
+from tests.test_remote_start import past_uncontained
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -1093,7 +1094,7 @@ def test_a_tracing_login_profile_never_echoes_an_environment_value(
 def test_with_telemetry_off_a_remote_start_reports_no_environment(tmp_path: Path) -> None:
     run, db, _ = _remote_run(tmp_path, "codex", env={"ORCH_TELEMETRY": "off"})
     assert run.returncode == 0, run.stderr
-    assert run.stdout.splitlines()[0] == "welcome"
+    assert past_uncontained(run.stdout.encode()).splitlines()[0] == b"welcome"
     assert "ORCH-WORKER-ENV" not in run.stdout
 
 

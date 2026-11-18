@@ -3,13 +3,22 @@
 # orch_host names the device that runs orch. With no local: true device it is
 # required; a local device would have to be the orch host.
 orch_host: pc
+# accounts names each subscription (#772). id is a stable, non-secret name
+# (letters, digits, '.', '_' and '-'), never an email, org ID or token.
+# harness is claude, codex, cursor, or external (a plan no factory process
+# runs; `orch usage record` writes its readings). A bare bot value under a
+# device's harnesses means the account <harness>-default, which needs no
+# entry; {bot, account} names a declared account of that harness.
+accounts:
+  - {id: codex-pro-1, harness: codex, plan: pro, label: "Codex Pro"}
+  - {id: cursor-grok-ultra, harness: external, plan: ultra, label: "Grok and Cursor Ultra"}
 devices:
   - name: pc
     tailscale_name: pc-wsl-bots.example.ts.net
     slot_max: 10
     harnesses:
       claude: claude-bot
-      codex: codex-bot
+      codex: {bot: codex-bot, account: codex-pro-1}
       cursor: cursor-bot
     # workdir_root is where job worktrees are made (empty at job start).
     # factory_root is the deployed factory checkout (skills/, bin/orch), not

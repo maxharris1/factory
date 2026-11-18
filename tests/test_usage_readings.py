@@ -32,6 +32,7 @@ from lib.dashboard import collect_snapshot
 from lib.dashboard_usage import read_usage
 from lib.job_token import PROOF_ENV
 from lib.machines_yml import Device, MachinesConfig
+from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import TAG_ENV, Exchanged, RemoteTarget, SshTransport, ssh_argv
 from lib.telemetry import Scrubber, Session, harness_argv, stream_flags
 from lib.usage import reserve_check
@@ -651,11 +652,12 @@ def _probe_bin(directory: Path, mode: str) -> Path:
     return wrapper
 
 
-def _box_run(tmp_path: Path, mode: str, command: list[str] | None = None, env: dict | None = None):
+def _box_run(tmp_path: Path, mode: str, command: list[str] | None = None, env: dict | None = None,
+             machines: Path = LOCAL_BOX_MACHINES):
     _, job = _running_job(tmp_path)
     wrapper = _probe_bin(tmp_path / "bin", mode)
     run = _orch(
-        "job", "run", "claude-bot", job.id, "--machines", str(LOCAL_BOX_MACHINES), "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
+        "job", "run", "claude-bot", job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"), "--interval", "0.2",
         "--", *(command or [str(wrapper), *CLAUDE_BOT]),
         env={"ORCH_JOB_STATE_DIR": str(tmp_path / "state"), TAG_ENV: TAG_VALUE, "PROBE_TEST": ENV_VALUE,
              **(env or {})},
@@ -701,6 +703,20 @@ def test_a_box_claude_bot_wrapper_job_is_probed_through_its_wrapper(tmp_path: Pa
     assert _probe_lines(run) == []
     assert _usage_rows(db) == [
         ("claude", "claude-bot", "box", "five_hour", 0.125), ("claude", "claude-bot", "box", "seven_day", 0.345)]
+
+
+def test_a_job_stores_its_readings_under_the_placed_devices_account(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "accounts:\n  - {id: claude-max-1, harness: claude}\n"
+        + LOCAL_BOX_MACHINES.read_text(encoding="utf-8").replace(
+            "claude: claude-bot", "claude: {bot: claude-bot, account: claude-max-1}", 1),
+        encoding="utf-8",
+    )
+    _, _, db = _box_run(tmp_path, "reply", machines=machines)
+    with sqlite3.connect(db) as connection:
+        rows = connection.execute("SELECT device, window, account FROM usage_readings ORDER BY window").fetchall()
+    assert rows == [("box", "five_hour", "claude-max-1"), ("box", "seven_day", "claude-max-1")]
 
 
 def test_a_remote_claude_bot_job_is_probed_on_its_device(tmp_path: Path) -> None:
@@ -823,9 +839,9 @@ def _with_rows(db: Path, *rows: tuple[str, float | None, int, float], harness: s
         )
 
 
-def _source(db: Path, now: float) -> TelemetryUsage:
-    bots = {"claude": "claude-bot", "codex": "codex-bot"}
-    return TelemetryUsage(lambda: sqlite3.connect(db), bot_for=bots.get, device="box", clock=lambda: now)
+def _source(db: Path, now: float, accounts: dict[str, str] | None = None) -> TelemetryUsage:
+    used = accounts if accounts is not None else {"claude": "claude-default", "codex": "codex-default"}
+    return TelemetryUsage(lambda: sqlite3.connect(db), account_for=used.get, clock=lambda: now)
 
 
 def test_one_fresh_window_is_an_unverified_report_and_never_blocks(tmp_path: Path) -> None:
@@ -858,6 +874,48 @@ def test_stale_or_missing_readings_give_no_report(tmp_path: Path) -> None:
     assert _source(db, CAPTURED).read("cursor") is None
 
 
+def _store_account(db: Path, account: str, device: str, *rows: tuple[str, float, int, float]) -> None:
+    with sqlite3.connect(db) as connection:
+        usage_readings.store(
+            connection, harness="codex", bot="codex-bot", device=device, job_id=f"job-{account}",
+            readings=[Reading(window, used, resets, observed) for window, used, resets, observed in rows],
+            account=account,
+        )
+
+
+def test_two_accounts_of_one_bot_keep_their_own_windows_and_headroom(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    _store_account(db, "codex-a", "box", ("five_hour", 0.9, FIVE_HOUR_RESET, CAPTURED),
+                   ("seven_day", 0.5, SEVEN_DAY_RESET, CAPTURED))
+    _store_account(db, "codex-b", "pc", ("five_hour", 0.2, FIVE_HOUR_RESET + 3600, CAPTURED),
+                   ("seven_day", 0.3, SEVEN_DAY_RESET - 86400, CAPTURED))
+    a = _source(db, CAPTURED + 60, {"codex": "codex-a"}).read("codex")
+    b = _source(db, CAPTURED + 60, {"codex": "codex-b"}).read("codex")
+    assert a is not None and a.verified and a.remaining == pytest.approx(0.1)
+    assert b is not None and b.verified and b.remaining == pytest.approx(0.7)
+    with sqlite3.connect(db) as connection:
+        rows = connection.execute(
+            "SELECT account, device, window, used, resets_at FROM usage_readings ORDER BY account, window"
+        ).fetchall()
+    assert rows == [
+        ("codex-a", "box", "five_hour", 0.9, FIVE_HOUR_RESET),
+        ("codex-a", "box", "seven_day", 0.5, SEVEN_DAY_RESET),
+        ("codex-b", "pc", "five_hour", 0.2, FIVE_HOUR_RESET + 3600),
+        ("codex-b", "pc", "seven_day", 0.3, SEVEN_DAY_RESET - 86400),
+    ]
+
+
+def test_an_account_on_two_devices_reads_the_newest_reading_of_each_window(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    _store_account(db, "codex-a", "box", ("five_hour", 0.9, FIVE_HOUR_RESET, CAPTURED + 60),
+                   ("seven_day", 0.5, SEVEN_DAY_RESET, CAPTURED))
+    _store_account(db, "codex-a", "pc", ("five_hour", 0.2, FIVE_HOUR_RESET, CAPTURED),
+                   ("seven_day", 0.6, SEVEN_DAY_RESET, CAPTURED + 60))
+    report = _source(db, CAPTURED + 120, {"codex": "codex-a"}).read("codex")
+    assert report is not None and report.remaining == pytest.approx(0.1)
+    assert _source(db, CAPTURED + 120, {"codex": "codex-b"}).read("codex") is None
+
+
 # --- the snapshot ------------------------------------------------------------------------
 
 
@@ -883,7 +941,12 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
     accounts = _accounts(usage)
     assert set(accounts) == {"claude", "codex", "cursor"}
     assert accounts["claude"] == {
+        "account": "claude-default",
+        "plan": None,
+        "label": None,
+        "source": "get_usage",
         "bot": "claude-bot",
+        "bots": ["claude-bot"],
         "harness": "claude",
         "devices": ["box"],
         "state": "ok",
@@ -917,6 +980,7 @@ def test_an_account_shared_by_devices_is_one_entry_with_the_newest_reading_per_w
     ):
         usage_readings.store(connection, harness=harness, bot=bot, device=device, job_id="j",
                              readings=[Reading(window, used, SEVEN_DAY_RESET, observed)])
+    connection.execute("UPDATE usage_readings SET account = 'claude-old' WHERE device = 'mac'")
     usage = read_usage(connection, CAPTURED, SHARED)
     assert [(e["harness"], e["bot"], e["devices"]) for e in usage["accounts"]] == [
         ("claude", "claude-bot", ["box", "pc"]), ("codex", "codex-bot", ["box"]),
@@ -1010,8 +1074,9 @@ def test_a_window_left_out_of_three_fresh_readings_is_not_on_the_plan(tmp_path: 
     assert codex["seven_day"] == {"used": 0.68, "resets_at": SEVEN_DAY_RESET, "observed_at": CAPTURED + 1200,
                                   "state": "ok"}
     assert codex["headroom"] == 0.32 and codex["state"] == "ok"
-    assert set(codex) == {"bot", "harness", "devices", "state", "five_hour", "seven_day", "headroom",
-                          "observed_at", "age_seconds", "limited_until", "limit_label"}
+    assert set(codex) == {"account", "plan", "label", "source", "bot", "bots", "harness", "devices", "state",
+                          "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "limited_until",
+                          "limit_label"}
     assert set(codex["five_hour"]) == set(codex["seven_day"]) == {"used", "resets_at", "observed_at", "state"}
 
 
@@ -1239,6 +1304,156 @@ def test_an_older_table_read_only_is_no_reading_not_no_telemetry(tmp_path: Path)
     assert codex["state"] == "no reading" and codex["five_hour"]["state"] == "no reading"
 
 
+PRE_ACCOUNT_DDL = (
+    "CREATE TABLE usage_readings (harness TEXT NOT NULL, bot TEXT NOT NULL, device TEXT NOT NULL,"
+    " window TEXT NOT NULL, used REAL, resets_at INTEGER, observed_at REAL NOT NULL, job_id TEXT NOT NULL,"
+    " absent INTEGER NOT NULL DEFAULT 0, source_at REAL, PRIMARY KEY (harness, bot, device, window))"
+)
+PRE_ACCOUNT_OBSERVATIONS_DDL = (
+    "CREATE TABLE usage_observations (harness TEXT NOT NULL, bot TEXT NOT NULL, window TEXT NOT NULL,"
+    " source_at REAL NOT NULL, absent INTEGER NOT NULL, PRIMARY KEY (harness, bot, window, source_at))"
+)
+PRE_ACCOUNT_EVIDENCE_DDL = (
+    "CREATE TABLE lane_limit_evidence (harness TEXT NOT NULL, bot TEXT NOT NULL, window TEXT NOT NULL,"
+    " observed_at REAL NOT NULL, free_at REAL NOT NULL, PRIMARY KEY (harness, bot, window))"
+)
+PRE_ACCOUNT_UPSERT = """
+INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id, absent, source_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (harness, bot, device, window) DO UPDATE SET
+    used = excluded.used,
+    resets_at = excluded.resets_at,
+    observed_at = excluded.observed_at,
+    job_id = excluded.job_id,
+    absent = excluded.absent,
+    source_at = excluded.source_at
+WHERE COALESCE(excluded.source_at, excluded.observed_at) > COALESCE(usage_readings.source_at, usage_readings.observed_at)
+"""
+
+
+def _pre_account_db(db: Path) -> None:
+    db.parent.mkdir(exist_ok=True)
+    with sqlite3.connect(db) as connection:
+        for ddl in (PRE_ACCOUNT_DDL, PRE_ACCOUNT_OBSERVATIONS_DDL, PRE_ACCOUNT_EVIDENCE_DDL):
+            connection.execute(ddl)
+        connection.executemany(PRE_ACCOUNT_UPSERT, [
+            ("claude", "claude-bot", "box", "five_hour", 0.4, FIVE_HOUR_RESET, CAPTURED, "j1", 0, CAPTURED),
+            ("codex", "codex-bot", "pc", "seven_day", None, None, CAPTURED, "j2", 2, CAPTURED),
+        ])
+        connection.executemany(
+            "INSERT INTO usage_observations VALUES (?, ?, ?, ?, ?)",
+            [("codex", "codex-bot", "seven_day", CAPTURED - 60, 1), ("codex", "codex-bot", "seven_day", CAPTURED, 1)],
+        )
+        connection.execute(
+            "INSERT INTO lane_limit_evidence VALUES (?, ?, ?, ?, ?)",
+            ("claude", "claude-bot", "five_hour", CAPTURED, CAPTURED),
+        )
+
+
+def _columns(db: Path) -> set[str]:
+    with closing(sqlite3.connect(db)) as connection:
+        return {row[1] for row in connection.execute("PRAGMA table_info(usage_readings)")}
+
+
+def _dump(db: Path) -> list[str]:
+    with closing(sqlite3.connect(db)) as connection:
+        return list(connection.iterdump())
+
+
+def _migrate(db: Path, backups: Path) -> bool:
+    return usage_readings.migrate(db, lambda: sqlite3.connect(db), directory=backups)
+
+
+def test_the_migration_backs_up_then_names_every_row_and_a_second_run_changes_nothing(tmp_path: Path) -> None:
+    db, backups = tmp_path / "state" / "orch.db", tmp_path / "manual"
+    _pre_account_db(db)
+
+    assert _migrate(db, backups) is True
+    [backup] = list(backups.glob("orch-*-usage-accounts.db"))
+    assert "account" not in _columns(backup), "the backup holds the old schema"
+    with closing(sqlite3.connect(db)) as connection:
+        accounts = connection.execute(
+            "SELECT harness, device, account FROM usage_readings ORDER BY harness"
+        ).fetchall()
+        observations = connection.execute(
+            "SELECT account, window, source_at, absent FROM usage_account_observations ORDER BY source_at"
+        ).fetchall()
+        evidence = connection.execute("SELECT * FROM lane_account_evidence").fetchall()
+        limits = connection.execute("SELECT COUNT(*) FROM lane_account_limits").fetchone()
+    assert accounts == [("claude", "box", "claude-default"), ("codex", "pc", "codex-default")]
+    assert observations == [("codex-default", "seven_day", CAPTURED - 60, 1),
+                            ("codex-default", "seven_day", CAPTURED, 1)]
+    assert evidence == [("claude-default", "five_hour", CAPTURED, CAPTURED)]
+    assert limits == (0,)
+
+    dump = _dump(db)
+    assert _migrate(db, backups) is False
+    assert list(backups.iterdir()) == [backup], "no second backup"
+    assert _dump(db) == dump
+
+    with sqlite3.connect(db) as connection:
+        connection.execute(PRE_ACCOUNT_UPSERT, (
+            "claude", "claude-bot", "box", "five_hour", 0.7, FIVE_HOUR_RESET, CAPTURED + 60, "j3", 0, CAPTURED + 60))
+        connection.execute(PRE_ACCOUNT_UPSERT, (
+            "claude", "claude-bot", "pc", "five_hour", 0.1, FIVE_HOUR_RESET, CAPTURED + 60, "j4", 0, CAPTURED + 60))
+        rows = connection.execute(
+            "SELECT device, used, account FROM usage_readings WHERE harness = 'claude' ORDER BY device"
+        ).fetchall()
+    assert rows == [("box", 0.7, "claude-default"), ("pc", 0.1, None)], "an older binary's upsert still runs"
+
+
+def test_a_failed_backup_leaves_the_database_unmigrated(tmp_path: Path) -> None:
+    db, backups = tmp_path / "state" / "orch.db", tmp_path / "not-a-directory"
+    _pre_account_db(db)
+    backups.write_text("")
+    dump = _dump(db)
+    with pytest.raises(OSError):
+        _migrate(db, backups)
+    assert _dump(db) == dump
+
+
+def test_a_database_without_readings_is_backed_up_before_it_gets_the_tables(tmp_path: Path) -> None:
+    db, backups = tmp_path / "state" / "orch.db", tmp_path / "manual"
+    db.parent.mkdir()
+    queue = SQLiteJobQueue(db, clock=lambda: 160.0)
+    job = queue.enqueue(JobRequest("owner/repo", "1", "build", "claude", "go", 3600), dedupe_key="j")
+    assert _migrate(db, backups) is True
+    copies = list(backups.iterdir())
+    assert [copy.name.endswith("-usage-accounts.db") for copy in copies] == [True]
+    with closing(sqlite3.connect(copies[0])) as connection:
+        assert connection.execute("SELECT id FROM jobs").fetchall() == [(job.id,)]
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'usage_readings'"
+        ).fetchone() is None
+    assert "account" in _columns(db)
+    assert _migrate(db, backups) is False
+    assert list(backups.iterdir()) == copies
+
+
+def test_before_the_migration_a_job_writes_the_old_row_shape(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    _pre_account_db(db)
+    _store_account(db, "codex-a", "box", ("five_hour", 0.3, FIVE_HOUR_RESET, CAPTURED + 60))
+    assert "account" not in _columns(db), "orch job run never adds the column"
+    report = _source(db, CAPTURED + 120, {"codex": "codex-default"}).read("codex")
+    assert report is not None and report.remaining == pytest.approx(0.7)
+
+
+def test_orch_usage_migrate_says_whether_it_migrated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from lib import cli
+
+    db = tmp_path / "state" / "orch.db"
+    _pre_account_db(db)
+    monkeypatch.setenv("ORCH_DB_BACKUP", str(tmp_path / "backup" / "orch.db"))
+    assert cli.main(["usage", "migrate", "--db", str(db)]) == 0
+    assert cli.main(["usage", "migrate", "--db", str(db)]) == 0
+    first, second = capsys.readouterr().out.splitlines()
+    assert (first, second) == (f"migrated {db}", f"{db} already migrated")
+    assert [path.name.endswith("-usage-accounts.db") for path in (tmp_path / "backup" / "manual").iterdir()] == [True]
+
+
 # --- no credential file ---------------------------------------------------------------------
 
 
@@ -1291,9 +1506,13 @@ def test_capture_and_reads_open_no_file_but_the_database_and_the_jobs_rollout(
 @pytest.mark.parametrize("module", ["lib/usage_readings.py", "lib/dashboard_usage.py", "lib/codex_rollout.py"])
 def test_usage_modules_import_no_process_or_network_library(module: str) -> None:
     tree = ast.parse((ROOT / module).read_text(encoding="utf-8"))
-    names = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import)
+    typing_only = {id(node) for block in ast.walk(tree)
+                   if isinstance(block, ast.If) and ast.unparse(block.test) == "TYPE_CHECKING"
+                   for statement in block.body for node in ast.walk(statement)}
+    imports = [node for node in ast.walk(tree) if id(node) not in typing_only]
+    names = {alias.name.split(".")[0] for node in imports if isinstance(node, ast.Import)
              for alias in node.names}
-    names |= {node.module.split(".")[0] for node in ast.walk(tree)
+    names |= {node.module.split(".")[0] for node in imports
               if isinstance(node, ast.ImportFrom) and node.module}
     assert not names & {"subprocess", "urllib", "http", "requests", "socket"}
     if module != "lib/codex_rollout.py":

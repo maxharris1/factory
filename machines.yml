@@ -16,6 +16,9 @@
 # Slots are counted per device name: list each host (tailscale_name) once.
 # F2-02 starts a remote job over `ssh -l <login> <ssh_alias>`; nothing here
 # implies a device is reachable.
+# Each bare bot value uses the account <harness>-default (#772). Add an
+# accounts: section and {bot, account} values only after every device runs
+# code that reads them (README "Usage accounts"); older code refuses the key.
 orch_host: pc
 devices:
   # The WSL Ubuntu node on the PC, not the Windows host.

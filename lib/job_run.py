@@ -577,6 +577,13 @@ def _wait(
     return -signal.SIGKILL
 
 
+def _readable(fd: int, timeout: float) -> bool:
+    """select() refuses a descriptor past FD_SETSIZE (1024); poll() takes any."""
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    return bool(poller.poll(math.ceil(timeout * 1000)))
+
+
 class _Exit:
     def __init__(self, child: subprocess.Popen[bytes], status: int | None):
         self.child = child
@@ -589,7 +596,7 @@ class _Exit:
                 return self.child.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 return None
-        if not select.select([self.status], [], [], timeout)[0]:
+        if not _readable(self.status, timeout):
             return None
         chunk = os.read(self.status, 64)
         if not chunk:

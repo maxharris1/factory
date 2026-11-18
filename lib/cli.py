@@ -32,11 +32,13 @@ from lib import (
     skill_preflight,
     telemetry,
     usage_probe,
+    usage_readings,
+    usage_record,
     waiter,
     worktrees,
 )
 from lib.dashboard_cli import main as dashboard_main
-from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for, push_timer_tick
 from lib.dispatch.constants import HARNESS_WORK
 from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.helpers import _retry_of
@@ -68,7 +70,7 @@ from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
-from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.machines_yml import MachinesConfig, default_account, load_machines_yml
 from lib.orch_yml import (
     OrchConfig,
     approvals,
@@ -181,6 +183,7 @@ commands:
   settings         apply device settings asked for in Mission Control (#777)
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
+  usage            per-account usage readings: migrate orch.db, record an external reading (#772)
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -516,6 +519,27 @@ retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH] [--machines PATH]
   (#663). Linear tickets are out of scope.
   Prints the new comment id. Exits 2 on a bad ticket or empty reason, 1
   when refused or the post fails.
+
+usage migrate [--db PATH]
+  Key the usage readings on the account (#772). Takes the labelled backup
+  usage-accounts (as db-backup does) first, then adds usage_readings.account
+  filled with <harness>-default and the account-keyed tables. `orch poll`
+  runs it at start. Says whether it migrated; a second run changes nothing.
+  --db defaults to ORCH_DB. Exit 1 when the backup or the migration fails.
+
+usage record --account ID --window five_hour|seven_day|weekly --used FRACTION
+             --resets-at EPOCH [--observed-at EPOCH] [--db PATH] [--machines PATH]
+  Store one usage reading for an account machines.yml declares with
+  harness: external (Grok, Cursor), whose usage no factory process can
+  read. --used is the used fraction, 0 to 1; weekly is stored as
+  seven_day. --resets-at is whole epoch seconds within 30 days of now.
+  --observed-at defaults to now and may be at most 300 seconds ahead.
+  A reading no newer than the stored one is not written: it prints
+  "kept newer reading" and exits 0. --db defaults to $ORCH_DB, --machines
+  to the checkout's machines.yml. Exits 2 and writes nothing on an
+  unknown or non-external account, a bad value, an unknown option, or a
+  usage_readings table without the account column (run orch usage
+  migrate first); 1 when the database cannot be written.
 """
 
 
@@ -577,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(status_main, argv[1:])
     if argv[0] == "retry":
         return _call(_retry, argv[1:])
+    if argv[0] == "usage":
+        return _call(_usage, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -919,7 +945,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         return source._factory_at(project.repo, project.factory_ref)
 
     def post(repo: str, pr: int, body: str, marker: str) -> str:
-        return actions[projects[repo.lower()].repo].post_issue_comment_once(repo, pr, body, marker)
+        return actions[repo.lower()].post_issue_comment_once(repo, pr, body, marker)
 
     def storage(repo: str) -> S3Storage:
         entry = projects[repo.lower()].qa_storage
@@ -974,6 +1000,15 @@ def _poll(argv: list[str]) -> int:
                 create=False,
                 machines_path=args.machines,
             )
+            try:
+                if _migrate_usage(path):
+                    print(f"orch poll: migrated usage readings in {path} (#772)", file=sys.stderr)
+            except (BackupError, OSError, sqlite3.Error) as exc:
+                print(
+                    f"orch poll: usage migration not done ({' '.join(str(exc).split())}); "
+                    "readings keep the harness-wide shape",
+                    file=sys.stderr,
+                )
             pusher, push_seconds = _dashboard_pusher(path, args.orch)
             after_poll = _AfterPoll(
                 CycleBackup(
@@ -999,7 +1034,7 @@ def _poll(argv: list[str]) -> int:
                 # SSH reachability probe, each in its own daemon thread.
                 beats = health.poller_beats(path, args.machines, cycle=loop.cycle_state).start()
                 push_timer = (
-                    health._Loop("dashboard-push-timer", push_seconds,
+                    health._Loop("dashboard-push-timer", push_timer_tick(push_seconds),
                                  lambda: pusher.on_timer(push_seconds), block_signals=False)
                     if pusher is not None else None
                 )
@@ -1166,6 +1201,26 @@ def _db_backup(argv: list[str]) -> int:
     for old in pruned:
         print(f"pruned {old}")
     return 0
+
+
+def _usage_migrate(args: argparse.Namespace) -> int:
+    try:
+        path = _db_path(args.db)
+        migrated = _migrate_usage(path)
+    except (BackupError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch usage migrate: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    if migrated:
+        print(f"migrated {path}")
+    else:
+        print(f"{path} already migrated")
+    return 0
+
+
+def _migrate_usage(path: Path) -> bool:
+    if not path.exists():
+        raise BackupError(f"database {path} does not exist")
+    return usage_readings.migrate(path, lambda: sqlite3.connect(path, timeout=30))
 
 
 def _restore_db(argv: list[str]) -> int:
@@ -2168,6 +2223,7 @@ def _job_run_command(argv: list[str]) -> int:
         environ=environment,
         worker_env=placed.remote,
         device=placed.device.name,
+        account=placed.device.account_for(owner) or default_account(owner),
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
@@ -2630,6 +2686,49 @@ def _move_db(argv: list[str]) -> int:
         print(f"orch move-db {args.command}: {exc}", file=sys.stderr)
         return 2 if args.command == "drained" else 1
     print(f"wrote {args.out}")
+    return 0
+
+
+def _usage(argv: list[str]) -> int:
+    parser = _Parser(prog="orch usage", add_help=True, allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    record = commands.add_parser("record", allow_abbrev=False)
+    record.add_argument("--account", required=True)
+    record.add_argument("--window", required=True)
+    record.add_argument("--used", required=True)
+    record.add_argument("--resets-at", required=True)
+    record.add_argument("--observed-at")
+    record.add_argument("--db", type=Path)
+    record.add_argument("--machines", type=Path)
+    migrate = commands.add_parser("migrate", allow_abbrev=False)
+    migrate.add_argument("--db", type=Path)
+    args, unknown = parser.parse_known_args(argv)
+    prog = f"orch usage {args.command}"
+    if unknown:
+        print(f"{prog}: refused: unknown arguments (not echoed)", file=sys.stderr)
+        return 2
+    if args.command == "migrate":
+        return _usage_migrate(args)
+    try:
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        reading = usage_record.parse(
+            machines,
+            account=args.account,
+            window=args.window,
+            used=args.used,
+            resets_at=args.resets_at,
+            observed_at=args.observed_at,
+            now=time.time(),
+        )
+        written = usage_record.store(_db_path(args.db), reading)
+    except (WaitError, ValueError) as exc:
+        print(f"{prog}: refused: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"recorded {reading.account} {reading.window}" if written else "kept newer reading")
     return 0
 
 

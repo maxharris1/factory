@@ -283,26 +283,33 @@ class DetailMixin:
             job, answered = self._enqueue_step(
                 connection, ticket, comment, request, dedupe_key=dedupe_key, ci=ci
             )
+            if answered is None:
+                self._flag_dropped(connection, ticket, request, job)
             connection.commit()
-        if answered is None:
-            self._flag_dropped(ticket, request, job)
         return job, answered
 
-    def _flag_dropped(self, ticket: TrackedTicket, request: JobRequest, job: Job) -> None:
+    def _flag_dropped(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        request: JobRequest,
+        job: Job,
+    ) -> None:
         if job.request.source_comment_id == request.source_comment_id:
-            self.clear_attention(ticket.repo, ticket.ticket_id, DEDUPE_DROPPED)
-        elif job.state not in ("queued", "running") and not self._harness_active(ticket):
+            self.clear_attention(
+                ticket.repo, ticket.ticket_id, DEDUPE_DROPPED, connection=connection
+            )
+        elif job.state not in ("queued", "running") and not _harness_job_active(
+            connection, (ticket.repo.lower(), ticket.ticket_id)
+        ):
             self.flag_attention(
                 ticket.repo,
                 ticket.ticket_id,
                 DEDUPE_DROPPED,
                 f"{request.action} for comment {request.source_comment_id} matched "
                 f"finished job {job.id} ({job.state}); nothing was queued",
+                connection=connection,
             )
-
-    def _harness_active(self, ticket: TrackedTicket) -> bool:
-        with self._connect() as connection:
-            return _harness_job_active(connection, (ticket.repo.lower(), ticket.ticket_id))
 
     def _enqueue_step(
         self,
