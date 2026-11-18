@@ -32,6 +32,7 @@ from lib import (
     skill_preflight,
     telemetry,
     usage_probe,
+    usage_readings,
     waiter,
     worktrees,
 )
@@ -68,7 +69,7 @@ from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
-from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.machines_yml import MachinesConfig, default_account, load_machines_yml
 from lib.orch_yml import (
     OrchConfig,
     approvals,
@@ -181,6 +182,7 @@ commands:
   settings         apply device settings asked for in Mission Control (#777)
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
+  usage            key orch.db's usage readings on the account (migrate)
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -516,6 +518,13 @@ retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH] [--machines PATH]
   (#663). Linear tickets are out of scope.
   Prints the new comment id. Exits 2 on a bad ticket or empty reason, 1
   when refused or the post fails.
+
+usage migrate [--db PATH]
+  Key the usage readings on the account (#772). Takes the labelled backup
+  usage-accounts (as db-backup does) first, then adds usage_readings.account
+  filled with <harness>-default and the account-keyed tables. `orch poll`
+  runs it at start. Says whether it migrated; a second run changes nothing.
+  --db defaults to ORCH_DB. Exit 1 when the backup or the migration fails.
 """
 
 
@@ -577,6 +586,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(status_main, argv[1:])
     if argv[0] == "retry":
         return _call(_retry, argv[1:])
+    if argv[0] == "usage":
+        return _call(_usage, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -974,6 +985,15 @@ def _poll(argv: list[str]) -> int:
                 create=False,
                 machines_path=args.machines,
             )
+            try:
+                if _migrate_usage(path):
+                    print(f"orch poll: migrated usage readings in {path} (#772)", file=sys.stderr)
+            except (BackupError, OSError, sqlite3.Error) as exc:
+                print(
+                    f"orch poll: usage migration not done ({' '.join(str(exc).split())}); "
+                    "readings keep the harness-wide shape",
+                    file=sys.stderr,
+                )
             pusher, push_seconds = _dashboard_pusher(path, args.orch)
             after_poll = _AfterPoll(
                 CycleBackup(
@@ -1166,6 +1186,31 @@ def _db_backup(argv: list[str]) -> int:
     for old in pruned:
         print(f"pruned {old}")
     return 0
+
+
+def _usage(argv: list[str]) -> int:
+    parser = _Parser(prog="orch usage", add_help=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    migrate = commands.add_parser("migrate")
+    migrate.add_argument("--db", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        migrated = _migrate_usage(path)
+    except (BackupError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch usage migrate: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    if migrated:
+        print(f"migrated {path}")
+    else:
+        print(f"{path} already migrated")
+    return 0
+
+
+def _migrate_usage(path: Path) -> bool:
+    if not path.exists():
+        raise BackupError(f"database {path} does not exist")
+    return usage_readings.migrate(path, lambda: sqlite3.connect(path, timeout=30))
 
 
 def _restore_db(argv: list[str]) -> int:
@@ -2168,6 +2213,7 @@ def _job_run_command(argv: list[str]) -> int:
         environ=environment,
         worker_env=placed.remote,
         device=placed.device.name,
+        account=placed.device.account_for(owner) or default_account(owner),
         guard=lambda connection: require_latest_claim(connection, args.job_id, claim_proof),
         skills_root=None if factory_root is None else f"{factory_root}/skills",
     )
