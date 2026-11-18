@@ -13,9 +13,9 @@ any harness. Inside that transaction a pool given `machines_path` reads
 machines.yml as it is now, and the file can only narrow placement live: it
 disables a device, drains it or lowers its slot_max, so a settings change
 written under the same lock (lib/settings_apply.py) stops the next claim
-even in a process that loaded the file earlier (#777). Enabling a device,
-clearing drain or raising slot_max takes effect when the process restarts
-on the new file.
+even in a process that loaded the file earlier (#777). The pool keeps the
+strictest setting it has seen for each device until the process restarts,
+so enabling a device, clearing drain or raising slot_max waits for a restart.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -221,6 +221,16 @@ def _file_key(path: Path) -> FileKey:
     return info.st_ino, info.st_mtime_ns, info.st_size
 
 
+Settings = tuple[bool, bool, int | None]
+
+
+def _stricter(seen: Settings | None, device: Device) -> Settings:
+    if seen is None:
+        return device.enabled, device.drain, device.slot_max
+    limits = [s for s in (seen[2], device.slot_max) if s is not None]
+    return seen[0] and device.enabled, seen[1] or device.drain, min(limits, default=None)
+
+
 def _narrowed(device: Device, enabled: bool, drain: bool, slot_max: int | None) -> Device:
     if device.slot_max is not None and slot_max is not None:
         slot_max = min(device.slot_max, slot_max)
@@ -247,9 +257,8 @@ class DevicePool:
         self.queue = queue
         self.config = config
         self.machines_path = machines_path
-        self._file_settings: tuple[
-            tuple[FileKey, FileKey], dict[str, tuple[bool, bool, int | None]]
-        ] | None = None
+        self._file_key: tuple[FileKey, FileKey] | None = None
+        self._strictest: dict[str, Settings] = {}
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -306,16 +315,16 @@ class DevicePool:
         if self.machines_path is None:
             return self.config
         key = (_file_key(self.machines_path), _file_key(overlay_path(self.machines_path)))
-        if self._file_settings is None or self._file_settings[0] != key:
+        if self._file_key != key:
+            self._file_key = key
             try:
                 current, findings = load_machines_yml(self.machines_path)
             except (OSError, ValueError):
                 current, findings = None, []
-            errors = any(f.severity == "error" for f in findings)
-            self._file_settings = (key, {} if current is None or errors else {
-                d.name: (d.enabled, d.drain, d.slot_max) for d in current.devices
-            })
-        settings = self._file_settings[1]
+            if current is not None and not any(f.severity == "error" for f in findings):
+                for d in current.devices:
+                    self._strictest[d.name] = _stricter(self._strictest.get(d.name), d)
+        settings = self._strictest
         return replace(self.config, devices=tuple(
             _narrowed(d, *settings[d.name]) if d.name in settings else d
             for d in self.config.devices

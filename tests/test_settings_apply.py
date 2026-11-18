@@ -806,3 +806,111 @@ devices:
     assert stale.used().get("box", 0) <= loaded(machines).device("box").slot_max
     fresh = DevicePool(queue, loaded(machines), machines_path=machines)
     assert sum(fresh.claim("claude") is not None for _ in range(7)) == 1
+
+
+def test_an_unrestarted_waiter_keeps_a_disable_it_saw_through_a_later_enable(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(ENABLE_PC.replace("enabled: false", "enabled: true"), encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    waiter = DevicePool(queue, loaded(machines), machines_path=machines)
+    transport = SignalTransport()
+    monitor = DeviceMonitor(DevicePool(queue, loaded(machines), machines_path=machines),
+                            loaded(machines), transport, machines_path=machines,
+                            alive=lambda pid, start: pid is not None)
+    dispatcher = Dispatcher(queue.path, queue, trusted_logins=TRUSTED_LOGINS,
+                            devices=monitor, review_actions=FakeReviewActions(),
+                            grok_delivery=FakeGrokDelivery())
+    (tmp_path / "state").mkdir()
+
+    def applier(run):
+        return Applier(machines, tmp_path / "state", tmp_path / "deploy", "maxharris1", {},
+                       ("poller",), ("waiter-claude-bot",),
+                       settings_apply.claim_lock(queue.path), run=run)
+
+    def poller_restarted(argv, environ, log):
+        monitor.reload()
+        return 0
+
+    disable = applier(poller_restarted).apply(settings_apply.SettingsRequest(
+        "disable-request-123456", "maxharris1", "2026-11-17T10:00:00Z",
+        "pc", "enabled", True, False))
+    assert (disable.result, disable.pending) == ("pending", ("waiter-claude-bot",)), disable
+    job = remote.enqueue(queue, "claude", "1", timeout=5400)
+    assert waiter.claim("claude") is None, "the waiter saw pc disabled"
+    claims = []
+
+    def poller_still_finishing_its_disabled_cycle(argv, environ, log):
+        claimed = waiter.claim("claude")
+        claims.append(None if claimed is None else claimed[1].device)
+        if claimed is not None:
+            waiter.attach_runner(job, owner="claude", pid=os.getpid(), start=None,
+                                 alive=lambda pid, start: pid is not None)
+            waiter.attach_worker(job, owner="claude", remote=True,
+                                 tag="0123456789abcdef0123456789abcdef")
+            monitor.reconcile(100.0, 900.0, dispatcher._device_lost)
+        return 0
+
+    enable = applier(poller_still_finishing_its_disabled_cycle).apply(
+        settings_apply.SettingsRequest("enable-request-123456", "maxharris1",
+                                       "2026-11-17T10:00:00Z", "pc", "enabled", False, True))
+
+    assert (enable.result, enable.pending) == ("pending", ("waiter-claude-bot",)), enable
+    assert claims == [None], "the unrestarted waiter keeps pc disabled"
+    assert remote.state(queue, job) == "queued"
+    assert remote.job_events(queue, job) == [], "never lost"
+    assert transport.signals == [], "no worker was signalled"
+    restarted = DevicePool(queue, loaded(machines), machines_path=machines).claim("claude")
+    assert restarted is not None and restarted[1].device == "pc", "a restarted waiter places on pc"
+
+
+def test_an_unrestarted_waiter_never_places_past_the_lowest_slot_max_it_saw(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text("""\
+devices:
+  - name: box
+    local: true
+    enabled: true
+    slot_max: 6
+    harnesses: {claude: claude-bot}
+""", encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    stale = DevicePool(queue, loaded(machines), machines_path=machines)
+    applier = Applier(machines, tmp_path, tmp_path / "deploy", "maxharris1", {}, (),
+                      ("poller", "waiter-claude-bot"), settings_apply.claim_lock(queue.path))
+
+    def apply(field, expect, value):
+        entry = applier.apply(settings_apply.SettingsRequest(
+            f"request-{field}-{value}-123456", "maxharris1", "2026-11-17T10:00:00Z",
+            "box", field, expect, value))
+        assert (entry.result, entry.pending) == ("pending", ("poller", "waiter-claude-bot"))
+
+    apply("slot_max", 6, 1)
+    apply("enabled", True, False)
+    for n in range(7):
+        remote.enqueue(queue, "claude", str(n), timeout=5400)
+    assert stale.claim("claude") is None
+    apply("enabled", False, True)
+    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0
+    apply("slot_max", 1, 6)
+    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0
+    assert stale.used().get("box", 0) == 0
+    fresh = DevicePool(queue, loaded(machines), machines_path=machines)
+    assert sum(fresh.claim("claude") is not None for _ in range(7)) == 6
+
+
+def test_an_invalid_machines_yml_does_not_widen_an_unrestarted_waiter(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(ENABLE_PC.replace("enabled: false", "enabled: true"), encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    waiter = DevicePool(queue, loaded(machines), machines_path=machines)
+    remote.enqueue(queue, "claude", "1", timeout=5400)
+    machines.write_text(ENABLE_PC, encoding="utf-8")
+    assert waiter.claim("claude") is None, "the waiter saw pc disabled"
+
+    machines.write_text(ENABLE_PC.replace("slot_max: 3", "slot_max: 0"), encoding="utf-8")
+
+    assert waiter.claim("claude") is None, "an invalid file keeps pc disabled"
