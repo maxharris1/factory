@@ -13,6 +13,7 @@ import errno
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from lib.job_state import KILL_GRACE_SECONDS
 
 # #199 r1: every process of a local run carries this tag in its environment.
 RUN_TAG_ENV = "ORCH_RUN_TAG"
+# How long contain waits on loginctl, on busctl, and for the pid to enter its scope.
+CONTAIN_SECONDS = 2.0
 
 Log = Callable[[str], None]
 
@@ -36,6 +39,7 @@ class Process:
     start: str
     tagged: bool
     group: int | None = None
+    scope: str | None = None
 
 
 def processes(tag: str | None) -> dict[int, Process]:
@@ -44,7 +48,8 @@ def processes(tag: str | None) -> dict[int, Process]:
     From /proc where there is one, else from `ps` (macOS: no tag is read,
     so only the process tree counts there). With no tag, none is tagged.
     Each process's `group` is its session on Linux, its process group on
-    macOS (whose `ps` cannot name a session).
+    macOS (whose `ps` cannot name a session). Its `scope` (Linux) is the
+    last component of its cgroup v2 path.
     """
     if os.path.isdir("/proc/self"):
         return _proc_processes(tag)
@@ -77,9 +82,71 @@ def _proc_processes(tag: str | None) -> dict[int, Process]:
             except OSError:
                 pass
         found[int(name)] = Process(
-            int(name), int(fields[1]), fields[19], tagged, int(fields[3])
+            int(name), int(fields[1]), fields[19], tagged, int(fields[3]), scope_of(int(name))
         )
     return found
+
+
+def scope_of(pid: int) -> str | None:
+    """The last component of pid's cgroup v2 path, None when it cannot be read."""
+    try:
+        with open(f"/proc/{pid}/cgroup", "rb") as handle:
+            lines = handle.read().decode(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("0::"):
+            return line[3:].rstrip("/").rsplit("/", 1)[-1] or None
+    return None
+
+
+def scope_unit(tag: str) -> str:
+    return f"orch-run-{tag}.scope"
+
+
+def contain(pid: int, tag: str, log: Log) -> str | None:
+    """Move pid into a new systemd user scope named for the run; its name, or None.
+
+    Only on Linux, and only while the user has Linger on, so the user
+    manager outlives every login. Anything else leaves the run uncontained:
+    one log line says why and the caller keeps today's tracking.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    unit = scope_unit(tag)
+    try:
+        linger = _output(["loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"])
+        if linger.strip() != "yes":
+            raise _Uncontained(f"Linger is {linger.strip() or 'unset'} for this user")
+        _output([
+            "busctl", "--user", "call", "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+            "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
+            "2", "PIDs", "au", "1", str(pid), "CollectMode", "s", "inactive-or-failed", "0",
+        ])
+        deadline = time.monotonic() + CONTAIN_SECONDS
+        while scope_of(pid) != unit:
+            if time.monotonic() >= deadline:
+                raise _Uncontained(f"pid {pid} did not enter {unit}")
+            time.sleep(0.01)
+    except (_Uncontained, OSError, subprocess.SubprocessError) as exc:
+        log(f"the run is uncontained (no systemd scope): {_one_line(exc)}")
+        return None
+    return unit
+
+
+class _Uncontained(Exception):
+    pass
+
+
+def _output(argv: list[str]) -> str:
+    done = subprocess.run(
+        argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=CONTAIN_SECONDS
+    )
+    if done.returncode != 0:
+        detail = " ".join(done.stderr.split())
+        raise _Uncontained(f"{argv[0]} exited {done.returncode}: {detail or 'no detail'}")
+    return done.stdout
 
 
 def run_tag(pid: int) -> str | None:
@@ -138,7 +205,10 @@ class Tree:
     `responsible` (macOS), an orphan whose responsible process is the root
     belongs to it. `responsible` returns None for a process that is
     gone or not this user's, and raises ProcessesUnknown when it cannot say.
-    With `session`, every process whose `group` it is belongs to it.
+    With `scope`, every process in that systemd scope belongs to it.
+    With `session`, a process whose `group` it is belongs to it while a member
+    is in that session: a session number is reused once its last process
+    exits, so it names the run only alongside a member proven otherwise.
     The root is taken by pid only on the first look; `known` (pid and start
     time) seeds the members instead, for a run this process did not start.
     After that a pid counts only by its start time, so a reused pid never
@@ -157,6 +227,7 @@ class Tree:
         responsible: Callable[[int], int | None] | None = None,
         known: Mapping[int, str] | None = None,
         session: int | None = None,
+        scope: str | None = None,
     ):
         self.root = root
         self.responsible = responsible
@@ -169,6 +240,7 @@ class Tree:
         self.looked = known is not None
         self.foreign: set[int] = set()
         self.session = session
+        self.scope = scope
 
     def track(self) -> dict[int, Process]:
         """Look again: the run's live processes, the root's own process included."""
@@ -181,6 +253,7 @@ class Tree:
         }
         if not self.looked and self.root in listing:
             members[self.root] = listing[self.root]
+        sessions = {process.group for process in members.values()}
         grown = True
         while grown:
             grown = False
@@ -189,12 +262,15 @@ class Tree:
                     continue
                 if (
                     process.tagged
-                    or (self.session is not None and process.group == self.session)
+                    or (self.scope is not None and process.scope == self.scope)
+                    or (self.session is not None and process.group == self.session
+                        and self.session in sessions)
                     or process.ppid in members
                     or self._adopted(process, me)
                     or self._disowned(process)
                 ):
                     members[process.pid] = process
+                    sessions.add(process.group)
                     grown = True
         self.known = {pid: process.start for pid, process in members.items()}
         self.looked = True

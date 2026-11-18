@@ -32,7 +32,9 @@ F2-02 records on the slot row who runs the job: `runner_pid` and
 was attempted, so the device must confirm the worker gone) and
 `worker_tag` (the random tag every process of that remote start carries,
 lib/remote.py, so a check never trusts a stored process number). #722
-adds `run_tag`: the tag every process of a box job's run carries. #80 adds
+adds `run_tag`: the tag every process of a box job's run carries, and #817
+`run_scope`: the systemd user scope the run was moved into on Linux (NULL
+for an uncontained run, lib/process_tree.py contain). #80 adds
 `autostart_pid` and `autostart_start`: the autostart waiter that claimed
 the job, if one did. #96 adds `run_token_hash`: the hash of the secret
 token the job's current `orch job run` holds (never the token itself). The
@@ -43,9 +45,10 @@ takes no new placement, for any harness, until its `until` time. #662
 adds `device_orphans`: the slot of a job lost with its device, moved there
 so the slot is free while its worker may still run. #679 reads it back:
 the monitor stops that worker once its device answers and forgets the row
-once the worker is gone. #722 keeps a lost box job's `run_tag` there,
-and `members`, every process of its run seen so far (pid and start time),
-so the monitor finds the run again after it restarts.
+once the worker is gone. #722 keeps a lost box job's `run_tag` (and #817
+its `run_scope`) there, and `members`, every process of its run seen so
+far (pid and start time), so the monitor finds the run again after it
+restarts.
 
 This module starts nothing and contacts no device.
 """
@@ -101,6 +104,8 @@ _SLOT_COLUMNS = (
     # #722: the RUN_TAG_ENV value every process of a box job's run carries
     # (lib/process_tree.py), so a lost run is found after its parents exit.
     ("run_tag", "TEXT"),
+    # #817: the systemd user scope every process of a box job's run is in.
+    ("run_scope", "TEXT"),
 )
 
 
@@ -119,6 +124,7 @@ class Placement:
     worker_tag: str | None = None
     autostart_pid: int | None = None
     autostart_start: str | None = None
+    run_scope: str | None = None
 
     @property
     def autostarted(self) -> bool:
@@ -149,6 +155,7 @@ class Orphan:
     worker_start: str | None = None
     run_tag: str | None = None
     members: Mapping[int, str] = field(default_factory=dict)
+    run_scope: str | None = None
 
 
 def choose_device(
@@ -502,6 +509,7 @@ class DevicePool:
         remote: bool = False,
         tag: str | None = None,
         run_tag: str | None = None,
+        run_scope: str | None = None,
         runner: int | None = None,
         proof: Proof | None = None,
     ) -> str | None:
@@ -545,8 +553,8 @@ class DevicePool:
         self._update_slot(
             job_id,
             owner,
-            "worker_pid = ?, worker_start = ?, run_tag = ?",
-            (pid, start, run_tag),
+            "worker_pid = ?, worker_start = ?, run_tag = ?, run_scope = ?",
+            (pid, start, run_tag, run_scope),
             guard=checked,
             proof=proof,
         )
@@ -584,7 +592,7 @@ class DevicePool:
             job_id,
             owner,
             "worker_pid = NULL, worker_start = NULL, remote_started = 0, worker_tag = NULL, "
-            "run_tag = NULL",
+            "run_tag = NULL, run_scope = NULL",
             (),
             guard=guard,
             proof=proof,
@@ -784,6 +792,7 @@ def _orphan(row: sqlite3.Row) -> Orphan:
         }
         if "members" in keys
         else {},
+        run_scope=_text(row["run_scope"]) if "run_scope" in keys else None,
     )
 
 
@@ -802,6 +811,7 @@ def _placement(row: sqlite3.Row) -> Placement:
         worker_tag=_text(row["worker_tag"]),
         autostart_pid=_int(row["autostart_pid"]),
         autostart_start=_text(row["autostart_start"]),
+        run_scope=_text(row["run_scope"]),
     )
 
 
@@ -843,6 +853,7 @@ _ORPHAN_PIDS = (
     ("worker_pid", "INTEGER"),
     ("worker_start", "TEXT"),
     ("run_tag", "TEXT"),
+    ("run_scope", "TEXT"),
 )
 
 

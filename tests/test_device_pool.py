@@ -631,14 +631,36 @@ def test_an_orphan_keeps_its_runner_and_worker_pids_and_a_legacy_table_gains_the
     assert pool.orphans()[0].worker_pid is None
 
     pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
-    pool.attach_worker(job.id, owner="claude", pid=12, start="w")
+    pool.attach_worker(job.id, owner="claude", pid=12, start="w", run_scope=SCOPE)
     with queue.connect() as connection:
         device_pool.orphan_slot(connection, job.id, 200.0)
 
-    lost = pool.orphans()[1]
+    legacy_row, lost = pool.orphans()
+    assert legacy_row.run_scope is None
     assert (lost.runner_pid, lost.runner_start, lost.worker_pid, lost.worker_start) == (
         11, "r", 12, "w",
     )
+    assert lost.run_scope == SCOPE
+
+
+SCOPE = f"orch-run-{'a' * 32}.scope"
+
+
+def test_a_slot_table_from_before_run_scope_gains_it_and_records_the_scope(
+    tmp_path: Path,
+) -> None:
+    pool, queue = make_pool(tmp_path, device("box", 1, "claude"))
+    with queue.connect() as connection:
+        connection.execute("ALTER TABLE device_slots DROP COLUMN run_scope")
+        connection.commit()
+    pool = DevicePool(queue, pool.config)
+    enqueue(queue, "claude", "1")
+    job, _ = pool.claim("claude")
+    pool.attach_runner(job.id, owner="claude", pid=11, start="r", alive=lambda *_: False)
+
+    pool.attach_worker(job.id, owner="claude", pid=12, start="w", run_scope=SCOPE)
+
+    assert pool.placement(job.id).run_scope == SCOPE
 
 
 def target_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue]:
