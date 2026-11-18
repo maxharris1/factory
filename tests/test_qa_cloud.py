@@ -51,7 +51,7 @@ class Lab:
         shares_usage_with: dict[str, str] | None = None,
     ):
         qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5)
-        qa = replace(qa, runners=tuple(item for item in qa.runners if item.name in runners))
+        qa = replace(qa, runners=tuple(item for name in runners for item in qa.runners if item.name == name))
         self.run = Harness(tmp_path, qa)
         self.fakes = {name: FakeRunner(name) for name in ("claude-cloud", "cursor-cloud")}
         self.head_outcome: dict[str, str] = {}
@@ -787,3 +787,82 @@ def test_paused_account_launches_no_new_lane_until_the_pause_ends(
     assert len(lab.fakes["claude-cloud"].launched) == 2
     assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("done",)]
     assert lab.header()["result"] == result
+
+
+class _Crash(BaseException):
+    pass
+
+
+OWED_ORDERS = [
+    pytest.param(("claude-cloud", "cursor-cloud"), RunnerOutage("down"), "cursor", id="fallback-limited"),
+    pytest.param(("cursor-cloud", "claude-cloud"), RunnerOutage("down"), "claude", id="reversed-fallback-limited"),
+    pytest.param(("claude-cloud", "cursor-cloud"), UsageLimit("at limit"), "cursor", id="both-limited"),
+]
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["queue", "queue-restart"])
+@pytest.mark.parametrize(("order", "first_error", "owed"), OWED_ORDERS)
+def test_a_limited_fallback_is_not_launched_until_its_recipient_jobs_are_claimed(
+    tmp_path: Path, order: tuple[str, str], first_error: Exception, owed: str, restart: bool
+) -> None:
+    original, fallback = order
+    lab = Lab(tmp_path, lanes=1, runners=order, shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2, runner=original)
+    lab.fakes[original].launch_errors.append(first_error)
+    lab.fakes[fallback].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    build = _build(lab, owed)
+    lab.run.now[0] = 1301
+    if restart:
+        lab.worker = lab.new_worker()
+    lab.fakes[original].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", build) == [("queued",)]
+
+    lab.run.now[0] = 1700
+    if restart:
+        lab.worker = lab.new_worker()
+    lab.fakes[original].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    claimed = lab.run.queue.claim(owed)
+    assert claimed is not None and claimed.id == build
+    lab.run.now[0] = 2100
+    lab.fakes[original].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes[fallback].launched) == 1
+    assert lab.fakes[original].launched == []
+
+
+def test_a_lane_moved_to_a_limited_fallback_before_a_crash_waits_after_restart(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(RunnerOutage("down"))
+    lab.fakes["cursor-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+
+    lab.run.now[0] = 1301
+    lab.fakes["claude-cloud"].launch_errors.append(RunnerOutage("down"))
+    lab.fakes["cursor-cloud"].launch_errors.append(_Crash())
+    with pytest.raises(_Crash):
+        lab.worker.tick()
+    assert [row[5] for row in lab.lanes()] == ["cursor-cloud"]
+
+    build = _build(lab, "cursor")
+    lab.worker = lab.new_worker()
+    lab.tick(2)
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("running",)]
+
+    claimed = lab.run.queue.claim("cursor")
+    assert claimed is not None and claimed.id == build
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes["cursor-cloud"].launched) == 1

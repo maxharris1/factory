@@ -447,7 +447,7 @@ class QaWorker:
         )
         runner = row.runner
         with self.queue.connect() as connection:
-            if self._paused(connection, runner, self.queue.now()) is not None:
+            if self._yields(connection, job.id, runner, self.queue.now()) is not None:
                 return "deferred"
             connection.execute(
                 "UPDATE qa_lanes SET launch_called_at = ? WHERE lane_id = ?", (self.queue.now(), row.lane_id)
@@ -463,7 +463,7 @@ class QaWorker:
                 self._backoff[runner] = self.queue.now() + BACKOFF_SECONDS
                 if isinstance(exc, UsageLimit) and runner in self.shares_usage_with:
                     limited.append(runner)
-                following = self._next_runner(plan, runner, {self.shares_usage_with[name] for name in limited})
+                following = self._next_runner(job, plan, runner, {self.shares_usage_with[name] for name in limited})
                 if following is None or not self._move(row, following):
                     self._requeue(job, plan, runner, exc, limited)
                     return "requeued"
@@ -625,7 +625,7 @@ class QaWorker:
             connection.commit()
         return moved
 
-    def _next_runner(self, plan: RunPlan, runner: str, spent: set[str]) -> str | None:
+    def _next_runner(self, job: Job, plan: RunPlan, runner: str, spent: set[str]) -> str | None:
         if plan.detail.arm != "primary" or plan.qa.shootout:
             return None
         names = [item.name for item in plan.qa.runners]
@@ -637,7 +637,7 @@ class QaWorker:
                     name for name in following
                     if name in self.runners
                     and self.shares_usage_with.get(name) not in spent
-                    and self._paused(connection, name, now) is None
+                    and self._yields(connection, job.id, name, now) is None
                 ),
                 None,
             )
@@ -653,16 +653,20 @@ class QaWorker:
         limit = self._paused(connection, runner, now)
         if limit is not None:
             return f"{recipient}: {lane_limit.label(limit)}"
-        last = connection.execute(
-            "SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-requeued' ORDER BY id DESC LIMIT 1",
-            (job_id,),
-        ).fetchone()
-        causes = (entry.partition(":") for entry in (last["detail"] if last else "").split(","))
-        if any(cause == UsageLimit.__name__ and self.shares_usage_with.get(name) == recipient
-               for name, _, cause in causes):
-            if claim_order(connection, recipient, now=now):
-                return f"behind queued {recipient} jobs"
+        if recipient in self._owed(connection, job_id) and claim_order(connection, recipient, now=now):
+            return f"behind queued {recipient} jobs"
         return None
+
+    def _owed(self, connection: sqlite3.Connection, job_id: str) -> set[str]:
+        rows = connection.execute(
+            "SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-requeued'", (job_id,)
+        ).fetchall()
+        return {
+            self.shares_usage_with[name]
+            for row in rows
+            for name, _, cause in (entry.partition(":") for entry in row["detail"].split(","))
+            if cause == UsageLimit.__name__ and name in self.shares_usage_with
+        }
 
     def _plan(self, job: Job) -> RunPlan:
         detail = Detail.of(json.loads(job.request.detail or "{}"))
