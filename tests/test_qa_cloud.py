@@ -27,8 +27,8 @@ from tests.qa_support import (
     REPO,
     SIGNATURE,
     STORE,
+    FakeStorage,
     Harness,
-    SigningStorage,
     qa_config,
     ready,
     scenarios,
@@ -77,7 +77,7 @@ class Lab:
         self.broken: dict[tuple[int, int], Callable[[dict], None]] = {}
         self.silent: set[tuple[int, int]] = set()
         self.posted: dict[str, tuple[int, str]] = {}
-        self.storage = SigningStorage()
+        self.storage = FakeStorage()
         self.logs: list[str] = []
         self.cap = cap
         self.shares_usage_with = shares_usage_with or {}

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import tarfile
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +12,7 @@ from pathlib import Path
 from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.factory_md import QaConfig, QaLane, QaRunner
 from lib.orch_yml import Approvals
-from lib.qa_storage import DownloadLink, UploadLink
+from lib.qa_storage import DownloadLink, StorageError, UploadLink
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, factory
 
@@ -23,9 +25,14 @@ SIGNATURE = "sig-7f3c9e1d"
 STORE = "https://store.invalid"
 
 
-class SigningStorage:
-    def __init__(self) -> None:
+class FakeStorage:
+    """Signs links tagged with SIGNATURE and serves `objects` as the bucket."""
+
+    def __init__(self, objects: dict[str, bytes] | None = None) -> None:
+        self.objects = {} if objects is None else objects
         self.signed: list[tuple[str, str, int]] = []
+        self.fetched: list[str] = []
+        self.fail: list[Exception] = []
 
     def sign_upload(self, key: str, max_bytes: int, expires_s: int) -> UploadLink:
         self.signed.append(("upload", key, expires_s))
@@ -37,7 +44,24 @@ class SigningStorage:
         return DownloadLink(key, expires_s, url=f"{STORE}/{key}?down={SIGNATURE}")
 
     def fetch(self, key: str, dest: Path, max_bytes: int) -> bool:
-        raise AssertionError("signing only")
+        self.fetched.append(key)
+        if self.fail:
+            raise self.fail.pop(0)
+        data = self.objects.get(key)
+        if data is None:
+            return False
+        if len(data) > max_bytes:
+            raise StorageError(f"fetch {key}: over {max_bytes} bytes")
+        dest.write_bytes(data)
+        return True
+
+
+def bundle(*members: tuple[tarfile.TarInfo, bytes | None]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for info, data in members:
+            tar.addfile(info, None if data is None else io.BytesIO(data))
+    return buf.getvalue()
 
 
 def qa_config(*, shootout: bool = False, paths: tuple[str, ...] = (), full_rerun_lines: int = 400) -> QaConfig:
