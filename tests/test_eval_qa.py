@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from lib import cli
+from lib.dispatcher import CIResult, Comment
 from lib.eval_report import build_metrics, render_metrics, render_qa
+from lib.poll_source import _linear_comment
+from tests.qa_support import REPO as QA_REPO
+from tests.qa_support import TICKET as QA_TICKET
+from tests.qa_support import HEAD_A, Harness, qa_config, qa_report, ready, scenarios, verdict
 from tests.test_dispatcher import setup
 
 REPO = "owner/repo"
@@ -204,3 +210,107 @@ def test_cli_prints_the_qa_section_after_the_metrics(tmp_path: Path, capsys) -> 
     assert capsys.readouterr().out == render_metrics(metrics, build_metrics(baseline)) + (
         "qa no runs in the window\n"
     )
+
+
+def test_a_fail_on_a_head_the_reviewer_approved_counts_while_ci_is_red(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config())
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1")), head=HEAD_A)
+    run.poll()
+    run.post("101", qa_report(HEAD_A, "FAIL"))
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("v1", verdict(HEAD_A, "APPROVE"))
+    snapshot = run.thread.snapshot
+    run.thread.snapshot = lambda: replace(snapshot(), ci={HEAD_A: CIResult("failure")})
+    run.poll()
+
+    assert run.rows("SELECT outcome FROM handled_comments WHERE comment_id = 'v1'") == [
+        ("approve-ci-red",)
+    ]
+    lines = render_qa(build_metrics(run.queue.path)).splitlines()
+    assert "fail-on-approved-head 1" in lines
+
+
+def test_a_fail_on_a_head_the_reviewer_revised_does_not_count(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config())
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1")), head=HEAD_A)
+    run.poll()
+    run.post("101", qa_report(HEAD_A, "FAIL"))
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("v1", verdict(HEAD_A, "REVISE"))
+    run.poll()
+
+    assert run.rows("SELECT verdict FROM verdict_heads WHERE comment_id = 'v1'") == [("REVISE",)]
+    lines = render_qa(build_metrics(run.queue.path)).splitlines()
+    assert "fail-on-approved-head 0" in lines
+
+
+def _shootout_pair(run: Harness, comments: list[Comment]) -> None:
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1")), head=HEAD_A)
+    run.poll()
+    run.thread.comments.extend(comments)
+    run.poll()
+
+
+def _disagreed(db: Path) -> list[str]:
+    return [line for line in render_qa(build_metrics(db)).splitlines() if line.startswith("disagreed ")]
+
+
+def test_a_disagreeing_linear_pair_links_both_recorded_linear_comments(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config(shootout=True))
+    issue = "https://linear.app/acme/issue/AUT-763/qa"
+    run.thread.base = replace(
+        run.thread.base, ticket_id="AUT-763", source_issue="AUT-763",
+        linear_issue_id="linear-issue-id", ticket_url=issue,
+    )
+    run.dispatcher.trusted_logins["linear"] = {"linear:qa-user": frozenset({"grok-bot"})}
+    pass_id, fail_id = "b8e4bbf4-57e2-4de0-9be0-b4f8d6616f49", "59c72632-2c51-4ac9-a7f6-a1b05ca33b63"
+    _shootout_pair(
+        run,
+        [
+            _linear_comment(
+                {
+                    "id": comment_id,
+                    "body": qa_report(HEAD_A, result, runner=runner, arm=arm),
+                    "createdAt": "1970-01-01T00:17:10Z",
+                    "user": {"id": "qa-user"},
+                    "url": f"{issue}#comment-{comment_id}",
+                }
+            )
+            for comment_id, result, runner, arm in (
+                (pass_id, "PASS", "claude-cloud", "primary"),
+                (fail_id, "FAIL", "cursor-cloud", "shootout"),
+            )
+        ],
+    )
+
+    assert _disagreed(run.queue.path) == [
+        f"disagreed {QA_REPO} AUT-763 {HEAD_A[:12]}"
+        f" claude-cloud PASS {issue}#comment-{pass_id}"
+        f" cursor-cloud FAIL {issue}#comment-{fail_id}"
+    ]
+
+
+def test_a_disagreeing_pair_keeps_its_pr_after_the_ticket_moves_to_another_pr(
+    tmp_path: Path,
+) -> None:
+    run = Harness(tmp_path, qa_config(shootout=True))
+    _shootout_pair(
+        run,
+        [
+            Comment(id=comment_id, author="maxharris1", body=body, created_at=run.now[0])
+            for comment_id, body in (
+                ("101", qa_report(HEAD_A, "PASS", runner="claude-cloud")),
+                ("102", qa_report(HEAD_A, "FAIL", runner="cursor-cloud", arm="shootout")),
+            )
+        ],
+    )
+    run.thread.base = replace(run.thread.base, pr_number="813")
+    run.poll()
+
+    assert _disagreed(run.queue.path) == [
+        f"disagreed {QA_REPO} {QA_TICKET} {HEAD_A[:12]}"
+        f" claude-cloud PASS https://github.com/{QA_REPO}/pull/812#issuecomment-101"
+        f" cursor-cloud FAIL https://github.com/{QA_REPO}/pull/812#issuecomment-102"
+    ]

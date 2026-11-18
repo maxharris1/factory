@@ -140,12 +140,15 @@ render_qa prints the QA section (#794) after the metrics, for the current
 snapshot only, from qa_runs rows started in the window with a scope in
 QA_SCOPES. Each figure is split by runner: runs by
 scope (any state), PASS, FAIL and BLOCKED among reported runs, the median
-minutes from started_at to finished_at, FAILs on a head with an accepted
-reviewer APPROVE (verdict_heads, matched by sha prefix), and wrong FAILs
-and wrong PASSes from the ruling column. A runner with no ruled run, or
-a snapshot without the column, prints not ruled. A head with a reported
-primary and a reported shootout run is a pair, and each disagreeing pair
-lists both QA comment links. A window with no run prints one line.
+minutes from started_at to finished_at, FAILs on a head with a trusted
+reviewer APPROVE (verdict_heads.verdict, matched by sha prefix, whatever
+CI did; a row from before that column counts when an acceptance or ship
+record names it), and wrong FAILs and wrong PASSes from the ruling column.
+A runner with no ruled run, or a snapshot without the column, prints not
+ruled. A head with a reported primary and a reported shootout run is a
+pair, and each disagreeing pair lists both QA comment links: the link
+comment_links recorded, else a GitHub link on the QA job's PR, else on
+the ticket's PR. A window with no run prints one line.
 
 This module does not correct, reflect, run blinded evals, or maintain.
 """
@@ -1918,6 +1921,8 @@ class _QaRow(NamedTuple):
     started_at: float
     finished_at: float | None
     ruling: str | None
+    link: str | None
+    job_pr: str | None
 
     @property
     def reported(self) -> bool:
@@ -1927,16 +1932,29 @@ class _QaRow(NamedTuple):
 def _qa(connection: sqlite3.Connection, tables: set[str], window: MetricWindow) -> Qa | Unrecorded:
     if "qa_runs" not in tables:
         return _missing("qa_runs")
-    ruling = "ruling" if "ruling" in _columns(connection, "qa_runs") else "NULL"
-    clause, bounds = window.sql("started_at")
+    ruling = "q.ruling" if "ruling" in _columns(connection, "qa_runs") else "NULL"
+    clause, bounds = window.sql("q.started_at")
+    link = (
+        """(SELECT l.link FROM comment_links l WHERE l.repo = lower(q.repo)
+            AND l.ticket_id = q.ticket_id AND l.comment_id = q.comment_id)"""
+        if "comment_links" in tables
+        else "NULL"
+    )
+    job_pr = (
+        """(SELECT json_extract(j.detail, '$.pr_number') FROM jobs j
+            WHERE j.id = q.job_id AND json_valid(j.detail))"""
+        if "jobs" in tables
+        else "NULL"
+    )
     rows = [
         _QaRow(*row)
         for row in connection.execute(
             f"""
-            SELECT lower(repo), ticket_id, head, runner, arm, scope, state, result, comment_id,
-                   started_at, finished_at, {ruling}
-            FROM qa_runs WHERE scope IN {QA_SCOPES} AND {clause}
-            ORDER BY started_at, rowid
+            SELECT lower(q.repo), q.ticket_id, q.head, q.runner, q.arm, q.scope, q.state,
+                   q.result, q.comment_id, q.started_at, q.finished_at, {ruling},
+                   {link}, {job_pr}
+            FROM qa_runs q WHERE q.scope IN {QA_SCOPES} AND {clause}
+            ORDER BY q.started_at, q.rowid
             """,
             bounds,
         )
@@ -2014,11 +2032,17 @@ def _approved_heads(
     for table in ("verdict_heads", "ship_intents", "review_events"):
         if table not in tables:
             return _missing(table)
+    approve = (
+        "v.verdict = 'APPROVE' OR (v.verdict IS NULL AND a.comment_id IS NOT NULL)"
+        if "verdict" in _columns(connection, "verdict_heads")
+        else "a.comment_id IS NOT NULL"
+    )
     heads: dict[tuple[str, str], list[str]] = defaultdict(list)
     for repo, ticket_id, head in connection.execute(
         f"""
         SELECT DISTINCT lower(v.repo), v.ticket_id, v.head FROM verdict_heads v
-        JOIN ({_approvals_sql(tables)}) a ON a.comment_id = v.comment_id
+        LEFT JOIN ({_approvals_sql(tables)}) a ON a.comment_id = v.comment_id
+        WHERE {approve}
         """
     ):
         heads[(str(repo), str(ticket_id))].append(str(head))
@@ -2048,7 +2072,7 @@ def _qa_pairs(
                 ticket_id,
                 head,
                 *(
-                    QaReported(row.runner, str(row.result), _qa_link(repo, pr, row.comment_id))
+                    QaReported(row.runner, str(row.result), _qa_link(row, pr))
                     for row in (primary, shootout)
                 ),
             )
@@ -2068,7 +2092,9 @@ def _qa_pr_numbers(connection: sqlite3.Connection, tables: set[str]) -> dict[tup
     }
 
 
-def _qa_link(repo: str, pr: str, comment_id: str | None) -> str:
-    if comment_id is None:
+def _qa_link(row: _QaRow, pr: str) -> str:
+    if row.comment_id is None:
         return "no-comment"
-    return f"https://github.com/{repo}/pull/{pr}#issuecomment-{comment_id}"
+    if row.link:
+        return row.link
+    return f"https://github.com/{row.repo}/pull/{row.job_pr or pr}#issuecomment-{row.comment_id}"

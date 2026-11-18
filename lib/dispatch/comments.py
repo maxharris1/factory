@@ -510,17 +510,20 @@ class CommentsMixin:
                         ticket.changed_lines
                         if _matching_head(head, ticket.current_head) is not None
                         else None,
+                        fields.get("verdict"),
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
                 """
                 INSERT INTO verdict_heads (
-                    repo, ticket_id, comment_id, head, review_round, posted_at, changed_lines
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, head, review_round, posted_at, changed_lines,
+                    verdict
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
                 SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at),
-                    changed_lines = COALESCE(verdict_heads.changed_lines, excluded.changed_lines)
+                    changed_lines = COALESCE(verdict_heads.changed_lines, excluded.changed_lines),
+                    verdict = COALESCE(verdict_heads.verdict, excluded.verdict)
                 """,
                 rows,
             )
