@@ -512,10 +512,9 @@ def _remove_oldest_closed_runs(
         except OSError as exc:
             skipped.append((run_id, f"cannot remove evidence folder ({exc.strerror or exc})"))
             try:
-                remaining = _size(root_fd, parts)
+                usage -= sizes[run_id] - _size(root_fd, parts)
             except OSError:
-                remaining = 0
-            usage -= sizes[run_id] - remaining
+                pass
             continue
         usage -= sizes[run_id]
         removed.append(PurePosixPath(*parts).as_posix())

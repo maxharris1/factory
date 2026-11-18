@@ -438,6 +438,35 @@ def test_partly_removed_run_counts_only_what_is_left(db: sqlite3.Connection, roo
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_unremovable_unmeasurable_run_frees_nothing(
+    db: sqlite3.Connection, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    oldest, middle, newest = (
+        _failed_run(db, root, f"m-{n}", "12", NOW - (5 - n) * DAY, size)
+        for n, size in ((1, 5000), (2, 1000), (3, 5000))
+    )
+    _closed(db, "12", "merged", NOW - DAY)
+    budget = _bytes(oldest)
+    real_rmtree = lib.qa_evidence.shutil.rmtree
+
+    def rmtree(path: str, *args: object, **kwargs: object) -> None:
+        if path == oldest.name:
+            oldest.chmod(0o000)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(lib.qa_evidence.shutil, "rmtree", rmtree)
+    try:
+        report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=budget)
+    finally:
+        oldest.chmod(0o700)
+
+    assert report.skipped == (("m-1", "cannot remove evidence folder (Permission denied)"),)
+    assert report.removed == ("Acme/Shop/12/m-2", "Acme/Shop/12/m-3")
+    assert [middle.exists(), newest.exists()] == [False, False]
+    assert _bytes(oldest) <= budget
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 def test_unmeasurable_run_is_reported_and_left(db: sqlite3.Connection, root: Path) -> None:
     folder = _failed_run(db, root, "m-1", "12", NOW - 3 * DAY, 1024)
     _closed(db, "12", "merged", NOW - DAY)
