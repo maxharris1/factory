@@ -459,6 +459,29 @@ def test_is_merged_validates_head_sha_even_on_an_open_pr(
         actions.is_merged(pr(), HEAD)
 
 
+def test_pull_head_reads_the_head_sha_at_call_time() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, served("pull-42-open.json"))
+
+    assert actions.pull_head("owner/repo", "42") == HEAD
+    assert gh.keys() == [PULL]
+
+
+@pytest.mark.parametrize(
+    "bad_sha",
+    [HEAD[:7], HEAD.upper(), "", None],
+    ids=["short", "uppercase", "empty", "null"],
+)
+def test_pull_head_refuses_a_head_that_is_not_a_full_sha(bad_sha: str | None) -> None:
+    actions, gh = adapter()
+    text = (FIXTURES / "pull-42-open.json").read_text()
+    replacement = "null" if bad_sha is None else f'"{bad_sha}"'
+    gh.route(PULL, GhResult(0, text.replace(f'"sha": "{HEAD}"', f'"sha": {replacement}'), ""))
+
+    with pytest.raises(GitHubAdapterError, match="pull request head"):
+        actions.pull_head("owner/repo", "42")
+
+
 def test_paginated_comments_with_tied_created_at_order_9_before_10() -> None:
     actions, gh = adapter()
     gh.route(COMMENTS, served("comments-tied-page-1.json", "comments-tied-page-2.json"))

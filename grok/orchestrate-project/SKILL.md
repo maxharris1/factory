@@ -107,12 +107,12 @@ Classify a builder's or reviewer's questions the same way, ask Max product quest
 
 ## Wakes
 
-One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.constants.GROK_WAKE_REASONS`, `clarify`, and the reasons and instructions that arrive inside another action's `detail`. `tests/test_grok_skill_wakes.py` fails when a wake has no row.
+One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.constants.GROK_WAKE_REASONS`, `clarify`, and the reasons and instructions inside another action's `detail`.
 
 | Wake | Cause | What to do |
 | --- | --- | --- |
 | `refused` | The feeder refused an issue whose body fails the intake template (`detail.defects`), or a bot's `kind=stuck` with `state=refused`. | Report stop `refused` once with the defects or the comment as evidence. |
-| `blocked` | A `verdict=BLOCKED`, an APPROVE on red CI while `review.start_before_ci` is off, a bot's `kind=stuck` with `state=blocked`, or the feeder holding a ticket stacked on open pull requests (`detail.pulls`). | Run Stalled ticket. A stacked feeder hold clears by itself when those pull requests merge. |
+| `blocked` | A `verdict=BLOCKED`, an APPROVE on red CI while `review.start_before_ci` is off, a bot's `kind=stuck` with `state=blocked`, or the feeder holding a ticket stacked on open pull requests (`detail.pulls`). | Run Stalled ticket. A stacked feeder hold clears when those pull requests merge. |
 | `capped` | A REVISE at the effective cap after the poller's own `review.auto_extra_rounds` rounds are spent, or a bot's `kind=stuck` with `state=capped`. | Run Stalled ticket. |
 | `stuck` | A job failed twice (`job_id` set), a device checkout still lagging past its wait, or a bot's `kind=stuck` comment. | Post `stuck_comment` when the ticket has none yet, then run Stalled ticket. |
 | `preflight-missing` | A `stuck` wake whose failed job's `skill_preflight` detail names a pinned skill file missing on the device (`preflight-missing: <path>`). | Run Stalled ticket. The cause is a skills deploy, then `orch retry`. |
@@ -128,6 +128,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `awaiting-ok` | `factory.md`'s `hold:` holds a `ship: merge` pull request. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that it waits on his `ok` or `/ok <sha>`. |
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
+| `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |
 
 ## Stalled ticket

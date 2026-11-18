@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from lib.brief.qa import RECEIPTS
 from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.factory_md import QaConfig, QaLane, QaRunner
 from lib.orch_yml import Approvals
@@ -60,6 +62,22 @@ def bundle(*members: tuple[tarfile.TarInfo, bytes | None]) -> bytes:
         for info, data in members:
             tar.addfile(info, None if data is None else io.BytesIO(data))
     return buf.getvalue()
+
+
+def receipts_bundle(
+    ids: Sequence[str], *, omit: Collection[str] = (), corrupt: Collection[str] = ()
+) -> tuple[bytes, list[dict]]:
+    members: list[tuple[tarfile.TarInfo, bytes | None]] = []
+    artifacts = []
+    for path in (f"{sid}/{name}" for sid in ids for name in RECEIPTS):
+        data = f"{path}\n".encode()
+        digest = "0" * 64 if path in corrupt else hashlib.sha256(data).hexdigest()
+        artifacts.append({"path": path, "sha256": digest, "size": len(data)})
+        if path not in omit:
+            info = tarfile.TarInfo(path)
+            info.size = len(data)
+            members.append((info, data))
+    return bundle(*members), artifacts
 
 
 def qa_config(*, shootout: bool = False, paths: tuple[str, ...] = (), full_rerun_lines: int = 400) -> QaConfig:

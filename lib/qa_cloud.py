@@ -17,19 +17,22 @@ import sqlite3
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from lib import lane_limit
 from lib.brief.qa import AFTER_SCREENSHOT, PASS_OUTPUT, LaneFacts, Scenario, pack_ids, render_qa_brief
 from lib.dispatch.constants import ORCHESTRATOR
-from lib.dispatch.qa import record_runner_moved
+from lib.dispatch.qa import record_runner_moved, record_stale
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.factory_md import FactoryConfig, QaConfig
 from lib.orch_yml import QaStorage
-from lib.queue import QA_RECIPIENT, Job, SQLiteJobQueue, claim_order, job_from_row
-from lib.qa_evidence import EvidenceRefused, collect, lane_dir, record_evidence_dir, recycle, run_dir, stored
+from lib.queue import QA_RECIPIENT, Job, JobRequest, SQLiteJobQueue, claim_order, job_from_row
+from lib.qa_audit import AskedScenario, Gap, GapKind, LaneEvidence, audit
+from lib.qa_evidence import (
+    MANIFEST_NAME, EvidenceRefused, collect, lane_dir, record_evidence_dir, recycle, run_dir, stored,
+)
 from lib.qa_runners import Lane, Runner, RunnerOutage, UsageLimit
 from lib.qa_storage import Storage, StorageError, links_for_lane
 
@@ -52,6 +55,14 @@ _WORDS = {
     "needs-human": "Needs human",
 }
 _ON_BASE = ("regression", "base-check")
+_GAP_PHRASES: dict[GapKind, str] = {
+    "lane-commit": "the result names another commit",
+    "lane-method": "the result names another method",
+    "scenario-missing": "no lane reported it",
+    "artifact-missing": "a receipt it relies on is not in the evidence",
+    "artifact-mismatch": "a receipt does not match its listed hash or size",
+    "evidence-malformed": "the result or manifest is malformed",
+}
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,12 @@ class Decision:
     table: tuple[tuple[str, str, str], ...]
     findings: tuple[str, ...]
     gaps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Stale:
+    start: str
+    head: str
 
 
 def s_id(qa_id: str) -> str:
@@ -271,6 +288,52 @@ def decide(rows: Sequence[LaneRow], detail: Detail) -> Decision:
     return Decision(result, table, findings, tuple(gaps))
 
 
+def asked(detail: Detail) -> tuple[AskedScenario, ...]:
+    return tuple(
+        AskedScenario(id=sid, after=f"{sid}/{AFTER_SCREENSHOT}", pass_output=f"{sid}/{PASS_OUTPUT}")
+        for sid in map(s_id, detail.ids)
+    )
+
+
+def receipts(plan: RunPlan, rows: Sequence[LaneRow]) -> tuple[LaneEvidence, ...]:
+    return tuple(
+        LaneEvidence(
+            lane=row.lane_no,
+            commit=row.commit,
+            method=row.result["method"],
+            result=row.result,
+            manifest=_manifest(lane_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id, row.lane_no)),
+        )
+        for row in newest(rows).values()
+        if row.state == "reported" and row.result is not None
+    )
+
+
+def _manifest(folder: Path) -> Mapping:
+    try:
+        return json.loads((folder / MANIFEST_NAME).read_bytes())
+    except (OSError, ValueError):
+        return {}
+
+
+def audited(
+    decision: Decision, verdict: Literal["clean"] | tuple[Gap, ...], start: str, head: str
+) -> Decision | Stale:
+    if verdict == "clean":
+        return decision
+    if any(gap.kind == "head-moved" for gap in verdict):
+        return Stale(start, head)
+    lines = (f"{_where(gap)}{gap.kind}, {_GAP_PHRASES[gap.kind]}" for gap in verdict)
+    return replace(decision, result="BLOCKED", gaps=decision.gaps + tuple(dict.fromkeys(lines)))
+
+
+def _where(gap: Gap) -> str:
+    lane = None if gap.lane is None else f"lane {gap.lane}"
+    if gap.scenario is None:
+        return "" if lane is None else f"{lane}: "
+    return f"{qa_id(gap.scenario)}: " if lane is None else f"{qa_id(gap.scenario)} ({lane}): "
+
+
 def render_comment(
     plan: RunPlan | None,
     detail: Detail,
@@ -320,6 +383,7 @@ class QaWorker:
     base_commit: Callable[[str, str, str], str]
     post: Post
     storage: Callable[[str], Storage] | None = None
+    head: Callable[[str, int], str] | None = None
     max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
     shares_usage_with: Mapping[str, str] = field(default_factory=dict)
     log: Callable[[str], None] = lambda line: None
@@ -335,7 +399,7 @@ class QaWorker:
 
     def tick(self) -> None:
         self._recycle()
-        if not self.runners or self.storage is None:
+        if not self.runners or self.storage is None or self.head is None:
             return
         waiting: Counter[str] = Counter()
         try:
@@ -633,10 +697,39 @@ class QaWorker:
         decision = decide(rows, detail)
         latest = [row for row in newest(rows).values() if row.agent_id]
         lanes = [(row, self._describe(row)) for row in latest]
+        evidence = receipts(plan, rows)
+        current = self.head(job.request.repo, detail.pr)
+        verdict = audit(evidence, asked(detail), start_commit=detail.head, current_head=current)
+        outcome = audited(decision, verdict, detail.head, current)
+        if isinstance(outcome, Stale):
+            self._stale(job, detail, outcome)
+            return
+        for gap in () if verdict == "clean" else verdict:
+            self.log(f"qa audit {detail.run_id}: {gap.detail}")
         runner = rows[0].runner if rows else detail.runner
-        body = render_comment(plan, detail, decision, runner=runner, attempt=job.request.attempt, lanes=lanes)
+        body = render_comment(plan, detail, outcome, runner=runner, attempt=job.request.attempt, lanes=lanes)
         comment_id = self.post(job.request.repo, detail.pr, body, f"<!-- qa-run {detail.run_id} -->")
         self.queue.finish(job.id, owner=QA_RECIPIENT, handoff_comment_id=str(comment_id))
+        self._plans.pop(detail.run_id, None)
+
+    def _stale(self, job: Job, detail: Detail, stale: Stale) -> None:
+        self.log(f"qa run {detail.run_id}: head moved from {stale.start[:12]} to {stale.head[:12]}")
+        request = job.request
+        wake = JobRequest(
+            repo=request.repo, ticket_id=request.ticket_id, action="qa-head-moved", recipient="grok",
+            source_comment_id=request.source_comment_id, timeout_seconds=request.timeout_seconds,
+            generation=request.generation, head=stale.head,
+            detail=json.dumps({
+                "run_id": detail.run_id, "from": stale.start, "to": stale.head,
+                "link": f"https://github.com/{request.repo}/pull/{detail.pr}",
+            }),
+        )
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            record_stale(connection, detail.run_id, self.queue.now())
+            self.queue.enqueue_in_transaction(connection, wake, dedupe_key=f"qa-head-moved:{detail.run_id}")
+            connection.commit()
+        self.queue.finish(job.id, owner=QA_RECIPIENT, handoff_comment_id=None)
         self._plans.pop(detail.run_id, None)
 
     def _describe(self, row: LaneRow) -> str:
@@ -812,7 +905,7 @@ class QaWorker:
     def _run_cancelled(self, run_id: str) -> bool:
         with self.queue.connect() as connection:
             row = connection.execute("SELECT state FROM qa_runs WHERE run_id = ?", (run_id,)).fetchone()
-        return row is not None and row["state"] == "cancelled"
+        return row is not None and row["state"] in ("cancelled", "stale")
 
     def _active_jobs(self) -> list[Job]:
         with self.queue.connect() as connection:
