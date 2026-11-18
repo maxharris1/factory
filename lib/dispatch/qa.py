@@ -400,9 +400,21 @@ class QaMixin:
                 return True
         return False
 
+    def _record_unhandled_qa(self, ticket: TrackedTicket) -> None:
+        for comment in ticket.comments:
+            if comment.edited_at is not None or self._is_handled(ticket, comment.id):
+                continue
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if fields["kind"] == "qa":
+                self._mark_handled(ticket, comment.id, self._qa_record(ticket, comment, fields))
+
     def _held_qa(self, ticket: TrackedTicket, head: str) -> dict[str, object] | None:
         qa = ticket.factory.qa
         assert qa is not None
+        self._record_unhandled_qa(ticket)
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -425,11 +437,15 @@ class QaMixin:
             row["started_at"] + qa.timeout_minutes * 60
         ):
             return None
-        link = f"/qa/runs/{row['run_id']}"
         if row["state"] == "reported":
-            bodies = {comment.id: comment.body for comment in ticket.comments}
-            rows = _scenario_rows(bodies.get(row["comment_id"], ""))
+            report = next(
+                (comment for comment in ticket.comments if comment.id == row["comment_id"]),
+                Comment(id=row["comment_id"], author="", body="", created_at=0.0),
+            )
+            rows = _scenario_rows(report.body)
             passed = sum(verified for _qa_id, verified in rows)
+            evidence = _EVIDENCE.search(report.body)
+            link = evidence.group(1) if evidence else _comment_link(report)
             return {
                 "result": row["result"],
                 "passed": passed,
@@ -444,8 +460,7 @@ class QaMixin:
         return {
             "result": None,
             "reason": reason,
-            "evidence_link": link,
-            "summary": f"QA did not finish ({reason}). Evidence: {link}",
+            "summary": f"QA did not finish ({reason}).",
         }
 
     def _qa_job_failed(self, job: Job) -> None:

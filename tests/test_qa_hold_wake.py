@@ -14,6 +14,7 @@ from tests.qa_support import HEAD_A, Harness, qa_config, qa_report, ready, scena
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
 TABLE = "| qa-1 | Verified | ok |\n| qa-2 | Verified | ok |\n| qa-3 | Not verified | slow |\n"
+EVIDENCED = TABLE + "Evidence: https://qa.example/runs/q1\n"
 
 
 def held(tmp_path: Path, qa, **kwargs) -> Harness:
@@ -49,10 +50,6 @@ def wakes(run: Harness) -> list[dict]:
     ]
 
 
-def primary_run_id(run: Harness) -> str:
-    return run.rows("SELECT run_id FROM qa_runs WHERE arm = 'primary'")[0][0]
-
-
 def polls_until_wake(run: Harness, limit: int = 6) -> int:
     for count in range(1, limit + 1):
         run.poll()
@@ -64,11 +61,11 @@ def polls_until_wake(run: Harness, limit: int = 6) -> int:
 def test_a_reported_pass_names_the_result_counts_and_evidence_link(tmp_path: Path) -> None:
     run = held(tmp_path, qa_config())
     approve(run)
-    run.post("q1", qa_report(HEAD_A, "PASS", body=TABLE))
+    run.post("q1", qa_report(HEAD_A, "PASS", body=EVIDENCED))
     run.poll(4)
 
     [wake] = wakes(run)
-    link = f"/qa/runs/{primary_run_id(run)}"
+    link = "https://qa.example/runs/q1"
     assert wake["qa"] == {
         "result": "PASS",
         "passed": 2,
@@ -76,6 +73,32 @@ def test_a_reported_pass_names_the_result_counts_and_evidence_link(tmp_path: Pat
         "evidence_link": link,
         "summary": f"QA PASS: 2 of 3 scenarios passed. Evidence: {link}",
     }
+
+
+def test_a_report_with_no_evidence_line_links_the_report_itself(tmp_path: Path) -> None:
+    run = held(tmp_path, qa_config())
+    approve(run)
+    run.post("q1", qa_report(HEAD_A, "PASS", body=TABLE))
+    run.poll(4)
+
+    [wake] = wakes(run)
+    assert wake["qa"]["evidence_link"] == "comment:q1"
+
+
+def test_a_report_posted_before_the_timeout_supplies_the_wake_polled_after_it(
+    tmp_path: Path,
+) -> None:
+    run = held(tmp_path, replace(qa_config(), timeout_minutes=5))
+    approve(run)
+    run.poll()
+    [(started,)] = run.rows("SELECT started_at FROM qa_runs")
+    run.now[0] = started + 299
+    run.post("q1", qa_report(HEAD_A, "PASS", body=EVIDENCED))
+    run.now[0] = started + 301
+    run.poll(3)
+
+    [wake] = wakes(run)
+    assert (wake["qa"]["result"], wake["qa"]["passed"], wake["qa"]["total"]) == ("PASS", 2, 3)
 
 
 TODAY = {
@@ -133,12 +156,10 @@ def test_a_run_past_its_timeout_wakes_once_saying_qa_did_not_finish(tmp_path: Pa
     run.poll(5)
 
     [wake] = wakes(run)
-    link = f"/qa/runs/{primary_run_id(run)}"
     assert wake["qa"] == {
         "result": None,
         "reason": "timeout",
-        "evidence_link": link,
-        "summary": f"QA did not finish (timeout). Evidence: {link}",
+        "summary": "QA did not finish (timeout).",
     }
 
 
@@ -213,11 +234,7 @@ def test_a_shootout_run_changes_neither_the_wake_timing_nor_its_detail(
             count = polls_until_wake(run)
         except AssertionError:
             count = None
-        found = wakes(run)
-        for wake in found:
-            assert wake["qa"].pop("evidence_link") == f"/qa/runs/{primary_run_id(run)}"
-            wake["qa"].pop("summary")
-        return count, found
+        return count, wakes(run)
 
     without = drive(tmp_path / "without", False)
     assert without == drive(tmp_path / "with", True)
