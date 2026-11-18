@@ -87,36 +87,38 @@ class HoldsMixin:
                     at=self.queue.now(),
                 )
                 connection.commit()
+        detail = {
+            "project_bot": ticket.grok_bot,
+            "outcome": "awaiting-ok",
+            "pr": ticket.ticket_url or ticket.pr_number,
+            "pr_number": ticket.pr_number,
+            "post_to": ticket.ticket_url,
+            "head": head,
+            "approver": hold.approver,
+            "reasons": list(decision.reasons),
+            "held_paths": list(decision.paths),
+            "label": hold.label,
+            "clears_with": (
+                f"<!-- orch:v1 kind=ok head={head} --> from "
+                f"{hold.approver}"
+                + (
+                    f", or {hold.approver} removing {hold.label}"
+                    if decision.reasons == ("label",)
+                    else ""
+                )
+            ),
+        }
+        if ticket.factory.qa is not None:
+            qa = self._held_qa(ticket, head)
+            if qa is None:
+                return False, "awaiting-ok"
+            detail["qa"] = qa
         self.wake_grok_once(
             ticket,
             reason="awaiting-ok",
             source_comment_id=comment.id,
             head=head,
-            detail=json.dumps(
-                {
-                    "project_bot": ticket.grok_bot,
-                    "outcome": "awaiting-ok",
-                    "pr": ticket.ticket_url or ticket.pr_number,
-                    "pr_number": ticket.pr_number,
-                    "post_to": ticket.ticket_url,
-                    "head": head,
-                    "approver": hold.approver,
-                    "reasons": list(decision.reasons),
-                    "held_paths": list(decision.paths),
-                    "label": hold.label,
-                    "clears_with": (
-                        f"<!-- orch:v1 kind=ok head={head} --> from "
-                        f"{hold.approver}"
-                        + (
-                            f", or {hold.approver} removing {hold.label}"
-                            if decision.reasons == ("label",)
-                            else ""
-                        )
-                    ),
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
+            detail=json.dumps(detail, separators=(",", ":"), sort_keys=True),
         )
         return False, "awaiting-ok"
 

@@ -229,17 +229,17 @@ def _handled_ready_at_a_newer_head(board, pr) -> str:
     return "wrong-head-ready"
 
 
-def _handled_duplicate_go(board, pr) -> str:
+def _handled_untrusted_go(board, pr) -> str:
     pr.push(sha(2), ci="pending")
-    board.go(pr, "duplicate-go")
+    board.go(pr, "untrusted-go", author="stranger")
     board.poll()
-    assert board.outcome("duplicate-go") == "deduped-build"
-    return "duplicate-go"
+    assert board.outcome("untrusted-go") == "rejected-go-author"
+    return "untrusted-go"
 
 
 @pytest.mark.parametrize("omitted", [False, True])
 @pytest.mark.parametrize("upgrade", [False, True])
-@pytest.mark.parametrize("handled", [_handled_ready_at_a_newer_head, _handled_duplicate_go])
+@pytest.mark.parametrize("handled", [_handled_ready_at_a_newer_head, _handled_untrusted_go])
 def test_an_upgrade_never_counts_a_handled_non_verdict_as_the_reviews_verdict(
     tmp_path: Path, upgrade: bool, omitted: bool, handled
 ) -> None:
@@ -273,14 +273,14 @@ ORCHESTRATOR_QUESTIONS = (
 @pytest.mark.parametrize(
     ("body", "author", "outcome"),
     [
-        (GO.format(state="building"), "grok-login", "deduped-build"),
+        (GO.format(state="building"), "stranger", "rejected-go-author"),
         (PLAN.format(round=1, ac="met"), "claude-login", "rejected-plan-without-plan-job"),
         (ORCHESTRATOR_QUESTIONS, "grok-login", "no-questions"),
         (ANSWERS, "grok-login", "rejected-answers-without-question"),
         (RETRY.format(reason="Try again."), "grok-login", "rejected-retry-not-stuck"),
         (READY.format(head=sha(3)), "claude-login", "stale-ready-head"),
     ],
-    ids=["duplicate-go", "plan", "questions", "answers", "retry", "wrong-head-ready"],
+    ids=["untrusted-go", "plan", "questions", "answers", "retry", "wrong-head-ready"],
 )
 def test_a_hidden_handled_non_verdict_comment_never_answers_the_review(
     tmp_path: Path, body: str, author: str, outcome: str
