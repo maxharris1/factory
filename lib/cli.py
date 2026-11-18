@@ -33,6 +33,7 @@ from lib import (
     telemetry,
     usage_probe,
     usage_readings,
+    usage_record,
     waiter,
     worktrees,
 )
@@ -182,7 +183,7 @@ commands:
   settings         apply device settings asked for in Mission Control (#777)
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
-  usage            key orch.db's usage readings on the account (migrate)
+  usage            per-account usage readings: migrate orch.db, record an external reading (#772)
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -525,6 +526,20 @@ usage migrate [--db PATH]
   filled with <harness>-default and the account-keyed tables. `orch poll`
   runs it at start. Says whether it migrated; a second run changes nothing.
   --db defaults to ORCH_DB. Exit 1 when the backup or the migration fails.
+
+usage record --account ID --window five_hour|seven_day|weekly --used FRACTION
+             --resets-at EPOCH [--observed-at EPOCH] [--db PATH] [--machines PATH]
+  Store one usage reading for an account machines.yml declares with
+  harness: external (Grok, Cursor), whose usage no factory process can
+  read. --used is the used fraction, 0 to 1; weekly is stored as
+  seven_day. --resets-at is whole epoch seconds within 30 days of now.
+  --observed-at defaults to now and may be at most 300 seconds ahead.
+  A reading no newer than the stored one is not written: it prints
+  "kept newer reading" and exits 0. --db defaults to $ORCH_DB, --machines
+  to the checkout's machines.yml. Exits 2 and writes nothing on an
+  unknown or non-external account, a bad value, an unknown option, or a
+  usage_readings table without the account column (run orch usage
+  migrate first); 1 when the database cannot be written.
 """
 
 
@@ -1188,12 +1203,7 @@ def _db_backup(argv: list[str]) -> int:
     return 0
 
 
-def _usage(argv: list[str]) -> int:
-    parser = _Parser(prog="orch usage", add_help=True)
-    commands = parser.add_subparsers(dest="command", required=True)
-    migrate = commands.add_parser("migrate")
-    migrate.add_argument("--db", type=Path)
-    args = parser.parse_args(argv)
+def _usage_migrate(args: argparse.Namespace) -> int:
     try:
         path = _db_path(args.db)
         migrated = _migrate_usage(path)
@@ -2676,6 +2686,49 @@ def _move_db(argv: list[str]) -> int:
         print(f"orch move-db {args.command}: {exc}", file=sys.stderr)
         return 2 if args.command == "drained" else 1
     print(f"wrote {args.out}")
+    return 0
+
+
+def _usage(argv: list[str]) -> int:
+    parser = _Parser(prog="orch usage", add_help=True, allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    record = commands.add_parser("record", allow_abbrev=False)
+    record.add_argument("--account", required=True)
+    record.add_argument("--window", required=True)
+    record.add_argument("--used", required=True)
+    record.add_argument("--resets-at", required=True)
+    record.add_argument("--observed-at")
+    record.add_argument("--db", type=Path)
+    record.add_argument("--machines", type=Path)
+    migrate = commands.add_parser("migrate", allow_abbrev=False)
+    migrate.add_argument("--db", type=Path)
+    args, unknown = parser.parse_known_args(argv)
+    prog = f"orch usage {args.command}"
+    if unknown:
+        print(f"{prog}: refused: unknown arguments (not echoed)", file=sys.stderr)
+        return 2
+    if args.command == "migrate":
+        return _usage_migrate(args)
+    try:
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        reading = usage_record.parse(
+            machines,
+            account=args.account,
+            window=args.window,
+            used=args.used,
+            resets_at=args.resets_at,
+            observed_at=args.observed_at,
+            now=time.time(),
+        )
+        written = usage_record.store(_db_path(args.db), reading)
+    except (WaitError, ValueError) as exc:
+        print(f"{prog}: refused: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"recorded {reading.account} {reading.window}" if written else "kept newer reading")
     return 0
 
 
