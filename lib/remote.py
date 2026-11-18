@@ -1114,7 +1114,12 @@ _CHECKOUT = (
     'mkdir -p -- "$d" || fail "cannot make $d"; '
     'cd -- "$d" || fail "cannot enter $d"; '
     'if [ -n "$b" ]; then (umask 077 && cat > "$b") || fail "cannot write the brief $b"; fi; '
+    "exclude() { mkdir -p .git/info && for p in "
+    + " ".join(shlex.quote(f"/{name}") for name in (PID_FILE, start_record("*"), scope_record("*")))
+    + '; do grep -qxF -- "$p" .git/info/exclude 2>/dev/null '
+    '|| printf \'%s\\n\' "$p" >> .git/info/exclude || return 1; done; }; '
     "if [ -d .git ] && t=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
+    'exclude || fail "cannot write .git/info/exclude"; '
     f"printf '{_CHECKOUT_MARK} ok %s reused\\n' \"$t\"; exit 0; fi; "
     'git init -q . >/dev/null || fail "git init failed"; '
     "git remote remove origin >/dev/null 2>&1; "
@@ -1139,9 +1144,7 @@ _CHECKOUT = (
     "else "
     'git checkout -q --detach "$t" || fail "git checkout failed"; '
     "fi; "
-    "{ mkdir -p .git/info && "
-    "printf '%s\\n' /.orch-worker.pid '/.orch-worker-*.pid' >> .git/info/exclude; } "
-    '|| fail "cannot write .git/info/exclude"; '
+    'exclude || fail "cannot write .git/info/exclude"; '
     f"printf '{_CHECKOUT_MARK} ok %s new\\n' \"$t\""
 )
 
