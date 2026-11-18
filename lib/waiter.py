@@ -219,9 +219,7 @@ REMOTE_RECORD = "remote.json"
 STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
 HOME_RETRY_SECONDS = 60.0
-# #901: how often the waiter sweeps the factory.job containers of finished jobs.
 CONTAINER_SWEEP_SECONDS = 600.0
-FINISHED_STATES = frozenset({"done", "failed", "cancelled"})
 UNSTARTED_CLAIM = (
     "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
     "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
@@ -1160,12 +1158,6 @@ class Waiter:
         self._sweep_containers()
 
     def _sweep_containers(self) -> None:
-        """#901: remove finished jobs' factory.job containers on each device, every CONTAINER_SWEEP_SECONDS.
-
-        It catches the containers whose job's teardown never ran, as when
-        `orch job run` itself was killed. It visits the box and each enabled
-        remote device this waiter's bot logs in to, as that bot.
-        """
         now = self.clock()
         if now - self._containers_swept_at < CONTAINER_SWEEP_SECONDS:
             return
@@ -1179,19 +1171,19 @@ class Waiter:
                 runners.append((device.name, containers.remote_runner(self.transport, target)))
         lines: set[str] = set()
         for name, runner in runners:
-            for line in containers.sweep(runner, self._job_finished, name):
+            for line in containers.sweep(runner, self._job_state_name, name):
                 if line not in self._container_lines:
                     self.log(line)
                 lines.add(line)
         self._container_lines = lines
 
-    def _job_finished(self, job_id: str) -> bool | None:
+    def _job_state_name(self, job_id: str) -> str | None:
         try:
             state = retry_locked(lambda: self._job_state(job_id))
         except (QueueError, sqlite3.Error, OSError) as exc:
             self.log(f"job {job_id}: containers kept, its state is unreadable ({_one_line(exc)})")
-            return False
-        return None if state is None else state[0] in FINISHED_STATES
+            return "unreadable"
+        return None if state is None else state[0]
 
     def _remove_scratch_once_workers_exit(self) -> None:
         jobs = self.state_dir / "jobs"

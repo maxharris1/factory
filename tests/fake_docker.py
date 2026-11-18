@@ -1,21 +1,3 @@
-"""A fake `docker` for tests (#901). It never contacts a daemon.
-
-Containers live in the JSON file named by argv[1] as a list of
-`{"id": ..., "labels": {...}}`; every call is appended to `<state>.calls` as
-one JSON list of its arguments. The `Docker` helper writes a `docker`
-wrapper that passes that path, so the fake works where the environment is
-not passed on (tests/fake_ssh.py gives a "device" only PATH and HOME).
-A `<state>.down` file makes every call fail as a stopped daemon does.
-
-It understands the calls lib/containers.py makes and one the agent makes:
-
-* `run -d --label K=V ... IMAGE ...` adds a container and prints its id;
-* `ps -a [-q] [--filter label=K[=V]] [--format ...]` lists the containers
-  that match: their ids with -q, else `<id> <factory.job label value>`;
-* `rm -f [-v] ID...` removes those containers; an unknown id is ignored,
-  as `docker rm -f` does.
-"""
-
 from __future__ import annotations
 
 import fcntl
@@ -69,8 +51,6 @@ def main(state: Path, args: list[str]) -> int:
 
 
 class Docker:
-    """A fake `docker` in `<tmp_path>/fake-docker/bin`, with its state beside it."""
-
     def __init__(self, tmp_path: Path):
         root = tmp_path / "fake-docker"
         self.bin = root / "bin"

@@ -64,7 +64,6 @@ GONE = "gone"
 LOST = "lost"
 REFUSED = "refused"
 STOPPED = "stopped"
-UNCONFIRMED_STOP = "not confirmed stopped"
 BUSY_EXIT = 124
 
 Log = Callable[[str], None]
@@ -85,11 +84,11 @@ class FollowEnd:
     code: int | None = None
     detail: str = ""
     in_transit: bool = True
+    unconfirmed: bool = False
 
     @property
     def worker_ended(self) -> bool:
-        """The device saw the worker exit or vanish, so nothing of the run still runs there."""
-        return self.kind in (EXITED, GONE) or (self.kind == STOPPED and self.detail != UNCONFIRMED_STOP)
+        return self.kind in (EXITED, GONE) or (self.kind == STOPPED and not self.unconfirmed)
 
 
 @dataclass(frozen=True)
@@ -192,7 +191,9 @@ class Follower:
                 stopped_at = self.clock()
             elif stopped_at is not None and self.clock() - stopped_at >= STOP_GRACE_SECONDS:
                 # lib/placed_run.py finish stops it again; the slot stays held until it is gone.
-                return FollowEnd(STOPPED, 128 + (control.signum or 15), UNCONFIRMED_STOP)
+                return FollowEnd(
+                    STOPPED, 128 + (control.signum or 15), "not confirmed stopped", unconfirmed=True
+                )
             poll = self._poll()
             if poll is not None and poll.state in (EXITED, GONE, "none", "running"):
                 contact = self.clock()

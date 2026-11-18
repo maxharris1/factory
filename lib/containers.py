@@ -1,22 +1,8 @@
-"""Remove the containers a job labelled `factory.job=<job id>` (#901).
-
-Every brief asks the agent to label each container or compose stack it
-starts with `factory.job=$ORCH_JOB_ID`. The agent's own cleanup can be
-killed with it, so the factory removes them too: `orch job run`'s teardown
-removes the job's containers on the device it ran on, and the waiter's sweep
-removes those of finished jobs whose teardown never ran.
-
-Each call runs one POSIX sh script on one device: `sh -c` on the box, or
-`bash -lc` over the job's ssh login on a remote device, whose login PATH
-finds `docker` (Docker Desktop on macOS is per user). A device without
-`docker` has nothing to remove. Nothing here raises: a failure comes back as
-one log line, so a teardown or a waiter step always finishes.
-"""
-
 from __future__ import annotations
 
 import shlex
 import subprocess
+from collections import Counter
 from collections.abc import Callable
 
 from lib.remote import (
@@ -31,6 +17,7 @@ from lib.remote import (
 
 LABEL = "factory.job"
 TIMEOUT_SECONDS = 60.0
+FINISHED_STATES = frozenset({"done", "failed", "cancelled"})
 
 Runner = Callable[[str], Called]
 
@@ -49,7 +36,6 @@ def remove_script(job_id: str) -> str:
 
 
 def list_script() -> str:
-    """Print `<container id> <label value>` for each container with the label."""
     template = shlex.quote(f'{{{{.ID}}}} {{{{.Label "{LABEL}"}}}}')
     return _NO_DOCKER + f"docker ps -a --filter label={LABEL} --format {template}\n"
 
@@ -96,39 +82,28 @@ def _failed(result: Called) -> str | None:
 
 
 def remove(job_id: str, runner: Runner, device: str) -> str | None:
-    """Remove job_id's labelled containers. None when done, else a log line."""
     failure = _failed(runner(remove_script(job_id)))
     if failure is None:
         return None
     return f"could not remove job {job_id}'s {LABEL} containers on {device} ({failure})"
 
 
-def sweep(runner: Runner, finished: Callable[[str], bool | None], device: str) -> list[str]:
-    """Remove the labelled containers of finished jobs. Returns log lines.
-
-    finished(job_id) is True for a finished job, False for one that is
-    queued or running, and None for an id orch.db does not know. Only a
-    finished job's containers are removed. An unknown id, or a label value
-    that is not a job id, keeps its containers and gets a log line.
-    """
+def sweep(runner: Runner, job_state: Callable[[str], str | None], device: str) -> list[str]:
     listed = runner(list_script())
     if (failure := _failed(listed)) is not None:
         return [f"could not list {LABEL} containers on {device} ({failure})"]
-    by_job: dict[str, int] = {}
-    for line in listed.stdout.splitlines():
-        parts = line.split(maxsplit=1)
-        if parts:
-            value = parts[1].strip() if len(parts) > 1 else ""
-            by_job[value] = by_job.get(value, 0) + 1
+    by_job = Counter(
+        (line.split(maxsplit=1)[1:] or [""])[0].strip() for line in listed.stdout.splitlines() if line.strip()
+    )
     lines = []
     for job_id, count in sorted(by_job.items()):
         if not _JOB_ID.fullmatch(job_id):
             lines.append(f"kept {count} container(s) on {device} labelled {LABEL}={job_id!r}: not a job id")
             continue
-        state = finished(job_id)
+        state = job_state(job_id)
         if state is None:
             lines.append(f"kept {count} container(s) on {device} of job {job_id}: not in orch.db")
-        elif state:
+        elif state in FINISHED_STATES:
             lines.append(
                 remove(job_id, runner, device)
                 or f"removed {count} container(s) on {device} of finished job {job_id}"
