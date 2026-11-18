@@ -13,9 +13,10 @@ from tests.merge_queue_support import APPROVE, TRUSTED_LOGINS, sha
 from tests.test_review_before_ci import board_with, built_with_ci_pending, reviewed_at_pending_ci
 
 PRE_FLOOR_MAIN = "eb2b606e70d9509435281ed76e460c8fb35bf6d7"
+OLD_METHODS = ("_process_comments", "_after_finish")
 
 
-def _pre_floor_process_comments():
+def _pre_floor_methods() -> dict:
     try:
         source = subprocess.run(
             ["git", "show", f"{PRE_FLOOR_MAIN}:lib/dispatch/comments.py"],
@@ -26,23 +27,23 @@ def _pre_floor_process_comments():
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip(f"needs {PRE_FLOOR_MAIN[:7]} in the git history (a shallow checkout lacks it)")
-    method = next(
+    methods = [
         node
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef) and node.name == "_process_comments"
-    )
+        if isinstance(node, ast.FunctionDef) and node.name in OLD_METHODS
+    ]
     namespace = vars(comments_module).copy()
     exec(
-        compile(ast.Module(body=[method], type_ignores=[]), f"{PRE_FLOOR_MAIN}:comments.py", "exec"),
+        compile(ast.Module(body=methods, type_ignores=[]), f"{PRE_FLOOR_MAIN}:comments.py", "exec"),
         namespace,
     )
-    return namespace["_process_comments"]
+    return {name: namespace[name] for name in OLD_METHODS}
 
 
 def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     tmp_path: Path,
 ) -> None:
-    old_process_comments = _pre_floor_process_comments()
+    old_methods = _pre_floor_methods()
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
@@ -50,7 +51,8 @@ def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     with board.queue.connect() as connection:
         connection.execute("ALTER TABLE verdict_heads DROP COLUMN posted_at")
         connection.execute("DROP TABLE verdict_heads_floor")
-    board.dispatcher._process_comments = types.MethodType(old_process_comments, board.dispatcher)
+    for name, method in old_methods.items():
+        setattr(board.dispatcher, name, types.MethodType(method, board.dispatcher))
     mark = board.dispatcher._mark_handled
 
     def interrupted(ticket, comment_id, outcome):
