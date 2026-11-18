@@ -796,6 +796,10 @@ time.sleep(120)
         assert result.stdout.decode().strip() == f"{remote.LAUNCH_MARK} started", result.stderr
         worker_pid = int(wait_file(ready))
         cgroup = Path(f"/proc/{worker_pid}/cgroup").read_text().strip()
+        said = (box.run_dir() / "log").read_text().splitlines()
+        assert said.count("orch: the run is uncontained (no systemd scope)") == (
+            1 if linger == "no" else 0
+        ), said
         if linger == "no":
             assert not record.exists(), "no scope without a lingering user manager"
             assert not cgroup.endswith(unit)
