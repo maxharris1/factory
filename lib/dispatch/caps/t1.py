@@ -9,8 +9,6 @@ from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
-GO_KEYED_ON_GENERATION = TERMINAL_STATES | {"waiting-external"}
-
 
 class T1Mixin:
     def _t1(
@@ -146,7 +144,7 @@ class T1Mixin:
                 return comment.id
             spent = held.get(f"{prefix}g{generation}")
             if (
-                current not in GO_KEYED_ON_GENERATION
+                current not in TERMINAL_STATES
                 and spent is not None
                 and spent["state"] not in ("queued", "running")
                 and spent["source_comment_id"] != comment.id

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tests.merge_queue_support import REPO, Board, sha
 
 
@@ -131,11 +133,37 @@ def test_go_on_an_approved_after_ticket_in_the_queue_is_honored(tmp_path: Path) 
     assert board.state("42")["approved_head"] is None
 
 
-def test_go_on_a_ready_for_review_after_ticket_keeps_its_generation_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state", ["building", "planning"])
+def test_fresh_go_after_finished_generation_in_waiting_external_queues_on_the_go(
+    tmp_path: Path, state: str
+) -> None:
     board, pr = queued(tmp_path, ship="after:tracy-site", finish_line="ready-for-review")
-    assert board.state("42")["workflow_state"] == "waiting-external"
-    builds = len(board.jobs("build"))
-    board.go(pr, "go-again")
+    before = board.state("42")
+    assert before["workflow_state"] == "waiting-external"
+    assert before["approved_head"] is None
+    with board.queue.connect() as connection:
+        generation_job = connection.execute(
+            "SELECT state FROM jobs WHERE dedupe_key LIKE ?",
+            (f"t1:%:build:g{before['generation']}",),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE recipient NOT IN ('grok', 'qa')"
+            " AND state IN ('queued', 'running')"
+        ).fetchone()[0]
+    assert generation_job["state"] == "done"
+    assert active == 0
+    action = "build" if state == "building" else "plan"
+    jobs = len(board.jobs(action))
+
+    board.go(pr, "fresh-go", state=state)
     board.poll()
-    assert board.outcome("go-again") == "deduped-build"
-    assert len(board.jobs("build")) == builds
+
+    assert board.outcome("fresh-go") == f"queued-{action}"
+    added = [job for job in board.jobs(action) if job["source_comment_id"] == "fresh-go"]
+    assert len(board.jobs(action)) == jobs + 1
+    assert len(added) == 1
+    if state == "building":
+        assert added[0]["dedupe_key"].endswith(":build:fresh-go")
+
+    board.poll()
+    assert len(board.jobs(action)) == jobs + 1
