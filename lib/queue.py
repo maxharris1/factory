@@ -58,6 +58,7 @@ ACTIONS = (
     "go-not-from-approver",
     "qa",
     "qa-failed",
+    "qa-env-failed",
 )
 QA_RECIPIENT = "qa"
 RECIPIENTS = ("claude", "codex", "cursor", "grok", QA_RECIPIENT)
@@ -268,6 +269,14 @@ class SQLiteJobQueue:
         assert row is not None
         if spill is not None and row["id"] == job_id:
             job_detail.write(job_detail.root(connection), job_id, spill)
+        if (
+            row["id"] == job_id
+            and _has_table(connection, "needs_attention")
+        ):
+            connection.execute(
+                "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                (request.repo.lower(), request.ticket_id, attention.DEDUPE_DROPPED),
+            )
         return _job(row, connection)
 
     def claim(

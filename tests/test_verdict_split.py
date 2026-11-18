@@ -23,6 +23,7 @@ NAMES_BEFORE_SPLIT = (
 RULE_MODULE = {
     "_t3": "t3",
     "_record_revise": "t3",
+    "_spend_review_round": "t3",
     "_t3_unsat": "t3",
     "_criterion_text": "t3",
     "_revise_ci_gate": "t3",
@@ -41,6 +42,8 @@ RULE_MODULE = {
     "_ship_approval": "t4",
     "_ship_covered": "t4",
     "_approve_refusal": "t4",
+    "_paused_for_qa": "t4",
+    "_approve_qa": "t4",
     "_t_blocked": "blocked",
     "_blocked_by_another": "blocked",
     "_blocked_review_recorded": "blocked",

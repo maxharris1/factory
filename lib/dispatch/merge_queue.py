@@ -650,6 +650,9 @@ class MergeQueueMixin:
         approved = str(row["approved_head"])
         if not self._approval_covers(ticket, approved, head):
             return f"approval at {approved[:12]} does not cover {head[:12]}"
+        qa_wait = self._queue_qa_wait(ticket, row, head)
+        if qa_wait is not None:
+            return qa_wait
         ship = ticket.factory.ship
         if ship.startswith("after:"):
             # The approver's ok still ships it (ReviewShipper).
@@ -663,6 +666,17 @@ class MergeQueueMixin:
                 parts.append(f"unread: {held.unread}")
             return f"held ({', '.join(parts)})"
         return None
+
+    def _queue_qa_wait(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> str | None:
+        gated = self._approve_qa(
+            ticket, self._queue_comment(ticket, row), head, int(row["review_round"] or 0) + 1
+        )
+        if gated is None:
+            return None
+        spent, outcome = gated
+        if spent:
+            self._leave_merge_queue(ticket, outcome)
+        return f"QA {outcome} at {head[:12]}"
 
     def _log_queue_wait(self, ticket: TrackedTicket, head: str | None, reason: str) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
