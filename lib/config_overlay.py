@@ -35,7 +35,7 @@ from lib.load import Finding, load_yaml
 
 DISABLE_ENV = "ORCH_NO_LOCAL_OVERLAY"
 GIT_TIMEOUT = 10
-KEYED_LISTS = {"projects": "repo", "devices": "name"}
+KEYED_LISTS = {"projects": "repo", "devices": "name", "accounts": "id"}
 OPAQUE = frozenset({"trusted_logins", "trusted_linear_users", "linear_assignees", "base_branches"})
 SPELLINGS = {"linear_project_id": "linear_project_ids", "linear_project_ids": "linear_project_id"}
 

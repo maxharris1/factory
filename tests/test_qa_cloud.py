@@ -674,7 +674,8 @@ def _pause(lab: Lab, recipient: str, seconds: int) -> lane_limit.LaneLimit:
     now = lab.run.now[0]
     with lab.run.queue.connect() as connection:
         limit = lane_limit.record(connection, job_id=_build(lab, recipient), harness=recipient,
-                                  bot=f"{recipient}-bot", limit=lane_limit.UsageLimit(int(now) + seconds), now=now)
+                                  bot=f"{recipient}-bot", account=f"{recipient}-default",
+                                  limit=lane_limit.UsageLimit(int(now) + seconds), now=now)
     assert limit is not None
     return limit
 

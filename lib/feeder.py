@@ -1133,7 +1133,7 @@ class Feeder:
         room: dict[str, int] = {}
         with self.queue.connect() as connection:
             used = slots_in_use(connection, self.machines)
-            blocked = placement_blocked(connection, now)
+            blocked = placement_blocked(connection, now, self.machines)
             for harness in harnesses:
                 free = free_slots(self.machines, harness, used, blocked) if self.machines else 0
                 queued = connection.execute(
