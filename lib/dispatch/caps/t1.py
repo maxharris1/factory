@@ -9,8 +9,7 @@ from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
-# #108: a go on a ready-for-review handoff or a closed ticket changes nothing.
-GO_KEEPS_GENERATION = TERMINAL_STATES | {"waiting-external"}
+GO_KEYED_ON_GENERATION = TERMINAL_STATES | {"waiting-external"}
 
 
 class T1Mixin:
@@ -147,7 +146,7 @@ class T1Mixin:
                 return comment.id
             spent = held.get(f"{prefix}g{generation}")
             if (
-                current not in GO_KEEPS_GENERATION
+                current not in GO_KEYED_ON_GENERATION
                 and spent is not None
                 and spent["state"] not in ("queued", "running")
                 and spent["source_comment_id"] != comment.id
