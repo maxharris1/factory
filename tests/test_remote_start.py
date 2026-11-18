@@ -1501,12 +1501,55 @@ def systemd_scopes() -> bool:
         return False
 
 
-def fake_linger(tmp_path: Path, linger: str, *, busctl_fails: bool = False) -> str:
+FAKE_SYSTEMD_RUN = f"""#!{sys.executable}
+import json, os, re, sys
+
+args = sys.argv[1:]
+options = []
+while args and args[0].startswith("-"):
+    word = args.pop(0)
+    if word == "--":
+        break
+    options.append(word)
+if os.environ.get("FAKE_SYSTEMD_OLD") == "1" and any(
+    o.startswith("--expand-environment") for o in options
+):
+    sys.exit("systemd-run: unrecognized option '--expand-environment=no'")
+if not any(o.startswith("--unit=") for o in options):
+    sys.exit(0)
+with open(os.environ["FAKE_SYSTEMD_LOG"], "a") as log:
+    log.write(json.dumps(options) + "\\n")
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+def value(name):
+    if NAME.fullmatch(name):
+        return os.environ.get(name, "")
+    print(f"Invalid environment variable name evaluates to an empty string: {{name}}",
+          file=sys.stderr)
+    return ""
+
+def expand(word):
+    if word.startswith("$") and not word.startswith("${{"):
+        return value(word[1:]).split()
+    return [re.sub(r"\\$\\$|\\$\\{{([^}}]*)\\}}",
+                   lambda m: "$" if m[0] == "$$" else value(m[1]), word)]
+
+if os.environ.get("FAKE_SYSTEMD_OLD") != "1" and "--expand-environment=no" not in options:
+    args = args[:1] + [w for a in args[1:] for w in expand(a)]
+os.execvp(args[0], args)
+"""
+
+
+def fake_linger(
+    tmp_path: Path, linger: str, *, busctl_fails: bool = False, systemd_run: bool = False
+) -> str:
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
     fakes = {"loginctl": f"#!/bin/sh\necho {linger}\n"}
     if busctl_fails:
         fakes["busctl"] = "#!/bin/sh\necho 'no user bus' >&2\nexit 1\n"
+    if systemd_run:
+        fakes["systemd-run"] = FAKE_SYSTEMD_RUN
     for name, body in fakes.items():
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
@@ -2982,3 +3025,41 @@ def test_a_profile_name_reference_never_puts_the_job_token_on_stderr(
     assert JOB_SECRET not in result.stderr
     assert result.returncode == 0, result.stderr
     assert json.loads(report.read_text(encoding="utf-8")) == [["--add-dir", str(tmp_path)], JOB_SECRET]
+
+
+@pytest.mark.parametrize("old_systemd", [False, True], ids=["systemd-254+", "systemd-252"])
+def test_a_contained_start_hands_the_command_its_argv_whatever_systemd_expands(
+    tmp_path: Path, old_systemd: bool
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    log = tmp_path / "systemd-run.log"
+    report = tmp_path / "report.json"
+    dump = f"import json, os, sys\njson.dump([sys.argv[1:], os.environ.get('GH_TOKEN')], open({str(report)!r}, 'w'))\n"
+    target = _token_target(tmp_path)
+    args = ["a b", "$(touch pwn6)", "${HOME}", "$HOME"]
+    script = remote.start_script(
+        target, [sys.executable, "-c", dump, *args], {"GH_TOKEN": "x${HOME}y"},
+        guarded_dirs=[str(tmp_path)], insert_at=3, report_env=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={
+            "PATH": fake_linger(tmp_path, "yes", systemd_run=True),
+            "HOME": str(home),
+            "FAKE_SYSTEMD_LOG": str(log),
+            "FAKE_SYSTEMD_OLD": "1" if old_systemd else "0",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Invalid environment variable" not in result.stderr
+    assert json.loads(report.read_text(encoding="utf-8")) == [
+        ["--add-dir", str(tmp_path), *args], "x${HOME}y"
+    ]
+    assert not any(tmp_path.rglob("pwn*"))
+    [options] = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert f"--unit=orch-run-{target.tag}.scope" in options
+    if old_systemd:
+        assert not any(o.startswith("--expand-environment") for o in options)
+    else:
+        assert "--expand-environment=no" in options
