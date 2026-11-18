@@ -203,8 +203,10 @@ class ShipMixin:
             self._enter_ship_state(connection, ticket.repo, ticket.ticket_id, state)
             if approval is not None:
                 self._record_approval(connection, ticket, *approval)
+            self.clear_attention(
+                ticket.repo, ticket.ticket_id, "ship-failed", connection=connection
+            )
             connection.commit()
-        self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
 
     def _mark_ship_intent_failed(
         self,
@@ -213,6 +215,7 @@ class ShipMixin:
         error: str,
         *,
         redrive: bool = False,
+        ship_failed_detail: str | None = None,
     ) -> bool:
         """pending -> failed. A handoff that failed before any confirmed
         write, or a merge that failed with a retryable error (issue #83), is
@@ -237,6 +240,14 @@ class ShipMixin:
                     comment_id,
                 ),
             ).rowcount
+            if changed == 1 and ship_failed_detail is not None:
+                self.flag_attention(
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "ship-failed",
+                    ship_failed_detail,
+                    connection=connection,
+                )
         return changed == 1
 
     def _redrive_handoffs(self, ticket: TrackedTicket) -> None:
@@ -365,16 +376,17 @@ class ShipMixin:
                         """,
                         (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
                     )
+                    self.flag_attention(
+                        ticket.repo,
+                        ticket.ticket_id,
+                        "ship-failed",
+                        f"{policy} ship failed again on its one retry: {error}",
+                        connection=connection,
+                    )
                 self._wake_ship_failed(
                     ticket,
                     comment,
                     f"{policy} re-drive raised {error}",
-                )
-                self.flag_attention(
-                    ticket.repo,
-                    ticket.ticket_id,
-                    "ship-failed",
-                    f"{policy} ship failed again on its one retry: {error}",
                 )
                 continue
             state = _ship_state(policy)
@@ -433,8 +445,10 @@ class ShipMixin:
                 "DELETE FROM handled_times WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
                 (*scope, comment_id),
             )
+            self.clear_attention(
+                ticket.repo, ticket.ticket_id, "ship-failed", connection=connection
+            )
             connection.commit()
-        self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
 
     def _enter_ship_state(
         self,
