@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,7 +15,7 @@ from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
 from lib.feeder_gates import Progress, RefStatus, blocker_waits, github_ref, parse_gate_lines
 from lib.github_actions import GhResult, GitHubAdapterError
 from lib.handoff import Handoff, format_comment
-from lib.intake_live import OPEN_PULL_COMMITS_QUERY, _PULL_COMMITS, GitHubIntakeClient
+from lib.intake_live import OPEN_PULL_COMMITS_QUERY, GitHubIntakeClient
 from lib.poll_source import LivePollSource
 from tests.test_feeder import (
     LINEAR_FACTORY_MD,
@@ -212,32 +214,18 @@ OPEN_PULLS = (
 D = "d" * 40
 
 
-def commit_page(commits, *, total: int | None = None, cursor: str | None = None) -> dict:
+def commit_page(commits, *, total: int | None = None) -> dict:
     return {
         "totalCount": len(commits) if total is None else total,
-        "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
         "nodes": [{"commit": {"oid": sha}} for sha in commits],
     }
 
 
-def open_pull(
-    number: int, commits, *, base: str = "main", head: str = D,
-    total: int | None = None, cursor: str | None = None,
-):
+def open_pull(number: int, commits, *, base: str = "main", head: str = D, total: int | None = None):
     return {
         "number": number, "baseRefName": base, "headRefOid": head,
-        "commits": commit_page(commits, total=total, cursor=cursor),
+        "commits": commit_page(commits, total=total),
     }
-
-
-def more_commits(*pages: tuple[int, str]) -> tuple[str, ...]:
-    fields = " ".join(
-        f"p{number}: pullRequest(number: {number}) "
-        f'{{ commits(first: 100, after: "{cursor}") {_PULL_COMMITS} }}'
-        for number, cursor in pages
-    )
-    query = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
-    return ("graphql", "-f", f"query={query}", "-f", "owner=owner", "-f", "name=app")
 
 
 def open_pulls_page(*pulls: dict, cursor: str | None = None) -> GhResult:
@@ -254,17 +242,31 @@ def ahead_of_main(tip: str, shas) -> tuple[tuple[str, ...], GhResult]:
     )
 
 
-@pytest.mark.parametrize("n", [1, 50])
-def test_a_long_branch_costs_two_reads_however_many_commits_it_carries(n: int) -> None:
-    ahead = [f"{index:040x}" for index in range(1, n + 1)]
-    shared = ahead[min(17, n) - 1]
+def shas_from(start: int, count: int) -> list[str]:
+    return [f"{index:040x}" for index in range(start, start + count)]
+
+
+def compare_page(base: str, head: str, page: int) -> tuple[str, ...]:
+    return (f"{REPO_PATH}/compare/{base}...{head}?per_page=250&page={page}",)
+
+
+def compared(shas, total: object) -> GhResult:
+    return ok({"total_commits": total, "commits": [{"sha": sha} for sha in shas]})
+
+
+@pytest.mark.parametrize("n", [1, 50, 101, 201])
+def test_a_ready_costs_two_reads_however_long_it_and_its_own_pr_are(n: int) -> None:
+    ahead = shas_from(1, n)
+    tip, shared = ahead[-1], ahead[min(17, n) - 1]
     gh = RecordedGh()
-    gh.route(*ahead_of_main(D, ahead))
+    gh.route(*ahead_of_main(tip, ahead))
     gh.route(OPEN_PULLS, open_pulls_page(
-        open_pull(113, [A], head=A), open_pull(114, [B, shared], head=B), open_pull(115, [C], head=C),
+        open_pull(113, ahead[:100], head=tip, total=n),
+        open_pull(114, [B, shared], head=B),
+        open_pull(115, [C], head=C),
     ))
 
-    assert stacked_pulls(GitHubIntakeClient(gh), HOME, "main", D, own=None) == (114,)
+    assert stacked_pulls(GitHubIntakeClient(gh), HOME, "main", tip, own=113) == (114,)
     assert len(gh.calls) == 2
 
 
@@ -290,43 +292,6 @@ def test_open_pull_commits_reads_every_page_of_open_prs() -> None:
         114: OpenPull(commits=frozenset({C}), complete=False, base=RELEASE, head=C),
     }
     assert any("pullRequests(states: OPEN" in arg for arg in gh.calls[0])
-
-
-def test_open_pull_commits_reads_the_rest_of_every_long_pr_together() -> None:
-    gh = RecordedGh()
-    first, second, third = (
-        [f"{index:040x}" for index in range(start, start + size)]
-        for start, size in ((1, 100), (101, 100), (201, 50))
-    )
-    gh.route(OPEN_PULLS, open_pulls_page(
-        open_pull(113, first, head=A, total=250, cursor="a1"),
-        open_pull(114, [B], head=B, total=400, cursor="b1"),
-        open_pull(115, [C], head=C),
-    ))
-    gh.route(more_commits((113, "a1"), (114, "b1")), ok({"data": {"repository": {
-        "p113": {"commits": commit_page(second, total=250, cursor="a2")},
-        "p114": {"commits": commit_page([D], total=400)},
-    }}}))
-    gh.route(more_commits((113, "a2")), ok({"data": {"repository": {
-        "p113": {"commits": commit_page(third, total=250)},
-    }}}))
-
-    pulls = GitHubIntakeClient(gh).open_pull_commits(HOME)
-
-    assert pulls[113] == OpenPull(
-        commits=frozenset(first + second + third), complete=True, base="main", head=A
-    )
-    assert pulls[114] == OpenPull(commits=frozenset({B, D}), complete=False, base="main", head=B)
-    assert pulls[115].complete
-    assert len(gh.calls) == 3
-
-
-def test_open_pull_commits_refuses_an_unreadable_further_page() -> None:
-    gh = RecordedGh()
-    gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [A], head=A, total=150, cursor="a1")))
-    gh.route(more_commits((113, "a1")), ok({"data": {"repository": {"p113": None}}}))
-    with pytest.raises(GitHubAdapterError):
-        GitHubIntakeClient(gh).open_pull_commits(HOME)
 
 
 @pytest.mark.parametrize(
@@ -362,79 +327,93 @@ def test_open_pull_commits_past_the_page_cap_fails() -> None:
         GitHubIntakeClient(gh).open_pull_commits(HOME)
 
 
-def test_an_incomplete_pr_is_stacked_when_its_merge_base_is_ahead_and_not_on_its_base() -> None:
+def test_pull_commits_reads_every_compare_page_once() -> None:
+    theirs = shas_from(1001, 300)
     gh = RecordedGh()
-    gh.route(*ahead_of_main(D, [A, B]))
-    gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [], base=FEATURE, head=C, total=400)))
-    gh.route((f"{REPO_PATH}/compare/{D}...{C}",), ok({"merge_base_commit": {"sha": B}}))
-    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{FEATURE}...{B}"), ok({"status": "ahead"}))
-
-    assert stacked_pulls(GitHubIntakeClient(gh), HOME, "main", D, own=None) == (113,)
-
-
-def test_an_incomplete_pr_whose_merge_base_is_on_our_base_costs_one_read_and_holds_nothing() -> None:
-    gh = RecordedGh()
-    gh.route(*ahead_of_main(D, [A, B]))
-    gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [], head=C, total=400)))
-    gh.route((f"{REPO_PATH}/compare/{D}...{C}",), ok({"merge_base_commit": {"sha": "e" * 40}}))
-
-    assert stacked_pulls(GitHubIntakeClient(gh), HOME, "main", D, own=None) == ()
-    assert len(gh.calls) == 3
-
-
-def test_an_incomplete_pr_whose_base_has_its_merge_base_is_not_stacked() -> None:
-    gh = RecordedGh()
-    gh.route(*ahead_of_main(D, [A, B]))
-    gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [], base=FEATURE, head=C, total=400)))
-    gh.route((f"{REPO_PATH}/compare/{D}...{C}",), ok({"merge_base_commit": {"sha": B}}))
-    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{FEATURE}...{B}"), ok({"status": "behind"}))
-
-    assert stacked_pulls(GitHubIntakeClient(gh), HOME, "main", D, own=None) == ()
-
-
-@pytest.mark.parametrize("compared", [{}, {"merge_base_commit": None}, {"merge_base_commit": {"sha": "abc"}}])
-def test_merge_base_refuses_an_unreadable_compare(compared: object) -> None:
-    gh = RecordedGh()
-    gh.route((f"{REPO_PATH}/compare/{D}...{C}",), ok(compared))
-    with pytest.raises(GitHubAdapterError):
-        GitHubIntakeClient(gh).merge_base(HOME, D, C)
-
-
-def test_a_merge_base_of_two_shas_is_read_once() -> None:
-    gh = RecordedGh()
-    gh.route((f"{REPO_PATH}/compare/{D}...{C}",), GhResult(1, "", "HTTP 502"),
-             ok({"merge_base_commit": {"sha": B}}))
-    gh.route((f"{REPO_PATH}/compare/main...{C}",), ok({"merge_base_commit": {"sha": A}}))
+    gh.route(compare_page("main", D, 1), compared(theirs[:250], 300))
+    gh.route(compare_page("main", D, 2), compared(theirs[250:], 300))
     client = GitHubIntakeClient(gh)
 
-    with pytest.raises(GitHubAdapterError):
-        client.merge_base(HOME, D, C)
-    assert [client.merge_base(HOME, D, C) for _ in range(2)] == [B, B]
-    assert [client.merge_base(HOME, "main", C) for _ in range(2)] == [A, A]
-    assert gh.count((f"{REPO_PATH}/compare/{D}...{C}",)) == 2
-    assert gh.count((f"{REPO_PATH}/compare/main...{C}",)) == 2
+    assert client.pull_commits(HOME, "main", D) == frozenset(theirs)
+    assert client.pull_commits(HOME, "main", D) == frozenset(theirs)
+    assert gh.keys() == [compare_page("main", D, 1), compare_page("main", D, 2)]
 
 
-@pytest.mark.parametrize("n", [1, 50])
-def test_a_retry_after_a_failed_read_repeats_only_the_compare_and_the_failed_read(n: int) -> None:
-    ahead = [f"{index:040x}" for index in range(1, n + 1)]
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (compared(shas_from(1, 200), 300), compared(shas_from(201, 100), 300)),
+        (compared(shas_from(1, 250), 300), compared([], 300)),
+        (compared(shas_from(1, 250), 300), compared([*shas_from(251, 49), "abc"], 300)),
+        (compared(shas_from(1, 250), 300), compared(shas_from(251, 50), 301)),
+        (compared(shas_from(1, 250), 300), compared(shas_from(1, 50), 300)),
+        (ok({"commits": []}), compared([], 0)),
+        (compared([A], True), compared([], 0)),
+        (ok([]), compared([], 0)),
+    ],
+    ids=["short", "empty", "bad-sha", "total-changed", "repeated", "no-total", "bool-total", "not-a-dict"],
+)
+def test_pull_commits_refuses_an_unreadable_compare(first: GhResult, second: GhResult) -> None:
     gh = RecordedGh()
-    compare, answer = ahead_of_main(D, ahead)
+    gh.route(compare_page("main", D, 1), first)
+    gh.route(compare_page("main", D, 2), second)
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).pull_commits(HOME, "main", D)
+
+
+def test_pull_commits_past_the_page_cap_fails() -> None:
+    gh = RecordedGh()
+    gh.route(compare_page("main", D, 1), compared(shas_from(1, 250), 10_001))
+    with pytest.raises(GitHubAdapterError, match="page cap"):
+        GitHubIntakeClient(gh).pull_commits(HOME, "main", D)
+    assert len(gh.calls) == 1
+
+
+def test_a_retry_rereads_only_the_compare_page_that_failed() -> None:
+    theirs = shas_from(1001, 300)
+    gh = RecordedGh()
+    compare, answer = ahead_of_main(D, [theirs[270], D])
     gh.route(compare, answer)
-    gh.route(OPEN_PULLS, open_pulls_page(
-        open_pull(113, [A], head=A), open_pull(114, [B], base=FEATURE, head=C, total=400),
-    ))
-    merge = (f"{REPO_PATH}/compare/{D}...{C}",)
-    gh.route(merge, GhResult(1, "", "HTTP 502"), ok({"merge_base_commit": {"sha": ahead[-1]}}))
-    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{FEATURE}...{ahead[-1]}"), ok({"status": "ahead"}))
+    gh.route(OPEN_PULLS, open_pulls_page(open_pull(114, theirs[:100], head=theirs[-1], total=300)))
+    first, second = compare_page("main", theirs[-1], 1), compare_page("main", theirs[-1], 2)
+    gh.route(first, compared(theirs[:250], 300))
+    gh.route(second, GhResult(1, "", "HTTP 502"), compared(theirs[250:], 300))
     client = GitHubIntakeClient(gh)
+    client.clock = lambda: 1000.0
 
     with pytest.raises(GitHubAdapterError):
         stacked_pulls(client, HOME, "main", D, own=None)
-    failed = len(gh.calls)
     assert stacked_pulls(client, HOME, "main", D, own=None) == (114,)
-    assert gh.keys()[failed:failed + 2] == [compare, merge]
-    assert gh.count(OPEN_PULLS) == 1
+    assert [gh.count(key) for key in (OPEN_PULLS, first, second)] == [1, 1, 2]
+
+
+def test_compare_pages_are_reread_after_a_minute() -> None:
+    gh = RecordedGh()
+    gh.route(compare_page("main", D, 1), compared([A], 1))
+    client = GitHubIntakeClient(gh)
+    now = [1000.0]
+    client.clock = lambda: now[0]
+
+    for step in (0, 59, 2):
+        now[0] += step
+        assert client.pull_commits(HOME, "main", D) == frozenset({A})
+    assert gh.count(compare_page("main", D, 1)) == 2
+
+
+def test_a_retry_rereads_only_the_open_pr_page_that_failed() -> None:
+    gh = RecordedGh()
+    compare, answer = ahead_of_main(D, [B])
+    gh.route(compare, answer)
+    gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [A], head=A), cursor="p1"))
+    later = (*OPEN_PULLS, "-f", "after=p1")
+    gh.route(later, GhResult(1, "", "HTTP 502"), open_pulls_page(open_pull(114, [B], head=B)))
+    client = GitHubIntakeClient(gh)
+    client.clock = lambda: 1000.0
+
+    with pytest.raises(GitHubAdapterError):
+        stacked_pulls(client, HOME, "main", D, own=None)
+    assert stacked_pulls(client, HOME, "main", D, own=None) == (114,)
+    assert (gh.count(OPEN_PULLS), gh.count(later)) == (1, 2)
 
 
 def test_a_failed_open_pr_read_keeps_nothing() -> None:
@@ -468,27 +447,69 @@ def test_the_open_prs_are_reread_after_a_minute() -> None:
     assert (gh.count(compare), gh.count(OPEN_PULLS)) == (3, 2)
 
 
-@pytest.mark.parametrize(
-    ("status", "has"), [("behind", True), ("identical", True), ("ahead", False), ("diverged", False)]
-)
-def test_branch_has_reads_the_compare_of_branch_and_commit(status: str, has: bool) -> None:
-    gh = RecordedGh()
-    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{FEATURE}...{A}"), ok({"status": status}))
-    assert GitHubIntakeClient(gh).branch_has(HOME, FEATURE, A) is has
+def git(root: Path, *args: str, stdin: str = "", stamp: int = 1_000_000_000) -> str:
+    identity = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test",
+                "GIT_AUTHOR_DATE": f"@{stamp} +0000", "GIT_COMMITTER_DATE": f"@{stamp} +0000"}
+    return subprocess.run(
+        ["git", "-C", str(root), *args], input=stdin, text=True, capture_output=True, check=True,
+        env={"PATH": os.environ["PATH"], "HOME": str(root), "GIT_CONFIG_NOSYSTEM": "1", **identity},
+    ).stdout.strip()
 
 
-@pytest.mark.parametrize("compared", [{}, {"status": None}, {"status": "unknown"}, []])
-def test_branch_has_refuses_an_unreadable_compare(compared: object) -> None:
-    gh = RecordedGh()
-    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/main...{A}"), ok(compared))
-    with pytest.raises(GitHubAdapterError):
-        GitHubIntakeClient(gh).branch_has(HOME, "main", A)
+def criss_cross(root: Path) -> dict[str, str]:
+    git(root, "init", "-q")
+    tree = git(root, "mktree")
+    stamps = iter(range(1_000_000_000, 1_000_001_000))
+
+    def commit(message: str, *parents: str) -> str:
+        flags = [arg for parent in parents for arg in ("-p", parent)]
+        return git(root, "commit-tree", tree, *flags, stdin=message, stamp=next(stamps))
+
+    root_commit = commit("root")
+    theirs = root_commit
+    for index in range(120):
+        theirs = commit(f"their own {index}", theirs)
+    shared = commit("unmerged shared", root_commit)
+    main = commit("main", root_commit)
+    tip = commit("ours merges main and shared", main, shared)
+    merged_main = commit("theirs merges main", theirs, main)
+    head = commit("theirs merges shared", merged_main, shared)
+    git(root, "update-ref", "refs/heads/main", main)
+    return {"main": main, "shared": shared, "tip": tip, "merged_main": merged_main, "head": head}
 
 
-@pytest.mark.parametrize(("branch", "sha"), [("-x", A), ("main", "abc")])
-def test_branch_has_refuses_unsafe_input(branch: str, sha: str) -> None:
-    with pytest.raises(GitHubAdapterError):
-        GitHubIntakeClient(RecordedGh()).branch_has(HOME, branch, sha)
+class GitReads:
+    def __init__(self, root: Path, base: str, head: str) -> None:
+        self.root = root
+        listed = git(root, "rev-list", "--reverse", f"{base}..{head}").split()
+        self.pull = OpenPull(frozenset(listed[:100]), len(listed) <= 100, base, head)
+
+    def ahead_commits(self, repo: str, base: str, tip: str) -> list[str]:
+        return git(self.root, "rev-list", f"{base}..{tip}").split()
+
+    def open_pull_commits(self, repo: str) -> dict[int, OpenPull]:
+        return {113: self.pull}
+
+    def pull_commits(self, repo: str, base: str, head: str) -> list[str]:
+        return git(self.root, "rev-list", f"{base}..{head}").split()
+
+
+def test_a_long_pr_with_two_merge_bases_carrying_our_commit_holds(tmp_path: Path) -> None:
+    graph = criss_cross(tmp_path)
+    reads = GitReads(tmp_path, graph["main"], graph["head"])
+    assert len(git(tmp_path, "merge-base", "--all", graph["tip"], graph["head"]).split()) == 2
+    assert not reads.pull.complete and graph["shared"] not in reads.pull.commits
+
+    assert stacked_pulls(reads, HOME, "main", graph["tip"], own=None) == (113,)
+
+
+def test_a_long_pr_carrying_none_of_our_commits_does_not_hold(tmp_path: Path) -> None:
+    graph = criss_cross(tmp_path)
+    reads = GitReads(tmp_path, graph["main"], graph["merged_main"])
+    assert not reads.pull.complete
+
+    assert stacked_pulls(reads, HOME, "main", graph["tip"], own=None) == ()
 
 
 @pytest.mark.parametrize(
@@ -1040,6 +1061,7 @@ def test_a_pr_on_a_git_valid_base_outside_the_factory_names_still_holds(tmp_path
     gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [], base=RELEASE, head=B, total=101)))
     github = stacked_github()
     github.pulls[(HOME, 113)]["base"] = RELEASE
+    github.branches[(HOME, RELEASE)] = A
     github.branch_commits[(HOME, RELEASE)] = (A,)
     github.open_pull_commits = GitHubIntakeClient(gh).open_pull_commits
     feeder, _, _, _ = make_feeder(tmp_path, github=github)
@@ -1055,14 +1077,12 @@ def test_branch_reads_accept_a_git_valid_name_and_encode_it() -> None:
     gh = RecordedGh()
     encoded = "release%2Bstable"
     gh.route(OPEN_PULLS, open_pulls_page(open_pull(113, [A], base=RELEASE, head=A)))
-    gh.route(("--cache", "60s", f"{REPO_PATH}/compare/{encoded}...{A}"), ok({"status": "behind"}))
     gh.route((f"{REPO_PATH}/pulls/1461",), ok({"state": "open", "base": {"ref": RELEASE}}))
     gh.route((f"{REPO_PATH}/git/ref/heads/{encoded}",), ok({"object": {"sha": A}}))
     gh.route((f"{REPO_PATH}/compare/{encoded}...{BRANCH}",), ok({"total_commits": 1, "commits": [{"sha": B}]}))
     client = GitHubIntakeClient(gh)
 
     assert client.open_pull_commits(HOME)[113].base == RELEASE
-    assert client.branch_has(HOME, RELEASE, A) is True
     assert client.pull_base(HOME, 1461) == RELEASE
     assert client.branch_sha(HOME, RELEASE) == A
     assert client.ahead_commits(HOME, RELEASE, BRANCH) == (B,)
@@ -1074,4 +1094,4 @@ def test_branch_reads_refuse_a_name_github_refuses(name: str) -> None:
     with pytest.raises(GitHubAdapterError, match="not safe"):
         client.branch_sha(HOME, name)
     with pytest.raises(GitHubAdapterError, match="not safe"):
-        client.branch_has(HOME, name, A)
+        client.pull_commits(HOME, name, A)

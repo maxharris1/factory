@@ -232,12 +232,8 @@ class FakeGitHub:
             if pull_repo == repo and pull.get("state", "open") == "open" and not pull.get("merged")
         }
 
-    def merge_base(self, repo: str, a: str, b: str) -> str:
-        theirs = set(self._commits_on(repo, b))
-        return [sha for sha in self._commits_on(repo, a) if sha in theirs][-1]
-
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool:
-        return sha in self._commits_on(repo, branch)
+    def pull_commits(self, repo: str, base: str, head: str) -> frozenset[str]:
+        return frozenset(self._commits_on(repo, head)) - frozenset(self._commits_on(repo, base))
 
     def _commits_on(self, repo: str, branch: str) -> tuple[str, ...]:
         if (repo, branch) in self.branch_commits:

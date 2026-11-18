@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -9,9 +9,6 @@ from lib.feeder_gates import Wait, github_ref
 
 @dataclass(frozen=True)
 class OpenPull:
-    """An open PR's commits on its head that its base lacks; complete is
-    false when GitHub listed only some of them."""
-
     commits: frozenset[str]
     complete: bool
     base: str
@@ -23,9 +20,7 @@ class BranchReads(Protocol):
 
     def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
 
-    def merge_base(self, repo: str, a: str, b: str) -> str: ...
-
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool: ...
+    def pull_commits(self, repo: str, base: str, head: str) -> Collection[str]: ...
 
 
 def stacked_pulls(
@@ -36,19 +31,16 @@ def stacked_pulls(
         return ()
     return tuple(sorted(
         number for number, pull in reads.open_pull_commits(repo).items()
-        if number != own and _carries(reads, repo, tip, ahead, pull)
+        if number != own and _carries(reads, repo, ahead, pull)
     ))
 
 
-def _carries(reads: BranchReads, repo: str, tip: str, ahead: set[str], pull: OpenPull) -> bool:
+def _carries(reads: BranchReads, repo: str, ahead: set[str], pull: OpenPull) -> bool:
     if not ahead.isdisjoint(pull.commits):
         return True
     if pull.complete:
         return False
-    # Every commit tip shares with the PR head is an ancestor of their merge
-    # base, so the PR carries one of ours iff that base is ours and not its base's.
-    shared = reads.merge_base(repo, tip, pull.head)
-    return shared in ahead and not reads.branch_has(repo, pull.base, shared)
+    return not ahead.isdisjoint(reads.pull_commits(repo, pull.base, pull.head))
 
 
 def stack_wait(repo: str, where: str, pulls: Sequence[int]) -> Wait:
