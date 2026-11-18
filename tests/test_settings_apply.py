@@ -26,6 +26,7 @@ from lib.settings_apply import Applier, LocalSpool, SshSpool, run_pass
 from lib.worktrees import pid_alive, process_start
 from tests import test_remote_start as remote
 from tests import test_waiter
+from tests.pool_helpers import poller_adopts
 from tests.procs import alive
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 
@@ -78,7 +79,7 @@ def holding(running: dict[str, int]):
     @contextmanager
     def lock():
         yield settings_apply.Held(running=lambda config: running,
-                                  commit_version=lambda machines, loaded: None)
+                                  commit_version=lambda machines: None)
 
     return lock
 
@@ -595,6 +596,7 @@ class Placed:
                                   machines_path=self.machines,
                                   kill=lambda pid, sig: self.kills.append(sig)),
         )
+        self.dispatcher.devices.reload()
         self.sleepers: list[subprocess.Popen] = []
         self.state = tmp_path / "settings-state"
         self.state.mkdir()
@@ -736,13 +738,6 @@ def loaded(machines: Path):
     config, findings = load_machines_yml(machines)
     assert config is not None, findings
     return config
-
-
-def poller_adopts(queue: SQLiteJobQueue, machines: Path) -> None:
-    with queue.connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        live_settings.adopted(connection, machines)
-        connection.commit()
 
 
 def applied(queue: SQLiteJobQueue, version: int | None) -> bool:

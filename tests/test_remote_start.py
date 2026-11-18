@@ -30,7 +30,7 @@ from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
 from lib.worktrees import pid_alive, process_start
-from tests.pool_helpers import TARGET_MACHINES_YML, write_target_machines
+from tests.pool_helpers import TARGET_MACHINES_YML, poller_adopts, write_target_machines
 from tests.test_dispatcher import (
     GO,
     TRUSTED_LOGINS,
@@ -363,6 +363,7 @@ def test_orch_wait_claims_a_box_slot_and_names_the_device(tmp_path: Path) -> Non
     machines = machines_file(tmp_path, box_slots=3, pc=False)
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
+    poller_adopts(queue, machines)
     first = enqueue(queue, "claude", "1")
     proc = orch("wait", "claude-bot", "--db", str(db), "--machines", str(machines))
     out, err = proc.communicate(timeout=20)

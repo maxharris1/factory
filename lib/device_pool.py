@@ -16,7 +16,8 @@ not by the config the process loaded. A settings change written under the
 same lock (lib/settings_apply.py) that disables, drains or lowers slot_max
 stops the next claim in every process (#777). An enable, an undrain or a
 higher slot_max reaches placement once the poller's DeviceMonitor adopts the
-file, within one poll, with no restart.
+file, within one poll, with no restart. Until the poller first adopts, every
+device is closed.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -287,8 +288,7 @@ class DevicePool:
     def _placement_config(self, connection: sqlite3.Connection) -> MachinesConfig:
         if self.machines_path is None:
             return self.config
-        live = live_settings.narrowed(connection, self.machines_path, self.config)
-        return self.config if live is None else live.placement_config(self.config)
+        return live_settings.narrowed(connection, self.machines_path).placement_config(self.config)
 
     def claim(
         self,

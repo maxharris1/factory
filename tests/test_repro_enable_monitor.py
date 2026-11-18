@@ -91,6 +91,39 @@ def test_a_job_claimed_after_an_enable_is_not_lost_while_the_poller_finishes_its
     assert transport.signals == [], "no worker was signalled"
 
 
+def test_a_fresh_waiter_places_nothing_on_an_enable_the_poller_has_not_adopted(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(ENABLE_PC, encoding="utf-8")
+    config = loaded(machines)
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    transport = SignalTransport()
+    monitor = DeviceMonitor(DevicePool(queue, config, machines_path=machines), config,
+                            transport, machines_path=machines,
+                            alive=lambda pid, start: pid is not None)
+    dispatcher = Dispatcher(queue.path, queue, trusted_logins=TRUSTED_LOGINS,
+                            devices=monitor, review_actions=FakeReviewActions(),
+                            grok_delivery=FakeGrokDelivery())
+    job = remote.enqueue(queue, "claude", "1", timeout=5400)
+    machines.write_text(ENABLE_PC.replace("enabled: false", "enabled: true"), encoding="utf-8")
+    waiter = DevicePool(queue, loaded(machines), machines_path=machines)
+
+    assert waiter.claim("claude") is None
+    assert monitor.reconcile(100.0, 900.0, dispatcher._device_lost).lost == ()
+
+    monitor.reload()
+    claimed = waiter.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc"
+    run_on(waiter, job)
+    result = monitor.reconcile(100.0, 900.0, dispatcher._device_lost)
+
+    assert result.lost == ()
+    assert remote.state(queue, job) == "running"
+    assert "device-lost" not in [e for e, _ in remote.job_events(queue, job)]
+    assert transport.signals == []
+
+
 def test_a_retry_does_not_lose_a_job_claimed_onto_a_device_enabled_live(
     tmp_path: Path,
 ) -> None:

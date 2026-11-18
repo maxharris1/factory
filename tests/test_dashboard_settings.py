@@ -12,7 +12,6 @@ import pytest
 
 from lib import live_settings
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
-from lib.machines_yml import load_machines_yml
 from tests import test_dashboard_layout as layout
 from tests.test_dashboard import GH_CLASSIC, GH_OAUTH, GH_PAT, NOW, make_db
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
@@ -101,11 +100,9 @@ def _settings_row(db: Path, machines: Path, *, adopt: bool) -> None:
     machines.parent.mkdir()
     machines.write_text("devices:\n  - {name: box, local: true, slot_max: 3, harnesses: {claude: claude-bot}}\n",
                         encoding="utf-8")
-    loaded, findings = load_machines_yml(machines)
-    assert loaded is not None, findings
     with sqlite3.connect(db, isolation_level=None) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        assert live_settings.narrowed(connection, machines, loaded).written == 1
+        assert live_settings.narrowed(connection, machines).written == 1
         if adopt:
             live_settings.adopted(connection, machines)
         connection.execute("COMMIT")
@@ -160,6 +157,15 @@ def test_a_versioned_change_is_applied_once_the_poller_adopts_it(tmp_path: Path)
     pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
     assert '<span class="chip ok">applied</span>' in pc
     assert "waiting" not in pc and "pending" not in pc
+
+
+def test_a_pending_change_stays_pending_once_the_poller_adopts_it(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, [{**PENDING, "version": 1}], "adopted")
+    (row,) = snapshot["settings"]["results"]
+    assert (row["result"], row.get("waiting")) == ("pending", None)
+    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    assert '<span class="chip warn">pending</span>' in pc
+    assert '<span class="st-err">restart pending: waiter-codex-bot</span>' in pc
 
 
 def test_every_page_links_settings(tmp_path: Path) -> None:

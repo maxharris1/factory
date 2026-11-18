@@ -521,11 +521,11 @@ def services(config_dir: Path, state_dir: Path) -> tuple[tuple[str, ...], tuple[
 @dataclass(frozen=True)
 class Held:
     running: Callable[[MachinesConfig], Mapping[str, int]]
-    commit_version: Callable[[Path, MachinesConfig], int | None]
+    commit_version: Callable[[Path], int | None]
 
 
 ClaimLock = Callable[[], AbstractContextManager[Held]]
-NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines, loaded: None)
+NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines: None)
 
 
 def claim_lock(db: Path) -> ClaimLock:
@@ -538,13 +538,13 @@ def claim_lock(db: Path) -> ClaimLock:
         try:
             connection.execute("BEGIN IMMEDIATE")
 
-            def commit_version(machines: Path, loaded: MachinesConfig) -> int | None:
+            def commit_version(machines: Path) -> int | None:
                 try:
-                    live = live_settings.narrowed(connection, machines, loaded)
+                    live = live_settings.narrowed(connection, machines)
                     connection.execute("COMMIT")
                 except sqlite3.Error:
                     return None
-                return None if live is None else live.written
+                return live.written
 
             yield Held(running=lambda config: slots_in_use(connection, config),
                        commit_version=commit_version)
@@ -584,11 +584,11 @@ class Applier:
     def apply(self, request: SettingsRequest) -> AuditEntry:
         try:
             with self.claims() as held:
-                old, old_bytes, new_text, previous = self._plan(request, held)
+                old_bytes, new_text, previous = self._plan(request, held)
                 mode = stat.S_IMODE(os.stat(self.machines).st_mode)
                 backup = self._backup(old_bytes, mode)
                 _replace(self.machines, new_text.encode("utf-8"), mode)
-                version = held.commit_version(self.machines, old)
+                version = held.commit_version(self.machines)
         except Refused as refusal:
             return self._entry(request, REFUSED, refusal.previous, refusal.error)
         except sqlite3.Error:
@@ -605,7 +605,7 @@ class Applier:
         )
 
     def _plan(self, request: SettingsRequest,
-              held: Held) -> tuple[MachinesConfig, bytes, str, object]:
+              held: Held) -> tuple[bytes, str, object]:
         if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
             raise Refused("not-approver")
         old_bytes = self.machines.read_bytes()
@@ -645,7 +645,7 @@ class Applier:
             raise Refused(f"invalid after the edit: {error}"[:200], previous)
         if _changes(old, new) != [(request.device, request.field, request.value)]:
             raise Refused("the edit changed more than that field", previous)
-        return old, old_bytes, new_text, previous
+        return old_bytes, new_text, previous
 
     def _parse(self, text: str):
         with tempfile.TemporaryDirectory() as tmp:

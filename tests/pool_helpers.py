@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lib import job_token
+from lib import job_token, live_settings
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
 from lib.queue import Job, SQLiteJobQueue
@@ -21,6 +21,16 @@ def pool_claim(queue: SQLiteJobQueue, recipient: str, machines: Path | None = No
     claimed = DevicePool(queue, config).claim(recipient)
     assert claimed is not None
     return claimed[0]
+
+
+
+def poller_adopts(queue: SQLiteJobQueue, machines: Path) -> None:
+    """What the poller's DeviceMonitor does on its first poll: until then no
+    pool given a machines_path places anything (lib/live_settings.py)."""
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        live_settings.adopted(connection, machines)
+        connection.commit()
 
 
 TARGET_MACHINES_YML = """\

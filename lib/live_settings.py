@@ -12,8 +12,8 @@ than the view the poller's DeviceMonitor acts on:
   applier's). It meets the file into the row: a device is enabled only if
   both say so, drained if either does, and its slot_max is the lower. It
   never widens. A device missing from either side counts as closed. The
-  first writer (a claim or the applier) creates the row from the file met
-  with the config that writer loaded.
+  first writer (a claim or the applier) creates the row with every device
+  closed, so nothing is placed before the poller adopts.
 * `adopted` is called by the poller only, inside its own BEGIN IMMEDIATE. It
   sets the row to the file exactly and returns the parse it wrote, which the
   monitor installs as its view before it next reconciles. It is the only
@@ -83,28 +83,20 @@ def file_key(machines: Path) -> str:
     return json.dumps([_stat(machines), _stat(overlay_path(machines))])
 
 
-def narrowed(
-    connection: sqlite3.Connection, machines: Path, loaded: MachinesConfig
-) -> Live | None:
+def narrowed(connection: sqlite3.Connection, machines: Path) -> Live:
     """Meet machines.yml as it is now into the row. The caller holds BEGIN
-    IMMEDIATE. With no row yet, the row starts as the file met with `loaded`,
-    the config the calling process started from, so it widens nothing that
-    process would not place on. None only when there is no row yet and the
-    file is invalid."""
+    IMMEDIATE. With no row yet, every device starts closed. An invalid file
+    writes nothing and leaves the row as it was."""
     _create(connection)
     key = file_key(machines)
     found = _read(connection)
     if found is not None and found[1] == key:
         return found[0]
+    row = Live({}, written=0, adopted=0) if found is None else found[0]
     config = _load(machines)
     if config is None:
-        return None if found is None else found[0]
-    switches = _switches(config)
-    if found is None:
-        live = Live(_meet(_switches(loaded), switches), written=1, adopted=0)
-    else:
-        row = found[0]
-        live = Live(_meet(row.switches, switches), row.written + 1, row.adopted)
+        return row
+    live = Live(_meet(row.switches, _switches(config)), row.written + 1, row.adopted)
     _write(connection, live, key)
     return live
 

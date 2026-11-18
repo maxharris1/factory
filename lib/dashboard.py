@@ -2379,10 +2379,10 @@ def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]
             row = {key: _audit_value(entry.get(key)) for key in AUDIT_KEYS}
             row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
             version = row["version"]
-            if row["result"] in ("applied", "pending") and type(version) is int:
-                applied = live is not None and live.is_applied(version)
-                row["result"] = "applied" if applied else "pending"
-                row["waiting"] = not applied
+            if row["result"] == "applied" and type(version) is int:
+                row["waiting"] = live is None or not live.is_applied(version)
+                if row["waiting"]:
+                    row["result"] = "pending"
             results.append(row)
     return results
 

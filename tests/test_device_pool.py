@@ -8,12 +8,12 @@ from types import MappingProxyType
 
 import pytest
 
-from lib import device_pool, device_sync, live_settings
+from lib import device_pool, device_sync
 from lib.device_pool import DevicePool, Orphan, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from lib.wait import wait_for_job
-from tests.pool_helpers import write_target_machines
+from tests.pool_helpers import poller_adopts, write_target_machines
 from tests.test_dispatcher import GO, comment, setup, ticket
 
 
@@ -203,6 +203,7 @@ def file_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue, Path]:
     assert config is not None, findings
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
     enqueue(queue, "claude", "1")
+    poller_adopts(queue, machines)
     return DevicePool(queue, config, machines_path=machines), queue, machines
 
 
@@ -225,13 +226,38 @@ def test_a_claim_places_while_the_file_is_unchanged(tmp_path: Path) -> None:
     assert claimed is not None and claimed[1].device == "box"
 
 
-def test_an_invalid_file_leaves_the_loaded_settings_in_force(tmp_path: Path) -> None:
+def test_an_invalid_file_leaves_the_row_in_force(tmp_path: Path) -> None:
     pool, _, machines = file_pool(tmp_path)
     machines.write_text(BOX_FILE.replace("drain: false", "drain: maybe"), encoding="utf-8")
 
     claimed = pool.claim("claude")
 
     assert claimed is not None and claimed[1].device == "box"
+
+
+def test_nothing_is_placed_before_the_poller_first_adopts(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(BOX_FILE, encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    enqueue(queue, "claude", "1")
+    pool = restarted(queue, machines)
+
+    assert pool.claim("claude") is None
+    poller_adopts(queue, machines)
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "box"
+
+
+def test_an_invalid_file_with_no_row_places_nothing(tmp_path: Path) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(BOX_FILE, encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    enqueue(queue, "claude", "1")
+    pool = restarted(queue, machines)
+    machines.write_text(BOX_FILE.replace("drain: false", "drain: maybe"), encoding="utf-8")
+
+    assert pool.claim("claude") is None
+    assert [job.state for job in queue.outstanding()] == ["queued"]
 
 
 def edited_after_load(
@@ -244,7 +270,9 @@ def edited_after_load(
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
     for n in range(jobs):
         enqueue(queue, "claude", str(n))
+    poller_adopts(queue, machines)
     machines.write_text(edited, encoding="utf-8")
+    os.utime(machines, ns=(10**18, 10**18))
     return DevicePool(queue, config, machines_path=machines), queue, machines
 
 
@@ -256,13 +284,6 @@ def restarted(queue: SQLiteJobQueue, machines: Path) -> DevicePool:
 
 def placements(pool: DevicePool, attempts: int) -> int:
     return sum(pool.claim("claude") is not None for _ in range(attempts))
-
-
-def poller_adopts(queue: SQLiteJobQueue, machines: Path) -> None:
-    with queue.connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        live_settings.adopted(connection, machines)
-        connection.commit()
 
 
 @pytest.mark.parametrize("edit", [("enabled: true", "enabled: false"), ("drain: false", "drain: true")])

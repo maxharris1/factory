@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
@@ -31,6 +32,7 @@ from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, factory
+from tests.test_settings_apply import SignalTransport
 
 FACTORY_MD = """---
 base_branch: main
@@ -644,6 +646,27 @@ def test_held_slots_and_disabled_devices_give_no_capacity(tmp_path: Path) -> Non
     github.issues["owner/app"] = [issue(1)]
     assert feeder.feed_once().fed == ()
     assert rows(tmp_path / "orch.db")["1"]["state"] == "waiting-capacity"
+
+
+def test_an_enable_the_poller_adopts_gives_capacity_without_a_feeder_restart(
+    tmp_path: Path,
+) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    path = tmp_path / "machines.yml"
+    enabled = path.read_text(encoding="utf-8")
+    path.write_text(enabled.replace("    local: true\n", "    local: true\n    enabled: false\n"),
+                    encoding="utf-8")
+    feeder.machines = config = load_machines_yml(path)[0]
+    monitor = DeviceMonitor(DevicePool(queue, config, machines_path=path), config,
+                            SignalTransport(), machines_path=path)
+    monitor.reload()
+    github.issues["owner/app"] = [issue(85)]
+    assert feeder.feed_once().fed == ()
+
+    path.write_text(enabled, encoding="utf-8")
+    monitor.reload()
+
+    assert len(feeder.feed_once().fed) == 1
 
 
 def test_waiting_items_are_fed_once_a_slot_frees(tmp_path: Path) -> None:
