@@ -12,19 +12,26 @@ CSS = """\
 .ci-body{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:8px}
 .ci-body .tiles{flex:none}
 .ci-slot{display:flex;flex-direction:column;gap:4px;min-width:0}
-.ci-slot>.tile{flex:1 0 auto}
+.ci-slot>.tile{flex:1 0 auto;min-height:60px}
 .ci-rn{font:11px/1.2 var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ci-group{display:flex;flex-direction:column;gap:6px}
 .ci-group .igroup{margin:6px 0 0}
-.tile.ci{position:relative}
+.tile.ci{position:relative;min-height:60px}
 .tile.ci .cover{position:absolute;inset:0;z-index:0}
 .tile.ci:hover,.tile.ci:focus-within{border-color:var(--brand)}
 .tile.ci.bad{border-color:var(--bad)}
-.tile.ci .tile-body{position:relative;pointer-events:none}
+.tile.ci .tile-body{position:relative;gap:3px;padding:4px 8px 5px;font-size:11px;line-height:1.25;pointer-events:none}
 .tile.ci .tile-body a{position:relative;z-index:1;pointer-events:auto}
-.tile.ci .tile-l4{flex-wrap:wrap;gap:4px 8px}
-.tile.ci .tile-l4 .what{min-width:0;overflow-wrap:anywhere;color:var(--text-2)}
-.cibar{flex:1 1 100%;display:flex;gap:1px;height:4px;background:var(--line-hi)}
+.tile.ci .tile-l1 .ticket{font-size:12px}
+.tile.ci .ci-a{line-height:1.25}
+.tile.ci .tile-l2{flex-wrap:wrap;gap:0 6px;min-height:0;color:var(--muted)}
+.tile.ci .verb{font-size:11px;line-height:1.25}
+.tile.ci .tile-l2 .action{min-width:0;overflow-wrap:anywhere;color:var(--text-2)}
+.tile.ci .tile-l2 .t{flex:none;margin-left:auto;white-space:nowrap}
+.tile.ci .tile-l3{display:block;overflow-wrap:anywhere}
+.tile.ci .tile-l3 .what{color:var(--text-2)}
+.tile.ci .tile-l3 .ci-a{margin-left:6px}
+.cibar{display:inline-flex;gap:1px;width:40px;height:4px;margin:0 6px 0 0;vertical-align:middle;background:var(--line-hi)}
 .cibar i{display:block;min-width:2px}
 .cibar .passed{background:var(--ok)}.cibar .failed{background:var(--bad)}.cibar .running{background:var(--accent)}
 .cibar .queued{background:var(--warn)}.cibar .skipped{background:var(--muted)}
@@ -165,31 +172,31 @@ SCRIPT = r"""
     var card = el('div', 'tile ci ' + c.status + (c.status === 'failed' ? ' bad' : ''));
     card.setAttribute('data-ci', key);
     add(card, link('cover', ticketPageHref(c, true))).setAttribute('aria-label', 'CI for ' + tileLabel(c));
-    add(card, PX.strip('ci-' + key, {effect: look[0], tint: look[1], seed: seed, height: 16}));
+    add(card, PX.strip('ci-' + key, {effect: look[0], tint: look[1], seed: seed, height: CI.strip_h}));
     var bodyEl = add(card, el('div', 'tile-body'));
     var l1 = add(bodyEl, el('div', 'tile-l1'));
     add(l1, el('span', 'ticket', tileLabel(c)));
     if (c.pr) ciLink(l1, 'ci-a', repo, 'pull/' + c.pr, 'PR #' + c.pr + ' ↗');
     if (c.head_short) ciLink(l1, 'ci-a', repo, 'commit/' + c.head_short, c.head_short);
-    ciVerb(add(bodyEl, el('div', 'tile-l2')), 'ci-' + c.status, seed);
-    var l3 = add(bodyEl, el('div', 'tile-l3'));
+    var l2 = add(bodyEl, el('div', 'tile-l2'));
+    ciVerb(l2, 'ci-' + c.status, seed);
     var w = c.wait;
     if (w) {
-      if (w.step) add(l3, el('span', 'action', 'then ' + w.step));
-      if (w.round !== null && w.round !== undefined) add(l3, el('span', 'round', 'round ' + w.round));
-      ticking(add(l3, el('span', 't')), w.waiting_seconds, 'waiting ');
+      if (w.step) add(l2, el('span', 'action', 'then ' + w.step));
+      if (w.round !== null && w.round !== undefined) add(l2, el('span', 'round', 'round ' + w.round));
+      ticking(add(l2, el('span', 't')), w.waiting_seconds, 'waiting ');
     } else if (c.age_seconds !== null && c.age_seconds !== undefined) {
-      ticking(add(l3, el('span', 't')), c.age_seconds, CI.since[c.status], ' ago');
+      ticking(add(l2, el('span', 't')), c.age_seconds, CI.since[c.status], ' ago');
     }
-    var l4 = add(bodyEl, el('div', 'tile-l4'));
+    var l3 = add(bodyEl, el('div', 'tile-l3'));
     var p = c.progress;
     if (p.total) {
-      var bar = add(l4, el('div', 'cibar'));
+      var bar = add(l3, el('div', 'cibar'));
       bar.setAttribute('aria-hidden', 'true');
       CI.segments.forEach(function (n) { if (p[n]) add(bar, el('i', n)).setAttribute('style', 'flex:' + p[n]); });
-      add(l4, el('span', 'cibt', c.progress_text));
-    } else add(l4, el('span', 'what', w ? checksNamed(w) : 'no checks yet'));
-    if (c.pr) ciLink(l4, 'ci-a', repo, 'pull/' + c.pr + '/checks', 'checks');
+      add(l3, el('span', 'cibt', c.progress_text));
+    } else add(l3, el('span', 'what', w ? checksNamed(w) : 'no checks yet'));
+    if (c.pr) ciLink(l3, 'ci-a', repo, 'pull/' + c.pr + '/checks', 'checks');
     return mark('lanes', 'ci-' + key, card);
   }
   function ciSlotEl(s, lane, seed) {
@@ -200,13 +207,13 @@ SCRIPT = r"""
     if (s.state === 'lead') add(box, ciCardEl(s.card, lane.cards[s.card], seed));
     else if (s.state === 'cont') {
       tile = add(box, el('div', 'tile empty ci-cont'));
-      add(tile, PX.strip('ci-' + s.runner, {effect: 'static', tint: CI.tint, seed: seed, height: 16}));
+      add(tile, PX.strip('ci-' + s.runner, {effect: 'static', tint: CI.tint, seed: seed, height: CI.strip_h}));
       add(tile, el('span', 'lbl', '↳ ' + tileLabel(lane.cards[s.card]) + ' · ' + s.job.name));
     } else if (s.state === 'busy') {
       tile = add(box, el('div', 'tile empty px-held'));
-      add(tile, PX.strip('ci-' + s.runner, {state: 'held', seed: seed, height: 16}));
+      add(tile, PX.strip('ci-' + s.runner, {state: 'held', seed: seed, height: CI.strip_h}));
       add(tile, el('div', 'lbl', 'busy'));
-    } else add(box, idleTile('ci-' + s.runner, s.state === 'offline', seed));
+    } else add(box, idleTile('ci-' + s.runner, s.state === 'offline', seed, CI.strip_h));
     return box;
   }
   function ciPoolText(pool) {
@@ -388,6 +395,7 @@ def _failure(row: dict) -> str:
 
 
 CI_TINT = "#ff9e64"
+CARD_STRIP_HEIGHT = 4
 _BAD = "#f7768e"
 CARD_STRIP = {"running": ("scan", CI_TINT), "queued": ("static", CI_TINT), "failed": ("static", _BAD)}
 GROUP_LABEL = {"hosted": "GitHub-hosted", "queued": "Queued · no runner yet", "failed": "Failed · 24 h"}
@@ -428,14 +436,14 @@ def _card(key: str, card: dict, seed: int) -> str:
         + (_link("ci-a", repo, f"commit/{head}", head) if head else "")
     )
     if wait:
-        line3 = (
+        timing = (
             (_span("action", f"then {wait['step']}") if wait["step"] else "")
             + (_span("round", f"round {wait['round']}") if wait["round"] is not None else "")
             + _span("t", "waiting " + duration(wait["waiting_seconds"]))
         )
     else:
-        line3 = _span("t", SINCE[status] + duration(card["age_seconds"]) + " ago") if card["age_seconds"] is not None else ""
-    line4 = (
+        timing = _span("t", SINCE[status] + duration(card["age_seconds"]) + " ago") if card["age_seconds"] is not None else ""
+    line3 = (
         (_bar(card) if p["total"] else _span("what", checks_named(wait) if wait else "no checks yet"))
         + (_link("ci-a", repo, f"pull/{pr}/checks", "checks") if pr else "")
     )
@@ -443,9 +451,9 @@ def _card(key: str, card: dict, seed: int) -> str:
     return (
         f'<div class="tile ci {status}{" bad" if status == "failed" else ""}" data-ci="{_e(key)}">'
         f'<a class="cover" href="{_e(ticket_page_href(card, open_ci=True))}" aria-label="{_e(f"CI for {label}")}"></a>'
-        f'{px_strip(f"ci-{key}", effect=effect, tint=tint, seed=seed, height=16)}<div class="tile-body">'
-        f'<div class="tile-l1">{line1}</div><div class="tile-l2">{_verb(f"ci-{status}", seed)}</div>'
-        f'<div class="tile-l3">{line3}</div><div class="tile-l4">{line4}</div></div></div>'
+        f'{px_strip(f"ci-{key}", effect=effect, tint=tint, seed=seed, height=CARD_STRIP_HEIGHT)}<div class="tile-body">'
+        f'<div class="tile-l1">{line1}</div><div class="tile-l2">{_verb(f"ci-{status}", seed)}{timing}</div>'
+        f'<div class="tile-l3">{line3}</div></div></div>'
     )
 
 
@@ -458,13 +466,13 @@ def _slot(slot: dict, lane: dict, seed: int) -> str:
         tile = _card(slot["card"], lane["cards"][slot["card"]], seed)
     elif state == "cont":
         text = f"↳ {_tile_label(lane['cards'][slot['card']])} · {slot['job']['name']}"
-        strip = px_strip(f"ci-{runner}", effect="static", tint=CI_TINT, seed=seed, height=16)
+        strip = px_strip(f"ci-{runner}", effect="static", tint=CI_TINT, seed=seed, height=CARD_STRIP_HEIGHT)
         tile = f'<div class="tile empty ci-cont">{strip}{_span("lbl", text)}</div>'
     elif state == "busy":
-        strip = px_strip(f"ci-{runner}", state="held", seed=seed, height=16)
+        strip = px_strip(f"ci-{runner}", state="held", seed=seed, height=CARD_STRIP_HEIGHT)
         tile = f'<div class="tile empty px-held">{strip}<div class="lbl">busy</div></div>'
     else:
-        tile = _idle_tile(f"ci-{runner}", state == "offline", seed)
+        tile = _idle_tile(f"ci-{runner}", state == "offline", seed, CARD_STRIP_HEIGHT)
     return f'<div class="ci-slot" data-runner="{_e(runner)}">{_span("ci-rn", runner)}{tile}</div>'
 
 
@@ -542,6 +550,7 @@ def ci_extras(snapshot: dict, address: str, row: dict, open_: bool) -> str:
 
 
 SCRIPT = SCRIPT.replace("__CI__", json.dumps(
-    {"strip": CARD_STRIP, "groups": GROUP_LABEL, "since": SINCE, "segments": SEGMENTS, "tint": CI_TINT},
+    {"strip": CARD_STRIP, "groups": GROUP_LABEL, "since": SINCE, "segments": SEGMENTS, "tint": CI_TINT,
+     "strip_h": CARD_STRIP_HEIGHT},
     ensure_ascii=False, separators=(",", ":"),
 ))

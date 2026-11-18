@@ -4,21 +4,25 @@ import copy
 import json
 import re
 import sqlite3
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from lib.ci_lane import ci_lane
 from lib.dashboard import collect_snapshot, render_pages, tickets_json, write_snapshot
+from lib.dashboard_pages import ci as ci_page
+from lib.dashboard_pages import lanes as lanes_page
 from lib.dashboard_pages.ci import ci_lane_html, ci_popup
 from lib.dashboard_pages.ticket_detail import ticket_view
 from tests import test_dashboard_activity as activity
 from tests.test_dashboard import NOW, seeded
-from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
+from tests.test_dashboard_lanes import CHROME, Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import BAR, _no_script, _section, needs_node, run_harness
 
 ROOT = Path(__file__).resolve().parents[1]
-SHOTS = ("issue-717-ci-1440.png", "issue-717-ci-375.png")
+SHOTS = ("issue-851-ci-1440.png", "issue-851-ci-375.png")
 REPO = "maxharris1/cleffy"
 HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f901234567890"
@@ -387,3 +391,131 @@ def test_review_screenshots_are_committed() -> None:
     for name in SHOTS:
         assert (ROOT / "docs" / "screenshots" / name).stat().st_size > 0, name
 
+
+def _pooled(connection: sqlite3.Connection) -> None:
+    ci_fixture(connection)
+    for name in ("pc-wsl-bots-1", "pc-wsl-bots-2", "pc-wsl-bots-3"):
+        connection.execute("INSERT INTO ci_runners VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (REPO, name, "Linux", "online", 0, '["self-hosted","factory-linux"]', NOW))
+
+
+def compact_snapshot(tmp_path: Path) -> dict:
+    snapshot = snapshot_with(tmp_path, _pooled)
+    (ticket,) = [t for t in snapshot["tickets"] if t["repo"] == REPO and str(t["ticket_id"]) == "13"]
+    ticket["ci_wait"] = {"reason": "ci-pending", "checks": ["pytest"], "waiting_seconds": 125, "round": 3}
+    snapshot["ci_lane"] = ci_lane(snapshot)
+    return snapshot
+
+
+def _card_lines(lane: str, key: str) -> list[str]:
+    card = lane.split(f'data-ci="{key}"')[1].split('<div class="tile ci ')[0].split('<div class="ci-slot"')[0]
+    assert "tile-l4" not in card
+    return re.findall(r'<div class="tile-l\d">(.*?)</div>(?=<div class="tile-l\d">|</div>)', card, flags=re.S)
+
+
+def test_a_compact_card_keeps_every_field_on_three_lines(tmp_path: Path) -> None:
+    lane = ci_lane_html(compact_snapshot(tmp_path))
+    card = lane.split(f'data-ci="{REPO}#13"')[1]
+    strip = re.search(r'<canvas [^>]*data-px-key="ci-maxharris1/cleffy#13"[^>]*>', card).group(0)
+    assert f"height:{ci_page.CARD_STRIP_HEIGHT}px" in strip and ci_page.CARD_STRIP_HEIGHT < 16
+    ids, status, progress = _card_lines(lane, f"{REPO}#13")
+    assert '<span class="ticket">cleffy#13</span>' in ids
+    assert f'href="https://github.com/{REPO}/pull/113"' in ids and f">{HEAD_B[:7]}</a>" in ids
+    assert 'role="img" aria-label="Testing…"' in status and 'class="glyph"' in status
+    for needle in ("then review", "round 3", "waiting 2m 05s"):
+        assert needle in _text(status), needle
+    assert '<div class="cibar" aria-hidden="true"><i class="passed" style="flex:1"></i>' in progress
+    assert "1/5 passed, 3 running, 0 failed, 1 queued" in progress
+    assert f'href="https://github.com/{REPO}/pull/113/checks"' in progress
+    assert "started 1m 00s ago" in _text(_card_lines(lane, f"{REPO}#12")[1])
+
+    def failed_only(connection: sqlite3.Connection) -> None:
+        add_ci(connection, "12", HEAD_A, "pytest", "completed", "failure", pr="112", completed_at=NOW - 90)
+
+    failed = ci_lane_html(snapshot_with(tmp_path / "failed", failed_only))
+    failed_status = _card_lines(failed, f"{REPO}#12")[1]
+    assert 'aria-label="CI failed"' in failed_status and "failed 1m 30s ago" in _text(failed_status)
+
+
+def test_idle_and_continuation_slots_use_the_compact_strip(tmp_path: Path) -> None:
+    lane = ci_lane_html(compact_snapshot(tmp_path))
+    slots = dict(re.findall(r'<div class="ci-slot" data-runner="([^"]+)">(.*?)(?=<div class="ci-slot"|</div><div class="ci-group")',
+                            lane, flags=re.S))
+    assert '<div class="tile empty ci-cont">' in slots["pc-wsl-bots-2"]
+    assert "↳ cleffy#13 · pytest (3/4)" in slots["pc-wsl-bots-2"]
+    assert '<div class="tile empty free">' in slots["pc-wsl-bots-3"] and '<div class="lbl">idle</div>' in slots["pc-wsl-bots-3"]
+    for runner in ("pc-wsl-bots-2", "pc-wsl-bots-3"):
+        assert re.findall(r"height:(\d+)px", slots[runner]) == [str(ci_page.CARD_STRIP_HEIGHT)], runner
+
+
+def _rules(css: str) -> list[str]:
+    css = re.sub(r"@media[^{]*\{", "", re.sub(r"@keyframes[^{]*\{[^}]*\}\}", "", css))
+    return [sel.strip() for block in css.split("}") if "{" in block for sel in block.split("{")[0].split(",")]
+
+
+def test_the_compact_css_leaves_build_cards_alone() -> None:
+    for rule in (".tile{display:block;min-width:0;min-height:124px;",
+                 ".tile-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;",
+                 ".verb{display:flex;white-space:pre;font:500 14px/1.25 var(--mono);",
+                 ".tile-l2{display:flex;align-items:center;gap:7px;min-height:18px}"):
+        assert rule in lanes_page.CSS, rule
+    shared = re.compile(r"\.(tile|tile-l\d|tile-body|verb|glyph|px|lbl|ticket|t|action|round)\b")
+    scoped = (".tile.ci", ".ci-slot", ".tile.empty.ci-cont", ".ci-body", ".ci-group", ".ci-")
+    loose = [sel for sel in _rules(ci_page.CSS) if shared.search(sel) and not sel.startswith(scoped)]
+    assert not loose, loose
+    assert "height:16px" in lanes_page._idle_tile("slot-box-1", False, 1)
+
+
+CI_SIZES = """(function () {
+  function h(sel) { return [].map.call(document.querySelectorAll(sel), function (t) {
+    return Math.round(t.getBoundingClientRect().height); }); }
+  return {build: h('#lanes .lane[data-device]:not(#queue):not([data-device="ci"]) a.tile'),
+          ci: h('#lanes .lane[data-device="ci"] .tile.ci'),
+          idle: h('#lanes .lane[data-device="ci"] .ci-slot .tile.empty.free'),
+          cont: h('#lanes .lane[data-device="ci"] .ci-slot .tile.empty.ci-cont'),
+          scrollWidth: document.documentElement.scrollWidth};
+})()"""
+
+
+@needs_chrome
+@pytest.mark.parametrize("width", [1440, 375])
+def test_ci_cards_draw_smaller_than_build_cards(tmp_path: Path, width: int) -> None:
+    browser = Browser()
+    try:
+        browser.open(_page_with_status_stub(compact_snapshot(tmp_path), "index.html"), width)
+        found = browser.eval(CI_SIZES)
+    finally:
+        browser.close()
+    assert found["build"] and found["ci"] and found["idle"] and found["cont"], found
+    assert max(found["ci"] + found["idle"] + found["cont"]) < min(found["build"]), found
+    assert found["scrollWidth"] <= width, found
+
+
+@needs_node
+def test_the_script_draws_a_compact_card_as_the_server_does(tmp_path: Path) -> None:
+    snapshot = compact_snapshot(tmp_path)
+    html = render_pages(snapshot)["index.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
+    assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
+
+
+def write_screenshots(out: Path) -> list[Path]:
+    html = _page_with_status_stub(compact_snapshot(Path(tempfile.mkdtemp())), "index.html")
+    chrome = Browser()
+    try:
+        paths = []
+        for name, width in zip(SHOTS, (1440, 375)):
+            chrome.open(html, width)
+            paths.append(out.resolve() / name)
+            chrome.screenshot(paths[-1], width)
+        return paths
+    finally:
+        chrome.close()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["--shots"] or len(sys.argv) != 3 or CHROME is None:
+        sys.exit("usage: python -m tests.test_dashboard_ci --shots <dir>  (needs Chrome or Chromium)")
+    for written in write_screenshots(Path(sys.argv[2])):
+        print(written)
