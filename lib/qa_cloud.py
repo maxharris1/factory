@@ -319,7 +319,6 @@ class QaWorker:
     shares_usage_with: Mapping[str, str] = field(default_factory=dict)
     log: Callable[[str], None] = lambda line: None
     _plans: dict[str, RunPlan] = field(default_factory=dict)
-    _backoff: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         with self.queue.connect() as connection:
@@ -354,10 +353,12 @@ class QaWorker:
             runner = raw["runner"]
             if runner not in self.runners:
                 continue
-            if self._backoff.get(runner, 0.0) > now:
-                self._restart_wait(job)
-                continue
             with self.queue.connect() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM qa_runner_backoff WHERE runner = ? AND until > ?", (runner, now)
+                ).fetchone() is not None:
+                    _restart_wait(connection, job.id, now)
+                    continue
                 reason = self._yields(connection, job.id, runner, now)
                 if reason is not None:
                     _restart_wait(connection, job.id, now)
@@ -452,7 +453,14 @@ class QaWorker:
                 if not first:
                     self._close(row, "gap", f"launch-failed:{type(exc).__name__}")
                     return "gap"
-                self._backoff[runner] = self.queue.now() + BACKOFF_SECONDS
+                with self.queue.connect() as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO qa_runner_backoff (runner, until) VALUES (?, ?)
+                        ON CONFLICT(runner) DO UPDATE SET until = MAX(until, excluded.until)
+                        """,
+                        (runner, self.queue.now() + BACKOFF_SECONDS),
+                    )
                 if isinstance(exc, UsageLimit) and runner in self.shares_usage_with:
                     limited.append(runner)
                 following = self._next_runner(job, plan, runner, {self.shares_usage_with[name] for name in limited})

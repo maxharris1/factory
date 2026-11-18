@@ -603,6 +603,31 @@ def test_usage_limit_requeue_outlasts_the_backoff_and_retries(tmp_path: Path) ->
     assert lab.run.rows("SELECT event FROM job_events WHERE job_id = ? AND event = 'qa-no-retry'", job) == []
 
 
+def test_a_restarted_worker_keeps_the_runner_backoff(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    job = lab.enqueue(ids=2)
+    fake = lab.fakes["claude-cloud"]
+    launch = fake.launch
+    called_at: list[float] = []
+
+    def timed_launch(lane):
+        called_at.append(lab.run.now[0])
+        return launch(lane)
+
+    fake.launch = timed_launch
+    fake.launch_errors.append(UsageLimit("at limit"))
+    while lab.run.now[0] < 1300:
+        lab.worker = lab.new_worker()
+        lab.tick()
+    assert called_at == [1000.0]
+
+    lab.run.dispatcher.reconcile_jobs()
+    lab.worker = lab.new_worker()
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(fake.launched) == 1
+
+
 def _cancel_by_new_head(lab: Lab) -> None:
     lab.run.finish("codex", "v1")
     lab.run.post("v1", verdict(HEAD_A, "REVISE"))

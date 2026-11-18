@@ -762,3 +762,6 @@ def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
         WHERE state IN ('launching', 'running')
         """
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS qa_runner_backoff (runner TEXT PRIMARY KEY, until REAL NOT NULL)"
+    )
