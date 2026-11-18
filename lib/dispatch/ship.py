@@ -215,12 +215,11 @@ class ShipMixin:
         error: str,
         *,
         redrive: bool = False,
-        attention: str | None = None,
+        ship_failed_detail: str | None = None,
     ) -> bool:
         """pending -> failed. A handoff that failed before any confirmed
         write, or a merge that failed with a retryable error (issue #83), is
-        marked redrive='eligible' for one re-drive. `attention` flags
-        ship-failed in the same transaction."""
+        marked redrive='eligible' for one re-drive."""
         with self._connect() as connection:
             changed = connection.execute(
                 """
@@ -241,12 +240,12 @@ class ShipMixin:
                     comment_id,
                 ),
             ).rowcount
-            if changed == 1 and attention is not None:
+            if changed == 1 and ship_failed_detail is not None:
                 self.flag_attention(
                     ticket.repo,
                     ticket.ticket_id,
                     "ship-failed",
-                    attention,
+                    ship_failed_detail,
                     connection=connection,
                 )
         return changed == 1

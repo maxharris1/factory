@@ -401,10 +401,7 @@ class PollMixin:
         *,
         connection: sqlite3.Connection | None = None,
     ) -> None:
-        """Show a ticket as needs-attention in orch status and the dashboard.
-
-        Pass the transaction that commits the flag's trigger as `connection`
-        so the flag cannot outlive it unwritten (#839)."""
+        """Show a ticket as needs-attention in orch status and the dashboard."""
         flag = (detail[:SHIP_ERROR_LIMIT], self.queue.now())
         self._note_attention((repo.lower(), ticket_id, reason), flag, connection)
         if self.log is not None:

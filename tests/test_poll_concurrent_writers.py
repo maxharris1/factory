@@ -1,6 +1,3 @@
-"""#839 ac-5: the poller's cycle and the dashboard snapshot get through while
-about 20 other connections keep writing to orch.db."""
-
 from __future__ import annotations
 
 import json

@@ -279,10 +279,9 @@ class CommentsMixin:
         eligible for one re-drive where the policy allows it."""
         error = safe_ship_error(exc)
         eligible = _redrive_eligible(exc, ticket.factory.ship)
-        # Issue #83: with no retry coming, a person must look.
         attention = None if eligible else f"{ticket.factory.ship} ship failed: {error}"
         if not self._mark_ship_intent_failed(
-            ticket, comment.id, error, redrive=eligible, attention=attention
+            ticket, comment.id, error, redrive=eligible, ship_failed_detail=attention
         ):
             return
         self._wake_ship_failed(ticket, comment, f"ship raised {error}")
