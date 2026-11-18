@@ -19,6 +19,7 @@ from lib import heal, settings_apply
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
+from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
 from lib.settings_apply import Applier, LocalSpool, SshSpool, run_pass
 from lib.worktrees import pid_alive, process_start
@@ -696,3 +697,112 @@ def test_a_waiter_left_pending_places_nothing_on_the_changed_device(
         assert spawn.calls == [], "no run started"
     finally:
         spawn.end_runners()
+
+
+ENABLE_PC = """\
+orch_host: box
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses: {codex: codex-bot}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    enabled: false
+    slot_max: 3
+    harnesses: {claude: claude-bot}
+    workdir_root: /srv/work/{bot}
+    ssh_alias: pc-{bot}
+    factory_root: /srv/factory
+"""
+
+
+class SignalTransport:
+    def __init__(self):
+        self.signals: list[str] = []
+
+    def run(self, argv, *, timeout):
+        script = argv[-1]
+        if "kill -TERM" in script or "kill -KILL" in script:
+            self.signals.append("KILL" if "kill -KILL" in script else "TERM")
+            return 0
+        return 1
+
+
+def loaded(machines: Path):
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    return config
+
+
+def test_an_enable_never_reaches_a_waiter_or_monitor_holding_the_old_file(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(ENABLE_PC, encoding="utf-8")
+    config = loaded(machines)
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    waiter_pool = DevicePool(queue, config, machines_path=machines)
+    transport = SignalTransport()
+    monitor = DeviceMonitor(DevicePool(queue, config, machines_path=machines), config,
+                            transport, machines_path=machines,
+                            alive=lambda pid, start: pid is not None)
+    dispatcher = Dispatcher(queue.path, queue, trusted_logins=TRUSTED_LOGINS,
+                            devices=monitor, review_actions=FakeReviewActions(),
+                            grok_delivery=FakeGrokDelivery())
+    job = remote.enqueue(queue, "claude", "1", timeout=5400)
+    monitor.reload()
+    claims = []
+
+    def poller_still_finishing_its_cycle(argv, environ, log):
+        if Path(argv[0]).name == "poller-service.sh":
+            claims.append(waiter_pool.claim("claude"))
+            monitor.reconcile(100.0, 900.0, dispatcher._device_lost)
+        return 0
+
+    (tmp_path / "state").mkdir()
+    applier = Applier(machines, tmp_path / "state", tmp_path / "deploy", "maxharris1", {},
+                      ("poller", "waiter:claude-bot"), (),
+                      settings_apply.claim_lock(queue.path), run=poller_still_finishing_its_cycle)
+    entry = applier.apply(settings_apply.SettingsRequest(
+        "race-request-abcdefghij", "maxharris1", "2026-11-17T10:00:00Z",
+        "pc", "enabled", False, True))
+
+    assert entry.result == "applied", entry
+    assert claims == [None], "the waiter still on the old file places nothing on pc"
+    assert remote.state(queue, job) == "queued"
+    assert "device-lost" not in [e for e, _ in remote.job_events(queue, job)]
+    assert transport.signals == [], "no worker was signalled"
+    claimed = DevicePool(queue, loaded(machines), machines_path=machines).claim("claude")
+    assert claimed is not None and claimed[1].device == "pc", "a restarted waiter places on pc"
+
+
+def test_an_unrestarted_waiter_places_nothing_after_a_lowered_slot_max_and_an_enable(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    machines.write_text("""\
+devices:
+  - name: box
+    local: true
+    enabled: false
+    slot_max: 6
+    harnesses: {claude: claude-bot}
+""", encoding="utf-8")
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    stale = DevicePool(queue, loaded(machines), machines_path=machines)
+    for n in range(7):
+        remote.enqueue(queue, "claude", str(n), timeout=5400)
+    applier = Applier(machines, tmp_path, tmp_path / "deploy", "maxharris1", {}, (),
+                      ("waiter-claude-bot",), settings_apply.claim_lock(queue.path))
+
+    for field, expect, value in [("slot_max", 6, 1), ("enabled", False, True)]:
+        entry = applier.apply(settings_apply.SettingsRequest(
+            f"request-{field}-123456", "maxharris1", "2026-11-17T10:00:00Z",
+            "box", field, expect, value))
+        assert (entry.result, entry.pending) == ("pending", ("waiter-claude-bot",)), entry
+
+    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0
+    assert stale.used().get("box", 0) <= loaded(machines).device("box").slot_max
+    fresh = DevicePool(queue, loaded(machines), machines_path=machines)
+    assert sum(fresh.claim("claude") is not None for _ in range(7)) == 1

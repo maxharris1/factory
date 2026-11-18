@@ -2129,8 +2129,11 @@ changes to it. Signed in as the approver, Max can turn `enabled` and `drain`
 on or off and set `slot_max` (1 to 64). Drain is the safe way to take a
 device out of placement; turning `enabled` off on a device that holds a
 running job is refused with "drain it first". That check and the file write
-hold orch.db's write lock, and every claim reads `enabled` and `drain` from
-the file under the same lock, so no job lands in between.
+hold orch.db's write lock, and every claim reads the file under the same
+lock, so no job lands in between. The file only narrows a running process
+live (disable, drain, a lower `slot_max`); enabling, clearing drain or a
+higher `slot_max` takes effect when the poller or waiter restarts on the new
+file (fast live enable is #852).
 
 The dashboard server never edits `machines.yml` or runs a script. It
 cannot reach the orch host, and the orch host's credentials stay there:

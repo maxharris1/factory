@@ -233,6 +233,64 @@ def test_an_invalid_file_leaves_the_loaded_settings_in_force(tmp_path: Path) -> 
     assert claimed is not None and claimed[1].device == "box"
 
 
+def edited_after_load(
+    tmp_path: Path, loaded: str, edited: str, jobs: int
+) -> tuple[DevicePool, SQLiteJobQueue, Path]:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(loaded, encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(jobs):
+        enqueue(queue, "claude", str(n))
+    machines.write_text(edited, encoding="utf-8")
+    return DevicePool(queue, config, machines_path=machines), queue, machines
+
+
+def restarted(queue: SQLiteJobQueue, machines: Path) -> DevicePool:
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    return DevicePool(queue, config, machines_path=machines)
+
+
+def placements(pool: DevicePool, attempts: int) -> int:
+    return sum(pool.claim("claude") is not None for _ in range(attempts))
+
+
+@pytest.mark.parametrize("edit", [("enabled: true", "enabled: false"), ("drain: false", "drain: true")])
+def test_a_file_that_enables_or_undrains_waits_for_a_restart(
+    tmp_path: Path, edit: tuple[str, str]
+) -> None:
+    loaded = BOX_FILE.replace(*edit)
+    pool, queue, machines = edited_after_load(tmp_path, loaded, BOX_FILE, jobs=1)
+
+    assert pool.claim("claude") is None, "the live file never widens placement"
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+    claimed = restarted(queue, machines).claim("claude")
+    assert claimed is not None and claimed[1].device == "box", "a restart loads the file"
+
+
+def test_a_lower_slot_max_in_the_file_caps_placement_live(tmp_path: Path) -> None:
+    pool, _, _ = edited_after_load(
+        tmp_path, BOX_FILE.replace("slot_max: 2", "slot_max: 3"),
+        BOX_FILE.replace("slot_max: 2", "slot_max: 1"), jobs=3,
+    )
+
+    assert placements(pool, 3) == 1
+    assert pool.used() == {"box": 1}
+
+
+def test_a_higher_slot_max_in_the_file_waits_for_a_restart(tmp_path: Path) -> None:
+    pool, queue, machines = edited_after_load(
+        tmp_path, BOX_FILE.replace("slot_max: 2", "slot_max: 1"),
+        BOX_FILE.replace("slot_max: 2", "slot_max: 3"), jobs=3,
+    )
+
+    assert placements(pool, 3) == 1, "the loaded slot_max still caps the box"
+    assert placements(restarted(queue, machines), 3) == 2, "a restart raises it to 3"
+    assert pool.used() == {"box": 3}
+
+
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:
     devices = (device("box", 2, "claude", "codex"),)
     pool, queue = make_pool(tmp_path, *devices)
