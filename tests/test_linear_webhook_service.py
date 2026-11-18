@@ -672,9 +672,15 @@ def test_restart_and_stop_end_children_orphaned_by_a_killed_loop(
         assert _processes_of(home) == []
 
 
+def _read_pid(path: Path) -> int | None:
+    try:
+        return int(path.read_text().split()[0])
+    except (FileNotFoundError, IndexError, ValueError):
+        return None
+
+
 def _forward_owner(home: Path) -> int | None:
-    path = home / "forward-owner"
-    return int(path.read_text()) if path.exists() and path.read_text() else None
+    return _read_pid(home / "forward-owner")
 
 
 def _ssh_children(home: Path) -> list[int]:
@@ -837,8 +843,7 @@ def test_child_records_name_the_running_serve_and_ssh(home: Path) -> None:
     state = _state(home)
 
     def recorded(mode: str) -> int | None:
-        path = state / f"linear-webhook-{mode}-child.pid"
-        return int(path.read_text().split()[0]) if path.exists() else None
+        return _read_pid(state / f"linear-webhook-{mode}-child.pid")
 
     assert _service(home, "ensure").returncode == 0
     _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
