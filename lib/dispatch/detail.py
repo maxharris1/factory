@@ -135,10 +135,11 @@ class DetailMixin:
                 question_id=question_id,
                 parked_outcome=fact.get("parked"),
             )
+            why = wait.why if wait is not None else None
+            if why != "question" and key not in flagged:
+                continue
             try:
-                self._backstop_driver_wake(
-                    ticket, question_id, wait.why if wait is not None else None, key in flagged
-                )
+                self._backstop_driver_wake(ticket, question_id, why, key in flagged)
             except Exception as exc:
                 self.record_poll_exception(
                     ticket.repo, ticket.ticket_id, exc, prefix="driver-wake:"
