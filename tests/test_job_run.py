@@ -196,6 +196,187 @@ def test_missing_command_is_exit_127() -> None:
     assert messages and messages[0].startswith("cannot start /nonexistent/harness")
 
 
+MACOS_ANCHOR = pytest.mark.skipif(sys.platform != "darwin", reason="macOS anchor")
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while _alive(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _kill_if_alive(pid_file: Path) -> None:
+    if not pid_file.exists():
+        return
+    try:
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+@MACOS_ANCHOR
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("import sys; sys.exit(3)", 3),
+        ("import os; os.kill(os.getpid(), 15)", 128 + signal.SIGTERM),
+    ],
+    ids=["exit-3", "sigterm"],
+)
+def test_macos_the_anchor_passes_the_commands_exit_status_through(
+    source: str, expected: int
+) -> None:
+    workers: list[int] = []
+    code = job_run.run(
+        [sys.executable, "-c", source],
+        beat=lambda: None,
+        interval=1,
+        log=lambda _m: None,
+        started=workers.append,
+    )
+    assert code == expected
+    assert len(workers) == 1 and not _alive(workers[0]), "the anchor is gone once run returns"
+
+
+@MACOS_ANCHOR
+def test_macos_a_sigterm_to_the_recorded_worker_pid_reaches_the_command(tmp_path: Path) -> None:
+    ready, marker = tmp_path / "ready", tmp_path / "marker"
+    source = (
+        "import signal, sys, time\n"
+        "def stop(*_):\n"
+        f"    open({str(marker)!r}, 'w').close()\n"
+        "    sys.exit(7)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"open({str(ready)!r}, 'w').close()\n"
+        "time.sleep(30)\n"
+    )
+    workers: list[int] = []
+
+    def signal_the_worker_once_ready() -> None:
+        deadline = time.monotonic() + 20
+        while not (workers and ready.exists()):
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.02)
+        os.kill(workers[0], signal.SIGTERM)
+
+    sender = threading.Thread(target=signal_the_worker_once_ready, daemon=True)
+    sender.start()
+    code = job_run.run(
+        [sys.executable, "-c", source],
+        beat=lambda: None,
+        interval=1,
+        log=lambda _m: None,
+        started=workers.append,
+    )
+    sender.join(5)
+    assert ready.exists(), "the command started and installed its SIGTERM handler"
+    assert code == 7, "the command exited from its SIGTERM handler"
+    assert marker.exists(), "the SIGTERM sent to the worker pid reached the command"
+
+
+@MACOS_ANCHOR
+def test_macos_a_command_that_cannot_start_is_127_and_never_execed() -> None:
+    workers: list[int] = []
+    execed: list[bool] = []
+    code = job_run.run(
+        ["/nonexistent/harness"],
+        beat=lambda: None,
+        interval=1,
+        log=lambda _m: None,
+        started=workers.append,
+        execed=lambda: execed.append(True),
+    )
+    assert code == 127
+    assert execed == [], "execed is never called for a command that did not start"
+    assert len(workers) == 1 and not _alive(workers[0]), "nothing of the run is left"
+
+
+SETSID_GRANDCHILD = """\
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[1] + ".tmp", "w").write(str(os.getpid()))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(60)
+"""
+
+LEAVES_A_SETSID_GRANDCHILD = """\
+import os, subprocess, sys, time
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1], sys.argv[2]],
+    env={"PATH": os.environ.get("PATH", "")}, start_new_session=True,
+)
+while not os.path.exists(sys.argv[2]):
+    time.sleep(0.02)
+"""
+
+
+@MACOS_ANCHOR
+def test_macos_run_kills_a_setsid_grandchild_whose_parent_exited_and_the_anchor(
+    tmp_path: Path,
+) -> None:
+    grandchild = tmp_path / "grandchild.pid"
+    workers: list[int] = []
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", LEAVES_A_SETSID_GRANDCHILD, SETSID_GRANDCHILD, str(grandchild)],
+            beat=lambda: None,
+            interval=1,
+            log=lambda _m: None,
+            started=workers.append,
+        )
+        assert code == 0
+        assert grandchild.exists(), "the grandchild started before the command exited"
+        assert len(workers) == 1 and not _alive(workers[0]), "the anchor is gone once run returns"
+        assert _gone_within(int(grandchild.read_text()), 2), (
+            "the setsid grandchild, untagged and orphaned, died with the run"
+        )
+    finally:
+        _kill_if_alive(grandchild)
+
+
+@MACOS_ANCHOR
+def test_macos_a_command_past_its_budget_that_ignores_sigterm_is_killed_with_the_anchor(
+    tmp_path: Path,
+) -> None:
+    command = tmp_path / "command.pid"
+    source = (
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(command)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    workers: list[int] = []
+    budget = job_run.Budget(seconds=2, grace=1)
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", source],
+            beat=lambda: None,
+            interval=1,
+            log=lambda _m: None,
+            started=workers.append,
+            budget=budget,
+        )
+        assert command.exists(), "the command started and ignored SIGTERM"
+        assert code == 128 + signal.SIGKILL
+        assert budget.expired
+        assert len(workers) == 1 and not _alive(workers[0]), "the anchor is gone once run returns"
+        assert _gone_within(int(command.read_text()), 2), "the command was killed with the tree"
+    finally:
+        _kill_if_alive(command)
+
+
 # --- the CLI, against a real dispatcher database -----------------------------
 
 

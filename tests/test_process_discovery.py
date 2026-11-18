@@ -471,6 +471,7 @@ if role == "leaf":
 elif role == "middle":
     spawn_leaf()
 else:
+    open(os.path.join(here, "command.pid"), "w").write(str(os.getpid()))
     if sys.argv[3] == "anchor":
         subprocess.run([sys.executable, __file__, "middle", here])
     else:
@@ -522,25 +523,33 @@ def test_responsibility_probe_a_setsid_grandchild_names_its_disclaimed_ancestor(
             assert time.monotonic() < deadline and worker.poll() is None
             time.sleep(0.02)
         leaf = int(leaf_file.read_text())
-        w = worker.pid
+        w, command = worker.pid, int((tmp_path / "command.pid").read_text())
         resp_w = process_tree._responsible_pid(w)
-        live = (process_tree._responsible_pid(leaf), _ppid(leaf))
+        live = process_tree._responsible_pid(leaf)
         assert worker.stdin is not None
         worker.stdin.close()
-        worker.wait(timeout=10)
+        if not gated:
+            worker.wait(timeout=10)
+        while _alive(command):
+            assert time.monotonic() < deadline + 10, "the command did not exit"
+            time.sleep(0.02)
+        after = process_tree._responsible_pid(leaf)
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()
         time.sleep(0.2)
-        gone = (process_tree._responsible_pid(leaf), _ppid(leaf))
+        gone = process_tree._responsible_pid(leaf)
         print(
-            f"PROBE gated={gated} mode={mode} test={os.getpid()} W={w} L={leaf} "
-            f"resp(W)={resp_w} W-alive resp(L)={live[0]} ppid(L)={live[1]} "
-            f"W-gone resp(L)={gone[0]} ppid(L)={gone[1]}"
+            f"PROBE gated={gated} mode={mode} test={os.getpid()} W={w} command={command} "
+            f"L={leaf} resp(W)={resp_w} resp(L): command-alive={live} command-gone={after} "
+            f"W-gone={gone} ppid(L)={_ppid(leaf)}"
         )
         assert _alive(leaf)
         if gated:
-            assert resp_w == w
-            assert live[0] == w
+            assert (resp_w, live, after) == (w, w, w), "the leaf names the anchor while it lives"
+            assert gone == leaf, "the name collapses once the anchor exits"
         else:
-            assert live[0] != w
+            assert w not in (live, after, gone)
     finally:
         if leaf is not None:
             try:
