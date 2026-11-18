@@ -321,9 +321,6 @@ def test_a_re_drive_on_a_team_with_no_rfr_state_reports_it_in_the_done_wake(
     assert wakes[1][1]["note"] == NO_READY_NOTE
 
 
-# #895: a reviewer's rework state (linear_rework_states) is moved back to
-# the project's ready state by the next approved handoff.
-
 CHANGES_REQUESTED = {
     "id": "cr",
     "name": "Changes Requested",

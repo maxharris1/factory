@@ -485,8 +485,8 @@ unknown state fails the handoff before any write. The target is the first
 `projects[].linear_rework_states` (default none) names the states a reviewer
 uses to send an issue back, such as `[Changes Requested]`; the approved fix
 round moves an issue in one of them back to the target, wherever the state
-sits in the team's order. A name may not also be a handoff state. On a team with no Ready for
-Review state the PR is still marked ready and the handoff completes; the
+sits in the team's order. A name may not also be a handoff state. On a team
+with no Ready for Review state the PR is still marked ready and the handoff completes; the
 `done` wake's detail carries `note: "linear-not-moved: team has no Ready for
 Review state"` so the project bot can move the issue by hand. No other
 dispatcher state writes Linear, and `ship: handoff` never merges.

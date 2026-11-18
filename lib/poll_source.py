@@ -2620,18 +2620,6 @@ def _linear_state_phase(
     ready_name: str = DEFAULT_LINEAR_HANDOFF_STATES[0],
     rework: frozenset[str] = frozenset(),
 ) -> str | None:
-    """Where the issue stands relative to the ready state, or None if unknown.
-
-    The ready state is ready_name, the project's first handoff state.
-    before-review: backlog, triage, unstarted, or started and not after
-    the ready state in the team's order. ready-for-review: in that state.
-    moved-on: completed, canceled, or a started state after the ready
-    state. no-ready-state: not completed or canceled, on a team that has
-    no ready state, so there is nothing to move it to. rework: in one of
-    the project's linear_rework_states (a reviewer sent it back), whatever
-    its position. The handoff moves a before-review or rework issue and
-    fails closed on None.
-    """
     state = issue.get("state")
     if not isinstance(state, dict):
         return None

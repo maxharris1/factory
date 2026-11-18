@@ -1,9 +1,3 @@
-"""#895: a shipped ticket keeps no paused question or stuck flag.
-
-A ticket paused on a question (or stuck) that then ships leaves the paused
-columns behind unless the ship-state write clears them.
-"""
-
 from dataclasses import replace
 from pathlib import Path
 
