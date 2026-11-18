@@ -61,7 +61,7 @@ from lib.usage import UsageReport
 
 TABLE = "usage_readings"
 WINDOWS = ("five_hour", "seven_day")
-SOURCES = {"claude": "get_usage", "codex": "rollout"}
+SOURCES = {"claude": "get_usage", "codex": "rollout", "external": "external"}
 NOT_TRACKED = frozenset({"cursor"})
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 GET_USAGE_ID = "orch-usage"
@@ -84,9 +84,15 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     job_id TEXT NOT NULL,
     absent INTEGER NOT NULL DEFAULT 0,
     source_at REAL,
+    account TEXT,
     PRIMARY KEY (harness, bot, device, window)
 )
 """
+
+ACCOUNT_SQL = "COALESCE(account, harness || '-default')"
+EXTERNAL = "external"
+EXTERNAL_DEVICE = "external"
+EXTERNAL_JOB = "orch-usage-record"
 
 ADDED_COLUMNS = {"absent": "INTEGER NOT NULL DEFAULT 0", "source_at": "REAL"}
 
@@ -99,6 +105,17 @@ CREATE TABLE IF NOT EXISTS {OBSERVATIONS} (
     source_at REAL NOT NULL,
     absent INTEGER NOT NULL,
     PRIMARY KEY (harness, bot, window, source_at)
+)
+"""
+
+ACCOUNT_OBSERVATIONS = "usage_account_observations"
+ACCOUNT_OBSERVATIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {ACCOUNT_OBSERVATIONS} (
+    account TEXT NOT NULL,
+    window TEXT NOT NULL,
+    source_at REAL NOT NULL,
+    absent INTEGER NOT NULL,
+    PRIMARY KEY (account, window, source_at)
 )
 """
 

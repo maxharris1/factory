@@ -58,6 +58,31 @@ CREATE TABLE IF NOT EXISTS {EVIDENCE_TABLE} (
 )
 """
 
+ACCOUNT_TABLE = "lane_account_limits"
+ACCOUNT_DDL = f"""
+CREATE TABLE IF NOT EXISTS {ACCOUNT_TABLE} (
+    account TEXT PRIMARY KEY,
+    harness TEXT NOT NULL,
+    bot TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    limited_at REAL NOT NULL,
+    until INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    job_id TEXT NOT NULL
+)
+"""
+
+ACCOUNT_EVIDENCE_TABLE = "lane_account_evidence"
+ACCOUNT_EVIDENCE_DDL = f"""
+CREATE TABLE IF NOT EXISTS {ACCOUNT_EVIDENCE_TABLE} (
+    account TEXT NOT NULL,
+    window TEXT NOT NULL,
+    observed_at REAL NOT NULL,
+    free_at REAL NOT NULL,
+    PRIMARY KEY (account, window)
+)
+"""
+
 _PHRASE = re.compile(r"usage limit|limit reached|hit your limit", re.IGNORECASE)
 _EPOCH = re.compile(r"\|(\d{10})\b")
 _MONTHS = {
@@ -91,6 +116,7 @@ class LaneLimit:
     limited_at: float
     until: int
     source: str
+    account: str | None = None
 
 
 def detect(harness: str, event: dict, now: float) -> UsageLimit | None:
@@ -301,6 +327,25 @@ def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
         return []
     rows = connection.execute(f"SELECT recipient FROM {TABLE} ORDER BY recipient").fetchall()
     return [limit for limit in (active(connection, str(r[0]), now) for r in rows) if limit]
+
+
+def account_limits(connection: sqlite3.Connection, now: float) -> dict[str, LaneLimit]:
+    """Each account's lane limit while it holds (#772), keyed by account id."""
+    if not _has_table(connection, ACCOUNT_TABLE):
+        return {}
+    rows = connection.execute(
+        f"""
+        SELECT recipient, harness, bot, limited_at, until, source, account
+        FROM {ACCOUNT_TABLE} WHERE until > ? ORDER BY account
+        """,
+        (now,),
+    ).fetchall()
+    return {
+        str(row[6]): LaneLimit(
+            str(row[0]), str(row[1]), str(row[2]), float(row[3]), int(row[4]), str(row[5]), str(row[6])
+        )
+        for row in rows
+    }
 
 
 def paused_through(connection: sqlite3.Connection, now: float) -> dict[str, float]:
