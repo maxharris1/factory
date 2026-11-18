@@ -329,7 +329,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 ### 4.2.2 The QA worker (issue #784)
 
-`orch qa-worker` is a fixed program run by orch, never a model session. It claims jobs whose recipient is `qa`, holds no build slot and makes no model call. It ticks every 15 seconds (`--tick-seconds`, `--once` for one tick) under a lock beside the database, so one worker runs per `orch.db`. `deploy/orch-qa-worker.service` is a user unit in the waiter unit's style; nothing in the repo installs or starts it. All run state is in `jobs`, `qa_runs`, `qa_lanes` and `qa_runner_backoff`, so a restarted worker carries on from the rows. The code is `lib/qa_cloud.py` (`QaWorker`).
+`orch qa-worker` is a fixed program run by orch, never a model session. It claims jobs whose recipient is `qa`, holds no build slot and makes no model call. It ticks every 15 seconds (`--tick-seconds`, `--once` for one tick) under a lock beside the database, so one worker runs per `orch.db`. `deploy/orch-qa-worker.service` is a user unit in the waiter unit's style; nothing in the repo installs or starts it. All run state is in `jobs`, `qa_runs`, `qa_lanes` and `qa_runner_backoff`, so a restarted worker carries on from the rows. When a project's evidence root has less free space than its `qa_storage.min_free_gib`, the worker claims none of that project's QA jobs and logs the pause once (section 7, QA storage and evidence intake). The code is `lib/qa_cloud.py` (`QaWorker`).
 
 **Runners.** A runner is one vendor, behind the interface in `lib/qa_runners/__init__.py`. `launch(lane)` starts one cloud agent and returns its id and link. Launching the same `lane_id` again returns the first agent, so a worker that crashed between a launch and its write never starts a second one. A `Lane` is the lane id, the rendered brief (`lib/brief/qa.py`), the repo, the base branch, the `qa.<runner>.environment` name (`environment_name`) and the model. It has no field that could hold a secret value. `status(agent_id)` is `running` or `ended`. `stop(agent_id)` ends an agent, and stopping an ended one is not an error. `describe(agent_id)` gives the machine size and the agent version. A launch raises `RunnerOutage`, `UsageLimit` or `LaunchFailed`, each a `LaunchError`. Runners register by name. The worker builds only the names in `factory_md.QA_RUNNERS` that are registered. `lib/qa_runners/fake.py` registers `fake`, for tests; `factory.md` refuses that name. With no runner registered (today), the worker claims nothing.
 
@@ -1082,6 +1082,8 @@ bucket per owner, so company and personal data never share one (Max,
 | `endpoint` | no | An `https` URL with no credentials, query or fragment. Default `https://s3.<region>.amazonaws.com`. Objects are addressed path-style, `<endpoint>/<bucket>/<key>`. |
 | `access_key_env`, `secret_key_env` | yes | Names of the two environment variables that hold the key on the host. Never the values. A missing variable's error names the variable only. |
 | `evidence_root` | yes | Absolute host path where intake stores evidence. |
+| `evidence_budget_gib` | no | Whole GiB of evidence this repo may keep. Over it, recycling removes whole runs of closed tickets, oldest first. Left out, there is no budget. |
+| `min_free_gib` | no | Whole GiB that must stay free on the disk holding `evidence_root`. Below it, the QA worker claims no job for this repo. Left out, there is no floor. |
 
 `check-config` refuses an unknown key, a missing required key and any value
 outside its row. A `factory.md` with `qa.enabled: true` needs its project's
@@ -1196,9 +1198,34 @@ opens each level with `O_NOFOLLOW`, walks the lanes by directory handle,
 and unlinks only regular files. A symlink is never followed or deleted.
 `recycle` returns `Recycled(deleted, skipped)`: the removed paths relative
 to the root, and a `(run_id, reason)` pair for each skipped run and each
-symlink it left in place. Nothing calls `recycle` yet. The QA worker runs
-it once per poll, with a per-repo disk budget and a free-disk floor, in
-issue #874.
+symlink it left in place. A run folder that does not exist is nothing to
+do and is not reported.
+
+**Budget, floor and the worker (issue #874).** `recycle` takes an optional
+`budget_bytes`. After the keep table, it adds up the `lstat` sizes of the
+files in every run folder this repo's rows name, walking by directory
+handle and following no link. While the total is over the budget, it
+removes the oldest run, by `started_at`, whose ticket is `merged`, `done`
+or `abandoned` and which is not `queued` or `running`. The 7-day wait does
+not apply. It removes the run whole, by its id, under its ticket folder's
+handle, and adds the run folder to `Recycled.removed`. A run of an open ticket is
+never removed, even when the repo stays over budget. A refused folder or a
+failed removal is skipped with a reason. The row and its `evidence_dir`
+stay.
+
+Every QA worker tick starts by calling `recycle` for each repo with a
+`qa_storage` entry, with `evidence_budget_gib` as the budget. It logs each
+removed run and the count of deleted files. It logs each skip once per
+worker process. An error is logged and the tick goes on. Before the worker
+claims a job, it checks free space on the repo's `evidence_root`. Below
+`min_free_gib`, the job stays `queued` with its wait clock restarted. The
+worker logs `qa claim paused for <repo>` once when the repo's root drops
+below that repo's floor and `qa claim resumed for <repo>` once when it
+recovers. Pause state is per repo, so repos that share a root with different
+floors pause and resume apart. A root whose free space cannot be read counts
+as below the floor. When the worker accepts a lane's result,
+it records the run's `run_dir` as `evidence_dir`, in the transaction that
+closes the lane.
 
 ### QA receipts audit
 
