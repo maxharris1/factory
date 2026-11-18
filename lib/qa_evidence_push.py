@@ -3,11 +3,9 @@
 A full `orch dashboard push` calls `push_evidence` once the snapshot is out.
 Each settled run's lane files and a rendered index.html go as one tar over
 one ssh, unpacked into a temp folder beside `<remote_dir>/qa/<run_id>` and
-moved into place only when whole. Each push first reads the PC's `qa` folder
-(one `du -sk` over ssh); that inventory is `plan()`'s view of what the PC
-holds (#927). `.qa-push.json` beside the snapshot keeps only the fingerprint
-each run last had when sent to this destination and remote_dir, so a run on
-the PC with an unchanged fingerprint is not sent again. A symlink, a
+moved into place only when whole. A run on the PC whose files have not
+changed since its last send to this destination and remote_dir
+(`.qa-push.json` beside the snapshot) is not sent again. A symlink, a
 hard-linked file or a folder outside the evidence root is never sent: the run
 is refused with one log line and the others still go. `plan()` decides which
 runs leave the PC first (#921): runs gone from the box, then closed tickets'
@@ -131,11 +129,8 @@ def plan(
     sent: Mapping[str, str],
     budget_bytes: int | None,
 ) -> Plan:
-    """What one push removes from the PC and sends to it. `pc` is the PC's
-    `qa` inventory in disk bytes and `sent` the fingerprint each run last went
-    with. A Ready run counts its own file bytes against the budget, so a fixed
-    budget settles. An empty `all_ids` (no qa_runs rows read) names nothing,
-    and a Held run is never named."""
+    """What one push removes from the PC and sends to it. An empty `all_ids`
+    (no qa_runs rows read) names nothing, and a Held run is never named."""
     local = {run.run_id: run.local for run in runs}
     remove = [
         run_id
@@ -185,8 +180,6 @@ def inventory_script(remote_dir: str) -> str:
 
 
 def parse_inventory(stdout: str) -> dict[str, int]:
-    """`{run_id: disk bytes}` from `inventory_script`'s output. Empty output is
-    an empty (wiped) PC; any line that is not `du -sk` output raises."""
     inventory = {}
     for line in stdout.splitlines():
         if not line.strip():
