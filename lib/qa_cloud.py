@@ -423,7 +423,10 @@ class QaWorker:
 
     def tick(self) -> None:
         self._recycle()
-        self._post_linear()
+        try:
+            self._post_linear()
+        except Exception as exc:
+            self.log(f"qa linear: {type(exc).__name__}")
         if not self.runners or self.storage is None or self.head is None:
             return
         waiting: Counter[str] = Counter()
