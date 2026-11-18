@@ -44,7 +44,6 @@ _DRIVER_ANSWERS = frozenset({"go", "answers", "ok"})
 def driver_wake_step(
     why: Why | None, answered: bool, attempt: int, delivered_at: float, now: float, timeout: float
 ) -> DriverWakeStep:
-    """#916: what a delivered clarify wake needs on this poll."""
     if why != "question" or answered:
         return "settled"
     if now - delivered_at < timeout:
@@ -103,11 +102,6 @@ class DetailMixin:
                     )
 
     def _backstop_driver_wakes(self) -> None:
-        """#916: a clarify wake nobody answers is delivered once more after
-        job_states.driver_wake_seconds, then flags the ticket once. The flag
-        stays only while that step is flag, so an answer or a new question
-        clears it. Only a ticket this poll read is looked at, so a failed
-        read never re-wakes."""
         with self._connect() as connection:
             facts = wait_facts(connection)
             states = {

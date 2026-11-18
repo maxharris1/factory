@@ -1,5 +1,3 @@
-"""A clarify wake nobody answers is re-delivered once, then flagged (#916)."""
-
 from __future__ import annotations
 
 import sqlite3

@@ -1287,11 +1287,9 @@ def _qa(data: dict, findings: list[Finding]) -> QaWorkerConfig:
 def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:
     """job_states (#75): when a running job counts as stale, how long a
     claimed job that was never started waits before the poller requeues it,
-    how long a device stays unreachable before its running jobs are lost, and
-    how long a delivered clarify wake goes unanswered before the driver is
-    woken again and then flagged (#916). Whole minutes, at least 1; the
-    stale threshold must stay above `orch job run`'s heartbeat (15 seconds
-    by default, an override at most 30)."""
+    and how long a device stays unreachable before its running jobs are lost.
+    Whole minutes, at least 1; the stale threshold must stay above `orch job
+    run`'s heartbeat (15 seconds by default, an override at most 30)."""
     if "job_states" not in data:
         return None
     value = data["job_states"]
