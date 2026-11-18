@@ -1347,29 +1347,56 @@ evidence step has run 120 seconds; the rest go out on the next push.
 `ssh -G` (with `-F <ssh_config>` when set) resolves `host` to, so a change of
 ssh_config that points the alias at another PC is a new destination.
 For each run sent there it keeps a sha256 over each file's relative path,
-size and `mtime_ns`, and the size of the tar sent. It also lists the runs
-removed for budget. The box rewrites it after each send and each removal. A
+size and `mtime_ns`, and the sum of its file sizes. The box rewrites it after
+each send and after the removal step. A
 run whose fingerprint has not changed is not sent again. A changed run, such
 as one the box's recycling trimmed, is sent whole again, so the files
 recycling deleted disappear from the PC too. A store for another destination,
 or a lost or unreadable one, loads empty. Every run is then
 sent to the current destination, and nothing is removed from the old one.
 
-After the sends, the push removes from the PC each recorded run whose
-`qa_runs` row is gone or no longer settled, and each run whose box folder it
-found gone this push. A refused run, a run held because its repo has no
-`qa_storage` or its root cannot be opened, and a run the 120-second limit
-left unvisited stay on the PC. Each removal is one ssh step,
-`cd -- <remote_dir> && rm -rf -- qa/<run_id>`, for a `check_id`-valid run id
-only.
+**Recycling on the PC (issue #921).** Each evidence step first plans, then
+acts. `plan()` is pure: it takes every `qa_runs` run id, each settled run's
+state on the box, the runs the store records as on the PC with their file
+sizes, and the budget, and returns the run ids to remove, the run ids to
+send and whether the PC stays over budget. A settled run on the box is
+`Ready` (walked, with its fingerprint and file sizes), `Gone` (its ticket
+folder opens but `<run_id>` is not in it: recycled whole) or `Held` (refused,
+its repo has no `qa_storage`, or its evidence root cannot be opened).
 
-`dashboard.push.qa_budget_gib` (ssh only, a positive integer, unset by
-default) caps the evidence on the PC, counted as the recorded tar sizes.
-While the total is over the cap, the push removes the oldest run (by
-`started_at`) of a ticket whose `ticket_state` is `merged`, `done` or
-`abandoned`, the same way. A run of an open ticket is never removed for
-budget, even when the total stays over. A run removed for budget is not sent
-again while the box lists it. Unset, nothing is removed for budget.
+- A recorded run is removed when its `qa_runs` row is gone or the box run is
+  `Gone`. A row that is no longer settled keeps its copy.
+- A `Ready` run is sent when the store has no record of it or its fingerprint
+  changed.
+- `dashboard.push.qa_budget_gib` (ssh only, a positive integer, unset by
+  default) caps the PC's evidence, counted as the file sizes of the runs
+  recorded after this push's removals plus those of the runs it sends. A
+  pending run and its record count the same bytes, so with unchanged
+  evidence and budget the next push removes and sends nothing. While that
+  total is over the cap, the plan drops the oldest `Ready` run (by
+  `started_at`, then rowid) of a ticket whose `ticket_state` is `merged`,
+  `done` or `abandoned`. A dropped run on the PC is removed; a dropped run
+  not yet there is not sent. A run of an open ticket is never dropped, even
+  when the total stays over; the push then logs
+  `dashboard push: qa evidence stays over qa_budget_gib; nothing more can be
+  removed for budget`. Unset, nothing is removed for budget, so a run dropped
+  earlier is sent again.
+
+These cases remove nothing:
+
+| Case | Why |
+| --- | --- |
+| The `qa_runs` read returns no rows | An empty read never counts a run as gone, and no budget eviction runs. |
+| A repo with no `qa_storage`, or an evidence root missing or unmounted | Its runs are `Held`. |
+| A refused run | It is `Held`. |
+| A name that is not `check_id`-valid or starts with a dot | It is never named. |
+
+The removals run first, as one ssh step,
+`rm -rf -- <remote_dir>/qa/<run_id> <remote_dir>/qa/<run_id>...`, then the
+sends, newest first. The evidence step holds a non-blocking `flock` on
+`<out>/.qa-push.lock`; a push that overlaps it, such as self-heal's or a
+manual one, logs `dashboard push: qa evidence skipped: another push holds
+the lock` and sends and removes nothing.
 
 Any evidence error, such as a failed ssh, logs one redacted
 `dashboard push: qa ...` line and ends the evidence step. The exit status

@@ -44,3 +44,21 @@ def test_check_config_accepts_a_qa_budget(tmp_path: Path) -> None:
     path.write_text(BASE_ORCH + push, encoding="utf-8")
     result = run_orch("check-config", "--orch", str(path))
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "push, message",
+    [
+        *[
+            (f"transport: ssh\n    host: {TARGET}\n    qa_budget_gib: {budget}\n", "qa_budget_gib must be a positive integer")
+            for budget in ("0", "-1", "1.5", '"5"', "true")
+        ],
+        ("transport: none\n    qa_budget_gib: 5\n", "qa_budget_gib is only for transport ssh"),
+    ],
+)
+def test_check_config_refuses_a_bad_qa_budget(tmp_path: Path, push: str, message: str) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(BASE_ORCH + f"dashboard:\n  push:\n    {push}", encoding="utf-8")
+    result = run_orch("check-config", "--orch", str(path))
+    assert result.returncode != 0
+    assert f"dashboard.push.{message}" in result.stdout + result.stderr

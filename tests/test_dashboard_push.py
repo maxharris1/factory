@@ -1,3 +1,4 @@
+import fcntl
 import os
 import shutil
 import subprocess
@@ -18,7 +19,7 @@ import lib.dashboard_cli
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
 from lib.qa_evidence import EvidenceRefused, RunFile, run_dir, walk_run, write_run_tar
-from lib.qa_evidence_push import push_evidence
+from lib.qa_evidence_push import LOCK_NAME, BoxRun, Gone, Held, Plan, Ready, Sent, plan, push_evidence
 from tests.test_qa_evidence_recycle import DAY, NOW, REPO, TICKET, _closed, _lane, _run, db, root  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -835,9 +836,11 @@ class FakePC:
     def __init__(self, home_by_ssh_config: dict[str | None, Path]):
         self.home_by_ssh_config = home_by_ssh_config
         self.scripts: list[str] = []
+        self.argvs: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
         assert argv[0] == "ssh", argv
+        self.argvs.append(argv)
         config = argv[argv.index("-F") + 1] if "-F" in argv else None
         home = self.home_by_ssh_config[config]
         if "-G" in argv:
@@ -928,7 +931,9 @@ def _runs_on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard") -> set[st
 
 
 @pytest.mark.parametrize("gone", ["folder", "row"])
-def test_a_run_gone_from_the_box_is_removed_from_the_pc(db, root: Path, tmp_path: Path, gone: str) -> None:
+def test_a_run_gone_from_the_box_is_removed_from_the_pc_before_any_send(
+    db, root: Path, tmp_path: Path, gone: str
+) -> None:
     folder = _settled(db, root, "run-1")
     _settled(db, root, "run-2")
     _push_evidence(db, root, tmp_path)
@@ -937,11 +942,34 @@ def test_a_run_gone_from_the_box_is_removed_from_the_pc(db, root: Path, tmp_path
     else:
         db.execute("DELETE FROM qa_runs WHERE run_id = 'run-1'")
         db.commit()
+    _settled(db, root, "run-3", started_at=NOW)
     pc, lines = _push_evidence(db, root, tmp_path)
-    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-1"]
+    removal, send = [argv for argv in pc.argvs if "-G" not in argv]
+    assert removal == ["ssh", *OPTIONS, "--", TARGET, "rm -rf -- factory-dashboard/qa/run-1"]
+    assert "mv -- .run-3.push-tmp run-3" in send[-1]
     assert lines == []
-    assert _runs_on_pc(tmp_path) == {"run-2"}
+    assert _runs_on_pc(tmp_path) == {"run-2", "run-3"}
     assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+
+def test_an_empty_qa_runs_read_removes_nothing(db, root: Path, tmp_path: Path) -> None:
+    _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path)
+    db.execute("DELETE FROM qa_runs")
+    db.commit()
+    pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=1)
+    assert pc.scripts == []
+    assert lines == ["dashboard push: qa evidence stays over qa_budget_gib; nothing more can be removed for budget"]
+    assert _runs_on_pc(tmp_path) == {"run-1"}
+
+
+def test_an_overlapping_push_holding_the_lock_runs_no_ssh_step(db, root: Path, tmp_path: Path) -> None:
+    _settled(db, root, "run-1")
+    with open(tmp_path / LOCK_NAME, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        pc, lines = _push_evidence(db, root, tmp_path)
+    assert (pc.argvs, lines) == ([], ["dashboard push: qa evidence skipped: another push holds the lock"])
+    assert _push_evidence(db, root, tmp_path)[0].scripts != []
 
 
 def test_over_budget_the_oldest_closed_runs_leave_the_pc_and_open_runs_stay(
@@ -953,27 +981,51 @@ def test_over_budget_the_oldest_closed_runs_leave_the_pc_and_open_runs_stay(
     _settled(db, root, "run-open", ticket="13", started_at=NOW - 4 * DAY)
     _closed(db, TICKET, "merged", NOW)
     pc, _ = _push_evidence(db, root, tmp_path)
-    assert len(pc.scripts) == 3 and not [script for script in pc.scripts if "rm -rf -- qa/" in script]
+    assert len(pc.scripts) == 3 and not [script for script in pc.scripts if script.startswith("rm ")]
     assert _push_evidence(db, root, tmp_path)[0].scripts == []
 
     pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=512 * 1024)
-    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-old"]
+    assert pc.scripts == ["rm -rf -- factory-dashboard/qa/run-old"]
     assert _runs_on_pc(tmp_path) == {"run-mid", "run-open"}
 
-    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=1)
-    assert pc.scripts == ["cd -- factory-dashboard && rm -rf -- qa/run-mid"]
+    pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=1)
+    assert pc.scripts == ["rm -rf -- factory-dashboard/qa/run-mid"]
     assert _runs_on_pc(tmp_path) == {"run-open"}
+    assert lines == [
+        "dashboard push: qa evidence stays over qa_budget_gib; nothing more can be removed for budget"
+    ]
 
     (big / "lane-1" / "s-1" / "video.webm").write_bytes(b"w" * 1024)
-    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+    assert _push_evidence(db, root, tmp_path, budget_bytes=1)[0].scripts == []
     assert _runs_on_pc(tmp_path) == {"run-open"}
+
+    pc, _ = _push_evidence(db, root, tmp_path)
+    assert len(pc.scripts) == 2 and not [script for script in pc.scripts if script.startswith("rm ")]
+    assert _runs_on_pc(tmp_path) == {"run-old", "run-mid", "run-open"}
+
+
+def test_a_fixed_budget_push_settles_once_the_evidence_is_unchanged(db, root: Path, tmp_path: Path) -> None:
+    folder = _settled(db, root, "run-1")
+    _closed(db, TICKET, "merged", NOW)
+    budget = sum(path.stat().st_size for path in folder.rglob("*") if path.is_file())
+    pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=budget)
+    assert (len(pc.scripts), lines) == (1, [])
+    for _ in range(3):
+        pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=budget)
+        assert (pc.scripts, lines, _runs_on_pc(tmp_path)) == ([], [], {"run-1"})
+
+    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=budget - 1)
+    assert pc.scripts == ["rm -rf -- factory-dashboard/qa/run-1"]
+    for _ in range(3):
+        pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=budget - 1)
+        assert (pc.scripts, lines, _runs_on_pc(tmp_path)) == ([], [], set())
 
 
 def test_a_new_remote_dir_gets_every_run(db, root: Path, tmp_path: Path) -> None:
     _settled(db, root, "run-1")
     _push_evidence(db, root, tmp_path)
     pc, _ = _push_evidence(db, root, tmp_path, remote_dir="dashboard-b")
-    assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
+    assert len(pc.scripts) == 1 and not pc.scripts[0].startswith("rm ")
     assert b"QA run run-1" in _on_pc(tmp_path, "dashboard-b")["run-1/index.html"]
     assert _runs_on_pc(tmp_path) == {"run-1"}
 
@@ -985,23 +1037,26 @@ def test_an_ssh_config_that_resolves_the_alias_to_another_pc_gets_every_run(
     _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-a")
     assert _runs_on_pc(tmp_path) == {"run-1"}
     pc, _ = _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-b")
-    assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
+    assert len(pc.scripts) == 1 and not pc.scripts[0].startswith("rm ")
     assert b"QA run run-1" in _on_pc(tmp_path, pc="pc-b")["run-1/index.html"]
     assert _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-b")[0].scripts == []
 
 
-@pytest.mark.parametrize("why", ["refused", "held"])
+@pytest.mark.parametrize("why", ["refused", "no qa_storage", "missing root"])
 def test_a_refused_or_held_run_stays_on_the_pc(db, root: Path, tmp_path: Path, why: str) -> None:
     folder = _settled(db, root, "run-1")
+    _closed(db, TICKET, "merged", NOW)
     _push_evidence(db, root, tmp_path)
     roots = None
     if why == "refused":
         os.symlink(tmp_path, folder / "lane-1" / "s-1" / "leak.png")
-    else:
+    elif why == "no qa_storage":
         roots = {}
+    else:
+        roots = {REPO.lower(): tmp_path / "unmounted"}
     pc, lines = _push_evidence(db, root, tmp_path, roots=roots, budget_bytes=1)
     assert pc.scripts == []
-    assert len(lines) == 1 and f"qa run run-1 {why}" in lines[0]
+    assert len(lines) == 2 and f"qa run run-1 {'refused' if why == 'refused' else 'held'}" in lines[0]
     assert _runs_on_pc(tmp_path) == {"run-1"}
 
 
@@ -1121,3 +1176,67 @@ def test_cli_push_passes_the_qa_budget_in_bytes(
     argv = ["push", "--once", "--orch", str(orch), "--db", db_path, "--out", str(tmp_path / "out")]
     assert lib.dashboard_cli.main(argv) == 0
     assert budgets == [budget]
+
+
+def _box(
+    run_id: str, at: float, *, closed: bool = True, mark: str = "m", size: int = 10, local=None
+) -> BoxRun:
+    ready = Ready("", -1, (), (), mark, size)
+    return BoxRun(run_id, at, int(at), closed, ready if local is None else local)
+
+
+def _sent(**sizes: int) -> dict[str, Sent]:
+    return {run_id.replace("_", "-"): Sent("m", size) for run_id, size in sizes.items()}
+
+
+IDS = frozenset({"run-a", "run-b", "run-c", "run-o", "run-n", "run-h", "run-g"})
+
+
+@pytest.mark.parametrize(
+    "runs, pc, budget, all_ids, remove, sends, over",
+    [
+        pytest.param(
+            [_box("run-c", 3), _box("run-a", 1), _box("run-b", 2)],
+            _sent(run_a=10, run_b=10, run_c=10), 15, IDS, ("run-a", "run-b"), (), False,
+            id="merged-runs-named-oldest-first",
+        ),
+        pytest.param(
+            [_box("run-o", 0, closed=False, size=100), _box("run-a", 1)],
+            _sent(run_o=100, run_a=10), 5, IDS, ("run-a",), (), True,
+            id="open-run-never-named-while-over",
+        ),
+        pytest.param(
+            [_box("run-a", 1)], _sent(run_a=10, run_x=10), None, IDS, ("run-x",), (), False,
+            id="row-gone",
+        ),
+        pytest.param(
+            [_box("run-g", 1, local=Gone()), _box("run-a", 2)], _sent(run_g=10, run_a=10), None, IDS,
+            ("run-g",), (), False,
+            id="box-folder-recycled-whole",
+        ),
+        pytest.param(
+            [_box("run-a", 1, size=10), _box("run-n", 2, closed=False, size=1)], {}, 5, IDS, (), ("run-n",), False,
+            id="evictable-run-not-on-pc-dropped-from-sends",
+        ),
+        pytest.param(
+            [], {".run-a.push-tmp": Sent("m", 1), "bad/name": Sent("m", 1), "run-x": Sent("m", 1)}, 0, IDS,
+            ("run-x",), (), True,
+            id="dot-named-or-invalid-names-never-named",
+        ),
+        pytest.param(
+            [_box("run-a", 1), _box("run-b", 2), _box("run-c", 3, mark="new")], _sent(run_c=10), None, IDS,
+            (), ("run-c", "run-b", "run-a"), False,
+            id="changed-and-new-runs-sent-newest-first",
+        ),
+        pytest.param(
+            [_box("run-a", 1)], _sent(run_a=10, run_x=10), 1, frozenset(), (), (), True,
+            id="fuse-empty-qa-runs-read",
+        ),
+        pytest.param(
+            [_box("run-h", 1, local=Held("root missing"))], _sent(run_h=100), 1, IDS, (), (), True,
+            id="fuse-held-run",
+        ),
+    ],
+)
+def test_plan(runs, pc, budget, all_ids, remove, sends, over) -> None:
+    assert plan(all_ids=all_ids, runs=runs, pc=pc, budget_bytes=budget) == Plan(remove, sends, over)
