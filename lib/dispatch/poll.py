@@ -49,6 +49,10 @@ class PollMixin:
         if begin is not None:
             begin()
         self._polled = {}
+        # None marks a failed log read: skipped for the rest of a poll, retried next poll.
+        self._ci_log_reads = {
+            key: logs for key, logs in self._ci_log_reads.items() if logs is not None
+        }
         self._read_started = None
         self._merged_repos = set()
         self.merged_this_poll = set()

@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 _CI_RED_READY = frozenset({"queued-ci-fix", "ci-red-in-flight"})
 _RERUN_STATES = (None, "building", "fixing", "review")
 _AFTER_BUILD_STATES = frozenset({"review", "fixing", "awaiting-ok", "handed-off", "merge-queue"})
+_CI_LOG_READS = 64
 
 
 class ReadyMixin:
@@ -228,8 +229,10 @@ class ReadyMixin:
             if base is None:
                 return False, "stacked-held"
             ticket = replace(ticket, factory=replace(ticket.factory, base_branch=base))
-        if result is not None and self._waiting_on_ci_rerun(ticket, head, result):
-            return False, "ci-rerun"
+        if result is not None:
+            result = self._settled_red(ticket, head, result)
+            if result is None:
+                return False, "ci-rerun"
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
                 return True, "stale-ready"
@@ -387,29 +390,37 @@ class ReadyMixin:
                 return True
         return False
 
-    def _waiting_on_ci_rerun(self, ticket: TrackedTicket, head: str, result: CIResult) -> bool:
-        if self.ci_rerun is None or result.status != "failure":
-            return False
+    def _settled_red(
+        self, ticket: TrackedTicket, head: str, result: CIResult
+    ) -> CIResult | None:
+        if result.status != "failure":
+            return result
         key = (ticket.repo.lower(), ticket.ticket_id)
+        row = None
+        if self.ci_rerun is not None:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT outcome, job_ids, requested_at FROM ci_reruns
+                    WHERE repo = ? AND ticket_id = ? AND head = ?
+                    """,
+                    (*key, head),
+                ).fetchone()
+            if row is not None and row["outcome"] == "requested":
+                # GitHub gives rerun jobs new ids: the old ids are the attempt
+                # before the rerun, which a stale read can still show.
+                before = set(json.loads(row["job_ids"]))
+                if (
+                    any(check.job_id in before for check in failed_checks(result))
+                    and self.queue.now() - float(row["requested_at"]) < CI_RERUN_SETTLE_SECONDS
+                ):
+                    return None
+        from lib.evidence.ci import classify_logged
+
+        result = classify_logged(result, self._failed_job_logs(ticket.repo, result))
+        if self.ci_rerun is None or row is not None:
+            return result
         failed = failed_checks(result)
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT outcome, job_ids, requested_at FROM ci_reruns
-                WHERE repo = ? AND ticket_id = ? AND head = ?
-                """,
-                (*key, head),
-            ).fetchone()
-        if row is not None:
-            if row["outcome"] != "requested":
-                return False
-            # GitHub gives rerun jobs new ids: the old ids are the attempt
-            # before the rerun, which a stale read can still show.
-            before = set(json.loads(row["job_ids"]))
-            return (
-                any(check.job_id in before for check in failed)
-                and self.queue.now() - float(row["requested_at"]) < CI_RERUN_SETTLE_SECONDS
-            )
         run_ids = list(dict.fromkeys(check.run_id for check in failed if check.run_id is not None))
         job_ids = [check.job_id for check in failed if check.job_id is not None]
         outcome, detail = "requested", None
@@ -441,7 +452,7 @@ class ReadyMixin:
                     else f"rerun of run {runs} refused ({detail}); charging the failure"
                 )
             )
-        return outcome == "requested"
+        return None if outcome == "requested" else result
 
     def _charge_unannounced_red(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
@@ -469,7 +480,10 @@ class ReadyMixin:
             if charged or updating or _harness_job_active(connection, key):
                 return
         source = self._latest_trusted_comment(ticket)
-        if source is None or self._waiting_on_ci_rerun(ticket, head, result):
+        if source is None:
+            return
+        result = self._settled_red(ticket, head, result)
+        if result is None:
             return
         _status, count = self._record_ci_result(ticket, head, "failure")
         if self._mark_stuck_on_third_red(ticket, source, head, count):
@@ -509,12 +523,21 @@ class ReadyMixin:
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
         head = ticket.current_head
         result = ticket.ci.get(head) if head is not None else None
-        if (
-            result is None
-            or result.status != "success"
-            or self._is_stuck(ticket)
-            or self._review_context(ticket)[0] not in _RERUN_STATES
-        ):
+        if result is None or result.status != "success" or self._is_stuck(ticket):
+            return
+        state = self._review_context(ticket)[0]
+        if state not in TERMINAL_STATES:
+            with self._connect() as connection:
+                failed = connection.execute(
+                    """
+                    SELECT 1 FROM ci_events
+                    WHERE repo = ? AND ticket_id = ? AND head = ? AND status = 'failure'
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, head),
+                ).fetchone()
+            if failed is not None:
+                self._record_ci_result(ticket, head, "success")
+        if state not in _RERUN_STATES:
             return
         latest = self._latest_ready_at(ticket, head)
         if latest is None or self._open_job_at(ticket, head):
@@ -616,8 +639,9 @@ class ReadyMixin:
     def _ci_fix_evidence(
         self, repo: str, result: CIResult, dedupe_key: str
     ) -> CIEvidence | None:
-        """Runs outside the enqueue's transaction, so no network read holds the DB lock."""
-        from lib.evidence.ci import ci_evidence, classify_logged
+        """Runs outside the enqueue's transaction, so no network read holds the DB lock.
+        The result comes classified from _settled_red."""
+        from lib.evidence.ci import ci_evidence
 
         with self._connect() as connection:
             held = connection.execute(
@@ -625,22 +649,34 @@ class ReadyMixin:
             ).fetchone()
         if held is not None:
             return None
+        return ci_evidence(failed=failed_checks(result), logs=self._failed_job_logs(repo, result))
+
+    def _failed_job_logs(self, repo: str, result: CIResult) -> dict[str, str | None]:
+        """Each failed job's log by job id, each run's failed attempt read at most once."""
         failed = failed_checks(result)
         logs: dict[str, str | None] = {}
-        if self.ci_logs is not None:
-            run_ids = [check.run_id for check in failed if check.run_id is not None]
-            for run_id in dict.fromkeys(run_ids):
+        if self.ci_logs is None:
+            return logs
+        for run_id in dict.fromkeys(check.run_id for check in failed if check.run_id is not None):
+            checks = [check for check in failed if check.run_id == run_id]
+            key = (repo.lower(), run_id, tuple(check.job_id for check in checks))
+            if key in self._ci_log_reads:
+                run_logs = self._ci_log_reads[key] or {}
+            else:
+                read: Mapping[str, str] | None
                 try:
-                    run_logs = self.ci_logs(repo, run_id)
+                    run_logs = read = self.ci_logs(repo, run_id)
                 except Exception as exc:
-                    run_logs = {}
+                    run_logs, read = {}, None
                     if self.log is not None:
                         self.log(f"ci log: {repo} run {run_id} unavailable: {type(exc).__name__}")
-                for check in failed:
-                    if check.run_id == run_id and check.job_id is not None:
-                        logs[check.job_id] = run_logs.get(check.name)
-        classified = classify_logged(result, logs)
-        return ci_evidence(failed=failed_checks(classified), logs=logs)
+                self._ci_log_reads[key] = read
+                if len(self._ci_log_reads) > _CI_LOG_READS:
+                    del self._ci_log_reads[next(iter(self._ci_log_reads))]
+            for check in checks:
+                if check.job_id is not None:
+                    logs[check.job_id] = run_logs.get(check.name)
+        return logs
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved

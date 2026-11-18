@@ -41,13 +41,15 @@ class RerunBoard(Board):
         }
         return replace(ticket, ci=ci)
 
-    def red(self, pr: PR, head: str, *job_ids: str, run_id: str | None = RUN) -> None:
+    def red(
+        self, pr: PR, head: str, *job_ids: str, run_id: str | None = RUN, cause: str = "unknown"
+    ) -> None:
         pr.ci[head] = "failure"
         self.results[head] = CIResult(
             "failure",
             "failed: " + ", ".join(f"pytest-{job}" for job in job_ids),
             failed=tuple(
-                FailedCheck(f"pytest-{job}", run_id, job, RUN_URL if run_id else None)
+                FailedCheck(f"pytest-{job}", run_id, job, RUN_URL if run_id else None, cause)
                 for job in job_ids
             ),
         )
@@ -151,6 +153,50 @@ def test_the_ci_fix_carries_the_cause_its_fetched_logs_classify(tmp_path: Path) 
         ("pytest-22", "unknown", None),
     ]
     assert reads == [RUN]
+
+
+def test_the_red_the_dispatcher_acts_on_is_classified_from_its_fetched_logs(
+    tmp_path: Path,
+) -> None:
+    board, pr = built(tmp_path)
+    reads: list[str] = []
+
+    def logs(repo: str, run_id: str) -> dict[str, str]:
+        reads.append(run_id)
+        return {
+            name: "build\tSet up job\t2026-11-17T10:00:00.0000000Z The runner has received a shutdown signal.\n"
+            for name in ("pytest-11", "pytest-21")
+        }
+
+    charged: list[CIResult] = []
+    queue_ci_fix = board.dispatcher._queue_ci_fix
+
+    def capture(ticket, comment, head, result, *args, **kwargs):
+        charged.append(result)
+        return queue_ci_fix(ticket, comment, head, result, *args, **kwargs)
+
+    board.dispatcher.ci_logs = logs
+    board.dispatcher._queue_ci_fix = capture
+    board.red(pr, pr.head, "11", cause="code")
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) is None
+    [rerun_line] = [line for line in board.log if "rerunning the failed jobs" in line]
+    assert "(cause infra)" in rerun_line
+    assert reads == [RUN]
+
+    board.red(pr, pr.head, "21", cause="code")
+    board.poll()
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) == "queued-ci-fix"
+    assert [result.cause for result in charged] == ["infra"]
+    [fix] = board.jobs("fix")
+    assert json.loads(fix["detail"])["evidence"]["ci"]["cause"] == "infra"
+    assert reads == [RUN, RUN]
 
 
 def test_the_same_failed_jobs_past_the_settle_window_charge(tmp_path: Path) -> None:
@@ -300,6 +346,25 @@ def test_a_red_push_after_handoff_with_no_ready_gets_the_rerun_then_the_fix(tmp_
     assert board.reruns == [("owner/repo", RUN)]
 
 
+def test_a_green_rerun_after_an_unannounced_red_clears_it_once_handed_off(
+    tmp_path: Path,
+) -> None:
+    board, pr = handed_off(tmp_path)
+    pr.push(sha(2))
+    board.red(pr, pr.head, "31")
+    stopped_poll(board)
+    board.red(pr, pr.head, "32")
+    stopped_poll(board)
+    assert board.state("42")["gate_count"] == 1
+    board.finish("claude")
+
+    pr.ci[pr.head] = "success"
+    stopped_poll(board)
+
+    assert board.state("42")["gate_count"] == 0
+    assert board.ci_events()[-1] == (sha(2), "success", 0)
+
+
 def test_a_red_push_after_handoff_is_charged_at_once_with_reruns_off(tmp_path: Path) -> None:
     board, pr = handed_off(tmp_path)
     board.dispatcher.ci_rerun = None
@@ -328,6 +393,34 @@ def test_a_red_push_while_the_builder_works_is_left_to_its_ready(tmp_path: Path)
     assert board.reruns == []
     assert board.ci_events() == [(sha(1), "success", 0)]
     assert len(board.jobs("fix")) == 1
+
+
+def test_a_green_rerun_after_an_unannounced_red_clears_it_while_fixing(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    board.ready(pr, pr.head)
+    board.poll()
+    board.finish("codex")
+    board.revise(pr, "1/3")
+    board.poll()
+    board.finish("claude")
+    assert board.state("42")["workflow_state"] == "fixing"
+
+    pr.push(sha(2))
+    board.red(pr, sha(2), "41")
+    board.poll()
+    board.red(pr, sha(2), "42")
+    board.poll()
+    assert board.state("42")["gate_count"] == 1
+    assert board.ci_events()[-1] == (sha(2), "failure", 1)
+    assert [job["head"] for job in board.jobs("fix")][-1] == sha(2)
+    board.finish("claude")
+
+    pr.ci[sha(2)] = "success"
+    board.poll()
+
+    row = board.state("42")
+    assert (row["workflow_state"], row["gate_count"]) == ("fixing", 0)
+    assert board.ci_events()[-1] == (sha(2), "success", 0)
 
 
 def before_ci(tmp_path: Path) -> tuple[RerunBoard, PR]:
