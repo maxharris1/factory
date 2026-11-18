@@ -12,7 +12,8 @@ when configured, pushes it out. Paths:
 
 `snapshot` writes status.json, the five pages (index.html, job.html,
 activity.html, efficiency.html, health.html) and tickets.json (a record per
-tracked ticket); `push` sends them all.
+tracked ticket); `push` sends them all and, over ssh, each settled QA run's
+evidence folder (lib/qa_evidence_push.py).
 `push --status-only` sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
 last cycle ended, reported as poll health. `--poll-seconds` (30 or 60) is the
@@ -30,8 +31,10 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from lib import health
@@ -41,9 +44,10 @@ from lib.dashboard import (
     write_snapshot_pages,
 )
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_push import NoopTransport, run_push, transport_for
+from lib.dashboard_push import NoopTransport, SshTransport, run_push, transport_for
 from lib.job_state import JobStateConfig
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig, load_orch_yml
+from lib.qa_evidence_push import STORE_NAME, push_evidence
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -121,7 +125,7 @@ def main(argv: list[str]) -> int:
                 health.DASHBOARD,
                 interval=publish,
                 machines=args.machines,
-                log=lambda line: print(line, file=sys.stderr, flush=True),
+                log=_log,
             )
             paths = _snapshot(
                 args,
@@ -142,7 +146,8 @@ def main(argv: list[str]) -> int:
             interval=config.push.interval_seconds,
             once=args.once,
             sleep=time.sleep,
-            log=lambda line: print(line, file=sys.stderr, flush=True),
+            log=_log,
+            evidence=_evidence(args, transport, orch),
         )
 
     if not _paths_ok(args, prog):
@@ -157,6 +162,32 @@ def main(argv: list[str]) -> int:
         return 1
     print("wrote " + " ".join(str(path) for path in paths))
     return 0
+
+
+def _evidence(
+    args: argparse.Namespace, transport: object, orch: OrchConfig | None
+) -> Callable[[], None] | None:
+    """A full ssh push's QA evidence step, or None when there is nothing to send."""
+    roots = {
+        project.repo.lower(): project.qa_storage.evidence_root
+        for project in (orch.projects if orch is not None else ())
+        if project.qa_storage is not None
+    }
+    if not isinstance(transport, SshTransport) or args.status_only or not roots:
+        return None
+
+    def evidence() -> None:
+        connection = sqlite3.connect(f"{_db(args).resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            push_evidence(transport, connection=connection, roots=roots, store=_out(args) / STORE_NAME, log=_log)
+        finally:
+            connection.close()
+
+    return evidence
+
+
+def _log(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
 
 
 def _paths_ok(args: argparse.Namespace, prog: str) -> bool:
@@ -195,7 +226,6 @@ def _snapshot(
     """status.json first, then every page."""
     db = _db(args)
     log = args.log or _env_path("ORCH_POLL_LOG") or db.parent / "poller.log"
-    out = args.out or _env_path("ORCH_DASHBOARD_DIR") or db.parent / "dashboard"
     machines = args.machines if args.machines is not None else ROOT / "machines.yml"
     snapshot = collect_snapshot(
         db,
@@ -210,11 +240,15 @@ def _snapshot(
         orch=orch,
         publish_seconds=publish_seconds,
     )
-    return write_snapshot_pages(out, snapshot)
+    return write_snapshot_pages(_out(args), snapshot)
 
 
 def _db(args: argparse.Namespace) -> Path:
     return args.db if args.db is not None else Path(os.environ["ORCH_DB"])
+
+
+def _out(args: argparse.Namespace) -> Path:
+    return args.out or _env_path("ORCH_DASHBOARD_DIR") or _db(args).parent / "dashboard"
 
 
 def _env_path(name: str) -> Path | None:

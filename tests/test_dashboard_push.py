@@ -13,10 +13,12 @@ from lib.dashboard_push import (
     run_push,
     transport_for,
 )
+import lib.dashboard_cli
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
 from lib.qa_evidence import EvidenceRefused, RunFile, run_dir, walk_run, write_run_tar
-from tests.test_qa_evidence_recycle import REPO, TICKET, _lane, root  # noqa: F401
+from lib.qa_evidence_push import push_evidence
+from tests.test_qa_evidence_recycle import REPO, TICKET, _lane, _run, db, root  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "pc-wsl-bots.tail68624b.ts.net"
@@ -831,7 +833,98 @@ def test_remote_runs_one_ssh_with_the_feed_and_timeout() -> None:
     assert (second_kwargs["stdin"], second_kwargs["timeout"]) == (subprocess.DEVNULL, 20)
 
 
+class FakePC:
+    """Runs each ssh script with sh in a local stand-in for the PC login's home."""
+
+    def __init__(self, home: Path):
+        self.home = home
+        self.scripts: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        assert argv[0] == "ssh", argv
+        script = argv[argv.index("--") + 2]
+        self.scripts.append(script)
+        return subprocess.run(
+            ["sh", "-c", script], cwd=self.home, stdin=kwargs["stdin"], capture_output=True, text=True
+        )
+
+
 LANE_FILES = ["s-1/after-screenshot.png", "s-1/console.log"]
+
+
+def _settled(db, root: Path, run_id: str, state: str = "reported") -> Path:
+    folder = run_dir(root, REPO, TICKET, run_id)
+    _lane(folder, 1, {"s-1": "pass"}, LANE_FILES)
+    _run(db, run_id, folder, state=state)
+    return folder
+
+
+def _push_evidence(db, root: Path, tmp_path: Path) -> tuple[FakePC, list[str]]:
+    home = tmp_path / "pc"
+    (home / "factory-dashboard").mkdir(parents=True, exist_ok=True)
+    pc, lines = FakePC(home), []
+    transport = SshTransport(TARGET, "factory-dashboard", runner=pc)
+    roots = {REPO.lower(): root}
+    push_evidence(transport, connection=db, roots=roots, store=tmp_path / ".qa-push.json", log=lines.append)
+    return pc, lines
+
+
+def _on_pc(tmp_path: Path) -> dict[str, bytes]:
+    qa = tmp_path / "pc" / "factory-dashboard" / "qa"
+    assert not [path for path in qa.rglob("*") if path.is_symlink()]
+    return {path.relative_to(qa).as_posix(): path.read_bytes() for path in qa.rglob("*") if path.is_file()}
+
+
+def test_full_push_copies_each_settled_run_once_and_tracks_box_recycling(db, root: Path, tmp_path: Path) -> None:
+    folder = _settled(db, root, "run-1")
+    _settled(db, root, "run-q", state="queued")
+    _settled(db, root, "run-r", state="running")
+    pc, lines = _push_evidence(db, root, tmp_path)
+    on_pc = _on_pc(tmp_path)
+    lane = {
+        f"run-1/lane-1/{name}": (folder / "lane-1" / name).read_bytes()
+        for name in ("result.json", "manifest.json", *LANE_FILES)
+    }
+    assert {path: data for path, data in on_pc.items() if path != "run-1/index.html"} == lane
+    assert b"QA run run-1" in on_pc["run-1/index.html"]
+    assert lines == []
+    (script,) = pc.scripts
+    assert ".run-1.push-tmp" in script and script.count("mv -- .run-1.push-tmp run-1") == 1
+    assert sorted(os.listdir(tmp_path / "pc" / "factory-dashboard" / "qa")) == ["run-1"]
+
+    assert _push_evidence(db, root, tmp_path)[0].scripts == []
+
+    (folder / "lane-1" / LANE_FILES[1]).unlink()
+    pc, _ = _push_evidence(db, root, tmp_path)
+    assert len(pc.scripts) == 1
+    assert "run-1/lane-1/s-1/console.log" not in _on_pc(tmp_path)
+    assert "run-1/lane-1/s-1/after-screenshot.png" in _on_pc(tmp_path)
+
+
+def test_a_folder_outside_the_evidence_root_is_refused(db, root: Path, tmp_path: Path) -> None:
+    outside = run_dir((tmp_path / "elsewhere").resolve(), REPO, TICKET, "run-out")
+    _lane(outside, 1, {"s-1": "pass"}, LANE_FILES)
+    _run(db, "run-out", outside)
+    _settled(db, root, "run-ok")
+    pc, lines = _push_evidence(db, root, tmp_path)
+    assert {path.split("/")[0] for path in _on_pc(tmp_path)} == {"run-ok"}
+    assert lines == ["dashboard push: qa run run-out refused: evidence folder is outside the evidence root"]
+
+
+@pytest.mark.parametrize("reason, plant", [("symlink", os.symlink), ("hard-linked file", os.link)])
+def test_a_run_holding_a_link_is_never_sent(db, root: Path, tmp_path: Path, reason: str, plant) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("box secret", encoding="utf-8")
+    folder = _settled(db, root, "run-link")
+    plant(secret, folder / "lane-1" / "s-1" / "leak.png")
+    _settled(db, root, "run-ok")
+    pc, lines = _push_evidence(db, root, tmp_path)
+    assert [script for script in pc.scripts if "run-link" in script] == []
+    assert len(pc.scripts) == 1
+    on_pc = _on_pc(tmp_path)
+    assert {path.split("/")[0] for path in on_pc} == {"run-ok"}
+    assert all(b"box secret" not in data for data in on_pc.values())
+    assert lines == [f"dashboard push: qa run run-link refused: {reason}: lane-1/s-1/leak.png"]
 
 
 def test_a_file_that_changed_after_the_walk_is_refused(root: Path, tmp_path: Path) -> None:
@@ -874,3 +967,37 @@ def test_evidence_waits_for_a_sent_snapshot(tmp_path: Path, transport) -> None:
         sleep=lambda _: None, log=lambda _: None, evidence=lambda: calls.append(1),
     )
     assert calls == []
+
+
+QA_ORCH = f"""\
+poll_seconds: 60
+projects:
+  - repo: {REPO}
+    qa_storage:
+      bucket: factory-qa-owner
+      region: us-east-1
+      access_key_env: QA_S3_KEY_ID
+      secret_key_env: QA_S3_SECRET
+      evidence_root: /srv/factory/qa-evidence
+dashboard:
+  push:
+    transport: ssh
+    host: {TARGET}
+    method: scp
+"""
+
+
+@pytest.mark.parametrize("status_only, pushes", [(True, 0), (False, 1)])
+def test_cli_status_only_push_never_sends_evidence(
+    db, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_only: bool, pushes: int
+) -> None:
+    orch = tmp_path / "orch.yml"
+    orch.write_text(QA_ORCH, encoding="utf-8")
+    evidence: list[object] = []
+    transport = SshTransport(TARGET, "factory-dashboard", method="scp", runner=Recorder())
+    monkeypatch.setattr(lib.dashboard_cli, "transport_for", lambda config: transport)
+    monkeypatch.setattr(lib.dashboard_cli, "push_evidence", lambda *a, **kwargs: evidence.append(kwargs["roots"]))
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
+    argv = ["push", "--once", "--orch", str(orch), "--db", db_path, "--out", str(tmp_path / "out")]
+    assert lib.dashboard_cli.main(argv + (["--status-only"] if status_only else [])) == 0
+    assert evidence == [{REPO.lower(): Path("/srv/factory/qa-evidence")}] * pushes
