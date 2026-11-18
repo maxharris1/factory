@@ -919,7 +919,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         return source._factory_at(project.repo, project.factory_ref)
 
     def post(repo: str, pr: int, body: str, marker: str) -> str:
-        return actions[projects[repo.lower()].repo].post_issue_comment_once(repo, pr, body, marker)
+        return actions[repo.lower()].post_issue_comment_once(repo, pr, body, marker)
 
     def storage(repo: str) -> S3Storage:
         entry = projects[repo.lower()].qa_storage
