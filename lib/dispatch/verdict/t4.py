@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from lib.approve_rule import ApproveRefusal, approve_refusal
-from lib.dispatch.constants import MERGED_BEFORE_HANDOFF
+from lib.dispatch.constants import APPROVE_ROUND_STATES, MERGED_BEFORE_HANDOFF
 from lib.dispatch.helpers import (
     _comment_link,
     _holds,
@@ -12,6 +12,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
+from lib.dispatch.qa import EnsureQa, FixFromQa, ParkQa, RetryQa, Wait
 from lib.dispatch.types import (
     AlreadyMergedShip,
     CIResult,
@@ -71,6 +72,8 @@ class T4Mixin:
             ticket, comment.id
         )
         stale_state = state not in ("review", "awaiting-ok") and not held_fix
+        if state == "waiting-max" and self._paused_for_qa(ticket):
+            return False, "waiting-max-qa"
         if stale_state and self._reconcile_handoff(ticket, reading_comment_id=comment.id):
             return True, "handed-off-reconciled"
         if stale_state or reported_round != review_round + 1:
@@ -125,6 +128,14 @@ class T4Mixin:
             ticket, comment, approved_head, current_head, reported_round
         )
 
+    def _paused_for_qa(self, ticket: TrackedTicket) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT paused_action FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        return row is not None and row["paused_action"] == "qa"
+
     def _held_approval_gate(
         self, ticket: TrackedTicket, comment: Comment, head: str
     ) -> tuple[bool, str] | None:
@@ -136,6 +147,33 @@ class T4Mixin:
         if result.status == "failure":
             state, review_round = self._review_context(ticket)
             return self._held_ci_red(ticket, comment, head, result, state, review_round)
+        return None
+
+    def _approve_qa(
+        self, ticket: TrackedTicket, comment: Comment, head: str, reported_round: int | None
+    ) -> tuple[bool, str] | None:
+        match self._qa_gate(ticket, "APPROVE", head):
+            case Wait(outcome):
+                return False, outcome
+            case EnsureQa():
+                self._queue_qa(ticket, comment, head=head, review_round=reported_round or 0)
+                return False, "approve-qa-pending"
+            case RetryQa():
+                self._retry_qa(ticket, comment, head)
+                return False, "approve-qa-env-retry"
+            case ParkQa():
+                self._park_qa(ticket, comment, head)
+                return False, "waiting-max-qa"
+            case FixFromQa(report_id):
+                qa = self._qa_fix(ticket, report_id)
+                repeat = self._repeat_trigger(ticket, comment, reported_round, frozenset(qa.failed))
+                if repeat is not None:
+                    return self._t3_repeat(
+                        ticket, comment, repeat, reported_round, states=APPROVE_ROUND_STATES
+                    )
+                return self._spend_review_round(
+                    ticket, comment, reported_round, qa=qa, from_approve=True
+                )
         return None
 
     def _ship_approval(
@@ -153,6 +191,9 @@ class T4Mixin:
         covered = self._approval_covers(ticket, approved_head, current_head)
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
+        gated = self._approve_qa(ticket, comment, current_head, reported_round)
+        if gated is not None:
+            return gated
         if _holds(ticket):
             held = self._hold_gate(ticket, comment, current_head)
             if held is not None:
