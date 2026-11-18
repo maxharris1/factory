@@ -95,17 +95,21 @@ def wait_of(
     question_id: str | None = None,
     parked_outcome: str | None = None,
     approve_comment_id: str | None = None,
+    stop_comment_id: str | None = None,
 ) -> Wait | None:
     """Why a ticket in `state` waits on Max, or None when it does not.
     `parked_outcome` is the plan or review outcome recorded for the comment
-    that parked it at waiting-max."""
+    that parked it at waiting-max; `stop_comment_id` is the verdict that
+    capped or blocked it."""
     if stuck:
         return Wait("stuck", stuck_comment_id, stuck_reason)
     if state == "waiting-max":
         return Wait(_PARKED.get(parked_outcome or "", "question"), question_id)
     if state == "awaiting-ok":
         return Wait("awaiting-ok", approve_comment_id)
-    if state in ("capped", "blocked", "waiting-external"):
+    if state in ("capped", "blocked"):
+        return Wait(state, stop_comment_id or question_id)
+    if state == "waiting-external":
         return Wait(state, question_id)
     return None
 
@@ -119,8 +123,10 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
 
 def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str, str | None]]:
     """(repo casefolded, ticket id) -> what `wait_of` reads from orch.db: the
-    paused question, stuck source and hold approval comment ids, and the
-    outcome that parked the ticket at waiting-max."""
+    paused question, stuck source, hold approval and stopping verdict comment
+    ids, and the outcome that parked the ticket at waiting-max. The stopping
+    verdict is the latest capped-review or blocked-review event matching the
+    ticket's state, as the dispatcher's resume reads it."""
     tables = _tables(connection)
     if "ticket_state" not in tables:
         return {}
@@ -135,6 +141,15 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
         if table in tables
     )
     holds = "ship_holds" in tables
+    stop = (
+        f"""(SELECT stop.comment_id FROM review_events AS stop
+             WHERE stop.repo = state.repo AND stop.ticket_id = state.ticket_id
+               AND stop.outcome = CASE state.workflow_state
+                   WHEN 'capped' THEN 'capped-review' WHEN 'blocked' THEN 'blocked-review' END
+             ORDER BY stop.rowid DESC LIMIT 1)"""
+        if "review_events" in tables
+        else "NULL"
+    )
     facts: dict[tuple[str, str], dict[str, str | None]] = {}
     for row in connection.execute(
         f"""
@@ -142,7 +157,8 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
                {column("paused_question_id")} AS question_id,
                {column("stuck_source_comment_id")} AS stuck_comment_id,
                {"parked.outcome" if parked else "NULL"} AS parked,
-               {"hold.approve_comment_id" if holds else "NULL"} AS approve_comment_id
+               {"hold.approve_comment_id" if holds else "NULL"} AS approve_comment_id,
+               {stop} AS stop_comment_id
         FROM ticket_state AS state
         {f'''LEFT JOIN ({parked}) AS parked
           ON parked.repo = state.repo AND parked.ticket_id = state.ticket_id
@@ -157,7 +173,9 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
         facts[(str(row[0]).casefold(), str(row[1]))] = {
             key: None if value is None else str(value)
             for key, value in zip(
-                ("question_id", "stuck_comment_id", "parked", "approve_comment_id"), tuple(row)[2:]
+                ("question_id", "stuck_comment_id", "parked", "approve_comment_id",
+                 "stop_comment_id"),
+                tuple(row)[2:],
             )
         }
     return facts

@@ -1830,6 +1830,7 @@ def _read_db(
                 question_id=_comment_id(facts.get("question_id")),
                 parked_outcome=facts.get("parked"),
                 approve_comment_id=_comment_id(facts.get("approve_comment_id")),
+                stop_comment_id=_comment_id(facts.get("stop_comment_id")),
             )
             acting = {
                 "wait": wait.as_dict() if wait else None,

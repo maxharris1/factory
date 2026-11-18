@@ -1671,7 +1671,7 @@ def _wait_rows(tmp_path: Path) -> dict[str, dict]:
         add_ticket(connection, repo, "10", state="building", stuck=1, stuck_reason="job-failed-2")
         connection.executemany(
             "UPDATE ticket_state SET paused_question_id = ? WHERE repo = ? AND ticket_id = ?",
-            [(f"60{n}", repo, str(n)) for n in (2, 3, 4, 5, 6)],
+            [(f"60{n}", repo, str(n)) for n in (2, 3, 4, 5)],
         )
         connection.execute(
             "UPDATE ticket_state SET stuck_source_comment_id = '6010' "
@@ -1685,7 +1685,8 @@ def _wait_rows(tmp_path: Path) -> dict[str, dict]:
         connection.executemany(
             "INSERT INTO review_events (repo, ticket_id, comment_id, outcome) VALUES (?, ?, ?, ?)",
             [(repo, "3", "603", "waiting-max-repeat"), (repo, "4", "604", "waiting-max-unsat"),
-             (repo, "5", "605", "queued-fix")],
+             (repo, "5", "605", "queued-fix"), (repo, "6", "6061", "capped-review"),
+             (repo, "6", "606", "capped-review"), (repo, "7", "607", "blocked-review")],
         )
         connection.execute(
             "INSERT INTO ship_holds (repo, ticket_id, head, approver, reasons, approve_comment_id, "
@@ -1714,7 +1715,7 @@ def test_each_waiting_ticket_says_why_it_waits_and_which_actions_apply(tmp_path:
         "4": (("unsat", "604"), ["another-round", "close"]),
         "5": (("question", "605"), ["answer", "close"]),
         "6": (("capped", "606"), ["another-round", "close"]),
-        "7": (("blocked", None), ["resume", "close"]),
+        "7": (("blocked", "607"), ["resume", "close"]),
         "8": (("waiting-external", None), ["close"]),
         "9": (None, []),
         "10": (("stuck", "6010"), ["retry", "close"]),
