@@ -3,7 +3,7 @@
 Each test serves a scratch directory on loopback through `make_server`
 (the tailnet-only bind is enforced by `load_config`, tested in
 tests/test_deploy.py) and checks that only the snapshot files (status.json, the pages and tickets.json)
-are served, never anything outside the directory, never a listing.
+and a QA run's evidence under /qa/runs/ are served, never anything outside the directory, never a listing.
 """
 
 import http.client
@@ -1303,3 +1303,131 @@ def test_load_config_refuses_an_unsafe_actions_audit(
     env = _env(site, **actions, USER="factory-dash", DASHBOARD_ACTIONS_AUDIT=value)
     with pytest.raises(server_module.ConfigError, match=needle):
         server_module.load_config(env, process_user="factory-dash")
+
+
+# QA evidence (issue #875): a run stored by qa_evidence.collect(), with the
+# page run_page() renders for it, served under /qa/runs/<run_id>.
+
+from collections.abc import Callable  # noqa: E402
+from urllib.parse import quote, urljoin, urlsplit  # noqa: E402
+
+from lib.dashboard_pages.qa_evidence import run_page  # noqa: E402
+from lib.qa_storage import check_id  # noqa: E402
+from tests.test_qa_evidence import RUN as QA_RUN  # noqa: E402
+from tests.test_qa_evidence_page import LANES, PNG, WEBM, Page, collect_run  # noqa: E402
+
+QA_PAGE = f"/qa/runs/{QA_RUN}"
+
+
+@pytest.fixture
+def qa_run(site: Path, tmp_path: Path) -> Path:
+    run = site / "qa" / QA_RUN
+    run.parent.mkdir()
+    collect_run(tmp_path / "evidence").rename(run)
+    (run / "index.html").write_text(run_page(run, QA_RUN), encoding="utf-8")
+    return run
+
+
+def _without_date(headers: dict[str, str]) -> dict[str, str]:
+    return {key: value for key, value in headers.items() if key != "date"}
+
+
+def test_a_qa_run_page_and_its_evidence_are_served(qa_run: Path, get) -> None:
+    status, headers, body = get(QA_PAGE)
+    assert (status, headers["content-type"]) == (200, "text/html; charset=utf-8")
+    assert "img-src 'self'" in headers["content-security-policy"]
+    page = Page(body.decode())
+    for scenarios in LANES.values():
+        for scenario, outcome in scenarios.items():
+            assert scenario in page.text and outcome in page.text
+
+    served = {"img": ("image/png", PNG), "video": ("video/webm", WEBM)}
+    linked = [(tag, link) for tag, link in page.links if tag in served]
+    assert {tag for tag, _ in linked} == set(served)
+    for tag, link in linked:
+        path = urlsplit(urljoin(QA_PAGE, link)).path
+        status, headers, body = get(path)
+        assert (status, headers["content-type"], body) == (200, *served[tag]), path
+        assert "media-src 'self'" in headers["content-security-policy"]
+        head_status, head_headers, head_body = get(path, method="HEAD")
+        assert (head_status, head_body, _without_date(head_headers)) == (200, b"", _without_date(headers))
+
+    for name in ("app.log", "login/dom.html"):
+        status, headers, _ = get(f"{QA_PAGE}/lane-1/{name}")
+        assert (status, headers["content-type"]) == (200, "text/plain; charset=utf-8"), name
+        assert headers["content-disposition"] == "attachment"
+    snapshot_csp = get("/")[1]["content-security-policy"]
+    assert snapshot_csp == server_module.SECURITY_HEADERS["Content-Security-Policy"]
+
+
+def test_evidence_over_the_snapshot_cap_is_served_whole(
+    qa_run: Path, get, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_module, "MAX_BYTES", 16)
+    data = os.urandom(3 * 1024 * 1024 + 7)
+    (qa_run / "lane-1" / "login" / "long.webm").write_bytes(data)
+    status, headers, body = get(f"{QA_PAGE}/lane-1/login/long.webm")
+    assert (status, headers["content-length"], body == data) == (200, str(len(data)), True)
+
+
+def _plant(relative: str, make: Callable[[Path, Path], object]) -> Callable[[Path], None]:
+    def plant(run: Path) -> None:
+        target = run / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        make(target, run.parents[2])
+    return plant
+
+
+def _write_private(target: Path, _outside: Path) -> None:
+    target.write_text(PRIVATE, encoding="utf-8")
+
+
+@pytest.mark.parametrize("path,plant", [
+    pytest.param(f"{QA_PAGE}/lane-1/../../../../private.txt", None, id="dot-dot"),
+    pytest.param(f"{QA_PAGE}/lane-1/%2e%2e/%2e%2e/%2e%2e/%2e%2e/private.txt", None, id="encoded-dot-dot"),
+    pytest.param(f"{QA_PAGE}/lane-1/login%2fshot.png", None, id="encoded-slash"),
+    pytest.param(f"{QA_PAGE}/lane-1/login%5cshot.png", None, id="encoded-backslash"),
+    pytest.param(f"{QA_PAGE}/lane-1/login/shot.png%00", None, id="encoded-nul"),
+    pytest.param("/qa/runs/../../private.txt", None, id="run-dot-dot"),
+    pytest.param(f"{QA_PAGE}/lane-1/.shot.png.push-tmp",
+                 _plant("lane-1/.shot.png.push-tmp", _write_private), id="dot-file"),
+    pytest.param(f"{QA_PAGE}/lane-1/login/leak.png",
+                 _plant("lane-1/login/leak.png", lambda t, out: t.symlink_to(out / "private.txt")),
+                 id="file-symlink"),
+    pytest.param(f"{QA_PAGE}/lane-1/outside/private.txt",
+                 _plant("lane-1/outside", lambda t, out: t.symlink_to(out, target_is_directory=True)),
+                 id="directory-symlink"),
+    pytest.param(f"{QA_PAGE}/lane-1/login/hard.png",
+                 _plant("lane-1/login/hard.png", lambda t, out: os.link(out / "private.txt", t)),
+                 id="hard-link"),
+    pytest.param(f"{QA_PAGE}/lane-0/x", _plant("lane-0/x", _write_private), id="lane-0"),
+    pytest.param(f"{QA_PAGE}/notes/x", _plant("notes/x", _write_private), id="not-a-lane"),
+    pytest.param(f"{QA_PAGE}/lane-1/login", None, id="directory"),
+    pytest.param("/qa/runs/run-8", None, id="unknown-run"),
+    pytest.param(f"{QA_PAGE}/", None, id="trailing-slash"),
+    pytest.param(f"{QA_PAGE}/lane-1", None, id="lane-folder"),
+    pytest.param(f"{QA_PAGE}/index.html", None, id="page-by-name"),
+    pytest.param("/qa", None, id="qa"),
+    pytest.param("/qa/runs", None, id="runs"),
+    pytest.param("/qa/runs/", None, id="runs-slash"),
+])
+def test_qa_paths_outside_a_run_s_evidence_are_not_found(qa_run: Path, get, path: str, plant) -> None:
+    if plant is not None:
+        plant(qa_run)
+    for method in ("GET", "HEAD"):
+        status, _, body = get(path, method=method)
+        assert status == 404, (method, path)
+        assert PRIVATE.encode() not in body
+
+
+@pytest.mark.parametrize("run_id", [".", "..", "a" * 64, "a" * 65, "a/b", "run-7", "a.b_c"])
+def test_served_run_ids_are_exactly_the_ids_qa_storage_accepts(site: Path, get, run_id: str) -> None:
+    page = site / "qa" / run_id / "index.html"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(INDEX, encoding="utf-8")
+    try:
+        accepted = check_id(run_id, "run_id") == run_id
+    except ValueError:
+        accepted = False
+    status, _, _ = get(f"/qa/runs/{quote(run_id, safe='')}")
+    assert status == (200 if accepted else 404)
