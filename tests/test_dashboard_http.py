@@ -1017,7 +1017,6 @@ def test_load_config_refuses_an_unsafe_settings_spool(
         server_module.load_config(env, process_user="factory-dash")
 
 
-# Max's actions (#822): POST /api/act.
 
 from datetime import datetime, timezone  # noqa: E402
 from types import SimpleNamespace  # noqa: E402

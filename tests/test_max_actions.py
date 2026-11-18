@@ -45,10 +45,10 @@ AT = datetime(2026, 11, 18, 20, 4, tzinfo=timezone.utc)
 
 @pytest.mark.parametrize("state,stuck,facts,actions", [
     ("awaiting-ok", False, {"approve_comment_id": "5"}, ["ok", "close"]),
-    ("waiting-max", False, {"parked": "waiting-max-size", "question_id": "7"},
+    ("waiting-max", False, {"parked_outcome": "waiting-max-size", "question_id": "7"},
      ["approve-plan", "split", "close"]),
-    ("waiting-max", False, {"parked": "waiting-max-repeat"}, ["another-round", "close"]),
-    ("waiting-max", False, {"parked": "waiting-max-unsat"}, ["another-round", "close"]),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-repeat"}, ["another-round", "close"]),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-unsat"}, ["another-round", "close"]),
     ("waiting-max", False, {"question_id": "7"}, ["answer", "close"]),
     ("capped", False, {}, ["another-round", "close"]),
     ("blocked", False, {}, ["resume", "close"]),

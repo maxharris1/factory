@@ -93,16 +93,16 @@ def wait_of(
     stuck_reason: str | None = None,
     stuck_comment_id: str | None = None,
     question_id: str | None = None,
-    parked: str | None = None,
+    parked_outcome: str | None = None,
     approve_comment_id: str | None = None,
 ) -> Wait | None:
     """Why a ticket in `state` waits on Max, or None when it does not.
-    `parked` is the plan or review outcome recorded for the comment that
-    parked it at waiting-max."""
+    `parked_outcome` is the plan or review outcome recorded for the comment
+    that parked it at waiting-max."""
     if stuck:
         return Wait("stuck", stuck_comment_id, stuck_reason)
     if state == "waiting-max":
-        return Wait(_PARKED.get(parked or "", "question"), question_id)
+        return Wait(_PARKED.get(parked_outcome or "", "question"), question_id)
     if state == "awaiting-ok":
         return Wait("awaiting-ok", approve_comment_id)
     if state in ("capped", "blocked", "waiting-external"):
@@ -118,8 +118,9 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
 
 
 def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str, str | None]]:
-    """(repo casefolded, ticket id) -> the comment ids `wait_of` reads, for
-    every ticket in ticket_state."""
+    """(repo casefolded, ticket id) -> what `wait_of` reads from orch.db: the
+    paused question, stuck source and hold approval comment ids, and the
+    outcome that parked the ticket at waiting-max."""
     tables = _tables(connection)
     if "ticket_state" not in tables:
         return {}

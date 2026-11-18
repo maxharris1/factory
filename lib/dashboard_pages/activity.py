@@ -382,10 +382,8 @@ _SCRIPT = r"""
     });
   }
 
-  // #822: why a ticket waits on Max and, signed in, what he can do about it.
-  // AT keeps each row's form across status.json renders, by attention key.
   var ACT = __ACT__;
-  var AT = {};
+  var FORMS_BY_ATTENTION_KEY = {};
 
   function commentHref(x) {
     var refs = ghRefs(x);
@@ -424,7 +422,7 @@ _SCRIPT = r"""
   }
   function atActs(row, x, key) {
     var names = Object.keys(ACT.label).filter(function (name) { return (x.actions || []).indexOf(name) >= 0; });
-    var p = AT[key] || (AT[key] = atBuild());
+    var p = FORMS_BY_ATTENTION_KEY[key] || (FORMS_BY_ATTENTION_KEY[key] = atBuild());
     p.x = x;
     if (names.indexOf(p.action) < 0) p.action = null;
     if (names.length) {

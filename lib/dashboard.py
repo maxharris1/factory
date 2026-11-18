@@ -1826,7 +1826,7 @@ def _read_db(
                 stuck_reason=reason,
                 stuck_comment_id=_comment_id(facts.get("stuck_comment_id")),
                 question_id=_comment_id(facts.get("question_id")),
-                parked=facts.get("parked"),
+                parked_outcome=facts.get("parked"),
                 approve_comment_id=_comment_id(facts.get("approve_comment_id")),
             )
             acting = {
