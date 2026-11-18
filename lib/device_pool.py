@@ -11,13 +11,13 @@ in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness. Inside that transaction a pool given `machines_path` reads
 the shared settings row (lib/live_settings.py, #852) with machines.yml as
-it is now met into it, and places by the row's enabled, drain and slot_max,
-not by the config the process loaded. A settings change written under the
-same lock (lib/settings_apply.py) that disables, drains or lowers slot_max
-stops the next claim in every process (#777). An enable, an undrain or a
-higher slot_max reaches placement once the poller's DeviceMonitor adopts the
-file, within one poll, with no restart. Until the poller first adopts, every
-device is closed.
+it is now written into it, and places by the row's enabled, drain and
+slot_max, not by the config the process loaded. A settings change written
+under the same lock (lib/settings_apply.py) that disables, drains or lowers
+slot_max stops the next claim in every process (#777). An enable, an
+undrain or a higher slot_max reaches placement once the poller's
+DeviceMonitor adopts the file and every machines.yml the row holds allows
+it, with no restart. Until the poller first adopts, every device is closed.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -233,7 +233,6 @@ class DevicePool:
         self.queue = queue
         self.config = config
         self.machines_path = machines_path
-        self._loaded: tuple[str, str | None] | None = None
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -291,14 +290,8 @@ class DevicePool:
     ) -> tuple[MachinesConfig, live_settings.Live | None]:
         if self.machines_path is None:
             return self.config, None
-        live = live_settings.narrowed(connection, self.machines_path)
+        live = live_settings.recorded(connection, self.machines_path)
         return live.placement_config(self.config), live
-
-    def _loaded_digest(self, machines: Path) -> str | None:
-        key = live_settings.file_key(machines)
-        if self._loaded is None or self._loaded[0] != key:
-            self._loaded = key, live_settings.loaded_digest(machines)
-        return self._loaded[1]
 
     def serving(self, harness: str) -> frozenset[str]:
         """The accounts of harness on devices placement may use."""
@@ -328,10 +321,8 @@ class DevicePool:
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             config, live = self._placement(connection)
-            if live is not None and self.machines_path is not None:
-                version = live.loaded_version(self._loaded_digest(self.machines_path))
-                if version is not None:
-                    live_settings.record_seen(connection, harness, version)
+            if live is not None and live.places_by_adopted():
+                live_settings.record_seen(connection, harness, live.adopted)
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}

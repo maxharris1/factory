@@ -48,11 +48,9 @@ def test_separate_checkout_false_ack(tmp_path: Path) -> None:
 
 
 def test_applied_once_the_waiters_own_file_holds_the_enable(tmp_path: Path) -> None:
-    queue, audit, waiter, waiter_machines, shared_machines, monitor = separate_checkouts(tmp_path)
+    queue, audit, waiter, waiter_machines, shared_machines, _ = separate_checkouts(tmp_path)
     assert waiter.claim("claude") is None
     waiter_machines.write_bytes(shared_machines.read_bytes())
-    shared_machines.touch()
-    monitor.reload()
 
     claim = waiter.claim("claude")
 

@@ -103,7 +103,7 @@ def _settings_row(db: Path, machines: Path, *, adopt: bool, seen: dict[str, int]
                         encoding="utf-8")
     with sqlite3.connect(db, isolation_level=None) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        assert live_settings.narrowed(connection, machines).written == 1
+        assert live_settings.recorded(connection, machines).written == 1
         if adopt:
             live_settings.adopted(connection, machines)
         for harness, version in seen.items():

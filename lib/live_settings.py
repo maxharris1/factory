@@ -1,33 +1,36 @@
 """The device settings every process places by (#852).
 
-One row in orch.db's `device_live` holds each device's `enabled`, `drain`
-and `slot_max` as placement may use them now. Placement reads them from the
+One row in orch.db's `device_live` holds what placement may use now for each
+device's `enabled`, `drain` and `slot_max`. Placement reads them from the
 row, never from a process's own copy of machines.yml, so no process mixes
 fields from two versions of the file.
 
-The row is never wider than machines.yml as it is on disk, and never wider
-than the view the poller's DeviceMonitor acts on:
+The row keeps the switches the poller's DeviceMonitor adopted and, for each
+machines.yml any process read (keyed by its absolute path), that file's
+switches as last read. Placement uses their meet, `Live.switches`: a device
+is enabled only if the adopted switches and every file say so, drained if
+any does, and its slot_max is the lowest. A device the poller has not
+adopted is closed, so nothing is placed before the first adopt.
 
-* `narrowed` runs inside every claim's BEGIN IMMEDIATE (and the settings
-  applier's). It meets the file into the row: a device is enabled only if
-  both say so, drained if either does, and its slot_max is the lower. It
-  never widens. A device missing from either side counts as closed. The
-  first writer (a claim or the applier) creates the row with every device
-  closed, so nothing is placed before the poller adopts.
+* `recorded` runs inside every claim's BEGIN IMMEDIATE (and the settings
+  applier's). When the caller's file changed since its entry was written, it
+  replaces that entry. A narrowing in any file reaches placement at once; an
+  entry that widens lets placement widen only as far as the adopted
+  switches and every other file allow.
 * `adopted` is called by the poller only, inside its own BEGIN IMMEDIATE. It
-  sets the row to the file exactly and returns the parse it wrote, which the
-  monitor installs as its view before it next reconciles. It is the only
-  way a widening (an enable, an undrain, a higher slot_max) reaches
-  placement, so a claim can land on a device only once the poller already
-  treats that device as enabled.
+  sets the adopted switches and the poller's own entry to the file, drops
+  every other file's entry, and returns the parse it wrote, which the
+  monitor installs as its view before it next reconciles. It is the only way
+  a widening reaches the adopted switches, so a claim can land on a device
+  only once the poller already treats that device as enabled.
 
 `written` counts the file versions the row has seen and `adopted` the last
 of them the poller acted on, with `adopted_digest` the digest of the
-settings it adopted. The settings applier records `written` right after its
+switches it adopted. The settings applier records `written` right after its
 write as the change's `version`; the change is applied once `adopted`
 reaches it (`peek`, read by the dashboard) and every waiter it names has
-reported, by `loaded_version`, a version whose settings match the
-machines.yml that waiter itself loaded.
+recorded `seen` at that version, which a claim does only when placement
+uses exactly the adopted switches (`Live.places_by_adopted`).
 """
 
 from __future__ import annotations
@@ -84,12 +87,35 @@ class Live:
     def is_applied(self, version: int) -> bool:
         return self.adopted >= version
 
-    def loaded_version(self, digest: str | None) -> int | None:
-        """The adopted version when a process's own machines.yml, by its
-        `loaded_digest`, holds the settings the poller adopted; else None."""
-        if digest is None or digest != self.adopted_digest:
-            return None
-        return self.adopted
+    def places_by_adopted(self) -> bool:
+        return self.adopted > 0 and _digest(self.switches) == self.adopted_digest
+
+
+@dataclass(frozen=True)
+class _Source:
+    key: str
+    switches: Mapping[str, Switch]
+
+
+@dataclass(frozen=True)
+class _Row:
+    adopted_switches: Mapping[str, Switch]
+    written: int
+    adopted: int
+    adopted_digest: str
+    sources: Mapping[str, _Source]
+
+    def live(self) -> Live:
+        switches = dict(self.adopted_switches)
+        for source in self.sources.values():
+            switches = {
+                name: switch.meet(source.switches.get(name, CLOSED))
+                for name, switch in switches.items()
+            }
+        return Live(switches, self.written, self.adopted, self.adopted_digest)
+
+
+EMPTY = _Row({}, written=0, adopted=0, adopted_digest="", sources={})
 
 
 def file_key(machines: Path) -> str:
@@ -97,36 +123,30 @@ def file_key(machines: Path) -> str:
     return json.dumps([_stat(machines), _stat(overlay_path(machines))])
 
 
-def loaded_digest(machines: Path) -> str | None:
-    """The digest of the device settings machines.yml holds now; None when it
-    does not parse."""
-    config = _load(machines)
-    return None if config is None else _digest(_switches(config))
-
-
-def narrowed(connection: sqlite3.Connection, machines: Path) -> Live:
-    """Meet machines.yml as it is now into the row. The caller holds BEGIN
-    IMMEDIATE. With no row yet, every device starts closed. An invalid file
-    writes nothing and leaves the row as it was."""
+def recorded(connection: sqlite3.Connection, machines: Path) -> Live:
+    """The caller holds BEGIN IMMEDIATE. An invalid file writes nothing and
+    leaves the row as it was."""
     _create(connection)
+    path = os.path.abspath(machines)
     key = file_key(machines)
-    found = _read(connection)
-    if found is not None and found[1] == key:
-        return found[0]
-    row = Live({}, written=0, adopted=0) if found is None else found[0]
+    row = _read(connection) or EMPTY
+    source = row.sources.get(path)
+    if source is not None and source.key == key:
+        return row.live()
     config = _load(machines)
     if config is None:
-        return row
-    live = replace(row, switches=_meet(row.switches, _switches(config)), written=row.written + 1)
-    _write(connection, live, key)
-    return live
+        return row.live()
+    row = replace(row, written=row.written + 1,
+                  sources={**row.sources, path: _Source(key, _switches(config))})
+    _write(connection, row)
+    return row.live()
 
 
 def adopted(connection: sqlite3.Connection, machines: Path) -> tuple[Live, MachinesConfig]:
-    """Set the row to machines.yml exactly and return the parse. Poller only;
-    the caller holds BEGIN IMMEDIATE. An invalid file raises ValueError and
-    leaves the row as it was."""
+    """Poller only; the caller holds BEGIN IMMEDIATE. An invalid file raises
+    ValueError and leaves the row as it was."""
     _create(connection)
+    path = os.path.abspath(machines)
     key = file_key(machines)
     try:
         config, findings = load_machines_yml(machines)
@@ -140,11 +160,13 @@ def adopted(connection: sqlite3.Connection, machines: Path) -> tuple[Live, Machi
     if found is None:
         written = 1
     else:
-        written = found[0].written + (found[1] != key)
+        prior = found.sources.get(path)
+        written = found.written + (prior is None or prior.key != key)
     switches = _switches(config)
-    live = Live(switches, written=written, adopted=written, adopted_digest=_digest(switches))
-    _write(connection, live, key)
-    return live, config
+    row = _Row(switches, written=written, adopted=written, adopted_digest=_digest(switches),
+               sources={path: _Source(key, switches)})
+    _write(connection, row)
+    return row.live(), config
 
 
 def record_seen(connection: sqlite3.Connection, harness: str, adopted: int) -> None:
@@ -174,7 +196,7 @@ def peek(connection: sqlite3.Connection) -> Live | None:
         return None
     if found is None:
         return None
-    return replace(found[0], seen=_seen(connection))
+    return replace(found.live(), seen=_seen(connection))
 
 
 def _stat(path: Path) -> list[int] | None:
@@ -199,25 +221,23 @@ def _switches(config: MachinesConfig) -> dict[str, Switch]:
     return {d.name: Switch(d.enabled, d.drain, d.slot_max) for d in config.devices}
 
 
-def _encode(switches: Mapping[str, Switch]) -> str:
-    return json.dumps(
-        {
-            name: {"enabled": s.enabled, "drain": s.drain, "slot_max": s.slot_max}
-            for name, s in sorted(switches.items())
-        },
-        separators=(",", ":"),
-    )
+def _plain(switches: Mapping[str, Switch]) -> dict[str, dict]:
+    return {
+        name: {"enabled": s.enabled, "drain": s.drain, "slot_max": s.slot_max}
+        for name, s in sorted(switches.items())
+    }
+
+
+def _parsed(plain: Mapping[str, Mapping]) -> dict[str, Switch]:
+    return {
+        str(name): Switch(bool(value["enabled"]), bool(value["drain"]), value["slot_max"])
+        for name, value in plain.items()
+    }
 
 
 def _digest(switches: Mapping[str, Switch]) -> str:
-    return hashlib.sha256(_encode(switches).encode("utf-8")).hexdigest()
-
-
-def _meet(row: Mapping[str, Switch], file: Mapping[str, Switch]) -> dict[str, Switch]:
-    return {
-        name: row.get(name, CLOSED).meet(file.get(name, CLOSED))
-        for name in (*row, *(name for name in file if name not in row))
-    }
+    encoded = json.dumps(_plain(switches), separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _create(connection: sqlite3.Connection) -> None:
@@ -225,27 +245,28 @@ def _create(connection: sqlite3.Connection) -> None:
         f"""
         CREATE TABLE IF NOT EXISTS {TABLE} (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            switches TEXT NOT NULL,
+            adopted_switches TEXT NOT NULL,
             written INTEGER NOT NULL,
             adopted INTEGER NOT NULL,
             adopted_digest TEXT NOT NULL,
-            file_key TEXT NOT NULL
+            sources TEXT NOT NULL
         )
         """
     )
 
 
-def _read(connection: sqlite3.Connection) -> tuple[Live, str] | None:
+def _read(connection: sqlite3.Connection) -> _Row | None:
     row = connection.execute(
-        f"SELECT switches, written, adopted, adopted_digest, file_key FROM {TABLE} WHERE id = 1"
+        f"SELECT adopted_switches, written, adopted, adopted_digest, sources FROM {TABLE}"
+        " WHERE id = 1"
     ).fetchone()
     if row is None:
         return None
-    switches = {
-        str(name): Switch(bool(value["enabled"]), bool(value["drain"]), value["slot_max"])
-        for name, value in json.loads(row[0]).items()
+    sources = {
+        str(path): _Source(str(source["key"]), _parsed(source["switches"]))
+        for path, source in json.loads(row[4]).items()
     }
-    return Live(switches, int(row[1]), int(row[2]), str(row[3])), str(row[4])
+    return _Row(_parsed(json.loads(row[0])), int(row[1]), int(row[2]), str(row[3]), sources)
 
 
 def _seen(connection: sqlite3.Connection) -> dict[str, int]:
@@ -256,14 +277,19 @@ def _seen(connection: sqlite3.Connection) -> dict[str, int]:
     return {str(harness): int(adopted) for harness, adopted in rows}
 
 
-def _write(connection: sqlite3.Connection, live: Live, key: str) -> None:
+def _write(connection: sqlite3.Connection, row: _Row) -> None:
+    sources = {
+        path: {"key": source.key, "switches": _plain(source.switches)}
+        for path, source in sorted(row.sources.items())
+    }
     connection.execute(
         f"""
-        INSERT INTO {TABLE} (id, switches, written, adopted, adopted_digest, file_key)
+        INSERT INTO {TABLE} (id, adopted_switches, written, adopted, adopted_digest, sources)
         VALUES (1, ?, ?, ?, ?, ?)
-        ON CONFLICT (id) DO UPDATE SET switches = excluded.switches,
+        ON CONFLICT (id) DO UPDATE SET adopted_switches = excluded.adopted_switches,
             written = excluded.written, adopted = excluded.adopted,
-            adopted_digest = excluded.adopted_digest, file_key = excluded.file_key
+            adopted_digest = excluded.adopted_digest, sources = excluded.sources
         """,
-        (_encode(live.switches), live.written, live.adopted, live.adopted_digest, key),
+        (json.dumps(_plain(row.adopted_switches), separators=(",", ":")), row.written,
+         row.adopted, row.adopted_digest, json.dumps(sources, separators=(",", ":"))),
     )

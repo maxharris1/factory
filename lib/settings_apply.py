@@ -25,9 +25,9 @@ not seen:
   and must differ in exactly that one field.
 * machines.yml is copied to `machines.yml.bak-settings-<UTC stamp>` beside
   it, then replaced atomically, and still under the lock the new file is
-  met into the shared settings row (lib/live_settings.py, #852): a
+  written into the shared settings row (lib/live_settings.py, #852): a
   narrowing reaches every claim at once, a widening once the poller adopts
-  the file. The entry records the row's `written` then as its `version`, and
+  the file and every machines.yml the row holds allows it. The entry records the row's `written` then as its `version`, and
   the dashboard shows the change pending until the poller has adopted it.
   The poller and then each waiter this account owns and has not held
   stopped are restarted through their service scripts (lib/heal.py
@@ -540,7 +540,7 @@ def claim_lock(db: Path) -> ClaimLock:
 
             def commit_version(machines: Path) -> int | None:
                 try:
-                    live = live_settings.narrowed(connection, machines)
+                    live = live_settings.recorded(connection, machines)
                     connection.execute("COMMIT")
                 except sqlite3.Error:
                     return None

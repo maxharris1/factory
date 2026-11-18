@@ -7,10 +7,10 @@ machines.yml again on the first poll (the config the monitor was built
 with was read before it could stamp the file) and then whenever it or its
 machines.local.yml overlay has changed since the last good load. The load
 is an adopt (lib/live_settings.py, #852): in one BEGIN IMMEDIATE it sets
-the shared settings row every claim places by to the file, and the monitor
-acts on that same parse, so no claim lands on a device this monitor still
-holds disabled. A file that fails to load raises and the monitor keeps the
-last good config, so the next poll tries again. `reconcile` then walks each
+the adopted switches of the shared settings row every claim places by to
+the file, and the monitor acts on that same parse, so no claim lands on a
+device this monitor still holds disabled. A file that fails to load raises
+and the monitor keeps the last good config, so the next poll tries again. `reconcile` then walks each
 device that holds a slot or an orphan. A remote device gets all three
 steps below. On the box (a local device) a finished job's slot is
 released as below; when machines.yml sets it `enabled: false`, each

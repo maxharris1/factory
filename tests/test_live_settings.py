@@ -83,7 +83,7 @@ def adopt(connection: sqlite3.Connection, machines: Path) -> tuple[Live, Machine
 def narrow(connection: sqlite3.Connection, machines: Path) -> Live:
     connection.execute("BEGIN IMMEDIATE")
     try:
-        return live_settings.narrowed(connection, machines)
+        return live_settings.recorded(connection, machines)
     finally:
         connection.execute("COMMIT")
 
@@ -143,7 +143,7 @@ def test_adopted_sets_the_row_to_the_file_exactly(tmp_path: Path, db) -> None:
     ],
     ids=["enable", "undrain", "raise-slot-max"],
 )
-def test_narrowed_never_widens_the_row(tmp_path: Path, db, wider: dict) -> None:
+def test_recorded_never_widens_past_the_adopted(tmp_path: Path, db, wider: dict) -> None:
     machines = tmp_path / "machines.yml"
     narrowest = {"box_enabled": False, "box_drain": True, "box_slots": 1}
     write(machines, text(**narrowest))
@@ -167,7 +167,7 @@ def test_narrowed_never_widens_the_row(tmp_path: Path, db, wider: dict) -> None:
     ],
     ids=["disable", "drain", "lower-slot-max"],
 )
-def test_narrowed_applies_a_narrowing_at_once(
+def test_recorded_applies_a_narrowing_at_once(
     tmp_path: Path, db, narrower: dict, expected: Switch
 ) -> None:
     machines = tmp_path / "machines.yml"
@@ -181,7 +181,7 @@ def test_narrowed_applies_a_narrowing_at_once(
     assert live_settings.peek(db) == live
 
 
-def test_narrowed_with_no_row_closes_every_device_until_the_poller_adopts(
+def test_recorded_with_no_row_closes_every_device_until_the_poller_adopts(
     tmp_path: Path, db
 ) -> None:
     machines = tmp_path / "machines.yml"
@@ -211,7 +211,7 @@ def test_an_invalid_file_leaves_the_row_unchanged(tmp_path: Path, db) -> None:
     before, _ = adopt(db, machines)
     write_fresh(machines, text().replace("slot_max: 3", "slot_max: 0"))
 
-    assert narrow(db, machines) == before, "narrowed keeps the old row"
+    assert narrow(db, machines) == before, "recorded keeps the old row"
     with pytest.raises(ValueError):
         adopt(db, machines)
     assert live_settings.peek(db) == before, "adopted keeps the old row"
@@ -285,3 +285,44 @@ def test_recording_an_unchanged_seen_writes_nothing(tmp_path: Path, db) -> None:
     assert db.total_changes == before
     live_settings.record_seen(db, "claude", 2)
     assert db.total_changes == before + 1, "a new version is written"
+
+
+def test_a_second_file_narrows_until_it_holds_the_adopted_enable(tmp_path: Path, db) -> None:
+    poller = tmp_path / "poller" / "machines.yml"
+    waiter = tmp_path / "waiter" / "machines.yml"
+    poller.parent.mkdir()
+    waiter.parent.mkdir()
+    write(poller, text())
+    write(waiter, text(pc_enabled=False))
+    adopted, _ = adopt(db, poller)
+
+    closed = narrow(db, waiter)
+
+    assert adopted.switches["pc"].enabled and adopted.places_by_adopted()
+    assert not closed.switches["pc"].enabled
+    assert not closed.places_by_adopted()
+    write(waiter, text())
+
+    widened = narrow(db, waiter)
+
+    assert widened.switches == adopted.switches
+    assert widened.places_by_adopted()
+    assert widened.adopted == adopted.adopted
+
+
+def test_a_device_only_one_file_lists_does_not_hold_placement_off_the_adopted(
+    tmp_path: Path, db
+) -> None:
+    poller = tmp_path / "poller" / "machines.yml"
+    waiter = tmp_path / "waiter" / "machines.yml"
+    poller.parent.mkdir()
+    waiter.parent.mkdir()
+    write(poller, BOX_ONLY)
+    loaded = write(waiter, text())
+    adopt(db, poller)
+
+    live = narrow(db, waiter)
+
+    pc = live.placement_config(loaded).device("pc")
+    assert pc is not None and not pc.enabled
+    assert live.places_by_adopted()
