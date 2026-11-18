@@ -16,6 +16,10 @@ from tests.test_review_before_ci import board_with, built_with_ci_pending, revie
 PRE_FLOOR_MAIN = "eb2b606e70d9509435281ed76e460c8fb35bf6d7"
 
 
+class _Interrupted(KeyboardInterrupt):
+    pass
+
+
 def _pre_floor_methods():
     try:
         source = subprocess.run(
@@ -75,12 +79,12 @@ def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     def interrupted(ticket, comment_id, outcome):
         mark(ticket, comment_id, outcome)
         if comment_id == "approve-older":
-            raise KeyboardInterrupt()
+            raise _Interrupted()
 
     board.dispatcher._mark_handled = interrupted
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(_Interrupted):
         board.poll()
     board.finish("claude")
     hidden = next(item for item in pr.comments if item.id == "approve-older")
