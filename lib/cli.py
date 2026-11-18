@@ -52,7 +52,8 @@ from lib.eval_report import (
     render_metrics,
     render_qa,
 )
-from lib.factory_md import EXAMPLE_PATHS, load_factory_md
+from lib import qa_runners
+from lib.factory_md import EXAMPLE_PATHS, QA_RUNNERS, FactoryConfig, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, wake_delivery
 from lib.handoff import format_header
@@ -80,6 +81,7 @@ from lib.orch_yml import (
     parse_bind,
 )
 from lib.poll_source import FedPulls, IntakeRisks, LivePollSource, PollSourceError
+from lib.qa_cloud import QaWorker
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import (
@@ -127,6 +129,7 @@ from lib.update_check import (
     UpdateClass,
     classify as classify_update,
     head_diff,
+    merge_base,
     merge_update,
     rebase_scope,
 )
@@ -160,6 +163,7 @@ commands:
   eval-report      weekly eval report from a local log directory
   log-message      log one manual bot-to-bot message to dispatcher.log
   poll             poll configured trackers and dispatch work
+  qa-worker        claim qa jobs and run their cloud QA lanes
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
   db-backup        labelled backup to take before a manual write to orch.db
@@ -220,6 +224,12 @@ log-message --repo OWNER/NAME [--pr N] --from BOT --to BOT [--kind KIND]
   instead of a scripted handoff. eval-report counts these lines. --log
   defaults to dispatcher.log beside $ORCH_DB; --kind defaults to handoff.
   Exits 2 and writes nothing on a bad repo, pr, bot or kind.
+
+qa-worker [--db PATH] [--orch PATH] [--once] [--tick-seconds N]
+  Claim queued qa jobs and coordinate their cloud lanes (docs/SPEC.md 4.2.2).
+  Holds no build slot and makes no model call. --once runs one tick.
+  Only one worker may hold the database's qa-worker lock. With no QA runner
+  registered it claims nothing.
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -517,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_log_message, argv[1:])
     if argv[0] == "poll":
         return _call(_poll, argv[1:])
+    if argv[0] == "qa-worker":
+        return _call(_qa_worker, argv[1:])
     if argv[0] == "init-db":
         return _call(_init_db, argv[1:])
     if argv[0] == "backup-db":
@@ -848,6 +860,65 @@ def _wait_autostart(
     except WaitError as exc:
         log(str(exc))
         return 1
+
+
+def _qa_worker(argv: list[str]) -> int:
+    parser = _Parser(prog="orch qa-worker", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--orch", type=Path)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--tick-seconds", type=int, default=15)
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        config = _runtime_config(args.orch)
+        with open(path.with_name(f"{path.name}.qa-worker.lock"), "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("orch qa-worker: another qa worker holds this database", file=sys.stderr)
+                return 1
+            worker = _qa_runtime(path, config)
+            while True:
+                worker.tick()
+                if args.once:
+                    return 0
+                time.sleep(args.tick_seconds)
+    except (QueueError, WaitError, OSError, sqlite3.Error, ValueError) as exc:
+        print(f"orch qa-worker: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
+    source = LivePollSource(config)
+    projects = {project.repo.lower(): project for project in config.projects}
+    actions = source.review_actions_by_repo()
+
+    def factory(repo: str) -> FactoryConfig:
+        project = projects[repo.lower()]
+        if project.factory_ref is None:
+            raise ValueError(f"{repo} has no projects[].factory_ref in orch.yml")
+        return source._factory_at(project.repo, project.factory_ref)
+
+    def post(repo: str, pr: int, body: str, marker: str) -> str:
+        return actions[projects[repo.lower()].repo].post_issue_comment_once(repo, pr, body, marker)
+
+    return QaWorker(
+        open_queue(path),
+        runners={name: qa_runners.create(name) for name in QA_RUNNERS if name in qa_runners.registered()},
+        factory=factory,
+        base_commit=_qa_base_commit,
+        post=post,
+        max_cloud_lanes=config.qa.max_cloud_lanes,
+        log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
+    )
+
+
+def _qa_base_commit(repo: str, base: str, head: str) -> str:
+    clone = worktrees.fetched_clone(worktrees.work_root(None), repo, (head,), worktrees.url_template(None))
+    return merge_base(clone, head, f"refs/remotes/origin/{base}")
 
 
 def _poll(argv: list[str]) -> int:

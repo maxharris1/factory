@@ -551,6 +551,19 @@ class GitHubReviewActions:
             "-f", f"body={body}",
         )
 
+    def post_issue_comment_once(self, repo: str, number: int, body: str, marker: str) -> str:
+        """The id of this login's comment carrying marker, posting body first when there is none."""
+        for comment in self.list_comments(repo, str(_issue_number(number))):
+            if has_marker(comment.body, marker) and comment.author == self._login():
+                return comment.id
+        posted = _object(
+            self._json(
+                "-X", "POST", f"{_repo_path(repo)}/issues/{_issue_number(number)}/comments",
+                "-f", f"body={body}",
+            )
+        )
+        return str(posted["id"])
+
     def _login(self) -> str:
         if self.login is None:
             login = _object(self._json("user")).get("login")

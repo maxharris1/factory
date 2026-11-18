@@ -11,6 +11,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from lib.approver_commands import SlashQa
 from lib.dispatch.constants import ORCHESTRATOR
@@ -22,6 +23,9 @@ from lib.feeder_gates import path_matches
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import QA_RECIPIENT, Job, JobRequest, cancel_queued
 from lib.update_check import HeadDiff
+
+if TYPE_CHECKING:
+    from lib.evidence.scenarios import LiveScenarios
 
 OPEN_STATES = ("queued", "running")
 _BLOCKING = re.compile(r"^\s*(?:[-*+]\s+)?(\[blocking\].*?)\s*$")
@@ -237,7 +241,8 @@ class QaMixin:
                     (*key, head, patch_id),
                 )
         touched, lines = _under_paths(qa, diff)
-        live_ids = self._qa_live_ids(ticket)
+        live = self._qa_live(ticket)
+        live_ids = None if live is None else tuple(scenario.id for scenario in live.scenarios)
         decision = decide_scope(
             ScopeInput(
                 live_ids=live_ids,
@@ -270,7 +275,7 @@ class QaMixin:
                 for runner, arm in _arms(qa):
                     self._queue_qa_run(
                         connection, ticket, qa, comment, head, patch_id, review_round,
-                        generation, decision, runner, arm,
+                        generation, decision, runner, arm, live,
                     )
             connection.commit()
 
@@ -296,11 +301,13 @@ class QaMixin:
         run: Run,
         runner: str,
         arm: str,
+        live: LiveScenarios | None,
         *,
         attempt: int = 1,
     ) -> None:
         run_id = uuid.uuid4().hex
         retry = "" if attempt == 1 else f":attempt-{attempt}"
+        chosen = [scenario for scenario in (live.scenarios if live else ()) if scenario.id in run.scenario_ids]
         job = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
@@ -321,6 +328,18 @@ class QaMixin:
                         "runner": runner,
                         "arm": arm,
                         "scenarios": list(run.scenario_ids),
+                        "live": [
+                            {
+                                "id": scenario.id,
+                                "criterion": scenario.criterion,
+                                "steps": scenario.steps,
+                                "passes": scenario.passes,
+                                "pack": scenario.pack,
+                                "saves": list(scenario.saves),
+                            }
+                            for scenario in chosen
+                        ],
+                        "regression": [qa_id for qa_id in (live.regression if live else ()) if qa_id in run.scenario_ids],
                         "run_id": run_id,
                         "pr_number": ticket.pr_number,
                     },
@@ -364,7 +383,7 @@ class QaMixin:
                 latest.setdefault(qa_id, passed)
         return tuple(qa_id for qa_id in live_ids if not latest.get(qa_id, False))
 
-    def _qa_live_ids(self, ticket: TrackedTicket) -> tuple[str, ...] | None:
+    def _qa_live(self, ticket: TrackedTicket) -> LiveScenarios | None:
         from lib.evidence.scenarios import InvalidSection, live_scenarios
 
         found = live_scenarios(
@@ -372,7 +391,7 @@ class QaMixin:
         )
         if isinstance(found, InvalidSection) or not found.scenarios:
             return None
-        return tuple(scenario.id for scenario in found.scenarios)
+        return found
 
     def _trusted_builder_post(self, ticket: TrackedTicket, comment: Comment) -> bool:
         try:
@@ -568,7 +587,7 @@ class QaMixin:
             self._queue_qa_run(
                 connection, ticket, qa, comment, head, last["patch_id"], int(last["round"]),
                 generation, Run(last["scope"], scenarios), last["runner"], "primary",
-                attempt=int(last["attempt"]) + 1,
+                self._qa_live(ticket), attempt=int(last["attempt"]) + 1,
             )
             connection.commit()
 
@@ -767,9 +786,13 @@ def _followed(row: sqlite3.Row, current_head: str | None) -> tuple[str, str | No
         return "cancelled", "new-head"
     if row["job_state"] == "cancelled":
         return "cancelled", "job-cancelled"
-    if row["job_state"] == "running":
-        return "running", None
+    if row["job_state"] in ("running", "queued"):
+        return row["job_state"], None
     return row["state"], None
+
+
+def record_runner_moved(connection: sqlite3.Connection, run_id: str, runner: str) -> None:
+    connection.execute("UPDATE qa_runs SET runner = ? WHERE run_id = ?", (runner, run_id))
 
 
 def _prior(connection: sqlite3.Connection, where: str, args: tuple) -> Prior | None:

@@ -300,7 +300,7 @@ deduplication key.
 
 Only a project whose `factory.md` has `qa.enabled: true` gets QA runs. With QA absent or off, nothing here reads or writes anything. Under `gate: report` a result is recorded and shown, and no review, fix, round or ship waits on it. Under `gate: block` the QA gate in section 8 applies.
 
-The queue has the action `qa` and the recipient `qa`, the factory's own QA worker, which a later ticket builds. Until then nothing claims a `qa` job. A `qa` job's `detail` carries `head`, `scope`, `runner`, `arm`, `scenarios` (the scenario ids to run), `run_id` and `pr_number`. Its dedupe key is `qa:<ticket scope>:<scope>:<head>:<runner>:<arm>`, and its timeout is `qa.timeout_minutes`.
+The queue has the action `qa` and the recipient `qa`, the factory's own QA worker (section 4.2.2). A `qa` job's `detail` carries `head`, `scope`, `runner`, `arm`, `scenarios` (the scenario ids to run), `live` (each of those scenarios as the plan wrote it: `id`, `criterion`, `steps`, `passes`, `pack` and `saves`), `regression` (the plan's regression-lane ids among them), `run_id` and `pr_number`. The worker reads its scenarios from `live` alone, so it reads no comment thread and repeats no trust check. Its dedupe key is `qa:<ticket scope>:<scope>:<head>:<runner>:<arm>`, and its timeout is `qa.timeout_minutes`.
 
 The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at`, `finished_at`, and Max's `/qa` ruling (section 5) in `ruling` (`right` or `wrong`), `ruled_by`, `ruled_at` and `ruling_reason`, all null until he rules. A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) is its only writer. QA adds no workflow state.
 
@@ -323,9 +323,46 @@ A `qa` job is not harness work. It holds no device slot and counts against no bu
 
 Recording a result: a trusted `kind=qa` (`from=grok-bot`, a `trusted_logins` login for `grok-bot`, `role` absent or `qa`) whose `head` is the PR's current head sets the open row for its `runner` and `arm` to `reported` with its `result` and comment id (`qa-reported`). One that matches no open row changes nothing (`qa-unmatched`). One whose head is no longer current marks that head's row for its runner and arm `stale` and changes nothing else (`qa-stale`). An untrusted one is `qa-untrusted`. None of these outcomes wakes anyone.
 
-A new head: once per poll, after the comment pass, every `queued` or `running` row at a head other than the PR's current head is set to `cancelled` with reason `new-head`, and its job is cancelled while it is still queued. The queue cannot cancel a running job, so a running lane keeps running until the worker stops it, and its late report is recorded `stale`. The same pass moves a `queued` row to `running` once its job is claimed, and cancels a row whose job was cancelled (`job-cancelled`).
+A new head: once per poll, after the comment pass, every `queued` or `running` row at a head other than the PR's current head is set to `cancelled` with reason `new-head`, and its job is cancelled while it is still queued. The queue cannot cancel a running job, so a running lane keeps running until the worker stops it, and its late report is recorded `stale`. The same pass moves a `queued` row to `running` once its job is claimed, back to `queued` when the worker requeues the job, and cancels a row whose job was cancelled (`job-cancelled`).
 
 One wake: the same pass checks every primary row reported `FAIL`. When its comment has a line starting `[blocking]` (after an optional list marker) and the same head has a trusted APPROVE, it queues one `qa-failed` job for Grok Bot (recipient `grok`, as the other wakes are), keyed on the QA comment, so it fires whether the APPROVE comes before or after the FAIL and a replay queues no second one. The detail names the first blocking line (`finding`) and the report's `Evidence:` link (`evidence_link`). A shootout row never wakes anyone, and under `qa.gate: block` no row does (section 8). `qa-failed` is in `GROK_WAKE_REASONS` and the queue's actions.
+
+### 4.2.2 The QA worker (issue #784)
+
+`orch qa-worker` is a fixed program run by orch, never a model session. It claims jobs whose recipient is `qa`, holds no build slot and makes no model call. It ticks every 15 seconds (`--tick-seconds`, `--once` for one tick) under a lock beside the database, so one worker runs per `orch.db`. `deploy/orch-qa-worker.service` is a user unit in the waiter unit's style; nothing in the repo installs or starts it. All run state is in `jobs`, `qa_runs` and `qa_lanes`, so a restarted worker carries on from the rows. The code is `lib/qa_cloud.py` (`QaWorker`).
+
+**Runners.** A runner is one vendor, behind the interface in `lib/qa_runners/__init__.py`. `launch(lane)` starts one cloud agent and returns its id and link. Launching the same `lane_id` again returns the first agent, so a worker that crashed between a launch and its write never starts a second one. A `Lane` is the lane id, the rendered brief (`lib/brief/qa.py`), the repo, the base branch, the `qa.<runner>.environment` name (`environment_name`) and the model. It has no field that could hold a secret value. `status(agent_id)` is `running` or `ended`. `stop(agent_id)` ends an agent, and stopping an ended one is not an error. `describe(agent_id)` gives the machine size and the agent version. A launch raises `RunnerOutage`, `UsageLimit` or `LaunchFailed`, each a `LaunchError`. Runners register by name. The worker builds only the names in `factory_md.QA_RUNNERS` that are registered. `lib/qa_runners/fake.py` registers `fake`, for tests; `factory.md` refuses that name. With no runner registered (today), the worker claims nothing.
+
+**Seams.** The worker is given `collect(lane)`, which returns the lane's parsed `result.json` or nothing yet, and `uploads(lane, paths)`, which returns one upload link per expected file. Both are test doubles until the evidence tickets supply the real ones; without them the worker claims nothing. The base commit is the merge-base of the head and the base branch, from the waiter's fetched clone. The worker reads the project's `qa` block from `factory.md` at `projects[].factory_ref`.
+
+**`qa_lanes`.** One row per agent attempt: `lane_id`, `run_id`, `job_id`, `slice`, `kind` (`head`, `regression` or `base-check`), `lane_no`, `scenarios` (the `qa-<n>` ids), `commit_sha` (the commit the lane tests), `base_commit`, `runner`, `agent_id`, `agent_url`, `state`, `attempt` (1 or 2), `reason`, `result` (the accepted result JSON), `started_at`, `finished_at` and `launch_called_at` (written before the first launch call). States: `launching` (a reserved slot, no agent yet), `running`, `reported`, `dropped`, `gap`, `cancelled` and `timed-out`. `(run_id, slice, attempt)` is unique, so a replayed tick never launches twice. A slice's outcome is its newest row.
+
+**Slicing.** The run's ids split into at most `qa.lanes` slices. When the plan named regression ids among them and `qa.lanes` is at least 2, one slice is the `regression` lane and tests the base commit. Every run id is also tested at the head, split into the remaining lanes as contiguous chunks whose sizes differ by at most one. Lane numbers follow the slices. The brief uses `s-<n>` for `qa-<n>`, and a `Saves:` phrase becomes a plain file name (`after screenshot` is `after-screenshot.png`). A run with no scenarios (`smoke`) launches nothing and posts `BLOCKED` with the gap `no scenarios`.
+
+**The tick.**
+
+1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, or is at `qa.max_cloud_lanes`; a skipped job blocks nothing behind it. A job skipped for the cap or a backed-off runner gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
+2. Grant. A running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner.
+3. Advance. Check for cancel, launch reserved lanes, then read each running lane. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
+4. Finish. When every slice has a final row, or any slice is a gap and no lane is open, decide, post once, and finish the job with the comment id.
+
+**Lane rules.**
+
+- Drop. A result is accepted only when its `run_id`, `lane`, `kind`, `commit`, `base_commit` and scenario ids match the brief, its `method` is the verify skill or `fallback-playwright` or `fallback-control-ui`, its `status` is `PASS`, `ISSUES` or `BLOCKED`, and each scenario result is `verified`, `failed`, `inconclusive` or `needs-human`. A first miss stops the agent, writes the lane `dropped` and reserves its relaunch (attempt 2) in the same slot. A second miss writes it `gap`.
+- Ended. `status` says ended and there is no result: `gap` at once, with no relaunch.
+- Timeout. No result `qa.timeout_minutes` after the agent started: `stop()`, then `timed-out`, which counts as a gap.
+- Base-check. When every slice reported and some failed head scenario has no base result, exactly one `base-check` lane starts for those ids, at the base commit, in the last lane's slot, as the slice after the highest one written. It is the only extra lane a run may start.
+- Launch failures. An outage or usage limit on the run's first launch falls back (below). Any other launch failure, and any failure of a later launch (an extra lane, a relaunch, the base-check), makes that slice a gap.
+
+**Decision.** Any gap makes the run `BLOCKED`. So does a lane that reported `status: BLOCKED`, a head scenario that is `inconclusive`, and a run scenario no lane ran at the head: a gap is never a pass. Otherwise any failed head scenario makes it `FAIL`, with one finding per failed scenario under its `qa-<n>` id: `[follow-up]` when the same id failed on the base commit (in the regression or base-check lane), else `[blocking]`. Otherwise `PASS`. `needs-human` is not a failure.
+
+**Comment.** One issue comment on the PR as the orchestrator: `<!-- orch:v1 kind=qa from=grok-bot role=qa head=<sha> result=<R> scope=<S> lanes=<1..3> env=<qa.profile> runner=<runner that ran> arm=<arm> attempt=<n> -->` (`lanes` is absent when nothing launched), then the `| qa-<n> | ac-<n> | Result |` table, the findings, the gaps, each lane's agent link with its machine and agent version, and `<!-- qa-run <run_id> -->`. The findings carry no lane prose. The post finds an earlier comment by that marker first, so a crash between posting and finishing never posts twice. The dispatcher records the comment as section 4.2.1 says. A PR that merges mid-run still gets its result.
+
+**The cap.** `qa.max_cloud_lanes` in `orch.yml` (default 10) bounds the open lanes (`launching` or `running`) per runner. Every job gets one lane before any job gets a second.
+
+**Fallback.** When a job's first launch raises `RunnerOutage` or `UsageLimit`, the job is on arm `primary` and `qa.shootout` is off, its reserved lane and the run's `qa_runs.runner` (`record_runner_moved`) move to the next runner listed in `qa.runners` that is registered and has room, and it launches there, under the same rule. With no such runner, or on a shootout arm, the job goes back to `queued` with `qa_runs.runner` restored to the job's runner, with its `attempt` unchanged and a `qa-requeued` job event, and its runner is not claimed for 300 seconds. Each tick of that backoff restarts the job's queue-wait clock, as the cap wait does.
+
+**Cancel.** A run is cancelled when its `qa_runs` row is `cancelled` (a new head, or the job cancelled) or its job is no longer `running`. Each open lane's agent is stopped, and its row becomes `cancelled` only once the stop succeeds. A stop failure keeps the row open and retries next tick. A lane whose launch was called but whose agent id was never saved first recovers the agent through the idempotent launch. A row whose launch was never called closes at once. A still-running job is finished failed, so T6 records `qa-no-retry`. QA adds no workflow state.
 
 ### 4.3 Invariants, and where they live now
 
@@ -665,6 +702,9 @@ projects:
 # Optional (issue #107): harnesses whose jobs are refused; health expects
 # no waiter for them.
 # refused_harnesses: [cursor]
+# Optional (issue #784): the QA worker's limits (section 4.2.2).
+# qa:
+#   max_cloud_lanes: 10             # open cloud QA lanes per runner, at least 1; default shown
 # Approval credential (issue #122, docs/decisions/122-approver-credential.md)
 # and one GitHub App per bot (issue #170, docs/decisions/170-four-github-apps.md).
 # approver_logins: [maxharris1]     # capped-ticket go and hold ok, once enabled

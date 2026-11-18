@@ -34,6 +34,11 @@ same process that runs the command:
   so a descendant orphaned between two looks, even one that dropped the tag
   and left the session, is reparented to run rather than to init, and is
   killed with the rest;
+* on Linux, a gated command is moved into its own systemd user scope
+  (lib/process_tree.py contain) before `started` records it, so every
+  descendant, even one that left the session and dropped the tag, stays
+  findable by the scope; a user with no usable user manager or Linger off
+  gets a log line saying the run is uncontained, and the command still runs;
 * on macOS the command runs as its own responsible process (#329), which
   every descendant inherits, so a descendant reparented to launchd before
   any look saw its parent is killed with the rest.
@@ -65,9 +70,11 @@ from lib.process_tree import (
     Tree,
     _one_line,
     _responsible_pid,
+    contain,
     processes,
 )
 from lib.queue import QueueError
+from lib.remote import KEEPER
 
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 # How long run waits, once the command has exited, for `output` to drain the
@@ -273,6 +280,7 @@ def run(
     beat()
     heartbeat = Heartbeat(beat, interval, log)
     child: subprocess.Popen[bytes] | None = None
+    keeper: subprocess.Popen[bytes] | None = None
     reader: threading.Thread | None = None
     reaper: bool | None = None
     pending: list[int] = []
@@ -306,6 +314,11 @@ def run(
             return 127
         reaper = _subreaper(True)
         tagged = {**(dict(env) if env is not None else os.environ), RUN_TAG_ENV: tag}
+        try:
+            keeper = _session_keeper(tagged)
+        except OSError as exc:
+            log(f"not starting {argv[0]}: cannot start the session keeper: {_one_line(exc)}")
+            return 127
         spawn = list(argv)
         read_end = write_end = report_read = report_write = -1
         gated = started is not None or sys.platform == "darwin"
@@ -338,6 +351,7 @@ def run(
                 target=output, args=(child.stdout,), name="orch-output", daemon=True
             )
             reader.start()
+        scope = contain(child.pid, tag, log) if started is not None else None
         if gated:
             gate = write_end
 
@@ -381,6 +395,7 @@ def run(
         tree = Tree(
             child.pid, tag, adopts=reaper is not None, others=others,
             responsible=_responsible_pid if sys.platform == "darwin" else None,
+            scope=scope,
         )
         try:
             code = _wait(child, budget, argv[0], log, tree)
@@ -388,6 +403,9 @@ def run(
             tree.end(log)
         code = _past_budget(code if code >= 0 else 128 - code, budget)
     finally:
+        if keeper is not None:
+            keeper.kill()
+            keeper.wait()
         if reaper is not None:
             _subreaper(reaper)
         if reader is not None:
@@ -398,6 +416,25 @@ def run(
         if prepared and teardown is not None:
             teardown()
     return code
+
+
+def _session_keeper(env: Mapping[str, str]) -> subprocess.Popen[bytes] | None:
+    """Returns once the keeper has printed its pid, so it already ignores the
+    TERM a stop sends the run once the command starts (#827 f-6)."""
+    if not sys.platform.startswith("linux") or os.getsid(0) != os.getpid():
+        return None
+    keeper = subprocess.Popen(
+        ["sh", "-c", KEEPER, "orch-keeper"], env=env,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    assert keeper.stdout is not None
+    with keeper.stdout:
+        ready = keeper.stdout.readline().strip() == str(keeper.pid).encode()
+    if not ready:
+        keeper.kill()
+        keeper.wait()
+        raise OSError(f"the keeper exited {keeper.returncode} before it ignored TERM")
+    return keeper
 
 
 def _subreaper(on: bool) -> bool | None:
