@@ -589,7 +589,7 @@ class QaMixin:
                     "paused_generation": generation,
                     "paused_question_id": comment.id,
                 },
-                guard="workflow_state IN ('review', 'awaiting-ok', 'fixing')",
+                guard="workflow_state IN ('review', 'awaiting-ok', 'fixing', 'merge-queue', 'waiting-external')",
             )
             connection.commit()
         self.wake_grok_once(

@@ -20,7 +20,6 @@ from lib.dispatch.helpers import (
     _queue_state,
     _scope,
 )
-from lib.dispatch.qa import EnsureQa, Proceed
 from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
@@ -669,19 +668,15 @@ class MergeQueueMixin:
         return None
 
     def _queue_qa_wait(self, ticket: TrackedTicket, row: sqlite3.Row, head: str) -> str | None:
-        match self._qa_gate(ticket, "APPROVE", head):
-            case Proceed():
-                return None
-            case EnsureQa():
-                self._queue_qa(
-                    ticket,
-                    self._queue_comment(ticket, row),
-                    head=head,
-                    review_round=int(row["review_round"] or 0),
-                )
-                return f"QA queued at {head[:12]}"
-            case _:
-                return f"no covering QA PASS at {head[:12]}"
+        gated = self._approve_qa(
+            ticket, self._queue_comment(ticket, row), head, int(row["review_round"] or 0) + 1
+        )
+        if gated is None:
+            return None
+        spent, outcome = gated
+        if spent:
+            self._leave_merge_queue(ticket, outcome)
+        return f"QA {outcome} at {head[:12]}"
 
     def _log_queue_wait(self, ticket: TrackedTicket, head: str | None, reason: str) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)

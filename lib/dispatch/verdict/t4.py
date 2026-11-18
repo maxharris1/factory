@@ -149,6 +149,33 @@ class T4Mixin:
             return self._held_ci_red(ticket, comment, head, result, state, review_round)
         return None
 
+    def _approve_qa(
+        self, ticket: TrackedTicket, comment: Comment, head: str, reported_round: int | None
+    ) -> tuple[bool, str] | None:
+        match self._qa_gate(ticket, "APPROVE", head):
+            case Wait(outcome):
+                return False, outcome
+            case EnsureQa():
+                self._queue_qa(ticket, comment, head=head, review_round=reported_round or 0)
+                return False, "approve-qa-pending"
+            case RetryQa():
+                self._retry_qa(ticket, comment, head)
+                return False, "approve-qa-env-retry"
+            case ParkQa():
+                self._park_qa(ticket, comment, head)
+                return False, "waiting-max-qa"
+            case FixFromQa(report_id):
+                qa = self._qa_fix(ticket, report_id)
+                repeat = self._repeat_trigger(ticket, comment, reported_round, frozenset(qa.failed))
+                if repeat is not None:
+                    return self._t3_repeat(
+                        ticket, comment, repeat, reported_round, states=APPROVE_ROUND_STATES
+                    )
+                return self._spend_review_round(
+                    ticket, comment, reported_round, qa=qa, from_approve=True
+                )
+        return None
+
     def _ship_approval(
         self,
         ticket: TrackedTicket,
@@ -164,28 +191,9 @@ class T4Mixin:
         covered = self._approval_covers(ticket, approved_head, current_head)
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
-        match self._qa_gate(ticket, "APPROVE", current_head):
-            case Wait(outcome):
-                return False, outcome
-            case EnsureQa():
-                self._queue_qa(ticket, comment, head=current_head, review_round=reported_round or 0)
-                return False, "approve-qa-pending"
-            case RetryQa():
-                self._retry_qa(ticket, comment, current_head)
-                return False, "approve-qa-env-retry"
-            case ParkQa():
-                self._park_qa(ticket, comment, current_head)
-                return False, "waiting-max-qa"
-            case FixFromQa(report_id):
-                qa = self._qa_fix(ticket, report_id)
-                repeat = self._repeat_trigger(ticket, comment, reported_round, frozenset(qa.failed))
-                if repeat is not None:
-                    return self._t3_repeat(
-                        ticket, comment, repeat, reported_round, states=APPROVE_ROUND_STATES
-                    )
-                return self._spend_review_round(
-                    ticket, comment, reported_round, qa=qa, from_approve=True
-                )
+        gated = self._approve_qa(ticket, comment, current_head, reported_round)
+        if gated is not None:
+            return gated
         if _holds(ticket):
             held = self._hold_gate(ticket, comment, current_head)
             if held is not None:
