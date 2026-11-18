@@ -124,6 +124,7 @@ def test_an_unreadable_lane_reads_as_recycled(run: Path, damage: Callable[[Path]
     "search/./shot.png",
     "search/../search/shot.png",
     "search//shot.png",
+    "search/.shot.png.push-tmp",
 ])
 def test_a_listed_file_not_on_disk_or_unsafe_reads_as_recycled(run: Path, listed: str) -> None:
     lane = run / "lane-2"
@@ -133,6 +134,8 @@ def test_a_listed_file_not_on_disk_or_unsafe_reads_as_recycled(run: Path, listed
         manifest = json.loads((lane / "manifest.json").read_text())
         _rewrite_manifest(lane, [entry["path"] for entry in manifest["files"] if entry["path"] != "search/shot.png"]
                           + [listed])
+    if listed.endswith(".push-tmp"):
+        (lane / listed).write_bytes(PNG)
     page = Page(run_page(run, RUN))
 
     assert page.text.count(MISSING) == 1

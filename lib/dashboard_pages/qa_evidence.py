@@ -99,7 +99,7 @@ def _read_lane(folder: Path, n: int) -> Lane:
 
 def _evidence(lane_folder: Path, path: str) -> Evidence:
     parts = path.split("/")
-    if "\x00" in path or any(part in ("", ".", "..") for part in parts):
+    if "\x00" in path or any(not part or part.startswith(".") for part in parts):
         return Evidence(path, "missing")
     try:
         on_disk = stat.S_ISREG(os.lstat(lane_folder.joinpath(*parts)).st_mode)

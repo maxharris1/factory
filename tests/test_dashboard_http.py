@@ -10,9 +10,16 @@ import http.client
 import importlib.util
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote, urljoin, urlsplit
 
 import pytest
+
+from lib.dashboard_pages.qa_evidence import run_page
+from lib.qa_storage import check_id
+from tests.test_qa_evidence import RUN as QA_RUN
+from tests.test_qa_evidence_page import LANES, PNG, WEBM, Page, collect_run
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT / "deploy" / "factory-dashboard-http.py"
@@ -1304,17 +1311,6 @@ def test_load_config_refuses_an_unsafe_actions_audit(
     with pytest.raises(server_module.ConfigError, match=needle):
         server_module.load_config(env, process_user="factory-dash")
 
-
-# QA evidence (issue #875): a run stored by qa_evidence.collect(), with the
-# page run_page() renders for it, served under /qa/runs/<run_id>.
-
-from collections.abc import Callable  # noqa: E402
-from urllib.parse import quote, urljoin, urlsplit  # noqa: E402
-
-from lib.dashboard_pages.qa_evidence import run_page  # noqa: E402
-from lib.qa_storage import check_id  # noqa: E402
-from tests.test_qa_evidence import RUN as QA_RUN  # noqa: E402
-from tests.test_qa_evidence_page import LANES, PNG, WEBM, Page, collect_run  # noqa: E402
 
 QA_PAGE = f"/qa/runs/{QA_RUN}"
 
