@@ -940,7 +940,12 @@ def test_snapshot_usage_has_one_entry_per_account(tmp_path: Path) -> None:
     accounts = _accounts(usage)
     assert set(accounts) == {"claude", "codex", "cursor"}
     assert accounts["claude"] == {
+        "account": "claude-default",
+        "plan": None,
+        "label": None,
+        "source": "get_usage",
         "bot": "claude-bot",
+        "bots": ["claude-bot"],
         "harness": "claude",
         "devices": ["box"],
         "state": "ok",
@@ -974,6 +979,7 @@ def test_an_account_shared_by_devices_is_one_entry_with_the_newest_reading_per_w
     ):
         usage_readings.store(connection, harness=harness, bot=bot, device=device, job_id="j",
                              readings=[Reading(window, used, SEVEN_DAY_RESET, observed)])
+    connection.execute("UPDATE usage_readings SET account = 'claude-old' WHERE device = 'mac'")
     usage = read_usage(connection, CAPTURED, SHARED)
     assert [(e["harness"], e["bot"], e["devices"]) for e in usage["accounts"]] == [
         ("claude", "claude-bot", ["box", "pc"]), ("codex", "codex-bot", ["box"]),
@@ -1067,8 +1073,9 @@ def test_a_window_left_out_of_three_fresh_readings_is_not_on_the_plan(tmp_path: 
     assert codex["seven_day"] == {"used": 0.68, "resets_at": SEVEN_DAY_RESET, "observed_at": CAPTURED + 1200,
                                   "state": "ok"}
     assert codex["headroom"] == 0.32 and codex["state"] == "ok"
-    assert set(codex) == {"bot", "harness", "devices", "state", "five_hour", "seven_day", "headroom",
-                          "observed_at", "age_seconds", "limited_until", "limit_label"}
+    assert set(codex) == {"account", "plan", "label", "source", "bot", "bots", "harness", "devices", "state",
+                          "five_hour", "seven_day", "headroom", "observed_at", "age_seconds", "limited_until",
+                          "limit_label"}
     assert set(codex["five_hour"]) == set(codex["seven_day"]) == {"used", "resets_at", "observed_at", "state"}
 
 

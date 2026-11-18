@@ -154,9 +154,15 @@ SCRIPT = r"""
   var WINDOWS = ['five_hour', 'seven_day'];
   var WINDOW_NAMES = {five_hour: '5-hour', seven_day: '7-day'};
   var METER_CELLS = 20;
-  var HEADROOM_NOTE = 'Headroom is what is left in the fullest window. ' +
-    'One account is shared by every device that runs that harness';
+  var HEADROOM_NOTE = 'Headroom is what is left in the fullest window.';
   function usageTone(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }
+  function accountName(e) { return e.label || e.account; }
+  function accountAbout(e) {
+    return [e.plan, e.source ? 'via ' + e.source : null,
+      e.age_seconds === null ? 'never read' : 'read ' + dur(e.age_seconds) + ' ago',
+      e.devices.length ? 'used on ' + e.devices.join(', ') : null]
+      .filter(function (x) { return x; }).join(' · ');
+  }
   function accountView(e, now) {
     var fresh = WINDOWS.filter(function (w) { return e[w].state === 'ok'; });
     var planned = WINDOWS.filter(function (w) { return e[w].state !== 'not on plan'; });
@@ -174,7 +180,7 @@ SCRIPT = r"""
       v.resets = ends.length ? ['in ' + dur(Math.min.apply(null, ends) - now), null] : ['no reading', 'muted'];
     }
     if (e.limit_label || !fresh.length) {
-      v.label = e.harness + ' headroom: ' +
+      v.label = accountName(e) + ' headroom: ' +
         (e.limit_label || (e.state === 'no telemetry' ? 'no telemetry' : 'no reading'));
       return v;
     }
@@ -183,7 +189,7 @@ SCRIPT = r"""
     v.lit = Math.floor((2 * v.pct + 5) / 10);
     v.tone = only ? 'neutral' : usageTone(e.headroom);
     v.tag = only ? '(' + only + ' only)' : null;
-    v.label = e.harness + ' headroom ' + v.pct + ' percent' + (only ? ', from the ' + only + ' window only' : '') +
+    v.label = accountName(e) + ' headroom ' + v.pct + ' percent' + (only ? ', from the ' + only + ' window only' : '') +
       ': ' + v.lit + ' of ' + METER_CELLS + ' cells lit';
     return v;
   }
@@ -191,8 +197,8 @@ SCRIPT = r"""
   function accountWho(parent, e) {
     var line = add(parent, el('div', 'ef-who'));
     add(line, el('span', 'bot ' + e.harness, e.harness));
-    add(line, el('span', 'ef-name', e.bot));
-    add(parent, el('div', 'ef-dev', 'used on ' + e.devices.join(' · ')));
+    add(line, el('span', 'ef-name', accountName(e)));
+    add(parent, el('div', 'ef-dev', accountAbout(e)));
   }
   function headroomRoom(parent, v, phone) {
     var room = add(parent, el('div', 'ef-room'));
@@ -223,8 +229,8 @@ SCRIPT = r"""
     var views = accounts.filter(function (e) { return e.state !== 'not tracked'; })
       .map(function (e) { return accountView(e, d.generated_at_epoch); });
     var untracked = [];
-    accounts.filter(function (e) { return e.state === 'not tracked'; }).map(function (e) { return e.harness; })
-      .concat(['grok']).forEach(function (h) { if (untracked.indexOf(h) < 0) untracked.push(h); });
+    accounts.filter(function (e) { return e.state === 'not tracked'; })
+      .forEach(function (e) { if (untracked.indexOf(e.harness) < 0) untracked.push(e.harness); });
     var table = add(add(root, el('div', 'ef-scroll')), el('table', 'ef-usage'));
     var head = add(add(table, el('thead')), el('tr'));
     ['account', '5-hour window', '7-day window', 'resets', 'headroom']
@@ -237,7 +243,7 @@ SCRIPT = r"""
       headroomRoom(add(tr, el('td')), v, false);
     });
     untracked.forEach(function (h) { untrackedLine(body, h, true); });
-    add(root, el('p', 'ef-hnote', HEADROOM_NOTE + ', so the reading is per account, not per device.'));
+    add(root, el('p', 'ef-hnote', HEADROOM_NOTE));
     var list = add(root, el('div', 'ef-accts'));
     views.forEach(function (v) {
       var block = add(list, el('div', 'ef-acct'));
@@ -252,17 +258,13 @@ SCRIPT = r"""
       });
     });
     untracked.forEach(function (h) { untrackedLine(list, h, false); });
-    add(root, el('p', 'ef-hnote-ph', HEADROOM_NOTE + '.'));
+    add(root, el('p', 'ef-hnote-ph', HEADROOM_NOTE));
   }
 """
 
-HEADROOM_NOTE = (
-    "Headroom is what is left in the fullest window. "
-    "One account is shared by every device that runs that harness"
-)
+HEADROOM_NOTE = "Headroom is what is left in the fullest window."
 SHIPPED = ("merged", "done", "handed-off")
 ROUND_BUCKETS = ("0 rounds", "1 round", "2 rounds", "3 rounds", "4 or more")
-ALWAYS_UNTRACKED = "grok"
 METER_CELLS = 20
 WINDOWS = ("five_hour", "seven_day")
 WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "7-day"}
@@ -378,7 +380,7 @@ def _view(entry: dict, now: float) -> dict:
             "pct": None, "tone": None, "tag": None, "lit": 0}
     if entry["limit_label"] or not fresh:
         reason = entry["limit_label"] or ("no telemetry" if state == "no telemetry" else "no reading")
-        return {**view, "label": f"{entry['harness']} headroom: {reason}"}
+        return {**view, "label": f"{_name(entry)} headroom: {reason}"}
     only = WINDOW_NAMES[fresh[0]] if len(fresh) == 1 and len(planned) > 1 else None
     pct = _half_up(entry["headroom"] * 100)
     lit = (2 * pct + 5) // 10
@@ -386,7 +388,7 @@ def _view(entry: dict, now: float) -> dict:
     return {
         **view, "pct": pct, "lit": lit, "tone": "neutral" if only else _tone(entry["headroom"]),
         "tag": None if only is None else f"({only} only)",
-        "label": f"{entry['harness']} headroom {pct} percent{window}: {lit} of {METER_CELLS} cells lit",
+        "label": f"{_name(entry)} headroom {pct} percent{window}: {lit} of {METER_CELLS} cells lit",
     }
 
 
@@ -394,11 +396,25 @@ def _cell(text: str, cls: str | None, tag: str = "td") -> str:
     return f'<{tag} class="{f"ef-v {cls}" if cls else "ef-v"}">{_e(text)}</{tag}>'
 
 
+def _name(entry: dict) -> str:
+    return entry["label"] or entry["account"]
+
+
+def _about(entry: dict) -> str:
+    age = entry["age_seconds"]
+    return " · ".join(part for part in (
+        entry["plan"],
+        entry["source"] and f"via {entry['source']}",
+        "never read" if age is None else f"read {duration(age)} ago",
+        entry["devices"] and "used on " + ", ".join(entry["devices"]),
+    ) if part)
+
+
 def _who(entry: dict) -> str:
     harness = entry["harness"]
     return (
-        f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", entry["bot"])}</div>'
-        f'<div class="ef-dev">{_e("used on " + " · ".join(entry["devices"]))}</div>'
+        f'<div class="ef-who">{_span("bot " + harness, harness)}{_span("ef-name", _name(entry))}</div>'
+        f'<div class="ef-dev">{_e(_about(entry))}</div>'
     )
 
 
@@ -441,9 +457,7 @@ def _account_block(view: dict) -> str:
 def _headroom(snapshot: dict) -> str:
     accounts = snapshot["usage"]["accounts"]
     views = [_view(e, snapshot["generated_at_epoch"]) for e in accounts if e["state"] != "not tracked"]
-    untracked = list(dict.fromkeys(
-        [e["harness"] for e in accounts if e["state"] == "not tracked"] + [ALWAYS_UNTRACKED]
-    ))
+    untracked = list(dict.fromkeys(e["harness"] for e in accounts if e["state"] == "not tracked"))
     head = "".join(f"<th>{name}</th>" for name in
                    ("account", "5-hour window", "7-day window", "resets", "headroom"))
     rows = "".join(_account_row(view) for view in views) + "".join(
@@ -458,9 +472,9 @@ def _headroom(snapshot: dict) -> str:
     inner = (
         f'<div class="ef-scroll"><table class="ef-usage"><thead><tr>{head}</tr></thead>'
         f"<tbody>{rows}</tbody></table></div>"
-        f'<p class="ef-hnote">{HEADROOM_NOTE}, so the reading is per account, not per device.</p>'
+        f'<p class="ef-hnote">{HEADROOM_NOTE}</p>'
         f'<div class="ef-accts">{blocks}</div>'
-        f'<p class="ef-hnote-ph">{HEADROOM_NOTE}.</p>'
+        f'<p class="ef-hnote-ph">{HEADROOM_NOTE}</p>'
     )
     return _panel("headroom", "Subscription headroom", inner, count="per account", extra="ef-wide")
 
