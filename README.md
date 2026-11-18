@@ -2118,8 +2118,8 @@ Threat model, in short:
   it right before posting `/ok <40-char sha>`: if it moved, nothing is
   posted and the page is told the new head. The OK is refused unless the
   snapshot row is `awaiting-ok`.
-- The server writes nothing but settings request files (below) and has no
-  chat path. Residual risk: someone who gets Max to type their device code on
+- The server writes nothing but settings request files and the actions
+  audit (both below) and has no chat path. Residual risk: someone who gets Max to type their device code on
   github.com gets a session as Max; only his own devices can start a sign-in.
 
 **Device settings (issue #777).** The Settings page (`settings.html`, in
@@ -2184,6 +2184,49 @@ dashboard:
 ```
 
 Without this block, `orch settings apply` does nothing.
+
+**Max's actions (issue #822).** A ticket that waits on Max carries a
+`wait` (why it waits and the comment that explains it) and an `actions`
+list in `status.json`. Signed in as the approver, Max acts on it from the
+dashboard: merge OK, approve an oversize plan or split it, another round,
+answer a question, requeue a failed job, resume a blocked ticket, or close.
+The server posts the comment as Max; no bot posts on his behalf.
+
+1. With GitHub actions on, set `DASHBOARD_ACTIONS_AUDIT` in `http.env` to
+   an absolute file path. If the file exists it must be a regular file, not
+   a symlink, and not group- or world-writable; its directory must exist and
+   not be group- or world-writable. The server opens it once at startup
+   (append only, mode 0600). The unit's sandbox makes the home directory
+   read-only, so add a drop-in (`systemctl --user edit
+   factory-dashboard-http.service`) with `ReadWritePaths=` naming that
+   directory. Without the variable, `/api/act` is 404; setting it without
+   `DASHBOARD_GITHUB_CLIENT_ID` is a configuration error.
+2. `POST /api/act` `{repo, ticket_id, action, expect_state, expect_why,
+   words, head}` checks the session, CSRF and approver login (403
+   `not-approver`), the action name (400 `bad-action`), the words (400
+   `bad-words`: non-empty, at most 32768 characters) and, for the merge OK,
+   a full 40-character `head` (400 `bad-head`). It then finds the ticket's
+   row in the served `status.json` (404 `not-in-snapshot`) and refuses with
+   409 `changed` if the row's state or wait reason is no longer what the
+   page showed, `not-applicable` if the row no longer lists the action, and
+   `no-target` if the row has neither a PR nor a GitHub issue. The comment
+   goes on the row's PR, else its issue, so a Linear ticket's goes on its
+   PR. A merge OK re-reads the PR head and answers 409 `head-changed` with
+   the new head, posting nothing, if it moved. Otherwise the server builds
+   the comment itself and answers 201 with its URL.
+3. Each comment is an `orch:v1` header the server chooses (`kind=ok
+   head=<sha>`; a `kind=go` for approve, resume and another round;
+   `kind=answers` for an answer; `kind=retry` for requeue; `kind=answers
+   state=abandoned` for close and split), then Max's words under
+   `**Max's words** (Max <date> <time> ET)`, every line quoted with `> `
+   and `<!--`/`-->` escaped. Nothing he types can become a first line, a
+   `/ok` or a header.
+4. Every request that reaches `/api/act` with a valid session and CSRF,
+   posted or refused, appends one JSON line to the audit file: time (UTC),
+   login, repo, ticket id, action, expected state, head, result (`posted`
+   or the error code) and the comment URL. The words, token, cookie and
+   CSRF are never written. Requests refused before that (no session, a bad
+   CSRF, origin or content type) write no line.
 
 ## Local config overlay
 
