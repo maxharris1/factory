@@ -7,9 +7,7 @@ moved into place only when whole. A run whose files have not changed since
 its last send to this host and remote_dir (`.qa-push.json` beside the
 snapshot) is not sent again. A symlink, a hard-linked file or a folder outside
 the evidence root is never sent: the run is refused with one log line and the
-others still go. A sent run the box no longer lists, or whose folder is gone,
-is removed from the PC. Over `budget_bytes`, the oldest closed tickets' runs
-are removed from the PC too, and are not sent again.
+others still go.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from lib.dashboard import redact
 from lib.dashboard_config import valid_remote_dir
@@ -47,19 +46,22 @@ class Sent:
 
 @dataclass
 class Store:
-    """What this box put on one destination, `<host>:<remote_dir>`."""
-
     dest: str
     runs: dict[str, Sent] = field(default_factory=dict)
-    # Removed for budget; not sent again while the box lists them.
-    evicted: set[str] = field(default_factory=set)
+    budget_evicted: set[str] = field(default_factory=set)
 
 
-def settled_runs(connection: sqlite3.Connection) -> list[tuple[str, str, str, bool]]:
-    """(run_id, repo, evidence_dir, ticket closed), newest first."""
+class SettledRun(NamedTuple):
+    run_id: str
+    repo: str
+    evidence_dir: str
+    ticket_closed: bool
+
+
+def settled_runs(connection: sqlite3.Connection) -> list[SettledRun]:
     closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
     return [
-        (run_id, repo, evidence_dir, bool(is_closed))
+        SettledRun(run_id, repo, evidence_dir, bool(is_closed))
         for run_id, repo, evidence_dir, is_closed in connection.execute(
             f"""
             SELECT r.run_id, r.repo, r.evidence_dir, EXISTS (
@@ -125,16 +127,16 @@ def push_evidence(
 
     A transport PushError propagates; what was done before it stays recorded."""
     started = clock()
-    state = _load(store, f"{transport.host}:{transport.remote_dir}")
+    state = _load_for_dest(store, f"{transport.host}:{transport.remote_dir}")
     rows = settled_runs(connection)
     gone: set[str] = set()
     opened: dict[str, tuple[str, int | None]] = {}
     try:
-        for run_id, repo, evidence_dir, _closed in rows:
+        for run_id, repo, evidence_dir, _ticket_closed in rows:
             if clock() - started >= deadline:
                 log("dashboard push: qa evidence deadline reached; the rest goes next push")
                 break
-            if run_id in state.evicted:
+            if run_id in state.budget_evicted:
                 continue
             if repo.lower() not in opened:
                 opened[repo.lower()] = _open(run_id, repo, roots.get(repo.lower()), log)
@@ -159,8 +161,7 @@ def push_evidence(
                         script, feed=spool, timeout=SEND_TIMEOUT_SECONDS + math.ceil(size / _MIB)
                     )
             except FileNotFoundError:
-                # A file that vanished mid-walk is not a run recycled whole.
-                if not os.path.lexists(os.path.join(real_root, *parts)):
+                if _folder_gone(real_root, parts):
                     gone.add(run_id)
                 continue
             except (EvidenceRefused, OSError, ValueError) as exc:
@@ -174,21 +175,21 @@ def push_evidence(
             if fd is not None:
                 os.close(fd)
 
-    listed = {row[0] for row in rows}
+    listed = {row.run_id for row in rows}
     for run_id in [run_id for run_id in state.runs if run_id not in listed or run_id in gone]:
         _remove(transport, store, state, run_id)
-    if state.evicted - listed:
-        state.evicted &= listed
+    if state.budget_evicted - listed:
+        state.budget_evicted &= listed
         _save(store, state)
     if budget_bytes is None:
         return
     total = sum(sent.bytes for sent in state.runs.values())
-    for run_id, _repo, _dir, closed in reversed(rows):
+    for run_id, _repo, _dir, ticket_closed in reversed(rows):
         if total <= budget_bytes:
             return
-        if closed and run_id in state.runs:
+        if ticket_closed and run_id in state.runs:
             total -= state.runs[run_id].bytes
-            state.evicted.add(run_id)
+            state.budget_evicted.add(run_id)
             _remove(transport, store, state, run_id)
 
 
@@ -210,9 +211,11 @@ def _open(run_id: str, repo: str, root: Path | None, log: Callable[[str], None])
         return real_root, None
 
 
-def _load(store: Path, dest: str) -> Store:
-    """Anything but a version 2 store for `dest` is empty: everything is sent
-    again, and nothing is removed from a destination this box no longer owns."""
+def _folder_gone(real_root: str, parts: tuple[str, ...]) -> bool:
+    return not os.path.lexists(os.path.join(real_root, *parts))
+
+
+def _load_for_dest(store: Path, dest: str) -> Store:
     try:
         data = json.loads(store.read_bytes())
     except (OSError, ValueError, RecursionError):
@@ -230,7 +233,7 @@ def _load(store: Path, dest: str) -> Store:
             and isinstance(entry.get("mark"), str)
             and is_strict_int(entry.get("bytes"))
         },
-        evicted={run for run in (evicted if isinstance(evicted, list) else ()) if isinstance(run, str)},
+        budget_evicted={run for run in (evicted if isinstance(evicted, list) else ()) if isinstance(run, str)},
     )
 
 
@@ -239,7 +242,7 @@ def _save(store: Path, state: Store) -> None:
         "version": 2,
         "dest": state.dest,
         "runs": {run: {"mark": sent.mark, "bytes": sent.bytes} for run, sent in state.runs.items()},
-        "evicted": sorted(state.evicted),
+        "evicted": sorted(state.budget_evicted),
     }
     fd, temp = tempfile.mkstemp(prefix=f".{store.name}.", dir=store.parent)
     try:

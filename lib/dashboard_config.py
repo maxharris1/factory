@@ -91,7 +91,6 @@ class PushConfig:
     every_minutes: int | None = None
     # True: `orch poll` also pushes status.json whenever orch.db changes.
     live: bool = False
-    # None: no QA run is removed from the PC for budget.
     qa_budget_gib: int | None = None
 
 
