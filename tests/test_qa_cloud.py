@@ -522,6 +522,7 @@ def test_a_failed_fallback_requeues_and_restores_the_run_runner(tmp_path: Path) 
 
     assert lab.run.rows("SELECT state, attempt FROM jobs WHERE action = 'qa'") == [("queued", 1)]
     assert lab.run.rows("SELECT runner FROM qa_runs") == [("claude-cloud",)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE event = 'qa-requeued'") == [("cursor-cloud:RunnerOutage",)]
     assert lab.lanes() == []
     assert lab.posted == {}
 
@@ -597,19 +598,19 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
 SHARED = {"claude-cloud": "claude"}
 
 
-def _build(lab: Lab) -> str:
+def _build(lab: Lab, recipient: str = "claude") -> str:
     return lab.run.queue.enqueue(
-        JobRequest(repo=REPO, ticket_id="9", action="build", recipient="claude", source_comment_id="go-9",
+        JobRequest(repo=REPO, ticket_id="9", action="build", recipient=recipient, source_comment_id="go-9",
                    timeout_seconds=3600),
-        dedupe_key="build:9",
+        dedupe_key=f"build:9:{recipient}",
     ).id
 
 
-def _pause_claude(lab: Lab, seconds: int) -> lane_limit.LaneLimit:
+def _pause(lab: Lab, recipient: str, seconds: int) -> lane_limit.LaneLimit:
     now = lab.run.now[0]
     with lab.run.queue.connect() as connection:
-        limit = lane_limit.record(connection, job_id=_build(lab), harness="claude", bot="claude-bot",
-                                  limit=lane_limit.UsageLimit(int(now) + seconds), now=now)
+        limit = lane_limit.record(connection, job_id=_build(lab, recipient), harness=recipient,
+                                  bot=f"{recipient}-bot", limit=lane_limit.UsageLimit(int(now) + seconds), now=now)
     assert limit is not None
     return limit
 
@@ -617,7 +618,7 @@ def _pause_claude(lab: Lab, seconds: int) -> lane_limit.LaneLimit:
 def _paused_pair(lab: Lab) -> tuple[str, str, lane_limit.LaneLimit]:
     held = lab.enqueue(ids=2, ticket="1", runner="claude-cloud")
     free = lab.enqueue(ids=2, ticket="2", runner="cursor-cloud")
-    limit = _pause_claude(lab, 3600)
+    limit = _pause(lab, "claude", 3600)
     lab.silent.add((0, 1))
     lab.tick(3)
     return held, free, limit
@@ -654,7 +655,7 @@ def test_paused_recipient_grants_no_extra_lane(tmp_path: Path) -> None:
     lab.tick()
     assert len(lab.fakes["claude-cloud"].launched) == 1
 
-    limit = _pause_claude(lab, 90)
+    limit = _pause(lab, "claude", 90)
     lab.tick(2)
     assert len(lab.fakes["claude-cloud"].launched) == 1
     assert [row[3] for row in lab.lanes()] == ["running"]
@@ -705,3 +706,84 @@ def test_usage_limit_falls_back_only_to_another_account(
 
     assert len(lab.fakes["cursor-cloud"].launched) == int(moved)
     assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done" if moved else "queued", 1)]
+
+
+BOTH = {"claude-cloud": "claude", "cursor-cloud": "cursor"}
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["queue", "queue-restart"])
+def test_usage_limit_before_a_failed_fallback_still_waits_behind_recipient_builds(
+    tmp_path: Path, restart: bool
+) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.fakes["cursor-cloud"].launch_errors.append(RunnerOutage("down"))
+    lab.tick()
+    assert lab.run.rows("SELECT event, detail FROM job_events WHERE job_id = ?", job) == [
+        ("qa-requeued", "claude-cloud:UsageLimit,cursor-cloud:RunnerOutage")
+    ]
+
+    build = _build(lab)
+    lab.run.now[0] = 1301
+    if restart:
+        lab.worker = lab.new_worker()
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-yielded'", job) == [
+        ("behind queued claude jobs",)
+    ]
+    assert lab.launched() == []
+
+    claimed = lab.run.queue.claim("claude")
+    assert claimed is not None and claimed.id == build
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+
+@pytest.mark.parametrize("error", [RunnerOutage("down"), UsageLimit("at limit")], ids=["outage", "usage-limit"])
+def test_a_runner_whose_account_is_paused_is_not_a_fallback(tmp_path: Path, error: Exception) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=BOTH)
+    job = lab.enqueue(ids=2)
+    _pause(lab, "cursor", 3600)
+    lab.fakes["claude-cloud"].launch_errors.append(error)
+    lab.tick()
+
+    assert lab.launched() == []
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-requeued'", job) == [
+        (f"claude-cloud:{type(error).__name__}",)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("setup", "result"),
+    [
+        (lambda lab: lab.head_outcome.update({"qa-2": "failed"}), "FAIL"),
+        (lambda lab: lab.broken.update({(0, 1): lambda result: result.pop("commit")}), "PASS"),
+    ],
+    ids=["base-check", "retry"],
+)
+def test_paused_account_launches_no_new_lane_until_the_pause_ends(
+    tmp_path: Path, setup: Callable, result: str
+) -> None:
+    lab = Lab(tmp_path, lanes=1, shares_usage_with=SHARED)
+    job = lab.enqueue(ids=2)
+    setup(lab)
+    lab.silent.add((0, 1))
+    lab.tick()
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+    limit = _pause(lab, "claude", 3600)
+    lab.silent.clear()
+    lab.tick(3)
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("running",)]
+    assert lab.posted == {}
+
+    lab.run.now[0] = limit.until
+    lab.tick()
+    assert len(lab.fakes["claude-cloud"].launched) == 2
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", job) == [("done",)]
+    assert lab.header()["result"] == result

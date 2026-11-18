@@ -397,11 +397,9 @@ class QaWorker:
             if not any(row.agent_id for row in rows):
                 continue
             runner = rows[0].runner
-            recipient = self.shares_usage_with.get(runner)
             with self.queue.connect() as connection:
-                limit = None if recipient is None else lane_limit.active(connection, recipient, self.queue.now())
-            if limit is not None:
-                continue
+                if self._paused(connection, runner, self.queue.now()) is not None:
+                    continue
             taken = {row.slice for row in rows}
             for item in plan.slices:
                 if item.index in taken:
@@ -443,16 +441,18 @@ class QaWorker:
             return
         self._finish(job, plan, rows)
 
-    def _launch(self, job: Job, plan: RunPlan, row: LaneRow) -> Literal["launched", "gap", "requeued"]:
+    def _launch(self, job: Job, plan: RunPlan, row: LaneRow) -> Literal["launched", "gap", "requeued", "deferred"]:
         first = row.slice == 0 and row.attempt == 1 and row.kind != "base-check" and not any(
             other.agent_id for other in self._lanes(row.run_id)
         )
         runner = row.runner
         with self.queue.connect() as connection:
+            if self._paused(connection, runner, self.queue.now()) is not None:
+                return "deferred"
             connection.execute(
                 "UPDATE qa_lanes SET launch_called_at = ? WHERE lane_id = ?", (self.queue.now(), row.lane_id)
             )
-        spent: set[str] = set()
+        limited: list[str] = []
         while True:
             try:
                 launched = self.runners[runner].launch(self._lane(plan, row, runner))
@@ -462,10 +462,10 @@ class QaWorker:
                     return "gap"
                 self._backoff[runner] = self.queue.now() + BACKOFF_SECONDS
                 if isinstance(exc, UsageLimit) and runner in self.shares_usage_with:
-                    spent.add(self.shares_usage_with[runner])
-                following = self._next_runner(plan, runner, spent)
+                    limited.append(runner)
+                following = self._next_runner(plan, runner, {self.shares_usage_with[name] for name in limited})
                 if following is None or not self._move(row, following):
-                    self._requeue(job, plan, runner, exc)
+                    self._requeue(job, plan, runner, exc, limited)
                     return "requeued"
                 runner = following
                 continue
@@ -587,8 +587,9 @@ class QaWorker:
             return False
         return True
 
-    def _requeue(self, job: Job, plan: RunPlan, runner: str, exc: Exception) -> None:
+    def _requeue(self, job: Job, plan: RunPlan, runner: str, exc: Exception, limited: Sequence[str]) -> None:
         now = self.queue.now()
+        causes = [f"{name}:{UsageLimit.__name__}" for name in limited if name != runner]
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM qa_lanes WHERE run_id = ? AND agent_id IS NULL", (plan.detail.run_id,))
@@ -606,7 +607,7 @@ class QaWorker:
                     """,
                     (
                         job.id, job.request.repo.lower(), job.request.ticket_id, job.request.action,
-                        QA_RECIPIENT, f"{runner}:{type(exc).__name__}", now,
+                        QA_RECIPIENT, ",".join([*causes, f"{runner}:{type(exc).__name__}"]), now,
                     ),
                 )
             connection.commit()
@@ -629,24 +630,36 @@ class QaWorker:
             return None
         names = [item.name for item in plan.qa.runners]
         following = names[names.index(runner) + 1 :] if runner in names else []
-        return next(
-            (name for name in following if name in self.runners and self.shares_usage_with.get(name) not in spent),
-            None,
-        )
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            return next(
+                (
+                    name for name in following
+                    if name in self.runners
+                    and self.shares_usage_with.get(name) not in spent
+                    and self._paused(connection, name, now) is None
+                ),
+                None,
+            )
+
+    def _paused(self, connection: sqlite3.Connection, runner: str, now: float) -> lane_limit.LaneLimit | None:
+        recipient = self.shares_usage_with.get(runner)
+        return None if recipient is None else lane_limit.active(connection, recipient, now)
 
     def _yields(self, connection: sqlite3.Connection, job_id: str, runner: str, now: float) -> str | None:
         recipient = self.shares_usage_with.get(runner)
         if recipient is None:
             return None
-        limit = lane_limit.active(connection, recipient, now)
+        limit = self._paused(connection, runner, now)
         if limit is not None:
             return f"{recipient}: {lane_limit.label(limit)}"
         last = connection.execute(
             "SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-requeued' ORDER BY id DESC LIMIT 1",
             (job_id,),
         ).fetchone()
-        limited, _, cause = (last["detail"] if last else "").partition(":")
-        if cause == UsageLimit.__name__ and self.shares_usage_with.get(limited) == recipient:
+        causes = (entry.partition(":") for entry in (last["detail"] if last else "").split(","))
+        if any(cause == UsageLimit.__name__ and self.shares_usage_with.get(name) == recipient
+               for name, _, cause in causes):
             if claim_order(connection, recipient, now=now):
                 return f"behind queued {recipient} jobs"
         return None
