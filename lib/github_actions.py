@@ -1108,6 +1108,7 @@ def _run_job(job: dict[str, Any]) -> RunJob:
         completed_at=_display_time(job.get("completed_at")) if status == "completed" else None,
         runner_name=runner,
         runner_kind=kind,
+        steps=len(steps) if isinstance(steps := job.get("steps"), list) else None,
     )
 
 

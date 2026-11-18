@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 
 from lib.attention import DEDUPE_DROPPED
-from lib.dispatch.constants import CI_SILENT_REASON, TERMINAL_STATES
+from lib.dispatch.constants import CI_INFRA_BLOCKED_REASON, CI_SILENT_REASON, TERMINAL_STATES
 
 
 def write_workflow_state(
@@ -57,8 +57,8 @@ def write_workflow_state(
         connection.execute("DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key)
         connection.execute("DELETE FROM ci_silence WHERE repo = ? AND ticket_id = ?", key)
         connection.execute(
-            "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
-            (*key, CI_SILENT_REASON),
+            "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason IN (?, ?)",
+            (*key, CI_SILENT_REASON, CI_INFRA_BLOCKED_REASON),
         )
     if prior != state:
         if prior is not None:

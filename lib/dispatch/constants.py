@@ -9,8 +9,13 @@ GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 # merged and done are absorbing (#108): no later write moves a ticket out.
 FINISHED_STATES = ("merged", "done")
 TERMINAL_STATES = frozenset({"merged", "done", "refused", "abandoned"})
-CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending", "ci-rerun")
+CI_INFRA_WAIT = "ci-infra-wait"
+CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending", "ci-rerun", CI_INFRA_WAIT)
 CI_RERUN_SETTLE_SECONDS = 900.0
+# #905: how long a ready after a finished CI fix waits on an infrastructure
+# red at the same head before the ticket needs attention as ci-infra-blocked.
+CI_INFRA_WAIT_SECONDS = 1800.0
+CI_INFRA_BLOCKED_REASON = "ci-infra-blocked"
 # #615: how long a ready on a CI base waits with no check run and no commit
 # status on its head before the ticket needs attention as ci-silent.
 CI_SILENT_SECONDS = 600.0

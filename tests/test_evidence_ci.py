@@ -236,6 +236,11 @@ BILLING = (
     [
         ("cancelled", [NOT_ACQUIRED], ("infra", "runner not acquired")),
         ("failure", [BILLING], ("infra", "billing or spending limit")),
+        (
+            "failure",
+            ["The job was not started because your organization's Actions policy blocks it."],
+            ("infra", "job not started"),
+        ),
         ("failure", ["The hosted runner lost communication with the server."], ("infra", "runner lost")),
         ("failure", ["The runner has received a shutdown signal."], ("infra", "runner lost")),
         (
@@ -353,3 +358,30 @@ def test_the_spec_t2_row_states_the_rerun_and_classification_protocol():
     assert "classified `infra` or `code`" in row
     assert "no `ready` or verdict naming that head" in row
     assert "Red: queue `fix` with the failing log" not in row
+
+
+UNLOGGED = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL)
+
+
+@pytest.mark.parametrize(
+    ("steps", "expected"),
+    [
+        ({"7": 0}, ("infra", "job not started")),
+        ({"7": 3}, ("unknown", None)),
+        ({"7": None}, ("unknown", None)),
+        ({}, ("unknown", None)),
+        (None, ("unknown", None)),
+    ],
+)
+def test_a_failed_job_with_no_log_and_zero_steps_is_infra(steps, expected):
+    result = classify_logged(CIResult("failure", failed=(UNLOGGED,)), {"7": None}, steps)
+
+    assert [(check.cause, check.signal) for check in result.failed] == [expected]
+
+
+def test_a_log_naming_a_failing_test_stays_code_whatever_the_step_count():
+    log = "2026-11-10T19:50:02Z FAILED tests/test_x.py::test_y - boom\n"
+
+    result = classify_logged(CIResult("failure", failed=(PYTEST,)), {"7": log}, {"7": 0})
+
+    assert [(check.cause, check.signal) for check in result.failed] == [("code", None)]

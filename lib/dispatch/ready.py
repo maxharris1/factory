@@ -8,6 +8,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from lib.dispatch.constants import (
+    CI_INFRA_BLOCKED_REASON,
+    CI_INFRA_WAIT,
+    CI_INFRA_WAIT_SECONDS,
     CI_RERUN_SETTLE_SECONDS,
     CI_SILENT_REASON,
     CI_SILENT_SECONDS,
@@ -53,6 +56,12 @@ class ReadyMixin:
     ) -> tuple[bool, str]:
         handled, outcome = self._ready(ticket, comment, fields)
         self._record_ci_wait(ticket, comment, fields["head"], outcome)
+        if outcome != CI_INFRA_WAIT:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (ticket.repo.lower(), ticket.ticket_id, CI_INFRA_BLOCKED_REASON),
+                )
         return handled, outcome
 
     def _ready_at_base(self, ticket: TrackedTicket, comment: Comment) -> None:
@@ -261,20 +270,51 @@ class ReadyMixin:
             return False, "ci-red-handoff-unread"
         if carried:
             return True, "ci-red-in-flight"
+        dedupe_key = self._ci_fix_dedupe_key(ticket, head, generation)
+        if result.cause == "infra" and self._ci_fix_finished(dedupe_key, comment):
+            self._flag_infra_blocked(ticket, head, result)
+            return False, CI_INFRA_WAIT
         self._queue_ci_fix(
-            ticket,
-            comment,
-            head,
-            result,
-            review_round,
-            generation,
-            dedupe_key=self._ci_fix_dedupe_key(ticket, head, generation),
+            ticket, comment, head, result, review_round, generation, dedupe_key=dedupe_key
         )
         if rereview:
             self._leave_merge_queue(ticket, "update-ci-red")
         if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _ci_fix_finished(self, dedupe_key: str, comment: Comment) -> bool:
+        with self._connect() as connection:
+            fix = connection.execute(
+                "SELECT state, source_comment_id FROM jobs WHERE dedupe_key = ?", (dedupe_key,)
+            ).fetchone()
+        return (
+            fix is not None
+            and fix["state"] not in ("queued", "running")
+            and fix["source_comment_id"] != comment.id
+        )
+
+    def _flag_infra_blocked(self, ticket: TrackedTicket, head: str, result: CIResult) -> None:
+        now = self.queue.now()
+        with self._connect() as connection:
+            wait = connection.execute(
+                "SELECT since FROM ci_waits WHERE repo = ? AND ticket_id = ? AND head = ?",
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+            if wait is None or now - float(wait["since"]) < CI_INFRA_WAIT_SECONDS:
+                return
+            signals = ", ".join(
+                dict.fromkeys(check.signal for check in failed_checks(result) if check.signal)
+            )
+            self._flag_attention_once(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                CI_INFRA_BLOCKED_REASON,
+                f"CI on {head} is red for infrastructure ({signals or 'infra'}) "
+                f"{(now - float(wait['since'])) / 60:.0f} minutes after a CI fix; "
+                "the ready waits for green",
+            )
 
     def _record_ci_wait(
         self,
@@ -417,7 +457,8 @@ class ReadyMixin:
                     return None
         from lib.evidence.ci import classify_logged
 
-        result = classify_logged(result, self._failed_job_logs(ticket.repo, result))
+        logs = self._failed_job_logs(ticket.repo, result)
+        result = classify_logged(result, logs, self._unlogged_job_steps(ticket.repo, result, logs))
         if self.ci_rerun is None or row is not None:
             return result
         failed = failed_checks(result)
@@ -672,6 +713,38 @@ class ReadyMixin:
                 if check.job_id is not None:
                     logs[check.job_id] = run_logs.get(check.name)
         return logs
+
+    def _unlogged_job_steps(
+        self, repo: str, result: CIResult, logs: Mapping[str, str | None]
+    ) -> dict[str, int | None]:
+        """Step counts for failed jobs no log classified, so a job that never started reads infra."""
+        steps: dict[str, int | None] = {}
+        if self.ci_runs is None:
+            return steps
+        unlogged: dict[str, list[str]] = {}
+        for check in failed_checks(result):
+            if (
+                check.cause != "infra"
+                and check.run_id is not None
+                and check.job_id is not None
+                and logs.get(check.job_id) is None
+            ):
+                unlogged.setdefault(check.run_id, []).append(check.job_id)
+        for run_id, job_ids in unlogged.items():
+            key = (repo.lower(), run_id, tuple(job_ids))
+            if key not in self._ci_step_reads and key not in self._ci_step_failures:
+                try:
+                    self._ci_step_reads[key] = {
+                        job.job_id: job.steps for job in self.ci_runs(repo, run_id)
+                    }
+                except Exception as exc:
+                    self._ci_step_failures.add(key)
+                    if self.log is not None:
+                        self.log(f"ci jobs: {repo} run {run_id} unavailable: {type(exc).__name__}")
+                if len(self._ci_step_reads) > _CI_LOG_READS:
+                    del self._ci_step_reads[next(iter(self._ci_step_reads))]
+            steps.update(self._ci_step_reads.get(key, {}))
+        return steps
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved
