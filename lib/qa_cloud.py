@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sqlite3
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from lib.brief.qa import AFTER_SCREENSHOT, PASS_OUTPUT, LaneFacts, Scenario, pack_ids, render_qa_brief
@@ -24,7 +26,9 @@ from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.qa import record_runner_moved
 from lib.dispatch.schema import ensure_qa_lanes
 from lib.factory_md import FactoryConfig, QaConfig
+from lib.orch_yml import QaStorage
 from lib.queue import QA_RECIPIENT, Job, SQLiteJobQueue, claim_order, job_from_row
+from lib.qa_evidence import record_evidence_dir, recycle, run_dir
 from lib.qa_runners import Lane, Runner, RunnerOutage, UsageLimit
 from lib.qa_storage import Storage, links_for_lane
 
@@ -38,6 +42,7 @@ SCENARIO_RESULTS = ("verified", "failed", "inconclusive", "needs-human")
 LANE_STATUSES = ("PASS", "ISSUES", "BLOCKED")
 BACKOFF_SECONDS = 300
 DEFAULT_MAX_CLOUD_LANES = 10
+GIB = 2**30
 
 _WORDS = {
     "verified": "Verified",
@@ -316,14 +321,19 @@ class QaWorker:
     storage: Callable[[str], Storage] | None = None
     max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
     log: Callable[[str], None] = lambda line: None
+    evidence: Mapping[str, QaStorage] = field(default_factory=dict)
+    free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free
     _plans: dict[str, RunPlan] = field(default_factory=dict)
     _backoff: dict[str, float] = field(default_factory=dict)
+    _low_disk: set[Path] = field(default_factory=set)
+    _skips_logged: set[tuple[str, str]] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         with self.queue.connect() as connection:
             ensure_qa_lanes(connection)
 
     def tick(self) -> None:
+        self._recycle()
         if not self.runners or self.collect is None or self.storage is None:
             return
         waiting: Counter[str] = Counter()
@@ -339,9 +349,57 @@ class QaWorker:
             except Exception as exc:
                 self.log(f"qa run {job.id}: {type(exc).__name__}: {exc}")
 
+    def _recycle(self) -> None:
+        for repo, entry in self.evidence.items():
+            budget = entry.evidence_budget_gib
+            try:
+                with self.queue.connect() as connection:
+                    report = recycle(
+                        connection,
+                        root=entry.evidence_root,
+                        repo=repo,
+                        now=self.queue.now(),
+                        budget_bytes=None if budget is None else budget * GIB,
+                    )
+            except Exception as exc:
+                self.log(f"qa recycle {repo}: {type(exc).__name__}: {exc}")
+                continue
+            runs = [PurePosixPath(path).name for path in report.deleted if len(PurePosixPath(path).parts) == 4]
+            for run_id in runs:
+                self.log(f"qa recycle {repo}: removed run {run_id} for the budget")
+            if files := len(report.deleted) - len(runs):
+                self.log(f"qa recycle {repo}: deleted {files} files")
+            for run_id, reason in report.skipped:
+                if (run_id, reason) not in self._skips_logged:
+                    self._skips_logged.add((run_id, reason))
+                    self.log(f"qa recycle {repo}: skipped run {run_id}: {reason}")
+
+    def _disk_low(self, repo: str) -> bool:
+        entry = self.evidence.get(repo.lower())
+        if entry is None or entry.min_free_gib is None:
+            return False
+        root = entry.evidence_root
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            free = self.free_bytes(root)
+        except OSError as exc:
+            reason = f"cannot read free space ({exc.strerror or exc})"
+        else:
+            if free >= entry.min_free_gib * GIB:
+                if root in self._low_disk:
+                    self._low_disk.discard(root)
+                    self.log(f"qa claim resumed: {root}")
+                return False
+            reason = f"has {free // GIB} GiB free, below {entry.min_free_gib} GiB"
+        if root not in self._low_disk:
+            self._low_disk.add(root)
+            self.log(f"qa claim paused: {root} {reason}")
+        return True
+
     def _claim(self) -> Counter[str]:
         now = self.queue.now()
         waiting: Counter[str] = Counter()
+        low: dict[str, bool] = {}
         with self.queue.connect() as connection:
             jobs = [job_from_row(row, connection) for row in claim_order(connection, QA_RECIPIENT, now=now)]
         for job in jobs:
@@ -352,7 +410,10 @@ class QaWorker:
             runner = raw["runner"]
             if runner not in self.runners:
                 continue
-            if self._backoff.get(runner, 0.0) > now:
+            repo = job.request.repo.lower()
+            if repo not in low:
+                low[repo] = self._disk_low(repo)
+            if low[repo] or self._backoff.get(runner, 0.0) > now:
                 self._restart_wait(job)
                 continue
             if self._open_count(runner) >= self.max_cloud_lanes:
@@ -505,7 +566,13 @@ class QaWorker:
             return
         reason = rejection(row, result, plan.qa.verify)
         if reason is None:
-            self._close(row, "reported", None, result=result)
+            entry = self.evidence.get(plan.repo.lower())
+            with self.queue.connect() as connection:
+                _set_state(connection, row.lane_id, "reported", None, self.queue.now(), result=result)
+                run = connection.execute("SELECT ticket_id FROM qa_runs WHERE run_id = ?", (row.run_id,)).fetchone()
+                if entry is not None and run is not None:
+                    folder = run_dir(entry.evidence_root, plan.repo, run["ticket_id"], row.run_id)
+                    record_evidence_dir(connection, row.run_id, folder)
             return
         runner.stop(row.agent_id)
         if row.attempt == 2:

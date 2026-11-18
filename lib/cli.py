@@ -921,6 +921,7 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
         storage=storage,
         max_cloud_lanes=config.qa.max_cloud_lanes,
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
+        evidence={p.repo.lower(): p.qa_storage for p in config.projects if p.qa_storage},
     )
 
 

@@ -79,7 +79,10 @@ class EvidenceRefused(Exception):
 
 @dataclass(frozen=True)
 class Recycled:
-    """`deleted` holds posix paths relative to the evidence root."""
+    """`deleted` holds posix paths relative to the evidence root.
+
+    A run removed whole for the budget appears as its folder,
+    <owner>/<name>/<ticket>/<run_id>. A deleted file is always deeper."""
 
     deleted: tuple[str, ...]
     skipped: tuple[tuple[str, str], ...]
