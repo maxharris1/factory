@@ -1270,6 +1270,7 @@ def _runtime(
         rebase_classifier=_rebase_check,
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
+        ci_rerun=source.github.rerun_failed_jobs,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
         ci_pool=source.github.list_runners,

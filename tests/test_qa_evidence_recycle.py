@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import lib.qa_evidence
 from lib.qa_evidence import Recycled, record_evidence_dir, recycle, run_dir
 from tests.test_dispatcher import setup
 
@@ -335,6 +336,89 @@ def test_missing_run_folder_is_nothing_to_do(db: sqlite3.Connection, root: Path)
     _closed(db, TICKET, "merged", NOW - 30 * DAY)
 
     assert recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1) == Recycled(deleted=(), skipped=())
+
+
+def _swappable_root(tmp_path: Path) -> tuple[Path, Path, Path]:
+    base = tmp_path.resolve()
+    root = base / "current" / "evidence"
+    for top in ("current", "outside"):
+        _lane(run_dir(base / top / "evidence", REPO, TICKET, "run-1"), 1, {"s-1": "verified"}, ["s-1/trace.zip"])
+    return base, root, base / "outside"
+
+
+def _swap_current_for_outside(base: Path) -> None:
+    (base / "current").rename(base / "saved")
+    (base / "current").symlink_to(base / "outside", target_is_directory=True)
+
+
+def test_ancestor_swapped_after_checks_does_not_reach_outside(
+    db: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, root, outside = _swappable_root(tmp_path)
+    _run(db, "run-1", run_dir(root, REPO, TICKET, "run-1"))
+    outside_before = _snapshot(outside)
+    original = lib.qa_evidence._resolve
+
+    def resolve_then_swap(*args: object) -> object:
+        parts = original(*args)
+        _swap_current_for_outside(base)
+        return parts
+
+    monkeypatch.setattr(lib.qa_evidence, "_resolve", resolve_then_swap)
+
+    report = recycle(db, root=root, repo=REPO, now=NOW)
+
+    assert _snapshot(outside) == outside_before
+    assert not (run_dir(base / "saved" / "evidence", REPO, TICKET, "run-1") / "lane-1" / "s-1" / "trace.zip").exists()
+    assert report.deleted == ("Acme/Shop/12/run-1/lane-1/s-1/trace.zip",)
+
+
+def test_ancestor_swapped_before_root_is_opened_skips_every_run(
+    db: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, root, outside = _swappable_root(tmp_path)
+    _run(db, "run-1", run_dir(root, REPO, TICKET, "run-1"))
+    outside_before = _snapshot(outside)
+    original = os.path.realpath
+
+    def realpath_then_swap(path: object, **kwargs: object) -> str:
+        real = original(path, **kwargs)
+        if os.fspath(path) == str(root) and not (base / "saved").exists():
+            _swap_current_for_outside(base)
+        return real
+
+    monkeypatch.setattr(lib.qa_evidence.os.path, "realpath", realpath_then_swap)
+
+    report = recycle(db, root=root, repo=REPO, now=NOW)
+
+    assert report.deleted == ()
+    assert [run_id for run_id, _reason in report.skipped] == ["run-1"]
+    assert "evidence root" in report.skipped[0][1]
+    assert _snapshot(outside) == outside_before
+
+
+def test_repeated_scenario_id_leaves_that_lane_alone(db: sqlite3.Connection, root: Path) -> None:
+    folder = run_dir(root, REPO, TICKET, "run-1")
+    _lane(folder, 1, {"s-1": "failed"}, _files("s-1"))
+    scenarios = [{"id": "s-1", "result": "failed"}, {"id": "s-1", "result": "verified"}]
+    (folder / "lane-1" / "result.json").write_text(json.dumps({"lane": 1, "scenarios": scenarios}))
+    _lane(folder, 2, {"s-2": "verified"}, _files("s-2"))
+    _run(db, "run-1", folder)
+    lane_1_before = _snapshot(folder / "lane-1")
+
+    report = recycle(db, root=root, repo=REPO, now=NOW)
+
+    assert _snapshot(folder / "lane-1") == lane_1_before
+    assert _remaining(folder / "lane-2") == {
+        "result.json",
+        "manifest.json",
+        "s-2/shot.png",
+        "s-2/step.jpg",
+        "s-2/video.webm",
+    }
+    assert [run_id for run_id, _reason in report.skipped] == ["run-1"]
+    assert "scenario id" in report.skipped[0][1]
+    assert "Acme/Shop/12/run-1/lane-1" in report.skipped[0][1]
 
 
 def test_record_evidence_dir_sets_the_folder_once(db: sqlite3.Connection, root: Path) -> None:

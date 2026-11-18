@@ -76,6 +76,7 @@ from urllib.parse import quote
 from lib.dispatch.helpers import _base_mismatch
 from lib.dispatch.types import (
     CHECK_FAILED,
+    Cause,
     CheckRow,
     CIJobStatus,
     PoolRunner,
@@ -112,6 +113,7 @@ TIMEOUT_SECONDS = 60.0
 STATE_LABEL_PREFIX = "orch:state/"
 PULL_FILES_LIMIT = 3000
 GH_DRAIN_SECONDS = 2.0
+ANNOTATION_MEMO = 1024
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
@@ -256,6 +258,7 @@ class GitHubReviewActions:
         self.login: str | None = None
         self.warning_sink: Callable[[str], None] | None = None
         self._contradictions_logged: set[tuple[str, str, int | str]] = set()
+        self._completed_run_annotations: dict[tuple[str, int], tuple[str, ...]] = {}
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         if state not in STATES:
@@ -664,6 +667,8 @@ class GitHubReviewActions:
         A run is pending only with no conclusion; a conclusion decides it
         even when status is not completed (#720).
         """
+        from lib.evidence.ci import classify_failure
+
         head = _sha(head, "head")
         commit = f"{_repo_path(repo)}/commits/{head}"
         runs: list[dict[str, Any]] = []
@@ -695,7 +700,8 @@ class GitHubReviewActions:
             if status != "completed":
                 self._warn_contradiction(repo, head, run, name, status, conclusion)
             if conclusion in CHECK_FAILED:
-                failed.append(_failed_check(name, run.get("details_url")))
+                cause, signal = classify_failure(conclusion, self._failure_texts(repo, run))
+                failed.append(_failed_check(name, run.get("details_url"), cause, signal))
             elif conclusion == "success":
                 passed = True
             elif conclusion not in _CHECK_NOT_RUN:
@@ -703,7 +709,8 @@ class GitHubReviewActions:
         if total:
             state = combined.get("state")
             if state in ("failure", "error"):
-                failed.append(FailedCheck("commit status"))
+                cause, signal = classify_failure(state, ())
+                failed.append(FailedCheck("commit status", cause=cause, signal=signal))
             elif state == "pending":
                 pending.extend(_pending_contexts(combined) or ["commit status"])
             elif state == "success":
@@ -721,6 +728,43 @@ class GitHubReviewActions:
             "success" if passed and not pending else "pending",
             pending=tuple(pending),
             checks=checks,
+        )
+
+    def _failure_texts(self, repo: str, run: dict[str, Any]) -> list[str]:
+        output = run.get("output")
+        output = output if isinstance(output, dict) else {}
+        texts = [text for text in (output.get("title"), output.get("summary")) if isinstance(text, str)]
+        run_id = run.get("id")
+        count = output.get("annotations_count")
+        if isinstance(run_id, bool) or not isinstance(run_id, int):
+            return texts
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return texts
+        key = (repo.lower(), run_id)
+        annotations = self._completed_run_annotations.get(key)
+        if annotations is None:
+            annotations = self._read_failure_annotations(repo, run_id)
+            if annotations is None:
+                return texts
+            if run.get("status") == "completed":
+                if len(self._completed_run_annotations) >= ANNOTATION_MEMO:
+                    del self._completed_run_annotations[next(iter(self._completed_run_annotations))]
+                self._completed_run_annotations[key] = annotations
+        return [*texts, *annotations]
+
+    def _read_failure_annotations(self, repo: str, run_id: int) -> tuple[str, ...] | None:
+        try:
+            page = self._json(f"{_repo_path(repo)}/check-runs/{run_id}/annotations?per_page=100")
+        except GitHubAdapterError:
+            return None
+        if not isinstance(page, list):
+            return None
+        return tuple(
+            text
+            for item in page
+            if isinstance(item, dict) and item.get("annotation_level") == "failure"
+            for text in (item.get("title"), item.get("message"))
+            if isinstance(text, str) and text
         )
 
     def _warn_contradiction(
@@ -776,6 +820,11 @@ class GitHubReviewActions:
         return self._call(
             f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
         )
+
+    def rerun_failed_jobs(self, repo: str, run_id: str) -> None:
+        if not run_id.isdigit():
+            raise GitHubAdapterError("Actions run id is not a number")
+        self._call("-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs")
 
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
@@ -1004,11 +1053,18 @@ def _pending_contexts(combined: dict[str, Any]) -> list[str]:
     ]
 
 
-def _failed_check(name: str, details: object) -> FailedCheck:
+def _failed_check(name: str, details: object, cause: Cause, signal: str | None) -> FailedCheck:
     match = _ACTIONS_JOB.match(details) if isinstance(details, str) else None
     if match is None:
-        return FailedCheck(name)
-    return FailedCheck(name, run_id=match.group(2), job_id=match.group(3), run_url=match.group(1))
+        return FailedCheck(name, cause=cause, signal=signal)
+    return FailedCheck(
+        name,
+        run_id=match.group(2),
+        job_id=match.group(3),
+        run_url=match.group(1),
+        cause=cause,
+        signal=signal,
+    )
 
 
 def _check_row(run: dict[str, Any]) -> CheckRow:

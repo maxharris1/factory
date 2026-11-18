@@ -49,6 +49,7 @@ class PollMixin:
         if begin is not None:
             begin()
         self._polled = {}
+        self._ci_log_failures = set()
         self._read_started = None
         self._merged_repos = set()
         self.merged_this_poll = set()

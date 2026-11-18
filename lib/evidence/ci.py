@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 
-from lib.dispatch.types import FailedCheck
+from lib.dispatch.helpers import failed_checks
+from lib.dispatch.types import Cause, CIResult, FailedCheck, result_cause
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
@@ -17,6 +18,26 @@ _JOB_STEP = re.compile(r"^[^\t]*\t[^\t]*\t(?=\ufeff?\d{4}-\d{2}-\d{2}T)")
 _PYTEST_SUMMARY = re.compile(
     r"^(?:FAILED|ERROR) ([\w./-]+\.py(?:::[^\s\[]+)*(?:\[[^\]]*\])?)(?: - .*)?\s*$"
 )
+# Not "The operation was canceled.": a person or a concurrency group cancels too.
+INFRA_LINE_PREFIXES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), label)
+    for pattern, label in (
+        (r"The job was not acquired by Runner of type \S+", "runner not acquired"),
+        (r"No \S+ runner picked up the \S+ job within", "runner pickup timed out"),
+        (
+            r"The job was not started because (?:recent account payments have failed"
+            r"|your spending limit needs to be increased)",
+            "billing or spending limit",
+        ),
+        (r"The job was not started because your account is locked", "billing or spending limit"),
+        (r"The (?:self-hosted |hosted )?runner\b.* lost communication with the server", "runner lost"),
+        (r"The runner has received a shutdown signal", "runner lost"),
+        (r"No hosted runner found", "hosted runner unavailable"),
+        (r"The hosted runner encountered an error while running your job", "hosted runner unavailable"),
+        (r"GitHub Actions has encountered an internal error when running your job", "hosted runner unavailable"),
+    )
+)
+_LINE_PREFIX = re.compile(r"^##\[error\]\s*")
 
 
 @dataclass(frozen=True)
@@ -26,6 +47,8 @@ class CIJobLog:
     run_url: str | None
     log_tail: str | None
     cut: str | None
+    cause: Cause
+    signal: str | None
 
 
 @dataclass(frozen=True)
@@ -33,6 +56,14 @@ class CIEvidence:
     failed_checks: tuple[str, ...]
     runs: tuple[tuple[str, str], ...]
     jobs: tuple[CIJobLog, ...]
+    cause: Cause
+
+
+def classify_failure(conclusion: str | None, texts: Iterable[str]) -> tuple[Cause, str | None]:
+    signal = _infra_signal(texts)
+    if signal is not None:
+        return "infra", signal
+    return ("code" if conclusion == "failure" else "unknown"), None
 
 
 def ci_evidence(
@@ -48,12 +79,37 @@ def ci_evidence(
             runs.setdefault(check.run_id, check.run_url)
         text = logs.get(check.job_id) if check.job_id is not None else None
         tail, cut = _tail(text, limit) if text is not None else (None, None)
-        jobs.append(CIJobLog(check.name, check.run_id, check.run_url, tail, cut))
+        jobs.append(
+            CIJobLog(check.name, check.run_id, check.run_url, tail, cut, check.cause, check.signal)
+        )
     return CIEvidence(
         failed_checks=tuple(check.name for check in failed),
         runs=tuple(runs.items()),
         jobs=tuple(jobs),
+        cause=result_cause(job.cause for job in jobs),
     )
+
+
+def classify_logged(result: CIResult, logs: Mapping[str, str | None]) -> CIResult:
+    if result.status != "failure":
+        return result
+    checks = []
+    for check in failed_checks(result):
+        text = logs.get(check.job_id) if check.job_id is not None else None
+        signal = None if text is None or failing_tests(text) else _infra_signal((text,))
+        checks.append(check if signal is None else replace(check, cause="infra", signal=signal))
+    return replace(result, failed=tuple(checks))
+
+
+def _infra_signal(texts: Iterable[str]) -> str | None:
+    for text in texts:
+        for line in text.splitlines():
+            entry = _ACTIONS_TIMESTAMP.sub("", _JOB_STEP.sub("", _ANSI.sub("", line))).strip()
+            entry = _LINE_PREFIX.sub("", entry)
+            for pattern, label in INFRA_LINE_PREFIXES:
+                if pattern.match(entry):
+                    return label
+    return None
 
 
 def failing_tests(log_text: str) -> list[str]:

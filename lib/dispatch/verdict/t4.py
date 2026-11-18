@@ -316,6 +316,9 @@ class T4Mixin:
                 "SELECT 1 FROM jobs WHERE dedupe_key = ?", (key,)
             ).fetchone()
         if queued is None:
+            settled = self._settled_red(ticket, head, result)
+            if settled is None:
+                return False, "approve-ci-rerun"
             _status, count = self._record_ci_result(ticket, head, "failure")
             if self._mark_stuck_on_third_red(ticket, comment, head, count):
                 return True, "stuck-ci-red-3"
@@ -323,7 +326,7 @@ class T4Mixin:
                 ticket,
                 self._latest_fix_answer(ticket, comment, head),
                 head,
-                result,
+                settled,
                 review_round,
                 self._generation(ticket.repo, ticket.ticket_id),
                 dedupe_key=key,
@@ -377,6 +380,9 @@ class T4Mixin:
         result: CIResult,
         review_round: int,
     ) -> tuple[bool, str]:
+        settled = self._settled_red(ticket, head, result)
+        if settled is None:
+            return False, "approve-ci-rerun"
         _status, count = self._record_ci_result(ticket, head, "failure")
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
@@ -384,7 +390,7 @@ class T4Mixin:
             ticket,
             comment,
             head,
-            result,
+            settled,
             review_round,
             self._generation(ticket.repo, ticket.ticket_id),
             dedupe_key=f"t4:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",

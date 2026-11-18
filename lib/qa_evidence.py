@@ -17,7 +17,7 @@ import stat
 import tarfile
 import tempfile
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Literal, get_args
@@ -51,7 +51,11 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 Standing = Literal["latest", "superseded", "expired"]
 Kind = Literal["screenshot", "video", "trace", "log", "manifest", "other"]
-Outcome = Literal["deleted", "symlink-left"]
+Outcome = Literal["deleted", "symlink-left", "lane-refused"]
+_LEFT_IN_PLACE: dict[Outcome, str] = {
+    "symlink-left": "symlink left in place: {}",
+    "lane-refused": "result.json repeats a scenario id, lane left in place: {}",
+}
 
 _SUFFIXES: dict[Kind, str] = {
     "screenshot": ".png .jpg .jpeg .webp",
@@ -394,38 +398,46 @@ def recycle(
     deleted: list[str] = []
     skipped: list[tuple[str, str]] = []
     real_root = os.path.realpath(root)
-    for run_id, evidence_dir, standing in rows:
-        parts = _resolve(run_id, evidence_dir, real_root)
-        if isinstance(parts, str):
-            skipped.append((run_id, parts))
-            continue
-        try:
-            run_fd = _open_below(real_root, parts)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            skipped.append((run_id, f"cannot open evidence folder ({exc.strerror})"))
-            continue
-        try:
-            for outcome, rel in _recycle_run(run_fd, standing):
-                shown = PurePosixPath(*parts, rel).as_posix()
-                if outcome == "deleted":
-                    deleted.append(shown)
-                else:
-                    skipped.append((run_id, f"symlink left in place: {shown}"))
-        except OSError as exc:
-            skipped.append((run_id, f"stopped partway ({exc.strerror})"))
-        finally:
-            os.close(run_fd)
+    try:
+        root_fd = _open_root(real_root)
+    except OSError as exc:
+        reason = f"cannot open evidence root ({exc.strerror})"
+        return Recycled(deleted=(), skipped=tuple((run_id, reason) for run_id, _folder, _standing in rows))
     removed: list[str] = []
-    if budget_bytes is not None:
-        removed, refused = _remove_oldest_closed_runs(connection, repo, real_root, budget_bytes)
-        skipped += refused
+    try:
+        for run_id, evidence_dir, standing in rows:
+            parts = _resolve(run_id, evidence_dir, real_root)
+            if isinstance(parts, str):
+                skipped.append((run_id, parts))
+                continue
+            try:
+                run_fd = _open_unlinked(root_fd, parts)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                skipped.append((run_id, f"cannot open evidence folder ({exc.strerror})"))
+                continue
+            try:
+                for outcome, rel in _recycle_run(run_fd, standing):
+                    shown = PurePosixPath(*parts, rel).as_posix()
+                    if outcome == "deleted":
+                        deleted.append(shown)
+                    else:
+                        skipped.append((run_id, _LEFT_IN_PLACE[outcome].format(shown)))
+            except OSError as exc:
+                skipped.append((run_id, f"stopped partway ({exc.strerror})"))
+            finally:
+                os.close(run_fd)
+        if budget_bytes is not None:
+            removed, refused = _remove_oldest_closed_runs(connection, repo, root_fd, real_root, budget_bytes)
+            skipped += refused
+    finally:
+        os.close(root_fd)
     return Recycled(deleted=tuple(deleted), skipped=tuple(dict.fromkeys(skipped)), removed=tuple(removed))
 
 
 def _remove_oldest_closed_runs(
-    connection: sqlite3.Connection, repo: str, real_root: str, budget: int
+    connection: sqlite3.Connection, repo: str, root_fd: int, real_root: str, budget: int
 ) -> tuple[list[str], list[tuple[str, str]]]:
     removed: list[str] = []
     skipped: list[tuple[str, str]] = []
@@ -444,7 +456,7 @@ def _remove_oldest_closed_runs(
         (repo.lower(),),
     ).fetchall()
     runs = [(run_id, _resolve(run_id, folder, real_root), removable) for run_id, folder, removable in rows]
-    sizes = {run_id: _size(real_root, parts) for run_id, parts, _ in runs if not isinstance(parts, str)}
+    sizes = {run_id: _size(root_fd, parts) for run_id, parts, _ in runs if not isinstance(parts, str)}
     usage = sum(sizes.values())
     for run_id, parts, removable in runs:
         if usage <= budget:
@@ -455,7 +467,7 @@ def _remove_oldest_closed_runs(
             skipped.append((run_id, parts))
             continue
         try:
-            ticket_fd = _open_below(real_root, parts[:-1])
+            ticket_fd = _open_unlinked(root_fd, parts[:-1])
             try:
                 shutil.rmtree(run_id, dir_fd=ticket_fd)
             finally:
@@ -470,9 +482,9 @@ def _remove_oldest_closed_runs(
     return removed, skipped
 
 
-def _size(real_root: str, parts: tuple[str, ...]) -> int:
+def _size(root_fd: int, parts: tuple[str, ...]) -> int:
     try:
-        fd = _open_below(real_root, parts)
+        fd = _open_unlinked(root_fd, parts)
     except OSError:
         return 0
     try:
@@ -515,8 +527,16 @@ def _resolve(run_id: str, evidence_dir: object, real_root: str) -> tuple[str, ..
     return parts
 
 
-def _open_below(real_root: str, parts: tuple[str, ...]) -> int:
-    fd = os.open(real_root, _DIR_FLAGS)
+def _open_root(real_root: str) -> int:
+    top = os.open("/", _DIR_FLAGS)
+    try:
+        return _open_unlinked(top, PurePath(real_root).parts[1:])
+    finally:
+        os.close(top)
+
+
+def _open_unlinked(start_fd: int, parts: Iterable[str]) -> int:
+    fd = os.dup(start_fd)
     try:
         for part in parts:
             child = os.open(part, _DIR_FLAGS, dir_fd=fd)
@@ -535,6 +555,9 @@ def _recycle_run(run_fd: int, standing: Standing) -> Iterator[tuple[Outcome, Pur
         lane_fd = os.open(lane, _DIR_FLAGS, dir_fd=run_fd)
         try:
             results = _scenario_results(lane_fd)
+            if results is None:
+                yield "lane-refused", PurePosixPath(lane)
+                continue
 
             def keep(rel: PurePosixPath) -> bool:
                 result = results.get(rel.parts[0]) if len(rel.parts) > 1 else None
@@ -566,7 +589,7 @@ def _sweep(
             yield "deleted", path
 
 
-def _scenario_results(lane_fd: int) -> dict[str, str]:
+def _scenario_results(lane_fd: int) -> dict[str, str] | None:
     try:
         fd = os.open(RESULT_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=lane_fd)
     except OSError:
@@ -581,8 +604,10 @@ def _scenario_results(lane_fd: int) -> dict[str, str]:
     scenarios = data.get("scenarios") if isinstance(data, dict) else None
     if not isinstance(scenarios, list):
         return {}
-    return {
-        item["id"]: item["result"]
+    entries = [
+        (item["id"], item["result"])
         for item in scenarios
         if isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("result"), str)
-    }
+    ]
+    results = dict(entries)
+    return results if len(results) == len(entries) else None
