@@ -1708,8 +1708,9 @@ back. A `factory.md` the poller could not read, or has not read yet, is
 `status: unknown` with the `reason`, never a default.
 
 `status.json`'s `usage` backs the Efficiency page's Subscription headroom
-(issue #151). It has one entry per bot account (each harness's bot user on
-every enabled `machines.yml` device). Each entry gives the 5-hour and 7-day
+(issue #151). It has one entry per usage account (see Usage accounts
+below): each account a harness uses on an enabled `machines.yml` device,
+then each declared account no device uses, such as an `external` one. Each entry gives the 5-hour and 7-day
 window's `used` fraction, `resets_at` and `observed_at`, plus `headroom`
 (the least `1 - used` over fresh windows). Readings come only from the
 CLI's own output, captured by `orch job run` for every job and stored in
@@ -1740,8 +1741,72 @@ with a Codex plan that reports only its 7-day window. Its `used` stays null,
 and the other window alone is then the account's headroom.
 
 A newer `no reading` replaces older numbers. A window that has reset, or a
-reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked`, and a database without the
+reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked` while no Cursor account is declared, and a database without the
 table shows `no telemetry`.
+
+### Usage accounts
+
+Each subscription is its own usage account (issue #772), with its own
+readings, its own pause and its own Efficiency row. Declare accounts in
+`machines.yml` and name the one each bot login uses:
+
+```yaml
+accounts:
+  - {id: claude-max-1, harness: claude, plan: max, label: "Claude Max"}
+  - {id: claude-max-2, harness: claude, plan: max}
+  - {id: cursor-grok-ultra, harness: external, plan: ultra}
+devices:
+  - name: pc
+    harnesses:
+      claude: {bot: claude-bot, account: claude-max-1}
+      codex: codex-bot
+  - name: box
+    harnesses:
+      claude: {bot: claude-bot, account: claude-max-2}
+```
+
+An `id` is a stable, non-secret name: letters, digits, `.`, `_` and `-`,
+never an email, org ID or token. `harness` is `claude`, `codex`, `cursor`
+or `external`. A bare bot user, as in `codex: codex-bot`, is the account
+`<harness>-default`, so a file without `accounts:` loads unchanged. A
+device may use only a declared account of its own harness.
+
+Order matters. Deploy the code first, and add `accounts:` to `machines.yml`
+only after every device runs it: older code refuses the key. The poller
+migrates `orch.db` when it starts. To run it by hand:
+
+```sh
+bin/orch usage migrate --db ~/.local/share/factory/orch.db
+```
+
+The migration takes a labelled backup (`usage-accounts`) before any write,
+adds an `account` column to `usage_readings` (filled with
+`<harness>-default`) and three account-keyed tables, and does nothing on a
+second run. Rollback: deploy the older code, which ignores the column and
+tables. To remove them too, run `ALTER TABLE usage_readings DROP COLUMN
+account` and drop `usage_account_observations`, `lane_account_evidence` and
+`lane_account_limits`. As a last resort, `orch restore-db` from the
+labelled backup loses the readings taken since.
+
+A usage limit pauses only the account that hit it. The other accounts of
+that harness keep taking jobs, and the recipient's queue pauses only when
+every account serving it is limited.
+
+Grok and Cursor usage is visible only to Grok Bot, so an `external` account
+takes readings from a command:
+
+```sh
+bin/orch usage record --account cursor-grok-ultra --window weekly --used 0.42 --resets-at 1795467840
+```
+
+`--window` is `five_hour`, `seven_day` or `weekly` (stored as `seven_day`).
+`--used` is a fraction from 0 to 1, `--resets-at` an epoch second within 30
+days, and `--observed-at` (default now) may not be in the future. Only
+accounts with `harness: external` are accepted, and a reading older than
+the stored one is kept out (`kept newer reading`). The command takes no
+credential, cookie or token. A scheduled Grok Bot routine that calls
+`orch usage record` is a separate step that needs Max's approval. This
+ticket does not create it.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state

@@ -18,17 +18,21 @@ import pytest
 
 from lib import dashboard_usage, lane_limit
 from lib.dashboard import collect_snapshot, render_pages
+from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
+from lib.dispatcher import Dispatcher
 from lib.machines_yml import load_machines_yml
 from lib.job_state import REQUEUED_USAGE_LIMIT, USAGE_LIMIT, link_drop_requeues, usage_limit_end
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.status import JobRow, SQLiteStatusReader, Status, render
 from lib.telemetry import EventLog, Scrubber, Session, stream_flags
-from lib.usage_readings import Reading, parse_get_usage, store
+from lib.usage_readings import Reading, migrate, parse_get_usage, store
 from tests.pool_helpers import ROOT
-from tests.test_hooks import FakeGrokDelivery, say, setup, ticket
+from tests.test_hooks import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions, say, setup, ticket
 from tests.test_job_state import Poller
 from tests.test_link_drop_requeue import BACKOFF, dropped_run, poll, retries
+from tests.test_remote_start import FakeTransport
+from tests.test_usage_readings import PRE_ACCOUNT_DDL
 
 START = 1_800_000_000.0
 RESET = int(START) + 5 * 3600
@@ -46,7 +50,9 @@ CLAUDE_LIMIT = {
 }
 
 
-def _feed(db: Path, tmp_path: Path, job_id: str, harness: str, event: dict, now: list[float]) -> Session:
+def _feed(
+    db: Path, tmp_path: Path, job_id: str, harness: str, event: dict, now: list[float], account: str | None = None
+) -> Session:
     session = Session(
         connect=lambda: sqlite3.connect(db),
         job_id=job_id,
@@ -59,9 +65,15 @@ def _feed(db: Path, tmp_path: Path, job_id: str, harness: str, event: dict, now:
         log=lambda _: None,
         stdout=io.BytesIO(),
         clock=lambda: now[0],
+        account=account,
     )
     session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
     return session
+
+
+def _limit(db: Path, at: float, account: str = "claude-default") -> lane_limit.LaneLimit | None:
+    with sqlite3.connect(db) as connection:
+        return lane_limit.account_limits(connection, at).get(account)
 
 
 def _events(db: Path, job_id: str) -> list[tuple[str, str]]:
@@ -167,7 +179,7 @@ def test_a_codex_session_fed_the_incident_line_limits_the_codex_lane(tmp_path: P
     setup(tmp_path, now=now)
     _feed(db, tmp_path, job.id, "codex", {"type": "error", "message": CODEX_INCIDENT}, now)
     with sqlite3.connect(db) as connection:
-        limit = lane_limit.active(connection, "codex", START)
+        limit = lane_limit.account_limits(connection, START).get("codex-default")
         dump = "\n".join(str(row) for row in connection.iterdump())
     assert limit is not None and limit.source in ("message", "default")
     assert [e for e, _ in _events(db, job.id)] == [USAGE_LIMIT]
@@ -182,7 +194,7 @@ def test_a_usage_limited_build_requeues_as_itself_and_never_sticks(tmp_path: Pat
     assert _job(db, first) == ("queued", 1)
     assert REQUEUED_USAGE_LIMIT in [e for e, _ in _events(db, first)]
     with sqlite3.connect(db) as connection:
-        assert lane_limit.active(connection, "claude", now[0]).until == RESET
+        assert lane_limit.account_limits(connection, now[0])["claude-default"].until == RESET
 
     now[0] = RESET + 1
     second = _die_on_limit(tmp_path, now, queue, dispatcher, db, {
@@ -235,10 +247,10 @@ def test_status_and_dashboard_show_the_limit(tmp_path: Path) -> None:
     with sqlite3.connect(db) as connection:
         store(connection, harness="claude", bot="claude-bot", device="box", job_id=job_id,
               readings=[Reading("five_hour", 1.0, RESET, START - 60)])
-        limit = lane_limit.active(connection, "claude", now[0])
+        limit = lane_limit.account_limits(connection, now[0])["claude-default"]
         usage = dashboard_usage.read_usage(connection, now[0], _machines())
     label = lane_limit.label(limit)
-    assert SQLiteStatusReader(db).lane_limits(now[0]) == {"claude": label}
+    assert SQLiteStatusReader(db).lane_limits(now[0]) == {"claude": label, "claude (claude-default)": label}
     assert label.startswith("usage limit until ")
 
     row = JobRow(job_id, "owner/repo", "42", "build", "claude", "queued", START, START)
@@ -271,7 +283,7 @@ def test_a_fresh_reading_below_one_lifts_the_limit_and_an_older_one_does_not(tmp
     now, _, dispatcher, queue, db = _build(tmp_path)
     first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
     with sqlite3.connect(db) as connection:
-        limited_at = lane_limit.active(connection, "claude", now[0]).limited_at
+        limited_at = lane_limit.account_limits(connection, now[0])["claude-default"].limited_at
 
     def reading(observed_at: float) -> None:
         with sqlite3.connect(db) as connection:
@@ -315,7 +327,7 @@ def test_a_new_limit_after_an_early_resume_obeys_its_own_reset(tmp_path: Path) -
     with sqlite3.connect(db) as connection:
         store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
               readings=[Reading("five_hour", 0.4, RESET, now[0])])
-        assert lane_limit.active(connection, "claude", now[0]) is None
+        assert "claude-default" not in lane_limit.account_limits(connection, now[0])
     new_reset = int(now[0]) + 3600
     second = _die_on_limit(tmp_path, now, queue, dispatcher, db,
                            {**CLAUDE_LIMIT, "result": f"Claude AI usage limit reached|{new_reset}"})
@@ -339,7 +351,7 @@ def test_an_early_resume_holds_after_its_reading_ages_out(tmp_path: Path) -> Non
     queue.release(resumed.id, owner="claude")
     now[0] = START + 3601
     with sqlite3.connect(db) as connection:
-        assert lane_limit.all_active(connection, now[0]) == []
+        assert lane_limit.account_limits(connection, now[0]) == {}
     assert queue.claim("claude").id == first
 
 
@@ -469,7 +481,7 @@ def test_a_no_reading_never_restores_a_lifted_limit(tmp_path: Path) -> None:
     with sqlite3.connect(db) as connection:
         store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe2",
               readings=_unavailable_usage(now[0]))
-        assert lane_limit.active(connection, "claude", now[0]) is None
+        assert "claude-default" not in lane_limit.account_limits(connection, now[0])
     assert queue.claim("claude").id == first
 
 
@@ -531,3 +543,212 @@ def test_the_dashboard_shows_a_limit_before_any_reading(tmp_path: Path) -> None:
     assert entry["state"] == "no telemetry"
     page = render_pages(snapshot)["efficiency.html"]
     assert entry["limit_label"] in page.split("<script>")[0]
+
+
+TWO_CLAUDE_ACCOUNTS = """
+accounts:
+  - {{id: claude-a, harness: claude}}
+  - {{id: claude-b, harness: claude}}
+devices:
+  - name: box
+    local: true
+    slot_max: 3
+    harnesses: {{claude: {{bot: claude-bot, account: claude-a}}, codex: codex-bot}}
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 3
+    harnesses: {{claude: {{bot: claude-bot, account: claude-b}}, codex: codex-bot}}
+    workdir_root: {root}/remote/{{bot}}/work
+    ssh_alias: fakepc-{{bot}}
+    factory_root: /srv/factory
+"""
+
+
+def _two_accounts(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(TWO_CLAUDE_ACCOUNTS.format(root=tmp_path), encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    now = [START]
+    db = tmp_path / "d.db"
+    queue = SQLiteJobQueue(db, clock=lambda: now[0])
+    pool = DevicePool(queue, config)
+    dispatcher = Dispatcher(
+        db, queue, trusted_logins=TRUSTED_LOGINS, review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=DeviceMonitor(pool, config, FakeTransport(check=0), alive=lambda *_: False),
+    )
+    jobs = [
+        queue.enqueue(JobRequest("owner/repo", str(n), "build", "claude", f"c{n}", 3600), dedupe_key=f"build:{n}").id
+        for n in (1, 2)
+    ]
+    return now, queue, pool, dispatcher, jobs, db
+
+
+def test_a_limit_on_one_account_places_its_harness_on_the_other_accounts_device(tmp_path: Path) -> None:
+    _, _, control, _, jobs, _ = _two_accounts(tmp_path / "control")
+    assert [control.claim("claude")[1].device for _ in jobs] == ["pc", "box"]
+
+    now, _, pool, _, jobs, db = _two_accounts(tmp_path / "limited")
+    _feed(db, tmp_path, jobs[0], "claude", CLAUDE_LIMIT, now, account="claude-a")
+    assert _limit(db, now[0], "claude-a").until == RESET
+    assert [pool.claim("claude")[1].device for _ in jobs] == ["pc", "pc"]
+
+
+@pytest.mark.parametrize(
+    ("limited", "state"), [(("claude-a",), "failed"), (("claude-a", "claude-b"), "queued")]
+)
+def test_the_queue_waits_only_while_every_serving_account_is_limited(
+    tmp_path: Path, limited: tuple[str, ...], state: str
+) -> None:
+    now, _, pool, dispatcher, (ran, waiting), db = _two_accounts(tmp_path)
+    for account in limited:
+        _feed(db, tmp_path, ran, "claude", CLAUDE_LIMIT, now, account=account)
+    if len(limited) == 2:
+        assert pool.claim("claude") is None
+    now[0] = START + 3600 + 1
+    assert now[0] < RESET
+    dispatcher.reconcile_jobs()
+    assert _job(db, waiting)[0] == state, "a queued job times out only while some serving account is free"
+
+
+def test_a_healthy_reading_of_one_account_never_shortens_anothers_pause(tmp_path: Path) -> None:
+    now, _, _, _, jobs, db = _two_accounts(tmp_path)
+    _feed(db, tmp_path, jobs[0], "claude", CLAUDE_LIMIT, now, account="claude-a")
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="pc", job_id="b", account="claude-b",
+              readings=[Reading("five_hour", 0.2, RESET, START + 60)])
+    assert _limit(db, START + 61, "claude-a").until == RESET
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="a", account="claude-a",
+              readings=[Reading("five_hour", 0.2, RESET, START + 90)])
+    assert _limit(db, START + 91, "claude-a") is None
+
+
+def test_an_older_binarys_harness_wide_pause_still_holds_every_account(tmp_path: Path) -> None:
+    now, queue, pool, dispatcher, jobs, db = _two_accounts(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(lane_limit.DDL)
+        connection.execute(
+            "INSERT INTO lane_limits VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("claude", "claude", "claude-bot", START, RESET, "message", jobs[0]),
+        )
+    assert pool.claim("claude") is None
+    assert queue.claim("claude") is None
+    now[0] = START + 3601
+    dispatcher.reconcile_jobs()
+    assert [_job(db, job_id)[0] for job_id in jobs] == ["queued", "queued"]
+    now[0] = RESET + 1
+    assert pool.claim("claude") is not None
+
+
+def _legacy_pause(tmp_path: Path, migrated: bool) -> tuple[Path, SQLiteJobQueue]:
+    db = tmp_path / "state" / "orch.db"
+    db.parent.mkdir()
+    queue = SQLiteJobQueue(db, clock=lambda: 160.0)
+    job = queue.enqueue(JobRequest("owner/repo", "1", "build", "claude", "go", 3600), dedupe_key="j")
+    with sqlite3.connect(db) as connection:
+        connection.execute(PRE_ACCOUNT_DDL)
+        connection.execute(lane_limit.DDL)
+        connection.execute(
+            "INSERT INTO lane_limits VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("claude", "claude", "claude-bot", 100, 18100, "message", job.id),
+        )
+    if migrated:
+        migrate(db, lambda: sqlite3.connect(db), directory=tmp_path / "manual")
+    return db, queue
+
+
+def _legacy_until(db: Path, reading: Reading, account: str | None = None) -> int:
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
+              readings=[reading], account=account)
+        return connection.execute("SELECT until FROM lane_limits WHERE recipient = 'claude'").fetchone()[0]
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_a_healthy_default_account_reading_lifts_an_older_binarys_pause(tmp_path: Path, migrated: bool) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated)
+    assert queue.claim("claude") is None
+    assert _legacy_until(db, Reading("five_hour", 0.2, 18100, 150)) == 150
+    assert queue.claim("claude") is not None
+
+
+def _legacy_full_seven_day(db: Path) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.execute(lane_limit.EVIDENCE_DDL)
+        connection.execute(
+            "INSERT INTO lane_limit_evidence VALUES (?, ?, ?, ?, ?)", ("claude", "claude-bot", "seven_day", 120, 70000)
+        )
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_an_older_binarys_full_window_holds_its_pause_past_a_healthy_reading_of_another(
+    tmp_path: Path, migrated: bool
+) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated)
+    _legacy_full_seven_day(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE lane_limits SET until = 70000")
+        connection.execute(
+            "INSERT INTO usage_readings (harness, bot, device, window, used, resets_at, observed_at, job_id, absent,"
+            " source_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("claude", "claude-bot", "box", "seven_day", None, None, 130, "old", 0, 130),
+        )
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="new",
+              readings=[Reading("five_hour", 0.2, 18100, 150), Reading("seven_day", None, None, 150)])
+        assert connection.execute("SELECT until FROM lane_limits").fetchone()[0] == 70000
+    assert queue.claim("claude") is None
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_a_newer_healthy_reading_of_an_older_binarys_full_window_lifts_its_pause(
+    tmp_path: Path, migrated: bool
+) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated)
+    _legacy_full_seven_day(db)
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="new",
+              readings=[Reading("five_hour", 0.2, 18100, 150), Reading("seven_day", 0.3, 70000, 150)])
+        assert connection.execute("SELECT until FROM lane_limits").fetchone()[0] == 150
+    assert queue.claim("claude") is not None
+
+
+@pytest.mark.parametrize("migrated", [True, False], ids=["migrated", "unmigrated"])
+def test_an_older_binarys_full_window_holds_the_default_accounts_own_limit(tmp_path: Path, migrated: bool) -> None:
+    db, _ = _legacy_pause(tmp_path, migrated)
+    _legacy_full_seven_day(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute(lane_limit.ACCOUNT_DDL)
+        connection.execute(
+            "INSERT INTO lane_account_limits VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("claude-default", "claude", "claude-bot", "claude", 100, 70000, "message", "j"),
+        )
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="new",
+              readings=[Reading("five_hour", 0.2, 18100, 150)])
+        assert lane_limit.account_limits(connection, 160)["claude-default"].until == 70000
+
+
+def test_another_accounts_healthy_reading_never_moves_an_older_binarys_pause(tmp_path: Path) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated=True)
+    assert _legacy_until(db, Reading("five_hour", 0.2, 18100, 150), account="claude-work") == 18100
+    assert queue.claim("claude") is None
+
+
+def test_a_full_default_account_reading_moves_an_older_binarys_pause_to_its_reset(tmp_path: Path) -> None:
+    db, queue = _legacy_pause(tmp_path, migrated=True)
+    assert _legacy_until(db, Reading("five_hour", 1.0, 20000, 150)) == 20000
+    assert queue.claim("claude") is None
+
+
+def test_status_names_the_account_of_each_pause(tmp_path: Path) -> None:
+    now, _, _, _, jobs, db = _two_accounts(tmp_path)
+    _feed(db, tmp_path, jobs[0], "claude", CLAUDE_LIMIT, now, account="claude-a")
+    label = lane_limit.label(_limit(db, now[0], "claude-a"))
+    serving = {"claude": frozenset({"claude-a", "claude-b"})}
+    assert SQLiteStatusReader(db, serving=serving).lane_limits(now[0]) == {"claude (claude-a)": label}
+    _feed(db, tmp_path, jobs[1], "claude", CLAUDE_LIMIT, now, account="claude-b")
+    assert SQLiteStatusReader(db, serving=serving).lane_limits(now[0]) == {
+        "claude": label, "claude (claude-a)": label, "claude (claude-b)": label,
+    }

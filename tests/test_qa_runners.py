@@ -31,6 +31,15 @@ def test_stopping_an_ended_agent_is_not_an_error() -> None:
     assert runner.stopped == []
 
 
+def test_fake_replays_a_lane_id_it_already_launched() -> None:
+    runner = FakeRunner()
+    first = runner.launch(LANE)
+
+    assert runner.launch(LANE) == first
+    assert runner.launched == [LANE]
+    assert list(runner.agents) == [first.agent_id]
+
+
 def test_the_three_errors_are_runner_errors() -> None:
     assert all(issubclass(error, LaunchError) for error in (RunnerOutage, UsageLimit, LaunchFailed))
     runner = FakeRunner()

@@ -36,6 +36,7 @@ from tests.test_remote_start import (
     job_dir,
     kill_quietly,
     orch,
+    past_uncontained,
     wait_file,
     wait_gone,
 )
@@ -169,7 +170,7 @@ def test_a_remote_job_survives_a_forced_ssh_kill_and_completes(tmp_path: Path) -
     # #93: the start's worker-environment report is in neither log, and its
     # private `env` file is gone once the follower relayed it; its line
     # break is what stays in the device log.
-    report, relayed = device_log.split(b"\n", 1)
+    report, relayed = past_uncontained(device_log).split(b"\n", 1)
     assert report == b"" and not (rundir / "env").exists()
     assert b"ORCH-WORKER-ENV" not in device_log and b"ORCH-WORKER-ENV" not in run_log
     assert run_log.count(relayed) == 1 and run_log.count(b"line 0 ") == 1

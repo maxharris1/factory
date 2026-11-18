@@ -476,7 +476,7 @@ def test_an_unreachable_device_gets_no_placement_until_its_backoff_ends(
     device.ssh.offline("fakepc-claude-bot").unlink()
     now[0] += UNREACHABLE_BACKOFF_SECONDS - 1
     with sqlite3.connect(device.db) as connection:
-        assert pool_blocked(connection, now[0]).blocks("pc", "codex"), "the whole device backs off"
+        assert pool_blocked(connection, now[0], None).blocks("pc", "codex"), "the whole device backs off"
     later = enqueue(device.queue, "b")
     assert device.waiter.step() == later
     assert placed_on(device.db, later) == "box", "still inside the backoff"

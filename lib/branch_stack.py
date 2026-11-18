@@ -1,32 +1,46 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from lib.feeder_gates import Wait, github_ref
 
 
+@dataclass(frozen=True)
+class OpenPull:
+    commits: frozenset[str]
+    complete: bool
+    base: str
+    head: str
+
+
 class BranchReads(Protocol):
     def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
-    def commit_pulls(self, repo: str, sha: str) -> Mapping[int, str]: ...
+    def open_pull_commits(self, repo: str) -> Mapping[int, OpenPull]: ...
 
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool: ...
+    def pull_commits(self, repo: str, base: str, head: str) -> Collection[str]: ...
 
 
 def stacked_pulls(
     reads: BranchReads, repo: str, base: str, tip: str, own: int | None
 ) -> tuple[int, ...]:
-    found: set[int] = set()
-    for sha in reads.ahead_commits(repo, base, tip):
-        pulls = {
-            number: pull_base
-            for number, pull_base in reads.commit_pulls(repo, sha).items()
-            if number != own
-        }
-        has = {pull_base: reads.branch_has(repo, pull_base, sha) for pull_base in set(pulls.values())}
-        found.update(number for number, pull_base in pulls.items() if not has[pull_base])
-    return tuple(sorted(found))
+    ahead = set(reads.ahead_commits(repo, base, tip))
+    if not ahead:
+        return ()
+    return tuple(sorted(
+        number for number, pull in reads.open_pull_commits(repo).items()
+        if number != own and _carries(reads, repo, ahead, pull)
+    ))
+
+
+def _carries(reads: BranchReads, repo: str, ahead: set[str], pull: OpenPull) -> bool:
+    if not ahead.isdisjoint(pull.commits):
+        return True
+    if pull.complete:
+        return False
+    return not ahead.isdisjoint(reads.pull_commits(repo, pull.base, pull.head))
 
 
 def stack_wait(repo: str, where: str, pulls: Sequence[int]) -> Wait:

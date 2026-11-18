@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.branch_stack import OpenPull
 from lib.device_pool import DevicePool
 from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
@@ -218,16 +219,21 @@ class FakeGitHub:
         merged = set(self._commits_on(repo, base))
         return tuple(sha for sha in self._commits_on(repo, tip) if sha not in merged)
 
-    def commit_pulls(self, repo: str, sha: str) -> dict[int, str]:
+    def open_pull_commits(self, repo: str) -> dict[int, OpenPull]:
         return {
-            number: pull.get("base", "main")
+            number: OpenPull(
+                commits=frozenset(self._commits_on(repo, pull["head"]))
+                - frozenset(self._commits_on(repo, pull.get("base", "main"))),
+                complete=True,
+                base=pull.get("base", "main"),
+                head=self.branches.get((repo, pull["head"]), pull["head"]),
+            )
             for (pull_repo, number), pull in self.pulls.items()
-            if pull_repo == repo and pull.get("state", "open") == "open"
-            and not pull.get("merged") and sha in self._commits_on(repo, pull["head"])
+            if pull_repo == repo and pull.get("state", "open") == "open" and not pull.get("merged")
         }
 
-    def branch_has(self, repo: str, branch: str, sha: str) -> bool:
-        return sha in self._commits_on(repo, branch)
+    def pull_commits(self, repo: str, base: str, head: str) -> frozenset[str]:
+        return frozenset(self._commits_on(repo, head)) - frozenset(self._commits_on(repo, base))
 
     def _commits_on(self, repo: str, branch: str) -> tuple[str, ...]:
         if (repo, branch) in self.branch_commits:

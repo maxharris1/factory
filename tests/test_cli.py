@@ -13,6 +13,9 @@ import pytest
 import yaml
 
 from lib import cli
+from lib.github_actions import GitHubReviewActions
+from lib.orch_yml import OrchConfig, Project
+from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -915,3 +918,19 @@ def test_retry_names_the_trusted_login_on_a_403(
 def test_help_lists_retry(capsys) -> None:
     assert cli.main(["--help"]) == 0
     assert "retry <owner/repo>#<n> --reason TEXT" in capsys.readouterr().out
+
+
+def test_qa_worker_posts_for_a_mixed_case_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    posted: list[tuple] = []
+
+    def post_once(self, repo: str, number: int, body: str, marker: str) -> str:
+        posted.append((repo, number, body, marker))
+        return "comment-1"
+
+    monkeypatch.setattr(GitHubReviewActions, "post_issue_comment_once", post_once)
+    config = OrchConfig(poll_seconds=60, projects=(Project("MaxHarris1/Factory", factory_ref="main"),))
+    SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000.0)
+    worker = cli._qa_runtime(tmp_path / "orch.db", config)
+
+    assert worker.post("MaxHarris1/Factory", 7, "body", "marker") == "comment-1"
+    assert posted == [("MaxHarris1/Factory", 7, "body", "marker")]

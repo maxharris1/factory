@@ -242,7 +242,7 @@ def test_time_in_a_usage_limited_lane_never_counts_toward_the_lagging_bound(
     ended = int(START) + LAGGING_WAIT_SECONDS + 600
     with sqlite3.connect(factory.device.db) as connection:
         lane_limit.record(connection, job_id=job_id, harness="claude", bot="claude-bot",
-                          limit=lane_limit.UsageLimit(ended), now=START + 1)
+                          account="claude-default", limit=lane_limit.UsageLimit(ended), now=START + 1)
     at = START
     while at < ended + LAGGING_WAIT_SECONDS - 60:
         at += 30
@@ -266,7 +266,7 @@ def test_healthy_readings_after_a_pause_ends_never_extend_the_lagging_bound(
     ended = int(START) + 60
     with sqlite3.connect(factory.device.db) as connection:
         lane_limit.record(connection, job_id=job_id, harness="claude", bot="claude-bot",
-                          limit=lane_limit.UsageLimit(ended), now=START + 1)
+                          account="claude-default", limit=lane_limit.UsageLimit(ended), now=START + 1)
     at = START
     while at < ended + LAGGING_WAIT_SECONDS + 300:
         at += 30
@@ -295,7 +295,7 @@ def test_a_refusal_awaiting_its_first_reconcile_is_not_stuck_while_the_lane_is_p
     }, factory.now)
     factory.poll(START + LAGGING_WAIT_SECONDS + 1)
     with sqlite3.connect(factory.device.db) as connection:
-        assert lane_limit.active(connection, "claude", factory.now[0]) is not None
+        assert lane_limit.recipient_paused(connection, "claude", factory.now[0], None) is not None
     assert factory.stuck() == (0, None), "an active pause is waiting, not lag"
     assert (job_id, "failed", 1) not in factory.jobs()
 
