@@ -1432,19 +1432,6 @@ _SCRIPT = r"""
     tiles.forEach(function (name) { TILES[name](box, r, m); });
     return sec;
   }
-  var SHA = /^[0-9a-f]{40}$/;
-
-  function ghResult(out, res, text) {
-    out.replaceChildren();
-    var url = res.ok ? String(res.data.url || '') : '';
-    if (/^https:\/\/github\.com\//.test(url)) {
-      add(out, document.createTextNode(text + ' '));
-      var a = add(out, link(null, url));
-      a.setAttribute('rel', 'noopener noreferrer');
-      a.setAttribute('target', '_blank');
-      a.textContent = url;
-    } else out.textContent = res.ok ? text : 'error: ' + res.error;
-  }
   function ghBuild() {
     var p = {root: el('div', 'jd-gh'), head: null, busy: false, sent: false};
     p.auth = add(p.root, el('div', 'gh-row'));
