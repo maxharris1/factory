@@ -280,9 +280,9 @@ def reevaluate(
     incoming: list[usage_readings.Reading],
 ) -> None:
     """Fold the incoming and stored readings into the account's per-window
-    evidence, then move its limit, and an older binary's lane_limits row
-    when account is its harness's default, when that evidence is newer, to
-    when every window is free, in the caller's transaction."""
+    evidence, in the caller's transaction. Each limit older than that
+    evidence moves to when every window is free: the account's own, and an
+    older binary's lane_limits row when account is its harness's default."""
     connection.execute(ACCOUNT_EVIDENCE_DDL)
     connection.executemany(
         f"""

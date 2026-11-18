@@ -1424,7 +1424,7 @@ def test_a_database_without_readings_is_backed_up_before_it_gets_the_tables(tmp_
         assert connection.execute("SELECT id FROM jobs").fetchall() == [(job.id,)]
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'usage_readings'"
-        ).fetchone() is None, "the backup is the database before any write"
+        ).fetchone() is None
     assert "account" in _columns(db)
     assert _migrate(db, backups) is False
     assert list(backups.iterdir()) == copies
