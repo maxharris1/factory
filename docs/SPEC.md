@@ -347,7 +347,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **Lane rules.**
 
-- Read. A running lane's result comes from `collect` (section 7), which stores its checked and scrubbed evidence at `lane_dir` under the project's `evidence_root`. When that folder already exists, as after a crash between intake and the `reported` write, the worker reads it back with `stored` and fetches nothing. An accepted result records the run's `run_dir` as `evidence_dir`. `EvidenceRefused` is a miss with the reason `evidence-refused` (Drop). Its text names lane-controlled member names, so it goes only to the worker log, as `qa lane <n> of <run_id>: evidence refused: <text>`, never to a row or the comment. `StorageError` means no result this tick: the worker logs `qa lane <n> of <run_id>: StorageError: <text>` and fetches again next tick, and the timeout still applies. Neither text holds a signed link.
+- Read. A running lane's result comes from `collect` (section 7), which stores its checked and scrubbed evidence at `lane_dir` under the project's `evidence_root`. When that folder already exists, as after a crash between intake and the `reported` write, the worker reads it back with `stored` and fetches nothing. Any stored result, accepted or not, records the run's `run_dir` as `evidence_dir`. `EvidenceRefused` is a miss with the reason `evidence-refused` (Drop). Its text names lane-controlled member names, so it goes only to the worker log, as `qa lane <n> of <run_id>: evidence refused: <text>`, never to a row or the comment. `StorageError` means no result this tick: the worker logs `qa lane <n> of <run_id>: StorageError: <text>` and fetches again next tick, and the timeout still applies. Neither text holds a signed link.
 - Drop. A result is accepted only when its `run_id`, `lane`, `kind`, `commit`, `base_commit` and scenario ids match the brief, its `method` is the verify skill or `fallback-playwright` or `fallback-control-ui`, its `status` is `PASS`, `ISSUES` or `BLOCKED`, and each scenario result is `verified`, `failed`, `inconclusive` or `needs-human`. A first miss stops the agent, writes the lane `dropped` and reserves its relaunch (attempt 2) in the same slot. A second miss writes it `gap`.
 - Ended. `status` says ended and a fetch found no `result.json`: `gap` at once, with no relaunch. A `StorageError` is not such a fetch.
 - Timeout. No result `qa.timeout_minutes` after the agent started: `stop()`, then `timed-out`, which counts as a gap.
@@ -1236,9 +1236,9 @@ worker logs `qa claim paused for <repo>` once when the repo's root drops
 below that repo's floor and `qa claim resumed for <repo>` once when it
 recovers. Pause state is per repo, so repos that share a root with different
 floors pause and resume apart. A root whose free space cannot be read counts
-as below the floor. When the worker accepts a lane's result,
-it records the run's `run_dir` as `evidence_dir`, in the transaction that
-closes the lane.
+as below the floor. When intake stores a lane's result, accepted or not,
+the worker records the run's `run_dir` as `evidence_dir` before it closes
+the lane.
 
 ### QA receipts audit
 

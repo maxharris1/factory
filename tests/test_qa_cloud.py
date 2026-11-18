@@ -1167,6 +1167,32 @@ def test_accepted_result_records_evidence_dir(tmp_path: Path) -> None:
     ]
 
 
+def test_rejected_results_stay_in_reach_of_recycle(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    run_id = _ready_thread(lab)
+    lab.broken[(0, 1)] = lambda result: result.pop("commit")
+    lab.broken[(0, 2)] = lambda result: result.update(commit=BASE)
+    lab.tick(4)
+
+    assert [row[3:5] for row in lab.lanes()] == [("dropped", "wrong-commit"), ("gap", "dropped-twice:wrong-commit")]
+    assert lab.header()["result"] == "BLOCKED"
+    lab.run.post("q1", lab.only_comment())
+    lab.run.poll()
+    ticket = lab.run.rows("SELECT ticket_id FROM qa_runs WHERE run_id = ?", run_id)[0][0]
+    folder = run_dir(lab.root, REPO, ticket, run_id)
+    assert len(list(folder.iterdir())) == 2
+    with lab.run.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, 'merged')"
+            " ON CONFLICT (repo, ticket_id) DO UPDATE SET workflow_state = 'merged'",
+            (REPO, ticket),
+        )
+    lab.worker.evidence = evidence(lab.root, evidence_budget_gib=0)
+    lab.tick()
+
+    assert not folder.exists()
+
+
 def test_qa_worker_gets_each_project_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orch = tmp_path / "orch.yml"
     orch.write_text(

@@ -599,12 +599,12 @@ class QaWorker:
                 runner.stop(row.agent_id)
                 self._close(row, "timed-out", "no-result-in-time")
             return
+        with self.queue.connect() as connection:
+            record_evidence_dir(connection, row.run_id, run_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id))
         reason = rejection(row, result, plan.qa.verify)
         if reason is None:
             with self.queue.connect() as connection:
                 _set_state(connection, row.lane_id, "reported", None, self.queue.now(), result=result)
-                folder = run_dir(plan.evidence_root, plan.repo, plan.ticket, row.run_id)
-                record_evidence_dir(connection, row.run_id, folder)
             return
         self._drop(row, reason)
 
