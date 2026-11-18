@@ -285,6 +285,7 @@ class JobsMixin:
         for job in self.queue.unhandled_failures():
             self._t6(job)
         self._ensure_all_stuck_wakes()
+        self._backstop_driver_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
         self._drain_driver_inbox()
 

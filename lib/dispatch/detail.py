@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lib import job_detail
-from lib.attention import DEDUPE_DROPPED
+from lib.attention import DEDUPE_DROPPED, DRIVER_WAKE_UNANSWERED
 from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
@@ -28,13 +28,30 @@ from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
-from lib.queue import Job, JobRequest
+from lib.max_actions import Why, wait_facts, wait_of
+from lib.queue import Job, JobRequest, job_from_row
 from lib.queue import plan_round as _plan_round
 from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
     from lib.dispatch.qa import QaFix
     from lib.evidence.ci import CIEvidence
+
+DriverWakeStep = Literal["wait", "rewake", "flag", "settled"]
+_DRIVER_ANSWERS = frozenset({"go", "answers", "ok"})
+
+
+def driver_wake_step(
+    why: Why | None, answered: bool, attempt: int, delivered_at: float, now: float, timeout: float
+) -> DriverWakeStep:
+    """#916: what a delivered clarify wake needs on this poll."""
+    if why != "question" or answered:
+        return "settled"
+    if now - delivered_at < timeout:
+        return "wait"
+    if attempt == 1:
+        return "rewake"
+    return "flag"
 
 
 class DetailMixin:
@@ -84,6 +101,118 @@ class DetailMixin:
                     self._record_job_error(
                         job, release_exc, prefix="grok-delivery-release:"
                     )
+
+    def _backstop_driver_wakes(self) -> None:
+        """#916: a clarify wake nobody answers is delivered once more after
+        job_states.driver_wake_seconds, then flags the ticket once. The flag
+        stays only while that step is flag, so an answer or a new question
+        clears it. Only a ticket this poll read is looked at, so a failed
+        read never re-wakes."""
+        with self._connect() as connection:
+            facts = wait_facts(connection)
+            states = {
+                (str(row["repo"]).lower(), str(row["ticket_id"])): row
+                for row in connection.execute(
+                    "SELECT repo, ticket_id, workflow_state, stuck FROM ticket_state"
+                )
+            }
+            flagged = {
+                (str(row["repo"]), str(row["ticket_id"]))
+                for row in connection.execute(
+                    "SELECT repo, ticket_id FROM needs_attention WHERE reason = ?",
+                    (DRIVER_WAKE_UNANSWERED,),
+                )
+            }
+        for key, ticket in list(self._polled.items()):
+            fact = facts.get(key, {})
+            question_id = fact.get("question_id")
+            state = states.get(key)
+            if state is None or (question_id is None and key not in flagged):
+                continue
+            wait = wait_of(
+                str(state["workflow_state"]),
+                bool(state["stuck"]),
+                question_id=question_id,
+                parked_outcome=fact.get("parked"),
+            )
+            try:
+                self._backstop_driver_wake(
+                    ticket, question_id, wait.why if wait is not None else None, key in flagged
+                )
+            except Exception as exc:
+                self.record_poll_exception(
+                    ticket.repo, ticket.ticket_id, exc, prefix="driver-wake:"
+                )
+
+    def _backstop_driver_wake(
+        self, ticket: TrackedTicket, question_id: str | None, why: Why | None, flagged: bool
+    ) -> None:
+        repo, ticket_id = ticket.repo, ticket.ticket_id
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            wakes = [
+                job_from_row(row, connection)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE lower(repo) = ? AND ticket_id = ? AND recipient = 'grok'
+                      AND action = 'clarify' AND source_comment_id = ?
+                      AND state IN ('queued', 'running', 'done')
+                    """,
+                    (repo.lower(), ticket_id, question_id),
+                ).fetchall()
+            ]
+            step: DriverWakeStep | None = None
+            if wakes and all(job.state == "done" for job in wakes):
+                latest = max(wakes, key=lambda job: (job.request.attempt, job.finished_at))
+                step = driver_wake_step(
+                    why,
+                    self._driver_answered(ticket, latest.finished_at),
+                    latest.request.attempt,
+                    latest.finished_at,
+                    now,
+                    self.job_states.driver_wake_seconds,
+                )
+            if step == "rewake":
+                self.queue.enqueue_in_transaction(
+                    connection,
+                    replace(latest.request, attempt=2),
+                    dedupe_key=(
+                        f"driver-rewake:{_scope(repo, ticket_id)}:{question_id}:"
+                        f"{ticket.current_head or '-'}"
+                    ),
+                )
+            elif step == "flag":
+                minutes = int((now - min(job.finished_at for job in wakes)) // 60)
+                self._flag_attention_once(
+                    connection,
+                    repo,
+                    ticket_id,
+                    DRIVER_WAKE_UNANSWERED,
+                    f"clarify wake {latest.id} at head {ticket.current_head or '-'} "
+                    f"unanswered for {minutes} min",
+                )
+            elif flagged:
+                self.clear_attention(
+                    repo, ticket_id, DRIVER_WAKE_UNANSWERED, connection=connection
+                )
+            connection.commit()
+
+    def _driver_answered(self, ticket: TrackedTicket, since: float) -> bool:
+        for comment in ticket.comments:
+            if comment.created_at <= since:
+                continue
+            try:
+                fields = parse_comment(comment.body).as_dict()
+            except HandoffError:
+                continue
+            if fields.get("kind") in _DRIVER_ANSWERS and (
+                self._trusted(ticket, comment, fields, "grok-bot", role="orchestrator")
+                or self._approver_go(comment, fields)
+            ):
+                return True
+        return False
 
     grok_wake_skip: frozenset[str] = GROK_WAKE_SKIP
 
