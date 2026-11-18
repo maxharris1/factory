@@ -9,7 +9,7 @@ NAME = page_name(__file__)
 
 GOLDEN = {
     "lanes.CSS": "f4a39fb9ca6ddd3c65fa300cf3a99a1d1b0be53e7fc969997b9a0ead0e14ee07",
-    "lanes.SCRIPT": "0fee3d07703f910ef9076010a001fdae5ed7dad99455931fcc8291c1bf52c71f",
+    "lanes.SCRIPT": "bbebe57e2c71d7a8920e42781dd39c8c2c3e7cd25b5b14e310f863ca6821b480",
     "ci.CSS": "544cfa203943aaabe9f99f5e42e54dfed2fb9d9d4a505db18a8b125e2b12c883",
     "ci.SCRIPT": "94fe221acc3882029823674caee3d0dc683131ff004952d87977c0103ba9d91f",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",

@@ -349,6 +349,29 @@ SCRIPT = r"""
     return lane;
   }
 
+  function qaLane(d) {
+    var qa = d.qa || {}, runners = qa.runners || [], queued = qa.queued || [], cap = qa.cap;
+    if (!runners.some(function (r) { return r.open; }) && !queued.length) return null;
+    var lane = el('div', 'lane');
+    lane.setAttribute('data-device', 'qa');
+    var head = add(lane, el('div', 'lane-head'));
+    add(head, el('div', 'name', 'qa'));
+    add(head, el('div', 'sub', queued.reduce(function (n, r) { return n + r.count; }, 0) + ' waiting'));
+    var ul = add(add(lane, el('div', 'lane-body')), el('ul', 'qrail'));
+    runners.forEach(function (r) {
+      var li = add(ul, el('li'));
+      add(li, el('span', 'ticket', r.runner));
+      add(li, el('span', 'what', r.open + ' / ' + (cap === null || cap === undefined ? '?' : cap) + ' lanes'));
+      if (cap !== null && cap !== undefined && r.open >= cap) add(li, chip('at cap', 'warn'));
+    });
+    queued.forEach(function (r) {
+      var li = add(ul, el('li'));
+      add(li, el('span', 'ticket', r.repo));
+      add(li, el('span', 'what', r.count + ' waiting'));
+    });
+    return lane;
+  }
+
   function renderLanes(d) {
     var running = d.running || [];
     var lanes = laneDevices(d);
@@ -359,6 +382,8 @@ SCRIPT = r"""
     tileAnims = [];
     var box = add(root, el('div', 'lanes'));
     add(box, queueLane(d));
+    var qa = qaLane(d);
+    if (qa) add(box, qa);
     lanes.devices.forEach(function (dev, index) {
       var row = add(box, el('div', 'lane' + (dev.enabled ? '' : ' disabled')));
       row.setAttribute('data-device', dev.name);
@@ -712,13 +737,33 @@ def _queue_lane(snapshot: dict) -> str:
     )
 
 
+def _qa_lane(snapshot: dict) -> str:
+    qa = snapshot.get("qa", {})
+    runners, queued, cap = qa.get("runners", []), qa.get("queued", []), qa.get("cap")
+    if not any(row["open"] for row in runners) and not queued:
+        return ""
+    items = []
+    for row in runners:
+        lanes = f"{row['open']} / {'?' if cap is None else cap} lanes"
+        full = _chip("at cap", "warn") if cap is not None and row["open"] >= cap else ""
+        items.append(f'<li>{_span("ticket", row["runner"])}{_span("what", lanes)}{full}</li>')
+    for row in queued:
+        waiting = f"{row['count']} waiting"
+        items.append(f'<li>{_span("ticket", row["repo"])}{_span("what", waiting)}</li>')
+    return (
+        '<div class="lane" data-device="qa"><div class="lane-head"><div class="name">qa</div>'
+        f'<div class="sub">{sum(row["count"] for row in queued)} waiting</div></div>'
+        f'<div class="lane-body"><ul class="qrail">{"".join(items)}</ul></div></div>'
+    )
+
+
 def _lanes(snapshot: dict) -> str:
     from lib.dashboard_pages.ci import ci_lane_html
     from lib.dashboard_pages.shell import px_strip
 
     devices, wakes = lane_devices(snapshot)
     held_tiles = idle_tiles = 0
-    rows = [_queue_lane(snapshot)]
+    rows = [_queue_lane(snapshot), _qa_lane(snapshot)]
     for index, device in enumerate(devices):
         down = probe_down(snapshot, device["name"])
         cap = device["slot_max"]
