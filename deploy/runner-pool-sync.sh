@@ -22,7 +22,13 @@ if [ "${1:-}" = ensure ]; then
   else
     nohup "$0" loop >>"$LOG" 2>&1 </dev/null &
   fi
-  exit 0
+  for _ in $(seq 500); do
+    flock -n "$LOCK" true || exit 0
+    kill -0 $! 2>/dev/null || exit 0
+    sleep 0.01
+  done
+  echo "runner-pool-sync: the loop did not take $LOCK" >&2
+  exit 1
 fi
 exec 9>>"$LOCK"
 flock -n 9 || exit 0

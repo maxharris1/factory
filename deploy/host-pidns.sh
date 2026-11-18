@@ -34,7 +34,9 @@ factory_host_pidns_or_refuse() {
 }
 
 # A background child of a non-interactive shell does not lead its group, so
-# setsid and perl exec in place and $! stays the service pid.
+# setsid and perl exec in place and $! stays the service pid. Return only once
+# that pid leads its own group: a caller whose group is killed the moment this
+# returns must not take the launch down with it.
 factory_detach() {
     if command -v setsid >/dev/null 2>&1; then
         setsid nohup "$@" &
@@ -42,5 +44,15 @@ factory_detach() {
         nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' "$@" &
     else
         nohup "$@" &
+        return 0
     fi
+    factory_detach_tries=0
+    while [ "$factory_detach_tries" -lt 500 ]; do
+        factory_detach_pgid="$(ps -o pgid= -p "$!" 2>/dev/null | tr -d ' ')"
+        [ -n "$factory_detach_pgid" ] && [ "$factory_detach_pgid" != "$!" ] || return 0
+        factory_detach_tries=$((factory_detach_tries + 1))
+        sleep 0.01
+    done
+    echo "factory_detach: pid $! is still in the caller's process group" >&2
+    return 1
 }

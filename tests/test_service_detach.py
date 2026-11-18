@@ -82,6 +82,7 @@ class Service:
     home: Path
     start: str = "start"
     pidfiles: tuple[str, ...] = ()
+    autostart: Path | None = None
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run([*self.argv, *args], env=self.env, text=True,
@@ -90,13 +91,17 @@ class Service:
     def pids(self) -> list[int]:
         if not self.pidfiles:
             return self._sync_loops()
+        found = self._listed()
+        return found if len(found) == len(self.pidfiles) and all(map(alive, found)) else []
+
+    def _listed(self) -> list[int]:
         found = []
         for name in self.pidfiles:
             try:
                 found.append(int((self.home / STATE / name).read_text().split()[0]))
             except (OSError, ValueError, IndexError):
-                return []
-        return found if all(map(alive, found)) else []
+                pass
+        return found
 
     def _sync_loops(self) -> list[int]:
         script, home = str(DEPLOY / "runner-pool-sync.sh"), f"HOME={self.home}".encode()
@@ -117,8 +122,13 @@ class Service:
         return _locked(self.home / STATE / "runner-pool-sync.lock")
 
     def stop(self) -> None:
+        if self.autostart:
+            self.autostart.unlink(missing_ok=True)
         if self.pidfiles:
             self.run("stop")
+            for pid in self._listed():
+                if alive(pid):
+                    os.kill(pid, signal.SIGTERM)
             return
         for pid in self.pids():
             try:
@@ -139,6 +149,16 @@ def _poller(home: Path) -> Service:
            "ORCH_POLL_STOP_WAIT": "10", "ORCH_CRONTAB": str(home / "no-such-crontab")}
     return Service(["bash", str(DEPLOY / "poller-service.sh")], env, home,
                    pidfiles=("poller.pid",))
+
+
+def _poller_watchdog(home: Path) -> Service:
+    service = _poller(home)
+    service.autostart = home / ".config/factory/poller-autostart"
+    service.autostart.write_text("")
+    service.env["ORCH_POLL_ENSURE_SEC"] = "600"
+    service.start = "ensure"
+    service.pidfiles = ("poller.pid", "poller-ensure-loop.pid")
+    return service
 
 
 def _waiter(home: Path) -> Service:
@@ -175,8 +195,9 @@ def _runner_pool_sync(home: Path) -> Service:
     return Service(["bash", str(DEPLOY / "runner-pool-sync.sh")], env, home, start="ensure")
 
 
-SERVICES = {"poller": _poller, "waiter": _waiter, "linear-webhook": _linear,
-            "self-heal": _self_heal, "runner-pool-sync": _runner_pool_sync}
+SERVICES = {"poller": _poller, "poller-watchdog": _poller_watchdog, "waiter": _waiter,
+            "linear-webhook": _linear, "self-heal": _self_heal,
+            "runner-pool-sync": _runner_pool_sync}
 
 
 @pytest.fixture
@@ -184,7 +205,7 @@ def make(tmp_path: Path):
     made: list[Service] = []
 
     def build(name: str) -> Service:
-        made.append(SERVICES[name](tmp_path / "home"))
+        made.append(SERVICES[name](tmp_path / ("home" if not made else f"home-{len(made)}")))
         return made[-1]
 
     yield build
@@ -193,11 +214,13 @@ def make(tmp_path: Path):
         _wait_for(lambda: not service.pids(), "the service to stop")
 
 
-def _run_in_killed_group(service: Service, verb: str, tmp_path: Path) -> None:
+def _run_in_killed_group(service: Service, verb: str, tmp_path: Path,
+                         kill_on_return: bool = False) -> None:
     exit_file = tmp_path / f"exit-{time.monotonic_ns()}"
+    after = "kill -KILL 0" if kill_on_return else "sleep 60"
     with (tmp_path / "caller.log").open("a") as log:
         caller = subprocess.Popen(
-            ["bash", "-c", '"$@"; echo $? >"$EXIT_FILE"; sleep 60', "caller", *service.argv, verb],
+            ["bash", "-c", f'"$@"; echo $? >"$EXIT_FILE"; {after}', "caller", *service.argv, verb],
             env={**service.env, "EXIT_FILE": str(exit_file)}, process_group=0,
             stdin=subprocess.DEVNULL, stdout=log, stderr=log)
     try:
@@ -230,6 +253,22 @@ def test_a_service_outlives_the_process_group_that_started_it(
 
     service.stop()
     _wait_for(lambda: not any(map(alive, pids)), "stop to end every service pid", 10)
+
+
+@pytest.mark.parametrize("name", list(SERVICES))
+def test_a_service_survives_its_callers_group_dying_the_moment_the_launch_returns(
+    make, name: str, tmp_path: Path
+) -> None:
+    for _ in range(5):
+        service = make(name)
+        _run_in_killed_group(service, service.start, tmp_path, kill_on_return=True)
+
+        pids = service.pids()
+        for pid in pids:
+            assert os.getsid(pid) == pid, f"pid {pid} stayed in the caller's session"
+        assert service.status_ok()
+        service.stop()
+        _wait_for(lambda: not any(map(alive, pids)), "stop to end every service pid", 10)
 
 
 def _poller_starts(home: Path) -> list[int]:
