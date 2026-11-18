@@ -153,3 +153,29 @@ def test_a_missing_storage_field_is_refused(tmp_path: Path) -> None:
     assert "missing required field 'projects[0].qa_storage.secret_key_env'" in [
         finding.message for finding in findings
     ]
+
+
+def test_budget_and_floor_parse_as_gib(tmp_path: Path) -> None:
+    local = ENTRY + "      evidence_budget_gib: 40\n      min_free_gib: 5\n"
+
+    config, findings = load_orch_yml(write_orch(tmp_path, local))
+
+    assert findings == []
+    storage = config.projects[0].qa_storage
+    assert (storage.evidence_budget_gib, storage.min_free_gib) == (40, 5)
+
+
+def test_budget_and_floor_default_off(tmp_path: Path) -> None:
+    config, _findings = load_orch_yml(write_orch(tmp_path, ENTRY))
+
+    storage = config.projects[0].qa_storage
+    assert (storage.evidence_budget_gib, storage.min_free_gib) == (None, None)
+
+
+@pytest.mark.parametrize("key", ["evidence_budget_gib", "min_free_gib"])
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", '"5"', "true"])
+def test_a_bad_budget_or_floor_is_refused(tmp_path: Path, key: str, value: str) -> None:
+    config, findings = load_orch_yml(write_orch(tmp_path, ENTRY + f"      {key}: {value}\n"))
+
+    assert config is None
+    assert f"qa_storage.{key} must be a positive integer (GiB)" in [finding.message for finding in findings]
