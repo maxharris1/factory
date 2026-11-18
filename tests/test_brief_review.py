@@ -288,11 +288,11 @@ def test_verify_unavailable_waives_only_the_skill_factory_md_names_now() -> None
 @pytest.mark.parametrize("kind", ["review", "build"])
 def test_a_review_and_a_build_brief_require_labelled_containers(kind: str) -> None:
     for brief in snapshots.render_snapshot(kind).split("=====")[2::2]:
-        assert "`factory.job=$ORCH_JOB_ID`" in brief and "install a trap" in brief
+        assert "`factory.job=$ORCH_JOB_ID`" in brief and "EXIT trap" in brief
 
 
 def test_the_throwaway_copy_lines_point_at_the_container_rule() -> None:
     brief = review_brief("1/3")
     throwaway = [line for line in brief.splitlines() if "throwaway copy" in line]
     assert len(throwaway) == 2
-    assert all("its containers labelled as the Rules section says" in line for line in throwaway)
+    assert all("as the Rules say" in line for line in throwaway)

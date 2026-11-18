@@ -71,7 +71,7 @@ def review_rules(facts: dict) -> str:
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
         f"- That reviewer runs the project's verify skill when factory.md names one, {adversarial} "
-        "and may run code in a throwaway copy, its containers labelled as the Rules section says.\n"
+        "and may run code in a throwaway copy, its containers labelled as the Rules say.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "
         f"{high_risk}\n"
@@ -87,11 +87,7 @@ def review_rules(facts: dict) -> str:
     )
 
 
-CONTAINER_RULE = (
-    "Label every container or compose stack you start with `factory.job=$ORCH_JOB_ID` "
-    "(`docker run --label`, or a `labels:` entry on each compose service), and install a trap "
-    "that removes them when your script exits. Factory teardown removes any left when the job ends."
-)
+CONTAINER_RULE = "Label each container or compose stack `factory.job=$ORCH_JOB_ID` and remove it in an EXIT trap."
 SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
 
 

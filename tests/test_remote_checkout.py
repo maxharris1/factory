@@ -537,7 +537,10 @@ def test_without_worktree_a_remote_job_still_runs_under_a_login_shell(tmp_path: 
     assert device.seen()["ORCH_JOB_WORKTREE"] is None
     # the launch, its polls (#128) and the gone check: no preflight or checkout
     assert len(starts(device)) == 1
-    assert not [item for item in scripts(device) if item.startswith("exec bash -lc")]
+    assert not [
+        item for item in scripts(device)
+        if item.startswith("exec bash -lc") and not item.endswith(" orch-containers")
+    ]
 
 
 # --- the box is unchanged ----------------------------------------------------

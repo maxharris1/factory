@@ -610,7 +610,7 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
 
     # The command is spawned behind lib/job_run.py's fixed gate (Codex r1
     # F1.4: it waits until its pid is recorded, then execs the argv as is).
-    from lib import job_run
+    from lib import containers, job_run
 
     def ungated(argv: list[str]) -> list[str]:
         gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
@@ -625,8 +625,10 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
     assert all(
         tuple(argv) in containment or tuple(argv[:3]) in containment for argv in contained
     ), contained
+    teardown = ["sh", "-c", containers.remove_script(job.id)]
+    assert [argv for argv in started if argv[0] == "sh"] == [teardown]
     assert [
-        ungated(argv) for argv in started if argv[0] not in ("git", "loginctl", "busctl")
+        ungated(argv) for argv in started if argv[0] not in ("git", "loginctl", "busctl", "sh")
     ] == [command]
     assert code == 0
     git_calls = [argv for argv in started if argv[0] == "git"]
