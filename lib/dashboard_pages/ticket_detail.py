@@ -1474,7 +1474,7 @@ _SCRIPT = r"""
     p.ok.hidden = !eligible;
     if (!eligible) { p.ok.open = false; p.head = null; p.okOut.textContent = ''; }
     p.okButton.disabled = !p.head || p.busy;
-    p.okButton.textContent = p.sent ? 'OK sent' : p.head ? 'OK ' + p.head.slice(0, 7) : 'OK (reading head…)';
+    p.okButton.textContent = p.sent ? 'OK sent' : p.head ? 'OK ' + p.head : 'OK (reading head…)';
   }
   function ghPanel(r, t) {
     var key = threadKey(r);
@@ -1520,7 +1520,7 @@ _SCRIPT = r"""
     ghPost('/api/ok', {repo: refs.repo, pr: Number(refs.pr), head: head}, true).then(function (res) {
       p.busy = false;
       if (res.status === 409 && res.data.error === 'head-changed') {
-        p.okOut.textContent = 'head changed to ' + String(res.data.head || '').slice(0, 7);
+        p.okOut.textContent = 'head changed to ' + String(res.data.head || '');
         ghHead(p);
         return;
       }
