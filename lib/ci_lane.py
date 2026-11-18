@@ -132,8 +132,11 @@ def ci_lane(snapshot: dict) -> dict:
     failed_heads: dict[str, list[dict]] = {}
     for row in ci["failures"]:
         key = card_key(row)
-        if key not in cards and all(f["head_short"] == row["head_short"] for f in failed_heads.get(key, [row])):
-            failed_heads.setdefault(key, []).append(row)
+        if key in cards:
+            continue
+        rows = failed_heads.setdefault(key, [])
+        if not rows or rows[0]["head_short"] == row["head_short"]:
+            rows.append(row)
     waits = [t for t in tickets.values() if t.get("ci_wait") and card_key(t) not in cards]
     for ticket in waits:
         if card_key(ticket) not in failed_heads:
