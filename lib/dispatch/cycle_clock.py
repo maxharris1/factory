@@ -140,25 +140,21 @@ class CycleClock:
 
 @dataclass
 class CycleAlarm:
-    """Raise after `raise_after` bad cycles in a row; clear after CALM_CYCLES good ones."""
-
     raise_after: int
     bad: int = 0
     good: int = 0
-    # A restarted poller cannot know whether its last run left the flag up;
-    # the clear is idempotent, so assume it did.
-    raised: bool = True
+    may_be_up: bool = True
 
     def observe(self, bad: bool) -> Literal["raise", "clear"] | None:
         if bad:
             self.bad, self.good = self.bad + 1, 0
             if self.bad >= self.raise_after:
-                self.raised = True
+                self.may_be_up = True
                 return "raise"
             return None
         self.bad, self.good = 0, self.good + 1
-        if self.raised and self.good >= CALM_CYCLES:
-            self.raised = False
+        if self.may_be_up and self.good >= CALM_CYCLES:
+            self.may_be_up = False
             return "clear"
         return None
 

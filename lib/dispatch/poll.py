@@ -398,11 +398,7 @@ class PollMixin:
         reason: str,
         detail: str,
     ) -> None:
-        """Show a ticket as needs-attention in orch status and the dashboard.
-
-        The flag waits in `attention_outbox` until orch.db takes it, retried
-        at each cycle's start and end, so a held lock never drops it (#839).
-        """
+        """Show a ticket as needs-attention in orch status and the dashboard."""
         key = (repo.lower(), ticket_id, reason)
         self.attention_outbox[key] = (detail[:SHIP_ERROR_LIMIT], self.queue.now())
         self._send_attention(self.lock_ledger)
@@ -452,8 +448,6 @@ class PollMixin:
         return True
 
     def watch_cycle(self, clock: CycleClock) -> None:
-        """Flag a slow cycle, or a run of cycles that hit lock errors, naming
-        the phase that cost the most (#839 ac-4)."""
         seconds = clock.last_cycle_seconds or 0.0
         phase, spent = clock.slowest() or ("-", 0.0)
         locked = self.cycle_alarms[LOCK_ERRORS]
