@@ -341,7 +341,7 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **The tick.**
 
-1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, or is at `qa.max_cloud_lanes`; a skipped job blocks nothing behind it. A job skipped for the cap or a backed-off runner gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
+1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, yields to its shared account (below), or is at `qa.max_cloud_lanes`; a skipped job blocks nothing behind it. A job skipped for the cap, a backed-off runner or a shared account gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
 2. Grant. A running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner.
 3. Advance. Check for cancel, launch reserved lanes, then read each running lane. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
 4. Finish. When every slice has a final row, or any slice is a gap and no lane is open, decide, post once, and finish the job with the comment id.
@@ -360,7 +360,9 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **The cap.** `qa.max_cloud_lanes` in `orch.yml` (default 10) bounds the open lanes (`launching` or `running`) per runner. Every job gets one lane before any job gets a second.
 
-**Fallback.** When a job's first launch raises `RunnerOutage` or `UsageLimit`, the job is on arm `primary` and `qa.shootout` is off, its reserved lane and the run's `qa_runs.runner` (`record_runner_moved`) move to the next runner listed in `qa.runners` that is registered and has room, and it launches there, under the same rule. With no such runner, or on a shootout arm, the job goes back to `queued` with `qa_runs.runner` restored to the job's runner, with its `attempt` unchanged and a `qa-requeued` job event, and its runner is not claimed for 300 seconds. Each tick of that backoff restarts the job's queue-wait clock, as the cap wait does.
+**Fallback.** When a job's first launch raises `RunnerOutage` or `UsageLimit`, the job is on arm `primary` and `qa.shootout` is off, its reserved lane and the run's `qa_runs.runner` (`record_runner_moved`) move to the next runner listed in `qa.runners` that is registered and has room, and it launches there, under the same rule. After a `UsageLimit`, a runner on the same shared account is not a fallback. With no such runner, or on a shootout arm, the job goes back to `queued` with `qa_runs.runner` restored to the job's runner, with its `attempt` unchanged and a `qa-requeued` job event, and its runner is not claimed for 300 seconds. Each tick of that backoff restarts the job's queue-wait clock, as the cap wait does.
+
+**Shared accounts.** A QA runner can run on a vendor account that a builder harness also uses, so the two share one usage limit. When that limit bites, QA waits first, and a QA job never delays a build, fix or review job. `qa.shares_usage_with` in `orch.yml` maps a QA runner to that harness's recipient, as in `claude-cloud: claude`. It is empty by default, and an empty map changes nothing. A job whose runner is mapped is not claimed while the recipient's lane limit holds (`lane_limit.active`, #367). A job requeued after a `UsageLimit` on a runner of that account is also not claimed while `claim_order` has queued jobs for the recipient. A job that waits gets one `qa-yielded` job event per reason, with the reason as its detail. A running job on a paused account takes no extra lane, and its open lanes run on. A runner on another account is still a fallback.
 
 **Cancel.** A run is cancelled when its `qa_runs` row is `cancelled` (a new head, or the job cancelled) or its job is no longer `running`. Each open lane's agent is stopped, and its row becomes `cancelled` only once the stop succeeds. A stop failure keeps the row open and retries next tick. A lane whose launch was called but whose agent id was never saved first recovers the agent through the idempotent launch. A row whose launch was never called closes at once. A still-running job is finished failed, so T6 records `qa-no-retry`. QA adds no workflow state.
 
@@ -705,6 +707,7 @@ projects:
 # Optional (issue #784): the QA worker's limits (section 4.2.2).
 # qa:
 #   max_cloud_lanes: 10             # open cloud QA lanes per runner, at least 1; default shown
+#   shares_usage_with: {claude-cloud: claude}  # QA runner -> harness on the same account; QA waits first
 # Approval credential (issue #122, docs/decisions/122-approver-credential.md)
 # and one GitHub App per bot (issue #170, docs/decisions/170-four-github-apps.md).
 # approver_logins: [maxharris1]     # capped-ticket go and hold ok, once enabled

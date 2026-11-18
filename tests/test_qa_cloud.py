@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import lane_limit
 from lib.brief.qa import Upload
 from lib.handoff import parse_comment
 from lib.qa_cloud import LaneRow, QaWorker, plan_slices, qa_id, s_id, save_name
@@ -47,6 +48,7 @@ class Lab:
         runners: tuple[str, ...] = ("claude-cloud",),
         cap: int = 10,
         shootout: bool = False,
+        shares_usage_with: dict[str, str] | None = None,
     ):
         qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5)
         qa = replace(qa, runners=tuple(item for item in qa.runners if item.name in runners))
@@ -58,6 +60,7 @@ class Lab:
         self.silent: set[tuple[int, int]] = set()
         self.posted: dict[str, tuple[int, str]] = {}
         self.cap = cap
+        self.shares_usage_with = shares_usage_with or {}
         self.worker = self.new_worker()
 
     def new_worker(self) -> QaWorker:
@@ -72,6 +75,7 @@ class Lab:
                 Upload(path, f"https://uploads.invalid/{row.lane_id}/{path}") for path in paths
             ),
             max_cloud_lanes=self.cap,
+            shares_usage_with=self.shares_usage_with,
         )
 
     def post(self, repo: str, pr: int, body: str, marker: str) -> str:
@@ -588,3 +592,116 @@ def test_cancel_stops_an_agent_launched_before_a_crash_saved_its_id(tmp_path: Pa
     assert [row[3] for row in lab.lanes()] == ["cancelled"]
     assert fake.stopped == ["claude-cloud-1"]
     assert len(fake.launched) == 1
+
+
+SHARED = {"claude-cloud": "claude"}
+
+
+def _build(lab: Lab) -> str:
+    return lab.run.queue.enqueue(
+        JobRequest(repo=REPO, ticket_id="9", action="build", recipient="claude", source_comment_id="go-9",
+                   timeout_seconds=3600),
+        dedupe_key="build:9",
+    ).id
+
+
+def _pause_claude(lab: Lab, seconds: int) -> lane_limit.LaneLimit:
+    now = lab.run.now[0]
+    with lab.run.queue.connect() as connection:
+        limit = lane_limit.record(connection, job_id=_build(lab), harness="claude", bot="claude-bot",
+                                  limit=lane_limit.UsageLimit(int(now) + seconds), now=now)
+    assert limit is not None
+    return limit
+
+
+def _paused_pair(lab: Lab) -> tuple[str, str, lane_limit.LaneLimit]:
+    held = lab.enqueue(ids=2, ticket="1", runner="claude-cloud")
+    free = lab.enqueue(ids=2, ticket="2", runner="cursor-cloud")
+    limit = _pause_claude(lab, 3600)
+    lab.silent.add((0, 1))
+    lab.tick(3)
+    return held, free, limit
+
+
+def test_paused_recipient_holds_its_sharing_runner_and_not_another(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=SHARED)
+    held, free, limit = _paused_pair(lab)
+
+    last_tick = lab.run.now[0] - 30
+    assert lab.run.rows("SELECT state, last_activity_at FROM jobs WHERE id = ?", held) == [("queued", last_tick)]
+    assert lab.run.rows("SELECT event, detail FROM job_events WHERE job_id = ?", held) == [
+        ("qa-yielded", f"claude: {lane_limit.label(limit)}")
+    ]
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", free) == [("running",)]
+    assert lab.fakes["claude-cloud"].launched == []
+    assert len(lab.fakes["cursor-cloud"].launched) == 1
+
+
+def test_waiting_job_is_claimed_when_the_pause_ends(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=SHARED)
+    held, _, limit = _paused_pair(lab)
+    lab.run.now[0] = limit.until + 1
+    lab.tick()
+
+    assert lab.run.rows("SELECT state FROM jobs WHERE id = ?", held) == [("running",)]
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+
+def test_paused_recipient_grants_no_extra_lane(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=3, shares_usage_with=SHARED)
+    lab.enqueue(ids=5)
+    lab.silent.add((0, 1))
+    lab.tick()
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+    limit = _pause_claude(lab, 90)
+    lab.tick(2)
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+    assert [row[3] for row in lab.lanes()] == ["running"]
+
+    lab.run.now[0] = limit.until
+    lab.tick()
+    assert len(lab.fakes["claude-cloud"].launched) == 3
+
+
+def test_sharing_runner_usage_limit_requeues_behind_recipient_builds(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, shares_usage_with=SHARED)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+
+    build = _build(lab)
+    while lab.run.now[0] < 1400:
+        lab.tick()
+    lab.run.dispatcher.reconcile_jobs()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("queued", 1)]
+    assert lab.run.rows("SELECT detail FROM job_events WHERE job_id = ? AND event = 'qa-yielded'", job) == [
+        ("behind queued claude jobs",)
+    ]
+    assert lab.fakes["claude-cloud"].launched == []
+
+    claimed = lab.run.queue.claim("claude")
+    assert claimed is not None and claimed.id == build
+    lab.tick()
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done", 1)]
+    assert len(lab.fakes["claude-cloud"].launched) == 1
+
+
+@pytest.mark.parametrize(
+    ("shares", "moved"),
+    [
+        ({"claude-cloud": "claude", "cursor-cloud": "claude"}, False),
+        ({"claude-cloud": "claude", "cursor-cloud": "cursor"}, True),
+    ],
+)
+def test_usage_limit_falls_back_only_to_another_account(
+    tmp_path: Path, shares: dict[str, str], moved: bool
+) -> None:
+    lab = Lab(tmp_path, lanes=1, runners=("claude-cloud", "cursor-cloud"), shares_usage_with=shares)
+    job = lab.enqueue(ids=2)
+    lab.fakes["claude-cloud"].launch_errors.append(UsageLimit("at limit"))
+    lab.tick()
+
+    assert len(lab.fakes["cursor-cloud"].launched) == int(moved)
+    assert lab.run.rows("SELECT state, attempt FROM jobs WHERE id = ?", job) == [("done" if moved else "queued", 1)]

@@ -153,3 +153,16 @@ def test_a_missing_storage_field_is_refused(tmp_path: Path) -> None:
     assert "missing required field 'projects[0].qa_storage.secret_key_env'" in [
         finding.message for finding in findings
     ]
+
+
+def test_an_unknown_shared_account_runner_fails_check_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    orch = write_orch(tmp_path, ENTRY)
+    orch.write_text(ORCH + "qa:\n  shares_usage_with:\n    gpu-cloud: claude\n", encoding="utf-8")
+    factory = qa_factory_md(tmp_path)
+
+    status = cli.main(["check-config", "--orch", str(orch), "--factory", f"owner/repo={factory}"])
+
+    assert status != 0
+    assert "qa.shares_usage_with has unknown runner 'gpu-cloud'" in capsys.readouterr().err
