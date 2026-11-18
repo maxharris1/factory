@@ -1346,33 +1346,56 @@ evidence step has run 120 seconds; the rest go out on the next push.
 `<user>@<hostname>:<port>:<remote_dir>`, where user, hostname and port are what
 `ssh -G` (with `-F <ssh_config>` when set) resolves `host` to, so a change of
 ssh_config that points the alias at another PC is a new destination.
-For each run sent there it keeps a sha256 over each file's relative path,
-size and `mtime_ns`, and the sum of its file sizes. The box rewrites it after
-each send and after the removal step. A
-run whose fingerprint has not changed is not sent again. A changed run, such
+The store is version 3 and holds fingerprints only: for each run sent there,
+a sha256 over each file's relative path, size and `mtime_ns`. The box rewrites
+it after each send and after the removal step. A run that is on the PC and
+whose fingerprint has not changed is not sent again. A changed run, such
 as one the box's recycling trimmed, is sent whole again, so the files
 recycling deleted disappear from the PC too. A store for another destination,
-or a lost or unreadable one, loads empty. Every run is then
-sent to the current destination, and nothing is removed from the old one.
+a lost or unreadable one, or one of an older version (such as the version 2
+store of #921, which also recorded sizes) loads empty. Every run is then
+sent to the current destination once, and nothing is removed from the old one.
+
+**The PC's inventory (issue #927).** The store says what the box sent, not
+what the PC still holds. Each evidence step therefore reads the PC's `qa`
+folder in one ssh step before it plans:
+
+```
+cd -- <remote_dir>/qa 2>/dev/null || exit 0; set -- */; test -e "$1" || exit 0; du -sk -- "$@"
+```
+
+Each output line is `<KiB>\t<run_id>/`, the disk usage of one run folder.
+The `*/` glob skips dot-named folders, such as the temp folders of an
+interrupted send. A name that is not `check_id`-valid or starts with a dot is
+dropped and never named. Empty output, from a missing or empty `qa` folder,
+is an empty inventory. Any line that does not parse makes the whole
+inventory unparsable. Before planning, the box drops the store's marks for
+runs that are not in the inventory, so the store never claims more than the
+PC holds.
 
 **Recycling on the PC (issue #921).** Each evidence step first plans, then
 acts. `plan()` is pure: it takes every `qa_runs` run id, each settled run's
-state on the box, the runs the store records as on the PC with their file
-sizes, and the budget, and returns the run ids to remove, the run ids to
+state on the box, the PC's inventory, the store's fingerprints, and the
+budget, and returns the run ids to remove, the run ids to
 send and whether the PC stays over budget. A settled run on the box is
 `Ready` (walked, with its fingerprint and file sizes), `Gone` (its ticket
 folder opens but `<run_id>` is not in it: recycled whole) or `Held` (refused,
 its repo has no `qa_storage`, or its evidence root cannot be opened).
 
-- A recorded run is removed when its `qa_runs` row is gone or the box run is
-  `Gone`. A row that is no longer settled keeps its copy.
-- A `Ready` run is sent when the store has no record of it or its fingerprint
-  changed.
+- A run in the inventory is removed when its `qa_runs` row is gone or the
+  box run is `Gone`, whether or not the store recorded it. A row that is no
+  longer settled keeps its copy.
+- A `Ready` run is sent when the inventory lacks it or its fingerprint is
+  missing from the store or changed. A wiped PC (empty inventory) is
+  therefore sent every `Ready` run again, even when the store still holds
+  their fingerprints.
 - `dashboard.push.qa_budget_gib` (ssh only, a positive integer, unset by
-  default) caps the PC's evidence, counted as the file sizes of the runs
-  recorded after this push's removals plus those of the runs it sends. A
-  pending run and its record count the same bytes, so with unchanged
-  evidence and budget the next push removes and sends nothing. While that
+  default) caps the PC's evidence. The total counts each run on the PC
+  after this push's removals, plus the runs it sends. A `Ready` run counts
+  its file sizes on the box, which is what the PC holds once the push ends.
+  Any other run on the PC counts its inventory size. A pending run and the
+  copy it becomes count the same bytes, so with unchanged evidence and
+  budget the next push removes and sends nothing. While that
   total is over the cap, the plan drops the oldest `Ready` run (by
   `started_at`, then rowid) of a ticket whose `ticket_state` is `merged`,
   `done` or `abandoned`. A dropped run on the PC is removed; a dropped run
@@ -1390,6 +1413,8 @@ These cases remove nothing:
 | A repo with no `qa_storage`, or an evidence root missing or unmounted | Its runs are `Held`. |
 | A refused run | It is `Held`. |
 | A name that is not `check_id`-valid or starts with a dot | It is never named. |
+| The PC's `qa` folder is missing or empty | The inventory is empty, so no run is on the PC to remove. Every `Ready` run is sent. |
+| The inventory is unparsable, or the inventory ssh fails | The evidence step ends with one log line before it removes or sends anything. The next push reads it again. |
 
 The removals run first, as one ssh step,
 `rm -rf -- <remote_dir>/qa/<run_id> <remote_dir>/qa/<run_id>...`, then the

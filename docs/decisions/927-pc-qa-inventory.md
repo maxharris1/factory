@@ -1,0 +1,3 @@
+- **Decision:** The dashboard push plans the PC's QA evidence from a `du -sk` inventory of the PC's `qa` folder instead of the store's recorded runs and sizes. The store keeps fingerprints only (version 3). An unparsable inventory ends the evidence step before anything is removed or sent.
+- **When:** 2026-11-18 5:50 PM ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/935#issuecomment-6993962512
