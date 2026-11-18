@@ -186,6 +186,7 @@ from lib.dispatch.cycle_clock import LOCK_ERRORS, SLOW_CYCLE
 from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
+from lib.heal import POLLER_SERVICE
 from lib.job_state import (
     DEAD,
     JOB_STATES,
@@ -206,6 +207,7 @@ from lib.qa_cloud import qa_id
 from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
 from lib.schema import TICKETS
 from lib.status import PAUSED_STATES, _hold_approvers
+from lib.wait import OWNING_BOTS
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
@@ -2367,6 +2369,19 @@ def _audit_value(value: object) -> object:
     return _clean(value, 200)
 
 
+_WAITER_HARNESS = {f"waiter-{bot}": harness for bot, harness in OWNING_BOTS.items()}
+
+
+def _every_service_uses(pending: object, version: int, live: live_settings.Live | None) -> bool:
+    if live is None or not live.is_applied(version) or not isinstance(pending, list):
+        return False
+    return all(
+        name == POLLER_SERVICE
+        or (name in _WAITER_HARNESS and live.seen.get(_WAITER_HARNESS[name], 0) >= version)
+        for name in pending
+    )
+
+
 def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]:
     """The last SETTINGS_RESULTS entries of the settings audit log (#777),
     oldest first, each cut to the AuditEntry keys with its strings clipped."""
@@ -2384,6 +2399,9 @@ def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]
                 row["waiting"] = live is None or not live.is_applied(version)
                 if row["waiting"]:
                     row["result"] = "pending"
+            elif row["result"] == "pending" and type(version) is int:
+                if _every_service_uses(row["pending"], version, live):
+                    row["result"] = "applied"
             results.append(row)
     return results
 

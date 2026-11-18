@@ -39,7 +39,8 @@ AUDIT = [
 IDS = BAR + ["hud", "settings"]
 
 
-def _snapshot(tmp_path: Path, audit: list | None = AUDIT, live: str | None = None) -> dict:
+def _snapshot(tmp_path: Path, audit: list | None = AUDIT, live: str | None = None,
+              seen: dict[str, int] | None = None) -> dict:
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
@@ -48,7 +49,7 @@ def _snapshot(tmp_path: Path, audit: list | None = AUDIT, live: str | None = Non
     machines = tmp_path / "machines.yml"
     machines.write_text(MACHINES, encoding="utf-8")
     if live is not None:
-        _settings_row(db, tmp_path / "live" / "machines.yml", adopt=live == "adopted")
+        _settings_row(db, tmp_path / "live" / "machines.yml", adopt=live == "adopted", seen=seen or {})
     if audit is not None:
         lines = [json.dumps(entry) for entry in audit]
         (tmp_path / "settings-audit.jsonl").write_text("\n".join([*lines, "not json"]) + "\n", encoding="utf-8")
@@ -96,7 +97,7 @@ def test_each_card_shows_its_device(tmp_path: Path) -> None:
     assert "local · orch host" in _card(page, "box")
     assert "remote" in _text(_card(page, "pc")) and "orch host" not in _card(page, "pc")
 
-def _settings_row(db: Path, machines: Path, *, adopt: bool) -> None:
+def _settings_row(db: Path, machines: Path, *, adopt: bool, seen: dict[str, int]) -> None:
     machines.parent.mkdir()
     machines.write_text("devices:\n  - {name: box, local: true, slot_max: 3, harnesses: {claude: claude-bot}}\n",
                         encoding="utf-8")
@@ -105,6 +106,8 @@ def _settings_row(db: Path, machines: Path, *, adopt: bool) -> None:
         assert live_settings.narrowed(connection, machines).written == 1
         if adopt:
             live_settings.adopted(connection, machines)
+        for harness, version in seen.items():
+            live_settings.record_seen(connection, harness, version)
         connection.execute("COMMIT")
 
 
@@ -166,6 +169,41 @@ def test_a_pending_change_stays_pending_once_the_poller_adopts_it(tmp_path: Path
     pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
     assert '<span class="chip warn">pending</span>' in pc
     assert '<span class="st-err">restart pending: waiter-codex-bot</span>' in pc
+
+
+@pytest.mark.parametrize("seen", [{"codex": 1}, {"codex": 2}])
+def test_a_pending_change_is_applied_once_the_waiter_places_by_it(tmp_path: Path, seen: dict) -> None:
+    snapshot = _snapshot(tmp_path, [{**PENDING, "version": 1}], "adopted", seen)
+    (row,) = snapshot["settings"]["results"]
+    assert row["result"] == "applied"
+    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    assert '<span class="chip ok">applied</span>' in pc
+    assert "pending" not in pc
+
+
+@pytest.mark.parametrize("live,seen", [("adopted", {"codex": 0}), ("adopted", {"claude": 1}),
+                                       ("written", {"codex": 1})],
+                         ids=["older", "other-harness", "not-adopted"])
+def test_a_pending_change_stays_pending_until_the_waiter_places_by_it(
+    tmp_path: Path, live: str, seen: dict
+) -> None:
+    (row,) = _snapshot(tmp_path, [{**PENDING, "version": 1}], live, seen)["settings"]["results"]
+    assert (row["result"], row.get("waiting")) == ("pending", None)
+
+
+@pytest.mark.parametrize("live,result", [("written", "pending"), ("adopted", "applied")])
+def test_a_change_pending_only_on_the_poller_is_applied_once_it_adopts(
+    tmp_path: Path, live: str, result: str
+) -> None:
+    entry = {**PENDING, "pending": ["poller"], "version": 1}
+    (row,) = _snapshot(tmp_path, [entry], live)["settings"]["results"]
+    assert row["result"] == result
+
+
+def test_a_pending_change_naming_an_unknown_service_stays_pending(tmp_path: Path) -> None:
+    entry = {**PENDING, "pending": ["poller", "waiter-grok-bot"], "version": 1}
+    (row,) = _snapshot(tmp_path, [entry], "adopted", {"grok": 1})["settings"]["results"]
+    assert row["result"] == "pending"
 
 
 def test_every_page_links_settings(tmp_path: Path) -> None:

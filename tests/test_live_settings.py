@@ -257,3 +257,31 @@ def test_placement_config_takes_each_switch_from_the_row(tmp_path: Path, db) -> 
     assert box is not None and (box.enabled, box.drain, box.slot_max) == (True, True, 1)
     assert pc is not None and not pc.enabled
     assert box.harnesses == loaded.device("box").harnesses, "everything else is the loaded config"
+
+
+def test_peek_reads_back_what_each_harness_has_seen(tmp_path: Path, db) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, text())
+    live, _ = adopt(db, machines)
+    assert live_settings.peek(db).seen == {}, "no seen table yet"
+
+    live_settings.record_seen(db, "claude", 1)
+    live_settings.record_seen(db, "codex", 1)
+    live_settings.record_seen(db, "claude", 2)
+
+    assert live_settings.peek(db).seen == {"claude": 2, "codex": 1}
+    assert live_settings.peek(db).switches == live.switches
+
+
+def test_recording_an_unchanged_seen_writes_nothing(tmp_path: Path, db) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, text())
+    adopt(db, machines)
+    live_settings.record_seen(db, "claude", 1)
+    before = db.total_changes
+
+    live_settings.record_seen(db, "claude", 1)
+
+    assert db.total_changes == before
+    live_settings.record_seen(db, "claude", 2)
+    assert db.total_changes == before + 1, "a new version is written"

@@ -285,16 +285,19 @@ class DevicePool:
             ).fetchone()
         return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
 
-    def _placement_config(self, connection: sqlite3.Connection) -> MachinesConfig:
+    def _placement(
+        self, connection: sqlite3.Connection
+    ) -> tuple[MachinesConfig, live_settings.Live | None]:
         if self.machines_path is None:
-            return self.config
-        return live_settings.narrowed(connection, self.machines_path).placement_config(self.config)
+            return self.config, None
+        live = live_settings.narrowed(connection, self.machines_path)
+        return live.placement_config(self.config), live
 
     def serving(self, harness: str) -> frozenset[str]:
         """The accounts of harness on devices placement may use."""
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            config = self._placement_config(connection)
+            config, _ = self._placement(connection)
             connection.commit()
         return config.serving(harness)
 
@@ -317,7 +320,9 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            config = self._placement_config(connection)
+            config, live = self._placement(connection)
+            if live is not None:
+                live_settings.record_seen(connection, harness, live.adopted)
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}

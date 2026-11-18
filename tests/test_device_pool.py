@@ -8,7 +8,7 @@ from types import MappingProxyType
 
 import pytest
 
-from lib import device_pool, device_sync
+from lib import device_pool, device_sync, live_settings
 from lib.device_pool import DevicePool, Orphan, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -258,6 +258,44 @@ def test_an_invalid_file_with_no_row_places_nothing(tmp_path: Path) -> None:
 
     assert pool.claim("claude") is None
     assert [job.state for job in queue.outstanding()] == ["queued"]
+
+
+def adopted_and_seen(queue: SQLiteJobQueue) -> tuple[int, dict[str, int]]:
+    with queue.connect() as connection:
+        live = live_settings.peek(connection)
+    assert live is not None
+    return live.adopted, dict(live.seen)
+
+
+def test_every_claim_reports_the_adopted_version_it_placed_by_job_or_none(
+    tmp_path: Path,
+) -> None:
+    pool, queue, machines = file_pool(tmp_path)
+    adopted, seen = adopted_and_seen(queue)
+    assert seen == {}
+
+    assert pool.claim("codex") is None, "box takes no codex job"
+    claimed = pool.claim("claude")
+
+    assert claimed is not None
+    assert adopted_and_seen(queue) == (adopted, {"claude": adopted, "codex": adopted})
+    machines.write_text(BOX_FILE.replace("slot_max: 2", "slot_max: 3"), encoding="utf-8")
+    os.utime(machines, ns=(10**18, 10**18))
+    poller_adopts(queue, machines)
+    assert pool.claim("claude") is None, "no queued job left"
+    newer, seen = adopted_and_seen(queue)
+    assert newer > adopted and seen == {"claude": newer, "codex": adopted}
+
+
+def test_a_pool_that_does_not_place_by_the_row_reports_nothing(tmp_path: Path) -> None:
+    _, queue, machines = file_pool(tmp_path)
+    config, _ = load_machines_yml(machines)
+    assert config is not None
+
+    claimed = DevicePool(queue, config).claim("claude")
+
+    assert claimed is not None
+    assert adopted_and_seen(queue)[1] == {}
 
 
 def edited_after_load(

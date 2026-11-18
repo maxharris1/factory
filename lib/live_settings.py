@@ -33,13 +33,14 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from lib.config_overlay import overlay_path
 from lib.machines_yml import MachinesConfig, load_machines_yml
 
 TABLE = "device_live"
+SEEN_TABLE = "device_live_seen"
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class Live:
     switches: Mapping[str, Switch]
     written: int
     adopted: int
+    seen: Mapping[str, int] = field(default_factory=dict)
 
     def placement_config(self, config: MachinesConfig) -> MachinesConfig:
         devices = []
@@ -125,13 +127,34 @@ def adopted(connection: sqlite3.Connection, machines: Path) -> tuple[Live, Machi
     return live, config
 
 
+def record_seen(connection: sqlite3.Connection, harness: str, adopted: int) -> None:
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SEEN_TABLE} (
+            harness TEXT PRIMARY KEY,
+            adopted INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT INTO {SEEN_TABLE} (harness, adopted) VALUES (?, ?)
+        ON CONFLICT (harness) DO UPDATE SET adopted = excluded.adopted
+        WHERE {SEEN_TABLE}.adopted != excluded.adopted
+        """,
+        (harness, adopted),
+    )
+
+
 def peek(connection: sqlite3.Connection) -> Live | None:
     """The row, read only; None before any process has written it."""
     try:
         found = _read(connection)
     except sqlite3.OperationalError:
         return None
-    return None if found is None else found[0]
+    if found is None:
+        return None
+    return replace(found[0], seen=_seen(connection))
 
 
 def _stat(path: Path) -> list[int] | None:
@@ -188,6 +211,14 @@ def _read(connection: sqlite3.Connection) -> tuple[Live, str] | None:
         for name, value in json.loads(row[0]).items()
     }
     return Live(switches, int(row[1]), int(row[2])), str(row[3])
+
+
+def _seen(connection: sqlite3.Connection) -> dict[str, int]:
+    try:
+        rows = connection.execute(f"SELECT harness, adopted FROM {SEEN_TABLE}").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {str(harness): int(adopted) for harness, adopted in rows}
 
 
 def _write(connection: sqlite3.Connection, live: Live, key: str) -> None:
