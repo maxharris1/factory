@@ -71,6 +71,7 @@ class DispatcherBase:
         rebase_classifier: RebaseClassifier | None = None,
         approvals: Approvals | None = None,
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
+        ci_rerun: Callable[[str, str], None] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
         ci_pool: Callable[[str], Sequence[PoolRunner]] | None = None,
@@ -107,6 +108,7 @@ class DispatcherBase:
         self._hold_carries: dict[tuple[str, str, str, str, tuple[str, ...]], bool] = {}
         self.approvals = approvals if approvals is not None else Approvals()
         self.ci_logs = ci_logs
+        self.ci_rerun = ci_rerun
         self.ci_runs = ci_runs
         self.ci_job_log = ci_job_log
         self.ci_pool = ci_pool

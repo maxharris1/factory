@@ -9,6 +9,7 @@ from lib.evidence.ci import (
     CIJobLog,
     ci_evidence,
     classify_failure,
+    classify_logged,
     failing_tests,
 )
 
@@ -258,11 +259,12 @@ def test_classify_failure_reads_infra_signals_before_the_conclusion(conclusion, 
     [
         (["infra", "code"], "code"),
         (["infra", "infra"], "infra"),
-        (["infra", "unknown"], "unknown"),
+        (["infra", "unknown"], "infra"),
+        (["unknown", "unknown"], "unknown"),
         ([], "unknown"),
     ],
 )
-def test_result_cause_is_infra_only_when_every_check_is(causes, expected):
+def test_result_cause_is_code_over_infra_over_unknown(causes, expected):
     assert result_cause(causes) == expected
 
 
@@ -282,19 +284,20 @@ RUNNER_LOST = (
 )
 
 
-def test_a_log_with_a_runner_lost_line_and_no_failing_test_makes_the_bundle_infra():
-    unknown = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL)
+def test_a_fetched_runner_lost_log_makes_the_dispatchers_result_and_the_bundle_infra():
+    result = classify_logged(CIResult("failure", failed=(PYTEST,)), {"7": RUNNER_LOST})
+    bundle = ci_evidence(failed=result.failed, logs={"7": RUNNER_LOST})
 
-    bundle = ci_evidence(failed=(unknown,), logs={"7": RUNNER_LOST})
-
+    assert [(check.cause, check.signal) for check in result.failed] == [("infra", "runner lost")]
+    assert (result.cause, bundle.cause) == ("infra", "infra")
     assert [(job.cause, job.signal) for job in bundle.jobs] == [("infra", "runner lost")]
-    assert bundle.cause == "infra"
 
 
 def test_a_log_with_a_failing_test_stays_code_even_when_it_quotes_an_infra_signal():
     failed = "2026-11-10T19:50:02Z FAILED tests/test_x.py::test_y - boom\n"
+    logs = {"7": RUNNER_LOST + failed}
 
-    bundle = ci_evidence(failed=(PYTEST,), logs={"7": RUNNER_LOST + failed})
+    bundle = ci_evidence(failed=classify_logged(CIResult("failure", failed=(PYTEST,)), logs).failed, logs=logs)
 
     assert [(job.cause, job.signal) for job in bundle.jobs] == [("code", None)]
     assert bundle.cause == "code"
@@ -307,3 +310,46 @@ def test_an_infra_check_keeps_its_signal_in_the_bundle():
 
     assert [(job.cause, job.signal) for job in bundle.jobs] == [("infra", "runner not acquired")]
     assert bundle.cause == "infra"
+
+
+SPENDING_ASSERTION = (
+    "FAILED tests/test_billing.py::test_spending_limit - AssertionError: spending limit was not enforced"
+)
+UNITTEST_SPENDING = (
+    "2026-11-10T19:50:00Z FAIL: test_spending_limit (tests.test_billing.BillingTest)\n"
+    "2026-11-10T19:50:00Z Traceback (most recent call last):\n"
+    "2026-11-10T19:50:00Z AssertionError: the spending limit needs to be increased was not shown\n"
+    "2026-11-10T19:50:00Z ##[error]Process completed with exit code 1.\n"
+)
+
+
+def test_an_application_failure_that_mentions_billing_stays_code():
+    assert classify_failure("failure", [SPENDING_ASSERTION]) == ("code", None)
+    assert classify_failure("failure", [UNITTEST_SPENDING]) == ("code", None)
+    for log in (SPENDING_ASSERTION, UNITTEST_SPENDING):
+        result = classify_logged(CIResult("failure", failed=(PYTEST,)), {"7": log})
+        assert result.cause == "code"
+        assert ci_evidence(failed=result.failed, logs={"7": log}).cause == "code"
+
+
+def test_infra_sentences_only_count_at_the_start_of_a_line():
+    quoted = f"AssertionError: expected {NOT_ACQUIRED!r}"
+
+    assert classify_failure("failure", [quoted]) == ("code", None)
+    assert classify_failure("failure", [f"##[error]{NOT_ACQUIRED}"])[0] == "infra"
+
+
+def test_classify_logged_leaves_a_green_result_alone():
+    assert classify_logged(CIResult("success"), {"7": RUNNER_LOST}) == CIResult("success")
+
+
+def test_the_spec_t2_row_states_the_rerun_and_classification_protocol():
+    from pathlib import Path
+
+    spec = (Path(__file__).parent.parent / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    row = next(line for line in spec.splitlines() if line.startswith("| T2 |"))
+
+    assert "reruns the failed jobs once per head before the gate count moves or a fix is queued" in row
+    assert "classified `infra` or `code`" in row
+    assert "no `ready` or verdict naming that head" in row
+    assert "Red: queue `fix` with the failing log" not in row

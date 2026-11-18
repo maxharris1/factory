@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from lib.dispatch.types import Cause, FailedCheck, result_cause
+from lib.dispatch.helpers import failed_checks
+from lib.dispatch.types import Cause, CIResult, FailedCheck, result_cause
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
@@ -18,20 +19,25 @@ _PYTEST_SUMMARY = re.compile(
     r"^(?:FAILED|ERROR) ([\w./-]+\.py(?:::[^\s\[]+)*(?:\[[^\]]*\])?)(?: - .*)?\s*$"
 )
 # Not "The operation was canceled.": a person or a concurrency group cancels too.
-INFRA_SIGNALS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+INFRA_LINE_PREFIXES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), label)
     for pattern, label in (
-        (r"not acquired by Runner", "runner not acquired"),
-        (r"spending limit", "billing or spending limit"),
-        (r"account payments have failed", "billing or spending limit"),
-        (r"billing issue|locked due to a billing", "billing or spending limit"),
-        (r"lost communication with the server", "runner lost"),
-        (r"received a shutdown signal", "runner lost"),
-        (r"no hosted runner", "hosted runner unavailable"),
-        (r"hosted runner encountered an error", "hosted runner unavailable"),
-        (r"internal error when running your job", "hosted runner unavailable"),
+        (r"The job was not acquired by Runner of type \S+", "runner not acquired"),
+        (r"No \S+ runner picked up the \S+ job within", "runner pickup timed out"),
+        (
+            r"The job was not started because (?:recent account payments have failed"
+            r"|your spending limit needs to be increased)",
+            "billing or spending limit",
+        ),
+        (r"The job was not started because your account is locked", "billing or spending limit"),
+        (r"The (?:self-hosted |hosted )?runner\b.* lost communication with the server", "runner lost"),
+        (r"The runner has received a shutdown signal", "runner lost"),
+        (r"No hosted runner found", "hosted runner unavailable"),
+        (r"The hosted runner encountered an error while running your job", "hosted runner unavailable"),
+        (r"GitHub Actions has encountered an internal error when running your job", "hosted runner unavailable"),
     )
 )
+_LINE_PREFIX = re.compile(r"^##\[error\]\s*")
 
 
 @dataclass(frozen=True)
@@ -73,11 +79,9 @@ def ci_evidence(
             runs.setdefault(check.run_id, check.run_url)
         text = logs.get(check.job_id) if check.job_id is not None else None
         tail, cut = _tail(text, limit) if text is not None else (None, None)
-        cause, signal = check.cause, check.signal
-        logged = _untested_log_signal(text) if text is not None else None
-        if logged is not None:
-            cause, signal = "infra", logged
-        jobs.append(CIJobLog(check.name, check.run_id, check.run_url, tail, cut, cause, signal))
+        jobs.append(
+            CIJobLog(check.name, check.run_id, check.run_url, tail, cut, check.cause, check.signal)
+        )
     return CIEvidence(
         failed_checks=tuple(check.name for check in failed),
         runs=tuple(runs.items()),
@@ -86,15 +90,25 @@ def ci_evidence(
     )
 
 
-def _untested_log_signal(text: str) -> str | None:
-    return None if failing_tests(text) else _infra_signal((text,))
+def classify_logged(result: CIResult, logs: Mapping[str, str | None]) -> CIResult:
+    if result.status != "failure":
+        return result
+    checks = []
+    for check in failed_checks(result):
+        text = logs.get(check.job_id) if check.job_id is not None else None
+        signal = None if text is None or failing_tests(text) else _infra_signal((text,))
+        checks.append(check if signal is None else replace(check, cause="infra", signal=signal))
+    return replace(result, failed=tuple(checks))
 
 
 def _infra_signal(texts: Iterable[str]) -> str | None:
     for text in texts:
-        for pattern, label in INFRA_SIGNALS:
-            if pattern.search(text):
-                return label
+        for line in text.splitlines():
+            entry = _ACTIONS_TIMESTAMP.sub("", _JOB_STEP.sub("", _ANSI.sub("", line))).strip()
+            entry = _LINE_PREFIX.sub("", entry)
+            for pattern, label in INFRA_LINE_PREFIXES:
+                if pattern.match(entry):
+                    return label
     return None
 
 

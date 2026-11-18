@@ -56,7 +56,7 @@ def result_cause(causes: Iterable[Cause]) -> Cause:
     seen = set(causes)
     if "code" in seen:
         return "code"
-    return "infra" if seen == {"infra"} else "unknown"
+    return "infra" if "infra" in seen else "unknown"
 
 
 CHECK_FAILED = (

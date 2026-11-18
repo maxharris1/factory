@@ -316,6 +316,8 @@ class T4Mixin:
                 "SELECT 1 FROM jobs WHERE dedupe_key = ?", (key,)
             ).fetchone()
         if queued is None:
+            if self._waiting_on_ci_rerun(ticket, head, result):
+                return False, "approve-ci-rerun"
             _status, count = self._record_ci_result(ticket, head, "failure")
             if self._mark_stuck_on_third_red(ticket, comment, head, count):
                 return True, "stuck-ci-red-3"
@@ -377,6 +379,8 @@ class T4Mixin:
         result: CIResult,
         review_round: int,
     ) -> tuple[bool, str]:
+        if self._waiting_on_ci_rerun(ticket, head, result):
+            return False, "approve-ci-rerun"
         _status, count = self._record_ci_result(ticket, head, "failure")
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"

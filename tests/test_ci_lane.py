@@ -224,3 +224,10 @@ def test_a_failed_card_counts_every_check_of_its_run() -> None:
                "run_checks": [{"status": "completed", "conclusion": c} for c in ("success", "failure", "skipped")]}
     card = ci_lane(snapshot(full_pool(), failures=[failure]))["cards"][f"{REPO}#15"]
     assert card["progress_text"] == "1/3 passed, 0 running, 1 failed, 1 skipped"
+
+
+def test_every_ci_wait_reason_names_the_step_after_ci() -> None:
+    from lib.ci_lane import STEP_AFTER_CI
+    from lib.dispatch.constants import CI_WAIT_REASONS
+
+    assert set(STEP_AFTER_CI) == set(CI_WAIT_REASONS)

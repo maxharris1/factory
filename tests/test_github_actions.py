@@ -33,6 +33,7 @@ from lib.github_actions import (
     NotFastForwardError,
     review_actions_for,
 )
+from lib.evidence.ci import ci_evidence
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.queue import Job, SQLiteJobQueue
@@ -2364,3 +2365,70 @@ def test_post_issue_comment_once_returns_the_new_or_existing_comment_id() -> Non
     gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(9, QA_BODY)]), ""))
     assert actions.post_issue_comment_once("owner/repo", 42, QA_BODY, QA_MARKER) == "9"
     assert gh.count(POST_QA) == 0
+
+
+WATCHDOG_RUN = 133415718700
+WATCHDOG_ANNOTATIONS = (f"{REPO}/check-runs/{WATCHDOG_RUN}/annotations?per_page=100",)
+
+
+def _watchdog_pickup_message() -> str:
+    workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml").read_text()
+    line = next(line for line in workflow.splitlines() if "title=macos runner pickup::" in line)
+    message = line.split("title=macos runner pickup::", 1)[1].rstrip().removesuffix('"')
+    return message.replace("$((PICKUP_SECONDS / 60))", "10").replace(
+        "$created_at", "2026-11-16T15:49:22Z"
+    )
+
+
+@pytest.mark.parametrize("watchdog_conclusion", ["failure", "cancelled"])
+def test_the_macos_pickup_watchdog_and_the_job_it_cancelled_read_as_infra(
+    watchdog_conclusion: str,
+) -> None:
+    page = json.loads((FIXTURES / "check-runs-cancelled-pickup.json").read_text())
+    macos = page["check_runs"][0]
+    macos["output"]["annotations_count"] = 0
+    watchdog = json.loads(json.dumps(macos))
+    watchdog.update(
+        id=WATCHDOG_RUN,
+        name="macos-pickup",
+        conclusion=watchdog_conclusion,
+        details_url=f"https://github.com/owner/repo/actions/runs/43900570415/job/{WATCHDOG_RUN}",
+    )
+    watchdog["output"]["annotations_count"] = 1
+    page["check_runs"].append(watchdog)
+    page["total_count"] = 2
+    annotation = {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "macos runner pickup",
+        "message": _watchdog_pickup_message(),
+    }
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(WATCHDOG_ANNOTATIONS, GhResult(0, json.dumps([annotation]), ""))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert [(check.name, check.cause, check.signal) for check in result.failed] == [
+        ("macos", "unknown", None),
+        ("macos-pickup", "infra", "runner pickup timed out"),
+    ]
+    assert result.cause == "infra"
+    assert ci_evidence(failed=result.failed, logs={}).cause == "infra"
+
+
+def test_a_failed_test_that_names_the_spending_limit_stays_code() -> None:
+    page = json.loads((FIXTURES / "check-runs-failure.json").read_text())
+    page["check_runs"][0]["output"] = {
+        "title": "pytest",
+        "summary": "FAILED tests/test_billing.py::test_spending_limit - AssertionError: spending limit was not enforced",
+        "annotations_count": 0,
+    }
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert [(check.cause, check.signal) for check in result.failed] == [("code", None)]

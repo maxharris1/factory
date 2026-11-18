@@ -821,6 +821,11 @@ class GitHubReviewActions:
             f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
         )
 
+    def rerun_failed_jobs(self, repo: str, run_id: str) -> None:
+        if not run_id.isdigit():
+            raise GitHubAdapterError("Actions run id is not a number")
+        self._call("-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs")
+
     def _call(
         self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
     ) -> str:

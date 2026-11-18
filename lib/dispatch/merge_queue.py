@@ -562,6 +562,8 @@ class MergeQueueMixin:
                     f"{head[:12]}, its update job gone: {verdict.reason}"
                 )
             return True
+        if self._waiting_on_ci_rerun(ticket, head, ci):
+            return False
         _status, count = self._record_ci_result(ticket, head, ci.status)
         if self._mark_stuck_on_third_red(ticket, source, head, count):
             return True

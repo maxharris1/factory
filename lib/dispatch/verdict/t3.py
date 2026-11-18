@@ -345,6 +345,8 @@ class T3Mixin:
             return ReviseCIGate(outcome=(False, "revise-ci-pending"))
         if result.status == "not-run":
             return ReviseCIGate()
+        if self._waiting_on_ci_rerun(ticket, head, result):
+            return ReviseCIGate(outcome=(False, "revise-ci-rerun"))
         _status, count = self._record_ci_result(ticket, head, result.status)
         if result.status == "success":
             return ReviseCIGate()
