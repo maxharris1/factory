@@ -407,6 +407,26 @@ def compact_snapshot(tmp_path: Path) -> dict:
     return snapshot
 
 
+def crowded_snapshot(tmp_path: Path, *conclusions: str) -> dict:
+    snapshot = compact_snapshot(tmp_path)
+    (run,) = [r for r in snapshot["ci_runs"]["runs"] if r["ticket_id"] == "13"]
+    (ticket,) = [t for t in snapshot["tickets"] if t["repo"] == REPO and str(t["ticket_id"]) == "13"]
+    lint = next(job for job in run["jobs"] if job["name"] == "lint")
+    run["jobs"] += [{**lint, "name": f"extra ({c})", "conclusion": c} for c in conclusions]
+    for row in (run, ticket):
+        row.update(repo="maxharris1/factory", ticket_id="855")
+    run["pr"] = "856"
+    snapshot["ci_lane"] = ci_lane(snapshot)
+    return snapshot
+
+
+SIZED = {
+    "compact": compact_snapshot,
+    "skipped": lambda tmp_path: crowded_snapshot(tmp_path, "skipped"),
+    "all-five": lambda tmp_path: crowded_snapshot(tmp_path, "skipped", "failure"),
+}
+
+
 def _card_lines(lane: str, key: str) -> list[str]:
     card = lane.split(f'data-ci="{key}"')[1].split('<div class="tile ci ')[0].split('<div class="ci-slot"')[0]
     assert "tile-l4" not in card
@@ -477,23 +497,40 @@ CI_SIZES = """(function () {
 })()"""
 
 
+def _open_server_page(browser: Browser, html: str, width: int) -> None:
+    page = Path(browser.tmp.name) / "page.html"
+    page.write_text(html, encoding="utf-8")
+    browser.call("Emulation.setDeviceMetricsOverride", width=width, height=900, deviceScaleFactor=1, mobile=False)
+    browser.call("Page.navigate", url=page.as_uri())
+    browser.eval("""new Promise(function (done) { (function wait() {
+      if (document.readyState === 'complete' && !document.scripts.length) document.fonts.ready.then(done);
+      else setTimeout(wait, 50); })(); })""")
+
+
 @needs_chrome
-@pytest.mark.parametrize("width", [1440, 375])
+@pytest.mark.parametrize("width", [1440, 768, 375])
 def test_ci_cards_draw_smaller_than_build_cards(tmp_path: Path, width: int) -> None:
     browser = Browser()
     try:
-        browser.open(_page_with_status_stub(compact_snapshot(tmp_path), "index.html"), width)
-        found = browser.eval(CI_SIZES)
+        for name, make in SIZED.items():
+            snapshot = make(tmp_path / name)
+            for renderer in ("live", "server"):
+                if renderer == "live":
+                    browser.open(_page_with_status_stub(snapshot, "index.html"), width)
+                else:
+                    _open_server_page(browser, _no_script(render_pages(snapshot)["index.html"]), width)
+                found = browser.eval(CI_SIZES)
+                assert found["build"] and found["ci"] and found["idle"] and found["cont"], (name, renderer, found)
+                assert max(found["ci"] + found["idle"] + found["cont"]) < min(found["build"]), (name, renderer, found)
+                assert found["scrollWidth"] <= width, (name, renderer, found)
     finally:
         browser.close()
-    assert found["build"] and found["ci"] and found["idle"] and found["cont"], found
-    assert max(found["ci"] + found["idle"] + found["cont"]) < min(found["build"]), found
-    assert found["scrollWidth"] <= width, found
 
 
 @needs_node
-def test_the_script_draws_a_compact_card_as_the_server_does(tmp_path: Path) -> None:
-    snapshot = compact_snapshot(tmp_path)
+@pytest.mark.parametrize("name", list(SIZED))
+def test_the_script_draws_a_compact_card_as_the_server_does(tmp_path: Path, name: str) -> None:
+    snapshot = SIZED[name](tmp_path)
     html = render_pages(snapshot)["index.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])

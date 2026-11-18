@@ -20,10 +20,11 @@ CSS = """\
 .tile.ci .cover{position:absolute;inset:0;z-index:0}
 .tile.ci:hover,.tile.ci:focus-within{border-color:var(--brand)}
 .tile.ci.bad{border-color:var(--bad)}
-.tile.ci .tile-body{position:relative;gap:3px;padding:4px 8px 5px;font-size:11px;line-height:1.25;pointer-events:none}
+.tile.ci .tile-body{position:relative;gap:2px;padding:3px 8px 4px;font-size:11px;line-height:1.25;pointer-events:none}
 .tile.ci .tile-body a{position:relative;z-index:1;pointer-events:auto}
-.tile.ci .tile-l1 .ticket{font-size:12px}
-.tile.ci .ci-a{line-height:1.25}
+.tile.ci .tile-l1{gap:0 5px}
+.tile.ci .tile-l1 .ticket{font-size:11px}
+.tile.ci .ci-a{flex:none;font-size:11px;line-height:1.25}
 .tile.ci .tile-l2{flex-wrap:wrap;gap:0 6px;min-height:0;color:var(--muted)}
 .tile.ci .verb{font-size:11px;line-height:1.25}
 .tile.ci .tile-l2 .action{min-width:0;overflow-wrap:anywhere;color:var(--text-2)}
