@@ -1101,7 +1101,7 @@ def test_orch_status_and_the_dashboard_show_waiting_on_the_approver(
             "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
             "VALUES ('owner/repo', '42', 'github', 1)"
         )
-    dispatcher.process(snapshot(approve(), labels=("factory:hold",)))
+    dispatcher.process(snapshot(approve(comment_id="7001"), labels=("factory:hold",)))
 
     reader = SQLiteStatusReader(queue.path)
     output = render(build_status(reader, reader, clock=lambda: 100))
@@ -1122,10 +1122,13 @@ def test_orch_status_and_the_dashboard_show_waiting_on_the_approver(
             "source": None,
             "pr": "42",
             "detail": f"awaiting-ok (waiting on {APPROVER})",
+            "state": "awaiting-ok",
+            "wait": {"why": "awaiting-ok", "comment_id": "7001", "detail": None},
+            "actions": ["ok", "close"],
         }
     ]
 
-    dispatcher.process(snapshot(approve(), ok(HEAD), labels=("factory:hold",)))
+    dispatcher.process(snapshot(approve(comment_id="7001"), ok(HEAD), labels=("factory:hold",)))
     output = render(build_status(SQLiteStatusReader(queue.path), SQLiteStatusReader(queue.path), clock=lambda: 100))
     assert "waiting on" not in output
 

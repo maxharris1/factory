@@ -25,6 +25,7 @@ from lib.dashboard_pages import ticket_detail
 from lib.dashboard_pages.common import duration, ticket_page_href
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
+from tests import test_dashboard_attention_actions as attention
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW
 from tests.test_dashboard_activity import HARNESS as POLLING
@@ -807,6 +808,40 @@ def test_the_page_carries_the_actions_api_and_no_credential(tmp_path: Path) -> N
         assert hook in html, hook
     for secret in ("gho_", "ghp_", "github_pat_", "client_secret"):
         assert secret not in html, secret
+
+
+HELD = "maxharris1/tracy-harris-coaching#5"
+HOLD_OK = f'document.querySelector(\'article.ticketpage[data-ticket="{HELD}"] .jd-gh\')'
+
+
+@attention.needs_chrome
+def test_the_hold_ok_shows_the_whole_head_it_pins_and_the_whole_new_head(tmp_path: Path) -> None:
+    old, new = "a" * 40, "b" * 40
+    snapshot = _snapshot(tmp_path)
+    held = next(t for t in snapshot["tickets"] if f"{t['repo']}#{t['ticket_id']}" == HELD)
+    held.update(state="awaiting-ok", waiting_on="maxharris1")
+    replies = {"/api/head": {"status": 200, "body": {"head": old}},
+               "/api/ok": {"status": 409, "body": {"error": "head-changed", "head": new}}}
+    stub = attention.STUB.replace("__SESSION__", json.dumps(attention.SIGNED_IN)).replace("__REPLIES__", json.dumps(replies))
+    server = _serve(tmp_path, {"site": snapshot})
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        chrome.send("Page.enable", chrome.session)
+        chrome.send("Page.addScriptToEvaluateOnNewDocument", chrome.session, source=stub)
+        _open(chrome, _ticket_url(server, "site", HELD), f"{HOLD_OK} && !{HOLD_OK}.querySelector('.gh-okbox').hidden")
+        chrome.run(f"{HOLD_OK}.querySelector('.gh-okbox').open = true")
+        chrome.wait_for(f"!{HOLD_OK}.querySelector('.gh-ok').disabled", "the head")
+        shown = chrome.run(f"{HOLD_OK}.innerText")
+        chrome.run(f"{HOLD_OK}.querySelector('.gh-ok').click()")
+        chrome.wait_for(f"/head changed/.test({HOLD_OK}.querySelector('.gh-okbox .gh-out').textContent)", "the new head")
+        changed = chrome.run(f"{HOLD_OK}.innerText")
+        posts = chrome.run("window.posts")
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert old in shown
+    assert new in changed
+    assert {"url": "/api/ok", "csrf": "x", "body": {"repo": "maxharris1/tracy-harris-coaching", "pr": 5, "head": old}} in posts
 
 
 # --- #531a: ticket.html#t=<repo>#<ticket>, one live ticket keyed by ticket ------------------------

@@ -204,6 +204,7 @@ from lib.project_rules import read_rows as read_project_rules
 from lib.qa_cloud import qa_id
 from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
 from lib.schema import TICKETS
+from lib import max_actions
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
@@ -920,7 +921,7 @@ def collect_snapshot(
         "qa": {**db["qa"], "cap": orch.qa.max_cloud_lanes if orch is not None else None},
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
-            report,
+            report, db["tickets"],
         ),
         "health": {**_without_checkout_paths(component_health.report_json(report, now)),
                    "publish_seconds": publish_seconds},
@@ -1266,6 +1267,17 @@ def _ticket_ref(
     return ref
 
 
+def _acting(row: dict) -> dict:
+    return {key: row[key] for key in ("state", "wait", "actions") if key in row}
+
+
+_COMMENT_ID = re.compile(r"[0-9]{1,20}")
+
+
+def _comment_id(value: str | None) -> str | None:
+    return value if value is not None and _COMMENT_ID.fullmatch(value) else None
+
+
 def _same_ref(row: dict) -> dict:
     return {key: row[key] for key in ("repo", "ticket_id", "source", "pr") if key in row}
 
@@ -1313,6 +1325,7 @@ def _attention(
     paused: list[dict],
     flags: Sequence[dict] = (),
     health: component_health.HealthReport | None = None,
+    tickets: Sequence[dict] = (),
 ) -> dict:
     """Everything that needs Max, each ticket or job once: stuck tickets,
     overdue jobs, tickets flagged needs-attention (a ship that failed and
@@ -1320,10 +1333,13 @@ def _attention(
     that are not already listed, then (#92) down components, an unreadable
     orch.health.db and harnesses whose queued jobs have no live waiter, each
     linked to the Health tab. `count` heads the attention strip on every page."""
+    acting = {(row["repo"], row["ticket_id"]): _acting(row) for row in tickets}
+
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
-        items.append({"kind": "stuck", **_same_ref(row), "detail": detail})
+        items.append({"kind": "stuck", **_same_ref(row), "detail": detail,
+                      **acting.get((row["repo"], row["ticket_id"]), {})})
     for row in overdue:
         job_state = row.get("job_state")
         if job_state == DEAD:
@@ -1340,7 +1356,8 @@ def _attention(
         })
     for row in flags:
         detail = row["reason"] + (f": {row['detail']}" if row["detail"] else "")
-        items.append({"kind": "needs-attention", **_same_ref(row), "detail": detail})
+        items.append({"kind": "needs-attention", **_same_ref(row), "detail": detail,
+                      **acting.get((row["repo"], row["ticket_id"]), {})})
     listed = {(row["repo"], row["ticket_id"]) for row in stuck}
     listed |= {(row["repo"], row["ticket_id"]) for row in flags}
     for row in paused:
@@ -1349,7 +1366,8 @@ def _attention(
         detail = row["state"] + (f" ({row['paused_action']})" if row["paused_action"] else "")
         if row.get("waiting_on"):
             detail += f" (waiting on {row['waiting_on']})"
-        items.append({"kind": "paused", **_same_ref(row), "detail": detail})
+        items.append({"kind": "paused", **_same_ref(row), "detail": detail,
+                      **acting.get((row["repo"], row["ticket_id"]), {})})
     for component in health.down if health is not None else ():
         reason = f" ({component.reason})" if component.reason else ""
         items.append({"kind": "down", "repo": "", "ticket_id": "",
@@ -1750,6 +1768,7 @@ def _read_db(
     waiting_on: dict[tuple[str, str], str] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
         approvers = _hold_approvers(connection)
+        wait_facts = max_actions.wait_facts(connection)
         ci_waits = _ci_waits(connection, now) if "ci_waits" in tables else {}
         no_ci_bases = _no_ci_bases(connection) if "no_ci_bases" in tables else {}
         state_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(ticket_state)")}
@@ -1803,6 +1822,20 @@ def _read_db(
             reason = (
                 _clean(row["stuck_reason"], 200) if row["stuck_reason"] is not None else None
             )
+            facts = wait_facts.get(key, {})
+            wait = max_actions.wait_of(
+                str(row["workflow_state"]), stuck,
+                stuck_reason=reason,
+                stuck_comment_id=_comment_id(facts.get("stuck_comment_id")),
+                question_id=_comment_id(facts.get("question_id")),
+                parked_outcome=facts.get("parked"),
+                approve_comment_id=_comment_id(facts.get("approve_comment_id")),
+                stop_comment_id=_comment_id(facts.get("stop_comment_id")),
+            )
+            acting = {
+                "wait": wait.as_dict() if wait else None,
+                "actions": max_actions.applicable(wait),
+            }
             ticket_info[key] = TicketInfo(
                 _enum(row["tracker"], TRACKERS), stuck, state,
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
@@ -1823,6 +1856,7 @@ def _read_db(
                     **({"no_ci": no_ci} if no_ci else {}),
                     **({"external_at": row["external_at"]} if row["external_at"] is not None else {}),
                     **({"linear_state": _clean(row["linear_state"], 64)} if row["linear_state"] else {}),
+                    **acting,
                 }
             )
             ticket_rows.append((tickets[-1], key))

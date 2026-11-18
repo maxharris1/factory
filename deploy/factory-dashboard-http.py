@@ -51,6 +51,23 @@ request file <id>.json into that directory. The orch host applies it
 (`orch settings apply`); this server never touches machines.yml or runs
 anything. Setting the spool without actions is a configuration error, and
 without it /api/settings is 404.
+
+Max's actions on a ticket that waits on him (merge OK, approve or split an
+oversize plan, another round, answer, requeue, resume, close) are on only
+with actions on and DASHBOARD_ACTIONS_AUDIT set: an absolute path to an
+append-only JSONL file (if it exists, a regular file and not a symlink;
+neither it nor its directory group- or world-writable), opened once at
+startup. POST /api/act, from the signed-in approver, checks the ticket row
+in the served status.json still has the state and wait reason the page
+showed and still lists the action, builds the comment on the server, and
+posts it as Max on the row's PR, else its issue. A merge OK re-reads the PR
+head first and posts nothing if it moved. Every request that reaches the
+route with a valid session and CSRF, posted or refused, appends one audit
+line (time, login, ticket, action, expected state, head, result, url; never
+the words, token, cookie or CSRF). A request refused before that (no
+session, bad CSRF, wrong content type or origin) writes none. Setting the
+audit file without actions is a configuration error, and without it
+/api/act is 404.
 """
 
 from __future__ import annotations
@@ -69,10 +86,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 DEFAULT_PORT = 8787
@@ -169,6 +189,7 @@ class ActionsConfig(NamedTuple):
     api_base: str = GITHUB_API
     web_base: str = GITHUB_WEB
     settings_spool: Path | None = None
+    audit: Path | None = None
 
 
 def check_spool(value: str) -> Path:
@@ -187,16 +208,45 @@ def check_spool(value: str) -> Path:
     return Path(value)
 
 
+def check_audit(value: str) -> Path:
+    if not os.path.isabs(value):
+        raise ConfigError("DASHBOARD_ACTIONS_AUDIT must be an absolute path")
+    path = Path(value)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        info = None
+    except OSError:
+        raise ConfigError(f"DASHBOARD_ACTIONS_AUDIT cannot be read: {value}") from None
+    if info is not None:
+        if stat.S_ISLNK(info.st_mode):
+            raise ConfigError("DASHBOARD_ACTIONS_AUDIT must not be a symlink")
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigError(f"DASHBOARD_ACTIONS_AUDIT is not a regular file: {value}")
+        if info.st_mode & 0o022:
+            raise ConfigError("DASHBOARD_ACTIONS_AUDIT must not be group- or world-writable")
+    try:
+        parent = os.stat(path.parent)
+    except OSError:
+        raise ConfigError(f"DASHBOARD_ACTIONS_AUDIT's directory does not exist: {value}") from None
+    if parent.st_mode & 0o022:
+        raise ConfigError(
+            "DASHBOARD_ACTIONS_AUDIT's directory must not be group- or world-writable"
+        )
+    return path
+
+
 def check_actions(
     environ: dict[str, str], own_address: str, process_user: str
 ) -> ActionsConfig | None:
     client_id = environ.get("DASHBOARD_GITHUB_CLIENT_ID", "")
     spool = environ.get("DASHBOARD_SETTINGS_SPOOL", "")
+    audit = environ.get("DASHBOARD_ACTIONS_AUDIT", "")
     if not client_id:
-        if spool:
-            raise ConfigError(
-                "DASHBOARD_SETTINGS_SPOOL needs GitHub actions (DASHBOARD_GITHUB_CLIENT_ID)"
-            )
+        for name, value in (("DASHBOARD_SETTINGS_SPOOL", spool),
+                            ("DASHBOARD_ACTIONS_AUDIT", audit)):
+            if value:
+                raise ConfigError(f"{name} needs GitHub actions (DASHBOARD_GITHUB_CLIENT_ID)")
         return None
     if CLIENT_ID.fullmatch(client_id) is None:
         raise ConfigError("DASHBOARD_GITHUB_CLIENT_ID is not an OAuth App client id")
@@ -226,7 +276,8 @@ def check_actions(
             )
         clients.add(ipaddress.IPv4Address(entry))
     return ActionsConfig(client_id, approver, frozenset(clients),
-                         settings_spool=check_spool(spool) if spool else None)
+                         settings_spool=check_spool(spool) if spool else None,
+                         audit=check_audit(audit) if audit else None)
 
 
 def current_user() -> str:
@@ -585,6 +636,13 @@ def is_bot_login(login: str) -> bool:
     return login.endswith("[bot]") or BOT_USER.fullmatch(login.casefold()) is not None
 
 
+def require_approver(actions: Actions, session: Session) -> None:
+    if session.login.casefold() != actions.config.approver.casefold() or is_bot_login(
+        session.login
+    ):
+        raise ApiError(403, "not-approver")
+
+
 def device_row(status: dict, device: object) -> dict:
     """The status.json `slots.devices[]` row named `device`: only devices the
     dashboard shows can be changed."""
@@ -603,6 +661,133 @@ def applied_ids(status: dict) -> set[str]:
         entry["id"] for entry in (results if isinstance(results, list) else [])
         if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
+
+
+EASTERN = ZoneInfo("America/New_York")
+MAX_WORDS = MAX_COMMENT // 2
+COMMENT_ID = re.compile(r"[0-9]{1,20}")
+ISSUE_NUMBER = re.compile(r"[1-9][0-9]{0,9}")
+AUDIT_FIELDS = ("repo", "ticket_id", "action", "expect_state", "head")
+GO_HEADER = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->"
+ANSWERS_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->"
+CLOSE_HEADER = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->"
+RETRY_HEADER = "<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->"
+
+
+def clock() -> datetime:
+    return datetime.now(EASTERN)
+
+
+def words_block(words: str, at: datetime) -> str:
+    """Max's words, each line quoted and any HTML comment marker escaped, so
+    nothing he types can be a comment's first line or close a header."""
+    at = at.astimezone(EASTERN)
+    stamp = f"{at:%Y-%m-%d} {at.hour % 12 or 12}:{at:%M %p} ET"
+    quoted = []
+    for line in words.strip().splitlines():
+        line = line.rstrip().replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+        quoted.append(f"> {line}" if line else ">")
+    return f"**Max's words** (Max {stamp})\n" + "\n".join(quoted) + "\n"
+
+
+class ActFacts(NamedTuple):
+    repo: str
+    ticket_id: str
+    number: int
+    head: str | None
+    plan_comment_id: str | None
+    words: str
+
+
+def _split_body(facts: ActFacts) -> str:
+    link = (
+        f": {GITHUB_WEB}/{facts.repo}/issues/{facts.number}#issuecomment-{facts.plan_comment_id}"
+        if facts.plan_comment_id
+        else "."
+    )
+    return f"{CLOSE_HEADER}\n\nSplit per the plan's Proposed split{link}\n\n{facts.words}"
+
+
+def _another_round_body(facts: ActFacts) -> str:
+    return (
+        f"{GO_HEADER}\n\n**Ticket**\n{facts.repo}#{facts.ticket_id}\n\n{facts.words}\n"
+        "**Instruction**\nRun one more round, as Max's words above say.\n"
+    )
+
+
+class ActionSpec(NamedTuple):
+    head_bound: bool
+    body: Callable[[ActFacts], str]
+
+
+# Mirrors lib/max_actions.py ACTIONS; tests/test_max_actions.py checks they match.
+ACTIONS: dict[str, ActionSpec] = {
+    "ok": ActionSpec(
+        True, lambda facts: f"<!-- orch:v1 kind=ok head={facts.head} -->\n\n{facts.words}"
+    ),
+    "approve-plan": ActionSpec(False, lambda facts: f"{GO_HEADER}\n\n{facts.words}"),
+    "split": ActionSpec(False, _split_body),
+    "another-round": ActionSpec(False, _another_round_body),
+    "answer": ActionSpec(False, lambda facts: f"{ANSWERS_HEADER}\n\n{facts.words}"),
+    "retry": ActionSpec(False, lambda facts: f"{RETRY_HEADER}\n\n{facts.words}"),
+    "resume": ActionSpec(False, lambda facts: f"{GO_HEADER}\n\n{facts.words}"),
+    "close": ActionSpec(False, lambda facts: f"{CLOSE_HEADER}\n\n{facts.words}"),
+}
+
+
+def ticket_row(status: dict, repo: object, ticket_id: object) -> dict:
+    tickets = status.get("tickets")
+    if isinstance(repo, str) and isinstance(ticket_id, str):
+        for row in tickets if isinstance(tickets, list) else []:
+            if (
+                isinstance(row, dict)
+                and isinstance(row.get("repo"), str)
+                and row["repo"].casefold() == repo.casefold()
+                and row.get("ticket_id") == ticket_id
+            ):
+                return row
+    raise ApiError(404, "not-in-snapshot")
+
+
+def comment_target(row: dict) -> Target | None:
+    """The row's PR, else its GitHub issue. A Linear ticket has only its PR."""
+    repo, pr, source = row["repo"], row.get("pr"), row.get("source")
+    if REPO.fullmatch(repo) is None:
+        return None
+    if isinstance(pr, (str, int)) and not isinstance(pr, bool) and ISSUE_NUMBER.fullmatch(str(pr)):
+        return Target(repo, int(pr), "pull")
+    if isinstance(source, str) and source.startswith("#") and ISSUE_NUMBER.fullmatch(source[1:]):
+        return Target(repo, int(source[1:]), "issue")
+    return None
+
+
+def _audit_value(value: object) -> str | None:
+    return value if isinstance(value, str) and len(value) <= 256 else None
+
+
+class Audit:
+    """The append-only action record. Each line is one os.write on an
+    O_APPEND descriptor, so concurrent request threads never interleave."""
+
+    def __init__(self, path: Path):
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | NOFOLLOW, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise OSError(f"{path} is not a regular file")
+        self.fd = fd
+
+    def append(self, entry: dict) -> None:
+        line = (json.dumps(entry, separators=(",", ":")) + "\n").encode()
+        try:
+            os.write(self.fd, line)
+        except OSError:
+            # The reply must still reach the page: the comment may already be posted.
+            sys.stderr.write("factory-dashboard-http: audit write failed\n")
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
 
 
 class Spool:
@@ -796,12 +981,60 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             raise ApiError(409, "head-changed", head=current)
         return 201, {"url": actions.post_as_approver(session, target, f"/ok {seen}")}, []
 
+    def _act(self, actions: Actions, session: Session | None, payload: dict):
+        assert session is not None
+        at = clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry = {"at": at, "login": session.login,
+                 **{key: _audit_value(payload.get(key)) for key in AUDIT_FIELDS}}
+        audit: Audit = self.server.audit  # type: ignore[attr-defined]
+        try:
+            url = self._post_act(actions, session, payload)
+        except ApiError as exc:
+            audit.append({**entry, "result": exc.body["error"], "url": None})
+            raise
+        audit.append({**entry, "result": "posted", "url": url})
+        return 201, {"url": url}, []
+
+    def _post_act(self, actions: Actions, session: Session, payload: dict) -> str:
+        require_approver(actions, session)
+        name = payload.get("action")
+        spec = ACTIONS.get(name) if isinstance(name, str) else None
+        if spec is None:
+            raise ApiError(400, "bad-action")
+        words = payload.get("words")
+        if not isinstance(words, str) or not words.strip() or len(words) > MAX_WORDS:
+            raise ApiError(400, "bad-words")
+        head = payload.get("head") if spec.head_bound else None
+        if spec.head_bound and (not isinstance(head, str) or SHA.fullmatch(head) is None):
+            raise ApiError(400, "bad-head")
+        status = read_status(self.server.root_fd)  # type: ignore[attr-defined]
+        row = ticket_row(status, payload.get("repo"), payload.get("ticket_id"))
+        wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+        if row.get("state") != payload.get("expect_state") or wait.get("why") != payload.get(
+            "expect_why"
+        ):
+            raise ApiError(409, "changed")
+        listed = row.get("actions")
+        if not isinstance(listed, list) or name not in listed:
+            raise ApiError(409, "not-applicable")
+        target = comment_target(row)
+        if target is None or (spec.head_bound and target.kind != "pull"):
+            raise ApiError(409, "no-target")
+        if spec.head_bound:
+            current = actions.head(session, target)
+            if current != head:
+                raise ApiError(409, "head-changed", head=current)
+        plan = wait.get("comment_id")
+        facts = ActFacts(
+            target.repo, row["ticket_id"], target.number, head,
+            plan if isinstance(plan, str) and COMMENT_ID.fullmatch(plan) else None,
+            words_block(words, clock()),
+        )
+        return actions.post_as_approver(session, target, spec.body(facts))
+
     def _settings(self, actions: Actions, session: Session | None, payload: dict):
         assert session is not None
-        if session.login.casefold() != actions.config.approver.casefold() or is_bot_login(
-            session.login
-        ):
-            raise ApiError(403, "not-approver")
+        require_approver(actions, session)
         field = payload.get("field")
         valid = FIELDS.get(field) if isinstance(field, str) else None
         if valid is None:
@@ -865,6 +1098,7 @@ POST_ROUTES = {
     "/api/ok": (SnapshotHandler._ok, True),
 }
 SETTINGS_ROUTES = {"/api/settings": (SnapshotHandler._settings, True)}
+ACT_ROUTES = {"/api/act": (SnapshotHandler._act, True)}
 
 
 class SnapshotServer(ThreadingHTTPServer):
@@ -874,16 +1108,24 @@ class SnapshotServer(ThreadingHTTPServer):
         self.root = root
         self.actions = Actions(actions) if actions is not None else None
         self.spool: Spool | None = None
+        self.audit: Audit | None = None
         self.root_fd = open_root(root)
         try:
             if actions is not None and actions.settings_spool is not None:
                 self.spool = Spool(actions.settings_spool)
-            self.post_routes = {**POST_ROUTES, **(SETTINGS_ROUTES if self.spool else {})}
+            if actions is not None and actions.audit is not None:
+                self.audit = Audit(actions.audit)
+            self.post_routes = {
+                **POST_ROUTES,
+                **(SETTINGS_ROUTES if self.spool else {}),
+                **(ACT_ROUTES if self.audit else {}),
+            }
             super().__init__(address, SnapshotHandler)
         except BaseException:
             os.close(self.root_fd)
-            if self.spool is not None:
-                self.spool.close()
+            for held in (self.spool, self.audit):
+                if held is not None:
+                    held.close()
             raise
 
     def server_close(self) -> None:
@@ -891,8 +1133,9 @@ class SnapshotServer(ThreadingHTTPServer):
         if self.root_fd >= 0:
             os.close(self.root_fd)
             self.root_fd = -1
-        if self.spool is not None:
-            self.spool.close()
+        for held in (self.spool, self.audit):
+            if held is not None:
+                held.close()
 
 
 def make_server(
@@ -915,6 +1158,8 @@ def main(argv: list[str]) -> int:
         suffix = f" with GitHub actions for {actions.approver}" if actions else ""
         if actions and actions.settings_spool:
             suffix += f" and settings requests to {actions.settings_spool}"
+        if actions and actions.audit:
+            suffix += f" and Max's actions audited to {actions.audit}"
         print(f"ok: would serve {root} on {host}:{port}{suffix}")
         return 0
     server = make_server(host, port, root, actions)
