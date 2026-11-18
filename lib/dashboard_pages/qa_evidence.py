@@ -82,7 +82,8 @@ def _read_lane(folder: Path, n: int) -> Lane:
         paths = [entry["path"] for entry in manifest["files"]]
     except (OSError, ValueError, RecursionError, TypeError, KeyError):
         return Lane(n, None)
-    if not all(isinstance(text, str) for text in (*paths, *(text for pair in scenarios for text in pair))):
+    texts = [text for pair in scenarios for text in pair]
+    if not all(isinstance(text, str) for text in (*paths, *texts)) or not all(map(_utf8, texts)):
         return Lane(n, None)
     evidence = [_evidence(folder, path) for path in paths]
     return Lane(n, tuple(
@@ -93,13 +94,21 @@ def _read_lane(folder: Path, n: int) -> Lane:
 
 def _evidence(lane_folder: Path, path: str) -> Evidence:
     parts = path.split("/")
-    if "\x00" in path or any(not part or part.startswith(".") for part in parts):
-        return Evidence(path, "missing")
+    if not _utf8(path) or "\x00" in path or any(not part or part.startswith(".") for part in parts):
+        return Evidence(path.encode("utf-8", "backslashreplace").decode(), "missing")
     try:
         on_disk = stat.S_ISREG(os.lstat(lane_folder.joinpath(*parts)).st_mode)
     except OSError:
         on_disk = False
     return Evidence(path, _KINDS.get(os.path.splitext(path)[1].lower(), "file") if on_disk else "missing")
+
+
+def _utf8(text: str) -> bool:
+    try:
+        text.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _lane_html(lane: Lane, run_id: str) -> str:
