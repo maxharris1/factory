@@ -67,7 +67,6 @@ class JobRow:
 
 
 def keep_reason(job: JobRow, ticket_active: bool, cutoff: float) -> str | None:
-    """Why the job's checkout stays, or None when it may be removed."""
     if job.state not in FINISHED:
         return LIVE
     if job.finished_at is None or job.finished_at >= cutoff:
@@ -77,8 +76,7 @@ def keep_reason(job: JobRow, ticket_active: bool, cutoff: float) -> str | None:
     return None
 
 
-def kept_by_host(jobs: Iterable[JobRow], cutoff: float) -> dict[str, str | None]:
-    """Every job id with its keep reason (None: eligible for removal)."""
+def keep_reasons(jobs: Iterable[JobRow], cutoff: float) -> dict[str, str | None]:
     rows = list(jobs)
     active = {(row.repo.lower(), row.ticket_id) for row in rows if row.state in ACTIVE}
     return {
@@ -149,7 +147,6 @@ class Report:
 
 
 def disk_bytes(paths: Iterable[Path]) -> int:
-    """Bytes on disk of paths and all under them, as du counts: hard links once, symlinks not followed."""
     seen: set[tuple[int, int]] = set()
     total = 0
 
@@ -173,8 +170,7 @@ def disk_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
-def holders(jobs: Path) -> set[str] | None:
-    """Job ids whose folder holds a process's cwd or open file; None when no scan works."""
+def jobs_held_open(jobs: Path) -> set[str] | None:
     prefix = f"{jobs}/"
     proc = Path("/proc")
     if (proc / "self" / "cwd").exists():
@@ -227,7 +223,7 @@ def _device_reason(folder: Path, cutoff: float, held: set[str] | None) -> str | 
     return None
 
 
-def _checkout(folder: Path) -> list[Path]:
+def _removable(folder: Path) -> list[Path]:
     return [entry for entry in folder.iterdir() if not entry.name.startswith(WORKER_RECORD)]
 
 
@@ -247,8 +243,7 @@ def _empty(entries: Iterable[Path]) -> str | None:
     return None
 
 
-def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = holders) -> Report:
-    """Empty every finished job folder under root/jobs the guards allow."""
+def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = jobs_held_open) -> Report:
     jobs = root / "jobs"
     folders = sorted(
         path for path in (jobs.iterdir() if jobs.is_dir() else ())
@@ -265,7 +260,7 @@ def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | Non
         if reason is not None:
             kept[folder.name] = reason
             continue
-        entries = _checkout(folder)
+        entries = _removable(folder)
         size = disk_bytes(entries)
         failed = None if plan.dry_run else _empty(entries)
         if failed is None:
@@ -275,8 +270,7 @@ def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | Non
     return Report(removed, kept, plan.dry_run)
 
 
-def relabel(report: Report, reasons: Mapping[str, str | None]) -> Report:
-    """Name why each folder the host did not list stays."""
+def label_unnamed(report: Report, reasons: Mapping[str, str | None]) -> Report:
     kept = {
         job_id: (reasons.get(job_id) or UNKNOWN) if reason == NOT_NAMED else reason
         for job_id, reason in report.kept.items()
@@ -308,7 +302,6 @@ def device_script(checkout: str, workdir_root: str) -> str:
 
 
 def clean_target(transport: CaptureTransport, target: Target, plan: Plan) -> Report | str:
-    """One target's report, or a one-line reason it failed."""
     try:
         result = transport.call(
             ssh_argv(target.remote, device_script(target.checkout, target.remote.workdir_root)),
@@ -331,9 +324,8 @@ def clean_target(transport: CaptureTransport, target: Target, plan: Plan) -> Rep
 
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,
         dry_run: bool) -> list[tuple[Target, Report | str]]:
-    """Clean every device target; each one's report or its failure."""
     cutoff = now - grace_hours * 3600
-    reasons = kept_by_host(read_jobs(db), cutoff)
+    reasons = keep_reasons(read_jobs(db), cutoff)
     plan = Plan(frozenset(i for i, r in reasons.items() if r is None), cutoff, dry_run)
     found = {(t.device, t.remote.user, t.remote.workdir_root): t for t in targets(machines)}
     work = list(found.values())
@@ -342,7 +334,7 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
     with ThreadPoolExecutor(max_workers=len(work)) as pool:
         outcomes = pool.map(lambda t: clean_target(transport, t, plan), work)
         return [
-            (target, outcome if isinstance(outcome, str) else relabel(outcome, reasons))
+            (target, outcome if isinstance(outcome, str) else label_unnamed(outcome, reasons))
             for target, outcome in zip(work, outcomes)
         ]
 

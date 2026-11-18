@@ -28,7 +28,7 @@ OLD = NOW - 3 * 86400
 HOUR = 3600.0
 
 
-class LocalTransport:
+class ShellTransport:
     def __init__(self, home: Path):
         self.home = home
         self.offline: set[str] = set()
@@ -46,9 +46,7 @@ class LocalTransport:
 
 
 class InProcessTransport:
-    """Runs the device step in this process: the guards, without a python start per call."""
-
-    def __init__(self, root: Path, scan=job_cleanup.holders):
+    def __init__(self, root: Path, scan=job_cleanup.jobs_held_open):
         self.root = root
         self.scan = scan
 
@@ -79,7 +77,6 @@ def work_root(tmp_path: Path, name: str = "pc") -> Path:
 
 
 def database(tmp_path: Path, rows: list[tuple[str, str, str, float | None]]) -> Path:
-    """rows: (job id, ticket, state, finished_at), all in one repo."""
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=lambda: NOW)
     with SQLiteJobQueue(db, clock=lambda: NOW).connect() as connection:
@@ -157,7 +154,7 @@ def test_finished_checkout_goes_and_its_logs_and_records_stay(tmp_path: Path) ->
     folder = job_folder(root, "done1")
     before = kept_files(root, "done1")
     db = database(tmp_path, [("done1", "t1", "done", OLD)])
-    outcomes = job_cleanup.run(db, machines(tmp_path, "pc"), LocalTransport(tmp_path),
+    outcomes = job_cleanup.run(db, machines(tmp_path, "pc"), ShellTransport(tmp_path),
                                now=NOW, grace_hours=6, dry_run=False)
 
     [(_, report)] = outcomes
@@ -176,7 +173,7 @@ def test_cli_backlog_pass_prints_one_line_per_target(tmp_path: Path, capsys, mon
     db = database(tmp_path, [("done1", "t1", "done", OLD)])
     monkeypatch.setattr(job_cleanup.health, "load_machines", lambda _: machines(tmp_path, "pc"))
 
-    code, out = cleanup(["run", "--backlog", "--db", str(db)], LocalTransport(tmp_path), capsys)
+    code, out = cleanup(["run", "--backlog", "--db", str(db)], ShellTransport(tmp_path), capsys)
 
     assert code == 0
     assert out.startswith(f"pc claude-bot {root}: removed 1 checkouts (")
@@ -291,7 +288,7 @@ def test_backlog_sweep_of_mixed_folders_removes_only_finished_checkouts(
     snapshot = sorted(str(path.relative_to(jobs)) for path in jobs.rglob("*"))
     sizes = {job_id: du(jobs / job_id) for job_id in finished}
     config = machines(tmp_path, "pc")
-    transport = LocalTransport(tmp_path)
+    transport = ShellTransport(tmp_path)
 
     [(_, dry)] = job_cleanup.run(db, config, transport, now=NOW, grace_hours=6, dry_run=True)
     assert sorted(str(path.relative_to(jobs)) for path in jobs.rglob("*")) == snapshot
@@ -322,7 +319,7 @@ def test_a_failing_target_does_not_stop_the_others(tmp_path: Path, capsys, monke
     db = database(tmp_path, [("done1", "t1", "done", OLD)])
     monkeypatch.setattr(job_cleanup.health, "load_machines",
                         lambda _: machines(tmp_path, "pc", "mac"))
-    transport = LocalTransport(tmp_path)
+    transport = ShellTransport(tmp_path)
     transport.offline.add("pc-claude-bot")
 
     code, out = cleanup(["run", "--backlog", "--db", str(db)], transport, capsys)
