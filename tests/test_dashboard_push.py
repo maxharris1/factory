@@ -15,6 +15,8 @@ from lib.dashboard_push import (
 )
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
+from lib.qa_evidence import EvidenceRefused, RunFile, run_dir, walk_run, write_run_tar
+from tests.test_qa_evidence_recycle import REPO, TICKET, _lane, root  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "pc-wsl-bots.tail68624b.ts.net"
@@ -812,3 +814,23 @@ def test_cli_push_refuses_invalid_orch_yml(tmp_path: Path) -> None:
     result = run_orch("dashboard", "push", "--orch", str(orch), "--db", str(tmp_path / "x.db"))
     assert result.returncode == 1
     assert "dashboard.push.host is required for ssh" in result.stderr
+
+
+# --- QA evidence (#910) ---------------------------------------------------------
+
+
+LANE_FILES = ["s-1/after-screenshot.png", "s-1/console.log"]
+
+
+def test_a_file_that_changed_after_the_walk_is_refused(root: Path, tmp_path: Path) -> None:
+    folder = run_dir(root, REPO, TICKET, "run-1")
+    _lane(folder, 1, {"s-1": "pass"}, LANE_FILES)
+    parts = folder.relative_to(root).parts
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        first, *rest = walk_run(root_fd, parts)
+        grown = RunFile(first.path, first.size + 1, first.mtime_ns)
+        with (tmp_path / "out.tar").open("wb") as out, pytest.raises(EvidenceRefused, match="changed since"):
+            write_run_tar(out, root_fd, parts, (grown, *rest), b"<p>")
+    finally:
+        os.close(root_fd)
