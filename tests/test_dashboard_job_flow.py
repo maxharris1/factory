@@ -43,6 +43,7 @@ NAV = [
     ("activity.html", "Activity"),
     ("efficiency.html", "Efficiency"),
     ("health.html", "System"),  # #92, #139
+    ("settings.html", "Settings"),
 ]
 # Ticket 40 (tests/test_dashboard_layout.py _history): built, reviewed,
 # revised once, now in its second review.
