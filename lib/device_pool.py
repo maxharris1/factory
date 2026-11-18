@@ -10,12 +10,13 @@ draining, and lists that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness. Inside that transaction a pool given `machines_path` reads
-machines.yml as it is now, and the file can only narrow placement live: it
-disables a device, drains it or lowers its slot_max, so a settings change
-written under the same lock (lib/settings_apply.py) stops the next claim
-even in a process that loaded the file earlier (#777). The pool keeps the
-strictest setting it has seen for each device until the process restarts,
-so enabling a device, clearing drain or raising slot_max waits for a restart.
+the shared settings row (lib/live_settings.py, #852) with machines.yml as
+it is now met into it, and places by the row's enabled, drain and slot_max,
+not by the config the process loaded. A settings change written under the
+same lock (lib/settings_apply.py) that disables, drains or lowers slot_max
+stops the next claim in every process (#777). An enable, an undrain or a
+higher slot_max reaches placement once the poller's DeviceMonitor adopts the
+file, within one poll, with no restart.
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -61,7 +62,6 @@ This module starts nothing and contacts no device.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
 import json
@@ -69,13 +69,12 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib.config_overlay import overlay_path
+from lib import live_settings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.device_sync import blocked as sync_blocked
 from lib.machines_yml import (
     Device,
     MachinesConfig,
-    load_machines_yml,
     orch_host,
     shared_tailscale_names,
 )
@@ -216,36 +215,6 @@ def free_slots(
     return total
 
 
-FileKey = tuple[int, int, int] | None
-
-
-def _file_key(path: Path) -> FileKey:
-    try:
-        info = os.stat(path)
-    except OSError:
-        return None
-    return info.st_ino, info.st_mtime_ns, info.st_size
-
-
-Settings = tuple[bool, bool, int | None]
-
-
-def _stricter(seen: Settings | None, device: Device) -> Settings:
-    if seen is None:
-        return device.enabled, device.drain, device.slot_max
-    limits = [s for s in (seen[2], device.slot_max) if s is not None]
-    return seen[0] and device.enabled, seen[1] or device.drain, min(limits, default=None)
-
-
-def _narrowed(device: Device, enabled: bool, drain: bool, slot_max: int | None) -> Device:
-    if device.slot_max is not None and slot_max is not None:
-        slot_max = min(device.slot_max, slot_max)
-    else:
-        slot_max = device.slot_max
-    return replace(device, enabled=device.enabled and enabled,
-                   drain=device.drain or drain, slot_max=slot_max)
-
-
 class DevicePool:
     def __init__(
         self,
@@ -263,8 +232,6 @@ class DevicePool:
         self.queue = queue
         self.config = config
         self.machines_path = machines_path
-        self._file_key: tuple[FileKey, FileKey] | None = None
-        self._strictest: dict[str, Settings] = {}
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -317,24 +284,11 @@ class DevicePool:
             ).fetchone()
         return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
 
-    def _narrowed_by_file(self) -> MachinesConfig:
+    def _placement_config(self, connection: sqlite3.Connection) -> MachinesConfig:
         if self.machines_path is None:
             return self.config
-        key = (_file_key(self.machines_path), _file_key(overlay_path(self.machines_path)))
-        if self._file_key != key:
-            self._file_key = key
-            try:
-                current, findings = load_machines_yml(self.machines_path)
-            except (OSError, ValueError):
-                current, findings = None, []
-            if current is not None and not any(f.severity == "error" for f in findings):
-                for d in current.devices:
-                    self._strictest[d.name] = _stricter(self._strictest.get(d.name), d)
-        settings = self._strictest
-        return replace(self.config, devices=tuple(
-            _narrowed(d, *settings[d.name]) if d.name in settings else d
-            for d in self.config.devices
-        ))
+        live = live_settings.narrowed(connection, self.machines_path, self.config)
+        return self.config if live is None else live.placement_config(self.config)
 
     def claim(
         self,
@@ -355,7 +309,7 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            config = self._narrowed_by_file()
+            config = self._placement_config(connection)
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import pwd
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib import heal, settings_apply
+from lib import heal, live_settings, settings_apply
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
@@ -76,7 +77,8 @@ class Runner:
 def holding(running: dict[str, int]):
     @contextmanager
     def lock():
-        yield lambda config: running
+        yield settings_apply.Held(running=lambda config: running,
+                                  commit_version=lambda machines, loaded: None)
 
     return lock
 
@@ -149,7 +151,8 @@ def test_the_approvers_request_is_applied_backed_up_audited_and_restarted(tmp_pa
     assert entry.result == "pending", entry
     (line,) = box.audit()
     assert set(line) == {"id", "actor", "requested_at", "applied_at", "device", "field",
-                         "previous", "new", "result", "error", "backup", "restarted", "pending"}
+                         "previous", "new", "result", "error", "backup", "restarted", "pending",
+                             "version"}
     assert {k: line[k] for k in ("id", "actor", "requested_at", "applied_at", "device",
                                  "field", "previous", "new", "result", "error")} == {
         "id": rid, "actor": "maxharris1", "requested_at": "2026-11-17T10:00:00Z",
@@ -634,12 +637,12 @@ def test_a_claim_racing_a_disable_never_lands_on_the_disabled_device(tmp_path: P
     def racing():
         with lock() as held:
             def held_then_claim(config):
-                counts = held(config)
+                counts = held.running(config)
                 claim.start()
                 claim.join(timeout=0.5)
                 return counts
 
-            yield held_then_claim
+            yield dataclasses.replace(held, running=held_then_claim)
 
     try:
         entry = placed.applier(racing).apply(_request("enabled", True, False))
@@ -735,7 +738,22 @@ def loaded(machines: Path):
     return config
 
 
-def test_an_enable_never_reaches_a_waiter_or_monitor_holding_the_old_file(
+def poller_adopts(queue: SQLiteJobQueue, machines: Path) -> None:
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        live_settings.adopted(connection, machines)
+        connection.commit()
+
+
+def applied(queue: SQLiteJobQueue, version: int | None) -> bool:
+    assert version is not None, "the applier records the row's version"
+    with queue.connect() as connection:
+        live = live_settings.peek(connection)
+    assert live is not None
+    return live.is_applied(version)
+
+
+def test_an_enable_reaches_a_waiter_only_after_the_poller_adopts_it(
     tmp_path: Path,
 ) -> None:
     machines = tmp_path / "machines.yml"
@@ -769,15 +787,20 @@ def test_an_enable_never_reaches_a_waiter_or_monitor_holding_the_old_file(
         "pc", "enabled", False, True))
 
     assert entry.result == "applied", entry
-    assert claims == [None], "the waiter still on the old file places nothing on pc"
+    assert claims == [None], "a waiter places nothing on pc while the old poller cycle runs"
     assert remote.state(queue, job) == "queued"
     assert "device-lost" not in [e for e, _ in remote.job_events(queue, job)]
     assert transport.signals == [], "no worker was signalled"
-    claimed = DevicePool(queue, loaded(machines), machines_path=machines).claim("claude")
-    assert claimed is not None and claimed[1].device == "pc", "a restarted waiter places on pc"
+    assert not applied(queue, entry.version), "the enable shows pending until the poller adopts it"
+    monitor.reload()
+    assert applied(queue, entry.version), "the poller's next cycle adopted the enable"
+    claimed = waiter_pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc", (
+        "the same unrestarted waiter places on pc after the adopt"
+    )
 
 
-def test_an_unrestarted_waiter_places_nothing_after_a_lowered_slot_max_and_an_enable(
+def test_an_unrestarted_waiter_places_up_to_a_lowered_slot_max_once_the_poller_adopts_an_enable(
     tmp_path: Path,
 ) -> None:
     machines = tmp_path / "machines.yml"
@@ -802,13 +825,13 @@ devices:
             "box", field, expect, value))
         assert (entry.result, entry.pending) == ("pending", ("waiter-claude-bot",)), entry
 
-    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0
-    assert stale.used().get("box", 0) <= loaded(machines).device("box").slot_max
-    fresh = DevicePool(queue, loaded(machines), machines_path=machines)
-    assert sum(fresh.claim("claude") is not None for _ in range(7)) == 1
+    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0, "before the adopt"
+    poller_adopts(queue, machines)
+    assert sum(stale.claim("claude") is not None for _ in range(7)) == 1, "after the adopt"
+    assert stale.used() == {"box": loaded(machines).device("box").slot_max}
 
 
-def test_an_unrestarted_waiter_keeps_a_disable_it_saw_through_a_later_enable(
+def test_an_enable_after_a_disable_reaches_an_unrestarted_waiter_only_through_the_poller(
     tmp_path: Path,
 ) -> None:
     machines = tmp_path / "machines.yml"
@@ -841,15 +864,18 @@ def test_an_unrestarted_waiter_keeps_a_disable_it_saw_through_a_later_enable(
     assert waiter.claim("claude") is None, "the waiter saw pc disabled"
     claims = []
 
+    def attach() -> None:
+        waiter.attach_runner(job, owner="claude", pid=os.getpid(), start=None,
+                             alive=lambda pid, start: pid is not None)
+        waiter.attach_worker(job, owner="claude", remote=True,
+                             tag="0123456789abcdef0123456789abcdef")
+        monitor.reconcile(100.0, 900.0, dispatcher._device_lost)
+
     def poller_still_finishing_its_disabled_cycle(argv, environ, log):
         claimed = waiter.claim("claude")
         claims.append(None if claimed is None else claimed[1].device)
         if claimed is not None:
-            waiter.attach_runner(job, owner="claude", pid=os.getpid(), start=None,
-                                 alive=lambda pid, start: pid is not None)
-            waiter.attach_worker(job, owner="claude", remote=True,
-                                 tag="0123456789abcdef0123456789abcdef")
-            monitor.reconcile(100.0, 900.0, dispatcher._device_lost)
+            attach()
         return 0
 
     enable = applier(poller_still_finishing_its_disabled_cycle).apply(
@@ -857,15 +883,22 @@ def test_an_unrestarted_waiter_keeps_a_disable_it_saw_through_a_later_enable(
                                        "2026-11-17T10:00:00Z", "pc", "enabled", False, True))
 
     assert (enable.result, enable.pending) == ("pending", ("waiter-claude-bot",)), enable
-    assert claims == [None], "the unrestarted waiter keeps pc disabled"
+    assert claims == [None], "pc stays disabled while the old poller cycle runs"
     assert remote.state(queue, job) == "queued"
     assert remote.job_events(queue, job) == [], "never lost"
     assert transport.signals == [], "no worker was signalled"
-    restarted = DevicePool(queue, loaded(machines), machines_path=machines).claim("claude")
-    assert restarted is not None and restarted[1].device == "pc", "a restarted waiter places on pc"
+    monitor.reload()
+    claimed = waiter.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc", (
+        "the same unrestarted waiter places on pc once the poller adopts the enable"
+    )
+    attach()
+    assert remote.state(queue, job) == "running", "the poller holds pc enabled too"
+    assert "device-lost" not in [e for e, _ in remote.job_events(queue, job)]
+    assert transport.signals == [], "no worker was signalled"
 
 
-def test_an_unrestarted_waiter_never_places_past_the_lowest_slot_max_it_saw(
+def test_an_unrestarted_waiter_places_up_to_the_slot_max_on_disk_only_after_each_adopt(
     tmp_path: Path,
 ) -> None:
     machines = tmp_path / "machines.yml"
@@ -888,29 +921,51 @@ devices:
             "box", field, expect, value))
         assert (entry.result, entry.pending) == ("pending", ("poller", "waiter-claude-bot"))
 
+    def placed() -> int:
+        return sum(stale.claim("claude") is not None for _ in range(7))
+
     apply("slot_max", 6, 1)
     apply("enabled", True, False)
+    poller_adopts(queue, machines)
     for n in range(7):
         remote.enqueue(queue, "claude", str(n), timeout=5400)
-    assert stale.claim("claude") is None
+    assert stale.claim("claude") is None, "box is disabled"
     apply("enabled", False, True)
-    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0
+    assert placed() == 0, "the enable waits for the poller's adopt"
+    poller_adopts(queue, machines)
+    assert placed() == 1, "slot_max 1 on disk caps the enabled box"
     apply("slot_max", 1, 6)
-    assert sum(stale.claim("claude") is not None for _ in range(7)) == 0
-    assert stale.used().get("box", 0) == 0
-    fresh = DevicePool(queue, loaded(machines), machines_path=machines)
-    assert sum(fresh.claim("claude") is not None for _ in range(7)) == 6
+    assert placed() == 0, "the higher slot_max waits for the poller's adopt"
+    poller_adopts(queue, machines)
+    assert placed() == 5
+    assert stale.used() == {"box": 6} == {"box": loaded(machines).device("box").slot_max}
 
 
-def test_an_invalid_machines_yml_does_not_widen_an_unrestarted_waiter(tmp_path: Path) -> None:
+def test_an_invalid_machines_yml_widens_nothing_until_the_poller_adopts_a_valid_one(
+    tmp_path: Path,
+) -> None:
     machines = tmp_path / "machines.yml"
     machines.write_text(ENABLE_PC.replace("enabled: false", "enabled: true"), encoding="utf-8")
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
     waiter = DevicePool(queue, loaded(machines), machines_path=machines)
+    monitor = DeviceMonitor(DevicePool(queue, loaded(machines), machines_path=machines),
+                            loaded(machines), SignalTransport(), machines_path=machines,
+                            alive=lambda pid, start: pid is not None)
     remote.enqueue(queue, "claude", "1", timeout=5400)
     machines.write_text(ENABLE_PC, encoding="utf-8")
     assert waiter.claim("claude") is None, "the waiter saw pc disabled"
 
-    machines.write_text(ENABLE_PC.replace("slot_max: 3", "slot_max: 0"), encoding="utf-8")
+    invalid = ENABLE_PC.replace("enabled: false", "enabled: true").replace(
+        "slot_max: 3", "slot_max: 0")
+    machines.write_text(invalid, encoding="utf-8")
+    os.utime(machines, ns=(10**18, 10**18))
 
     assert waiter.claim("claude") is None, "an invalid file keeps pc disabled"
+    with pytest.raises(ValueError):
+        monitor.reload()
+    assert waiter.claim("claude") is None, "the poller cannot adopt an invalid file"
+    machines.write_text(ENABLE_PC.replace("enabled: false", "enabled: true"), encoding="utf-8")
+    assert waiter.claim("claude") is None, "a valid enable still waits for the poller"
+    monitor.reload()
+    claimed = waiter.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc"

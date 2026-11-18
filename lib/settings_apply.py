@@ -24,9 +24,14 @@ not seen:
   devices stay byte-for-byte; both texts are parsed with load_machines_yml
   and must differ in exactly that one field.
 * machines.yml is copied to `machines.yml.bak-settings-<UTC stamp>` beside
-  it, then replaced atomically. The poller and then each waiter this account
-  owns and has not held stopped are restarted through their service scripts
-  (lib/heal.py service_argv) with heal's scrubbed environment, after the lock
+  it, then replaced atomically, and still under the lock the new file is
+  met into the shared settings row (lib/live_settings.py, #852): a
+  narrowing reaches every claim at once, a widening once the poller adopts
+  the file. The entry records the row's `written` then as its `version`, and
+  the dashboard shows the change pending until the poller has adopted it.
+  The poller and then each waiter this account owns and has not held
+  stopped are restarted through their service scripts (lib/heal.py
+  service_argv) with heal's scrubbed environment, after the lock
   is released; services another account owns are listed as pending, and the
   result is then `pending`, not `applied`. A failed restart restores the
   backup under the same lock (not when that would disable a device now
@@ -59,7 +64,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
-from lib import dashboard_push, heal
+from lib import dashboard_push, heal, live_settings
 from lib.config_overlay import overlay_path, read_overlay
 from lib.dashboard_config import SettingsConfig, is_bot_login
 from lib.device_pool import slots_in_use
@@ -148,6 +153,7 @@ class AuditEntry:
     backup: str | None = None
     restarted: tuple[str, ...] = ()
     pending: tuple[str, ...] = ()
+    version: int | None = None
 
     def line(self) -> str:
         data = asdict(self)
@@ -512,20 +518,36 @@ def services(config_dir: Path, state_dir: Path) -> tuple[tuple[str, ...], tuple[
     return restart, pending
 
 
-Held = Callable[[MachinesConfig], Mapping[str, int]]
+@dataclass(frozen=True)
+class Held:
+    running: Callable[[MachinesConfig], Mapping[str, int]]
+    commit_version: Callable[[Path, MachinesConfig], int | None]
+
+
 ClaimLock = Callable[[], AbstractContextManager[Held]]
+NO_DATABASE = Held(running=lambda config: {}, commit_version=lambda machines, loaded: None)
 
 
 def claim_lock(db: Path) -> ClaimLock:
     @contextmanager
     def hold() -> Iterator[Held]:
         if not db.is_file():
-            yield lambda config: {}
+            yield NO_DATABASE
             return
         connection = sqlite3.connect(db, timeout=30, isolation_level=None)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            yield lambda config: slots_in_use(connection, config)
+
+            def commit_version(machines: Path, loaded: MachinesConfig) -> int | None:
+                try:
+                    live = live_settings.narrowed(connection, machines, loaded)
+                    connection.execute("COMMIT")
+                except sqlite3.Error:
+                    return None
+                return None if live is None else live.written
+
+            yield Held(running=lambda config: slots_in_use(connection, config),
+                       commit_version=commit_version)
         finally:
             connection.close()
 
@@ -562,15 +584,16 @@ class Applier:
     def apply(self, request: SettingsRequest) -> AuditEntry:
         try:
             with self.claims() as held:
-                old_bytes, new_text, previous = self._plan(request, held)
+                old, old_bytes, new_text, previous = self._plan(request, held)
                 mode = stat.S_IMODE(os.stat(self.machines).st_mode)
                 backup = self._backup(old_bytes, mode)
                 _replace(self.machines, new_text.encode("utf-8"), mode)
+                version = held.commit_version(self.machines, old)
         except Refused as refusal:
             return self._entry(request, REFUSED, refusal.previous, refusal.error)
         except sqlite3.Error:
             return self._entry(request, REFUSED, None, "cannot read running jobs")
-        return self._restart_all(request, old_bytes, mode, backup, previous)
+        return self._restart_all(request, old_bytes, mode, backup, previous, version)
 
     def _entry(self, request: SettingsRequest, result: str, previous: object,
                error: str | None = None, **extra: object) -> AuditEntry:
@@ -581,7 +604,8 @@ class Applier:
             result=result, error=error, **extra,
         )
 
-    def _plan(self, request: SettingsRequest, held: Held) -> tuple[bytes, str, object]:
+    def _plan(self, request: SettingsRequest,
+              held: Held) -> tuple[MachinesConfig, bytes, str, object]:
         if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
             raise Refused("not-approver")
         old_bytes = self.machines.read_bytes()
@@ -605,7 +629,7 @@ class Applier:
             raise Refused("no-change", previous)
         if request.field == "enabled" and request.value is False:
             try:
-                running = held(old).get(request.device, 0)
+                running = held.running(old).get(request.device, 0)
             except sqlite3.Error:
                 raise Refused("cannot read running jobs", previous) from None
             if running:
@@ -621,7 +645,7 @@ class Applier:
             raise Refused(f"invalid after the edit: {error}"[:200], previous)
         if _changes(old, new) != [(request.device, request.field, request.value)]:
             raise Refused("the edit changed more than that field", previous)
-        return old_bytes, new_text, previous
+        return old, old_bytes, new_text, previous
 
     def _parse(self, text: str):
         with tempfile.TemporaryDirectory() as tmp:
@@ -633,11 +657,12 @@ class Applier:
             return load_machines_yml(probe)
 
     def _restart_all(self, request: SettingsRequest, old_bytes: bytes, mode: int,
-                     backup: Path, previous: object) -> AuditEntry:
+                     backup: Path, previous: object, version: int | None) -> AuditEntry:
         restarted, failure = self._restart(stop_on_failure=True)
         if failure is None:
             return self._entry(request, PENDING if self.pending else APPLIED, previous,
-                               backup=backup.name, restarted=restarted, pending=self.pending)
+                               backup=backup.name, restarted=restarted, pending=self.pending,
+                               version=version)
         kept = self._restore(request, old_bytes, mode)
         again, refailure = self._restart(stop_on_failure=False)
         error = (f"{failure}; " + (kept or f"restored {backup.name}")
@@ -652,7 +677,7 @@ class Applier:
             with self.claims() as held:
                 if request.field == "enabled" and request.value is True:
                     now, _ = load_machines_yml(self.machines)
-                    running = 0 if now is None else held(now).get(request.device, 0)
+                    running = 0 if now is None else held.running(now).get(request.device, 0)
                     if running:
                         return f"not restored: {request.device} holds {running} running job(s)"
                 _replace(self.machines, old_bytes, mode)

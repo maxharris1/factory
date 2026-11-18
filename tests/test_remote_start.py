@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, job_run, process_tree, remote
+from lib import device_monitor, job_run, live_settings, process_tree, remote
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
@@ -1816,13 +1816,13 @@ def test_an_unchanged_machines_yml_is_not_loaded_again(
 ) -> None:
     now, queue, pool, transport, dispatcher, job = lost_setup(tmp_path, check=1, reload=True)
     loads: list[Path] = []
-    real = device_monitor.load_machines_yml
+    real = live_settings.load_machines_yml
 
     def counted(path: Path, **kwargs):
         loads.append(path)
         return real(path, **kwargs)
 
-    monkeypatch.setattr(device_monitor, "load_machines_yml", counted)
+    monkeypatch.setattr(live_settings, "load_machines_yml", counted)
     for at in (0.0, 60.0, 120.0):
         poll_at(now, dispatcher, at)
     assert loads == [tmp_path / "machines.yml"]

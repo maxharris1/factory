@@ -1,4 +1,5 @@
 import io
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +8,7 @@ from types import MappingProxyType
 
 import pytest
 
-from lib import device_pool, device_sync
+from lib import device_pool, device_sync, live_settings
 from lib.device_pool import DevicePool, Orphan, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -257,8 +258,15 @@ def placements(pool: DevicePool, attempts: int) -> int:
     return sum(pool.claim("claude") is not None for _ in range(attempts))
 
 
+def poller_adopts(queue: SQLiteJobQueue, machines: Path) -> None:
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        live_settings.adopted(connection, machines)
+        connection.commit()
+
+
 @pytest.mark.parametrize("edit", [("enabled: true", "enabled: false"), ("drain: false", "drain: true")])
-def test_a_file_that_enables_or_undrains_waits_for_a_restart(
+def test_a_file_that_enables_or_undrains_waits_for_the_pollers_adopt(
     tmp_path: Path, edit: tuple[str, str]
 ) -> None:
     loaded = BOX_FILE.replace(*edit)
@@ -266,8 +274,12 @@ def test_a_file_that_enables_or_undrains_waits_for_a_restart(
 
     assert pool.claim("claude") is None, "the live file never widens placement"
     assert [job.state for job in queue.outstanding()] == ["queued"]
-    claimed = restarted(queue, machines).claim("claude")
-    assert claimed is not None and claimed[1].device == "box", "a restart loads the file"
+    assert restarted(queue, machines).claim("claude") is None, "nor does a restart alone"
+    poller_adopts(queue, machines)
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "box", (
+        "the same unrestarted pool places once the poller adopts the file"
+    )
 
 
 def test_a_lower_slot_max_in_the_file_caps_placement_live(tmp_path: Path) -> None:
@@ -280,15 +292,40 @@ def test_a_lower_slot_max_in_the_file_caps_placement_live(tmp_path: Path) -> Non
     assert pool.used() == {"box": 1}
 
 
-def test_a_higher_slot_max_in_the_file_waits_for_a_restart(tmp_path: Path) -> None:
+def test_a_higher_slot_max_in_the_file_waits_for_the_pollers_adopt(tmp_path: Path) -> None:
     pool, queue, machines = edited_after_load(
         tmp_path, BOX_FILE.replace("slot_max: 2", "slot_max: 1"),
         BOX_FILE.replace("slot_max: 2", "slot_max: 3"), jobs=3,
     )
 
     assert placements(pool, 3) == 1, "the loaded slot_max still caps the box"
-    assert placements(restarted(queue, machines), 3) == 2, "a restart raises it to 3"
+    assert placements(restarted(queue, machines), 3) == 0, "a restart alone does not raise it"
+    poller_adopts(queue, machines)
+    assert placements(pool, 3) == 2, "the same unrestarted pool places up to the adopted 3"
     assert pool.used() == {"box": 3}
+
+
+def test_pools_loaded_from_different_files_never_pass_the_slot_max_on_disk_together(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.yml"
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    for n in range(8):
+        enqueue(queue, "claude", str(n))
+    pools = []
+    for at, slots in enumerate((6, 4)):
+        machines.write_text(BOX_FILE.replace("slot_max: 2", f"slot_max: {slots}"), encoding="utf-8")
+        os.utime(machines, ns=(10**18 + at, 10**18 + at))
+        pools.append(restarted(queue, machines))
+        if at == 0:
+            poller_adopts(queue, machines)
+    machines.write_text(BOX_FILE, encoding="utf-8")
+    os.utime(machines, ns=(10**18 + 2, 10**18 + 2))
+
+    placed = sum(pool.claim("claude") is not None for _ in range(4) for pool in pools)
+
+    assert placed == 2, "the file's slot_max of 2 caps both pools together"
+    assert pools[0].used() == {"box": 2}
 
 
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:
