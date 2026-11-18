@@ -279,17 +279,13 @@ class CommentsMixin:
         eligible for one re-drive where the policy allows it."""
         error = safe_ship_error(exc)
         eligible = _redrive_eligible(exc, ticket.factory.ship)
-        if not self._mark_ship_intent_failed(ticket, comment.id, error, redrive=eligible):
+        # Issue #83: with no retry coming, a person must look.
+        attention = None if eligible else f"{ticket.factory.ship} ship failed: {error}"
+        if not self._mark_ship_intent_failed(
+            ticket, comment.id, error, redrive=eligible, attention=attention
+        ):
             return
         self._wake_ship_failed(ticket, comment, f"ship raised {error}")
-        if not eligible:
-            # Issue #83: no retry is coming, so a person must look.
-            self.flag_attention(
-                ticket.repo,
-                ticket.ticket_id,
-                "ship-failed",
-                f"{ticket.factory.ship} ship failed: {error}",
-            )
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
         if comment.edited_at is not None:
@@ -473,6 +469,8 @@ class CommentsMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
             self._record_handled_time(connection, ticket, comment_id, self.queue.now())
+            sent = self._write_attention_outbox(connection)
+        self._settle_attention(sent)
 
     def _record_handled_time(
         self,

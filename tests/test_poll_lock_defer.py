@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 import sqlite3
 from pathlib import Path
 
@@ -25,14 +26,20 @@ from lib.dispatch.cycle_clock import (
 from lib.dispatch.poll import PollLoop
 from lib.wait import lock_backoff
 from tests.test_dispatcher import (
+    GO,
+    FakeReviewActions,
     FakeSource,
     _attention,
     _done_build,
     _handoff_events,
+    comment,
+    seed_review_job,
     setup,
     ticket,
 )
 from tests.test_feeder import dispatcher_for, issue, make_feeder
+from tests.test_github_actions import HEAD
+from tests.test_ship_redrive import approve_snapshot
 
 TICKETS = ("42", "43")
 
@@ -224,6 +231,98 @@ def test_an_unverified_handoff_flag_survives_a_lock_released_just_before_the_aud
 
     assert _handoff_events(queue) == ["handoff-unverified"]
     assert _attention(queue) == ["unverified-handoff"]
+
+
+def test_an_unverified_handoff_flag_survives_a_restart_while_locked_after_the_audit(
+    tmp_path: Path, slept: list[float]
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "missing-ready")
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    now[0] = 200.0
+    locks: list[sqlite3.Connection] = []
+    log_event = dispatcher._log_job_event
+
+    def lock_after_audit(job, event, detail):
+        log_event(job, event, detail)
+        if event == "handoff-unverified":
+            locks.append(hold_lock(queue.path))
+
+    dispatcher._log_job_event = lock_after_audit
+    source = FakeSource(ticket())
+    dispatcher.poll_once(source)
+    locks[0].execute("ROLLBACK")
+    assert _handoff_events(queue) == ["handoff-unverified"]
+
+    restarted, queue = setup(tmp_path, now)
+    restarted.poll_once(source)
+    restarted.poll_once(source)
+
+    assert _attention(queue) == ["unverified-handoff"]
+
+
+def test_an_edited_comment_flag_survives_a_restart_once_the_comment_is_handled(
+    tmp_path: Path, slept: list[float]
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    edited = replace(
+        comment("go-1", GO.format(state="building"), author="grok-login", created_at=1),
+        edited_at=5,
+    )
+    flag = dispatcher.flag_attention
+    mark_handled = dispatcher._mark_handled
+    locks: list[sqlite3.Connection] = []
+
+    def flag_under_a_lock(*args, **kwargs):
+        lock = hold_lock(queue.path)
+        flag(*args, **kwargs)
+        lock.execute("ROLLBACK")
+
+    def lock_after_marking(*args, **kwargs):
+        mark_handled(*args, **kwargs)
+        locks.append(hold_lock(queue.path))
+
+    dispatcher.flag_attention = flag_under_a_lock
+    dispatcher._mark_handled = lock_after_marking
+    dispatcher.process(ticket(edited))
+    locks[0].execute("ROLLBACK")
+
+    restarted, queue = setup(tmp_path)
+    restarted.process(ticket(edited))
+
+    assert _attention(queue) == ["edited-comment"]
+
+
+def test_a_ship_failed_flag_survives_a_restart_while_locked_after_the_failure(
+    tmp_path: Path, slept: list[float]
+) -> None:
+    class FailingHandoff(FakeReviewActions):
+        def handoff(self, ticket, head):
+            raise RuntimeError("handoff exploded")
+
+    dispatcher, queue = setup(tmp_path, review_actions=FailingHandoff())
+    seed_review_job(dispatcher, queue, HEAD)
+    wake = dispatcher._wake_ship_failed
+    locks: list[sqlite3.Connection] = []
+
+    def lock_after_waking(*args, **kwargs):
+        wake(*args, **kwargs)
+        locks.append(hold_lock(queue.path))
+
+    dispatcher._wake_ship_failed = lock_after_waking
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        dispatcher.process(approve_snapshot())
+    locks[0].execute("ROLLBACK")
+
+    restarted, queue = setup(tmp_path, review_actions=FailingHandoff())
+    restarted.process(approve_snapshot())
+
+    assert _attention(queue) == ["ship-failed"]
 
 
 def test_a_cycle_over_the_threshold_flags_its_slowest_phase(tmp_path: Path) -> None:

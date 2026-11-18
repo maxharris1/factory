@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from itertools import islice
 from typing import TYPE_CHECKING
@@ -237,14 +237,15 @@ class PollMixin:
                     self._record_job_event(
                         connection, job, event, detail, self.queue.now()
                     )
+                    if problem:
+                        self.flag_attention(
+                            ticket.repo,
+                            ticket.ticket_id,
+                            "unverified-handoff",
+                            f"job {job.id[:8]} {job.request.action}: {problem}",
+                            connection=connection,
+                        )
                 self._log_job_event(job, event, detail)
-                if problem:
-                    self.flag_attention(
-                        ticket.repo,
-                        ticket.ticket_id,
-                        "unverified-handoff",
-                        f"job {job.id[:8]} {job.request.action}: {problem}",
-                    )
 
     def _unpolled_handoff_refs(self, read_from: float) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
@@ -397,11 +398,15 @@ class PollMixin:
         ticket_id: str,
         reason: str,
         detail: str,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
-        """Show a ticket as needs-attention in orch status and the dashboard."""
-        key = (repo.lower(), ticket_id, reason)
-        self.attention_outbox[key] = (detail[:SHIP_ERROR_LIMIT], self.queue.now())
-        self._send_attention(self.lock_ledger)
+        """Show a ticket as needs-attention in orch status and the dashboard.
+
+        Pass the transaction that commits the flag's trigger as `connection`
+        so the flag cannot outlive it unwritten (#839)."""
+        flag = (detail[:SHIP_ERROR_LIMIT], self.queue.now())
+        self._note_attention((repo.lower(), ticket_id, reason), flag, connection)
         if self.log is not None:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
@@ -424,27 +429,57 @@ class PollMixin:
         if added and self.log is not None:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
-    def clear_attention(self, repo: str, ticket_id: str, reason: str) -> None:
-        self.attention_outbox[(repo.lower(), ticket_id, reason)] = None
-        self._send_attention(self.lock_ledger)
+    def clear_attention(
+        self,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        self._note_attention((repo.lower(), ticket_id, reason), None, connection)
+
+    def _note_attention(
+        self,
+        key: tuple[str, str, str],
+        flag: tuple[str, float] | None,
+        connection: sqlite3.Connection | None,
+    ) -> None:
+        if connection is None:
+            self.attention_outbox[key] = flag
+            self._send_attention(self.lock_ledger)
+            return
+        self.attention_outbox.pop(key, None)
+        _put_attention(connection, {key: flag})
+
+    def _write_attention_outbox(
+        self, connection: sqlite3.Connection
+    ) -> dict[tuple[str, str, str], tuple[str, float] | None]:
+        """Write every queued flag and clear in connection's transaction; pass
+        the result to _settle_attention once that transaction commits."""
+        pending = dict(self.attention_outbox)
+        _put_attention(connection, pending)
+        return pending
+
+    def _settle_attention(
+        self, sent: Mapping[tuple[str, str, str], tuple[str, float] | None]
+    ) -> None:
+        for key, flag in sent.items():
+            if self.attention_outbox.get(key) == flag:
+                del self.attention_outbox[key]
 
     def _send_attention(self, ledger: LockLedger | None) -> bool:
         if not self.attention_outbox:
             return True
         pending = dict(self.attention_outbox)
-
-        def work(connection: sqlite3.Connection) -> None:
-            for (repo, ticket_id, reason), flag in pending.items():
-                if flag is None:
-                    _delete_attention(connection, repo, ticket_id, reason)
-                else:
-                    _write_attention(connection, (repo, ticket_id, reason, *flag))
-
-        if not bookkeeping_write(self._connect, work, site="attention", ledger=ledger):
+        if not bookkeeping_write(
+            self._connect,
+            lambda connection: _put_attention(connection, pending),
+            site="attention",
+            ledger=ledger,
+        ):
             return False
-        for key, flag in pending.items():
-            if self.attention_outbox.get(key) == flag:
-                del self.attention_outbox[key]
+        self._settle_attention(pending)
         return True
 
     def watch_cycle(self, clock: CycleClock) -> None:
@@ -691,6 +726,17 @@ def _delete_attention(
         "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
         (repo.lower(), ticket_id, reason),
     )
+
+
+def _put_attention(
+    connection: sqlite3.Connection,
+    flags: Mapping[tuple[str, str, str], tuple[str, float] | None],
+) -> None:
+    for (repo, ticket_id, reason), flag in flags.items():
+        if flag is None:
+            _delete_attention(connection, repo, ticket_id, reason)
+        else:
+            _write_attention(connection, (repo, ticket_id, reason, *flag))
 
 
 def _print_deferred(repo: str, ticket_id: str, error: str) -> None:
