@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import resource
 import signal
 import sqlite3
 import subprocess
@@ -304,6 +305,21 @@ def test_macos_a_command_that_cannot_start_is_127_and_never_execed() -> None:
     assert len(workers) == 1 and not _alive(workers[0]), "nothing of the run is left"
 
 
+@pytest.fixture
+def descriptors_past_1023():
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = 1025
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        pytest.skip(f"the hard RLIMIT_NOFILE {hard} cannot hold fd 1024")
+    if soft != resource.RLIM_INFINITY and soft < needed:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.usefixtures("descriptors_past_1023")
 def test_a_status_pipe_past_fd_1023_still_reports_the_exit_code() -> None:
     read, write = os.pipe()
     high = fcntl.fcntl(read, fcntl.F_DUPFD, 1024)
