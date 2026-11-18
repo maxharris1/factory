@@ -101,6 +101,24 @@ def test_a_mismatch_on_an_extra_artifact_a_verified_scenario_listed_yields_a_gap
     assert [(g.kind, g.scenario) for g in gaps] == [("artifact-mismatch", "s-2")]
 
 
+@pytest.mark.parametrize(
+    ("listed", "recorded"),
+    [
+        ("./s-2//trace.zip", "s-2/trace.zip"),
+        ("s-2/trace.zip", "./s-2/trace.zip"),
+        ("./s-2/./after.png", "s-2//after.png"),
+    ],
+)
+def test_a_mismatch_matches_a_verified_scenarios_artifact_however_either_side_spells_it(listed: str, recorded: str) -> None:
+    entry = _entry(S2)
+    entry["artifacts"].append({"path": listed, "sha256": "0" * 64, "size": 1})
+    lanes = [_lane([_entry(S1), entry], mismatches=[{"path": recorded, "reason": "missing"}])]
+
+    gaps = _run(lanes)
+
+    assert [(g.kind, g.scenario) for g in gaps] == [("artifact-mismatch", "s-2")]
+
+
 def test_a_mismatch_on_a_file_no_verified_scenario_relies_on_yields_no_gap() -> None:
     lanes = [_lane([_entry(S1), _entry(S2)], mismatches=[{"path": "network.json", "reason": "invalid network.json"}])]
 

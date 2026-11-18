@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sqlite3
+import tarfile
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -35,6 +37,7 @@ from tests.qa_support import (
     SIGNATURE,
     STORE,
     FakeStorage,
+    bundle,
     Harness,
     qa_config,
     ready,
@@ -1493,6 +1496,63 @@ def test_mismatch_on_a_failed_scenarios_artifact_stays_fail(tmp_path: Path) -> N
     assert lab.header()["result"] == "FAIL"
     assert "- [blocking] qa-1 (ac-1)" in lab.only_comment()
     assert "Gaps:" not in lab.only_comment()
+
+
+def test_mismatch_spelled_with_a_dot_prefix_blocks_a_verified_scenario(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=1)
+    upload = lab.storage._upload
+
+    def respelled_upload(folder: str) -> None:
+        upload(folder)
+        key = f"{folder}/{RESULT_NAME}"
+        result = json.loads(lab.storage.objects[key])
+        entry = result["artifacts"][0]
+        entry["path"] = "./" + entry["path"]
+        entry["sha256"] = "0" * 64
+        lab.storage.objects[key] = json.dumps(result).encode()
+
+    lab.storage._upload = respelled_upload
+    lab.tick(4)
+
+    head = json.loads(lab.run.rows("SELECT result FROM qa_lanes")[0][0])
+    assert {"path": "s-1/after-screenshot.png", "reason": "sha256"} in head["mismatches"]
+    assert lab.header()["result"] == "BLOCKED"
+    gaps = lab.only_comment().split("Gaps:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert any(line.startswith("- qa-1 (lane 1): artifact-mismatch") for line in gaps)
+
+
+@pytest.mark.parametrize(("bundled", "reason"), [(False, "missing"), (True, "sha256")])
+def test_mismatch_on_a_respelled_supplemental_artifact_blocks_a_verified_scenario(
+    tmp_path: Path, bundled: bool, reason: str
+) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=1)
+    upload = lab.storage._upload
+    trace = b"trace bytes"
+
+    def upload_with_trace(folder: str) -> None:
+        upload(folder)
+        key = f"{folder}/{RESULT_NAME}"
+        result = json.loads(lab.storage.objects[key])
+        for artifacts in (result["artifacts"], result["scenarios"][0]["artifacts"]):
+            artifacts.append({"path": "./s-1//trace.zip", "sha256": "0" * 64, "size": len(trace)})
+        lab.storage.objects[key] = json.dumps(result).encode()
+        if bundled:
+            source = tarfile.open(fileobj=io.BytesIO(lab.storage.objects[f"{folder}/{BUNDLE_NAME}"]), mode="r:gz")
+            members = [(info, source.extractfile(info).read()) for info in source.getmembers()]
+            info = tarfile.TarInfo("s-1/trace.zip")
+            info.size = len(trace)
+            lab.storage.objects[f"{folder}/{BUNDLE_NAME}"] = bundle(*members, (info, trace))
+
+    lab.storage._upload = upload_with_trace
+    lab.tick(4)
+
+    head = json.loads(lab.run.rows("SELECT result FROM qa_lanes")[0][0])
+    assert {"path": "s-1/trace.zip", "reason": reason} in head["mismatches"]
+    assert lab.header()["result"] == "BLOCKED"
+    gaps = lab.only_comment().split("Gaps:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert any(line.startswith("- qa-1 (lane 1): artifact-mismatch") for line in gaps)
 
 
 @pytest.mark.parametrize("result", ["PASS", "FAIL", "BLOCKED"])

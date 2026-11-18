@@ -101,8 +101,13 @@ def _items(raw: object) -> Iterator[Mapping[str, Any]]:
     return (item for item in raw if isinstance(item, Mapping)) if isinstance(raw, list) else iter(())
 
 
+def canonical_path(path: str) -> str:
+    parts = [part for part in path.split("/") if part not in ("", ".")]
+    return ("/" if path.startswith("/") else "") + "/".join(parts)
+
+
 def _paths(raw: object) -> Iterator[str]:
-    return (item["path"] for item in _items(raw) if isinstance(item.get("path"), str))
+    return (canonical_path(item["path"]) for item in _items(raw) if isinstance(item.get("path"), str))
 
 
 def _well_formed(raw: object) -> bool:
@@ -153,7 +158,7 @@ def _required(scenario: AskedScenario | None) -> list[tuple[str, str]]:
     if scenario is None:
         return []
     named = [("after screenshot", scenario.after), ("pass test output", scenario.pass_output), ("video", scenario.video)]
-    return [(what, path) for what, path in named if path is not None]
+    return [(what, canonical_path(path)) for what, path in named if path is not None]
 
 
 def _receipts(view: _View, by_id: dict[str, AskedScenario]) -> list[Gap]:
