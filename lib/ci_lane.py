@@ -1,8 +1,5 @@
 """The CI lane on index.html (#823), worked out from a snapshot's ci_pool, ci_runs and tickets.
 
-Pure: no I/O and no HTML. The server render and the page script both draw `ci_lane(snapshot)`, so
-placement and the progress math live only here.
-
     {pool: {state, age_seconds}, running, queued, failed_24h,
      slots: [{runner, os, state: lead|cont|idle|offline|busy, card, job}],
      groups: [{name: hosted|queued|failed, cards: [key]}],

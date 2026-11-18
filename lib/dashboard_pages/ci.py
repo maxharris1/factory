@@ -442,7 +442,7 @@ def _card(key: str, card: dict, seed: int) -> str:
     label = _tile_label(card)
     return (
         f'<div class="tile ci {status}{" bad" if status == "failed" else ""}" data-ci="{_e(key)}">'
-        f'<a class="cover" href="{_e(ticket_page_href(card, ci=True))}" aria-label="{_e(f"CI for {label}")}"></a>'
+        f'<a class="cover" href="{_e(ticket_page_href(card, open_ci=True))}" aria-label="{_e(f"CI for {label}")}"></a>'
         f'{px_strip(f"ci-{key}", effect=effect, tint=tint, seed=seed, height=16)}<div class="tile-body">'
         f'<div class="tile-l1">{line1}</div><div class="tile-l2">{_verb(f"ci-{status}", seed)}</div>'
         f'<div class="tile-l3">{line3}</div><div class="tile-l4">{line4}</div></div></div>'
@@ -520,8 +520,6 @@ def _popup_run(run: dict) -> str:
 
 
 def ci_popup(snapshot: dict, address: str, row: dict) -> str:
-    """The CI dialog on ticket.html#t=<address>&ci=1 (ciPopup in the script): that ticket's per-job rows
-    and its failures in the last day. ✕ links back to the ticket without &ci=1."""
     runs, failures = ci_popup_runs(snapshot, address)
     jobs = "".join(_popup_run(run) for run in runs) if runs else '<p class="empty">no CI queued or running</p>'
     failed = (
@@ -536,11 +534,10 @@ def ci_popup(snapshot: dict, address: str, row: dict) -> str:
 
 
 def ci_extras(snapshot: dict, address: str, row: dict, open_: bool) -> str:
-    """The ticket page's CI button, and the CI dialog when the hash carries ci=1."""
     runs, failures = ci_popup_runs(snapshot, address)
     if not (open_ or runs or failures):
         return ""
-    button = f'<a class="ci-open" href="{_e(ticket_page_href(row, ci=True))}">CI</a>'
+    button = f'<a class="ci-open" href="{_e(ticket_page_href(row, open_ci=True))}">CI</a>'
     return button + (ci_popup(snapshot, address, row) if open_ else "")
 
 

@@ -322,7 +322,7 @@ def test_the_ticket_page_script_draws_the_ci_popup_as_the_server_does(tmp_path: 
     address = f"{REPO}#13"
     card = re.search(r'<a class="cover" href="([^"]+)"', _lane(snapshot).split('data-ci="maxharris1/cleffy#13"')[1])
     assert card.group(1).replace("&amp;", "&") == "ticket.html#t=maxharris1%2Fcleffy%2313&ci=1"
-    server = ticket_view(snapshot, address, ci=True)
+    server = ticket_view(snapshot, address, open_ci=True)
     dialog = server[server.index("<dialog"):server.index("</dialog>") + 9]
     assert 'id="ci-pop"' in dialog and dialog.count('<li class="ci-job') == 5
     assert "actions/runs/8800/job/8802" in dialog and "test_waiting_on_capacity" in dialog

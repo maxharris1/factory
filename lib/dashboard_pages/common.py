@@ -234,7 +234,7 @@ SCRIPT_HEAD = r"""
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function threadKey(r) { return String(r.repo).toLowerCase() + '#' + r.ticket_id; }
   function ticketAddress(r) { return String(r.repo) + '#' + r.ticket_id; }
-  function ticketPageHref(r, ci) { return 'ticket.html#t=' + encodeURIComponent(ticketAddress(r)) + (ci ? '&ci=1' : ''); }
+  function ticketPageHref(r, openCi) { return 'ticket.html#t=' + encodeURIComponent(ticketAddress(r)) + (openCi ? '&ci=1' : ''); }
   function hashAddress() {
     var hash = String(location.hash || '');
     if (hash.indexOf('#t=') !== 0) return null;
@@ -702,10 +702,9 @@ def ticket_address(row: dict) -> str:
 ENCODE_URI_COMPONENT_SAFE = "-_.!~*'()"
 
 
-def ticket_page_href(row: dict, ci: bool = False) -> str:
-    """ci=True adds &ci=1, which opens the CI dialog on the ticket page (#823)."""
+def ticket_page_href(row: dict, open_ci: bool = False) -> str:
     href = "ticket.html#t=" + urllib.parse.quote(ticket_address(row), safe=ENCODE_URI_COMPONENT_SAFE)
-    return href + "&ci=1" if ci else href
+    return href + "&ci=1" if open_ci else href
 
 
 def _b(value: object, cls: str = "") -> str:

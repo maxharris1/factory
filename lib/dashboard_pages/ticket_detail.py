@@ -1142,15 +1142,14 @@ def _records(snapshot: dict) -> dict | None:
     return snapshot.get(RECORDS)
 
 
-def ticket_view(snapshot: dict, address: str | None, ci: bool = False) -> str:
-    """`ci` is the hash's ci=1 (#823): it opens the CI dialog over the ticket."""
+def ticket_view(snapshot: dict, address: str | None, open_ci: bool = False) -> str:
     from lib.dashboard_pages.ci import ci_extras
 
     records = _records(snapshot)
     found = None if address is None else resolve_ticket(snapshot, address, records)
     if not found:
         return f'<div id="ticketview">{_no_ticket(address, records is not None)}</div>'
-    extras = ci_extras(snapshot, found["address"], found["row"], ci)
+    extras = ci_extras(snapshot, found["address"], found["row"], open_ci)
     return f'<div id="ticketview">{_ticket_article(found, snapshot)}{extras}</div>'
 
 
