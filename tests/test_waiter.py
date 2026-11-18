@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import containers
 from lib import waiter as waiter_module
 from lib.device_pool import DevicePool
 from lib.dispatcher import Comment
@@ -35,6 +36,7 @@ from lib.job_state import RUNNING, derive, read_placements
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
 from lib.queue import JobRequest, SQLiteJobQueue
+from lib.remote import Called
 from lib.waiter import (
     ContextResult,
     GhContextSource,
@@ -491,6 +493,42 @@ def test_a_stopped_docker_daemon_is_logged_once_and_the_step_goes_on(
     now[0] += waiter_module.CONTAINER_SWEEP_SECONDS
     waiter._reap()
     assert docker.labelled() == []
+
+
+def test_the_sweep_keeps_a_container_a_requeued_run_starts_after_the_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker = Docker(tmp_path)
+    monkeypatch.setenv("PATH", docker.path())
+    job_id = "a" * 32
+    old = [docker.start_for(job_id), docker.start_for(job_id)]
+    started: list[str] = []
+
+    def requeued_and_restarted(asked: str) -> str:
+        assert asked == job_id
+        started.append(docker.start_for(job_id))
+        return "failed"
+
+    lines = containers.sweep(containers.local_runner(), requeued_and_restarted, "box")
+    assert docker.ids() == set(started)
+    assert not set(old) & docker.ids()
+    assert lines == [f"removed 2 container(s) on box of finished job {job_id}"]
+
+
+def test_the_sweep_never_puts_a_listed_id_that_is_not_hex_into_a_script() -> None:
+    job_id = "a" * 32
+    scripts: list[str] = []
+
+    def runner(script: str) -> Called:
+        scripts.append(script)
+        return Called(0, f"$(touch\tpwned) {job_id}\n0123456789ab {job_id}\n", "")
+
+    lines = containers.sweep(runner, lambda _: "done", "box")
+    assert lines == [
+        "kept 1 factory.job container(s) on box: not a container id",
+        f"removed 1 container(s) on box of finished job {job_id}",
+    ]
+    assert scripts[1].endswith("docker rm -f -v 0123456789ab >/dev/null\n")
 
 
 @pytest.mark.parametrize("enabled", [True, False])
