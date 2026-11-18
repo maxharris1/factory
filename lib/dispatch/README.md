@@ -76,3 +76,4 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Eval log | `eval_log.py` (`EvalLogMixin`) | `_export_eval_log`: append `dispatcher.log` beside the database from the rows each poll committed (#545) |
 | CI board | `ci_board.py` | `record`: the dashboard's `ci_jobs` rows from the check runs `ci_status` read, plus at most 3 `actions/runs/{id}/jobs` reads and 1 `actions/jobs/{id}/logs` read a cycle, each one `gh api` request (issue #717) |
 | Cycle timing | `cycle_clock.py` (`CycleClock`) | per-phase cycle durations for poller.log and `orch status` |
+| Bookkeeping writes | `bookkeeping.py` (`LockLedger`) | `bookkeeping_write`: a poller bookkeeping write (read markers, poll errors, streaks, attention, feeder state) retried briefly on a held orch.db lock, else deferred to the next cycle and counted per phase in the cycle's `LockLedger` (#839) |

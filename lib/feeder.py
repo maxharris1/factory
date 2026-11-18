@@ -117,6 +117,7 @@ from lib import attention
 from lib.branch_stack import stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
+from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
@@ -708,6 +709,7 @@ class Feeder:
         self.factory_for = factory_for
         self.log = log or (lambda line: None)
         self._base_notes: set[tuple[str, int, str, str, str]] = set()
+        self.ledger: LockLedger | None = None
         with self.queue.connect() as connection:
             ensure_tables(connection)
 
@@ -720,7 +722,9 @@ class Feeder:
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
         candidates, read_repos, read_errors = self._candidates()
-        self._record_seen(candidates, now)
+        if not self._record_seen(candidates, now):
+            self.log("feeder: intake not recorded, orch.db is locked; feeding next poll")
+            return FeedReport(eligible=len(candidates), errors=read_errors + 1)
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         refused = {
@@ -1139,10 +1143,10 @@ class Feeder:
 
     # -- bookkeeping -------------------------------------------------------------
 
-    def _record_seen(self, candidates: Sequence[_Candidate], now: float) -> None:
+    def _record_seen(self, candidates: Sequence[_Candidate], now: float) -> bool:
         unstarted = ", ".join(f"'{state}'" for state in UNSTARTED)
-        with self.queue.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+
+        def work(connection: sqlite3.Connection) -> None:
             for candidate in candidates:
                 issue = candidate.issue
                 connection.execute(
@@ -1199,14 +1203,17 @@ class Feeder:
                 f"AND {FEED_NOT_BEGUN}",
                 (now,),
             )
-            connection.commit()
+
+        return bookkeeping_write(
+            self.queue.connect, work, site="_record_seen", ledger=self.ledger
+        )
 
     def _record_priority(self, candidates: Sequence[_Candidate], now: float) -> None:
         """Each ticket's unblocks count, and the claim order of every ticket
         with a ticket id, so a label or blocker change after the feed still
         moves its queued job."""
-        with self.queue.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+
+        def work(connection: sqlite3.Connection) -> None:
             for candidate in candidates:
                 issue = candidate.issue
                 where = (issue.repo.lower(), issue.key)
@@ -1222,7 +1229,8 @@ class Feeder:
                         connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
                         tier=candidate.tier, unblocks=candidate.unblocks, at=now,
                     )
-            connection.commit()
+
+        bookkeeping_write(self.queue.connect, work, site="_record_priority", ledger=self.ledger)
 
     def _mark_done(self) -> None:
         with self.queue.connect() as connection:
@@ -1258,15 +1266,19 @@ class Feeder:
         *,
         error: str | None = None,
         reason: str | None = None,
-    ) -> None:
-        with self.queue.connect() as connection:
-            connection.execute(
+    ) -> bool:
+        return bookkeeping_write(
+            self.queue.connect,
+            lambda connection: connection.execute(
                 f"""
                 UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ?
                 WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')
                 """,
                 (state, error, reason, candidate.issue.repo.lower(), candidate.issue.key),
-            )
+            ),
+            site="_set_state",
+            ledger=self.ledger,
+        )
 
     def _record(self, candidate: _Candidate, **values: object) -> None:
         assignments = ", ".join(f"{name} = ?" for name in values)
@@ -1331,7 +1343,7 @@ class Feeder:
             )
             if wait is not None:
                 raise _Held(wait)
-        self._set_state(candidate, "feeding")
+        must_write(self._set_state(candidate, "feeding"))
         risk = str(row["risk"])
         if risk not in ("low", "high"):
             raise ValueError(f"ticket risk {risk!r} is not low or high")

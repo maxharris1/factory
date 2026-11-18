@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from lib.dispatch.bookkeeping import LockLedger
 from lib.dispatch.constants import (
     CORE_KINDS,
     FINISHED_STATES,
@@ -96,6 +97,7 @@ class DispatcherBase:
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
         self.feeder = feeder
+        self.lock_ledger = LockLedger()
         # #130: decides whether an update-from-main kept the approval. None,
         # or any error, sends the update back to review (fail closed).
         self.update_classifier = update_classifier
