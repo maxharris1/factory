@@ -29,6 +29,7 @@ from lib.remote_follow import (
     Follower,
     backoff,
 )
+from tests.fake_path import link_path_without
 from tests.test_remote_darwin import Mac
 from tests.test_remote_start import Ssh, gone, kill_quietly, use_fake_ssh, wait_file, wait_gone
 
@@ -218,15 +219,9 @@ def test_a_new_tag_may_start_once_the_first_has_exited(box: Box) -> None:
 def test_without_setsid_the_launch_detaches_with_perl(
     box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bare = tmp_path / "no-setsid"
-    bare.mkdir()
-    for directory in os.environ["PATH"].split(os.pathsep):
-        if not os.path.isdir(directory):
-            continue
-        for name in os.listdir(directory):
-            link = bare / name
-            if name not in ("setsid", "perl") and not link.exists():
-                link.symlink_to(os.path.join(directory, name))
+    bare = link_path_without(
+        tmp_path / "no-setsid", os.environ["PATH"].split(os.pathsep), {"setsid", "perl"}
+    )
     perl = shutil.which("perl")
     assert perl and not (bare / "setsid").exists()
     (bare / "perl").write_text(f'#!/bin/sh\nsleep 0.5\nexec {perl} "$@"\n')
