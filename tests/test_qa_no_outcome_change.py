@@ -18,6 +18,7 @@ from lib.cli import _retry_refusal
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.queue import SQLiteJobQueue
 from tests.qa_support import (
+    APPROVALS,
     HEAD_A,
     HEAD_B,
     REPO,
@@ -36,17 +37,22 @@ from tests.test_lifecycle_replay import Thread
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
 
 BLOCKING = "[blocking] f-1 the saved draft is gone after reload\nEvidence: https://example.test/run/1\n"
+RULING_REASON = "the draft was saved, the agent reloaded too early"
 
 
-def _thread(with_qa_reports: bool) -> list[Comment]:
+def _thread(with_qa_reports: bool, with_ruling: bool = False) -> list[Comment]:
     bodies = [
         ("r1", ready(HEAD_A, body=scenarios("qa-1", "qa-2"))),
         ("v1", verdict(HEAD_A, "REVISE")),
         ("r2", ready(HEAD_B, "2/3", body=scenarios("qa-1", "qa-2"))),
         ("q1", qa_report(HEAD_B, "FAIL", body=BLOCKING)),
+        ("qw1", f"/qa wrong\n{RULING_REASON}"),
         ("v2", verdict(HEAD_B, "APPROVE", "2/3")),
         ("q2", qa_report(HEAD_B, "FAIL", body=BLOCKING)),
+        ("qw2", f"/qa wrong\n{RULING_REASON}"),
     ]
+    if not with_ruling:
+        bodies = [item for item in bodies if not item[0].startswith("qw")]
     if not with_qa_reports:
         bodies = [item for item in bodies if not item[0].startswith("q")]
     return [
@@ -55,15 +61,22 @@ def _thread(with_qa_reports: bool) -> list[Comment]:
     ]
 
 
-def _replay(tmp_path: Path, qa: object, with_qa_reports: bool) -> tuple[list[tuple], tuple, list[tuple]]:
+def _replay(
+    tmp_path: Path, qa: object, with_qa_reports: bool, with_ruling: bool = False
+) -> tuple[list[tuple], tuple, list[tuple]]:
     now = [1000.0]
     path = tmp_path / "orch.db"
     queue = SQLiteJobQueue(path, clock=lambda: now[0])
     actions = FakeReviewActions()
     dispatcher = Dispatcher(
-        path, queue, trusted_logins=TRUSTED, review_actions=actions, grok_delivery=FakeGrokDelivery()
+        path,
+        queue,
+        trusted_logins=TRUSTED,
+        review_actions=actions,
+        grok_delivery=FakeGrokDelivery(),
+        approvals=APPROVALS,
     )
-    comments = _thread(with_qa_reports)
+    comments = _thread(with_qa_reports, with_ruling)
     base = TrackedTicket(
         repo=REPO,
         ticket_id=TICKET,
@@ -126,6 +139,39 @@ def test_qa_reports_change_no_review_fix_round_or_ship_outcome(tmp_path: Path) -
     assert off[1] == ("v2", 1)
     assert on == off
     assert reported == off
+
+
+def _rows(tmp_path: Path, sql: str) -> list[tuple]:
+    with SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 0.0).connect() as connection:
+        return [tuple(row) for row in connection.execute(sql)]
+
+
+def _every_job(tmp_path: Path) -> list[tuple]:
+    return [
+        (action, recipient, head, json.loads(detail or "{}").get("round"))
+        for action, recipient, head, detail in _rows(
+            tmp_path, "SELECT action, recipient, head, detail FROM jobs ORDER BY rowid"
+        )
+    ]
+
+
+@pytest.mark.parametrize(("gate", "shootout"), [("report", True), ("block", False)])
+def test_a_qa_ruling_changes_no_job_round_or_ship_outcome(tmp_path: Path, gate: str, shootout: bool) -> None:
+    qa = replace(qa_config(shootout=shootout), gate=gate, timeout_minutes=5)
+    reported = _replay(tmp_path / "reported", qa, True)
+    ruled = _replay(tmp_path / "ruled", qa, True, with_ruling=True)
+
+    assert "qa" in [job[0] for job in _every_job(tmp_path / "reported")]
+    assert _every_job(tmp_path / "ruled") == _every_job(tmp_path / "reported")
+    assert ruled == reported
+    assert _rows(tmp_path / "ruled", "SELECT outcome FROM handled_comments WHERE comment_id LIKE 'qw%'") == [
+        ("qa-ruled",),
+        ("qa-ruled",),
+    ]
+    assert _rows(
+        tmp_path / "ruled",
+        "SELECT head, arm, result, ruling, ruled_by, ruling_reason FROM qa_runs WHERE ruling IS NOT NULL",
+    ) == [(HEAD_B, "primary", "FAIL", "wrong", "maxharris1", RULING_REASON)]
 
 
 def test_the_replay_did_record_the_qa_fail_and_time_out_a_qa_job(tmp_path: Path) -> None:
