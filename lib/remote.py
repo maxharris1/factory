@@ -28,7 +28,14 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   pid stays the start's.
   sshd runs the command in a new session, so that process group is the
   job's. The record is never removed: deleting bookkeeping is not
-  evidence the processes are gone;
+  evidence the processes are gone. #817: when the bot's user manager
+  lingers (`loginctl ... -p Linger` says yes) and starts a process in a
+  scope of its own on the unified cgroup hierarchy, the start writes the
+  scope record `.orch-worker-<tag>.scope` naming `orch-run-<tag>.scope`
+  and execs the login shell under `systemd-run --user --scope` in that
+  unit, so the run is contained: every process it starts stays in the
+  scope, whatever its session or environment. Otherwise it runs as above,
+  uncontained;
 * preflight (#94, `orch job run --worktree`): under `bash -lc`, exit 0 when
   git, gh and the harness binary are all found, else name the missing ones;
 * checkout (#94): under `bash -lc`, clone (git init + fetch, so a job
@@ -41,13 +48,18 @@ worker. The remote POSIX shell scripts sent as the SSH command:
 * check: exit 1 while any process of the run lives (wherever its group or
   session now is): one of this user's that carries the job's tag, one the
   tree record `.orch-worker-<tag>.tree.pid` from this boot names with the
-  start time it has now, one in the start's session while that session
-  still holds one of those (its record from this boot names it), or a child
-  of any of them (#722). The check rewrites
+  start time it has now, one in the run's scope (#817: the last component
+  of its `0::` cgroup line is the unit the scope record names, and that
+  is `orch-run-<tag>.scope`), one in the start's session while that
+  session still holds one of those (its record from this boot names it;
+  only for an uncontained run, one with no scope record), or a child of
+  any of them (#722). The check rewrites
   the tree record with them (the boot id, then `<pid> <start time>` each,
   zombies left out), so a descendant that dropped the tag and left the
   session stays the run's after its parent exits; a number alone never
-  names one, so a reused pid never joins.
+  names one, so a reused pid never joins. In a contained run such a
+  descendant is the run's even when no check saw it before its parent
+  exited, and a reused session number never names a process outside it.
   The run's deadline (`ORCH_WORKER_DEADLINE`) is never the run's, nor its
   children. With none of them, exit 3 ("cannot tell") while the recorded
   group, from this boot, still has a process (one that dropped the tag, or
@@ -58,7 +70,8 @@ worker. The remote POSIX shell scripts sent as the SSH command:
 * stop: send SIGTERM to every process of the run, as check finds and
   records them, and to each process group that holds a tagged one (a group
   with a tagged process is in the start's own session, or was made by one
-  of its processes). The stop that kills first sends each SIGSTOP, finding
+  of its processes); in a contained run, every process in its scope. The
+  stop that kills first sends each SIGSTOP, finding
   them again until no new one appears, so none forks a process that
   escapes, then SIGKILL. A stored number is never signalled on its own;
 * probe: `exit 0`, the health check for a device whose slots need no
@@ -243,22 +256,25 @@ _BAD_GROUP = '""|0*|1|*[!0-9]*'
 # #722: from lines `B <boot id>` (this boot), `T <pid>` (carries the tag),
 # `X <pid>` (the run's deadline), `K ...` (the tree record: its boot id,
 # then `<pid> <start time>` per process), `S <pid> <boot id> <tag>` (the
-# start's record) and `P <pid> <ppid> <start time> <session>` (every live
-# process), prints the tree record anew when the run has a member: a tagged
-# process, a record entry from this boot whose pid has that start time now,
-# a process in the start's session, or a process whose parent is a member.
+# start's record), `R` (#817: the run is contained in its scope), `C <pid>`
+# (in the run's scope) and `P <pid> <ppid> <start time> <session>` (every
+# live process), prints the tree record anew when the run has a member: a
+# tagged process, a record entry from this boot whose pid has that start
+# time now, a process in the run's scope, a process in the start's session
+# (only for a run with no scope), or a process whose parent is a member.
 # A session number is not reused while a process is in it, but a record
 # outlives the session, so its number alone never names the run's session.
 # The deadline is never a member, so neither are the checks and stops it runs.
 _TREE_AWK = (
     '$1 == "B" { b = $2 } $1 == "K" && NF == 2 { r = $2 } '
     '$1 == "T" { t[$2] = 1 } $1 == "X" { x[$2] = 1 } '
+    '$1 == "R" { sc = 1 } $1 == "C" { c[$2] = 1 } '
     '$1 == "S" && NF == 4 { q = $2; qb = $3 } '
     '$1 == "K" && NF == 3 { k[$2] = $3 } '
     '$1 == "P" && NF == 5 { u[$2] = $3; s[$2] = $4; g[$2] = $5 } '
     'END { if (r == "" || r != b) split("", k); '
-    "for (p in u) if (!(p in x) && ((p in t) || ((p in k) && k[p] == s[p]))) m[p] = 1; "
-    'if (qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 || ((q in u) && !(q in m))) q = ""; '
+    "for (p in u) if (!(p in x) && ((p in t) || (p in c) || ((p in k) && k[p] == s[p]))) m[p] = 1; "
+    'if (sc || qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 || ((q in u) && !(q in m))) q = ""; '
     'if (q != "" && seal == "") { v = 0; for (p in m) if (g[p] == q) v = 1; if (!v) q = "" } '
     'if (q != "") for (p in u) if (!(p in x) && g[p] == q) m[p] = 1; '
     "do { n = 0; for (p in u) if (!(p in m) && !(p in x) && (u[p] in m)) { m[p] = 1; n = 1 } } "
@@ -278,6 +294,7 @@ def _members(directory: str, *, seal: bool = False) -> str:
     """
     record = f"{directory}/{tree_record('$t')}"
     start = f"{directory}/{start_record('$t')}"
+    scope = f"{directory}/{scope_record('$t')}"
     return (
         f"k={record}; listed() {{ "
         'b=; { read -r b < /proc/sys/kernel/random/boot_id; } 2>/dev/null; echo "B $b"; '
@@ -285,11 +302,16 @@ def _members(directory: str, *, seal: bool = False) -> str:
         'for e in $x; do e=${e#/proc/}; echo "X ${e%/environ}"; done; '
         "sed 's/^/K /' \"$k\" 2>/dev/null; "
         f"sed 's/^/S /' {start} 2>/dev/null; "
+        f'c=; {{ read -r c < {scope}; }} 2>/dev/null; '
+        'case "$c" in "orch-run-$t.scope") echo R;; *) c=;; esac; '
         "for e in /proc/[0-9]*; do "
         '{ read -r s < "$e/stat"; } 2>/dev/null || continue; '
         "set -- ${s##*) }; "
         'case "$1" in Z|X) continue;; esac; '
         'echo "P ${e#/proc/} $2 ${20} $4"; '
+        '[ -z "$c" ] || { while read -r l; do case "$l" in 0::*) '
+        '[ "${l##*/}" != "$c" ] || echo "C ${e#/proc/}"; break;; esac; '
+        'done < "$e/cgroup"; } 2>/dev/null; '
         "done; }; members() { "
         f"g=$({_TAGGED}); "
         f'x=$(grep -lzxsF -e "{DEADLINE_ENV}=$t" /proc/[0-9]*/environ); '
@@ -388,6 +410,11 @@ def start_record(tag: str) -> str:
 def tree_record(tag: str) -> str:
     """Linux: the run's tree record in the job directory, `<pid> <start time>` per process."""
     return f".orch-worker-{tag}.tree.pid"
+
+
+def scope_record(tag: str) -> str:
+    """Linux: names the systemd user scope the run is contained in, when it is (#817)."""
+    return f".orch-worker-{tag}.scope"
 
 
 def _darwin_worker(
@@ -540,6 +567,29 @@ def ssh_argv(target: RemoteTarget, script: str) -> list[str]:
     ]
 
 
+def _contain(tag: str) -> str:
+    """Linux (#817): set "$@" to the systemd-run words that exec the run in its own user scope.
+
+    Only on a device whose user manager lingers and puts a process it
+    starts in a scope of its own on the unified cgroup hierarchy (the
+    probe's `0::` line), and only once the scope record names the unit;
+    otherwise "$@" is empty and the run starts uncontained, as before.
+    XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager, is
+    the lingering user's runtime directory when the session gave none.
+    """
+    unit = f"orch-run-{tag}.scope"
+    return (
+        'set --; u=$(id -u 2>/dev/null) && '
+        '[ "$(loginctl show-user "$u" -p Linger --value 2>/dev/null)" = yes ] && '
+        "x=${XDG_RUNTIME_DIR:-/run/user/$u} && "
+        'XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect '
+        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1 && "
+        f"echo {unit} > {shlex.quote(scope_record(tag))} && "
+        'export XDG_RUNTIME_DIR="$x" && '
+        f"set -- systemd-run --user --scope --quiet --collect --unit={unit} --; "
+    )
+
+
 def start_script(
     target: RemoteTarget,
     command: Sequence[str],
@@ -603,7 +653,7 @@ def start_script(
         + f'"${{@: -{count}}}" /bin/sh -c \'exec "$@"\' sh "${{@:1:$#-{count}}}"'
     )
     login = (
-        f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
+        f"{LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
         f'"$d" {" ".join(assignments)} {guard}{argv}'
         + (" 3>&1 1>&2" if report_env else "")
     )
@@ -623,7 +673,7 @@ def start_script(
         f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
         f'&& (set -C; echo "$$ $c {tag} $s" > {record_file}) 2>/dev/null '
         f'|| {{ kill -KILL "$k"; exit {START_REFUSED}; }}; '
-        f"{login}"
+        f"exec {login}"
     )
     inner = (
         f"d={directory}; "
@@ -634,7 +684,8 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'(set -C; echo "$$ $b {tag}" > {record_file}) 2>/dev/null || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
-        f"{login}"
+        f"{_contain(tag)}"
+        f'exec "$@" {login}'
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
 

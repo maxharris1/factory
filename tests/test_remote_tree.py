@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,14 +23,18 @@ import pytest
 
 from lib import device_monitor, remote
 from lib.worktrees import pid_alive, process_start
+from tests.test_detached_remote import Box
 from tests.test_remote_start import (
     LocalShell,
     config_of,
     disable_pc,
+    kill_quietly,
     lost_setup,
     machines_file,
     orphans,
     poll_at,
+    wait_file,
+    wait_gone,
 )
 
 linux_path = pytest.mark.skipif(
@@ -285,6 +290,60 @@ def stat_line(pid: int, session: int, start: int) -> str:
     return f"{pid} (sleep) S 1 {session} {session} " + "0 " * 15 + f"{start}\n"
 
 
+SCOPE_SLICE = "/user.slice/user-1000.slice/user@1000.service/app.slice"
+RECORDED_SESSION = 456789
+
+
+class SyntheticDevice:
+    """A Linux device replayed from a synthetic /proc: only the processes a
+    test shows exist, and no environment carries the tag. The job directory
+    holds a start record from this boot naming RECORDED_SESSION."""
+
+    def __init__(self, tmp_path: Path):
+        self.proc = tmp_path / "proc"
+        (self.proc / "sys/kernel/random").mkdir(parents=True)
+        (self.proc / "sys/kernel/random/boot_id").write_text("boot-current\n")
+        (self.proc / "self").mkdir()
+        (self.proc / "self/stat").write_text("readable\n")
+        stubs = tmp_path / "bin"
+        stubs.mkdir()
+        for name, body in {
+            "uname": "echo Linux",
+            "grep": 'case "$*" in *"-qzxF x") exit 0;; *) exit 1;; esac',
+        }.items():
+            (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
+            (stubs / name).chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"}
+        self.target = remote.RemoteTarget(
+            "pc", "pc", "claude-bot", str(tmp_path / "work"), "job", "a" * 32
+        )
+        self.job = Path(self.target.job_dir)
+        self.job.mkdir(parents=True)
+        (self.job / remote.start_record(self.target.require_tag())).write_text(
+            f"{RECORDED_SESSION} boot-current {self.target.tag}\n"
+        )
+        (self.job / remote.PID_FILE).write_text(f"{RECORDED_SESSION} boot-current\n")
+
+    def show(self, process: subprocess.Popen, session: int, cgroup: str | None = None) -> None:
+        shown = self.proc / str(process.pid)
+        shown.mkdir()
+        (shown / "environ").write_bytes(b"PATH=/usr/bin\0")
+        (shown / "stat").write_text(stat_line(process.pid, session, 9000))
+        if cgroup is not None:
+            (shown / "cgroup").write_text(f"0::{cgroup}\n")
+
+    def run(self, script: str) -> int:
+        return subprocess.run(
+            ["sh", "-c", script.replace("/proc", str(self.proc))],
+            capture_output=True,
+            env=self.env,
+        ).returncode
+
+    def tree(self) -> list[str]:
+        record = self.job / remote.tree_record(self.target.require_tag())
+        return record.read_text().splitlines() if record.exists() else []
+
+
 @linux_path
 @pytest.mark.parametrize("member_in_session", [False, True])
 def test_a_recorded_session_counts_only_while_a_proven_member_is_in_it(
@@ -293,46 +352,18 @@ def test_a_recorded_session_counts_only_while_a_proven_member_is_in_it(
     """#722 f-5: the start's session number, from a record that outlived the
     session, is reused by an unrelated session whose leader then exits.
     """
-    proc = tmp_path / "proc"
-    (proc / "sys/kernel/random").mkdir(parents=True)
-    (proc / "sys/kernel/random/boot_id").write_text("boot-current\n")
-    (proc / "self").mkdir()
-    (proc / "self/stat").write_text("readable\n")
-    stubs = tmp_path / "bin"
-    stubs.mkdir()
-    for name, body in {
-        "uname": "echo Linux",
-        "grep": 'case "$*" in *"-qzxF x") exit 0;; *) exit 1;; esac',
-    }.items():
-        (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
-        (stubs / name).chmod(0o755)
-    env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"}
-    target = remote.RemoteTarget("pc", "pc", "claude-bot", str(tmp_path / "work"), "job", "a" * 32)
-    job = Path(target.job_dir)
-    job.mkdir(parents=True)
-    session = 456789
-    (job / remote.start_record(target.require_tag())).write_text(
-        f"{session} boot-current {target.tag}\n"
-    )
-    (job / remote.PID_FILE).write_text(f"{session} boot-current\n")
+    device = SyntheticDevice(tmp_path)
+    target, job, session = device.target, device.job, RECORDED_SESSION
     stray = subprocess.Popen(["sleep", "60"])
     member = subprocess.Popen(["sleep", "60"])
-    shown = [stray] + ([member] if member_in_session else [])
-    for process in shown:
-        (proc / str(process.pid)).mkdir()
-        (proc / str(process.pid) / "environ").write_bytes(b"PATH=/usr/bin\0")
-        (proc / str(process.pid) / "stat").write_text(stat_line(process.pid, session, 9000))
+    for process in [stray] + ([member] if member_in_session else []):
+        device.show(process, session)
     if member_in_session:
         (job / remote.tree_record(target.tag)).write_text(f"boot-current\n{member.pid} 9000\n")
 
-    def run(script: str) -> int:
-        return subprocess.run(
-            ["sh", "-c", script.replace("/proc", str(proc))], capture_output=True, env=env
-        ).returncode
-
     try:
-        check = run(remote.check_script(target))
-        run(remote.stop_script(target, kill=True))
+        check = device.run(remote.check_script(target))
+        device.run(remote.stop_script(target, kill=True))
         if member_in_session:
             assert check == 1, "a recorded member keeps the run alive"
             assert stray.wait(timeout=5) == -signal.SIGKILL, (
@@ -347,6 +378,178 @@ def test_a_recorded_session_counts_only_while_a_proven_member_is_in_it(
         for process in (stray, member):
             process.kill()
             process.wait()
+
+
+@linux_path
+@pytest.mark.parametrize("own_scope", [True, False])
+def test_a_contained_runs_descendant_that_left_its_session_and_tag_is_kept_and_killed(
+    tmp_path: Path, own_scope: bool
+) -> None:
+    """#817 f-2: a descendant that called setsid and dropped the tag, whose
+    parent exited before any check saw it, is found by the run's scope."""
+    device = SyntheticDevice(tmp_path)
+    target = device.target
+    unit = f"orch-run-{target.tag if own_scope else 'b' * 32}.scope"
+    (device.job / remote.scope_record(target.require_tag())).write_text(f"{unit}\n")
+    victim = subprocess.Popen(["sleep", "60"])
+    device.show(victim, session=victim.pid, cgroup=f"{SCOPE_SLICE}/{unit}")
+    try:
+        check = device.run(remote.check_script(target))
+        if own_scope:
+            assert check == 1, "a process in the run's scope keeps the run alive"
+            assert f"{victim.pid} 9000" in device.tree(), "the tree record names it"
+            device.run(remote.stop_script(target, kill=True))
+            assert victim.wait(timeout=5) == -signal.SIGKILL, "the kill reaches it"
+            return
+        assert check != 1, "a scope record naming another run's unit is ignored"
+        device.run(remote.stop_script(target, kill=True))
+        time.sleep(0.2)
+        assert victim.poll() is None, "a process outside the run is never signalled"
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+@linux_path
+def test_a_contained_run_never_counts_its_recorded_session(tmp_path: Path) -> None:
+    """#817 ac-3: a contained run's members are its scope's processes, so a
+    process in the recorded session number but another cgroup is not one,
+    even while a proven member is in that session."""
+    device = SyntheticDevice(tmp_path)
+    target, session = device.target, RECORDED_SESSION
+    unit = f"orch-run-{target.tag}.scope"
+    (device.job / remote.scope_record(target.require_tag())).write_text(f"{unit}\n")
+    member = subprocess.Popen(["sleep", "60"])
+    stray = subprocess.Popen(["sleep", "60"])
+    device.show(member, session, cgroup=f"{SCOPE_SLICE}/{unit}")
+    device.show(stray, session, cgroup="/user.slice/user-1000.slice/session-4.scope")
+    (device.job / remote.tree_record(target.tag)).write_text(f"boot-current\n{member.pid} 9000\n")
+    try:
+        assert device.run(remote.check_script(target)) == 1
+        assert f"{stray.pid} 9000" not in device.tree(), "the check does not count it"
+        device.run(remote.stop_script(target, kill=True))
+        assert member.wait(timeout=5) == -signal.SIGKILL
+        time.sleep(0.2)
+        assert stray.poll() is None, "a process outside the run is never signalled"
+    finally:
+        for process in (stray, member):
+            process.kill()
+            process.wait()
+
+
+@linux_path
+def test_an_uncontained_runs_reused_session_number_is_never_killed(tmp_path: Path) -> None:
+    """#817 ac-3: the recorded session number now belongs to an unrelated
+    real session whose leader has exited."""
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
+    assert target is not None
+    left = tmp_path / "sleep.pid"
+    leader = subprocess.Popen(
+        ["sh", "-c", f"sleep 60 > /dev/null 2>&1 & echo $! > {shlex.quote(str(left))}"],
+        start_new_session=True,
+    )
+    assert leader.wait(timeout=5) == 0
+    sleeper = int(left.read_text())
+    try:
+        assert Path(f"/proc/{sleeper}/stat").read_text().rsplit(") ", 1)[1].split()[3] == str(
+            leader.pid
+        ), "the sleep is in the session the record names"
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        job = Path(target.job_dir)
+        job.mkdir(parents=True)
+        (job / remote.start_record(target.require_tag())).write_text(
+            f"{leader.pid} {boot} {target.tag}\n"
+        )
+        (job / remote.PID_FILE).write_text(f"{leader.pid} {boot}\n")
+        shell = LocalShell()
+        assert remote.check_worker(shell, target, fence=False) != remote.RUNNING
+        assert remote.stop_worker(shell, target, kill=True)
+        time.sleep(0.2)
+        state = Path(f"/proc/{sleeper}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+        assert state == "S", "a process outside the run is never signalled"
+    finally:
+        kill_quietly(sleeper)
+
+
+def scope_usable() -> bool:
+    if sys.platform != "linux" or shutil.which("systemd-run") is None:
+        return False
+    probe = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"]
+    return subprocess.run(probe, capture_output=True, timeout=30).returncode == 0
+
+
+contained_path = pytest.mark.skipif(
+    not scope_usable(), reason="needs a Linux user manager that starts scopes"
+)
+
+
+@pytest.mark.parametrize(
+    "linger", [pytest.param("yes", marks=contained_path), pytest.param("no", marks=linux_path)]
+)
+def test_a_linux_launch_runs_in_a_scope_only_when_lingering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linger: str
+) -> None:
+    """#817: with a lingering user manager, a descendant the worker starts
+    in a new session with a clean environment as it exits on SIGTERM stays
+    the run's, and the kill ends it. Without, the run starts uncontained."""
+    box = Box(tmp_path, monkeypatch)
+    tools = tmp_path / "device-bin"
+    tools.mkdir()
+    (tools / "loginctl").write_text(f"#!/bin/sh\necho {linger}\n")
+    (tools / "loginctl").chmod(0o755)
+    monkeypatch.setenv("FAKE_SSH_PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    ready, tick, leaf_pid = tmp_path / "worker.pid", tmp_path / "tick", tmp_path / "leaf.pid"
+    leaf = f"""import os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(leaf_pid)!r}).write_text(str(os.getpid()))
+while True:
+    Path({str(tick)!r}).write_text(str(time.monotonic_ns()))
+    time.sleep(.02)
+"""
+    worker = f"""import os, signal, subprocess, sys, time
+from pathlib import Path
+def leave(*_):
+    subprocess.Popen([sys.executable, '-c', {leaf!r}], env={{'PATH': os.environ['PATH']}},
+                     start_new_session=True)
+    os._exit(0)
+signal.signal(signal.SIGTERM, leave)
+Path({str(ready)!r}).write_text(str(os.getpid()))
+time.sleep(120)
+"""
+    target, unit = box.target, f"orch-run-{box.target.tag}.scope"
+    record = Path(target.job_dir) / remote.scope_record(target.require_tag())
+    try:
+        result = box.send(box.launch(command=[sys.executable, "-c", worker]))
+        assert result.stdout.decode().strip() == f"{remote.LAUNCH_MARK} started", result.stderr
+        worker_pid = int(wait_file(ready))
+        cgroup = Path(f"/proc/{worker_pid}/cgroup").read_text().strip()
+        if linger == "no":
+            assert not record.exists(), "no scope without a lingering user manager"
+            assert not cgroup.endswith(unit)
+            assert remote.check_worker(box.transport, target, fence=False) == remote.RUNNING
+            return
+        assert record.read_text() == f"{unit}\n"
+        assert cgroup.startswith("0::/") and cgroup.endswith(f"/{unit}"), cgroup
+
+        assert remote.stop_worker(box.transport, target)
+        leaf = int(wait_file(leaf_pid))
+        wait_file(tick)
+        assert wait_gone(worker_pid), "the worker exited on SIGTERM"
+        box.wait_exit()
+        wrapper = int((box.run_dir() / "pid").read_text().split()[0])
+        assert wait_gone(wrapper), "the wrapper exited after its start"
+        assert remote.check_worker(box.transport, target, fence=False) == remote.RUNNING, (
+            "an untagged descendant in its own session keeps the contained run alive"
+        )
+        assert remote.stop_worker(box.transport, target, kill=True)
+        assert wait_gone(leaf, 5.0), "the kill reached the descendant"
+        assert remote.check_worker(box.transport, target, fence=False) == remote.GONE
+    finally:
+        remote.stop_worker(box.transport, target, kill=True)
+        box.cleanup()
+        kill_leftover(tmp_path)
 
 
 def command_substitutions(script: str) -> list[str]:
