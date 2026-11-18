@@ -10,11 +10,11 @@ from the enabled machines.yml devices (`devices` keeps their machines.yml
 order), then any account that has stored readings with the devices its rows
 name. Each window holds the newest reading across the account's devices and
 is `ok`, `stale` (the window has reset or the reading is older than
-STALE_SECONDS, and `used` is then null), `not on plan` (left out of
-NOT_ON_PLAN_READINGS fresh readings in a row that report other limits) or
-`no reading`. An account is `not tracked` (Cursor), `no reading` (no chosen
-source, or no row yet), `no telemetry` (no table: an older database, or
-telemetry never on), `stale` or `ok`. No value is guessed: a missing
+STALE_SECONDS, and `used` is then null), `not on plan` (Codex only: left
+out of NOT_ON_PLAN_READINGS fresh readings in a row that report other
+limits) or `no reading`. An account is `not tracked` (Cursor), `no
+reading` (no chosen source, or no row yet), `no telemetry` (no table: an
+older database, or telemetry never on), `stale` or `ok`. No value is guessed: a missing
 utilization stays null.
 """
 
@@ -86,10 +86,10 @@ def _rows(connection: sqlite3.Connection) -> dict[Account, tuple[list[str], dict
     return stored
 
 
-def _window(reading: Reading | None, now: float) -> dict:
+def _window(reading: Reading | None, now: float, harness: str) -> dict:
     if reading is None:
         return {"used": None, "resets_at": None, "observed_at": None, "state": "no reading"}
-    state = window_state(reading, now)
+    state = window_state(reading, now, harness)
     return {
         "used": reading.used if state == "ok" else None,
         "resets_at": reading.resets_at,
@@ -108,7 +108,7 @@ def _entry(
         "bot": bot,
         "harness": harness,
         "devices": devices,
-        **{window: _window(windows.get(window), now) for window in WINDOWS},
+        **{window: _window(windows.get(window), now, harness) for window in WINDOWS},
         "headroom": headroom(list(windows.values()), now),
         "observed_at": observed,
         "age_seconds": None if observed is None else int(max(0.0, now - observed)),
