@@ -299,7 +299,7 @@ class DeviceMonitor:
         """The lost run as its row names it: its tag, every member seen so far,
         each recorded parent still live, and its scope, else the runner's
         session; None when nothing names it."""
-        listing = self.scan(None)
+        listing = self.scan(orphan.run_tag)
         known = dict(orphan.members)
         for pid, start in (
             (orphan.runner_pid, orphan.runner_start),
@@ -313,7 +313,7 @@ class DeviceMonitor:
             tag = run_tag(worker)
         root = worker if worker is not None else orphan.runner_pid
         scope = orphan.run_scope
-        session = None if scope else _runner_session(orphan, listing)
+        session = None if scope else _runner_session(orphan, listing, known)
         if root is None or (tag is None and not known and session is None and scope is None):
             return None
         return Tree(
@@ -416,13 +416,18 @@ class DeviceMonitor:
             released.append(slot.placement.job_id)
 
 
-def _runner_session(orphan: Orphan, listing: dict[int, Process]) -> int | None:
-    """The session the waiter started the runner in, which its pid names.
+def _runner_session(
+    orphan: Orphan, listing: dict[int, Process], known: dict[int, str]
+) -> int | None:
+    """The session the waiter started the runner in, which its pid names, while a
+    proven process of the run is in it: one carrying the run's tag (the
+    keeper, lib/job_run.py), or a known member with its recorded start time.
 
-    A session number is not reused while a process is in it, so it is the
-    run's unless another process now holds the runner's pid.
+    A session number is not reused while a process is in it, but once the
+    last proven one leaves, the number names nothing of the run (#827 f-5).
     """
-    pid, start = orphan.runner_pid, orphan.runner_start
-    if pid in listing and start not in (None, listing[pid].start):
-        return None
-    return pid
+    pid = orphan.runner_pid
+    for process in listing.values():
+        if process.group == pid and (process.tagged or known.get(process.pid) == process.start):
+            return pid
+    return None

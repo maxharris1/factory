@@ -928,3 +928,55 @@ def test_cli_gc_reports_and_removes_old_unchanged_worktrees(
     assert old.returncode == 0, err
     assert out == f"removed job worktree {checkout.path} (acme/widgets, 48h old)\n"
     assert not checkout.path.exists()
+
+
+KEEPER_HELD_RUN = """import sys
+from pathlib import Path
+from lib.job_run import run
+here = Path(sys.argv[1])
+code = run([sys.executable, "-c", f"open({str(here / 'ran')!r}, 'w')"], beat=lambda: None,
+    interval=60, log=print, started=lambda pid: None)
+(here / "code").write_text(str(code))
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the keeper is Linux only")
+def test_the_command_waits_for_a_keeper_that_ignores_term(tmp_path: Path) -> None:
+    """#827 f-6: a TERM that ends the keeper before it ignores TERM leaves the
+    session unproven, so the command never runs beside an unprotected keeper."""
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    real = subprocess.run(["sh", "-c", "command -v sh"], capture_output=True, text=True).stdout.strip()
+    held = tmp_path / "held"
+    (shims / "sh").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$3" = orch-keeper ]; then echo $$ > {held}.tmp; mv {held}.tmp {held}; '
+        "while :; do sleep 0.05; done; fi\n"
+        f'exec {real} "$@"\n'
+    )
+    (shims / "sh").chmod(0o755)
+    script = tmp_path / "held_run.py"
+    script.write_text(KEEPER_HELD_RUN)
+    runner = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path)],
+        env={**os.environ, "PATH": f"{shims}:{os.environ['PATH']}",
+             "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not held.exists():
+            assert time.monotonic() < deadline, "the runner started the keeper"
+            time.sleep(0.05)
+        time.sleep(0.5)
+        assert not (tmp_path / "ran").exists(), "the command waits while the keeper is held"
+        os.kill(int(held.read_text()), signal.SIGTERM)
+        output, _ = runner.communicate(timeout=15)
+    finally:
+        if runner.poll() is None:
+            os.killpg(runner.pid, signal.SIGKILL)
+            runner.communicate()
+    assert (tmp_path / "code").read_text() == "127", output
+    assert "cannot start the session keeper" in output
+    assert not (tmp_path / "ran").exists(), "the command never ran"

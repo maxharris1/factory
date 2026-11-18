@@ -35,7 +35,11 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   and execs the login shell under `systemd-run --user --scope` in that
   unit, so the run is contained: every process it starts stays in the
   scope, whatever its session or environment. Otherwise it runs as above,
-  uncontained;
+  uncontained. Before either, when it leads its session, the start leaves
+  the keeper (KEEPER, #827) there and waits until the keeper ignores TERM,
+  HUP and INT: tagged, and there until it is the session's last process,
+  so the session holds a tagged member while any process of the start is
+  in it;
 * preflight (#94, `orch job run --worktree`): under `bash -lc`, exit 0 when
   git, gh and the harness binary are all found, else name the missing ones;
 * checkout (#94): under `bash -lc`, clone (git init + fetch, so a job
@@ -60,12 +64,15 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   names one, so a reused pid never joins. In a contained run such a
   descendant is the run's even when no check saw it before its parent
   exited, and a reused session number never names a process outside it.
+  Each rewrite holds `flock` on the record's lock file, so a check never
+  replaces a newer record with an older view; a device without `flock`,
+  or a lock not taken in 10 seconds, is 3.
   The run's deadline (`ORCH_WORKER_DEADLINE`) is never the run's, nor its
   children. With none of them, exit 3 ("cannot tell") while the recorded
-  group, from this boot, still has a process (one that dropped the tag, or
-  an unrelated group that reused the number), and exit 0 (gone) when it
-  has none, the record is from an earlier boot, or no record was ever
-  written. A malformed record (empty, not digits, a leading zero, 0 or 1)
+  group, from this boot, still has a live process (one that dropped the
+  tag, or an unrelated group that reused the number), and exit 0 (gone)
+  when it has none, the record is from an earlier boot, or no record was
+  ever written. A malformed record (empty, not digits, a leading zero, 0 or 1)
   is 3. ssh itself exits 255 when the device cannot be reached;
 * stop: send SIGTERM to every process of the run, as check finds and
   records them, and to each process group that holds a tagged one (a group
@@ -275,18 +282,20 @@ _TREE_AWK = (
     'END { if (r == "" || r != b) split("", k); '
     "for (p in u) if (!(p in x) && ((p in t) || (p in c) || ((p in k) && k[p] == s[p]))) m[p] = 1; "
     'if (sc || qb != b || q !~ /^[1-9][0-9]*$/ || q == 1 || ((q in u) && !(q in m))) q = ""; '
-    'if (q != "" && seal == "") { v = 0; for (p in m) if (g[p] == q) v = 1; if (!v) q = "" } '
+    'if (q != "") { v = 0; for (p in m) if (g[p] == q) v = 1; if (!v) q = "" } '
     'if (q != "") for (p in u) if (!(p in x) && g[p] == q) m[p] = 1; '
     "do { n = 0; for (p in u) if (!(p in m) && !(p in x) && (u[p] in m)) { m[p] = 1; n = 1 } } "
     "while (n); for (p in m) n++; if (n) { print b; for (p in m) print p, s[p] } }"
 )
 
 
-def _members(directory: str, *, seal: bool = False) -> str:
+def _members(directory: str) -> str:
     """Define `members`: rewrite the tree record of tag $t, then print its members' pids.
 
-    With seal, the start's session counts with no proven member in it: only
-    the wrapper that has just reaped the start passes it.
+    The read, scan and rewrite hold `flock` on the record's lock file, so a
+    writer that read the record earlier never replaces a newer one (#827).
+    The kernel drops the lock when its holder dies. `members` fails, printing
+    nothing, when the lock cannot be taken in 10 seconds.
 
     The listing is its own function, so no `)` of its case pattern sits
     inside a command substitution: macOS's sh (bash 3.2) closes the
@@ -312,14 +321,16 @@ def _members(directory: str, *, seal: bool = False) -> str:
         '[ -z "$c" ] || { while read -r l; do case "$l" in 0::*) '
         '[ "${l##*/}" != "$c" ] || echo "C ${e#/proc/}"; break;; esac; '
         'done < "$e/cgroup"; } 2>/dev/null; '
-        "done; }; members() { "
+        "done; }; tracked() { "
         f"g=$({_TAGGED}); "
         f'x=$(grep -lzxsF -e "{DEADLINE_ENV}=$t" /proc/[0-9]*/environ); '
-        f"o=$(listed | awk -v seal={'1' if seal else ''} {shlex.quote(_TREE_AWK)}); "
+        f"o=$(listed | awk {shlex.quote(_TREE_AWK)}); "
         'if [ -n "$o" ] || [ -e "$k" ]; then '
         '{ { [ -z "$o" ] || printf \'%s\\n\' "$o"; } > "$k.$$" '
         '&& mv -f -- "$k.$$" "$k"; } 2>/dev/null || rm -f -- "$k.$$"; fi; '
         "[ -z \"$o\" ] || printf '%s\\n' \"$o\" | sed -n 's/ .*//p'; }; "
+        'members() { if [ -d "${k%/*}" ]; then '
+        '{ flock -w 10 9 && tracked; } 9>>"$k.lock"; else tracked; fi; }; '
     )
 
 
@@ -386,15 +397,40 @@ _DARWIN_MEMBER = (
 # to the file $2, so ps is the keeper's own child, never a grandchild. The
 # start forks it from a subshell that exits at once, so it is not the
 # harness's child: a harness that waits for all its children never waits
-# on it.
+# on it. It prints its pid once it ignores those signals, then closes its
+# output, so the start reads the pid only from a keeper a TERM can no longer
+# end (#827 f-6).
 _DARWIN_KEEPER = (
-    'trap "" TERM INT HUP; '
+    'trap "" TERM INT HUP; echo "$$"; exec > /dev/null 2>&1; '
     "while sleep 1; do "
     'ps -A -o pgid= -o pid= -o ppid= > "$2" 2>/dev/null || continue; '
     '[ "$(awk -v p="$1" -v k="$$" '
     "'$2 == k { s = 1 } $1 == p && $2 != k && $3 != k { n = 1 } END { print s + 0, n + 0 }' "
     '"$2")" = "1 0" ] && break; '
     'done; rm -f -- "$2"'
+)
+# #827: the Linux counterpart of _DARWIN_KEEPER, for the start's session. Run
+# it as `sh -c "$KEEPER" orch-keeper` with the run's tag. It ignores TERM,
+# HUP and INT and exits once two scans in a row, 0.2 s apart, find no other
+# live process in its session, so the session holds a tagged process for as
+# long as anything else is in it: a session number proves the run only while
+# a proven member is in it. One scan is not enough: a process listed in it
+# can fork and exit before the scan reads it, and its child, born after the
+# listing, is missed. Only builtins run during a scan, so no child of its own
+# is listed. It prints its pid once it ignores those signals, then closes its
+# output: whoever starts it reads that line before the worker runs, so a TERM
+# sent once the worker runs never finds the keeper unprotected (#827 f-6).
+KEEPER = (
+    'trap "" TERM HUP INT; echo "$$"; exec > /dev/null 2>&1; '
+    'read -r s < /proc/self/stat || exit 0; set -- ${s##*) }; q=$4; z=; '
+    "while :; do n=; for e in /proc/[0-9]*; do "
+    '[ "${e#/proc/}" = "$$" ] && continue; '
+    '{ read -r s < "$e/stat"; } 2>/dev/null || continue; '
+    "set -- ${s##*) }; "
+    'case "$1" in Z|X) continue;; esac; '
+    '[ "$4" = "$q" ] && { n=1; break; }; '
+    'done; if [ -n "$n" ]; then z=; elif [ -n "$z" ]; then exit 0; else z=1; fi; '
+    "sleep 0.2 || sleep 1; done"
 )
 # What a check or stop writes as the record of a start that has written none:
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
@@ -668,7 +704,7 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f"k=$(sh -c {shlex.quote(_DARWIN_KEEPER)} orch-keeper $$ "
         f"{shlex.quote(f'.orch-worker-{tag}.keeper.pid')} "
-        "< /dev/null > /dev/null 2>&1 & echo $!); "
+        "< /dev/null 2> /dev/null &); "
         f'p=$k; {_LSTART}; [ -n "$k" ] && [ -n "$*" ] '
         f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
         f'&& (set -C; echo "$$ $c {tag} $s" > {record_file}) 2>/dev/null '
@@ -684,6 +720,10 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'(set -C; echo "$$ $b {tag}" > {record_file}) 2>/dev/null || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
+        f"read -r s < /proc/self/stat || exit {START_REFUSED}; "
+        's=${s##*) }; s=${s#* }; s=${s#* }; s=${s#* }; '
+        f'if [ "${{s%% *}}" = "$$" ]; then k=$(sh -c {shlex.quote(KEEPER)} orch-keeper '
+        f'< /dev/null 2> /dev/null &); [ -n "$k" ] || exit {START_REFUSED}; fi; '
         f"{_contain(tag)}"
         f'exec "$@" {login}'
     )
@@ -720,8 +760,9 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
         f"{record}"
         f"{_CAN_SCAN} || exit 3; "
         "[ -r /proc/self/stat ] || exit 3; "
+        "command -v flock >/dev/null 2>&1 || exit 3; "
         f"{_members(directory)}"
-        '[ -z "$(members)" ] || exit 1; '
+        'o=$(members) || exit 3; [ -z "$o" ] || exit 1; '
         '[ -e "$f" ] || exit 0; '
         '{ read -r p b < "$f"; } 2>/dev/null || exit 3; '
         f'case "$p" in {_BAD_GROUP}) exit 3;; esac; '
@@ -731,18 +772,10 @@ def _check_body(target: RemoteTarget, *, fence: bool = True, claim: bool = False
         "for d in /proc/[0-9]*; do "
         '{ read -r s < "$d/stat"; } 2>/dev/null || continue; '
         "set -- ${s##*) }; "
+        'case "$1" in Z|X) continue;; esac; '
         '[ "$3" = "$p" ] && exit 3; '
         "done; "
         "exit 0"
-    )
-
-
-def _record_session_script(target: RemoteTarget) -> str:
-    """Linux: record every process left in the start's session as the run's."""
-    return _sh(
-        f"t={target.require_tag()}; if {_IS_DARWIN}; then exit 0; fi; "
-        f"{_CAN_SCAN} || exit 0; [ -r /proc/self/stat ] || exit 0; "
-        f"{_members(shlex.quote(target.job_dir), seal=True)}members > /dev/null"
     )
 
 
@@ -771,11 +804,13 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
     sig = "KILL" if kill else "TERM"
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     halt = (
-        'a=; n=1; while [ -n "$n" ]; do n=; m=$(members); for q in $m; do '
+        'a=; n=1; while [ -n "$n" ]; do n=; '
+        'm=$(members) || { for q in $a; do kill -CONT "$q" 2>/dev/null; done; exit 3; }; '
+        "for q in $m; do "
         'case " $a " in *" $q "*) ;; *) kill -STOP "$q" 2>/dev/null; a="$a $q"; n=1;; esac; '
         "done; done; "
         if kill
-        else "m=$(members); "
+        else "m=$(members) || exit 3; "
     )
     resume = 'for q in $a; do kill -CONT "$q" 2>/dev/null; done; ' if kill else ""
     darwin = _darwin_worker(
@@ -790,6 +825,7 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
         f"t={tag}; f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
         f"{_CAN_SCAN} || exit 3; "
+        "command -v flock >/dev/null 2>&1 || exit 3; "
         f"{_members(shlex.quote(target.job_dir))}"
         f"{halt}"
         f"for e in $({_TAGGED}); do "
@@ -922,23 +958,21 @@ _WRITE_RESULT_PAST_STOPS = (
 )
 
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
-# directory, $2 the detacher, $3 the start script, $4 the session record
-# script (_record_session_script), then (#199 r1) $5 the budget in whole
-# seconds (empty: none), $6 the grace, $7 and $8 the stop and kill scripts,
-# $9 the check script. It starts the start (lib/remote.py start_script, which
+# directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
+# budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop and
+# kill scripts, $8 the check script. It starts the start (start_script, which
 # records the worker and execs the harness) in a session of its own with
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again
 # after a SIGTERM, which it catches so the start keeps default handling),
-# then runs the session record script without the tag and writes `handoff`
-# and `exit`, each through a temporary file.
+# then writes `handoff` and `exit`, each through a temporary file.
 _WRAPPER = (
-    'T=$1; S=$2; x=$3; z=$4; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
+    'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
     + _DETACH
     + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
-    'if [ -n "$5" ]; then '
-    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$5" "$6" "$7" "$8" "$9"; '
+    'if [ -n "$4" ]; then '
+    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7" "$8"; '
     f'if [ "$S" = setsid ]; then env -u {TAG_ENV} "{DEADLINE_ENV}=$t" setsid "$@" '
     '< /dev/null > /dev/null 2>&1 & '
     f'else env -u {TAG_ENV} "{DEADLINE_ENV}=$t" '
@@ -946,7 +980,6 @@ _WRAPPER = (
     '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
-    f'env -u {TAG_ENV} sh -c "$z" < /dev/null > /dev/null 2>&1; '
     + _WRITE_RESULT_PAST_STOPS
 )
 
@@ -1028,7 +1061,6 @@ def launch_script(
         f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
         + _DETACH
         + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
-        f"{shlex.quote(_record_session_script(target))} "
         f"{limits} < /dev/null > /dev/null 2>&1 & "
         "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
         "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "

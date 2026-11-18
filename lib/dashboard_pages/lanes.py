@@ -309,9 +309,9 @@ SCRIPT = r"""
     return tile;
   }
 
-  function idleTile(key, off, seed) {
+  function idleTile(key, off, seed, height) {
     var tile = el('div', 'tile empty free');
-    add(tile, PX.strip(key, {state: off ? 'held' : 'idle', seed: seed, height: 16}));
+    add(tile, PX.strip(key, {state: off ? 'held' : 'idle', seed: seed, height: height || 16}));
     add(tile, el('div', 'lbl', off ? 'off' : 'idle'));
     return tile;
   }
@@ -668,10 +668,10 @@ def _held_tile(key: str, seed: int) -> str:
     return f'<div class="tile empty px-held">{strip}<div class="lbl">held</div></div>'
 
 
-def _idle_tile(key: str, off: bool, seed: int) -> str:
+def _idle_tile(key: str, off: bool, seed: int, height: int = 16) -> str:
     from lib.dashboard_pages.shell import px_strip
 
-    strip = px_strip(key, state="held" if off else "idle", seed=seed, height=16)
+    strip = px_strip(key, state="held" if off else "idle", seed=seed, height=height)
     return f'<div class="tile empty free">{strip}<div class="lbl">{"off" if off else "idle"}</div></div>'
 
 
