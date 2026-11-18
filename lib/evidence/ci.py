@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from lib.dispatch.types import FailedCheck
+from lib.dispatch.types import Cause, FailedCheck, result_cause
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
@@ -17,6 +17,21 @@ _JOB_STEP = re.compile(r"^[^\t]*\t[^\t]*\t(?=\ufeff?\d{4}-\d{2}-\d{2}T)")
 _PYTEST_SUMMARY = re.compile(
     r"^(?:FAILED|ERROR) ([\w./-]+\.py(?:::[^\s\[]+)*(?:\[[^\]]*\])?)(?: - .*)?\s*$"
 )
+# Not "The operation was canceled.": a person or a concurrency group cancels too.
+INFRA_SIGNALS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), label)
+    for pattern, label in (
+        (r"not acquired by Runner", "runner not acquired"),
+        (r"spending limit", "billing or spending limit"),
+        (r"account payments have failed", "billing or spending limit"),
+        (r"billing issue|locked due to a billing", "billing or spending limit"),
+        (r"lost communication with the server", "runner lost"),
+        (r"received a shutdown signal", "runner lost"),
+        (r"no hosted runner", "hosted runner unavailable"),
+        (r"hosted runner encountered an error", "hosted runner unavailable"),
+        (r"internal error when running your job", "hosted runner unavailable"),
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +41,8 @@ class CIJobLog:
     run_url: str | None
     log_tail: str | None
     cut: str | None
+    cause: Cause
+    signal: str | None
 
 
 @dataclass(frozen=True)
@@ -33,6 +50,14 @@ class CIEvidence:
     failed_checks: tuple[str, ...]
     runs: tuple[tuple[str, str], ...]
     jobs: tuple[CIJobLog, ...]
+    cause: Cause
+
+
+def classify_failure(conclusion: str | None, texts: Iterable[str]) -> tuple[Cause, str | None]:
+    signal = _infra_signal(texts)
+    if signal is not None:
+        return "infra", signal
+    return ("code" if conclusion == "failure" else "unknown"), None
 
 
 def ci_evidence(
@@ -48,12 +73,29 @@ def ci_evidence(
             runs.setdefault(check.run_id, check.run_url)
         text = logs.get(check.job_id) if check.job_id is not None else None
         tail, cut = _tail(text, limit) if text is not None else (None, None)
-        jobs.append(CIJobLog(check.name, check.run_id, check.run_url, tail, cut))
+        cause, signal = check.cause, check.signal
+        logged = _untested_log_signal(text) if text is not None else None
+        if logged is not None:
+            cause, signal = "infra", logged
+        jobs.append(CIJobLog(check.name, check.run_id, check.run_url, tail, cut, cause, signal))
     return CIEvidence(
         failed_checks=tuple(check.name for check in failed),
         runs=tuple(runs.items()),
         jobs=tuple(jobs),
+        cause=result_cause(job.cause for job in jobs),
     )
+
+
+def _untested_log_signal(text: str) -> str | None:
+    return None if failing_tests(text) else _infra_signal((text,))
+
+
+def _infra_signal(texts: Iterable[str]) -> str | None:
+    for text in texts:
+        for pattern, label in INFRA_SIGNALS:
+            if pattern.search(text):
+                return label
+    return None
 
 
 def failing_tests(log_text: str) -> list[str]:

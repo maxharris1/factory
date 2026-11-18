@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from lib.dispatch.types import FailedCheck
-from lib.evidence.ci import LOG_LINES, CIEvidence, CIJobLog, ci_evidence, failing_tests
+import pytest
+
+from lib.dispatch.types import CIResult, FailedCheck, result_cause
+from lib.evidence.ci import (
+    LOG_LINES,
+    CIEvidence,
+    CIJobLog,
+    ci_evidence,
+    classify_failure,
+    failing_tests,
+)
 
 RUN_URL = "https://github.com/o/r/actions/runs/42"
-PYTEST = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL)
+PYTEST = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL, cause="code")
 
 
 def _log(lines: int) -> str:
@@ -31,9 +40,12 @@ def test_a_fetched_log_reaches_the_bundle_with_its_run():
                 RUN_URL,
                 "setup\nFAILED tests/test_x.py::test_y - AssertionError\n1 failed",
                 None,
+                "code",
+                None,
             ),
-            CIJobLog("commit status", None, None, None, None),
+            CIJobLog("commit status", None, None, None, None, "unknown", None),
         ),
+        cause="code",
     )
 
 
@@ -49,7 +61,7 @@ def test_two_jobs_of_one_run_list_the_run_once():
 def test_a_job_whose_log_was_not_fetched_is_unavailable():
     bundle = ci_evidence(failed=(PYTEST,), logs={})
 
-    assert bundle.jobs == (CIJobLog("pytest", "42", RUN_URL, None, None),)
+    assert bundle.jobs == (CIJobLog("pytest", "42", RUN_URL, None, None, "code", None),)
 
 
 def test_cap_keeps_last_lines_and_says_what_it_cut():
@@ -209,3 +221,89 @@ def test_failing_tests_keeps_the_first_ten_distinct_tests():
     lines = [f"FAILED tests/test_a.py::test_{n % 12} - boom" for n in range(30)]
 
     assert failing_tests("\n".join(lines)) == [f"tests/test_a.py::test_{n}" for n in range(10)]
+
+
+NOT_ACQUIRED = "The job was not acquired by Runner of type hosted even after multiple attempts"
+BILLING = (
+    "The job was not started because recent account payments have failed or your spending limit "
+    "needs to be increased. Please check the 'Billing & plans' section in your settings"
+)
+
+
+@pytest.mark.parametrize(
+    ("conclusion", "texts", "expected"),
+    [
+        ("cancelled", [NOT_ACQUIRED], ("infra", "runner not acquired")),
+        ("failure", [BILLING], ("infra", "billing or spending limit")),
+        ("failure", ["The hosted runner lost communication with the server."], ("infra", "runner lost")),
+        ("failure", ["The runner has received a shutdown signal."], ("infra", "runner lost")),
+        (
+            "failure",
+            ["GitHub Actions has encountered an internal error when running your job."],
+            ("infra", "hosted runner unavailable"),
+        ),
+        ("failure", ["FAILED tests/test_x.py::test_y - AssertionError"], ("code", None)),
+        ("failure", [], ("code", None)),
+        ("cancelled", ["The operation was canceled."], ("unknown", None)),
+        ("timed_out", [], ("unknown", None)),
+        (None, [], ("unknown", None)),
+    ],
+)
+def test_classify_failure_reads_infra_signals_before_the_conclusion(conclusion, texts, expected):
+    assert classify_failure(conclusion, texts) == expected
+
+
+@pytest.mark.parametrize(
+    ("causes", "expected"),
+    [
+        (["infra", "code"], "code"),
+        (["infra", "infra"], "infra"),
+        (["infra", "unknown"], "unknown"),
+        ([], "unknown"),
+    ],
+)
+def test_result_cause_is_infra_only_when_every_check_is(causes, expected):
+    assert result_cause(causes) == expected
+
+
+def test_only_a_failed_ci_result_has_a_cause():
+    infra = FailedCheck("macos", cause="infra", signal="runner lost")
+
+    assert CIResult("success").cause is None
+    assert CIResult("pending").cause is None
+    assert CIResult("failure", "failed: x").cause == "unknown"
+    assert CIResult("failure", failed=(infra, infra)).cause == "infra"
+    assert CIResult("failure", failed=(infra, PYTEST)).cause == "code"
+
+
+RUNNER_LOST = (
+    "2026-11-10T19:50:00Z collecting\n"
+    "2026-11-10T19:50:01Z ##[error]The runner has received a shutdown signal.\n"
+)
+
+
+def test_a_log_with_a_runner_lost_line_and_no_failing_test_makes_the_bundle_infra():
+    unknown = FailedCheck("pytest", run_id="42", job_id="7", run_url=RUN_URL)
+
+    bundle = ci_evidence(failed=(unknown,), logs={"7": RUNNER_LOST})
+
+    assert [(job.cause, job.signal) for job in bundle.jobs] == [("infra", "runner lost")]
+    assert bundle.cause == "infra"
+
+
+def test_a_log_with_a_failing_test_stays_code_even_when_it_quotes_an_infra_signal():
+    failed = "2026-11-10T19:50:02Z FAILED tests/test_x.py::test_y - boom\n"
+
+    bundle = ci_evidence(failed=(PYTEST,), logs={"7": RUNNER_LOST + failed})
+
+    assert [(job.cause, job.signal) for job in bundle.jobs] == [("code", None)]
+    assert bundle.cause == "code"
+
+
+def test_an_infra_check_keeps_its_signal_in_the_bundle():
+    lost = FailedCheck("macos", run_id="42", job_id="9", cause="infra", signal="runner not acquired")
+
+    bundle = ci_evidence(failed=(lost,), logs={})
+
+    assert [(job.cause, job.signal) for job in bundle.jobs] == [("infra", "runner not acquired")]
+    assert bundle.cause == "infra"

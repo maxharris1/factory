@@ -83,8 +83,17 @@ def test_ci_fix_carries_the_failed_checks_github_actions_reports(tmp_path: Path)
         "failed_checks": ["typecheck"],
         "runs": [],
         "jobs": [
-            {"check": "typecheck", "run_id": None, "run_url": None, "log_tail": None, "cut": None}
+            {
+                "check": "typecheck",
+                "run_id": None,
+                "run_url": None,
+                "log_tail": None,
+                "cut": None,
+                "cause": "code",
+                "signal": None,
+            }
         ],
+        "cause": "code",
     }
 
 

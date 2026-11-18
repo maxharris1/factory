@@ -78,8 +78,8 @@ CI_LOG = "FAILED tests/test_pricing.py::test_start_free - AssertionError\n```\nt
 
 RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
 CI_FAILED = (
-    FailedCheck("pytest", run_id="123456", job_id="31000000004", run_url=RUN_URL),
-    FailedCheck("check-config", run_id="123456", job_id="31000000005", run_url=RUN_URL),
+    FailedCheck("pytest", run_id="123456", job_id="31000000004", run_url=RUN_URL, cause="code"),
+    FailedCheck("check-config", run_id="123456", job_id="31000000005", run_url=RUN_URL, cause="code"),
 )
 PYTEST_LOG = (
     "".join(f"tests/test_pricing.py::test_case_{n} PASSED\n" for n in range(1, 154))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -39,12 +39,24 @@ class HandoffCandidate:
     unread: bool
 
 
+Cause = Literal["infra", "code", "unknown"]
+
+
 @dataclass(frozen=True)
 class FailedCheck:
     name: str
     run_id: str | None = None
     job_id: str | None = None
     run_url: str | None = None
+    cause: Cause = "unknown"
+    signal: str | None = None
+
+
+def result_cause(causes: Iterable[Cause]) -> Cause:
+    seen = set(causes)
+    if "code" in seen:
+        return "code"
+    return "infra" if seen == {"infra"} else "unknown"
 
 
 CHECK_FAILED = (
@@ -114,6 +126,12 @@ class CIResult:
     @property
     def clears(self) -> bool:
         return self.status in ("success", "not-run")
+
+    @property
+    def cause(self) -> Cause | None:
+        if self.status != "failure":
+            return None
+        return result_cause(check.cause for check in self.failed)
 
 
 # #615: not-run is a head on a base CI never runs on (factory.md ci.branches)

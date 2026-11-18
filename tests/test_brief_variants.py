@@ -216,6 +216,38 @@ def test_ci_fix_renders_the_run_id_and_the_redacted_log_tail():
     assert token not in task
 
 
+def _ci_fix_for(*failed: FailedCheck) -> str:
+    bundle = ci_evidence(failed=failed, logs={})
+    action, attempt, head, extra = CI_FIX
+    return _task(_render(action, attempt, head, {**extra, "evidence": _evidence(ci=asdict(bundle))}))
+
+
+def test_ci_fix_states_an_infra_failure_and_its_signals():
+    task = _ci_fix_for(
+        FailedCheck("macos", cause="infra", signal="runner not acquired"),
+        FailedCheck("linux", cause="infra", signal="runner lost"),
+        FailedCheck("windows", cause="infra", signal="runner lost"),
+    )
+
+    said = "The factory read this failure as infrastructure (runner not acquired, runner lost), not this PR."
+    assert task.index("Fix the red CI") < task.index(said) < task.index("First decide whether this PR caused")
+
+
+def test_ci_fix_states_a_code_failure():
+    task = _ci_fix_for(FailedCheck("pytest", cause="code"), FailedCheck("macos", cause="infra", signal="runner lost"))
+
+    assert "The factory read this failure as a code failure on this head." in task
+    assert "as infrastructure" not in task
+
+
+@pytest.mark.parametrize("failed", [(FailedCheck("pytest"),), ()])
+def test_ci_fix_states_no_cause_it_could_not_read(failed: tuple[FailedCheck, ...]):
+    task = _ci_fix_for(*failed)
+
+    assert "The factory read this failure" not in task
+    assert "The factory read this failure" not in _task(_render(*CI_FIX))
+
+
 def test_ci_fix_says_an_unfetched_log_is_unavailable_and_where_to_read_it():
     task = _ci_fix_with({"77": None})
 
