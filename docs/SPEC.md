@@ -302,7 +302,7 @@ Only a project whose `factory.md` has `qa.enabled: true` gets QA runs. With QA a
 
 The queue has the action `qa` and the recipient `qa`, the factory's own QA worker (section 4.2.2). A `qa` job's `detail` carries `head`, `scope`, `runner`, `arm`, `scenarios` (the scenario ids to run), `live` (each of those scenarios as the plan wrote it: `id`, `criterion`, `steps`, `passes`, `pack` and `saves`), `regression` (the plan's regression-lane ids among them), `run_id` and `pr_number`. The worker reads its scenarios from `live` alone, so it reads no comment thread and repeats no trust check. Its dedupe key is `qa:<ticket scope>:<scope>:<head>:<runner>:<arm>`, and its timeout is `qa.timeout_minutes`.
 
-The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at`, `finished_at`, and Max's `/qa` ruling (section 5) in `ruling` (`right` or `wrong`), `ruled_by`, `ruled_at` and `ruling_reason`, all null until he rules. A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) is its only writer. QA adds no workflow state.
+The `qa_runs` table holds one row per QA decision and runner at a head: `run_id`, `repo`, `ticket_id`, `head`, `patch_id`, `round`, `attempt`, `scope` (`full`, `targeted`, `smoke` or `none`), `runner`, `arm` (`primary` or `shootout`), `job_id`, `state` (`queued`, `running`, `reported`, `cancelled` or `stale`), `result`, `reason`, `comment_id`, `started_at`, `finished_at`, and Max's `/qa` ruling (section 5) in `ruling` (`right` or `wrong`), `ruled_by`, `ruled_at` and `ruling_reason`, all null until he rules, and `evidence_dir`, the run's evidence folder (section 7, Recycling). A row has a job exactly when its scope is not `none`. `lib/dispatch/qa.py` (`QaMixin`) writes every column but `evidence_dir`, which only `lib/qa_evidence.py` sets. QA adds no workflow state.
 
 Wherever the dispatcher queues a review for a head (T2, the patch review, the merge-queue re-review, and an approver's go on a BLOCKED ticket), it also decides QA for that head, once. A head with a `qa_runs` row is never decided again, so a T6 retry or a resume at the same head queues no second run. The live scenario ids come from `lib/evidence/scenarios.py`, read over the trusted builder's `plan` and `ready` comments. The scope is decided by `decide_scope`, a pure function of facts the dispatcher gathers; the first match wins:
 
@@ -333,18 +333,17 @@ One wake: the same pass checks every primary row reported `FAIL`. When its comme
 
 **Runners.** A runner is one vendor, behind the interface in `lib/qa_runners/__init__.py`. `launch(lane)` starts one cloud agent and returns its id and link. Launching the same `lane_id` again returns the first agent, so a worker that crashed between a launch and its write never starts a second one. A `Lane` is the lane id, the rendered brief (`lib/brief/qa.py`), the repo, the base branch, the `qa.<runner>.environment` name (`environment_name`) and the model. It has no field that could hold a secret value. `status(agent_id)` is `running` or `ended`. `stop(agent_id)` ends an agent, and stopping an ended one is not an error. `describe(agent_id)` gives the machine size and the agent version. A launch raises `RunnerOutage`, `UsageLimit` or `LaunchFailed`, each a `LaunchError`. Runners register by name. The worker builds only the names in `factory_md.QA_RUNNERS` that are registered. `lib/qa_runners/fake.py` registers `fake`, for tests; `factory.md` refuses that name. With no runner registered (today), the worker claims nothing.
 
-**Seams.** The worker is given `collect(lane)`, which returns the lane's parsed `result.json` or nothing yet, and `uploads(lane, paths)`, which returns one upload link per expected file. Both are test doubles until the evidence tickets supply the real ones; without them the worker claims nothing. The base commit is the merge-base of the head and the base branch, from the waiter's fetched clone. The worker reads the project's `qa` block from `factory.md` at `projects[].factory_ref`.
+**Seams.** The worker is given `collect(lane)`, which returns the lane's parsed `result.json` or nothing yet, and `storage(repo)`, which returns the project's `Storage` (built in production from `projects[].qa_storage`). `collect` is still a test double until #866 supplies the real intake. Before each launch the worker signs the lane's links with `links_for_lane`, for its run id, its lane number, the distinct packs its scenarios name and `qa.timeout_minutes` in seconds. The brief carries them. Without either seam the worker claims nothing. A `Lane`'s repr leaves out the brief, and no log line or comment holds a link. The base commit is the merge-base of the head and the base branch, from the waiter's fetched clone. The worker reads the project's `qa` block from `factory.md` at `projects[].factory_ref`.
 
-**`qa_lanes`.** One row per agent attempt: `lane_id`, `run_id`, `job_id`, `slice`, `kind` (`head`, `regression` or `base-check`), `lane_no`, `scenarios` (the `qa-<n>` ids), `commit_sha` (the commit the lane tests), `base_commit`, `runner`, `agent_id`, `agent_url`, `state`, `attempt` (1 or 2), `reason`, `result` (the accepted result JSON), `started_at`, `finished_at` and `launch_called_at` (written before the first launch call). States: `launching` (a reserved slot, no agent yet), `running`, `reported`, `dropped`, `gap`, `cancelled` and `timed-out`. `(run_id, slice, attempt)` is unique, so a replayed tick never launches twice. A slice's outcome is its newest row.
+**`qa_lanes`.** One row per agent attempt: `lane_id`, `run_id`, `job_id`, `slice`, `kind` (`head`, `regression` or `base-check`), `lane_no` (the next unused number in its run when the row was reserved, 1 to 8), `scenarios` (the `qa-<n>` ids), `commit_sha` (the commit the lane tests), `base_commit`, `runner`, `agent_id`, `agent_url`, `state`, `attempt` (1 or 2), `reason`, `result` (the accepted result JSON), `started_at`, `finished_at` and `launch_called_at` (written before the first launch call). States: `launching` (a reserved slot, no agent yet), `running`, `reported`, `dropped`, `gap`, `cancelled` and `timed-out`. `(run_id, slice, attempt)` is unique, so a replayed tick never launches twice. A slice's outcome is its newest row.
 
-**Slicing.** The run's ids split into at most `qa.lanes` slices. When the plan named regression ids among them and `qa.lanes` is at least 2, one slice is the `regression` lane and tests the base commit. Every run id is also tested at the head, split into the remaining lanes as contiguous chunks whose sizes differ by at most one. Lane numbers follow the slices. The brief uses `s-<n>` for `qa-<n>`, and a `Saves:` phrase becomes a plain file name (`after screenshot` is `after-screenshot.png`). A run with no scenarios (`smoke`) launches nothing and posts `BLOCKED` with the gap `no scenarios`.
+**Slicing.** The run's ids split into at most `qa.lanes` slices. When the plan named regression ids among them and `qa.lanes` is at least 2, one slice is the `regression` lane and tests the base commit. Every run id is also tested at the head, split into the remaining lanes as contiguous chunks whose sizes differ by at most one. Each `qa_lanes` row gets the next unused lane number in its run, in the order rows are reserved. When the cap has room, the slices take 1 to 3 and a relaunch or base-check takes the next number. Under a full cap, a relaunch can take a number before a later slice does. A lane's evidence key (`qa/<repo>/<run_id>/lane-<n>/`) is then never shared between two agents. The brief uses `s-<n>` for `qa-<n>`, and a `Saves:` phrase becomes a plain file name (`after screenshot` is `after-screenshot.png`). Every scenario also saves `after-screenshot.png` and `pass-test-output.txt`. A run with no scenarios (`smoke`) launches nothing and posts `BLOCKED` with the gap `no scenarios`.
 
 **The tick.**
 
 1. Claim. Walk `claim_order(conn, "qa")`. Skip a job whose runner is not registered, is backed off, or is at `qa.max_cloud_lanes`; a skipped job blocks nothing behind it. A job skipped for the cap or a backed-off runner gets its queue-wait clock restarted, so waiting is not a timeout. A claimed job's first lane is reserved `launching` in the same transaction as the cap count. A job whose detail has no `live` (queued before this worker) is finished failed and never retried.
-2. Grant. A running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner.
-3. Advance. Check for cancel, launch reserved lanes, then read each running lane. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
-4. Finish. When every slice has a final row, or any slice is a gap and no lane is open, decide, post once, and finish the job with the comment id.
+2. Advance. Check for cancel and launch reserved lanes, in lane number order. Then grant: a running job whose first lane has started takes its next slices, one lane each, while its runner has room after one lane for each job still waiting on that runner. Then read each running lane, so a slice the cap has room for is reserved before a relaunch takes a number. The job is heartbeated (`owner=qa`) only after a pass that raised nothing, so a run that fails every tick times out and is cancelled.
+3. Finish. When every slice has a final row, or any slice is a gap and no lane is open, decide, post once, and finish the job with the comment id.
 
 **Lane rules.**
 
@@ -1105,9 +1104,9 @@ the two upload links and one download link per pack id, each expiring after
 `content-length-range` of 0 to the cap, so the bucket itself refuses a
 larger upload. `fetch` caps the size a second time: it stops at the cap
 plus one byte and keeps no partial file. A missing object is "not there
-yet", not an error. Nothing calls these functions yet. Putting the links
-into a lane's brief is a later ticket, which must keep the same no-logging
-rule.
+yet", not an error. The QA worker calls `links_for_lane` before each launch
+(section 4.2.2), and the lane brief carries the links. No `repr`, log line
+or comment holds one.
 
 **Intake.** `lib/qa_evidence.py`, `collect(run_id, lane, *, storage, repo,
 ticket, root)`, treats everything in a bundle as untrusted:
@@ -1141,7 +1140,62 @@ Any other failure while unpacking, checking or scrubbing becomes an
 `EvidenceRefused` that names only the exception type, with no chained
 exception, so lane data never reaches error text. Intake
 deletes only the staging folder it made. It does not judge whether a
-result is acceptable, delete old evidence, or serve it to people.
+result is acceptable or serve evidence to people. Recycling, below,
+deletes old evidence.
+
+**Recycling (issue #789).** `run_dir(root, repo, ticket, run_id)` is the
+one place that builds a run's folder, `<root>/<owner>/<repo>/<ticket>/<run_id>`,
+and `collect` uses it. `qa_runs.evidence_dir` holds that folder as an
+absolute path with no link in it. `record_evidence_dir(connection, run_id,
+folder)` sets it only while it is empty. A run with no folder recorded is
+never recycled.
+
+`recycle(connection, *, root, repo, now)` looks at every run of `repo` that
+has a folder and is not `queued` or `running`. It gives each run a standing:
+
+- `expired`: the ticket's workflow state is `merged`, `done` or
+  `abandoned`, and its latest move into one of them is more than 7 days old.
+- `superseded`: a newer `reported` run exists on the same ticket and arm.
+  The primary and shootout arms are kept apart.
+- `latest`: any other run.
+
+Each file in a `lane-<n>` folder has a kind, taken from its name.
+
+| Kind | Names |
+| --- | --- |
+| manifest | `manifest.json` or `result.json` at the lane root |
+| log | `*.log` or `network.json` |
+| screenshot | `*.png`, `*.jpg`, `*.jpeg`, `*.webp` |
+| video | `*.webm`, `*.mp4` |
+| trace | `*.zip`, or any other name that starts with `trace` |
+| other | anything else |
+
+A file's scenario is its top folder, read against the scenario ids in the
+lane's `result.json`. The keep table decides what stays.
+
+| Standing | Scenario result | Kept | Deleted |
+| --- | --- | --- | --- |
+| latest | `verified` | screenshot, video, manifest, other | trace, log |
+| latest | `failed`, `needs-human`, `inconclusive`, or no scenario | everything | nothing |
+| superseded | `failed` | everything | nothing |
+| superseded | anything else, or no scenario | manifest | everything else |
+| expired | any | manifest | everything else |
+
+`inconclusive` counts as failed because a gap is never a pass. Both
+`manifest.json` and `result.json` count as manifests, because the run's
+scenario results live in `result.json`.
+
+Recycling deletes by run id only, never by a path pattern. It reads the
+run's folder from `evidence_dir` and skips the run, deleting nothing,
+unless the folder is absolute, equals its own real path, sits exactly four
+levels below the real evidence root and ends in the run's id. It then
+opens each level with `O_NOFOLLOW`, walks the lanes by directory handle,
+and unlinks only regular files. A symlink is never followed or deleted.
+`recycle` returns `Recycled(deleted, skipped)`: the removed paths relative
+to the root, and a `(run_id, reason)` pair for each skipped run and each
+symlink it left in place. Nothing calls `recycle` yet. The QA worker runs
+it once per poll, with a per-repo disk budget and a free-disk floor, in
+issue #874.
 
 ### QA receipts audit
 
