@@ -32,6 +32,7 @@ from lib.codex_sandbox import DeviceCommand, for_device, state_dirs, with_state_
 from lib.queue import SQLiteJobQueue
 from tests import test_remote_start as remote_start
 from tests.handoff_store import harness_comment_id
+from tests.pool_helpers import poller_adopts
 from tests.test_brief import FACTORY_MD
 from tests.test_waiter import (
     FAKE_GH,
@@ -254,6 +255,7 @@ def _codex_waiter(tmp_path: Path, command: list[str]):
     )
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
+    poller_adopts(queue, MACHINES)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
