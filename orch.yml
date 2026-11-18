@@ -137,3 +137,4 @@ projects:
 #     method: scp
 #     live: true           # real-time status.json pushes on orch.db changes
 #     # every_minutes: 5   # omitted: push after every poll cycle
+#     # qa_budget_gib: 5   # omitted: no QA run is removed from the PC for budget

@@ -2043,6 +2043,7 @@ dashboard:
     method: scp                          # or rsync (the default)
     live: true                           # optional: push status.json on every orch.db change
     # every_minutes: 5                   # omitted: push after every poll cycle
+    # qa_budget_gib: 5                   # optional: QA evidence cap on the PC (docs/SPEC.md)
     interval_seconds: 20                 # only for the `orch dashboard push` loop
 ```
 
