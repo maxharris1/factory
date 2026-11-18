@@ -33,13 +33,13 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   scope of its own on the unified cgroup hierarchy, the start writes the
   scope record `.orch-worker-<tag>.scope` naming `orch-run-<tag>.scope`
   and execs the login shell under `systemd-run --user --scope` in that
-  unit, so the run is contained: every process it starts stays in the
-  scope, whatever its session or environment. Otherwise it runs as above,
-  uncontained. Before either, when it leads its session, the start leaves
-  the keeper (KEEPER, #827) there and waits until the keeper ignores TERM,
-  HUP and INT: tagged, and there until it is the session's last process,
-  so the session holds a tagged member while any process of the start is
-  in it;
+  unit, with environment expansion off, so the run is contained: every
+  process it starts stays in the scope, whatever its session or
+  environment. Otherwise it runs as above, uncontained. Before either,
+  when it leads its session, the start leaves the keeper (KEEPER, #827)
+  there and waits until the keeper ignores TERM, HUP and INT: tagged, and
+  there until it is the session's last process, so the session holds a
+  tagged member while any process of the start is in it;
 * preflight (#94, `orch job run --worktree`): under `bash -lc`, exit 0 when
   git, gh and the harness binary are all found, else name the missing ones;
 * checkout (#94): under `bash -lc`, clone (git init + fetch, so a job
@@ -610,6 +610,8 @@ def _contain(tag: str) -> str:
     starts in a scope of its own on the unified cgroup hierarchy (the
     probe's `0::` line), and only once the scope record names the unit;
     otherwise "$@" is empty and the run starts uncontained, as before.
+    The scope runs with environment expansion off where systemd-run has
+    `--expand-environment` (254+), so the job's words reach bash verbatim.
     XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager, is
     the lingering user's runtime directory when the session gave none.
     """
@@ -618,11 +620,12 @@ def _contain(tag: str) -> str:
         'set --; u=$(id -u 2>/dev/null) && '
         '[ "$(loginctl show-user "$u" -p Linger --value 2>/dev/null)" = yes ] && '
         "x=${XDG_RUNTIME_DIR:-/run/user/$u} && "
-        'XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect '
-        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1 && "
+        'probe() { XDG_RUNTIME_DIR="$x" systemd-run --user --scope --quiet --collect "$@" '
+        "grep -q '^0::/.*[.]scope$' /proc/self/cgroup < /dev/null > /dev/null 2>&1; } && "
+        "{ probe --expand-environment=no && e=--expand-environment=no || { probe && e=; }; } && "
         f"echo {unit} > {shlex.quote(scope_record(tag))} && "
         'export XDG_RUNTIME_DIR="$x" && '
-        f"set -- systemd-run --user --scope --quiet --collect --unit={unit} --; "
+        f"set -- systemd-run --user --scope --quiet --collect $e --unit={unit} --; "
     )
 
 
