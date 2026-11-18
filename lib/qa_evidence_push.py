@@ -4,8 +4,8 @@ A full `orch dashboard push` calls `push_evidence` once the snapshot is out.
 Each settled run's lane files and a rendered index.html go as one tar over
 one ssh, unpacked into a temp folder beside `<remote_dir>/qa/<run_id>` and
 moved into place only when whole. A run whose files have not changed since
-its last send to this host and remote_dir (`.qa-push.json` beside the
-snapshot) is not sent again. A symlink, a hard-linked file or a folder outside
+its last send to this destination and remote_dir (`.qa-push.json` beside
+the snapshot) is not sent again. A symlink, a hard-linked file or a folder outside
 the evidence root is never sent: the run is refused with one log line and the
 others still go.
 """
@@ -127,7 +127,7 @@ def push_evidence(
 
     A transport PushError propagates; what was done before it stays recorded."""
     started = clock()
-    state = _load_for_dest(store, f"{transport.host}:{transport.remote_dir}")
+    state = _load_for_dest(store, f"{transport.destination()}:{transport.remote_dir}")
     rows = settled_runs(connection)
     gone: set[str] = set()
     opened: dict[str, tuple[str, int | None]] = {}

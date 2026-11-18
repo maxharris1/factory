@@ -832,16 +832,21 @@ def test_remote_runs_one_ssh_with_the_feed_and_timeout() -> None:
 
 
 class FakePC:
-    def __init__(self, home: Path):
-        self.home = home
+    def __init__(self, home_by_ssh_config: dict[str | None, Path]):
+        self.home_by_ssh_config = home_by_ssh_config
         self.scripts: list[str] = []
 
     def __call__(self, argv, **kwargs):
         assert argv[0] == "ssh", argv
+        config = argv[argv.index("-F") + 1] if "-F" in argv else None
+        home = self.home_by_ssh_config[config]
+        if "-G" in argv:
+            resolved = f"user factory\nhostname {home.name}\nport 22\n"
+            return subprocess.CompletedProcess(argv, 0, resolved, "")
         script = argv[argv.index("--") + 2]
         self.scripts.append(script)
         return subprocess.run(
-            ["sh", "-c", script], cwd=self.home, stdin=kwargs["stdin"], capture_output=True, text=True
+            ["sh", "-c", script], cwd=home, stdin=kwargs["stdin"], capture_output=True, text=True
         )
 
 
@@ -865,11 +870,16 @@ def _push_evidence(
     remote_dir: str = "factory-dashboard",
     budget_bytes: int | None = None,
     roots: dict[str, Path] | None = None,
+    ssh_config: str | None = None,
 ) -> tuple[FakePC, list[str]]:
-    home = tmp_path / "pc"
-    (home / remote_dir).mkdir(parents=True, exist_ok=True)
-    pc, lines = FakePC(home), []
-    transport = SshTransport(TARGET, remote_dir, runner=pc)
+    homes = {
+        None: tmp_path / "pc",
+        "/home/box/.ssh/config-a": tmp_path / "pc",
+        "/home/box/.ssh/config-b": tmp_path / "pc-b",
+    }
+    (homes[ssh_config] / remote_dir).mkdir(parents=True, exist_ok=True)
+    pc, lines = FakePC(homes), []
+    transport = SshTransport(TARGET, remote_dir, ssh_config=ssh_config, runner=pc)
     push_evidence(
         transport,
         connection=db,
@@ -881,8 +891,8 @@ def _push_evidence(
     return pc, lines
 
 
-def _on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard") -> dict[str, bytes]:
-    qa = tmp_path / "pc" / remote_dir / "qa"
+def _on_pc(tmp_path: Path, remote_dir: str = "factory-dashboard", pc: str = "pc") -> dict[str, bytes]:
+    qa = tmp_path / pc / remote_dir / "qa"
     assert not [path for path in qa.rglob("*") if path.is_symlink()]
     return {path.relative_to(qa).as_posix(): path.read_bytes() for path in qa.rglob("*") if path.is_file()}
 
@@ -966,6 +976,18 @@ def test_a_new_remote_dir_gets_every_run(db, root: Path, tmp_path: Path) -> None
     assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
     assert b"QA run run-1" in _on_pc(tmp_path, "dashboard-b")["run-1/index.html"]
     assert _runs_on_pc(tmp_path) == {"run-1"}
+
+
+def test_an_ssh_config_that_resolves_the_alias_to_another_pc_gets_every_run(
+    db, root: Path, tmp_path: Path
+) -> None:
+    _settled(db, root, "run-1")
+    _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-a")
+    assert _runs_on_pc(tmp_path) == {"run-1"}
+    pc, _ = _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-b")
+    assert len(pc.scripts) == 1 and "rm -rf -- qa/" not in pc.scripts[0]
+    assert b"QA run run-1" in _on_pc(tmp_path, pc="pc-b")["run-1/index.html"]
+    assert _push_evidence(db, root, tmp_path, ssh_config="/home/box/.ssh/config-b")[0].scripts == []
 
 
 @pytest.mark.parametrize("why", ["refused", "held"])

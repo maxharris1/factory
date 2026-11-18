@@ -1325,14 +1325,17 @@ dot-named parts, so it never serves a half-written run. Each send may take
 `SEND_TIMEOUT_SECONDS` plus one second per MiB. No new send starts after the
 evidence step has run 120 seconds; the rest go out on the next push.
 
-`<out>/.qa-push.json` on the box records one destination, `<host>:<remote_dir>`.
+`<out>/.qa-push.json` on the box records one destination,
+`<user>@<hostname>:<port>:<remote_dir>`, where user, hostname and port are what
+`ssh -G` (with `-F <ssh_config>` when set) resolves `host` to, so a change of
+ssh_config that points the alias at another PC is a new destination.
 For each run sent there it keeps a sha256 over each file's relative path,
 size and `mtime_ns`, and the size of the tar sent. It also lists the runs
 removed for budget. The box rewrites it after each send and each removal. A
 run whose fingerprint has not changed is not sent again. A changed run, such
 as one the box's recycling trimmed, is sent whole again, so the files
-recycling deleted disappear from the PC too. A store for another host or
-`remote_dir`, or a lost or unreadable one, loads empty. Every run is then
+recycling deleted disappear from the PC too. A store for another destination,
+or a lost or unreadable one, loads empty. Every run is then
 sent to the current destination, and nothing is removed from the old one.
 
 After the sends, the push removes from the PC each recorded run whose

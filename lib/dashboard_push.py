@@ -217,6 +217,15 @@ class SshTransport:
         for argv in self.commands(paths):
             self._run(argv)
 
+    def destination(self) -> str:
+        """`user@hostname:port` that this config resolves the host alias to,
+        read from `ssh -G` (local; it opens no connection)."""
+        result = self._run(["ssh", *self._ssh_options(), "-G", "--", self.host])
+        resolved = dict(line.split(" ", 1) for line in result.stdout.splitlines() if " " in line)
+        if not {"user", "hostname", "port"} <= resolved.keys():
+            raise PushError(f"ssh -G did not resolve {self.host}")
+        return f"{resolved['user']}@{resolved['hostname']}:{resolved['port']}"
+
     def remote(self, script: str, *, feed: IO[bytes] | None = None, timeout: int | None = None) -> None:
         self._run(
             ["ssh", *self._ssh_options(), "--", self.host, script],
@@ -224,7 +233,9 @@ class SshTransport:
             timeout=timeout,
         )
 
-    def _run(self, argv: list[str], *, stdin: object = subprocess.DEVNULL, timeout: int | None = None) -> None:
+    def _run(
+        self, argv: list[str], *, stdin: object = subprocess.DEVNULL, timeout: int | None = None
+    ) -> subprocess.CompletedProcess:
         program = argv[0]
         timeout = self.timeout if timeout is None else timeout
         try:
@@ -252,6 +263,7 @@ class SshTransport:
             if detail:
                 message += f": {redact(detail)[:200]}"
             raise PushError(message)
+        return result
 
 
 def transport_for(config: PushConfig, *, runner: Runner = run_in_own_group) -> Transport:
