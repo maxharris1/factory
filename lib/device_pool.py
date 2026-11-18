@@ -288,9 +288,7 @@ class DevicePool:
             ).fetchone()
         return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
 
-    def _live_config(self) -> MachinesConfig:
-        """self.config with each device's enabled and drain as machines.yml
-        and its overlay say now; unchanged when the file is missing or invalid."""
+    def _with_file_switches(self) -> MachinesConfig:
         if self.machines_path is None:
             return self.config
         key = (_file_key(self.machines_path), _file_key(overlay_path(self.machines_path)))
@@ -329,7 +327,7 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            config = self._live_config()
+            config = self._with_file_switches()
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}

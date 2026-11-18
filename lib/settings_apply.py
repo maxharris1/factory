@@ -517,9 +517,6 @@ ClaimLock = Callable[[], AbstractContextManager[Held]]
 
 
 def claim_lock(db: Path) -> ClaimLock:
-    """orch.db's write lock, the one every DevicePool.claim takes, yielding
-    the slots held per device under it. Nothing is written."""
-
     @contextmanager
     def hold() -> Iterator[Held]:
         if not db.is_file():
@@ -651,8 +648,6 @@ class Applier:
                            pending=self.pending)
 
     def _restore(self, request: SettingsRequest, old_bytes: bytes, mode: int) -> str | None:
-        """Put the old file back under the claim lock. Undoing an enable is a
-        disable, so it is skipped (the reason returned) while the device holds a job."""
         try:
             with self.claims() as held:
                 if request.field == "enabled" and request.value is True:

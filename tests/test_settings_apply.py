@@ -577,9 +577,6 @@ def _request(field: str, expect: object, value: object) -> settings_apply.Settin
 
 
 class Placed:
-    """A real queue, pool, monitor and dispatcher on a box-only machines.yml,
-    with each placed job's runner and worker live sleepers."""
-
     def __init__(self, tmp_path: Path):
         self.machines = remote.machines_file(tmp_path, pc=False)
         config = remote.config_of(self.machines)
