@@ -60,6 +60,7 @@ from lib.github_actions import (
     GitHubAdapterError,
     GitHubReviewActions,
     PULL_FILES_LIMIT,
+    PULL_FINGERPRINT_CHUNK,
     LinearReviewActions,
     Runner,
     _is_read,
@@ -1014,8 +1015,10 @@ class LivePollSource:
                 key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
             )
         )
-        probes, spent = self._pull_fingerprints(ordered, projects)
-        for ref in ordered:
+        probes: dict[tuple[str, str], str] = {}
+        probed: set[tuple[str, str]] = set()
+        spent: dict[str, float] = {}
+        for index, ref in enumerate(ordered):
             project = projects.get(ref.repo.lower())
             if project is None:
                 if ref.tracker == "linear":
@@ -1024,6 +1027,14 @@ class LivePollSource:
                 continue
             repo = ref.repo.lower()
             first_closed_read = ref in urgent
+            if self.tracked_read_budget_seconds - spent.get(repo, 0.0) > 0 and (
+                self._wants_probe(ref) and (repo, ref.ticket_id) not in probed
+            ):
+                started = self.clock()
+                try:
+                    probes.update(self._pull_fingerprints(project, ordered[index:], probed))
+                finally:
+                    spent[repo] = spent.get(repo, 0.0) + self.clock() - started
             left = self.tracked_read_budget_seconds - spent.get(repo, 0.0)
             if left <= 0 and not first_closed_read:
                 self._defer(f"tracked-read budget deferred {project.repo}")
@@ -1060,34 +1071,35 @@ class LivePollSource:
             self._tracked_turns[(repo, ref.ticket_id)] = self._tracked_turn
         return tuple(found)
 
+    def _wants_probe(self, ref: TicketRef) -> bool:
+        repo = ref.repo.lower()
+        return (
+            ref.tracker == "github"
+            and (repo, ref.ticket_id) in self._last_reads
+            and ("github", repo, ref.ticket_id) not in self._ticket_cache
+        )
+
     def _pull_fingerprints(
         self,
+        project: Project,
         refs: Sequence[TicketRef],
-        projects: Mapping[str, Project],
-    ) -> tuple[dict[tuple[str, str], str], dict[str, float]]:
-        wanted: dict[str, list[str]] = {}
-        for ref in refs:
-            repo = ref.repo.lower()
-            if (
-                ref.tracker == "github"
-                and repo in projects
-                and (repo, ref.ticket_id) in self._last_reads
-                and ("github", repo, ref.ticket_id) not in self._ticket_cache
-            ):
-                wanted.setdefault(repo, []).append(ref.ticket_id)
-        probes: dict[tuple[str, str], str] = {}
-        spent: dict[str, float] = {}
-        for repo, numbers in wanted.items():
-            started = self.clock()
-            try:
-                found = self.github.pull_fingerprints(projects[repo].repo, numbers)
-            except Exception:
-                self._defer(f"GitHub probe failed for {projects[repo].repo}, read in full")
-                continue
-            finally:
-                spent[repo] = self.clock() - started
-            probes.update({(repo, number): fingerprint for number, fingerprint in found.items()})
-        return probes, spent
+        probed: set[tuple[str, str]],
+    ) -> dict[tuple[str, str], str]:
+        repo = project.repo.lower()
+        numbers = [
+            ref.ticket_id
+            for ref in refs
+            if ref.repo.lower() == repo
+            and (repo, ref.ticket_id) not in probed
+            and self._wants_probe(ref)
+        ][:PULL_FINGERPRINT_CHUNK]
+        probed.update((repo, number) for number in numbers)
+        try:
+            found = self.github.pull_fingerprints(project.repo, numbers)
+        except Exception:
+            self._defer(f"GitHub probe failed for {project.repo}, read in full")
+            return {}
+        return {(repo, number): fingerprint for number, fingerprint in found.items()}
 
     def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
         projects = {project.repo.lower(): project for project in self.config.projects}

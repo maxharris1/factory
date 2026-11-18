@@ -430,6 +430,44 @@ def test_the_probe_is_charged_to_its_repos_tracked_read_budget() -> None:
     assert poller.deferrals
 
 
+class SlowProbes(GitHub):
+    def __init__(self, *pulls: Pull, failing_probe: int | None):
+        super().__init__(*pulls)
+        self.poller: Poller | None = None
+        self.failing_probe = failing_probe
+
+    def __call__(self, argv, timeout) -> GhResult:
+        if self.poller is not None and "graphql" in argv:
+            self.poller.now += 19
+            if self.calls["probe", "-"] + 1 == self.failing_probe:
+                self.calls["probe", "-"] += 1
+                return GhResult(1, "", "probe failed")
+        return super().__call__(argv, timeout)
+
+
+@pytest.mark.parametrize("failing_probe", [None, 7])
+def test_probes_that_spend_the_budget_still_let_tracked_tickets_progress(
+    failing_probe: int | None,
+) -> None:
+    numbers = [str(number) for number in range(12, 163)]
+    github = SlowProbes(
+        *(Pull(int(number), head=f"{int(number):040x}") for number in numbers),
+        failing_probe=failing_probe,
+    )
+    poller = Poller(github, *numbers)
+    poller.cycle(at=0)
+    poller.cycle(at=30)
+    fail_check(github.pulls["12"])
+    github.poller = poller
+
+    cycles = [poller.cycle(at=at) for at in (200, 400, 600)]
+
+    assert all(len(tickets) >= len(numbers) - 25 for tickets in cycles)
+    assert set().union(*cycles[:2]) == set(numbers)
+    first = next(tickets["12"] for tickets in cycles if "12" in tickets)
+    assert first.ci[first.current_head].failed
+
+
 def test_a_reopened_pr_is_read_in_full_and_open() -> None:
     github = GitHub(Pull(12, head="a" * 40, state="closed"))
     poller = Poller(github, "12")
