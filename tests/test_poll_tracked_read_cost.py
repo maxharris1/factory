@@ -167,6 +167,7 @@ class GitHub:
         self.calls: Counter[tuple[str, str]] = Counter()
         self.probe_down = False
         self.unprobed: set[str] = set()
+        self.errors: list[dict] = []
         encoded = base64.b64encode(HELD_FACTORY.encode()).decode()
         self.factory = {"encoding": "base64", "content": encoded}
 
@@ -226,7 +227,18 @@ class GitHub:
             f"p{number}": None if number in self.unprobed else self.pulls[number].node()
             for _, number in aliases
         }
-        return GhResult(0, json.dumps({"data": {"repository": repository}}), "")
+        document = {"data": {"repository": repository}}
+        if not self.errors:
+            return GhResult(0, json.dumps(document), "")
+        for error in self.errors:
+            *parents, leaf = error.get("path") or [None]
+            if leaf is not None:
+                target = document["data"]
+                for key in parents:
+                    target = target[key]
+                target[leaf] = None
+        document["errors"] = self.errors
+        return GhResult(1, json.dumps(document), "gh: partial GraphQL response")
 
 
 class Poller:
@@ -450,6 +462,34 @@ def test_a_pr_whose_ci_contexts_run_past_one_page_is_read_in_full_every_cycle() 
     for _ in range(2):
         poller.cycle()
         assert github.reads("12") == FULL_READ
+
+
+ROLLUP = ["commits", "nodes", 0, "commit", "statusCheckRollup"]
+PARTIAL = {
+    "at the pr's ci rollup": (["repository", "p12", *ROLLUP], NO_READ),
+    "at the pr's comments": (["repository", "p12", "comments"], NO_READ),
+    "with no path": (None, FULL_READ),
+    "at the repository": (["repository"], FULL_READ),
+}
+
+
+@pytest.mark.parametrize("path, other_reads", PARTIAL.values(), ids=PARTIAL.keys())
+def test_a_probe_error_touching_a_pr_reads_that_pr_in_full_every_cycle(
+    path: list | None, other_reads: dict[str, int]
+) -> None:
+    github = GitHub(Pull(12, head="a" * 40), Pull(13, head="b" * 40))
+    github.errors = [{"type": "INTERNAL", **({"path": path} if path else {})}]
+    poller = Poller(github, "12", "13")
+    poller.cycle()
+    poller.cycle()
+    poller.cycle()
+    assert github.reads("13") == other_reads
+
+    fail_check(github.pulls["12"])
+    after = poller.cycle()["12"]
+
+    assert github.reads("12") == FULL_READ
+    assert after.ci[after.current_head].status == "failure"
 
 
 class CachingGitHub(GitHub):

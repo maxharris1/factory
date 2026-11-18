@@ -477,7 +477,7 @@ base, mergeability, labels, newest 100 comments, review count and the head's
 CI contexts. When that matches the probe taken before the PR's last full read,
 and that read is less than 10 minutes old (`FULL_READ_SECONDS`), the poller
 reuses the read and makes no per-PR call (#870). A changed probe, a PR missing
-from the probe, a failed probe (a `GitHub probe failed` deferral) or an older
+from the probe, a GraphQL error under the PR or under no single PR, a failed probe (a `GitHub probe failed` deferral) or an older
 read gets the full read: the PR, its comments, CI, and the hold's labels,
 files and label events. A caller's fresh read never reuses. The probe's time
 is the `github-graphql` source of the `tracked-read` phase on the `cycle end`

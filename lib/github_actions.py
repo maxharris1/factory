@@ -633,11 +633,13 @@ class GitHubReviewActions:
                 )
             )
             pulls = _object(document.get("data")).get("repository")
-            if not isinstance(pulls, dict):
+            broken = _error_aliases(document)
+            if not isinstance(pulls, dict) or None in broken:
                 continue
             for number in chunk:
                 pull = pulls.get(f"p{number}")
-                if isinstance(pull, dict) and _whole_fingerprint(pull):
+                whole = isinstance(pull, dict) and _whole_fingerprint(pull)
+                if whole and f"p{number}" not in broken:
                     found[number] = json.dumps(pull, sort_keys=True, separators=(",", ":"))
         return found
 
@@ -1264,6 +1266,18 @@ def _whole_fingerprint(pull: dict[str, Any]) -> bool:
         and (connection.get("pageInfo") or {}).get("hasNextPage") is False
         for connection in connections
     )
+
+
+def _error_aliases(document: dict[str, Any]) -> set[str | None]:
+    """The repository field each GraphQL error sits under; None for an
+    error that names no single field, which spoils the whole response."""
+    errors = document.get("errors")
+    aliases: set[str | None] = set()
+    for error in errors if isinstance(errors, list) else ():
+        path = error.get("path") if isinstance(error, dict) else None
+        named = isinstance(path, list) and len(path) > 1 and path[0] == "repository"
+        aliases.add(path[1] if named and isinstance(path[1], str) else None)
+    return aliases
 
 
 def _has_graphql_data(text: str) -> bool:
