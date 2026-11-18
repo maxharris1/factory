@@ -631,6 +631,7 @@ class SchemaMixin:
                     "ruled_by": "TEXT",
                     "ruled_at": "REAL",
                     "ruling_reason": "TEXT",
+                    "evidence_dir": "TEXT",
                 },
             )
             connection.execute(
