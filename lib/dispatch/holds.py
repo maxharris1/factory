@@ -169,9 +169,9 @@ class HoldsMixin:
                 at=self.queue.now(),
                 guard=_NOT_FINISHED,
             )
+            if job is not None:
+                self._flag_dropped(connection, ticket, request, job)
             connection.commit()
-        if job is not None:
-            self._flag_dropped(ticket, request, job)
         self._write_state_label(ticket, "fixing")
         return True, _HELD_BASE_UPDATE
 

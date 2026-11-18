@@ -14,6 +14,7 @@ from lib.queue import Job
 from lib.update_check import HeadDiff, RebaseScope, UpdateClass
 
 if TYPE_CHECKING:
+    from lib.dispatch.bookkeeping import LockLedger
     from lib.dispatcher import Dispatcher
 
 
@@ -510,6 +511,8 @@ class Feeder(Protocol):
     another open PR's commits, and returns None when it did; otherwise it
     returns the base the review runs against, the open PR's own base.
     """
+
+    ledger: LockLedger | None
 
     def feed_once(self) -> object: ...
 
