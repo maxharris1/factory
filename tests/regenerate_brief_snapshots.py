@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.brief import render_brief  # noqa: E402
-from lib.brief.qa import LaneFacts, Scenario, Upload, render_qa_brief  # noqa: E402
+from lib.brief.qa import LaneFacts, Scenario, render_qa_brief  # noqa: E402
 from lib.brief_comment import before_factory_md  # noqa: E402
 from lib.dispatcher import Comment  # noqa: E402
 from lib.evidence import criteria_evidence  # noqa: E402
@@ -26,6 +26,7 @@ from lib.evidence.ci import ci_evidence  # noqa: E402
 from lib.evidence.criteria import canonical_brief  # noqa: E402
 from lib.evidence.findings import findings_evidence  # noqa: E402
 from lib.factory_md import QaEvidence, QaLane, parse_factory_context  # noqa: E402
+from lib.qa_storage import DownloadLink, LaneLinks, UploadLink  # noqa: E402
 from lib.queue import Job, JobRequest  # noqa: E402
 
 SNAPSHOTS = ROOT / "tests" / "snapshots" / "brief"
@@ -77,8 +78,8 @@ CI_LOG = "FAILED tests/test_pricing.py::test_start_free - AssertionError\n```\nt
 
 RUN_URL = "https://github.com/owner/repo/actions/runs/123456"
 CI_FAILED = (
-    FailedCheck("pytest", run_id="123456", job_id="31000000004", run_url=RUN_URL),
-    FailedCheck("check-config", run_id="123456", job_id="31000000005", run_url=RUN_URL),
+    FailedCheck("pytest", run_id="123456", job_id="31000000004", run_url=RUN_URL, cause="code"),
+    FailedCheck("check-config", run_id="123456", job_id="31000000005", run_url=RUN_URL, cause="code"),
 )
 PYTEST_LOG = (
     "".join(f"tests/test_pricing.py::test_case_{n} PASSED\n" for n in range(1, 154))
@@ -338,7 +339,19 @@ FACTORY_MDS = {
 }
 
 BASE_COMMIT = "9b8a7c6d5e4f3021fedcba9876543210abcdef01"
-UPLOAD_ROOT = "https://uploads.example.com/qa-run-7"
+UPLOADS = "https://uploads.example.com/factory-qa"
+LANE_KEY = "qa/app/qa-run-7/lane-1"
+
+
+def upload_link(name: str) -> UploadLink:
+    key = f"{LANE_KEY}/{name}"
+    return UploadLink(key, 1024, 300, url=UPLOADS,
+                      fields={"key": key, "policy": "eyJmYWtlIjp0cnVlfQ==", "x-amz-signature": "4f2a"})
+
+
+def download_link(pack: str) -> DownloadLink:
+    return DownloadLink(f"packs/{pack}", 300, url=f"{UPLOADS}/packs/{pack}?X-Amz-Signature=4f2a")
+
 
 QA_FACTS = LaneFacts(
     repo="acme/cleffy",
@@ -355,7 +368,7 @@ QA_FACTS = LaneFacts(
             steps=("Open /pricing.", "Click `Start free`."),
             pass_test="The sign-up form shows with the free plan chosen and no card field.",
             pack="pricing-visitor",
-            save=("start-free.png", "signup-form.png"),
+            save=("start-free.png", "signup-form.png", "after-screenshot.png", "pass-test-output.txt"),
         ),
         Scenario(
             id="s-2",
@@ -363,7 +376,7 @@ QA_FACTS = LaneFacts(
             steps=("Sign up with a new address.", "Open the confirmation email and follow its link."),
             pass_test="The account page says the email address is confirmed.",
             pack="new-visitor",
-            save=("confirmed.png",),
+            save=("confirmed.png", "after-screenshot.png", "pass-test-output.txt"),
         ),
     ),
     lane_config=QaLane(
@@ -374,9 +387,10 @@ QA_FACTS = LaneFacts(
     ),
     verify="verify-live",
     evidence=QaEvidence(video="multi-step", trace="on-failure"),
-    uploads=tuple(
-        Upload(path, f"{UPLOAD_ROOT}/{path}?sig=4f2a")
-        for path in ("s-1/start-free.png", "s-1/signup-form.png", "s-2/confirmed.png", "result.json")
+    links=LaneLinks(
+        result=upload_link("result.json"),
+        bundle=upload_link("bundle.tar.gz"),
+        packs=(download_link("pricing-visitor"), download_link("new-visitor")),
     ),
 )
 

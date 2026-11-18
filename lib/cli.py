@@ -82,6 +82,7 @@ from lib.orch_yml import (
 )
 from lib.poll_source import FedPulls, IntakeRisks, LivePollSource, PollSourceError
 from lib.qa_cloud import QaWorker
+from lib.qa_storage import S3Storage
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import (
@@ -920,12 +921,19 @@ def _qa_runtime(path: Path, config: OrchConfig) -> QaWorker:
     def post(repo: str, pr: int, body: str, marker: str) -> str:
         return actions[projects[repo.lower()].repo].post_issue_comment_once(repo, pr, body, marker)
 
+    def storage(repo: str) -> S3Storage:
+        entry = projects[repo.lower()].qa_storage
+        if entry is None:
+            raise ValueError(f"{repo} has no projects[].qa_storage in orch.yml")
+        return S3Storage.from_entry(entry)
+
     return QaWorker(
         open_queue(path),
         runners={name: qa_runners.create(name) for name in QA_RUNNERS if name in qa_runners.registered()},
         factory=factory,
         base_commit=_qa_base_commit,
         post=post,
+        storage=storage,
         max_cloud_lanes=config.qa.max_cloud_lanes,
         log=lambda line: print(f"orch qa-worker: {line}", file=sys.stderr, flush=True),
     )
@@ -1274,6 +1282,7 @@ def _runtime(
         rebase_classifier=_rebase_check,
         approvals=approvals(config),
         ci_logs=source.github.failed_run_logs,
+        ci_rerun=source.github.rerun_failed_jobs,
         ci_runs=source.github.run_jobs,
         ci_job_log=source.github.job_log,
         ci_pool=source.github.list_runners,

@@ -33,6 +33,7 @@ from lib.github_actions import (
     NotFastForwardError,
     review_actions_for,
 )
+from lib.evidence.ci import ci_evidence
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.queue import Job, SQLiteJobQueue
@@ -1382,8 +1383,9 @@ def test_ci_result_feeds_the_dispatcher_as_a_ci_result() -> None:
     result = actions.ci_status("owner/repo", HEAD)
 
     assert result == CIResult(
-        "failure", "failed: typecheck", failed=(FailedCheck("typecheck"),)
+        "failure", "failed: typecheck", failed=(FailedCheck("typecheck", cause="code"),)
     )
+    assert result.cause == "code"
 
 
 def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
@@ -1400,9 +1402,147 @@ def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
             run_id="123456",
             job_id="31000000004",
             run_url="https://github.com/owner/repo/actions/runs/123456",
+            cause="code",
         ),
-        FailedCheck("lint"),
-        FailedCheck("commit status"),
+        FailedCheck("lint", cause="code"),
+        FailedCheck("commit status", cause="code"),
+    )
+
+
+PICKUP_RUN = "133415718662"
+ANNOTATIONS = ("--paginate", f"{REPO}/check-runs/{PICKUP_RUN}/annotations?per_page=100")
+
+
+def test_ci_status_reads_a_run_not_acquired_by_a_runner_as_infra() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(ANNOTATIONS, served("annotations-not-acquired.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert (result.status, result.cause) == ("failure", "infra")
+    assert [(check.name, check.cause, check.signal) for check in result.failed] == [
+        ("macos", "infra", "runner not acquired")
+    ]
+
+
+def test_ci_status_reads_a_completed_runs_annotations_once() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(ANNOTATIONS, served("annotations-not-acquired.json"))
+
+    first = actions.ci_status("owner/repo", HEAD)
+    second = actions.ci_status("owner/repo", HEAD)
+
+    assert first == second
+    assert second.cause == "infra"
+    assert gh.count(ANNOTATIONS) == 1
+
+
+def test_a_failure_annotation_past_the_first_page_classifies_the_run() -> None:
+    notice = {"annotation_level": "notice", "title": "", "message": "Queue times may be longer."}
+    lost = {
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The hosted runner: GitHub Actions 7 lost communication with the server.",
+    }
+    pages = json.dumps([notice] * 100) + json.dumps([lost])
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(ANNOTATIONS, GhResult(0, pages, ""))
+
+    first = actions.ci_status("owner/repo", HEAD)
+    second = actions.ci_status("owner/repo", HEAD)
+
+    assert [(check.cause, check.signal) for check in first.failed] == [("infra", "runner lost")]
+    assert second == first
+    assert gh.count(ANNOTATIONS) == 1
+
+
+def test_an_unreadable_annotations_page_leaves_the_cause_unknown_and_is_read_again() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(
+        ANNOTATIONS,
+        GhResult(1, "", "gh: Server Error (HTTP 502)\n"),
+        served("annotations-not-acquired.json"),
+    )
+
+    failed = actions.ci_status("owner/repo", HEAD)
+    retried = actions.ci_status("owner/repo", HEAD)
+
+    assert (failed.status, failed.cause) == ("failure", "unknown")
+    assert [(check.cause, check.signal) for check in failed.failed] == [("unknown", None)]
+    assert retried.cause == "infra"
+    assert gh.count(ANNOTATIONS) == 2
+
+
+def test_annotations_of_a_run_not_yet_completed_are_read_again() -> None:
+    page = json.loads((FIXTURES / "check-runs-cancelled-pickup.json").read_text())
+    page["check_runs"][0]["status"] = "in_progress"
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(ANNOTATIONS, served("annotations-not-acquired.json"))
+
+    actions.ci_status("owner/repo", HEAD)
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.cause == "infra"
+    assert gh.count(ANNOTATIONS) == 2
+
+
+@pytest.mark.parametrize("count", [0, None])
+def test_a_failed_run_without_annotations_reads_no_annotations(count: int | None) -> None:
+    page = json.loads((FIXTURES / "check-runs-cancelled-pickup.json").read_text())
+    output = page["check_runs"][0]["output"]
+    if count is None:
+        del output["annotations_count"]
+    else:
+        output["annotations_count"] = count
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert (result.status, result.cause) == ("failure", "unknown")
+    assert gh.count(ANNOTATIONS) == 0
+
+
+@pytest.mark.parametrize(("state", "cause"), [("failure", "code"), ("error", "unknown")])
+def test_a_red_commit_status_is_code_only_when_it_failed(state: str, cause: str) -> None:
+    combined = json.loads((FIXTURES / "status-failure.json").read_text())
+    combined["state"] = state
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-empty.json"))
+    gh.route(STATUS, GhResult(0, json.dumps(combined), ""))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.failed == (FailedCheck("commit status", cause=cause),)
+    assert result.cause == cause
+
+
+def test_ci_status_reads_an_infra_signal_in_the_check_output() -> None:
+    page = json.loads((FIXTURES / "check-runs-failure.json").read_text())
+    page["check_runs"][0]["output"] = {
+        "title": "Billing",
+        "summary": "The job was not started because recent account payments have failed.",
+        "annotations_count": 0,
+    }
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert result.failed == (
+        FailedCheck("typecheck", cause="infra", signal="billing or spending limit"),
     )
 
 
@@ -2246,3 +2386,73 @@ def test_post_issue_comment_once_returns_the_new_or_existing_comment_id() -> Non
     gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(9, QA_BODY)]), ""))
     assert actions.post_issue_comment_once("owner/repo", 42, QA_BODY, QA_MARKER) == "9"
     assert gh.count(POST_QA) == 0
+
+
+WATCHDOG_RUN = 133415718700
+WATCHDOG_ANNOTATIONS = (
+    "--paginate",
+    f"{REPO}/check-runs/{WATCHDOG_RUN}/annotations?per_page=100",
+)
+
+
+def _watchdog_pickup_message() -> str:
+    workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml").read_text()
+    line = next(line for line in workflow.splitlines() if "title=macos runner pickup::" in line)
+    message = line.split("title=macos runner pickup::", 1)[1].rstrip().removesuffix('"')
+    return message.replace("$((PICKUP_SECONDS / 60))", "10").replace(
+        "$created_at", "2026-11-16T15:49:22Z"
+    )
+
+
+@pytest.mark.parametrize("watchdog_conclusion", ["failure", "cancelled"])
+def test_the_macos_pickup_watchdog_and_the_job_it_cancelled_read_as_infra(
+    watchdog_conclusion: str,
+) -> None:
+    page = json.loads((FIXTURES / "check-runs-cancelled-pickup.json").read_text())
+    macos = page["check_runs"][0]
+    macos["output"]["annotations_count"] = 0
+    watchdog = json.loads(json.dumps(macos))
+    watchdog.update(
+        id=WATCHDOG_RUN,
+        name="macos-pickup",
+        conclusion=watchdog_conclusion,
+        details_url=f"https://github.com/owner/repo/actions/runs/43900570415/job/{WATCHDOG_RUN}",
+    )
+    watchdog["output"]["annotations_count"] = 1
+    page["check_runs"].append(watchdog)
+    page["total_count"] = 2
+    annotation = {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "macos runner pickup",
+        "message": _watchdog_pickup_message(),
+    }
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(WATCHDOG_ANNOTATIONS, GhResult(0, json.dumps([annotation]), ""))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert [(check.name, check.cause, check.signal) for check in result.failed] == [
+        ("macos", "unknown", None),
+        ("macos-pickup", "infra", "runner pickup timed out"),
+    ]
+    assert result.cause == "infra"
+    assert ci_evidence(failed=result.failed, logs={}).cause == "infra"
+
+
+def test_a_failed_test_that_names_the_spending_limit_stays_code() -> None:
+    page = json.loads((FIXTURES / "check-runs-failure.json").read_text())
+    page["check_runs"][0]["output"] = {
+        "title": "pytest",
+        "summary": "FAILED tests/test_billing.py::test_spending_limit - AssertionError: spending limit was not enforced",
+        "annotations_count": 0,
+    }
+    actions, gh = adapter()
+    gh.route(CHECKS, GhResult(0, json.dumps(page), ""))
+    gh.route(STATUS, served("status-empty.json"))
+
+    result = actions.ci_status("owner/repo", HEAD)
+
+    assert [(check.cause, check.signal) for check in result.failed] == [("code", None)]

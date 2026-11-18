@@ -8,7 +8,7 @@ environment_name is the name of the vendor's QA environment, never its contents.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 AgentStatus = Literal["running", "ended"]
@@ -17,7 +17,7 @@ AgentStatus = Literal["running", "ended"]
 @dataclass(frozen=True)
 class Lane:
     lane_id: str
-    brief: str
+    brief: str = field(repr=False)
     repo: str
     base_ref: str
     environment_name: str

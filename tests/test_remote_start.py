@@ -1144,6 +1144,73 @@ def test_a_contained_lost_box_job_kills_its_scope_and_spares_its_session(
     assert orphans(queue) == []
 
 
+REUSED_SESSION_CASES = {
+    "reused-leader-gone": (
+        {12: process_tree.Process(12, 11, "w", False, 11)},
+        {44: process_tree.Process(44, 1, "z", False, 11)},
+        [],
+    ),
+    "different-session": (
+        {
+            12: process_tree.Process(12, 11, "w", False, 12),
+            45: process_tree.Process(45, 12, "m", False, 12),
+        },
+        {
+            45: process_tree.Process(45, 1, "m", False, 12),
+            44: process_tree.Process(44, 1, "z", False, 11),
+        },
+        [45],
+    ),
+    "recorded-member-keeps-session": (
+        {
+            12: process_tree.Process(12, 11, "w", False, 11),
+            45: process_tree.Process(45, 12, "m", False, 11),
+        },
+        {
+            45: process_tree.Process(45, 1, "m", False, 11),
+            44: process_tree.Process(44, 1, "z", False, 11),
+        },
+        [44, 45],
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("first", "later", "killed"),
+    list(REUSED_SESSION_CASES.values()),
+    ids=list(REUSED_SESSION_CASES),
+)
+def test_a_lost_box_jobs_session_counts_only_while_a_proven_member_is_in_it(
+    tmp_path: Path,
+    first: dict[int, process_tree.Process],
+    later: dict[int, process_tree.Process],
+    killed: list[int],
+) -> None:
+    """#827 f-5: the dead runner's pid names its session only while a process
+    of the run is still in it; after that the number may be another's."""
+    listing = {11: process_tree.Process(11, 1, "r", False, 11), **first}
+    now, queue, pool, dispatcher, job, kills = box_job_setup(tmp_path, alive={11: True, 12: True})
+    dispatcher.devices.scan = lambda _tag: dict(listing)
+    disable_box(tmp_path)
+    poll_at(now, dispatcher, 0.0)
+    assert kills == [(11, signal.SIGTERM)], "the lost job's live runner is asked to stop"
+
+    listing.clear()
+    listing.update(later)
+    kills.clear()
+    poll_at(now, dispatcher, 60.0)
+    stops = sorted(pid for pid, sig in kills if sig == signal.SIGSTOP)
+    ends = sorted(pid for pid, sig in kills if sig == signal.SIGKILL)
+    assert stops == ends == killed, f"the kill poll stops and kills only the run's: {kills}"
+    assert len(kills) == 2 * len(killed)
+
+    for pid in killed:
+        del listing[pid]
+    poll_at(now, dispatcher, 120.0)
+    assert orphans(queue) == [], "the row is forgotten once no process of the run is left"
+    assert len(kills) == 2 * len(killed), "a process outside the run is never signalled"
+
+
 LOST_TREE = """\
 import os, signal, subprocess, sys, time
 from pathlib import Path
@@ -1434,12 +1501,67 @@ def systemd_scopes() -> bool:
         return False
 
 
-def fake_linger(tmp_path: Path, linger: str, *, busctl_fails: bool = False) -> str:
+FAKE_SYSTEMD_RUN = f"""#!{sys.executable}
+import json, os, re, sys
+
+args = sys.argv[1:]
+options = []
+while args and args[0].startswith("-"):
+    word = args.pop(0)
+    if word == "--":
+        break
+    options.append(word)
+old = os.environ.get("FAKE_SYSTEMD_OLD") == "1"
+if "--help" in options:
+    if os.environ.get("FAKE_SYSTEMD_HELP_FAILS") == "1":
+        sys.exit(1)
+    print("  --scope    Run this as scope rather than service")
+    if not old:
+        print("  --expand-environment=BOOL    Control expansion of environment variables")
+    sys.exit(0)
+bus_blip = os.environ.get("FAKE_SYSTEMD_BUS_BLIP", "")
+if bus_blip and os.path.exists(bus_blip):
+    os.remove(bus_blip)
+    sys.exit("Failed to connect to bus: No such file or directory")
+if old and any(
+    o.startswith("--expand-environment") for o in options
+):
+    sys.exit("systemd-run: unrecognized option '--expand-environment=no'")
+if not any(o.startswith("--unit=") for o in options):
+    sys.exit(0)
+with open(os.environ["FAKE_SYSTEMD_LOG"], "a") as log:
+    log.write(json.dumps(options) + "\\n")
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+def value(name):
+    if NAME.fullmatch(name):
+        return os.environ.get(name, "")
+    print(f"Invalid environment variable name evaluates to an empty string: {{name}}",
+          file=sys.stderr)
+    return ""
+
+def expand(word):
+    if word.startswith("$") and not word.startswith("${{"):
+        return value(word[1:]).split()
+    return [re.sub(r"\\$\\$|\\$\\{{([^}}]*)\\}}",
+                   lambda m: "$" if m[0] == "$$" else value(m[1]), word)]
+
+if not old and "--expand-environment=no" not in options:
+    args = args[:1] + [w for a in args[1:] for w in expand(a)]
+os.execvp(args[0], args)
+"""
+
+
+def fake_linger(
+    tmp_path: Path, linger: str, *, busctl_fails: bool = False, systemd_run: bool = False
+) -> str:
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
     fakes = {"loginctl": f"#!/bin/sh\necho {linger}\n"}
     if busctl_fails:
         fakes["busctl"] = "#!/bin/sh\necho 'no user bus' >&2\nexit 1\n"
+    if systemd_run:
+        fakes["systemd-run"] = FAKE_SYSTEMD_RUN
     for name, body in fakes.items():
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
@@ -1498,6 +1620,60 @@ def test_a_lost_box_jobs_untagged_orphan_born_after_the_last_look_is_killed(
     finally:
         kill_all(*[pid for pid in (runner.pid, worker, leaf) if pid])
         runner.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_a_lost_box_job_never_kills_through_a_dead_runners_reused_session(
+    tmp_path: Path,
+) -> None:
+    """#827 f-5: a session whose leader's pid the dead runner once had holds
+    only an unrelated process; the lost job's cleanup never signals it."""
+    leader = subprocess.Popen(
+        ["sh", "-c", "sleep 120 < /dev/null > /dev/null 2>&1 & echo $!; read -r _ || :"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    stray = int(leader.stdout.readline())
+    leader_start = process_start(leader.pid)
+    leader.stdin.close()
+    leader.stdout.close()
+    assert leader.wait(timeout=10) == 0
+    worker = subprocess.Popen(["sleep", "60"])
+    worker_start = process_start(worker.pid)
+    worker.kill()
+    worker.wait()
+    signals: list[tuple[int, int]] = []
+
+    def kill(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        if pid != stray:
+            raise PermissionError(f"pid {pid} is outside this test")
+        os.kill(pid, signum)
+
+    try:
+        now, queue, pool, dispatcher, job, _ = box_job_setup(tmp_path, alive={})
+        monitor = dispatcher.devices
+        monitor.alive = pid_alive
+        monitor.kill = kill
+        monitor.scan = process_tree.processes
+        with queue.connect() as connection:
+            connection.execute(
+                "UPDATE device_slots SET runner_pid = ?, runner_start = ?, "
+                "worker_pid = ?, worker_start = ?, run_tag = NULL WHERE job_id = ?",
+                (leader.pid, leader_start, worker.pid, worker_start, job.id),
+            )
+            connection.commit()
+
+        disable_box(tmp_path)
+        for at in (0.0, 60.0, 120.0):
+            poll_at(now, dispatcher, at)
+        assert signals == [], "no process is signalled through the dead runner's session"
+        assert pid_alive(stray, None), "the unrelated process in that session still runs"
+        assert orphans(queue) == [], "the row is forgotten: nothing of the run is left"
+    finally:
+        kill_all(stray)
 
 
 @pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
@@ -2132,8 +2308,10 @@ def test_r1_f11_remote_child_that_will_not_stop_keeps_the_slot_until_it_is_gone(
 
         kill_quietly(child)
         assert wait_gone(child)
-        result = monitor.reconcile(time.time(), 600.0, lambda *_: None)
-        assert result.released == (job_id,)
+        deadline = time.monotonic() + 5
+        while monitor.reconcile(time.time(), 600.0, lambda *_: None).released != (job_id,):
+            assert time.monotonic() < deadline, "the slot is released once the run's keeper left"
+            time.sleep(0.1)
     finally:
         kill_quietly(child)
 
@@ -2859,3 +3037,65 @@ def test_a_profile_name_reference_never_puts_the_job_token_on_stderr(
     assert JOB_SECRET not in result.stderr
     assert result.returncode == 0, result.stderr
     assert json.loads(report.read_text(encoding="utf-8")) == [["--add-dir", str(tmp_path)], JOB_SECRET]
+
+
+@pytest.mark.parametrize(
+    ("old_systemd", "help_fails", "bus_blip", "launch"),
+    [
+        (False, False, False, ["--expand-environment=no"]),
+        (True, False, False, []),
+        (False, True, False, ["--expand-environment=no"]),
+        (True, True, False, None),
+        (False, False, True, None),
+        (True, False, True, None),
+    ],
+    ids=[
+        "systemd-254+",
+        "systemd-252",
+        "systemd-254+-help-fails",
+        "systemd-252-help-fails",
+        "systemd-254+-bus-blip",
+        "systemd-252-bus-blip",
+    ],
+)
+def test_a_contained_start_hands_the_command_its_argv_whatever_systemd_expands(
+    tmp_path: Path, old_systemd: bool, help_fails: bool, bus_blip: bool, launch: list[str] | None
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    log = tmp_path / "systemd-run.log"
+    blip = tmp_path / "bus-down"
+    if bus_blip:
+        blip.touch()
+    report = tmp_path / "report.json"
+    dump = f"import json, os, sys\njson.dump([sys.argv[1:], os.environ.get('GH_TOKEN')], open({str(report)!r}, 'w'))\n"
+    target = _token_target(tmp_path)
+    args = ["a b", "$(touch pwn6)", "${HOME}", "$HOME"]
+    script = remote.start_script(
+        target, [sys.executable, "-c", dump, *args], {"GH_TOKEN": "x${HOME}y"},
+        guarded_dirs=[str(tmp_path)], insert_at=3, report_env=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={
+            "PATH": fake_linger(tmp_path, "yes", systemd_run=True),
+            "HOME": str(home),
+            "FAKE_SYSTEMD_LOG": str(log),
+            "FAKE_SYSTEMD_OLD": "1" if old_systemd else "0",
+            "FAKE_SYSTEMD_HELP_FAILS": "1" if help_fails else "0",
+            "FAKE_SYSTEMD_BUS_BLIP": str(blip),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Invalid environment variable" not in result.stderr
+    assert json.loads(report.read_text(encoding="utf-8")) == [
+        ["--add-dir", str(tmp_path), *args], "x${HOME}y"
+    ]
+    assert not any(tmp_path.rglob("pwn*"))
+    launches = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    if launch is None:
+        assert launches == []
+    else:
+        [options] = launches
+        assert f"--unit=orch-run-{target.tag}.scope" in options
+        assert [o for o in options if o.startswith("--expand-environment")] == launch

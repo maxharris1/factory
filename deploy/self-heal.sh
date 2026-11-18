@@ -234,14 +234,6 @@ service_lock() {
     flock 9
 }
 
-detached() {
-    if command -v setsid >/dev/null 2>&1; then
-        setsid nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
-    else
-        nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
-    fi
-}
-
 head_sha() {
     git -C "$CHECKOUT" rev-parse -q --verify HEAD 2>/dev/null || true
 }
@@ -278,9 +270,9 @@ once() {
         say "orch settings apply exited $?; healing anyway" >>"$LOG"
     "$ORCH" health --json 2>>"$LOG" 8>&- | "$ORCH" heal --health-json - --state "$STATE" 8>&-
     statuses=("${PIPESTATUS[@]}")
-    detached "$ORCH" heal devices --state "$STATE"
+    factory_detach "$ORCH" heal devices --state "$STATE" >>"$LOG" 2>&1 </dev/null 8>&- 9>&-
     if [[ -n "$after" && "$before" != "$after" ]]; then
-        detached "$ORCH" dashboard push --once
+        factory_detach "$ORCH" dashboard push --once >>"$LOG" 2>&1 </dev/null 8>&- 9>&-
     fi
     set -e
     case "${statuses[0]}" in
@@ -303,9 +295,7 @@ kick() {
             return 0
         fi
     fi
-    local detach=()
-    command -v setsid >/dev/null 2>&1 && detach=(setsid)
-    "${detach[@]}" nohup bash "$SELF" once >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    factory_detach bash "$SELF" once >>"$LOG" 2>&1 </dev/null 8>&- 9>&-
     say "kick: started a detached pass (pid $!)" >>"$LOG"
 }
 
@@ -354,7 +344,7 @@ launch() {
         say "self-heal loop already running (pid ${pid})"
         return 0
     fi
-    nohup bash "$SELF" _loop "$STATE" >>"$LOG" 2>&1 </dev/null 9>&- &
+    factory_detach bash "$SELF" _loop "$STATE" >>"$LOG" 2>&1 </dev/null 9>&-
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then

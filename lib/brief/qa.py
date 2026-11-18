@@ -8,10 +8,14 @@ from typing import Literal
 
 from lib.brief.common import _REPO, _SKILL, _URL, BriefError, code_span, fenced
 from lib.factory_md import QA_RUNNERS, QaEvidence, QaLane
+from lib.qa_storage import LaneLinks, UploadLink, pack_key
 
 LaneKind = Literal["head", "regression", "base-check"]
 
 RESULT = "result.json"
+AFTER_SCREENSHOT = "after-screenshot.png"
+PASS_OUTPUT = "pass-test-output.txt"
+RECEIPTS = (AFTER_SCREENSHOT, PASS_OUTPUT)
 WORKTREE = "/tmp/lane-worktree"
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -32,12 +36,6 @@ class Scenario:
 
 
 @dataclass(frozen=True)
-class Upload:
-    path: str
-    url: str
-
-
-@dataclass(frozen=True)
 class LaneFacts:
     repo: str
     pr: int
@@ -50,7 +48,7 @@ class LaneFacts:
     lane_config: QaLane
     verify: str | None
     evidence: QaEvidence
-    uploads: tuple[Upload, ...]
+    links: LaneLinks
 
 
 @dataclass(frozen=True)
@@ -111,6 +109,7 @@ def render_qa_brief(facts: LaneFacts, runner: str) -> str:
         _health(facts),
         _driving(facts),
         _scenarios(facts),
+        _packs(facts),
         _repeat(),
         _blocking(),
         _undrivable(),
@@ -134,8 +133,8 @@ def _check(facts: LaneFacts, runner: str) -> None:
     for name, sha in (("commit", facts.commit), ("base_commit", facts.base_commit)):
         if not _SHA.fullmatch(sha):
             raise BriefError(f"{name} must be a 40-character lowercase hex sha")
-    if isinstance(facts.lane, bool) or facts.lane not in (1, 2, 3):
-        raise BriefError("lane must be 1, 2 or 3")
+    if isinstance(facts.lane, bool) or facts.lane not in range(1, 9):
+        raise BriefError("lane must be 1 to 8")
     if facts.kind not in _KINDS:
         raise BriefError(f"{facts.kind!r} is not a lane kind")
     if facts.verify is not None and not _SKILL.fullmatch(facts.verify):
@@ -155,28 +154,29 @@ def _check(facts: LaneFacts, runner: str) -> None:
         for name in scenario.save:
             if not _FILE.fullmatch(name):
                 raise BriefError(f"{name!r} is not a plain file name")
-    _check_uploads(facts)
+        if not set(RECEIPTS) <= set(scenario.save):
+            raise BriefError(f"{scenario.id} must save {AFTER_SCREENSHOT} and {PASS_OUTPUT}")
+    _check_links(facts)
 
 
-def _check_uploads(facts: LaneFacts) -> None:
-    expected = expected_paths(facts.scenarios)
-    paths = [upload.path for upload in facts.uploads]
-    if len(set(paths)) != len(paths):
-        raise BriefError("each upload path must appear once")
-    for upload in facts.uploads:
-        if upload.path not in expected:
-            raise BriefError(f"upload {upload.path!r} matches no expected file")
-        if not _URL.fullmatch(upload.url):
-            raise BriefError(f"upload {upload.path!r} needs an https:// link")
-    if RESULT not in paths:
-        raise BriefError(f"no upload for {RESULT}")
-    for path in expected:
-        if path not in paths:
-            raise BriefError(f"no upload for {path!r}")
+def _check_links(facts: LaneFacts) -> None:
+    links = facts.links
+    for name, link in (("result", links.result), ("bundle", links.bundle)):
+        if not _URL.fullmatch(link.url):
+            raise BriefError(f"the {name} upload needs an https:// link")
+    if not all(_URL.fullmatch(link.url) for link in links.packs):
+        raise BriefError("each pack download needs an https:// link")
+    try:
+        expected = {pack_key(pack) for pack in pack_ids(facts.scenarios)}
+    except ValueError:
+        raise BriefError("a scenario's pack is not a plain pack id") from None
+    keys = [link.key for link in links.packs]
+    if len(set(keys)) != len(keys) or set(keys) != expected:
+        raise BriefError("the lane needs one download link for each pack its scenarios name, and no other")
 
 
-def expected_paths(scenarios: tuple[Scenario, ...]) -> list[str]:
-    return [f"{scenario.id}/{name}" for scenario in scenarios for name in scenario.save] + [RESULT]
+def pack_ids(scenarios: tuple[Scenario, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(scenario.pack for scenario in scenarios if scenario.pack != "none"))
 
 
 def _tested(facts: LaneFacts, kind: _Kind) -> str:
@@ -185,6 +185,14 @@ def _tested(facts: LaneFacts, kind: _Kind) -> str:
 
 def _folder(facts: LaneFacts) -> str:
     return f"/tmp/swarm-{facts.pr}/worker-{facts.lane}"
+
+
+def _packs_folder(facts: LaneFacts) -> str:
+    return f"/tmp/swarm-{facts.pr}/packs"
+
+
+def _bundle(facts: LaneFacts) -> str:
+    return f"/tmp/swarm-{facts.pr}/bundle-{facts.lane}.tar.gz"
 
 
 def _opening(facts: LaneFacts) -> str:
@@ -310,6 +318,24 @@ def _scenarios(facts: LaneFacts) -> str:
     )
 
 
+def _packs(facts: LaneFacts) -> str:
+    packs = pack_ids(facts.scenarios)
+    if not packs:
+        return "## Fixture packs\nNo scenario names a fixture pack, so there is nothing to download."
+    urls = {link.key: link.url for link in facts.links.packs}
+    folder = _packs_folder(facts)
+    commands = "\n".join(
+        f"curl --fail --create-dirs -o {folder}/{pack} {shlex.quote(urls[pack_key(pack)])}" for pack in packs
+    )
+    return (
+        "## Fixture packs\n"
+        "Each scenario names its fixture pack in `pack`. Download each pack named below before the first "
+        f"scenario that uses it, into `{folder}/<pack id>`. That folder is outside the worker folder, so the "
+        "pack is not uploaded with the evidence.\n\n"
+        + fenced(commands)
+    )
+
+
 def _repeat() -> str:
     return (
         "## One repeat\n"
@@ -343,6 +369,8 @@ def _evidence(facts: LaneFacts) -> str:
         "## Evidence\n"
         f"Save every artifact under `{_folder(facts)}/<flow-id>/`, where the flow id is the scenario id, "
         f"for example `{_folder(facts)}/{first}/`. Name each file as the scenario's `save` list does. "
+        f"Each scenario saves `{AFTER_SCREENSHOT}`, a screenshot of the page after its last step, and "
+        f"`{PASS_OUTPUT}`, the text of what its pass test observed. "
         "Wait for the page to settle, with the network idle and no animation running, before a screenshot. "
         f"{_VIDEO[facts.evidence.video]} {_TRACE[facts.evidence.trace]} "
         "Never delete evidence during cleanup."
@@ -395,18 +423,26 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
     )
 
 
+def _post(link: UploadLink, path: str) -> str:
+    fields = "".join(f" --form-string {shlex.quote(f'{name}={value}')}" for name, value in link.fields.items())
+    return f"curl --fail{fields} -F {shlex.quote('file=@' + path)} {shlex.quote(link.url)}"
+
+
 def _handover(facts: LaneFacts) -> str:
-    urls = {upload.path: upload.url for upload in facts.uploads}
-    commands = "\n".join(
-        f"curl --fail --upload-file {_folder(facts)}/{path} {shlex.quote(urls[path])}" for path in expected_paths(facts.scenarios)
-    )
+    bundle = _bundle(facts)
+    commands = "\n".join((
+        f"tar -czf {bundle} -C {_folder(facts)} .",
+        _post(facts.links.bundle, bundle),
+        _post(facts.links.result, f"{_folder(facts)}/{RESULT}"),
+    ))
     return (
         "## Hand-over\n"
-        f"Upload every artifact, then `{RESULT}`, through the links given. Each link takes one PUT of one "
-        "file. Run these commands in this order:\n\n"
+        f"Pack the worker folder into one bundle outside it. Post the bundle, then post `{RESULT}`. Each "
+        "goes through its own signed form. Run these commands in this order:\n\n"
         + fenced(commands)
-        + "\n\nSkip a file the lane did not produce, such as one for a scenario that needs a human check, "
-        "and leave it out of `artifacts`. A lane with no uploaded result did not finish."
+        + "\n\nThe bundle holds every artifact under its scenario folder. Leave a file the lane did not "
+        "produce, such as one for a scenario that needs a human check, out of `artifacts`. "
+        "A lane with no uploaded result did not finish."
     )
 
 

@@ -10,12 +10,17 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
+import sqlite3
+import stat
 import tarfile
 import tempfile
 import zlib
-from pathlib import Path, PurePosixPath
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path, PurePath, PurePosixPath
+from typing import Any, Literal, get_args
 
 from lib.dispatch.errors_text import scrub_detail
 from lib.qa_storage import (
@@ -39,8 +44,69 @@ _NOTE = (
 )
 
 
+RETENTION = 7 * 86400.0
+CLOSED_STATES = ("merged", "done", "abandoned")
+_LANE = re.compile(r"lane-[1-9][0-9]*")
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+Standing = Literal["latest", "superseded", "expired"]
+Kind = Literal["screenshot", "video", "trace", "log", "manifest", "other"]
+Outcome = Literal["deleted", "symlink-left", "lane-refused"]
+_LEFT_IN_PLACE: dict[Outcome, str] = {
+    "symlink-left": "symlink left in place: {}",
+    "lane-refused": "result.json repeats a scenario id, lane left in place: {}",
+}
+
+_SUFFIXES: dict[Kind, str] = {
+    "screenshot": ".png .jpg .jpeg .webp",
+    "video": ".webm .mp4",
+    "trace": ".zip",
+    "log": ".log",
+}
+_KIND_BY_SUFFIX = {suffix: kind for kind, suffixes in _SUFFIXES.items() for suffix in suffixes.split()}
+_ALL_KINDS: frozenset[Kind] = frozenset(get_args(Kind))
+_MANIFEST_ONLY: frozenset[Kind] = frozenset({"manifest"})
+_KEPT: dict[tuple[Standing, str | None], frozenset[Kind]] = {
+    ("latest", "verified"): _ALL_KINDS - {"trace", "log"},
+    ("superseded", "failed"): _ALL_KINDS,
+}
+_KEPT_OTHERWISE: dict[Standing, frozenset[Kind]] = {
+    "latest": _ALL_KINDS,
+    "superseded": _MANIFEST_ONLY,
+    "expired": _MANIFEST_ONLY,
+}
+
+
 class EvidenceRefused(Exception):
     """Text is a reason and a scrubbed member or file name, never a link."""
+
+
+@dataclass(frozen=True)
+class Recycled:
+    """`deleted` holds posix paths relative to the evidence root."""
+
+    deleted: tuple[str, ...]
+    skipped: tuple[tuple[str, str], ...]
+
+
+def run_dir(root: Path, repo: str, ticket: str, run_id: str) -> Path:
+    check_id(run_id, "run_id")
+    check_id(ticket, "ticket")
+    if not isinstance(repo, str) or repo.count("/") != 1:
+        raise ValueError("repo must be owner/name")
+    owner, name = repo.split("/")
+    check_id(owner, "repo owner")
+    check_id(name, "repo name")
+    if not isinstance(root, Path) or not root.is_absolute():
+        raise ValueError("root must be an absolute Path")
+    return root / owner / name / ticket / run_id
+
+
+def record_evidence_dir(connection: sqlite3.Connection, run_id: str, folder: Path) -> None:
+    connection.execute(
+        "UPDATE qa_runs SET evidence_dir = ? WHERE run_id = ? AND evidence_dir IS NULL",
+        (str(folder), run_id),
+    )
 
 
 def collect(
@@ -50,16 +116,8 @@ def collect(
 
     None when the lane uploaded no result.json. Returns the parsed result
     with "mismatches" set to the artifact and scrub findings."""
-    check_id(run_id, "run_id")
-    check_id(ticket, "ticket")
-    if not isinstance(repo, str) or repo.count("/") != 1:
-        raise ValueError("repo must be owner/name")
-    owner, name = repo.split("/")
-    check_id(owner, "repo owner")
+    dest = run_dir(root, repo, ticket, run_id) / f"lane-{lane}"
     prefix = lane_prefix(repo, run_id, lane)
-    if not isinstance(root, Path) or not root.is_absolute():
-        raise ValueError("root must be an absolute Path")
-    dest = root / owner / name / ticket / run_id / f"lane-{lane}"
 
     staging_root = root / ".staging"
     staging_root.mkdir(parents=True, exist_ok=True)
@@ -282,3 +340,188 @@ def _sha256(file: Path) -> str:
 
 def _shown(name: str) -> str:
     return scrub_detail(name) or "<empty name>"
+
+
+def _kind(lane_rel: PurePosixPath) -> Kind:
+    if len(lane_rel.parts) == 1 and lane_rel.name in _RESERVED:
+        return "manifest"
+    if lane_rel.name == NETWORK_NAME:
+        return "log"
+    kind = _KIND_BY_SUFFIX.get(lane_rel.suffix.lower())
+    if kind is None and lane_rel.name.startswith("trace"):
+        return "trace"
+    return kind or "other"
+
+
+def keeps(standing: Standing, scenario_result: str | None, kind: Kind) -> bool:
+    return kind in _KEPT.get((standing, scenario_result), _KEPT_OTHERWISE[standing])
+
+
+def recycle(connection: sqlite3.Connection, *, root: Path, repo: str, now: float) -> Recycled:
+    """Delete what the keep table rejects from each finished run's folder.
+
+    A run is found by its recorded folder only. A folder that is not
+    exactly root/<owner>/<name>/<ticket>/<run_id>, with no link on the way,
+    is skipped and reported."""
+    closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
+    rows = connection.execute(
+        f"""
+        SELECT r.run_id, r.evidence_dir, CASE
+            WHEN EXISTS (
+                SELECT 1 FROM ticket_state s
+                WHERE lower(s.repo) = r.repo AND s.ticket_id = r.ticket_id
+                    AND s.workflow_state IN ({closed})
+            ) AND (
+                SELECT max(t.at) FROM ticket_transitions t
+                WHERE lower(t.repo) = r.repo AND t.ticket_id = r.ticket_id
+                    AND t.to_state IN ({closed})
+            ) <= :cutoff THEN 'expired'
+            WHEN EXISTS (
+                SELECT 1 FROM qa_runs n
+                WHERE n.repo = r.repo AND n.ticket_id = r.ticket_id AND n.arm = r.arm
+                    AND n.state = 'reported' AND n.started_at > r.started_at
+            ) THEN 'superseded'
+            ELSE 'latest'
+        END
+        FROM qa_runs r
+        WHERE r.repo = :repo AND r.evidence_dir IS NOT NULL
+            AND r.state NOT IN ('queued', 'running')
+        ORDER BY r.started_at, r.rowid
+        """,
+        {"repo": repo.lower(), "cutoff": now - RETENTION},
+    ).fetchall()
+    deleted: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    real_root = os.path.realpath(root)
+    try:
+        root_fd = _open_root(real_root)
+    except OSError as exc:
+        reason = f"cannot open evidence root ({exc.strerror})"
+        return Recycled(deleted=(), skipped=tuple((run_id, reason) for run_id, _folder, _standing in rows))
+    try:
+        for run_id, evidence_dir, standing in rows:
+            parts = _resolve(run_id, evidence_dir, real_root)
+            if isinstance(parts, str):
+                skipped.append((run_id, parts))
+                continue
+            try:
+                run_fd = _open_unlinked(root_fd, parts)
+            except OSError as exc:
+                skipped.append((run_id, f"cannot open evidence folder ({exc.strerror})"))
+                continue
+            try:
+                for outcome, rel in _recycle_run(run_fd, standing):
+                    shown = PurePosixPath(*parts, rel).as_posix()
+                    if outcome == "deleted":
+                        deleted.append(shown)
+                    else:
+                        skipped.append((run_id, _LEFT_IN_PLACE[outcome].format(shown)))
+            except OSError as exc:
+                skipped.append((run_id, f"stopped partway ({exc.strerror})"))
+            finally:
+                os.close(run_fd)
+    finally:
+        os.close(root_fd)
+    return Recycled(deleted=tuple(deleted), skipped=tuple(skipped))
+
+
+def _resolve(run_id: str, evidence_dir: object, real_root: str) -> tuple[str, ...] | str:
+    if not isinstance(evidence_dir, str) or "\x00" in evidence_dir or not os.path.isabs(evidence_dir):
+        return "evidence folder is not an absolute path"
+    if os.path.realpath(evidence_dir) != evidence_dir:
+        return "evidence folder path has a link or .. in it"
+    folder = PurePath(evidence_dir)
+    if not folder.is_relative_to(real_root):
+        return "evidence folder is outside the evidence root"
+    parts = folder.relative_to(real_root).parts
+    if len(parts) != 4:
+        return "evidence folder is not at <owner>/<name>/<ticket>/<run_id>"
+    if parts[-1] != run_id:
+        return "evidence folder belongs to another run id"
+    return parts
+
+
+def _open_root(real_root: str) -> int:
+    top = os.open("/", _DIR_FLAGS)
+    try:
+        return _open_unlinked(top, PurePath(real_root).parts[1:])
+    finally:
+        os.close(top)
+
+
+def _open_unlinked(start_fd: int, parts: Iterable[str]) -> int:
+    fd = os.dup(start_fd)
+    try:
+        for part in parts:
+            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _recycle_run(run_fd: int, standing: Standing) -> Iterator[tuple[Outcome, PurePosixPath]]:
+    with os.scandir(run_fd) as entries:
+        lanes = sorted(e.name for e in entries if _LANE.fullmatch(e.name) and e.is_dir(follow_symlinks=False))
+    for lane in lanes:
+        lane_fd = os.open(lane, _DIR_FLAGS, dir_fd=run_fd)
+        try:
+            results = _scenario_results(lane_fd)
+            if results is None:
+                yield "lane-refused", PurePosixPath(lane)
+                continue
+
+            def keep(rel: PurePosixPath) -> bool:
+                result = results.get(rel.parts[0]) if len(rel.parts) > 1 else None
+                return keeps(standing, result, _kind(rel))
+
+            for outcome, rel in _sweep(lane_fd, PurePosixPath(), keep):
+                yield outcome, PurePosixPath(lane, rel)
+        finally:
+            os.close(lane_fd)
+
+
+def _sweep(
+    fd: int, rel: PurePosixPath, keep: Callable[[PurePosixPath], bool]
+) -> Iterator[tuple[Outcome, PurePosixPath]]:
+    with os.scandir(fd) as scan:
+        entries = sorted(scan, key=lambda entry: entry.name)
+    for entry in entries:
+        path = rel / entry.name
+        if entry.is_symlink():
+            yield "symlink-left", path
+        elif entry.is_dir(follow_symlinks=False):
+            child = os.open(entry.name, _DIR_FLAGS, dir_fd=fd)
+            try:
+                yield from _sweep(child, path, keep)
+            finally:
+                os.close(child)
+        elif entry.is_file(follow_symlinks=False) and not keep(path):
+            os.unlink(entry.name, dir_fd=fd)
+            yield "deleted", path
+
+
+def _scenario_results(lane_fd: int) -> dict[str, str] | None:
+    try:
+        fd = os.open(RESULT_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=lane_fd)
+    except OSError:
+        return {}
+    try:
+        with open(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return {}
+            data = json.loads(handle.read(RESULT_CAP + 1))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    scenarios = data.get("scenarios") if isinstance(data, dict) else None
+    if not isinstance(scenarios, list):
+        return {}
+    entries = [
+        (item["id"], item["result"])
+        for item in scenarios
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("result"), str)
+    ]
+    results = dict(entries)
+    return results if len(results) == len(entries) else None

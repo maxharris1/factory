@@ -161,6 +161,7 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
     return [
         f"Fix the red CI on this PR. {failed} {where} "
         "Follow the router in Skills above.",
+        *_read_cause(ci.get("cause"), jobs),
         *_job_logs(jobs),
         _checkout(facts),
         "2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; "
@@ -173,6 +174,16 @@ def _ci_fix(detail: dict[str, object], facts: dict) -> list[str]:
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
     ]
+
+
+def _read_cause(cause: object, jobs: list[dict[str, object]]) -> list[str]:
+    if cause == "code":
+        return ["The factory read this failure as a code failure on this head."]
+    if cause != "infra":
+        return []
+    signals = dict.fromkeys(job["signal"] for job in jobs if isinstance(job.get("signal"), str))
+    named = f" ({', '.join(signals)})" if signals else ""
+    return [f"The factory read this failure as infrastructure{named}, not this PR."]
 
 
 def _job_logs(jobs: list[dict[str, object]]) -> list[str]:
