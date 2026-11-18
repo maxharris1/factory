@@ -28,6 +28,7 @@ from tests.test_remote_start import (
     LocalShell,
     config_of,
     disable_pc,
+    kill_all,
     kill_quietly,
     lost_setup,
     machines_file,
@@ -286,6 +287,264 @@ while True:
         unrelated.wait()
 
 
+def path_shim(directory: Path, name: str, body: str) -> None:
+    real = shutil.which(name)
+    assert real is not None
+    directory.mkdir(exist_ok=True)
+    shim = directory / name
+    shim.write_text(f'#!/bin/sh\n{body}\nexec {real} "$@"\n')
+    shim.chmod(0o755)
+
+
+def pause_untagged_scans(shims: Path, paused: Path, release: Path) -> None:
+    path_shim(
+        shims,
+        "grep",
+        f'if [ -z "${remote.TAG_ENV}" ] && [ -z "${remote.DEADLINE_ENV}" ]; then\n'
+        f": > {shlex.quote(str(paused))}\n"
+        f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done\n"
+        "fi",
+    )
+
+
+def kill_group(pid: int | None) -> None:
+    if pid is None:
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+@linux_path
+def test_a_kill_before_the_wrapper_records_still_stops_the_untagged_child(
+    tmp_path: Path,
+) -> None:
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
+    assert target is not None
+    shell = LocalShell()
+    paused, release, child_pid = tmp_path / "paused", tmp_path / "release", tmp_path / "child.pid"
+    shims = tmp_path / "shims"
+    pause_untagged_scans(shims, paused, release)
+    child = f"""import os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(child_pid)!r}).write_text(str(os.getpid()))
+while True:
+    time.sleep(.05)
+"""
+    worker = (
+        "import os, subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], env={{'PATH': os.environ['PATH']}})\n"
+    )
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=120, grace=1
+    )
+    exit_file = Path(remote.run_file(target, "exit"))
+    wrapper = None
+    try:
+        result = subprocess.run(
+            ["sh", "-c", launch],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            env={**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"},
+        )
+        assert result.returncode == 0, result.stderr
+        wrapper = int(Path(remote.run_file(target, "pid")).read_text().split()[0])
+        wait_until(child_pid.exists, "the worker started its untagged child")
+        orphan = int(child_pid.read_text())
+        wait_until(
+            lambda: exit_file.exists() or paused.exists(),
+            "the start ended and the wrapper wrote its exit or began an untagged record",
+        )
+
+        assert remote.stop_worker(shell, target, kill=True)
+        kill_group(wrapper)
+        release.touch()
+        wait_until(
+            lambda: not pid_alive(orphan, None),
+            "the KILL stop reached the untagged child left in the start's session",
+            5.0,
+        )
+        wait_until(
+            lambda: remote.check_worker(shell, target) == remote.GONE,
+            "the run is gone once its last process is",
+            10.0,
+        )
+    finally:
+        release.touch()
+        remote.stop_worker(shell, target, kill=True)
+        kill_group(wrapper)
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@linux_path
+def test_a_term_before_the_keeper_ignores_it_leaves_no_untracked_child(
+    tmp_path: Path,
+) -> None:
+    """#827 f-6: the keeper is held before its first instruction while the
+    stop's TERM arrives; a worker that answers TERM by starting an untagged
+    child in its session must not have run, or the KILL must reach that child."""
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
+    assert target is not None
+    shell = LocalShell()
+    held, worker_pid, child_pid = tmp_path / "held", tmp_path / "worker.pid", tmp_path / "child.pid"
+    shims = tmp_path / "shims"
+    path_shim(
+        shims,
+        "sh",
+        'if [ "$3" = orch-keeper ]; then\n'
+        f": > {shlex.quote(str(held))}\n"
+        "while :; do sleep 0.05; done\n"
+        "fi",
+    )
+    child = f"""import os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(child_pid)!r}).write_text(str(os.getpid()))
+while True:
+    time.sleep(.05)
+"""
+    worker = f"""import os, signal, subprocess, sys, time
+from pathlib import Path
+def answer(*_):
+    subprocess.Popen([sys.executable, '-c', {child!r}], env={{'PATH': os.environ['PATH']}})
+    os._exit(0)
+signal.signal(signal.SIGTERM, answer)
+Path({str(worker_pid)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+"""
+    start = remote.start_script(target, [sys.executable, "-c", worker], {})
+    launch = remote.launch_script(
+        target, start, size=0, not_after=int(time.time()) + 600, budget=120, grace=1
+    )
+    exit_file = Path(remote.run_file(target, "exit"))
+    wrapper = None
+    try:
+        result = subprocess.run(
+            ["sh", "-c", launch],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            env={**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"},
+        )
+        assert result.returncode == 0, result.stderr
+        wrapper = int(Path(remote.run_file(target, "pid")).read_text().split()[0])
+        wait_until(held.exists, "the keeper is held before its first instruction")
+        time.sleep(1.0)
+
+        assert remote.stop_worker(shell, target)
+        wait_until(exit_file.exists, "the run ended after the TERM")
+        if child_pid.exists():
+            wait_until(lambda: child_pid.read_text() != "", "the child wrote its pid")
+        assert remote.stop_worker(shell, target, kill=True)
+        if child_pid.exists():
+            orphan = int(child_pid.read_text())
+            wait_until(
+                lambda: not pid_alive(orphan, None),
+                "the KILL reached the untagged child the worker started on TERM",
+                5.0,
+            )
+        assert not worker_pid.exists(), "the worker never runs before the keeper ignores TERM"
+    finally:
+        remote.stop_worker(shell, target, kill=True)
+        kill_group(wrapper)
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+
+UNLOCKED_WRITE_SECONDS = 3
+
+
+@linux_path
+def test_a_concurrent_check_never_erases_a_newer_tree_record(tmp_path: Path) -> None:
+    """#827 f-6: a check that scanned before a member's child was born must
+    not replace the record a later check wrote with that child in it."""
+    config = config_of(machines_file(tmp_path))
+    target = device_monitor.remote_target(config.device("pc"), "claude", "job-1", uuid.uuid4().hex)
+    assert target is not None
+    paused, release = tmp_path / "paused", tmp_path / "release"
+    go, child_pid = tmp_path / "go", tmp_path / "child.pid"
+    shims = tmp_path / "shims"
+    path_shim(
+        shims,
+        "mv",
+        'if [ "$ORCH_TEST_PAUSE_MV" = 1 ]; then case "$*" in *.tree.pid)\n'
+        f": > {shlex.quote(str(paused))}\n"
+        f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done;;\n"
+        "esac; fi",
+    )
+    member = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, time\nfrom pathlib import Path\n"
+            f"while not Path({str(go)!r}).exists(): time.sleep(.02)\n"
+            "child = subprocess.Popen(['sleep', '60'])\n"
+            f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+            "time.sleep(60)\n",
+        ]
+    )
+    first = second = None
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        directory = Path(target.job_dir)
+        directory.mkdir(parents=True)
+        record = directory / remote.tree_record(target.require_tag())
+        record.write_text(f"{boot}\n{member.pid} {process_start(member.pid)}\n", encoding="utf-8")
+        check = ["sh", "-c", remote.check_script(target)]
+        first = subprocess.Popen(
+            check,
+            env={
+                **os.environ,
+                "PATH": f"{shims}:{os.environ['PATH']}",
+                "ORCH_TEST_PAUSE_MV": "1",
+            },
+        )
+        wait_until(paused.exists, "the first check scanned and reached its rename")
+        go.touch()
+        wait_until(child_pid.exists, "the member started its child after that scan")
+        child = int(child_pid.read_text())
+        second = subprocess.Popen(check)
+        try:
+            second.wait(timeout=UNLOCKED_WRITE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        release.touch()
+
+        assert first.wait(timeout=20) == 1, "the first check finds the member running"
+        assert second.wait(timeout=20) == 1, "the second check finds the member running"
+        lines = record.read_text(encoding="utf-8").splitlines()
+        entries = dict(line.split() for line in lines[1:])
+        assert entries.get(str(child)) == process_start(child), (
+            f"the child the second check saw is still recorded: {lines}"
+        )
+    finally:
+        release.touch()
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        member.kill()
+        member.wait()
+
+
 def stat_line(pid: int, session: int, start: int) -> str:
     return f"{pid} (sleep) S 1 {session} {session} " + "0 " * 15 + f"{start}\n"
 
@@ -338,6 +597,22 @@ class SyntheticDevice:
     def tree(self) -> list[str]:
         record = self.job / remote.tree_record(self.target.require_tag())
         return record.read_text().splitlines() if record.exists() else []
+
+
+@linux_path
+@pytest.mark.parametrize(("state", "expected"), [("Z", 0), ("S", 3)], ids=["zombie", "live"])
+def test_the_recorded_group_holds_the_check_only_while_a_live_process_is_in_it(
+    tmp_path: Path, state: str, expected: int
+) -> None:
+    """#827 f-7: an exited keeper its adopter has not reaped stays a zombie in
+    the start's group; a zombie runs nothing, so it never makes the check unsure."""
+    device = SyntheticDevice(tmp_path)
+    left = device.proc / "4242"
+    left.mkdir()
+    (left / "stat").write_text(
+        stat_line(4242, RECORDED_SESSION, 9000).replace(" S ", f" {state} ", 1)
+    )
+    assert device.run(remote.check_script(device.target)) == expected
 
 
 @linux_path
@@ -548,6 +823,82 @@ time.sleep(120)
         kill_leftover(tmp_path)
 
 
+# Holds the keeper's session: forks the keeper and a companion `sleep` in a
+# session of their own, then, as their child subreaper, adopts both and never
+# reaps one unless it reads its pid on stdin. A dead companion can so stay a
+# zombie whose parent is outside the keeper's session.
+KEEPER_HOLDER = """import ctypes, os, subprocess, sys
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+leader = subprocess.Popen(
+    ["sh", "-c", 'sh -c "$K" orch-keeper </dev/null >/dev/null 2>&1 & k=$!; sleep 60 </dev/null >/dev/null 2>&1 & echo "$k $!"'],
+    stdout=subprocess.PIPE, text=True, start_new_session=True,
+)
+print(leader.communicate()[0].strip(), flush=True)
+for line in sys.stdin:
+    os.waitpid(int(line), 0)
+"""
+
+
+def ignored_signals(pid: int) -> int:
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("SigIgn:"):
+            return int(line.split()[1], 16)
+    raise AssertionError(f"no SigIgn line for {pid}")
+
+
+def zombie(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1][0] == "Z"
+    except FileNotFoundError:
+        return False
+
+
+@linux_path
+@pytest.mark.parametrize("reaped", [True, False], ids=["companion-reaped", "companion-a-zombie"])
+def test_the_keeper_stays_through_stop_signals_until_it_is_alone_in_its_session(
+    reaped: bool,
+) -> None:
+    holder = subprocess.Popen(
+        [sys.executable, "-c", KEEPER_HOLDER],
+        env={**os.environ, "K": remote.KEEPER},
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdin is not None and holder.stdout is not None
+    keeper, companion = (int(pid) for pid in holder.stdout.readline().split())
+    stop_signals = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    mask = sum(1 << (signum - 1) for signum in stop_signals)
+    try:
+        wait_until(
+            lambda: pid_alive(keeper, None) and ignored_signals(keeper) & mask == mask,
+            "the keeper ignores TERM, HUP and INT",
+        )
+        for signum in stop_signals:
+            os.kill(keeper, signum)
+        time.sleep(0.6)
+        assert pid_alive(keeper, None), "the keeper stays while another process is in its session"
+
+        os.kill(companion, signal.SIGKILL)
+        if reaped:
+            holder.stdin.write(f"{companion}\n")
+            holder.stdin.flush()
+            wait_until(lambda: not Path(f"/proc/{companion}").exists(), "the companion was reaped")
+        else:
+            wait_until(
+                lambda: zombie(companion), "the companion is a zombie in the keeper's session"
+            )
+        wait_until(
+            lambda: not pid_alive(keeper, None),
+            "the keeper exits once no live process shares its session",
+            2.0,
+        )
+    finally:
+        kill_all(keeper, companion)
+        holder.kill()
+        holder.wait()
+
+
 def command_substitutions(script: str) -> list[str]:
     """Each `$(...)` body, ended where bash 3.2 ends it: at the `)` that
     balances its unquoted parentheses, so a case pattern's `)` ends it."""
@@ -575,7 +926,6 @@ def generated_scripts(target: remote.RemoteTarget) -> dict[str, str]:
         "stop": remote.stop_script(target),
         "kill": remote.stop_script(target, kill=True),
         "fenced check": remote.fenced_check_script(target),
-        "session record": remote._record_session_script(target),
     }
 
 
@@ -583,8 +933,10 @@ def test_every_generated_remote_script_parses_under_the_native_sh() -> None:
     """#722 f-4: macOS's /bin/sh (bash 3.2) ends a `$(...)` at an unquoted
     `)` such as a case pattern's, so each body must parse cut there too."""
     target = remote.RemoteTarget("pc", "pc", "claude-bot", "/tmp/w", "job", "a" * 32)
-    for name, script in generated_scripts(target).items():
-        inner = shlex.split(script)[3]
+    inners = {name: shlex.split(script)[3] for name, script in generated_scripts(target).items()}
+    inners["start"] = shlex.split(remote.start_script(target, ["true"], {}))[5]
+    inners["keeper"] = remote.KEEPER
+    for name, inner in inners.items():
         for code in [inner, *command_substitutions(inner)]:
             result = subprocess.run(["/bin/sh", "-n", "-c", code], capture_output=True, text=True)
             assert result.returncode == 0, f"{name}: {result.stderr} in {code[:80]!r}"
