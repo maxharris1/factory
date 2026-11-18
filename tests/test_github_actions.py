@@ -1410,7 +1410,7 @@ def test_ci_status_names_the_actions_run_and_job_of_each_failed_check() -> None:
 
 
 PICKUP_RUN = "133415718662"
-ANNOTATIONS = (f"{REPO}/check-runs/{PICKUP_RUN}/annotations?per_page=100",)
+ANNOTATIONS = ("--paginate", f"{REPO}/check-runs/{PICKUP_RUN}/annotations?per_page=100")
 
 
 def test_ci_status_reads_a_run_not_acquired_by_a_runner_as_infra() -> None:
@@ -1438,6 +1438,27 @@ def test_ci_status_reads_a_completed_runs_annotations_once() -> None:
 
     assert first == second
     assert second.cause == "infra"
+    assert gh.count(ANNOTATIONS) == 1
+
+
+def test_a_failure_annotation_past_the_first_page_classifies_the_run() -> None:
+    notice = {"annotation_level": "notice", "title": "", "message": "Queue times may be longer."}
+    lost = {
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The hosted runner: GitHub Actions 7 lost communication with the server.",
+    }
+    pages = json.dumps([notice] * 100) + json.dumps([lost])
+    actions, gh = adapter()
+    gh.route(CHECKS, served("check-runs-cancelled-pickup.json"))
+    gh.route(STATUS, served("status-empty.json"))
+    gh.route(ANNOTATIONS, GhResult(0, pages, ""))
+
+    first = actions.ci_status("owner/repo", HEAD)
+    second = actions.ci_status("owner/repo", HEAD)
+
+    assert [(check.cause, check.signal) for check in first.failed] == [("infra", "runner lost")]
+    assert second == first
     assert gh.count(ANNOTATIONS) == 1
 
 
@@ -2368,7 +2389,10 @@ def test_post_issue_comment_once_returns_the_new_or_existing_comment_id() -> Non
 
 
 WATCHDOG_RUN = 133415718700
-WATCHDOG_ANNOTATIONS = (f"{REPO}/check-runs/{WATCHDOG_RUN}/annotations?per_page=100",)
+WATCHDOG_ANNOTATIONS = (
+    "--paginate",
+    f"{REPO}/check-runs/{WATCHDOG_RUN}/annotations?per_page=100",
+)
 
 
 def _watchdog_pickup_message() -> str:
