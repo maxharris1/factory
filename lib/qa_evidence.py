@@ -79,13 +79,11 @@ class EvidenceRefused(Exception):
 
 @dataclass(frozen=True)
 class Recycled:
-    """`deleted` holds posix paths relative to the evidence root.
-
-    A run removed whole for the budget appears as its folder,
-    <owner>/<name>/<ticket>/<run_id>. A deleted file is always deeper."""
+    """`deleted` and `removed` hold posix paths relative to the evidence root."""
 
     deleted: tuple[str, ...]
     skipped: tuple[tuple[str, str], ...]
+    removed: tuple[str, ...] = ()
 
 
 def run_dir(root: Path, repo: str, ticket: str, run_id: str) -> Path:
@@ -419,9 +417,10 @@ def recycle(
             skipped.append((run_id, f"stopped partway ({exc.strerror})"))
         finally:
             os.close(run_fd)
+    removed: list[str] = []
     if budget_bytes is not None:
-        _over_budget(connection, repo, real_root, budget_bytes, deleted, skipped)
-    return Recycled(deleted=tuple(deleted), skipped=tuple(dict.fromkeys(skipped)))
+        _over_budget(connection, repo, real_root, budget_bytes, removed, skipped)
+    return Recycled(deleted=tuple(deleted), skipped=tuple(dict.fromkeys(skipped)), removed=tuple(removed))
 
 
 def _over_budget(
@@ -429,7 +428,7 @@ def _over_budget(
     repo: str,
     real_root: str,
     budget: int,
-    deleted: list[str],
+    removed: list[str],
     skipped: list[tuple[str, str]],
 ) -> None:
     closed = ", ".join(f"'{state}'" for state in CLOSED_STATES)
@@ -469,7 +468,7 @@ def _over_budget(
             skipped.append((run_id, f"cannot remove evidence folder ({exc.strerror or exc})"))
             continue
         usage -= sizes[run_id]
-        deleted.append(PurePosixPath(*parts).as_posix())
+        removed.append(PurePosixPath(*parts).as_posix())
 
 
 def _size(real_root: str, parts: tuple[str, ...]) -> int:

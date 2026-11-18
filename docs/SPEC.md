@@ -1205,7 +1205,7 @@ handle and following no link. While the total is over the budget, it
 removes the oldest run, by `started_at`, whose ticket is `merged`, `done`
 or `abandoned` and which is not `queued` or `running`. The 7-day wait does
 not apply. It removes the run whole, by its id, under its ticket folder's
-handle, and adds the run folder to `deleted`. A run of an open ticket is
+handle, and adds the run folder to `Recycled.removed`. A run of an open ticket is
 never removed, even when the repo stays over budget. A refused folder or a
 failed removal is skipped with a reason. The row and its `evidence_dir`
 stay.

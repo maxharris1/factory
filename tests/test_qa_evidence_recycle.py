@@ -233,7 +233,7 @@ def test_folder_outside_root_is_skipped_and_reported(
 
     report = recycle(db, root=root, repo=REPO, now=NOW)
 
-    assert report.deleted == ()
+    assert report.deleted == report.removed == ()
     assert [run_id for run_id, _reason in report.skipped] == ["run-1"]
     assert report.skipped[0][1]
     assert _snapshot(tmp_path) == before
@@ -294,13 +294,13 @@ def test_over_budget_deletes_merged_runs_oldest_first(db: sqlite3.Connection, ro
 
     report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=budget)
 
-    assert report == Recycled(deleted=("Acme/Shop/12/m-1", "Acme/Shop/12/m-2"), skipped=())
+    assert report == Recycled(deleted=(), skipped=(), removed=("Acme/Shop/12/m-1", "Acme/Shop/12/m-2"))
     assert [folder.exists() for folder in merged] == [False, False, True]
     assert {folder: _snapshot(folder) for folder in opened} == opened
 
     report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1)
 
-    assert report == Recycled(deleted=("Acme/Shop/12/m-3",), skipped=())
+    assert report == Recycled(deleted=(), skipped=(), removed=("Acme/Shop/12/m-3",))
     assert {folder: _snapshot(folder) for folder in opened} == opened
     assert recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1) == Recycled(deleted=(), skipped=())
     assert db.execute("SELECT COUNT(*) FROM qa_runs WHERE evidence_dir IS NOT NULL").fetchone() == (5,)
@@ -324,7 +324,7 @@ def test_budget_never_follows_a_link_out(db: sqlite3.Connection, root: Path, tmp
 
     report = recycle(db, root=root, repo=REPO, now=NOW, budget_bytes=1)
 
-    assert report.deleted == ()
+    assert report.deleted == report.removed == ()
     assert [run_id for run_id, _reason in report.skipped] == ["run-1"]
     assert report.skipped[0][1]
     assert _snapshot(outside) == before

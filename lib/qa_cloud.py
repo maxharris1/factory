@@ -364,11 +364,10 @@ class QaWorker:
             except Exception as exc:
                 self.log(f"qa recycle {repo}: {type(exc).__name__}: {exc}")
                 continue
-            runs = [PurePosixPath(path).name for path in report.deleted if len(PurePosixPath(path).parts) == 4]
-            for run_id in runs:
-                self.log(f"qa recycle {repo}: removed run {run_id} for the budget")
-            if files := len(report.deleted) - len(runs):
-                self.log(f"qa recycle {repo}: deleted {files} files")
+            for path in report.removed:
+                self.log(f"qa recycle {repo}: removed run {PurePosixPath(path).name} for the budget")
+            if report.deleted:
+                self.log(f"qa recycle {repo}: deleted {len(report.deleted)} files")
             for run_id, reason in report.skipped:
                 if (run_id, reason) not in self._skips_logged:
                     self._skips_logged.add((run_id, reason))
