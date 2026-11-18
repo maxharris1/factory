@@ -1164,8 +1164,6 @@ class Waiter:
         self._containers_swept_at = now
         runners = [(orch_host(self.pool.config), containers.local_runner())]
         for device in self.pool.config.devices:
-            if device.local or not device.enabled:
-                continue
             target = remote_target(device, self.recipient, "containers")
             if target is not None:
                 runners.append((device.name, containers.remote_runner(self.transport, target)))

@@ -493,8 +493,9 @@ def test_a_stopped_docker_daemon_is_logged_once_and_the_step_goes_on(
     assert docker.labelled() == []
 
 
+@pytest.mark.parametrize("enabled", [True, False])
 def test_the_sweep_reaches_a_remote_device_over_the_bots_own_login(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
 ) -> None:
     from tests.test_remote_start import Ssh
     from tests.test_waiter_remote import remote_machines
@@ -506,7 +507,7 @@ def test_the_sweep_reaches_a_remote_device_over_the_bots_own_login(
     monkeypatch.setenv("PATH", f"{ssh.bin}{os.pathsep}/usr/bin:/bin")
     monkeypatch.setenv("FAKE_SSH_HOME", str(docker.login_home()))
     db, queue = make_queue(tmp_path)
-    config, findings = load_machines_yml(remote_machines(tmp_path))
+    config, findings = load_machines_yml(remote_machines(tmp_path, pc=enabled))
     assert config is not None, findings
     done, running = enqueue(queue, "done"), enqueue(queue, "running")
     set_state(db, done, "done")
