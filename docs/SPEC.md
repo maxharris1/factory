@@ -1347,7 +1347,7 @@ evidence step has run 120 seconds; the rest go out on the next push.
 `ssh -G` (with `-F <ssh_config>` when set) resolves `host` to, so a change of
 ssh_config that points the alias at another PC is a new destination.
 For each run sent there it keeps a sha256 over each file's relative path,
-size and `mtime_ns`, and the size of the tar sent. The box rewrites it after
+size and `mtime_ns`, and the sum of its file sizes. The box rewrites it after
 each send and after the removal step. A
 run whose fingerprint has not changed is not sent again. A changed run, such
 as one the box's recycling trimmed, is sent whole again, so the files
@@ -1357,7 +1357,7 @@ sent to the current destination, and nothing is removed from the old one.
 
 **Recycling on the PC (issue #921).** Each evidence step first plans, then
 acts. `plan()` is pure: it takes every `qa_runs` run id, each settled run's
-state on the box, the runs the store records as on the PC with their tar
+state on the box, the runs the store records as on the PC with their file
 sizes, and the budget, and returns the run ids to remove, the run ids to
 send and whether the PC stays over budget. A settled run on the box is
 `Ready` (walked, with its fingerprint and file sizes), `Gone` (its ticket
@@ -1369,8 +1369,10 @@ its repo has no `qa_storage`, or its evidence root cannot be opened).
 - A `Ready` run is sent when the store has no record of it or its fingerprint
   changed.
 - `dashboard.push.qa_budget_gib` (ssh only, a positive integer, unset by
-  default) caps the PC's evidence, counted as the recorded tar sizes after
-  this push's removals plus the file sizes of the runs it sends. While that
+  default) caps the PC's evidence, counted as the file sizes of the runs
+  recorded after this push's removals plus those of the runs it sends. A
+  pending run and its record count the same bytes, so with unchanged
+  evidence and budget the next push removes and sends nothing. While that
   total is over the cap, the plan drops the oldest `Ready` run (by
   `started_at`, then rowid) of a ticket whose `ticket_state` is `merged`,
   `done` or `abandoned`. A dropped run on the PC is removed; a dropped run

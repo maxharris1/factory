@@ -270,7 +270,7 @@ def _push_locked(
             except (EvidenceRefused, OSError, ValueError) as exc:
                 _refused(run_id, exc, log)
                 continue
-            state.runs[run_id] = Sent(ready.mark, size)
+            state.runs[run_id] = Sent(ready.mark, ready.bytes)
             _save(store, state)
     finally:
         for _root, fd in opened.values():

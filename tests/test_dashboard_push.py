@@ -1004,6 +1004,23 @@ def test_over_budget_the_oldest_closed_runs_leave_the_pc_and_open_runs_stay(
     assert _runs_on_pc(tmp_path) == {"run-old", "run-mid", "run-open"}
 
 
+def test_a_fixed_budget_push_settles_once_the_evidence_is_unchanged(db, root: Path, tmp_path: Path) -> None:
+    folder = _settled(db, root, "run-1")
+    _closed(db, TICKET, "merged", NOW)
+    budget = sum(path.stat().st_size for path in folder.rglob("*") if path.is_file())
+    pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=budget)
+    assert (len(pc.scripts), lines) == (1, [])
+    for _ in range(3):
+        pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=budget)
+        assert (pc.scripts, lines, _runs_on_pc(tmp_path)) == ([], [], {"run-1"})
+
+    pc, _ = _push_evidence(db, root, tmp_path, budget_bytes=budget - 1)
+    assert pc.scripts == ["rm -rf -- factory-dashboard/qa/run-1"]
+    for _ in range(3):
+        pc, lines = _push_evidence(db, root, tmp_path, budget_bytes=budget - 1)
+        assert (pc.scripts, lines, _runs_on_pc(tmp_path)) == ([], [], set())
+
+
 def test_a_new_remote_dir_gets_every_run(db, root: Path, tmp_path: Path) -> None:
     _settled(db, root, "run-1")
     _push_evidence(db, root, tmp_path)
