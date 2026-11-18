@@ -19,6 +19,7 @@ NAMES_BEFORE_SPLIT = (
 
 RULE_MODULE = {
     "_t1": "t1",
+    "_go_once": "t1",
     "_resume_after_cap": "resume",
     "_resume_for_max": "resume",
     "_parked_for_max": "resume",

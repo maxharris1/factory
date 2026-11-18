@@ -12,7 +12,7 @@ from tests.test_review_before_ci import (
 )
 
 
-def test_a_hidden_duplicate_go_never_answers_the_review_after_an_upgrade(
+def test_a_hidden_untrusted_go_never_answers_the_review_after_an_upgrade(
     tmp_path: Path,
 ) -> None:
     board = board_with(tmp_path, on=True)
@@ -20,10 +20,10 @@ def test_a_hidden_duplicate_go_never_answers_the_review_after_an_upgrade(
     pr = built_with_ci_pending(board, older)
     reviewed_at_pending_ci(board, pr, older)
     pr.push(sha(2), ci="pending")
-    board.go(pr, "duplicate-go")
+    board.go(pr, "untrusted-go", author="stranger")
     board.poll()
-    assert board.outcome("duplicate-go") == "deduped-build"
-    pr.comments.remove(next(item for item in pr.comments if item.id == "duplicate-go"))
+    assert board.outcome("untrusted-go") == "rejected-go-author"
+    pr.comments.remove(next(item for item in pr.comments if item.id == "untrusted-go"))
     with board.queue.connect() as connection:
         connection.execute("DROP TABLE verdict_heads")
     _restart(board, tmp_path)

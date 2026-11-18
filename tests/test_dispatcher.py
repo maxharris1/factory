@@ -7973,7 +7973,7 @@ def landed_plan_comment(queue: SQLiteJobQueue) -> tuple[Comment, ...]:
 @pytest.mark.parametrize(
     ("case", "retried", "went"),
     [
-        ("verified", "rejected-retry-not-stuck", "deduped-plan"),
+        ("verified", "rejected-retry-not-stuck", "queued-plan"),
         ("running", "rejected-retry-not-stuck", "deduped-plan"),
         ("stuck", "queued-retry-plan", None),
     ],
@@ -8008,7 +8008,9 @@ def test_replan_leaves_other_states_alone(
         assert json.loads(plan.request.detail or "{}")["retry_of"] == failed.id
         assert after["generation"] == before + 1
     else:
-        assert queued_harness_jobs(queue) == []
+        assert [job.request.source_comment_id for job in queued_harness_jobs(queue)] == (
+            ["go-1"] if case == "verified" else []
+        )
         assert after["generation"] == before
 
 

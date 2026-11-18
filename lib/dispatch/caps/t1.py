@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.dispatch.constants import WATCHED_STATES
+from lib.dispatch.constants import TERMINAL_STATES, WATCHED_STATES
 from lib.dispatch.helpers import _route_go, _scope
+from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
@@ -82,7 +83,7 @@ class T1Mixin:
                 ),
             )
             return True, "queued-go-clarification"
-        once = f"g{generation}"
+        once = self._go_once(ticket, comment, action, generation, current)
         if current in WATCHED_STATES or (
             current == "waiting-external"
             and self._queue_row(ticket)["approved_head"] is not None
@@ -120,3 +121,34 @@ class T1Mixin:
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         self._set_workflow_state(ticket, state)
         return True, f"answered-{action}" if answered else f"queued-{action}"
+
+    def _go_once(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        action: str,
+        generation: int,
+        current: str | None,
+    ) -> str:
+        prefix = f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
+        with self._connect() as connection:
+            held = {
+                row["dedupe_key"]: row
+                for row in connection.execute(
+                    "SELECT dedupe_key, state, source_comment_id FROM jobs"
+                    " WHERE dedupe_key IN (?, ?)",
+                    (prefix + comment.id, f"{prefix}g{generation}"),
+                )
+            }
+            if prefix + comment.id in held:
+                return comment.id
+            spent = held.get(f"{prefix}g{generation}")
+            if (
+                current not in TERMINAL_STATES
+                and spent is not None
+                and spent["state"] not in ("queued", "running")
+                and spent["source_comment_id"] != comment.id
+                and not _harness_job_active(connection, (ticket.repo.lower(), ticket.ticket_id))
+            ):
+                return comment.id
+        return f"g{generation}"
