@@ -99,8 +99,7 @@ def wait_of(
 ) -> Wait | None:
     """Why a ticket in `state` waits on Max, or None when it does not.
     `parked_outcome` is the plan or review outcome recorded for the comment
-    that parked it at waiting-max; `stop_comment_id` is the verdict that
-    capped or blocked it."""
+    that parked it at waiting-max."""
     if stuck:
         return Wait("stuck", stuck_comment_id, stuck_reason)
     if state == "waiting-max":
@@ -122,11 +121,7 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
 
 
 def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str, str | None]]:
-    """(repo casefolded, ticket id) -> what `wait_of` reads from orch.db: the
-    paused question, stuck source, hold approval and stopping verdict comment
-    ids, and the outcome that parked the ticket at waiting-max. The stopping
-    verdict is the latest capped-review or blocked-review event matching the
-    ticket's state, as the dispatcher's resume reads it."""
+    """(repo casefolded, ticket id) -> what `wait_of` reads from orch.db."""
     tables = _tables(connection)
     if "ticket_state" not in tables:
         return {}

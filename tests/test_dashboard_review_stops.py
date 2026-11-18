@@ -1,6 +1,3 @@
-"""#822: a ticket a review stopped (capped, blocked) keeps its verdict link
-and its actions on the dashboard, driven through real dispatcher flows."""
-
 from pathlib import Path
 
 from lib.dashboard import collect_snapshot
