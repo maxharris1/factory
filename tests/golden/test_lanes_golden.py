@@ -9,9 +9,9 @@ NAME = page_name(__file__)
 
 GOLDEN = {
     "lanes.CSS": "f4a39fb9ca6ddd3c65fa300cf3a99a1d1b0be53e7fc969997b9a0ead0e14ee07",
-    "lanes.SCRIPT": "5984381d83ff268f0ab69e06a915c0f703e7ae1ab13a7130fcac25c3916a42e3",
-    "ci.CSS": "038671d04a68b99eaf8d159b1ccd019292f1a894ff7929de008a13763bcde3b6",
-    "ci.SCRIPT": "f8c11f914bd0f88fb2834a40f6e7dcaba5d0b59f9b28a99512709b9f91b90fcf",
+    "lanes.SCRIPT": "0fee3d07703f910ef9076010a001fdae5ed7dad99455931fcc8291c1bf52c71f",
+    "ci.CSS": "544cfa203943aaabe9f99f5e42e54dfed2fb9d9d4a505db18a8b125e2b12c883",
+    "ci.SCRIPT": "94fe221acc3882029823674caee3d0dc683131ff004952d87977c0103ba9d91f",
     "__LANES__": "0a070c5626c19ae07dc2fd8adfb927643b397d9899d61f93f67b20ee6f76e617",
     "seeded/main": "abe3aa634faae48b94196a9c3078f2f47ed827b85aefc18d4e49a032f18366e3",
     "seeded/chrome": "4df25dbd89766a89f79509dbd61528ec43573f62d3bd858a6b7643c91a8eb54b",
