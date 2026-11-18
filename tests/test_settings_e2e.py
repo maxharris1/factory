@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib import settings_apply
+from lib import live_settings, settings_apply
 from lib.dashboard import collect_snapshot, write_snapshot_pages
 from lib.settings_apply import Applier, LocalSpool, claim_lock, run_pass
 from tests.test_dashboard import NOW, make_db
@@ -93,6 +93,12 @@ class Mission:
         path = self.state / settings_apply.AUDIT_NAME
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
+    def poller_adopts(self) -> None:
+        with sqlite3.connect(self.db, isolation_level=None) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            live_settings.adopted(connection, self.machines)
+            connection.execute("COMMIT")
+
     def backups(self) -> list[Path]:
         return sorted(self.machines.parent.glob("machines.yml.bak-settings-*"))
 
@@ -169,11 +175,21 @@ def test_drain_from_the_page_is_applied_audited_and_shown(mission: Mission, max_
     assert [Path(argv[0]).name for argv in mission.runner.argvs] == [
         "poller-service.sh", "waiter-service.sh", "waiter-service.sh"]
 
+    assert line["version"] == 1
+
     published = mission.publish()
     (result,) = published["settings"]["results"]
     assert {k: result[k] for k in ("id", "actor", "device", "field", "previous", "new", "result")} == {
         "id": first, "actor": "maxharris1", "device": "box", "field": "drain", "previous": False,
-        "new": True, "result": "applied"}
+        "new": True, "result": "pending"}
+    card = _card(mission.page(), "box")
+    assert '<span class="chip warn">pending</span>' in card
+    assert "waiting for the poller&#x27;s next cycle" in card, "pending until the poller adopts it"
+
+    mission.poller_adopts()
+    published = mission.publish()
+    (result,) = published["settings"]["results"]
+    assert (result["id"], result["result"]) == (first, "applied")
     rows = {row["name"]: row for row in published["slots"]["devices"]}
     assert (rows["box"]["drain"], rows["pc"]["drain"]) == (True, False)
     card = _card(mission.page(), "box")

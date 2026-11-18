@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from lib import live_settings
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
+from lib.machines_yml import load_machines_yml
 from tests import test_dashboard_layout as layout
 from tests.test_dashboard import GH_CLASSIC, GH_OAUTH, GH_PAT, NOW, make_db
 from tests.test_dashboard_layout import BAR, HARNESS, _no_script, _section, _text, needs_node
@@ -38,7 +40,7 @@ AUDIT = [
 IDS = BAR + ["hud", "settings"]
 
 
-def _snapshot(tmp_path: Path, audit: list | None = AUDIT) -> dict:
+def _snapshot(tmp_path: Path, audit: list | None = AUDIT, live: str | None = None) -> dict:
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
@@ -46,6 +48,8 @@ def _snapshot(tmp_path: Path, audit: list | None = AUDIT) -> dict:
         connection.executemany("INSERT INTO device_slots VALUES (?, 'box')", [("j1",), ("j2",), ("j3",)])
     machines = tmp_path / "machines.yml"
     machines.write_text(MACHINES, encoding="utf-8")
+    if live is not None:
+        _settings_row(db, tmp_path / "live" / "machines.yml", adopt=live == "adopted")
     if audit is not None:
         lines = [json.dumps(entry) for entry in audit]
         (tmp_path / "settings-audit.jsonl").write_text("\n".join([*lines, "not json"]) + "\n", encoding="utf-8")
@@ -70,7 +74,7 @@ def test_device_rows_carry_local_and_drain(tmp_path: Path) -> None:
 def test_settings_results_keep_only_audit_keys_oldest_first(tmp_path: Path) -> None:
     results = _snapshot(tmp_path)["settings"]["results"]
     assert [r["id"] for r in results] == ["a" * 16, "b" * 16, "c" * 16]
-    assert all(set(r) == set(AUDIT[0]) - {"token"} for r in results)
+    assert all(set(r) == set(AUDIT[0]) - {"token"} | {"version"} for r in results)
     assert results[0]["restarted"] == ["poller", "waiter-codex"]
     assert results[1]["previous"] is False and results[1]["new"] is True
 
@@ -92,6 +96,19 @@ def test_each_card_shows_its_device(tmp_path: Path) -> None:
         assert _facts(_card(page, device)) == facts, device
     assert "local · orch host" in _card(page, "box")
     assert "remote" in _text(_card(page, "pc")) and "orch host" not in _card(page, "pc")
+
+def _settings_row(db: Path, machines: Path, *, adopt: bool) -> None:
+    machines.parent.mkdir()
+    machines.write_text("devices:\n  - {name: box, local: true, slot_max: 3, harnesses: {claude: claude-bot}}\n",
+                        encoding="utf-8")
+    loaded, findings = load_machines_yml(machines)
+    assert loaded is not None, findings
+    with sqlite3.connect(db, isolation_level=None) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        assert live_settings.narrowed(connection, machines, loaded).written == 1
+        if adopt:
+            live_settings.adopted(connection, machines)
+        connection.execute("COMMIT")
 
 
 def test_a_drained_device_reads_drained(tmp_path: Path) -> None:
@@ -120,6 +137,29 @@ def test_a_pending_result_names_the_waiter_left_to_restart(tmp_path: Path) -> No
     pc = _card(page, "pc")
     assert '<span class="chip warn">pending</span>' in pc
     assert '<span class="st-err">restart pending: waiter-codex-bot</span>' in pc
+
+
+VERSIONED = {**AUDIT[0], "id": "e" * 16, "result": "applied", "version": 1}
+
+
+@pytest.mark.parametrize("live", [None, "written"])
+def test_a_versioned_change_is_pending_until_the_poller_adopts_it(tmp_path: Path, live: str | None) -> None:
+    snapshot = _snapshot(tmp_path, [AUDIT[0], VERSIONED], live)
+    old, versioned = snapshot["settings"]["results"]
+    assert (old["result"], "waiting" in old) == ("applied", False), "a line with no version keeps its result"
+    assert (versioned["result"], versioned["waiting"]) == ("pending", True)
+    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    assert '<span class="chip warn">pending</span>' in pc
+    assert "<span class=\"st-err\">waiting for the poller&#x27;s next cycle</span>" in pc
+
+
+def test_a_versioned_change_is_applied_once_the_poller_adopts_it(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, [VERSIONED], "adopted")
+    (versioned,) = snapshot["settings"]["results"]
+    assert (versioned["result"], versioned["waiting"]) == ("applied", False)
+    pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
+    assert '<span class="chip ok">applied</span>' in pc
+    assert "waiting" not in pc and "pending" not in pc
 
 
 def test_every_page_links_settings(tmp_path: Path) -> None:
@@ -168,9 +208,11 @@ SIGNED_IN = {"signed_in": True, "login": "maxharris1", "csrf": "csrf-value"}
 
 
 @needs_node
-@pytest.mark.parametrize("audit", [AUDIT, [PENDING]], ids=["results", "pending"])
-def test_script_draws_the_cards_like_the_server(tmp_path: Path, audit: list) -> None:
-    snapshot = _snapshot(tmp_path, audit)
+@pytest.mark.parametrize("audit,live", [(AUDIT, None), ([PENDING], None), ([VERSIONED], "written"),
+                                        ([VERSIONED], "adopted")],
+                         ids=["results", "pending", "waiting", "adopted"])
+def test_script_draws_the_cards_like_the_server(tmp_path: Path, audit: list, live: str | None) -> None:
+    snapshot = _snapshot(tmp_path, audit, live)
     out = _run(tmp_path, snapshot, _harness(None))
     server = _section(_no_script(render_pages(snapshot)["settings.html"]), "settings")
     assert out["html"]["settings"] == server[server.index(">") + 1:server.rindex("<")]

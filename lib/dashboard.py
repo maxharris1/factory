@@ -160,6 +160,7 @@ from typing import NamedTuple
 import yaml
 
 from lib import health as component_health
+from lib import live_settings
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import (
@@ -222,7 +223,7 @@ RELAY_STEPS = 40
 SETTINGS_AUDIT = "settings-audit.jsonl"
 SETTINGS_RESULTS = 50
 AUDIT_KEYS = ("id", "actor", "requested_at", "applied_at", "device", "field", "previous", "new",
-              "result", "error", "backup", "restarted", "pending")
+              "result", "error", "backup", "restarted", "pending", "version")
 AUDIT_RESULTS = ("applied", "pending", "refused", "failed")
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
@@ -818,6 +819,7 @@ def collect_snapshot(
         telemetry = read_telemetry(connection, now)  # issue #93
         rules = read_project_rules(connection)  # issue #152
         usage = read_usage(connection, now, machines)  # issue #151
+        live = live_settings.peek(connection)
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -881,7 +883,7 @@ def collect_snapshot(
             "box": {"name": _clean(host, 40), "running": box_running, "slot_max": box_max},
             "devices": devices,
         },
-        "settings": {"results": _settings_results(db_path.parent / SETTINGS_AUDIT)},
+        "settings": {"results": _settings_results(db_path.parent / SETTINGS_AUDIT, live)},
         "stuck": {
             "tickets": db["stuck_tickets"],
             "overdue_jobs": db["overdue_jobs"],
@@ -2364,7 +2366,7 @@ def _audit_value(value: object) -> object:
     return _clean(value, 200)
 
 
-def _settings_results(path: Path) -> list[dict]:
+def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]:
     """The last SETTINGS_RESULTS entries of the settings audit log (#777),
     oldest first, each cut to the AuditEntry keys with its strings clipped."""
     results = []
@@ -2376,6 +2378,11 @@ def _settings_results(path: Path) -> list[dict]:
         if isinstance(entry, dict):
             row = {key: _audit_value(entry.get(key)) for key in AUDIT_KEYS}
             row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
+            version = row["version"]
+            if row["result"] in ("applied", "pending") and type(version) is int:
+                applied = live is not None and live.is_applied(version)
+                row["result"] = "applied" if applied else "pending"
+                row["waiting"] = not applied
             results.append(row)
     return results
 
