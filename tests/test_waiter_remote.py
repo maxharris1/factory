@@ -549,8 +549,12 @@ def test_a_remote_run_whose_runner_is_killed_never_runs_two_workers(
 
         os.kill(workers()[0], signal.SIGKILL)
         wait_for(lambda: not pid_alive(workers()[0], None))
-        dispatcher.reconcile_jobs()
-        assert state(db, job_id) == "failed"
+
+        def failed() -> bool:
+            dispatcher.reconcile_jobs()
+            return state(db, job_id) == "failed"
+
+        wait_for(failed)
     finally:
         for pid in workers():
             with contextlib.suppress(ProcessLookupError):

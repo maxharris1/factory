@@ -328,7 +328,10 @@ def test_stop_reaches_the_detached_worker_and_the_wrapper_records_it(box: Box) -
     assert remote.stop_worker(box.transport, box.target)
     assert wait_gone(harness)
     assert box.wait_exit() == str(128 + signal.SIGTERM)
-    assert remote.check_worker(box.transport, box.target) == remote.GONE
+    deadline = time.monotonic() + 5
+    while remote.check_worker(box.transport, box.target) != remote.GONE:
+        assert time.monotonic() < deadline, "the run is gone once its session keeper left"
+        time.sleep(0.1)
 
 
 # --- the follower: backoff, grace, partial transfers ------------------------
