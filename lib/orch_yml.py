@@ -83,7 +83,10 @@ _TOP_KEYS = {
     "approver_linear_users",
     "approver_gh_config_dir",
     "github_app",
+    "qa",
 }
+_QA_KEYS = {"max_cloud_lanes"}
+DEFAULT_MAX_CLOUD_LANES = 10
 _GITHUB_APP_KEYS = {"enabled", "apps"}
 _APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
 _MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
@@ -286,6 +289,11 @@ class Approvals:
 
 
 @dataclass(frozen=True)
+class QaWorkerConfig:
+    max_cloud_lanes: int = DEFAULT_MAX_CLOUD_LANES
+
+
+@dataclass(frozen=True)
 class OrchConfig:
     poll_seconds: int
     projects: tuple[Project, ...]
@@ -310,6 +318,7 @@ class OrchConfig:
     approver_logins: frozenset[str] | None = None
     approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
+    qa: QaWorkerConfig = field(default_factory=QaWorkerConfig)
 
     @property
     def secret_env_names(self) -> tuple[str, ...]:
@@ -552,6 +561,7 @@ def _validate(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
     github_app = _github_app(data, findings)
+    qa = _qa(data, findings)
     if github_app is not None and github_app.enabled:
         _app_switch(github_app, approver_logins, trusted_logins, projects, findings)
     if (
@@ -598,6 +608,7 @@ def _validate(
             approver_logins=approver_logins,
             approver_linear_users=approver_linear_users,
             approver_gh_config_dir=approver_gh_config_dir,
+            qa=qa,
         ),
         findings,
     )
@@ -1193,6 +1204,21 @@ def _public_url_ok(url: object, path: object) -> bool:
     if not isinstance(url, str) or _PUBLIC_URL.fullmatch(url) is None:
         return False
     return urlsplit(url).path == path
+
+
+def _qa(data: dict, findings: list[Finding]) -> QaWorkerConfig:
+    if "qa" not in data:
+        return QaWorkerConfig()
+    value = data["qa"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "qa must be a mapping"))
+        return QaWorkerConfig()
+    _unknown_keys(value, _QA_KEYS, "qa", findings)
+    lanes = value.get("max_cloud_lanes", DEFAULT_MAX_CLOUD_LANES)
+    if not is_strict_int(lanes) or lanes < 1:
+        findings.append(Finding("error", "qa.max_cloud_lanes must be an integer of at least 1"))
+        return QaWorkerConfig()
+    return QaWorkerConfig(max_cloud_lanes=int(lanes))
 
 
 def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:

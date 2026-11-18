@@ -104,3 +104,25 @@ def test_with_qa_off_a_qa_comment_stays_unhandled(tmp_path: Path) -> None:
     run.poll()
 
     assert run.rows("SELECT outcome FROM handled_comments WHERE comment_id = 'q1'") == []
+
+
+def test_qa_detail_carries_live_bodies_and_regression(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config())
+    body = (
+        "\n## Verify, live\n"
+        "- qa-1 (ac-1): Open the page with pack demo. Pass: it shows the title. Saves: after screenshot.\n"
+        "- qa-2 (ac-2): Click save. Pass: it saves.\n"
+        "- Regression lane: qa-2 on base.\n"
+    )
+    run.post("r1", ready(HEAD_A, body=body), head=HEAD_A)
+    run.poll()
+
+    [job] = run.qa_jobs()
+    assert job["live"] == [
+        {
+            "id": "qa-1", "criterion": "ac-1", "steps": "Open the page with pack demo.",
+            "passes": "it shows the title.", "pack": "demo", "saves": ["after screenshot"],
+        },
+        {"id": "qa-2", "criterion": "ac-2", "steps": "Click save.", "passes": "it saves.", "pack": None, "saves": []},
+    ]
+    assert job["regression"] == ["qa-2"]
