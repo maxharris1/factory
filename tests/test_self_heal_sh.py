@@ -168,6 +168,7 @@ def test_once_applies_settings_after_the_deploy_and_before_health(home: Path) ->
     (call,) = [json.loads(line) for line in (home / "settings-calls").read_text().splitlines()]
     assert call["argv"] == ["settings", "apply", "--state", str(home / STATE)]
     assert call["db"] == str(home / STATE / "orch.db")
+    assert _wait_for(lambda: "heal devices" in (home / "orch-order").read_text())
     order = (home / "orch-order").read_text().splitlines()
     assert order.index("heal deploy") < order.index("settings apply") < order.index("health --json")
 

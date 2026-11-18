@@ -15,7 +15,15 @@ import pytest
 
 from lib import self_deploy
 from tests.test_dispatcher import FakeSource, setup
-from tests.test_self_heal_sh import FAKE_SYSTEMCTL, STATE, _calls, _executable, _run, home
+from tests.test_self_heal_sh import (
+    FAKE_SYSTEMCTL,
+    STATE,
+    _calls,
+    _executable,
+    _run,
+    _wait_for,
+    home,
+)
 
 assert home  # the fixture, imported for these tests
 
@@ -33,10 +41,11 @@ def _service_log(home: Path) -> str:
 def test_once_deploys_before_health_and_heal(home: Path) -> None:
     result = _run(home, "once")
     assert result.returncode == 0, result.stderr
+    assert _wait_for(lambda: "heal devices" in _order(home))
     order = _order(home)
-    assert order[0] == "heal deploy"
-    assert order[1] == "settings apply"
-    assert sorted(order[2:]) == ["heal --health-json", "health --json"]
+    assert order[:2] == ["heal deploy", "settings apply"]
+    assert sorted(order[2:4]) == ["heal --health-json", "health --json"]
+    assert order[4:] == ["heal devices"]
     (deploy,) = [json.loads(line) for line in (home / "deploy-calls").read_text().splitlines()]
     assert deploy["argv"] == ["heal", "deploy", "--state", str(home / STATE)]
     assert deploy["db"] == str(home / STATE / "orch.db")
