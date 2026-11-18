@@ -640,6 +640,7 @@ class SchemaMixin:
                 WHERE state IN ('queued', 'running', 'reported')
                 """
             )
+            ensure_qa_lanes(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS eval_log_cursor (
@@ -690,3 +691,41 @@ def _add_missing_columns(
         if name not in present:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
     connection.commit()
+
+
+QA_LANE_STATES = ("launching", "running", "reported", "dropped", "gap", "cancelled", "timed-out")
+
+
+def ensure_qa_lanes(connection: sqlite3.Connection) -> None:
+    states = ", ".join(f"'{state}'" for state in QA_LANE_STATES)
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS qa_lanes (
+            lane_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            slice INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('head', 'regression', 'base-check')),
+            lane_no INTEGER NOT NULL CHECK (lane_no BETWEEN 1 AND 3),
+            scenarios TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            base_commit TEXT NOT NULL,
+            runner TEXT NOT NULL,
+            agent_id TEXT,
+            agent_url TEXT,
+            state TEXT NOT NULL CHECK (state IN ({states})),
+            attempt INTEGER NOT NULL CHECK (attempt IN (1, 2)),
+            reason TEXT,
+            result TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL,
+            UNIQUE (run_id, slice, attempt)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS qa_lanes_open ON qa_lanes (runner)
+        WHERE state IN ('launching', 'running')
+        """
+    )
