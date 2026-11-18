@@ -140,15 +140,12 @@ render_qa prints the QA section (#794) after the metrics, for the current
 snapshot only, from qa_runs rows started in the window with a scope in
 QA_SCOPES. Each figure is split by runner: runs by
 scope (any state), PASS, FAIL and BLOCKED among reported runs, the median
-minutes from started_at to finished_at, FAILs on a head with a trusted
-reviewer APPROVE (verdict_heads.verdict, matched by sha prefix, whatever
-CI did; a row from before that column counts when an acceptance or ship
-record names it), and wrong FAILs and wrong PASSes from the ruling column.
-A runner with no ruled run, or a snapshot without the column, prints not
-ruled. A head with a reported primary and a reported shootout run is a
-pair, and each disagreeing pair lists both QA comment links: the link
-comment_links recorded, else a GitHub link on the QA job's PR, else on
-the ticket's PR. A window with no run prints one line.
+minutes from started_at to finished_at, FAILs on a head a trusted
+reviewer APPROVEd, whatever CI did, and wrong FAILs and wrong PASSes
+from the ruling column. A runner with no ruled run, or a snapshot
+without the column, prints not ruled. A head with a reported primary
+and a reported shootout run is a pair, and each disagreeing pair lists
+both QA comment links. A window with no run prints one line.
 
 This module does not correct, reflect, run blinded evals, or maintain.
 """
