@@ -12,6 +12,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 
+from lib.approver_commands import SlashQa
 from lib.dispatch.constants import ORCHESTRATOR
 from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.types import Comment, TrackedTicket
@@ -314,6 +315,32 @@ class QaMixin:
         if not current:
             return "qa-stale"
         return "qa-reported" if row is not None else "qa-unmatched"
+
+    def _qa_ruling(self, ticket: TrackedTicket, comment: Comment, command: SlashQa) -> str:
+        target, args = "arm = 'primary'", ()
+        if command.runner is not None:
+            target, args = "lower(runner) = ?", (command.runner,)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"""
+                SELECT run_id FROM qa_runs
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND state = 'reported'
+                  AND comment_id IS NOT NULL AND {target}
+                ORDER BY finished_at DESC, rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, ticket.current_head, *args),
+            ).fetchone()
+            if row is not None:
+                connection.execute(
+                    """
+                    UPDATE qa_runs SET ruling = ?, ruled_by = ?, ruled_at = ?, ruling_reason = ?
+                    WHERE run_id = ?
+                    """,
+                    (command.ruling, comment.author, self.queue.now(), command.reason, row["run_id"]),
+                )
+            connection.commit()
+        return "qa-ruling-no-run" if row is None else "qa-ruled"
 
     def _qa_follow(self, ticket: TrackedTicket) -> None:
         if ticket.factory.qa is None:

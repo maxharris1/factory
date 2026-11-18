@@ -15,7 +15,7 @@ from tests.test_review_before_ci import board_with, built_with_ci_pending, revie
 PRE_FLOOR_MAIN = "eb2b606e70d9509435281ed76e460c8fb35bf6d7"
 
 
-def _pre_floor_methods():
+def _pre_floor_methods(*names: str) -> dict:
     try:
         source = subprocess.run(
             ["git", "show", f"{PRE_FLOOR_MAIN}:lib/dispatch/comments.py"],
@@ -26,7 +26,6 @@ def _pre_floor_methods():
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip(f"needs {PRE_FLOOR_MAIN[:7]} in the git history (a shallow checkout lacks it)")
-    names = ("_process_comments", "_after_finish")
     methods = [
         node
         for node in ast.walk(ast.parse(source))
@@ -43,7 +42,7 @@ def _pre_floor_methods():
 def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     tmp_path: Path,
 ) -> None:
-    old_methods = _pre_floor_methods()
+    old_methods = _pre_floor_methods("_process_comments", "_after_finish")
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
