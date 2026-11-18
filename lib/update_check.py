@@ -456,6 +456,13 @@ def _git(clone: Path, *args: str) -> str:
     return result.stdout.decode("utf-8")
 
 
+def merge_base(clone: Path, head: str, base_ref: str) -> str:
+    result = _run(clone, "merge-base", head, base_ref)
+    if result.returncode != 0:
+        raise ValueError("git merge-base failed")
+    return result.stdout.decode().strip()
+
+
 def _run(clone: Path, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         ["git", "--git-dir", str(clone), *args],

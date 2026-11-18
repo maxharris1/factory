@@ -585,3 +585,45 @@ def test_box_worktree_failure_is_still_exit_1_and_requeued_as_unstarted(tmp_path
     assert row(queue, job_id)["state"] == "queued"
     assert pool.placement(job_id) is None
     assert device.ssh.calls() == []
+
+
+def _checkout(tmp_path: Path, origin: Path, job_dir: Path) -> str:
+    target = remote.RemoteTarget("pc", "a", "codex-bot", str(job_dir.parent.parent), job_dir.name)
+    script = remote.checkout_script(
+        target, url=f"file://{origin}", head=None, base_branch="main", branch=None, brief=False
+    )
+    env = {**os.environ, **GIT_ENV, "HOME": str(tmp_path)}
+    done = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
+@pytest.mark.parametrize("made_by", ["new", "older orch"])
+def test_run_records_survive_git_clean_in_new_and_reused_checkouts(tmp_path: Path, made_by: str) -> None:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git("init", "-q", "-b", "main", cwd=origin)
+    (origin / "README").write_text("one\n", encoding="utf-8")
+    git("add", ".", cwd=origin)
+    git("commit", "-q", "-m", "one", cwd=origin)
+    job_dir = tmp_path / "w" / "jobs" / "job1"
+    assert "new" in _checkout(tmp_path, origin, job_dir)
+    if made_by == "older orch":
+        (job_dir / ".git/info/exclude").write_text(
+            "/.orch-worker.pid\n/.orch-worker-*.pid\n", encoding="utf-8"
+        )
+        assert "reused" in _checkout(tmp_path, origin, job_dir)
+        assert "reused" in _checkout(tmp_path, origin, job_dir)
+    tag = "0" * 32
+    records = [
+        remote.PID_FILE, remote.start_record(tag), remote.tree_record(tag), remote.scope_record(tag),
+        f".orch-worker-{tag}.keeper.pid", f".orch-worker-{tag}.members.pid",
+    ]
+    for name in records:
+        (job_dir / name).write_text("x\n", encoding="utf-8")
+
+    assert git("status", "--porcelain", "--untracked-files=all", cwd=job_dir) == ""
+    git("clean", "-fd", cwd=job_dir)
+    assert [name for name in records if not (job_dir / name).exists()] == []
+    excludes = (job_dir / ".git/info/exclude").read_text(encoding="utf-8").splitlines()
+    assert len(excludes) == len(set(excludes))
