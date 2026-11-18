@@ -112,6 +112,16 @@ def test_each_result_sits_on_its_own_card(tmp_path: Path) -> None:
     assert "refused" not in _card(page, "pc")
 
 
+PENDING = {**AUDIT[0], "id": "d" * 16, "result": "pending", "pending": ["waiter-codex-bot"]}
+
+
+def test_a_pending_result_names_the_waiter_left_to_restart(tmp_path: Path) -> None:
+    page = _section(_no_script(render_pages(_snapshot(tmp_path, [PENDING]))["settings.html"]), "settings")
+    pc = _card(page, "pc")
+    assert '<span class="chip warn">pending</span>' in pc
+    assert '<span class="st-err">restart pending: waiter-codex-bot</span>' in pc
+
+
 def test_every_page_links_settings(tmp_path: Path) -> None:
     pages = render_pages(_snapshot(tmp_path))
     for name, html in pages.items():
@@ -158,8 +168,9 @@ SIGNED_IN = {"signed_in": True, "login": "maxharris1", "csrf": "csrf-value"}
 
 
 @needs_node
-def test_script_draws_the_cards_like_the_server(tmp_path: Path) -> None:
-    snapshot = _snapshot(tmp_path)
+@pytest.mark.parametrize("audit", [AUDIT, [PENDING]], ids=["results", "pending"])
+def test_script_draws_the_cards_like_the_server(tmp_path: Path, audit: list) -> None:
+    snapshot = _snapshot(tmp_path, audit)
     out = _run(tmp_path, snapshot, _harness(None))
     server = _section(_no_script(render_pages(snapshot)["settings.html"]), "settings")
     assert out["html"]["settings"] == server[server.index(">") + 1:server.rindex("<")]

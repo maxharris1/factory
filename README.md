@@ -2128,7 +2128,9 @@ the nav) lists each `machines.yml` device: name, local or remote, enabled,
 changes to it. Signed in as the approver, Max can turn `enabled` and `drain`
 on or off and set `slot_max` (1 to 64). Drain is the safe way to take a
 device out of placement; turning `enabled` off on a device that holds a
-running job is refused with "drain it first".
+running job is refused with "drain it first". That check and the file write
+hold orch.db's write lock, and every claim reads `enabled` and `drain` from
+the file under the same lock, so no job lands in between.
 
 The dashboard server never edits `machines.yml` or runs a script. It
 cannot reach the orch host, and the orch host's credentials stay there:
@@ -2159,7 +2161,8 @@ cannot reach the orch host, and the orch host's credentials stay there:
    and restarts the poller, then each waiter this account owns, through the
    same scripts and environment as `orch heal`. Neither restart stops a
    running job. A failed restart restores the backup and restarts again.
-   Every request, applied, refused or failed, adds one line to
+   Every request, applied, pending (a waiter another account runs was not
+   restarted), refused or failed, adds one line to
    `settings-audit.jsonl` in the state dir (actor, request and apply times,
    device, field, previous and new values, result, error, backup), and the
    next push shows it on the page. An id is never applied twice.

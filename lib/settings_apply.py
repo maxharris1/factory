@@ -17,14 +17,18 @@ not seen:
   device exists, the field is in FIELDS with a valid value, machines.local.yml
   does not set that field for that device, `expect` equals the current value,
   and it does not disable a device that holds a running job (drain it first).
-  The new text is a line edit inside that device's block, so comments and
-  other devices stay byte-for-byte; both texts are parsed with
+  That check, the backup and the replace below run inside one BEGIN IMMEDIATE
+  on orch.db, the write lock every DevicePool.claim takes, and a claim reads
+  enabled and drain from the file under it: no job lands between the check
+  and the write. The new text is a line edit inside that device's block, so
+  comments and other devices stay byte-for-byte; both texts are parsed with
   load_machines_yml and must differ in exactly that one field.
 * machines.yml is copied to `machines.yml.bak-settings-<UTC stamp>` beside
   it, then replaced atomically. The poller and then each waiter this account
   owns and has not held stopped are restarted through their service scripts
-  (lib/heal.py service_argv) with heal's scrubbed environment; services
-  another account owns are listed as pending. A failed restart restores the
+  (lib/heal.py service_argv) with heal's scrubbed environment, after the lock
+  is released; services another account owns are listed as pending, and the
+  result is then `pending`, not `applied`. A failed restart restores the
   backup, restarts them again and records `failed`.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
@@ -47,7 +51,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from types import MappingProxyType
@@ -71,6 +76,7 @@ SSH_TIMEOUT_SECONDS = 20
 CLIP = 80
 
 APPLIED = "applied"
+PENDING = "pending"
 REFUSED = "refused"
 FAILED = "failed"
 
@@ -505,22 +511,27 @@ def services(config_dir: Path, state_dir: Path) -> tuple[tuple[str, ...], tuple[
     return restart, pending
 
 
-Running = Callable[[MachinesConfig], Mapping[str, int]]
+Held = Callable[[MachinesConfig], Mapping[str, int]]
+ClaimLock = Callable[[], AbstractContextManager[Held]]
 
 
-def running_from_db(db: Path) -> Running:
-    """Slots held per device in orch.db, read-only."""
+def claim_lock(db: Path) -> ClaimLock:
+    """orch.db's write lock, the one every DevicePool.claim takes, yielding
+    the slots held per device under it. Nothing is written."""
 
-    def read(config: MachinesConfig) -> Mapping[str, int]:
+    @contextmanager
+    def hold() -> Iterator[Held]:
         if not db.is_file():
-            return {}
-        connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+            yield lambda config: {}
+            return
+        connection = sqlite3.connect(db, timeout=30, isolation_level=None)
         try:
-            return slots_in_use(connection, config)
+            connection.execute("BEGIN IMMEDIATE")
+            yield lambda config: slots_in_use(connection, config)
         finally:
             connection.close()
 
-    return read
+    return hold
 
 
 def scrubbed_env(environ: Mapping[str, str], orch_config: object) -> dict[str, str]:
@@ -542,7 +553,7 @@ class Applier:
     environ: Mapping[str, str]
     restart: tuple[str, ...]
     pending: tuple[str, ...]
-    running: Running
+    claims: ClaimLock
     run: heal.Runner = heal.run_service
     clock: Callable[[], float] = time.time
 
@@ -552,10 +563,16 @@ class Applier:
 
     def apply(self, request: SettingsRequest) -> AuditEntry:
         try:
-            old_bytes, new_text, previous = self._plan(request)
+            with self.claims() as held:
+                old_bytes, new_text, previous = self._plan(request, held)
+                mode = stat.S_IMODE(os.stat(self.machines).st_mode)
+                backup = self._backup(old_bytes, mode)
+                _replace(self.machines, new_text.encode("utf-8"), mode)
         except Refused as refusal:
             return self._entry(request, REFUSED, refusal.previous, refusal.error)
-        return self._commit(request, old_bytes, new_text, previous)
+        except sqlite3.Error:
+            return self._entry(request, REFUSED, None, "cannot read running jobs")
+        return self._restart_all(request, old_bytes, mode, backup, previous)
 
     def _entry(self, request: SettingsRequest, result: str, previous: object,
                error: str | None = None, **extra: object) -> AuditEntry:
@@ -566,7 +583,7 @@ class Applier:
             result=result, error=error, **extra,
         )
 
-    def _plan(self, request: SettingsRequest) -> tuple[bytes, str, object]:
+    def _plan(self, request: SettingsRequest, held: Held) -> tuple[bytes, str, object]:
         if request.actor.casefold() != self.approver.casefold() or is_bot_login(request.actor):
             raise Refused("not-approver")
         old_bytes = self.machines.read_bytes()
@@ -590,11 +607,11 @@ class Applier:
             raise Refused("no-change", previous)
         if request.field == "enabled" and request.value is False:
             try:
-                held = self.running(old).get(request.device, 0)
+                running = held(old).get(request.device, 0)
             except sqlite3.Error:
                 raise Refused("cannot read running jobs", previous) from None
-            if held:
-                raise Refused(f"{request.device} holds {held} running job(s); drain it first",
+            if running:
+                raise Refused(f"{request.device} holds {running} running job(s); drain it first",
                               previous)
         new_text = edit_device_field(old_bytes.decode("utf-8"), request.device,
                                      request.field, request.value)
@@ -617,15 +634,12 @@ class Applier:
                 shutil.copyfile(local, overlay_path(probe))
             return load_machines_yml(probe)
 
-    def _commit(self, request: SettingsRequest, old_bytes: bytes, new_text: str,
-                previous: object) -> AuditEntry:
-        mode = stat.S_IMODE(os.stat(self.machines).st_mode)
-        backup = self._backup(old_bytes, mode)
-        _replace(self.machines, new_text.encode("utf-8"), mode)
+    def _restart_all(self, request: SettingsRequest, old_bytes: bytes, mode: int,
+                     backup: Path, previous: object) -> AuditEntry:
         restarted, failure = self._restart(stop_on_failure=True)
         if failure is None:
-            return self._entry(request, APPLIED, previous, backup=backup.name,
-                               restarted=restarted, pending=self.pending)
+            return self._entry(request, PENDING if self.pending else APPLIED, previous,
+                               backup=backup.name, restarted=restarted, pending=self.pending)
         _replace(self.machines, old_bytes, mode)
         again, refailure = self._restart(stop_on_failure=False)
         error = f"{failure}; restored {backup.name}" + (f"; then {refailure}" if refailure else "")
@@ -749,7 +763,7 @@ def main(argv: list[str], *, environ: Mapping[str, str] | None = None,
         applier = Applier(
             machines=args.machines, state_dir=state_dir, deploy=args.deploy,
             approver=settings.approver, environ=scrubbed_env(environ, orch_config),
-            restart=restart, pending=pending, running=running_from_db(db), clock=clock,
+            restart=restart, pending=pending, claims=claim_lock(db), clock=clock,
         )
         try:
             entries = run_pass(applier, spool_for(settings, orch_config.dashboard.push),

@@ -13,7 +13,7 @@ from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
 from lib.queue import SQLiteJobQueue
-from lib.settings_apply import Applier, LocalSpool, run_pass, running_from_db
+from lib.settings_apply import Applier, LocalSpool, claim_lock, run_pass
 from lib.worktrees import pid_alive, process_start
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 from tests.test_remote_start import (
@@ -44,7 +44,7 @@ class Settings:
         self.applier = Applier(
             machines=machines, state_dir=state, deploy=tmp_path / "deploy",
             approver="maxharris1", environ={}, restart=("poller", "waiter:claude-bot"),
-            pending=(), running=running_from_db(db),
+            pending=(), claims=claim_lock(db),
             run=lambda argv, env, log: self.restarts.append(list(argv)) or 0,
         )
         self.count = 0

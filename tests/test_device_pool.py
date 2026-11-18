@@ -184,6 +184,55 @@ def test_a_claim_with_every_device_draining_leaves_the_job_queued(tmp_path: Path
     assert [job.state for job in queue.outstanding()] == ["queued"]
 
 
+BOX_FILE = """\
+devices:
+  - name: box
+    local: true
+    enabled: true
+    drain: false
+    slot_max: 2
+    harnesses: {claude: claude-bot}
+"""
+
+
+def file_pool(tmp_path: Path) -> tuple[DevicePool, SQLiteJobQueue, Path]:
+    machines = tmp_path / "machines.yml"
+    machines.write_text(BOX_FILE, encoding="utf-8")
+    config, findings = load_machines_yml(machines)
+    assert config is not None, findings
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    enqueue(queue, "claude", "1")
+    return DevicePool(queue, config, machines_path=machines), queue, machines
+
+
+@pytest.mark.parametrize("edit", [("drain: false", "drain: true"), ("enabled: true", "enabled: false")])
+def test_a_claim_reads_drain_and_enabled_from_the_file_as_it_is_now(
+    tmp_path: Path, edit: tuple[str, str]
+) -> None:
+    pool, queue, machines = file_pool(tmp_path)
+    machines.write_text(BOX_FILE.replace(*edit), encoding="utf-8")
+
+    assert pool.claim("claude") is None, "the file changed after the pool loaded it"
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+
+
+def test_a_claim_places_while_the_file_is_unchanged(tmp_path: Path) -> None:
+    pool, _, _ = file_pool(tmp_path)
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None and claimed[1].device == "box"
+
+
+def test_an_invalid_file_leaves_the_loaded_settings_in_force(tmp_path: Path) -> None:
+    pool, _, machines = file_pool(tmp_path)
+    machines.write_text(BOX_FILE.replace("drain: false", "drain: maybe"), encoding="utf-8")
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None and claimed[1].device == "box"
+
+
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:
     devices = (device("box", 2, "claude", "codex"),)
     pool, queue = make_pool(tmp_path, *devices)

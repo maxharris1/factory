@@ -199,7 +199,7 @@ SETTINGS_AUDIT = "settings-audit.jsonl"
 SETTINGS_RESULTS = 50
 AUDIT_KEYS = ("id", "actor", "requested_at", "applied_at", "device", "field", "previous", "new",
               "result", "error", "backup", "restarted", "pending")
-AUDIT_RESULTS = ("applied", "refused", "failed")
+AUDIT_RESULTS = ("applied", "pending", "refused", "failed")
 # The Linear share of the hourly API budget the poller allows itself
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250

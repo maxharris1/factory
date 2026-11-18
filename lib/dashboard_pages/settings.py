@@ -11,7 +11,7 @@ import json
 
 from lib.dashboard_pages.common import _chip, _e, _panel, _span
 
-RESULT_TONE = {"applied": "ok", "refused": "warn", "failed": "bad", "other": "muted"}
+RESULT_TONE = {"applied": "ok", "pending": "warn", "refused": "warn", "failed": "bad", "other": "muted"}
 RESULTS_PER_DEVICE = 5
 QUEUED = "queued (applies within ~2 min)"
 READ_ONLY = "read-only: sign-in is not available here"
@@ -51,6 +51,12 @@ def result_line(row: dict) -> str:
             f" · {row.get('actor') or '—'} · {row.get('applied_at') or row.get('requested_at') or '—'}")
 
 
+def pending_line(row: dict) -> str | None:
+    if row.get("result") != "pending" or not row.get("pending"):
+        return None
+    return "restart pending: " + ", ".join(row["pending"])
+
+
 def _class(cls: str) -> str:
     return f' class="{cls}"' if cls else ""
 
@@ -65,7 +71,8 @@ def _card(snapshot: dict, row: dict) -> str:
         '<ul class="st-results">' + "".join(
             '<li class="st-res">' + _chip(r["result"], RESULT_TONE.get(r["result"], "muted"))
             + _span("st-what", result_line(r))
-            + (_span("st-err", r["error"]) if r.get("error") else "") + "</li>"
+            + (_span("st-err", r["error"]) if r.get("error") else "")
+            + (_span("st-err", line) if (line := pending_line(r)) else "") + "</li>"
             for r in results
         ) + "</ul>"
         if results else '<p class="empty">no changes yet</p>'
@@ -222,6 +229,9 @@ _SCRIPT = r"""
       add(li, chip(r.result, ST.tone[r.result] || 'muted'));
       add(li, el('span', 'st-what', stLine(r)));
       if (r.error) add(li, el('span', 'st-err', r.error));
+      if (r.result === 'pending' && (r.pending || []).length) {
+        add(li, el('span', 'st-err', 'restart pending: ' + r.pending.join(', ')));
+      }
     });
     return card;
   }

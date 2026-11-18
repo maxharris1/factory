@@ -222,7 +222,7 @@ def make_queue(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:
 def local_pool(queue: SQLiteJobQueue, machines: Path = MACHINES) -> DevicePool:
     config, findings = load_machines_yml(machines)
     assert config is not None, findings
-    return DevicePool(queue, local_only(config))
+    return DevicePool(queue, local_only(config), machines_path=machines)
 
 
 def enqueue(queue: SQLiteJobQueue, key: str, **fields) -> str:

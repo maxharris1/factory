@@ -13,7 +13,7 @@ import yaml
 
 from lib import settings_apply
 from lib.dashboard import collect_snapshot, write_snapshot_pages
-from lib.settings_apply import Applier, LocalSpool, run_pass, running_from_db
+from lib.settings_apply import Applier, LocalSpool, claim_lock, run_pass
 from tests.test_dashboard import NOW, make_db
 from tests.test_dashboard_http import MAX_TOKEN, Client, fake_github, serve_actions
 from tests.test_dashboard_layout import _no_script, _section
@@ -68,7 +68,7 @@ class Mission:
         self.applier = Applier(
             machines=self.machines, state_dir=self.state, deploy=tmp_path / "deploy",
             approver="maxharris1", environ={}, restart=RESTART, pending=(),
-            running=running_from_db(self.db), run=self.runner, clock=lambda: APPLY_NOW,
+            claims=claim_lock(self.db), run=self.runner, clock=lambda: APPLY_NOW,
         )
         self.seen_spool: dict[str, str] = {}
 

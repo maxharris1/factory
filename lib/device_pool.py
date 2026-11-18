@@ -9,7 +9,10 @@ remotes in machines.yml order; issue #223) that is schedulable, not
 draining, and lists that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
-any harness.
+any harness. Inside that transaction a pool given `machines_path` reads
+each device's enabled and drain from machines.yml as it is now, so a
+settings change written under the same lock (lib/settings_apply.py)
+stops the next claim even in a process that loaded the file earlier (#777).
 
 A running harness job with no slot row (claimed without a device: an older
 `orch wait`, issue #90) counts as one slot on the box, so the box never runs
@@ -52,15 +55,24 @@ This module starts nothing and contacts no device.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
 import json
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
+from pathlib import Path
 
+from lib.config_overlay import overlay_path
 from lib.device_sync import NOTHING_BLOCKED, Blocked
 from lib.device_sync import blocked as sync_blocked
-from lib.machines_yml import Device, MachinesConfig, orch_host, shared_tailscale_names
+from lib.machines_yml import (
+    Device,
+    MachinesConfig,
+    load_machines_yml,
+    orch_host,
+    shared_tailscale_names,
+)
 from lib.queue import (
     SLOTS_TABLE,
     Job,
@@ -195,8 +207,25 @@ def free_slots(
     return total
 
 
+FileKey = tuple[int, int, int] | None
+
+
+def _file_key(path: Path) -> FileKey:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_ino, info.st_mtime_ns, info.st_size
+
+
 class DevicePool:
-    def __init__(self, queue: SQLiteJobQueue, config: MachinesConfig):
+    def __init__(
+        self,
+        queue: SQLiteJobQueue,
+        config: MachinesConfig,
+        *,
+        machines_path: Path | None = None,
+    ):
         shared = shared_tailscale_names(config.devices)
         if shared:
             raise QueueError(
@@ -205,6 +234,8 @@ class DevicePool:
             )
         self.queue = queue
         self.config = config
+        self.machines_path = machines_path
+        self._switches: tuple[tuple[FileKey, FileKey], dict[str, tuple[bool, bool]]] | None = None
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -257,6 +288,28 @@ class DevicePool:
             ).fetchone()
         return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
 
+    def _live_config(self) -> MachinesConfig:
+        """self.config with each device's enabled and drain as machines.yml
+        and its overlay say now; unchanged when the file is missing or invalid."""
+        if self.machines_path is None:
+            return self.config
+        key = (_file_key(self.machines_path), _file_key(overlay_path(self.machines_path)))
+        if self._switches is None or self._switches[0] != key:
+            try:
+                current, findings = load_machines_yml(self.machines_path)
+            except (OSError, ValueError):
+                current, findings = None, []
+            errors = any(f.severity == "error" for f in findings)
+            self._switches = (key, {} if current is None or errors else {
+                d.name: (d.enabled, d.drain) for d in current.devices
+            })
+        switches = self._switches[1]
+        return replace(self.config, devices=tuple(
+            replace(d, enabled=switches[d.name][0], drain=switches[d.name][1])
+            if d.name in switches else d
+            for d in self.config.devices
+        ))
+
     def claim(
         self,
         harness: str,
@@ -276,6 +329,7 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            config = self._live_config()
             connection.execute(
                 f"""
                 DELETE FROM {SLOTS_TABLE}
@@ -283,7 +337,7 @@ class DevicePool:
                 """
             )
             device = choose_device(
-                self.config, harness, _used(connection, self.config),
+                config, harness, _used(connection, config),
                 placement_blocked(connection, now),
             )
             if device is None:
@@ -303,9 +357,9 @@ class DevicePool:
             dropped = _lost_on(connection, str(row["id"]))
             if dropped == device.name:
                 device = choose_device(
-                    self.config,
+                    config,
                     harness,
-                    _used(connection, self.config),
+                    _used(connection, config),
                     placement_blocked(connection, now),
                     avoid={dropped},
                 )

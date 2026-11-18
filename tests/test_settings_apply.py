@@ -7,15 +7,25 @@ import os
 import pwd
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 import yaml
 
 from lib import heal, settings_apply
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
+from lib.dispatcher import Dispatcher
+from lib.queue import SQLiteJobQueue
 from lib.settings_apply import Applier, LocalSpool, SshSpool, run_pass
+from lib.worktrees import pid_alive, process_start
+from tests import test_remote_start as remote
+from tests import test_waiter
 from tests.procs import alive
+from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = pwd.getpwuid(os.getuid()).pw_name
@@ -62,6 +72,14 @@ class Runner:
         return [argv for argv, _ in self.calls]
 
 
+def holding(running: dict[str, int]):
+    @contextmanager
+    def lock():
+        yield lambda config: running
+
+    return lock
+
+
 class Box:
     def __init__(self, tmp_path: Path, *, running: dict[str, int] | None = None,
                  codes: list[int] | None = None, environ: dict[str, str] | None = None):
@@ -80,7 +98,7 @@ class Box:
         self.applier = Applier(
             machines=self.machines, state_dir=self.state, deploy=self.deploy,
             approver="maxharris1", environ=environ or {}, restart=ALL[:3],
-            pending=("waiter-cursor-bot",), running=lambda config: running or {},
+            pending=("waiter-cursor-bot",), claims=holding(running or {}),
             run=self.runner, clock=lambda: NOW,
         )
         self.count = 0
@@ -127,7 +145,7 @@ def test_the_approvers_request_is_applied_backed_up_audited_and_restarted(tmp_pa
 
     (entry,) = box.run()
 
-    assert entry.result == "applied", entry
+    assert entry.result == "pending", entry
     (line,) = box.audit()
     assert set(line) == {"id", "actor", "requested_at", "applied_at", "device", "field",
                          "previous", "new", "result", "error", "backup", "restarted", "pending"}
@@ -135,7 +153,7 @@ def test_the_approvers_request_is_applied_backed_up_audited_and_restarted(tmp_pa
                                  "field", "previous", "new", "result", "error")} == {
         "id": rid, "actor": "maxharris1", "requested_at": "2026-11-17T10:00:00Z",
         "applied_at": heal.stamp(NOW), "device": "box", "field": "slot_max",
-        "previous": 6, "new": 4, "result": "applied", "error": None}
+        "previous": 6, "new": 4, "result": "pending", "error": None}
     assert line["restarted"] == ["poller", "waiter-claude-bot", "waiter-codex-bot"]
     assert line["pending"] == ["waiter-cursor-bot"]
     (backup,) = box.backups()
@@ -158,7 +176,7 @@ def test_a_new_key_is_one_inserted_line_and_every_comment_stays(tmp_path: Path) 
 
     (entry,) = box.run()
 
-    assert entry.result == "applied", entry
+    assert entry.result == "pending", entry
     after = box.machines.read_text()
     assert changed_lines(MACHINES, after) == [(None, "    drain: true")]
     for line in MACHINES.splitlines():
@@ -180,7 +198,7 @@ def test_anyone_but_the_approver_is_refused(tmp_path: Path, actor: str) -> None:
 def test_the_approver_login_matches_case_insensitively(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.request(actor="MaxHarris1")
-    assert box.run()[0].result == "applied"
+    assert box.run()[0].result == "pending"
 
 
 @pytest.mark.parametrize("value", [0, -1, 65, True, "6", None, 4.0])
@@ -233,7 +251,7 @@ def test_a_field_the_overlay_leaves_alone_still_applies(tmp_path: Path, monkeypa
     (box.machines.parent / "machines.local.yml").write_text(
         "devices:\n  - name: box\n    slot_max: 5\n", encoding="utf-8")
     box.request(field="drain", expect=False, value=True)
-    assert box.run()[0].result == "applied"
+    assert box.run()[0].result == "pending"
 
 
 def test_disabling_a_device_that_holds_a_running_job_is_refused(tmp_path: Path) -> None:
@@ -253,7 +271,7 @@ def test_disabling_an_idle_device_applies(tmp_path: Path) -> None:
 
     (entry,) = box.run()
 
-    assert entry.result == "applied", entry
+    assert entry.result == "pending", entry
     assert changed_lines(MACHINES, box.machines.read_text()) == [
         ("    enabled: true", "    enabled: false")]
 
@@ -319,7 +337,7 @@ def test_a_second_pass_applies_nothing_again(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.request()
     box.request(actor="someone-else")
-    assert [e.result for e in box.run()] == ["applied", "refused"]
+    assert [e.result for e in box.run()] == ["pending", "refused"]
     after = box.machines.read_bytes()
     calls = len(box.runner.calls)
 
@@ -357,7 +375,7 @@ def test_two_applies_in_one_second_keep_both_backups(tmp_path: Path) -> None:
     box.request()
     box.request(field="drain", expect=False, value=True)
 
-    assert [e.result for e in box.run()] == ["applied", "applied"]
+    assert [e.result for e in box.run()] == ["pending", "pending"]
 
     first, second = box.backups()
     assert first.read_bytes() == box.original
@@ -382,7 +400,7 @@ def test_the_ssh_spool_lists_and_reads_the_spool_in_one_call(tmp_path: Path) -> 
     (entry,) = run_pass(box.applier, spool, OWNER)
 
     assert len(calls) == 1
-    assert (entry.id, entry.result) == (rid, "applied")
+    assert (entry.id, entry.result) == (rid, "pending")
 
 
 def test_the_ssh_spool_refuses_a_group_writable_spool(tmp_path: Path) -> None:
@@ -454,7 +472,7 @@ def test_the_cli_applies_through_the_service_scripts_and_leaks_no_secret(
 
     out = capsys.readouterr()
     assert code == 0, out.err
-    assert f"settings: {rid} applied box.slot_max 6 -> 4" in out.out
+    assert f"settings: {rid} pending box.slot_max 6 -> 4" in out.out
     calls = [json.loads(line) for line in service_log.read_text().splitlines()]
     assert [c["argv"][1:] for c in calls] == [["restart"], ["codex-bot", "restart"]]
     for call in calls:
@@ -510,7 +528,7 @@ def test_a_real_waiter_restart_leaves_a_running_job_alive(tmp_path: Path) -> Non
     applier = Applier(
         machines=box.machines, state_dir=home / ".local/state/factory",
         deploy=ROOT / "deploy", approver="maxharris1", environ=_env(home),
-        restart=("waiter:claude-bot",), pending=(), running=lambda config: {},
+        restart=("waiter:claude-bot",), pending=(), claims=holding({}),
         run=heal.run_service, clock=lambda: NOW,
     )
     job = None
@@ -537,3 +555,129 @@ def test_a_real_waiter_restart_leaves_a_running_job_alive(tmp_path: Path) -> Non
             job.kill()
             job.wait()
         _cleanup(home)
+
+
+def _request(field: str, expect: object, value: object) -> settings_apply.SettingsRequest:
+    return settings_apply.SettingsRequest("race-request-abcdefghij", "maxharris1",
+                                          "2026-11-17T10:00:00Z", "box", field, expect, value)
+
+
+class Placed:
+    """A real queue, pool, monitor and dispatcher on a box-only machines.yml,
+    with each placed job's runner and worker live sleepers."""
+
+    def __init__(self, tmp_path: Path):
+        self.machines = remote.machines_file(tmp_path, pc=False)
+        config = remote.config_of(self.machines)
+        self.queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+        self.pool = DevicePool(self.queue, config, machines_path=self.machines)
+        self.job = remote.enqueue(self.queue, "claude", "race", timeout=5400)
+        self.kills: list[int] = []
+        self.dispatcher = Dispatcher(
+            self.queue.path, self.queue, trusted_logins=TRUSTED_LOGINS,
+            review_actions=FakeReviewActions(), grok_delivery=FakeGrokDelivery(),
+            devices=DeviceMonitor(self.pool, config, remote.FakeTransport(),
+                                  machines_path=self.machines,
+                                  kill=lambda pid, sig: self.kills.append(sig)),
+        )
+        self.sleepers: list[subprocess.Popen] = []
+        self.state = tmp_path / "settings-state"
+        self.state.mkdir()
+
+    def applier(self, claims, pending: tuple[str, ...] = ()) -> Applier:
+        return Applier(self.machines, self.state, self.state / "deploy", "maxharris1", {},
+                       ("poller",), pending, claims, run=lambda *_: 0)
+
+    def claim(self):
+        claimed = self.pool.claim("claude")
+        if claimed is None:
+            return None
+        for _ in range(2):
+            self.sleepers.append(subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(120)"]))
+        runner, worker = self.sleepers[-2:]
+        self.pool.attach_runner(self.job, owner="claude", pid=runner.pid,
+                                start=process_start(runner.pid), alive=pid_alive)
+        self.pool.attach_worker(self.job, owner="claude", pid=worker.pid,
+                                start=process_start(worker.pid))
+        return claimed[1].device
+
+    def state_and_events(self) -> tuple[str, list[str]]:
+        return (remote.state(self.queue, self.job),
+                [e for e, _ in remote.job_events(self.queue, self.job)])
+
+    def stop(self) -> None:
+        for proc in self.sleepers:
+            proc.kill()
+            proc.wait()
+
+
+def test_a_claim_racing_a_disable_never_lands_on_the_disabled_device(tmp_path: Path) -> None:
+    placed = Placed(tmp_path)
+    landed: list[str | None] = []
+    claim = threading.Thread(target=lambda: landed.append(placed.claim()))
+    lock = settings_apply.claim_lock(placed.queue.path)
+
+    @contextmanager
+    def racing():
+        with lock() as held:
+            claim.start()
+            claim.join(timeout=0.5)
+            yield held
+
+    try:
+        entry = placed.applier(racing).apply(_request("enabled", True, False))
+        claim.join(timeout=30)
+        placed.dispatcher.reconcile_jobs()
+
+        assert entry.result == "applied", entry
+        assert landed == [None], "the claim waited for the write and found box disabled"
+        assert placed.state_and_events() == ("queued", []), "the job waits, never lost"
+        assert placed.kills == [], "no worker was signalled"
+    finally:
+        placed.stop()
+
+
+def test_a_claim_that_lands_first_makes_the_disable_refuse(tmp_path: Path) -> None:
+    placed = Placed(tmp_path)
+    try:
+        assert placed.claim() == "box"
+
+        entry = placed.applier(settings_apply.claim_lock(placed.queue.path)).apply(
+            _request("enabled", True, False))
+        placed.dispatcher.reconcile_jobs()
+
+        assert (entry.result, entry.error) == (
+            "refused", "box holds 1 running job(s); drain it first")
+        assert placed.state_and_events()[0] == "running"
+        assert "device-lost" not in placed.state_and_events()[1]
+        assert placed.kills == []
+        assert [proc.poll() for proc in placed.sleepers] == [None, None], "the job runs on"
+    finally:
+        placed.stop()
+
+
+@pytest.mark.parametrize(("field", "expect", "value"),
+                         [("drain", False, True), ("enabled", True, False)])
+def test_a_waiter_left_pending_places_nothing_on_the_changed_device(
+    tmp_path: Path, field: str, expect: object, value: object
+) -> None:
+    machines = remote.machines_file(tmp_path, pc=False)
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 100.0)
+    spawn = test_waiter.FakeSpawn()
+    waiter = test_waiter.make_waiter(tmp_path, queue, queue.path, spawn, machines=machines)
+    job = test_waiter.enqueue(queue, "after-change")
+    (tmp_path / "settings-state").mkdir()
+    applier = Applier(machines, tmp_path / "settings-state", tmp_path / "deploy", "maxharris1",
+                      {}, ("poller",), ("waiter-claude-bot",),
+                      settings_apply.claim_lock(queue.path), run=lambda *_: 0)
+
+    entry = applier.apply(_request(field, expect, value))
+
+    assert (entry.result, entry.pending) == ("pending", ("waiter-claude-bot",)), entry
+    try:
+        waiter.step()
+        assert test_waiter.state(queue.path, job) == "queued", "the unrestarted waiter claims nothing"
+        assert spawn.calls == [], "no run started"
+    finally:
+        spawn.end_runners()
