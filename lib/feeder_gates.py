@@ -27,7 +27,8 @@ and a `Conflicts with` edge always does.
 
 Stop the line (issue #1025): while a check on the base branch that matches
 the project's factory.md `feeder.required_checks` is red on its latest
-completed run, no new ticket starts, except one labelled factory:main-fix.
+completed run, or that read fails, no ticket whose feed has not begun starts,
+except one labelled factory:main-fix. A begun feed goes on.
 """
 
 from __future__ import annotations
