@@ -327,10 +327,13 @@ WORLD_ACCOUNTS = {
 FAKE_HARNESS = """\
 #!/bin/sh
 printf '%s %s\\n' {name} "$(env | cut -d= -f1 | tr '\\n' ' ')" >> {log}
-if [ -n "{token_test}" ]; then cat {replies}/token; exit 0; fi
 folder=${{{home_variable}:-default}}
-cat "{replies}/${{folder##*/}}"
+reply=${{folder##*/}}
+if [ -n "{token_test}" ]; then reply=token; fi
+cat "{replies}/$reply" {stream}
+exit "$(cat "{replies}/$reply.code")"
 """
+STREAMS = {"claude": "", "codex": ">&2"}
 TOKEN_TESTS = {
     "claude": "$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN",
     "codex": "$OPENAI_API_KEY$CODEX_API_KEY",
@@ -338,15 +341,15 @@ TOKEN_TESTS = {
 HOME_VARIABLES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 REPLIES = {
     "claude": {
-        "default": claude_reply(),
-        "claude-b": claude_reply(org=ORG_B, email=EMAIL_B, subscription="pro"),
-        "claude-c": SIGNED_OUT_CLAUDE,
-        "token": claude_reply(method="oauth_token"),
+        "default": (claude_reply(), 0),
+        "claude-b": (claude_reply(org=ORG_B, email=EMAIL_B, subscription="pro"), 0),
+        "claude-c": (SIGNED_OUT_CLAUDE, 1),
+        "token": (claude_reply(method="oauth_token"), 0),
     },
     "codex": {
-        "default": b"Logged in using ChatGPT\n",
-        "codex-b": b"Not logged in\n",
-        "token": b"Logged in using an API key - sk-proj-***\n",
+        "default": (b"Logged in using ChatGPT\n", 0),
+        "codex-b": (b"Not logged in\n", 1),
+        "token": (b"Logged in using an API key - sk-proj-***\n", 0),
     },
 }
 PROFILE = """\
@@ -378,12 +381,13 @@ class World:
         for harness, replies in REPLIES.items():
             folder = tmp_path / "replies" / harness
             folder.mkdir(parents=True)
-            for name, reply in replies.items():
+            for name, (reply, code) in replies.items():
                 (folder / name).write_bytes(reply)
+                (folder / f"{name}.code").write_text(str(code), encoding="utf-8")
             fake = self.bin / harness
             fake.write_text(FAKE_HARNESS.format(
                 name=harness, log=self.env_log, token_test=TOKEN_TESTS[harness],
-                replies=folder, home_variable=HOME_VARIABLES[harness],
+                replies=folder, home_variable=HOME_VARIABLES[harness], stream=STREAMS[harness],
             ), encoding="utf-8")
             fake.chmod(0o755)
         self.profile()
@@ -461,6 +465,17 @@ def test_token_variables_from_the_login_profile_never_reach_the_harness(world: W
     assert sorted(name for name, _ in envs) == ["claude"] * 3 + ["codex"] * 2
     for _, names in envs:
         assert not names & set(TOKENS)
+    assert world.statuses() == EXPECTED
+
+
+@pytest.mark.parametrize("errexit", [
+    "set -e\n",
+    'claude() { set -e; command claude "$@"; }\ncodex() { set -e; command codex "$@"; }\n',
+], ids=["profile", "function"])
+def test_errexit_from_the_login_profile_neither_skips_nor_loses_a_pair(world: World, errexit: str) -> None:
+    world.profile(errexit)
+    assert world.doctor() == 0
+    assert sorted(name for name, _ in world.harness_envs()) == ["claude"] * 3 + ["codex"] * 2
     assert world.statuses() == EXPECTED
 
 

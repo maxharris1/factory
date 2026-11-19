@@ -185,15 +185,16 @@ def parse_codex(account: str, device: str, code: int, reply: bytes) -> Probe:
 @dataclass(frozen=True)
 class _Status:
     command: str
+    streams: str
     home_variable: str
     token_variables: tuple[str, ...]
     parse: Callable[[str, str, int, bytes], Probe]
 
 
 _STATUS: dict[Harness, _Status] = {
-    "claude": _Status("claude auth status", "CLAUDE_CONFIG_DIR",
+    "claude": _Status("claude auth status", "2>/dev/null", "CLAUDE_CONFIG_DIR",
                       ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), parse_claude),
-    "codex": _Status("codex login status", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
+    "codex": _Status("codex login status", "2>&1", "CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY"), parse_codex),
 }
 _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.token_variables)
 
@@ -201,12 +202,12 @@ _TOKEN_VARIABLES = tuple(name for status in _STATUS.values() for name in status.
 def status_script(harness: Harness, homes: Sequence[str | None]) -> str:
     status = _STATUS[harness]
     calls = [
-        ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
-        + f"{status.command} </dev/null 2>/dev/null; printf '\\nORCH-ACCOUNT %d %d\\n' {index} $?;"
+        "code=0; " + ("" if home is None else f"{status.home_variable}={shlex.quote(home)} ")
+        + f"{status.command} </dev/null {status.streams} || code=$?; printf '\\nORCH-ACCOUNT %d %d\\n' {index} \"$code\";"
         for index, home in enumerate(homes)
     ]
     inner = " ".join([
-        f"{_UNTRACE}unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};",
+        f"{_UNTRACE}set +e; unset {' '.join(_TOKEN_VARIABLES)} {status.home_variable};",
         f"printf '\\n%s\\n' {_BEGIN.decode()};",
         *calls,
     ])
