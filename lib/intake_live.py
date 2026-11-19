@@ -19,7 +19,10 @@ Reads:
 * linear_intake: issues in any of a repo's projects and in the workflow
   state (assigned to a listed user, for a project with linear_assignees),
   every page of them, and for each, who moved it there: the actor of the
-  latest history entry whose toState is that state.
+  latest history entry whose toState is that state;
+* dir_names: the file names in one repo folder at a commit (`contents/`),
+  for the feature map check (#1029). One bounded read: a recursive tree
+  read truncates on a large repo.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -307,6 +310,22 @@ class GitHubIntakeClient(GitHubReviewActions):
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise GitHubAdapterError(f"ref heads/{branch} has no commit sha")
         return sha
+
+    def dir_names(self, repo: str, path: str, sha: str) -> tuple[str, ...]:
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("folder read sha is not a full sha")
+        try:
+            entries = self._json(f"{_repo_path(repo)}/contents/{quote(path)}?ref={sha}")
+        except GitHubAdapterError as exc:
+            if _status(exc) == 404:
+                return ()
+            raise
+        if not isinstance(entries, list):
+            raise GitHubAdapterError(f"{path} is not a folder")
+        return tuple(
+            entry["name"] for entry in entries
+            if isinstance(entry, dict) and entry.get("type") == "file" and isinstance(entry.get("name"), str)
+        )
 
     def create_start_commit(self, repo: str, base_sha: str, message: str) -> str:
         if not _SHA.fullmatch(base_sha):

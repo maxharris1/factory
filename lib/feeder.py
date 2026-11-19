@@ -41,6 +41,9 @@ fails is `refused-intake` with its reasons, takes no room and no holds,
 posts nothing, raises needs-attention (`intake-refused`) and queues one
 Grok `refused` wake per distinct defect set. It is re-checked every poll,
 so a fixed ticket feeds. A ticket already feeding or fed is not re-checked.
+An optional `Features:` line names QA journeys (lib/journeys.py, #1029); each
+poll reads the qa.verify skill's feature map at the base once, refuses ids the
+map contradicts, and leaves a ticket eligible while that read fails.
 
 It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
@@ -168,6 +171,17 @@ from lib.feeder_gates import (
     paths_collide,
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
+from lib.journeys import (
+    Journey,
+    JourneyCode,
+    QaCriterion,
+    features_dir,
+    map_ids,
+    map_problems,
+    parse_features,
+    problems,
+    qa_tag,
+)
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 from lib.pr_title import prefixed, read_sources
@@ -259,6 +273,7 @@ _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
 _DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
 _TYPE_LINE = re.compile(_FIELD.format(name=r"type"), re.IGNORECASE)
+_FEATURES_LINE = re.compile(_FIELD.format(name=r"features"), re.IGNORECASE)
 _OTHER_PRS = (
     re.compile(
         r"\b(?:other|every|all|any)\s+(?:other\s+)?(?:open\s+)?(?:PRs?|pull\s+requests?)\b",
@@ -279,7 +294,10 @@ _OPS_ACTION = re.compile(
 
 @dataclass(frozen=True)
 class Defect:
-    code: Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type"]
+    code: (
+        Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type"]
+        | JourneyCode
+    )
     reason: str
 
 
@@ -294,6 +312,8 @@ class IntakeTemplate:
     plan_first: bool | None = None
     depends_on: str | None = None
     ticket_type: str | None = None
+    journeys: tuple[Journey, ...] = ()
+    qa_criteria: tuple[QaCriterion, ...] = ()
     defects: tuple[Defect, ...] = ()
 
 
@@ -387,6 +407,7 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
     defects: list[Defect] = []
     criteria: list[str] = []
     ops: list[str] = []
+    qa: list[QaCriterion] = []
     for item in _criteria_items(lines):
         tagged = _OPS_TAG.match(item)
         if tagged:
@@ -395,6 +416,9 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
             ops.append(item)
         else:
             criteria.append(item)
+            tag = qa_tag(item)
+            if tag is not None:
+                qa.append(tag)
     if not criteria:
         defects.append(Defect(
             "no-criteria",
@@ -430,6 +454,9 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         valid = ", ".join(f"`{name}`" for name in TICKET_TYPES)
         defects.append(Defect("bad-type", f"`Type: {ticket_type}` is not one of {valid} (no line means feature)"))
         ticket_type = None
+    journeys, bad = parse_features(_field(lines, _FEATURES_LINE))
+    qa_criteria = tuple(qa)
+    defects.extend(Defect(code, reason) for code, reason in problems(journeys, bad, qa_criteria))
     return IntakeTemplate(
         criteria=tuple(criteria),
         ops_criteria=tuple(ops),
@@ -438,6 +465,8 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         plan_first=plan_first,
         depends_on=depends,
         ticket_type=ticket_type,
+        journeys=journeys,
+        qa_criteria=qa_criteria,
         defects=tuple(defects),
     )
 
@@ -511,6 +540,8 @@ class GitHubIntake(Protocol):
     def ref_statuses(self, refs: Collection[Ref]) -> Mapping[Ref, RefStatus]: ...
 
     def base_checks(self, repo: str, branch: str) -> Mapping[str, BaseCheck]: ...
+
+    def dir_names(self, repo: str, path: str, sha: str) -> Sequence[str]: ...
 
 
 class LinearIntake(Protocol):
@@ -810,12 +841,14 @@ class Feeder:
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
+        unread, map_errors = self._check_journeys(candidates, states)
         refused = {
             candidate.ref
             for candidate in candidates
             if states[candidate.ref] in UNSTARTED and candidate.template.defects
         }
         writes = [self._refuse(candidate) for candidate in candidates if candidate.ref in refused]
+        writes += [_state_write(c, "eligible") for c in candidates if c.ref in unread - refused]
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
@@ -834,7 +867,7 @@ class Feeder:
         fed: list[TicketRef] = []
         waiting = 0
         blocked = 0
-        errors = read_errors + stop_errors + (0 if gate_read else 1)
+        errors = read_errors + stop_errors + map_errors + (0 if gate_read else 1)
         order = sorted(candidates, key=lambda item: (states[item.ref] not in IN_FLIGHT, *item.order()))
         while order:
             candidate = next(
@@ -842,7 +875,7 @@ class Feeder:
                 order[0],
             )
             order.remove(candidate)
-            if candidate.ref in refused:
+            if candidate.ref in refused or candidate.ref in unread:
                 continue
             state = self._state(candidate)
             if state in FINAL:
@@ -991,6 +1024,50 @@ class Feeder:
         )
         self.log(f"feeder: {issue.repo}#{issue.key} refused at intake: {reason}")
         return _state_write(candidate, "refused-intake", reason=reason)
+
+    def _check_journeys(
+        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
+    ) -> tuple[set[Ref], int]:
+        """Add the feature map's defects to each unstarted ticket naming
+        journeys, reading each map once per poll. Returns the tickets whose
+        map could not be read, and how many reads failed."""
+        maps: dict[tuple[str, str | None, str], frozenset[str] | None] = {}
+        unread: set[Ref] = set()
+        errors = 0
+        for candidate in candidates:
+            journeys = candidate.template.journeys
+            if not journeys or states[candidate.ref] not in UNSTARTED:
+                continue
+            qa = candidate.context.config.qa
+            verify = qa.verify if qa else None
+            ids = None
+            if verify is not None:
+                key = (candidate.project.repo.lower(), candidate.base, verify)
+                if key not in maps:
+                    maps[key] = self._map_ids(candidate.project.repo, candidate.base, verify)
+                    if maps[key] is None:
+                        errors += 1
+                ids = maps[key]
+                if ids is None:
+                    unread.add(candidate.ref)
+                    continue
+            found = map_problems(journeys, ids)
+            if found:
+                defects = tuple(Defect(code, reason) for code, reason in found)
+                template = candidate.template
+                candidate.template = replace(template, defects=template.defects + defects)
+        return unread, errors
+
+    def _map_ids(self, repo: str, base: str | None, verify: str) -> frozenset[str] | None:
+        try:
+            sha = self.github.branch_sha(repo, base) if base else None
+            if sha is not None:
+                return map_ids(self.github.dir_names(repo, features_dir(verify), sha))
+            why = f"no {base or 'base'} branch"
+        except Exception as exc:
+            why = safe_ship_error(exc)
+        self.log(f"feeder: {repo}@{base} feature map unreadable: {why}")
+        return None
 
     def _sync_intake_attention(
         self, refused: Sequence[_Candidate], repos: set[str], now: float
