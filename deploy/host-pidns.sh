@@ -23,7 +23,7 @@ factory_in_host_pidns() (
 
 # An unprivileged sandbox must unshare its user namespace to get its own PID
 # namespace, so a one-field NSpid in the initial user namespace is the host
-# after a restart. Returns 2 while a pidfile's pid runs in the recorded one.
+# after a restart.
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
