@@ -29,7 +29,8 @@ file or orch config.
 | Runner registration and its token | GitHub UI and the runner host's terminal | Max only |
 | Linux pool label for a repo | that repo's `factory.md` front matter as `ci_runner:` | a normal repo PR |
 | Which jobs use it | that repo's workflow `runs-on:` | a normal repo PR |
-| Overflow switch for factory's Linux jobs | repo Actions variable `FACTORY_LINUX_RUNNER` | `deploy/runner-pool-sync.sh` on the orch host (the PC), as the `factory` user |
+| Online `factory-linux` pool size | repo Actions variable `FACTORY_LINUX_POOL` | `deploy/runner-pool-sync.sh` on the orch host (the PC), as the `factory` user |
+| Overflow switch for factory's Linux jobs | repo Actions variable `FACTORY_LINUX_RUNNER` | Max, by hand (see "Overflow to hosted runners") |
 | Device inventory (hosts, Tailscale names) | `machines.yml` (F2-01) | already there, unchanged |
 | Credential-holding deploy workflows | GitHub-hosted runners, unchanged (D21) | nobody moves them |
 
@@ -71,7 +72,7 @@ jobs:
 ```
 
 The fallback is exactly the pool, `[self-hosted, Linux, X64, factory-linux]`,
-so local is the default. See "Overflow to hosted runners" below for what
+so local is the default. See "Overflow to hosted runners" below for who
 sets the variable.
 
 The one macOS job uses `[self-hosted, macOS, factory-mac]`. The host label
@@ -87,30 +88,36 @@ checks that every factory Linux job uses that `runs-on:` expression with the
 ## Overflow to hosted runners
 
 Max asked on 2026-11-17 that CI "default to the local runners before we
-overflow to GitHub". The switch is the repo Actions variable
-`FACTORY_LINUX_RUNNER`. It holds either the pool,
-`["self-hosted","Linux","X64","factory-linux"]`, or `"ubuntu-latest"`.
+overflow to GitHub". On 2026-11-19 he asked to stop the repo-wide
+flip-flop of `FACTORY_LINUX_RUNNER` (#996). The PC sync no longer writes
+that variable. It publishes the pool size instead, for a per-run router
+that #1012 wires into CI.
 
-- **What flips it.** `deploy/runner-pool-sync.sh` runs on the orch host
-  (the PC) as the `factory` user, from the deployed checkout at
-  `~/factory/deploy/runner-pool-sync.sh`. Every 30 s
-  it lists the repo's runners and counts the online `factory-linux` ones
-  and how many of them are idle. It sets the variable to `"ubuntu-latest"`
-  only after two checks in a row with no idle pool runner (or none online),
-  and back to the pool on the first check with one idle. A failed runner
-  list changes nothing. It reads the runner list with the `factory` user's
-  own `gh` (repo admin), so no secret is added to Actions.
-- **When it applies.** GitHub reads the variable when it queues each job.
-  Jobs queued while the pool has room stay local. Jobs queued while it is
-  full go to hosted runners. A job already queued for the pool waits for a
-  pool runner even if the variable flips later.
+- **What the sync publishes.** `deploy/runner-pool-sync.sh` runs on the
+  orch host (the PC) as the `factory` user, from the deployed checkout at
+  `~/factory/deploy/runner-pool-sync.sh`. Every 30 s it lists the repo's
+  runners and counts the online `factory-linux` ones. It publishes that
+  count as the repo Actions variable `FACTORY_LINUX_POOL`, as
+  `{"online":N}`. It writes `FACTORY_LINUX_POOL` only when the online
+  count changes and the new count holds for two checks in a row, so a
+  runner that drops for one check causes no write. It never reads whether
+  a runner is busy. A busy or idle change never writes it. When the
+  variable is unset, the first check writes it. A failed runner list
+  writes nothing, and the next count must then hold for two checks again.
+  It reads the runner list with the `factory` user's own `gh` (repo
+  admin), so no secret is added to Actions.
+- **Who reads it.** Nothing yet. Until #1012 lands, Linux jobs still read
+  `FACTORY_LINUX_RUNNER` in their `runs-on:`, and nothing sets that
+  variable any more. Once the new loop runs on the PC, Max deletes
+  `FACTORY_LINUX_RUNNER`, so every Linux job runs on the pool with no
+  overflow until #1012 lands.
 - **macOS never overflows.** `macos` stays on `factory-mac`, and
   `macos-pickup` still cancels the run red after 10 minutes with no Mac.
 - **Billing.** An overflowed job is a normal hosted job. It uses included
   minutes, and while the account is billing-blocked it fails in seconds,
   which turns the run red. Rerun failed jobs once the pool has room.
 - **Log.** `~/.local/state/factory/runner-pool-sync.log` on the PC, one
-  line per flip (`online=N idle=N -> <value>`).
+  line per write (`online=N -> {"online":N}`) and one per failed list.
 - **Restarts.** `runner-pool-sync.sh ensure` starts the loop in the
   background unless a running loop holds its lock
   (`flock` on `~/.local/state/factory/runner-pool-sync.lock`). The kernel
@@ -124,7 +131,7 @@ overflow to GitHub". The switch is the repo Actions variable
   `touch ~/.config/factory/runner-pool-sync-hold` stops the
   loop at its next check and makes `ensure` a no-op. Remove the file and
   run `ensure` to resume.
-- **Pin local or hosted by hand.** Hold the loop, then set the variable:
+- **Pin local or hosted by hand.** Set the variable the jobs read:
   `env -u GH_TOKEN gh variable set FACTORY_LINUX_RUNNER --repo maxharris1/factory --body '"ubuntu-latest"'`.
   `gh variable delete FACTORY_LINUX_RUNNER --repo maxharris1/factory`
   returns every Linux job to the pool, since unset means local.
@@ -294,11 +301,11 @@ before adding instances.
 - Settings > Actions > Runners > the runner > Remove shows a
   `./config.sh remove` command carrying a one-time removal token. Paste it
   yourself in the runner's terminal, as above.
-- If you remove every Linux runner, the sync loop sees none online and
-  flips `FACTORY_LINUX_RUNNER` to `"ubuntu-latest"` within about a minute,
-  so new Linux jobs go to hosted runners. If the loop is held or stopped,
-  set the variable by hand first (see "Overflow to hosted runners"), or the
-  jobs queue for a day and then fail. `macos` has no overflow: with the Mac
+- If you remove every Linux runner, the sync loop publishes
+  `{"online":0}` within about a minute, but no Linux job reads it until
+  #1012 lands. Set `FACTORY_LINUX_RUNNER` to `"ubuntu-latest"` by hand
+  first (see "Overflow to hosted runners"), or the jobs queue for a day and
+  then fail. `macos` has no overflow: with the Mac
   runner removed, change its `runs-on:` in a PR.
 
 ## Acceptance (SPEC F2-03)

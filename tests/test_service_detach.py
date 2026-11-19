@@ -52,8 +52,8 @@ while True:
 
 FAKE_GH = """#!/bin/sh
 case "$*" in
-  *actions/runners*) echo '4 1' ;;
-  *) echo '["self-hosted","Linux","X64","factory-linux"]' ;;
+  *actions/runners*) echo 3 ;;
+  *) echo '{"online":3}' ;;
 esac
 """
 

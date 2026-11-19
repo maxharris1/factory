@@ -3,12 +3,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import random
 import re
 import shutil
 import signal
 import subprocess
 import time
-from itertools import takewhile
+from itertools import pairwise, takewhile
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SYNC_SCRIPT = ROOT / "deploy/runner-pool-sync.sh"
 STATE = Path(".local/state/factory")
 HOLD = Path(".config/factory/runner-pool-sync-hold")
-POOL_VALUE = '["self-hosted","Linux","X64","factory-linux"]'
 
 needs_proc = pytest.mark.skipif(
     not Path("/proc/self/stat").exists(), reason="finds loop processes in /proc"
@@ -62,14 +62,32 @@ def _kill_loops(home: Path) -> None:
             pass
 
 
-def test_the_sync_script_flips_between_the_same_pool_and_ubuntu_latest() -> None:
+def runners(online: int = 0, busy: list[bool] | None = None, offline: int = 0, mac: bool = True) -> str:
+    busy = busy if busy is not None else [False] * online
+    assert len(busy) == online
+    linux = [{"id": 1, "name": "self-hosted", "type": "read-only"}, {"id": 2, "name": "Linux", "type": "read-only"},
+             {"id": 3, "name": "X64", "type": "read-only"}, {"id": 4, "name": "factory-linux", "type": "custom"}]
+    macos = [{"id": 1, "name": "self-hosted", "type": "read-only"}, {"id": 5, "name": "macOS", "type": "read-only"},
+             {"id": 6, "name": "ARM64", "type": "read-only"}, {"id": 7, "name": "factory-mac", "type": "custom"}]
+    pool = [("online", b) for b in busy] + [("offline", False)] * offline
+    listed = [
+        {"id": 10 + i, "name": f"pc-runner-{i}", "os": "Linux", "status": status, "busy": b, "labels": linux}
+        for i, (status, b) in enumerate(pool)
+    ]
+    if mac:
+        listed.append({"id": 99, "name": "mac-runner", "os": "macOS", "status": "online", "busy": True, "labels": macos})
+    return json.dumps({"total_count": len(listed), "runners": listed})
+
+
+def test_the_sync_script_publishes_the_online_count_of_the_factory_md_pool() -> None:
     config, findings = load_factory_md(ROOT / "factory.md")
     assert config is not None, findings
-    pool = json.dumps(["self-hosted", "Linux", "X64", config.ci_runner], separators=(",", ":"))
     text = SYNC_SCRIPT.read_text(encoding="utf-8")
-    assert f"POOL='{pool}'" in text
-    assert """HOSTED='"ubuntu-latest"'""" in text
-    assert "VAR=FACTORY_LINUX_RUNNER" in text
+    assert "VAR=FACTORY_LINUX_POOL" in text
+    runner_list = re.search(r"actions/runners\?per_page=100\" --jq '([^']*)'", text)
+    assert runner_list, "the loop no longer filters the runner list with --jq"
+    assert f'.name=="{config.ci_runner}"' in runner_list.group(1)
+    assert ".busy" not in text
 
 
 FAKE_SYNC_GH = """#!/usr/bin/env bash
@@ -80,27 +98,39 @@ case "$*" in
     line=$(sed -n "${n}p" "$GH_RESPONSES")
     if [[ -z "$line" ]]; then touch "$HOME/.config/factory/runner-pool-sync-hold"; exit 1; fi
     [[ "$line" == FAIL ]] && exit 1
-    echo "$line" ;;
-  *"--jq .value") cat "$GH_VALUE" ;;
+    filter=.
+    for ((i = 1; i < $#; i++)); do [[ ${!i} == --jq ]] && { j=$((i + 1)); filter=${!j}; }; done
+    jq -r "$filter" <<<"$line" ;;
+  *" -X PATCH "* | *" -X POST "*)
+    for arg; do [[ $arg == value=* ]] && printf '%s' "${arg#value=}" > "$GH_VALUE"; done ;;
+  *actions/variables/FACTORY_LINUX_POOL*)
+    if [[ ! -s "$GH_VALUE" ]]; then echo '{"message":"Not Found","status":"404"}'; exit 1; fi
+    if [[ "$*" == *"--jq .value" ]]; then cat "$GH_VALUE"; else jq -n --rawfile v "$GH_VALUE" '{name:"FACTORY_LINUX_POOL",value:$v}'; fi ;;
 esac
 """
 
 STEADY_SYNC_GH = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$GH_LOG"
 case "$*" in
-  *actions/runners*) echo '4 1' ;;
+  *actions/runners*) echo 3 ;;
   *"--jq .value") cat "$GH_VALUE" ;;
 esac
 """
 
+START = '{"online":3}'
+WRITE = re.compile(
+    r"api -X (?:PATCH repos/maxharris1/factory/actions/variables/FACTORY_LINUX_POOL"
+    r"|POST repos/maxharris1/factory/actions/variables) -f name=FACTORY_LINUX_POOL -f value=(.*)"
+)
 
-def _sync_env(tmp_path: Path, start: str, counts: list[str]) -> dict[str, str]:
+
+def _sync_env(tmp_path: Path, start: str, responses: list[str]) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "gh").write_text(FAKE_SYNC_GH, encoding="utf-8")
     (bin_dir / "gh").chmod(0o755)
     (tmp_path / ".config/factory").mkdir(parents=True)
-    (tmp_path / "responses").write_text("".join(f"{line}\n" for line in counts), encoding="utf-8")
+    (tmp_path / "responses").write_text("".join(f"{line}\n" for line in responses), encoding="utf-8")
     (tmp_path / "value").write_text(start, encoding="utf-8")
     log = tmp_path / "gh.log"
     log.write_text("", encoding="utf-8")
@@ -118,41 +148,79 @@ def _sync_env(tmp_path: Path, start: str, counts: list[str]) -> dict[str, str]:
 
 
 def _steady_env(tmp_path: Path, every: str) -> dict[str, str]:
-    env = _sync_env(tmp_path, POOL_VALUE, [])
+    env = _sync_env(tmp_path, START, [])
     (tmp_path / "bin/gh").write_text(STEADY_SYNC_GH, encoding="utf-8")
     return env | {"EVERY": every}
 
 
-def _run_sync(tmp_path: Path, start: str, counts: list[str]) -> list[str]:
-    env = _sync_env(tmp_path, start, counts)
+def _writes(env: dict[str, str]) -> list[str]:
+    return [m.group(1) for call in _gh_calls(env) if (m := WRITE.fullmatch(call))]
+
+
+def _run_sync(tmp_path: Path, start: str, responses: list[str]) -> dict[str, str]:
+    env = _sync_env(tmp_path, start, responses)
     result = subprocess.run(
-        ["bash", str(SYNC_SCRIPT), "loop"], env=env, capture_output=True, text=True, timeout=30
+        ["bash", str(SYNC_SCRIPT), "loop"], env=env, capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    return [
-        call.split("value=", 1)[1]
-        for call in Path(env["GH_LOG"]).read_text(encoding="utf-8").splitlines()
-        if call.startswith("api -X PATCH repos/maxharris1/factory/actions/variables/FACTORY_LINUX_RUNNER ")
-    ]
+    return env
 
 
 @pytest.mark.parametrize(
-    ("start", "counts", "writes"),
+    ("start", "responses", "writes"),
     [
-        (POOL_VALUE, ["4 1", "4 0", "4 1", "4 0"], []),
-        (POOL_VALUE, ["4 0", "4 0", "4 0", "4 2"], ['"ubuntu-latest"', POOL_VALUE]),
-        (POOL_VALUE, ["0 0", "0 0"], ['"ubuntu-latest"']),
-        (POOL_VALUE, ["4 0", "FAIL", "4 0"], ['"ubuntu-latest"']),
-        ('"ubuntu-latest"', ["4 1"], [POOL_VALUE]),
-        ("", ["4 1"], [POOL_VALUE]),
+        (START, [runners(3, [True, True, True]), runners(3, [True, False, True]), runners(3, [True, True, True])], []),
+        (START, [runners(3, [True, True, True]), runners(3, [True, False, True]), runners(3, [False, False, True]),
+                 runners(3, [True, True, True]), runners(3, [True, True, True])], []),
+        (START, [runners(3), runners(2, offline=1), runners(3)], []),
+        (START, [runners(3), runners(2, offline=1), runners(2, [True, False], offline=1)], ['{"online":2}']),
+        (START, [runners(3), runners(2), runners(2, [True, True]), runners(2, [False, True])], ['{"online":2}']),
+        (START, [runners(0, offline=3), runners(0, offline=3, mac=False)], ['{"online":0}']),
+        ("", [runners(3, [True, False, False], offline=1)], [START]),
+        (START, ["FAIL", "FAIL"], []),
+        ("", ["FAIL"], []),
+        (START, [runners(3), runners(2), "FAIL", runners(2)], []),
+        (START, [runners(3), runners(2), "FAIL", runners(2), runners(2)], ['{"online":2}']),
     ],
-    ids=["one-busy-check-stays", "two-busy-checks-overflow-then-return", "none-online",
-         "failed-list-keeps-count", "idle-returns", "unset-sets-pool"],
+    ids=["busy-idle-busy-stays", "held-busy-and-idle-stay", "one-check-dip-stays", "held-drop-writes-once", "longer-hold-writes-once",
+         "none-online", "unset-writes-at-once", "failed-list-writes-nothing", "failed-list-leaves-unset",
+         "failed-list-breaks-the-hold", "hold-after-a-failed-list"],
 )
-def test_the_sync_loop_overflows_only_after_two_full_checks(
-    tmp_path: Path, start: str, counts: list[str], writes: list[str]
+def test_the_sync_loop_writes_the_online_count_only_when_it_holds_for_two_checks(
+    tmp_path: Path, start: str, responses: list[str], writes: list[str]
 ) -> None:
-    assert _run_sync(tmp_path, start, counts) == writes
+    assert _writes(_run_sync(tmp_path, start, responses)) == writes
+
+
+def test_an_unset_variable_is_created_on_the_first_check(tmp_path: Path) -> None:
+    env = _run_sync(tmp_path, "", [runners(3)])
+    assert [call for call in _gh_calls(env) if " -X " in call] == [
+        f"api -X POST repos/maxharris1/factory/actions/variables -f name=FACTORY_LINUX_POOL -f value={START}"
+    ]
+    assert Path(env["GH_VALUE"]).read_text(encoding="utf-8") == START
+
+
+@pytest.mark.parametrize("seed", [1, 7, 42, 1000])
+def test_a_random_trace_writes_only_the_sustained_online_counts(tmp_path: Path, seed: int) -> None:
+    rng = random.Random(seed)
+    counts: list[int | None] = []
+    responses = []
+    for _ in range(100):
+        if rng.random() < 0.1:
+            counts.append(None)
+            responses.append("FAIL")
+            continue
+        online = rng.randint(0, 3)
+        counts.append(online)
+        responses.append(runners(online, [rng.random() < 0.5 for _ in range(online)],
+                                 offline=rng.randint(0, 2), mac=rng.random() < 0.5))
+    held = [b for a, b in pairwise(counts) if b is not None and a == b]
+    sustained = [f'{{"online":{v}}}' for before, v in pairwise([3, *held]) if v != before]
+    assert sustained, "the seed never changed the sustained count"
+    writes = _writes(_run_sync(tmp_path, START, responses))
+    assert len(writes) <= len(sustained)
+    assert writes[-1:] == sustained[-1:]
+    assert writes == sustained
 
 
 def _gh_calls(env: dict[str, str]) -> list[str]:
@@ -231,6 +299,10 @@ def test_the_header_and_usage_say_the_sync_runs_on_the_pc_as_factory_from_its_cr
         assert "the `factory` user" in text
         assert "crontab" in text
         assert "ensure" in text
+        assert (
+            "publishes the online factory-linux runner count as the repo actions variable factory_linux_pool"
+            " ({\"online\":n}), writing only when a changed count holds for two checks in a row"
+        ) in text.lower()
     assert "loop" in shown.stdout
     unknown = subprocess.run(["bash", str(SYNC_SCRIPT), "start"], env=env, capture_output=True, text=True, timeout=30)
     assert unknown.returncode != 0
@@ -241,7 +313,7 @@ def test_the_header_and_usage_say_the_sync_runs_on_the_pc_as_factory_from_its_cr
 def test_ensure_starts_the_loop_when_an_old_pidfile_names_an_unrelated_live_process(
     tmp_path: Path,
 ) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
+    env = _sync_env(tmp_path, START, [runners(3)])
     state = tmp_path / ".local/state/factory"
     state.mkdir(parents=True)
     hold = tmp_path / ".config/factory/runner-pool-sync-hold"
@@ -261,7 +333,7 @@ def test_ensure_starts_the_loop_when_an_old_pidfile_names_an_unrelated_live_proc
 
 
 def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: Path) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
+    env = _sync_env(tmp_path, START, [runners(3)])
     lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
     lock.parent.mkdir(parents=True)
     with lock.open("a") as handle:
@@ -274,7 +346,7 @@ def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: P
 
 
 def test_a_loop_outwaits_the_lock_probe_ensure_runs_while_it_starts(tmp_path: Path) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
+    env = _sync_env(tmp_path, START, [runners(3)])
     lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
     lock.parent.mkdir(parents=True)
     with lock.open("a") as probe:
@@ -293,12 +365,26 @@ def test_the_checklist_states_how_long_a_second_loop_waits_for_the_lock() -> Non
     assert "exits at once" not in text
 
 
+@pytest.mark.parametrize("doc", ["docs/F2-03-RUNNER-CHECKLIST.md", "docs/decisions/711-self-hosted-runners.md"])
+def test_the_runner_docs_say_the_loop_publishes_a_held_online_count(doc: str) -> None:
+    text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+    assert "`FACTORY_LINUX_POOL`" in text
+    assert '`{"online":N}`' in text
+    assert (
+        "writes `FACTORY_LINUX_POOL` only when the online count changes and the new count holds for two checks in a row"
+        in text
+    )
+    assert "A busy or idle change never writes it" in text
+    assert "What flips it" not in text
+    assert "flips `FACTORY_LINUX_RUNNER`" not in text
+
+
 STALLING_SYNC_GH = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$GH_LOG"
 if [[ "$*" == *"$STALL"* && ! -e "$STALLED" ]]; then touch "$STALLED"; exec sleep 30; fi
 case "$*" in
-  *actions/runners*) touch "$HOME/.config/factory/runner-pool-sync-hold"; echo '4 1' ;;
-  *"--jq .value") echo '["self-hosted","Linux","X64","factory-linux"]' ;;
+  *actions/runners*) touch "$HOME/.config/factory/runner-pool-sync-hold"; echo 3 ;;
+  *"--jq .value") echo '{"online":3}' ;;
 esac
 """
 
@@ -308,7 +394,7 @@ esac
 def test_a_loop_killed_during_a_stalled_request_frees_the_lock_and_ensure_restarts_it(
     tmp_path: Path, stall: str
 ) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, [])
+    env = _sync_env(tmp_path, START, [])
     (tmp_path / "bin/gh").write_text(STALLING_SYNC_GH, encoding="utf-8")
     stalled = tmp_path / "stalled"
     env |= {"STALL": stall, "STALLED": str(stalled)}

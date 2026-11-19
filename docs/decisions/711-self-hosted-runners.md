@@ -6,6 +6,8 @@ Max approved the plan's defaults and changed one of them. The box runner comes n
 
 **Update, 2026-11-19 (#996).** Max retired the box runner and moved the sync to the PC at 10:00 AM ET. The box runner is deregistered and its starter removed. It never carried the `factory-linux` label after the label change, so it was a dead fourth slot. The pool is the 3 PC instances, and the Mac runs `macos`.
 
+**Update, 2026-11-19 (#1000).** Max asked to "fix the instability issues": the sync flipped `FACTORY_LINUX_RUNNER` 335 times in two days. The sync now publishes only the online pool size, as `FACTORY_LINUX_POOL`, and no longer writes `FACTORY_LINUX_RUNNER`. Wiring a per-run router that reads it into CI is #1012. Until then, Max deletes `FACTORY_LINUX_RUNNER` once the new loop runs, and every Linux job runs on the pool with no overflow.
+
 ## Overflow to hosted runners
 
 Every Linux job says:
@@ -14,7 +16,7 @@ Every Linux job says:
 runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
 ```
 
-Unset means the pool, so local is the default. [`deploy/runner-pool-sync.sh`](../../deploy/runner-pool-sync.sh) runs on the orch host (the PC) as the `factory` user, from the deployed checkout. Every 30 s it reads the runner list. It sets the variable to `"ubuntu-latest"` only after two checks in a row with no idle online `factory-linux` runner (or none online), and back to the pool on the first check with one idle. GitHub reads the variable when it queues each job, so jobs queued while the pool has room stay local and the rest overflow. The runner list is read with the `factory` user's own `gh` (repo admin), so no secret is added to Actions.
+Unset means the pool, so local is the default. Since #1000 nothing sets `FACTORY_LINUX_RUNNER` but Max, by hand. [`deploy/runner-pool-sync.sh`](../../deploy/runner-pool-sync.sh) runs on the orch host (the PC) as the `factory` user, from the deployed checkout. Every 30 s it reads the runner list and counts the online `factory-linux` runners. It publishes the count as the repo Actions variable `FACTORY_LINUX_POOL`, as `{"online":N}`. It writes `FACTORY_LINUX_POOL` only when the online count changes and the new count holds for two checks in a row. It never reads whether a runner is busy. A busy or idle change never writes it. A failed runner list writes nothing. No job reads `FACTORY_LINUX_POOL` until #1012 wires the per-run router into CI. The runner list is read with the `factory` user's own `gh` (repo admin), so no secret is added to Actions.
 
 - **macOS** has no overflow. `macos` stays on `[self-hosted, macOS, factory-mac]`, and `macos-pickup` still cancels the run red after 10 minutes.
 - **Billing.** An overflowed job is billed like any hosted job. While the account is billing-blocked it fails in seconds and the run goes red; rerun failed jobs once the pool has room.
