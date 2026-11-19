@@ -17,8 +17,11 @@ it, or a process of this user has its cwd or an open file inside it. The
 host reads orch.db again and confirms only the ids still finished, so a
 job requeued and claimed since the first read is moved back. The device
 empties each confirmed folder, keeping only its `.orch-worker*` records,
-and moves it back. A device that cannot scan for such processes, or finds
-one of this user's it cannot inspect, removes nothing.
+and moves it back. A device that cannot scan for such processes removes
+nothing. A process whose cwd and files the scan cannot read (a non-dumpable
+one: ssh, an agent, a sandboxed shell) counts as holding what its readable
+parents hold, since it started in its parent's cwd. Its own later chdir into
+a job folder is the one move the scan cannot see.
 
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
@@ -73,6 +76,7 @@ FINISH = "finish"
 SET_ASIDE = ".cleanup"
 CLAIMED = ".claimed"
 LOCK = ".lock"
+PROC = Path("/proc")
 
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -198,77 +202,25 @@ def disk_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
-def _mine(process: Path) -> bool | None:
-    try:
-        status = (process / "status").read_text().splitlines()
-    except OSError:
-        return None
-    if not any(line.startswith("VmSize:") for line in status):
-        return None
-    uids = next((line.split()[1:] for line in status if line.startswith("Uid:")), [])
-    return str(os.getuid()) in uids
-
-
-def _parent(process: Path) -> Path | None:
-    try:
-        stat = (process / "stat").read_text()
-    except OSError:
-        return None
-    return process.with_name(stat.rsplit(")", 1)[1].split()[1])
-
-
-def _started_by_another_user(process: Path) -> bool:
-    """Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
-    then drops them to this user, which leaves them non-dumpable, so their
-    cwd cannot be read."""
-    seen = {process.name}
-    while (parent := _parent(process)) is not None and parent.name not in seen:
-        seen.add(parent.name)
-        if parent.name == "0":
-            return True
-        mine = _mine(parent)
-        if mine is None:
-            return False
-        if not mine:
-            return True
-        if _process_paths(parent) is not None:
-            return False
-        process = parent
-    return _mine(process) is None
-
-
-def _process_paths(process: Path) -> list[str] | None:
+def _process_paths(process: Path) -> list[str]:
     try:
         links = [process / "cwd", *(process / "fd").iterdir()]
-    except (FileNotFoundError, ProcessLookupError):
-        return []
     except OSError:
-        return None
+        return []
     paths = []
     for link in links:
         try:
             paths.append(os.readlink(link).removesuffix(" (deleted)"))
-        except (FileNotFoundError, ProcessLookupError):
-            continue
         except OSError:
-            return None
+            continue
     return paths
 
 
 def jobs_held_open(jobs: Path) -> set[str] | None:
     prefix = f"{os.path.realpath(jobs)}/"
-    proc = Path("/proc")
-    if (proc / "self" / "cwd").exists():
-        paths = []
-        for process in proc.iterdir():
-            if not process.name.isdigit():
-                continue
-            found = _process_paths(process)
-            if found is None:
-                if _mine(process) and not _started_by_another_user(process):
-                    return None
-                continue
-            paths.extend(found)
+    if (PROC / "self" / "cwd").exists():
+        paths = [path for process in PROC.iterdir() if process.name.isdigit()
+                 for path in _process_paths(process)]
     else:
         try:
             found = subprocess.run(
