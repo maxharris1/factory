@@ -1,0 +1,4 @@
+# Known flaky tests. They run in CI and are reported, but cannot fail it (#1019).
+# One entry per line: <pytest node id> <open GitHub issue url>
+# A node id without [params] covers every parametrization.
+# CI fails while a linked issue is closed: fix the flake or drop the entry.
