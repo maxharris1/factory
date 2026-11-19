@@ -776,12 +776,15 @@ class DetailMixin:
         self,
         ticket: TrackedTicket,
         detail: str,
+        *,
+        question: str | None = None,
     ) -> str:
         return json.dumps(
             {
                 "project_bot": ticket.grok_bot,
                 "detail": detail,
-            },
+            }
+            | ({} if question is None else {"question": question}),
             separators=(",", ":"),
             sort_keys=True,
         )

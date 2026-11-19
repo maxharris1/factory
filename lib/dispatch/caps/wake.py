@@ -14,6 +14,9 @@ class CappedWakeMixin:
             detail=self._project_wake_detail(
                 ticket,
                 f"review round cap reached, {_comment_link(comment)}",
+                question=self._stop_question(
+                    ticket, comment, "capped", self._stop_disputed(ticket, comment, "capped")
+                ),
             ),
             head=ticket.current_head,
         )

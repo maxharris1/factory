@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 
 from lib.approver_commands import parse_slash_go
@@ -46,6 +46,7 @@ _CLASSIFIED = re.compile(r"\[(?:observable|default-able|product)\]\s+(\S.*)")
 _DEFAULT = re.compile(r"^(\s*)Default:\s*(\S.*?)\s*$")
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _MAX_WORDS = "**Max's words**"
+_STOP_DEFAULTS = {"repeat": "Another round", "unsat": "Change the criterion"}
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,38 @@ def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
         Decision(text, options, choice, answer.author, answer.created_at, answer.url, answer.id, position)
         for position, (text, options, choice) in enumerate(entries)
     ]
+
+
+def record_decisions(
+    connection: sqlite3.Connection,
+    ticket: TrackedTicket,
+    question_id: str | None,
+    decisions: Iterable[Decision],
+) -> None:
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO decisions (
+            repo, ticket_id, answer_id, position, question_id, question,
+            options, choice, answerer, answered_at, url
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                ticket.repo.lower(),
+                ticket.ticket_id,
+                decision.answer_id,
+                decision.position,
+                question_id,
+                decision.question,
+                json.dumps(list(decision.options)),
+                decision.choice,
+                decision.answerer,
+                decision.answered_at,
+                decision.url,
+            )
+            for decision in decisions
+        ],
+    )
 
 
 def _answer_text(body: str) -> str:
@@ -374,31 +407,14 @@ class QuestionsMixin:
             (item for item in ticket.comments if item.id == paused["paused_question_id"]),
             None,
         )
+        stop = self._parked_for_max(ticket)
+        decisions = (
+            [self._stop_decision(ticket, question, stop, comment, _STOP_DEFAULTS[stop])]
+            if question is not None and stop in _STOP_DEFAULTS
+            else decisions_of(question, comment)
+        )
         with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT OR IGNORE INTO decisions (
-                    repo, ticket_id, answer_id, position, question_id, question,
-                    options, choice, answerer, answered_at, url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        ticket.repo.lower(),
-                        ticket.ticket_id,
-                        decision.answer_id,
-                        decision.position,
-                        paused["paused_question_id"],
-                        decision.question,
-                        json.dumps(list(decision.options)),
-                        decision.choice,
-                        decision.answerer,
-                        decision.answered_at,
-                        decision.url,
-                    )
-                    for decision in decisions_of(question, comment)
-                ],
-            )
+            record_decisions(connection, ticket, paused["paused_question_id"], decisions)
         paused_plan = gap_of(question) if question is not None else None
         if action == "build" and paused["paused_plan_text"] is not None:
             plan_text = paused["paused_plan_text"]
