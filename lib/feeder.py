@@ -539,12 +539,28 @@ class GitHubIntake(Protocol):
     def base_checks(self, repo: str, branch: str) -> Mapping[str, BaseCheck]: ...
 
     def file_repo_issue(
-        self, repo: str, title: str, body: str, labels: tuple[str, ...], marker: str, since: float
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+        since: float,
+        *,
+        before_post: Callable[[], None],
     ) -> int: ...
+
+    def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
+
+    def close_issue(self, repo: str, number: int, comment: str) -> None: ...
 
     def issue_state(self, repo: str, number: int) -> str: ...
 
     def failed_run_logs(self, repo: str, run_id: str) -> Mapping[str, str]: ...
+
+
+class _ClaimLost(Exception):
+    pass
 
 
 class LinearIntake(Protocol):
@@ -855,7 +871,6 @@ class Feeder:
         self.log = log or (lambda line: None)
         self._base_notes: set[tuple[str, int, str, str, str]] = set()
         self.ledger: LockLedger | None = None
-        self.token = uuid.uuid4().hex
         with self.queue.connect() as connection:
             ensure_tables(connection)
 
@@ -1127,15 +1142,19 @@ class Feeder:
             try:
                 for action in decide(row, line.read, issue_open=issue_open):
                     if isinstance(action, File):
-                        filing = self._claim_main_fix(line, repo, base, action.red, now)
-                        if filing is not None:
-                            self._post_main_fix(line, filing)
-                    elif action.row.state == "filing" and not self._take_main_fix(action.row.marker, now):
+                        claimed = self._claim_main_fix(line, repo, base, action.red, now)
+                        if claimed is not None:
+                            self._post_main_fix(line, *claimed)
                         continue
-                    elif isinstance(action, Retire):
-                        self._set_main_fix(action.row.marker, state="closed")
-                    else:
-                        self._post_main_fix(line, action.row)
+                    claim = None
+                    if action.row.state == "filing":
+                        claim = self._take_main_fix(action.row.marker)
+                        if claim is None:
+                            continue
+                    if isinstance(action, Retire):
+                        self._retire_main_fix(action.row.marker)
+                    elif claim is not None:
+                        self._post_main_fix(line, action.row, claim)
             except Exception as exc:
                 errors += 1
                 self.log(f"feeder: main-fix for {repo}@{base} not filed yet: {safe_ship_error(exc)}")
@@ -1152,13 +1171,14 @@ class Feeder:
 
     def _claim_main_fix(
         self, line: _MainLine, repo: str, base: str, red: MainRed, now: float
-    ) -> MainFixRow | None:
+    ) -> tuple[MainFixRow, str] | None:
         tag = marker(repo, base, now)
         body = self._main_fix_body(line, base, red, tag)
         row = MainFixRow(repo, base, tag, "filing", None, red.head, now, issue_title(red), body)
+        claim = uuid.uuid4().hex
         try:
             with self.queue.connect() as connection:
-                values = {**asdict(row), "claimed_by": self.token, "claimed_at": now}
+                values = {**asdict(row), "claimed_by": claim, "claimed_at": self.queue.now()}
                 connection.execute(
                     f"INSERT INTO {MAIN_FIX_TABLE} ({', '.join(values)}) "
                     f"VALUES ({', '.join(':' + name for name in values)})",
@@ -1166,25 +1186,33 @@ class Feeder:
                 )
         except sqlite3.IntegrityError:
             return None
-        return row
+        return row, claim
 
-    def _take_main_fix(self, marker: str, now: float) -> bool:
+    def _take_main_fix(self, marker: str) -> str | None:
+        claim = uuid.uuid4().hex
+        now = self.queue.now()
         with self.queue.connect() as connection:
             taken = connection.execute(
                 f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = ?, claimed_at = ? "
-                "WHERE marker = ? AND state = 'filing' "
-                "AND (claimed_by IS NULL OR claimed_by = ? OR claimed_at <= ?)",
-                (self.token, now, marker, self.token, now - CLAIM_SECONDS),
+                "WHERE marker = ? AND state = 'filing' AND (claimed_by IS NULL OR claimed_at <= ?)",
+                (claim, now, marker, now - CLAIM_SECONDS),
             ).rowcount
-        return taken == 1
+        return claim if taken == 1 else None
 
-    def _set_main_fix(self, marker: str, **values: object) -> None:
-        assignments = ", ".join(f"{name} = ?" for name in values)
+    def _renew_main_fix(self, marker: str, claim: str) -> None:
+        now = self.queue.now()
         with self.queue.connect() as connection:
-            connection.execute(
-                f"UPDATE {MAIN_FIX_TABLE} SET {assignments} WHERE marker = ?",
-                (*values.values(), marker),
-            )
+            renewed = connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET claimed_at = ? "
+                "WHERE marker = ? AND state = 'filing' AND claimed_by = ? AND claimed_at > ?",
+                (now, marker, claim, now - CLAIM_SECONDS),
+            ).rowcount
+        if renewed != 1:
+            raise _ClaimLost(marker)
+
+    def _retire_main_fix(self, marker: str) -> None:
+        with self.queue.connect() as connection:
+            connection.execute(f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed' WHERE marker = ?", (marker,))
 
     def _main_fix_body(self, line: _MainLine, base: str, red: MainRed, tag: str) -> str:
         repo = line.project.repo
@@ -1206,21 +1234,39 @@ class Feeder:
         evidence = ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
         return issue_body(repo, base, line.required, red, evidence, tag)
 
-    def _post_main_fix(self, line: _MainLine, row: MainFixRow) -> None:
+    def _post_main_fix(self, line: _MainLine, row: MainFixRow, claim: str) -> None:
         repo = line.project.repo
         try:
             number = self.github.file_repo_issue(
-                repo, row.title, row.body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at
+                repo, row.title, row.body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at,
+                before_post=lambda: self._renew_main_fix(row.marker, claim),
             )
+        except _ClaimLost:
+            self.log(f"feeder: main-fix for {repo}@{row.base} left to the feeder now holding it")
+            return
         except Exception:
             with self.queue.connect() as connection:
                 connection.execute(
                     f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = NULL WHERE marker = ? AND claimed_by = ?",
-                    (row.marker, self.token),
+                    (row.marker, claim),
                 )
             raise
-        self._set_main_fix(row.marker, state="open", issue=number)
-        self.log(f"feeder: filed main-fix {repo}#{number} for red {row.base} at {row.last_head[:8]}")
+        keep = self._close_main_fix_duplicates(repo, row, number)
+        with self.queue.connect() as connection:
+            connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ? WHERE marker = ? AND state != 'closed'",
+                (keep, row.marker),
+            )
+        self.log(f"feeder: filed main-fix {repo}#{keep} for red {row.base} at {row.last_head[:8]}")
+
+    def _close_main_fix_duplicates(self, repo: str, row: MainFixRow, posted: int) -> int:
+        found = (posted, *self.github.marked_issues(repo, row.marker, row.filed_at))
+        keep = min(found)
+        for duplicate in sorted(set(found) - {keep}):
+            self.github.close_issue(
+                repo, duplicate, f"Closing as a duplicate of #{keep}, the main-fix issue for this red streak."
+            )
+        return keep
 
     def _line_stops(
         self,

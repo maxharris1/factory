@@ -2368,6 +2368,47 @@ def test_file_repo_issue_returns_the_marked_issue_without_posting() -> None:
     assert not any("POST" in key for key in gh.keys())
 
 
+def test_file_repo_issue_posts_nothing_when_before_post_raises() -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUES, issues_page("unrelated"))
+
+    def lost() -> None:
+        raise LookupError("claim lost")
+
+    with pytest.raises(LookupError):
+        actions.file_repo_issue(
+            "owner/repo", "Main is red", "body", ("factory:ready",), FOLLOWUP_MARKER,
+            FOLLOWUP_SINCE, before_post=lost,
+        )
+
+    assert gh.keys() == [ISSUES]
+
+
+def test_marked_issues_lists_every_own_marked_issue_lowest_first() -> None:
+    actions, gh = adapter_as_own_login()
+    page = [
+        {"number": 205, "body": FOLLOWUP_MARKER, "user": {"login": OWN_LOGIN}},
+        {"number": 203, "body": "unrelated", "user": {"login": OWN_LOGIN}},
+        {"number": 201, "body": FOLLOWUP_MARKER, "user": {"login": OWN_LOGIN}},
+        {"number": 200, "body": FOLLOWUP_MARKER, "user": {"login": "someone-else"}},
+    ]
+    gh.route(ISSUES, GhResult(0, json.dumps(page), ""))
+
+    assert actions.marked_issues("owner/repo", FOLLOWUP_MARKER, FOLLOWUP_SINCE) == (201, 205)
+
+
+def test_close_issue_comments_then_closes() -> None:
+    actions, gh = adapter()
+    comment = ("-X", "POST", f"{REPO}/issues/307/comments", "-f", "body=Duplicate of #306.")
+    close = ("-X", "PATCH", f"{REPO}/issues/307", "-f", "state=closed")
+    gh.route(comment, GhResult(0, "{}", ""))
+    gh.route(close, GhResult(0, "{}", ""))
+
+    actions.close_issue("owner/repo", 307, "Duplicate of #306.")
+
+    assert gh.keys() == [comment, close]
+
+
 @pytest.mark.parametrize("state", ["open", "closed"])
 def test_issue_state_reads_the_issue(state: str) -> None:
     actions, gh = adapter()

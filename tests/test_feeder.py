@@ -23,6 +23,7 @@ from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
 from lib.feeder import (
     BODY_LIMIT,
+    CLAIM_SECONDS,
     FEEDER_TABLE,
     Feeder,
     IntakeIssue,
@@ -33,7 +34,7 @@ from lib.feeder import (
 )
 from lib.feeder_gates import Progress, Ref, RefStatus
 from lib.followups import has_marker
-from lib.github_actions import GitHubReviewActions
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import Handoff, format_comment, parse_comment
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -273,11 +274,12 @@ class FakeGitHub:
         return dict(self.main_checks.get((repo, branch), {}))
 
     def file_repo_issue(self, repo: str, title: str, body: str, labels, marker: str,
-                        since: float) -> int:
+                        since: float, *, before_post=lambda: None) -> int:
         self._maybe_fail("file_issue")
-        for (filed_repo, number), item in sorted(self.filed.items()):
-            if filed_repo == repo and has_marker(item["body"], marker):
-                return number
+        found = self.marked_issues(repo, marker, since)
+        if found:
+            return found[0]
+        before_post()
         self._next_issue += 1
         number = self._next_issue
         self.filed[(repo, number)] = {"title": title, "body": body, "labels": tuple(labels),
@@ -291,7 +293,15 @@ class FakeGitHub:
         self._maybe_fail("file_issue_after")
         return number
 
-    def close_issue(self, repo: str, number: int) -> None:
+    def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]:
+        return tuple(sorted(
+            number for (filed_repo, number), item in self.filed.items()
+            if filed_repo == repo and has_marker(item["body"], marker)
+        ))
+
+    def close_issue(self, repo: str, number: int, comment: str | None = None) -> None:
+        if comment is not None:
+            self.post_comment(repo, number, comment)
         self.filed[(repo, number)]["state"] = "closed"
         self.issues[repo] = [item for item in self.issues[repo] if item.key != str(number)]
 
@@ -1326,10 +1336,10 @@ def test_two_feeders_on_one_database_file_one_issue(tmp_path: Path) -> None:
     red_main(github)
     post = github.file_repo_issue
 
-    def racing(*args):
+    def racing(*args, **kwargs):
         github.file_repo_issue = post
         other.feed_once()
-        return post(*args)
+        return post(*args, **kwargs)
 
     github.file_repo_issue = racing
     feeder.feed_once()
@@ -1427,7 +1437,7 @@ def test_a_crashed_filer_is_resumed_by_another_feeder_once_its_claim_lapses(
     red_main(github)
     lines, _ = feeder._main_reads(feeder._contexts()[0])
 
-    def crash(*args: object) -> int:
+    def crash(*args: object, **kwargs: object) -> int:
         raise KeyboardInterrupt
 
     github.file_repo_issue = crash
@@ -1482,3 +1492,111 @@ def test_long_failing_test_ids_leave_every_log_tail_in_the_brief(tmp_path: Path)
     assert len(github.filed[MAIN[0], 900]["body"]) <= BODY_LIMIT
     brief = github.posted[MAIN[0], 501][0].body
     assert all(f"TAIL_SENTINEL_JOB_{job}" in brief for job in range(3))
+
+
+def overlap(tmp_path: Path, *, advance: float = 0, slow_logs: bool = False,
+            during_post: bool = False):
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    if slow_logs:
+        github.main_checks[MAIN] = {
+            f"test ({i})": BaseCheck(f"test ({i})", "failure", str(100 + i), str(i), RED_SHA)
+            for i in range(16)
+        }
+
+        def read_logs(repo: str, run_id: str) -> dict[str, str]:
+            now[0] += 59
+            return {f"test ({int(run_id) - 100})": "FIRST_HEAD_LOG\nFIRST_TAIL"}
+
+        github.failed_run_logs = read_logs
+    other = another_feeder(feeder, queue, github)
+    remote: list[dict] = []
+    triggered = [False]
+
+    def interleave() -> None:
+        triggered[0] = True
+        now[0] += advance
+        assert other.feed_once().errors == 0
+
+    def runner(argv, timeout):
+        args = list(argv)[list(argv).index("api") + 1:]
+        if "--paginate" in args:
+            snapshot = list(remote)
+            if not during_post and not triggered[0]:
+                interleave()
+            return GhResult(0, json.dumps(snapshot), "")
+        if args == ["user"]:
+            return GhResult(0, json.dumps({"login": "maxharris1"}), "")
+        assert args[:2] == ["-X", "POST"], args
+        if during_post and not triggered[0]:
+            interleave()
+        fields = dict(arg.split("=", 1) for arg in args if "=" in arg)
+        number = 900 + len(remote)
+        remote.append({"number": number, "body": fields["body"], "user": {"login": "maxharris1"}})
+        github.filed[("owner/app", number)] = {**fields, "state": "open"}
+        github.issues.setdefault("owner/app", []).append(
+            issue(number, body=fields["body"], title=fields["title"],
+                  labels=("factory:ready", "factory:main-fix"), template=False))
+        return GhResult(0, json.dumps({"number": number}), "")
+
+    github.file_repo_issue = GitHubReviewActions(runner=runner).file_repo_issue
+    assert feeder.feed_once().errors == 0
+    return remote, github
+
+
+def open_main_fixes(github: FakeGitHub) -> list[int]:
+    return sorted(n for (_, n), item in github.filed.items() if item["state"] == "open")
+
+
+def test_review_overlapping_feeders(tmp_path: Path) -> None:
+    remote, github = overlap(tmp_path)
+    assert [item["number"] for item in remote] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_review_overlapping_feeders_after_claim_expiry(tmp_path: Path) -> None:
+    remote, github = overlap(tmp_path, advance=CLAIM_SECONDS + 1)
+    assert [item["number"] for item in remote] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_review_claim_already_expired_after_log_reads(tmp_path: Path) -> None:
+    remote, github = overlap(tmp_path, slow_logs=True)
+    assert [item["number"] for item in remote] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_post_in_flight_past_its_lease_is_closed_as_a_duplicate_of_the_lowest(
+    tmp_path: Path,
+) -> None:
+    remote, github = overlap(tmp_path, advance=CLAIM_SECONDS + 1, during_post=True)
+
+    assert [item["number"] for item in remote] == [900, 901]
+    assert open_main_fixes(github) == [900]
+    assert "#900" in github.posted["owner/app", 901][-1].body
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_an_owner_whose_claim_lapsed_before_the_post_does_not_post(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    post = github.file_repo_issue
+
+    def stalled(*args, before_post):
+        github.file_repo_issue = post
+        now[0] += CLAIM_SECONDS + 1
+        before_post()
+        raise AssertionError("posted after its claim lapsed")
+
+    github.file_repo_issue = stalled
+
+    assert feeder.feed_once().errors == 0
+    assert main_fixes(github) == []
+    assert main_fix_rows(tmp_path / "orch.db") == [("filing", None)]
+
+    now[0] += 60
+    assert feeder.feed_once().errors == 0
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]

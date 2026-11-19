@@ -1083,7 +1083,13 @@ streak and a marker line in the issue body keep it to one issue across
 crashes and two feeders. The row stores the title and body rendered from
 the streak's first red read, so a retry posts that head's logs. A feeder
 posts or retires a filing row only while it holds the row's claim, which a
-failed post releases and a crash leaves to lapse after 15 minutes. A green
+failed post releases and a crash leaves to lapse after 15 minutes. The claim
+is stamped when the row is written, after the logs are read, and each claim
+gets its own token. Right before the POST the holder renews it with a
+compare-and-swap on that token and an unexpired lease, and posts nothing if
+that fails. After a POST the feeder lists the issues carrying the marker,
+keeps the lowest, closes any other as its duplicate and records the kept one
+in the row, which covers a POST still in flight when its lease ran out. A green
 read ends the streak; an issue closed while main is still red starts a new
 one. A ticket that waits is `waiting-blocked` with its reason, takes no
 room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that
