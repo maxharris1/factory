@@ -526,11 +526,6 @@ def test_a_process_of_this_user_that_hides_its_cwd_does_not_stop_the_scan(
     assert (jobs / "held" / "repo" / "README").exists()
 
 
-NON_DUMPABLE = (
-    "import ctypes, sys, time; "
-    "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0; "
-    "print('ready', flush=True); time.sleep(60)"
-)
 SPAWNS_NON_DUMPABLE = (
     "import subprocess, sys; "
     "child = subprocess.Popen([sys.executable, '-c', sys.argv[1]], stdout=subprocess.PIPE, text=True); "

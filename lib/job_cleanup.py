@@ -19,9 +19,11 @@ job requeued and claimed since the first read is moved back. The device
 empties each confirmed folder, keeping only its `.orch-worker*` records,
 and moves it back. A device that cannot scan for such processes removes
 nothing. A process whose cwd and files the scan cannot read (a non-dumpable
-one: ssh, an agent, a sandboxed shell) counts as holding what its readable
-parents hold, since it started in its parent's cwd. Its own later chdir into
-a job folder is the one move the scan cannot see.
+one: ssh, an agent, a sandboxed shell) is skipped and does not stop the scan.
+Its folder stays held while a readable process, usually the parent whose cwd
+it started in, still has that folder as its cwd or an open file. A hidden
+process left in a folder after every readable process there has moved away
+or exited is the case the scan misses.
 
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
