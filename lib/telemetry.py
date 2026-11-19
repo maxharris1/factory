@@ -75,6 +75,11 @@ stdout on a pipe and hands the pipe to a `Session` here:
   rollout and of each helper agent's, else the sum of each
   `turn.completed` usage; once a rollout total is in, a later turn no
   longer changes the count.
+* The one value the session writes outside `job_telemetry`: the model
+  Claude Code's first `system` `init` event names goes to
+  `job_exposure.model` (lib/exposure.py, F-01b #1079), replacing whatever
+  F-01a recorded at the job's start when it differs. A missing or malformed
+  report leaves the row as it is.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each
@@ -138,7 +143,7 @@ from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 from lib.codex_rollout import THREAD_ID
 from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
-from lib import lane_limit
+from lib import exposure, lane_limit
 from lib.job_state import USAGE_LIMIT, record_job_event
 from lib.machines_yml import DEFAULT_ORCH_HOST, default_account
 from lib.usage_readings import Reading, parse_codex, parse_rate_limit_event, store
@@ -1275,6 +1280,7 @@ class Summary:
         self._totals = False
         self._last_total_by_thread: dict[str, dict] = {}
         self.thread_id: str | None = None
+        self.model: str | None = None
 
     # -- shared --
 
@@ -1341,6 +1347,8 @@ class Summary:
             return
         if kind == "system":
             subtype = event.get("subtype")
+            if subtype == "init" and self.model is None:
+                self.model = exposure.reported_model(event.get("model"))
             if self.live is not None and isinstance(subtype, str) and subtype in _TASK_EVENTS:
                 self.live.task_event(subtype, event, now)
             return
@@ -1786,6 +1794,7 @@ class Session:
             data = self.row(code, finished=finished)
             with self._lock:
                 readings = list(self.usage.values())
+                model = self.summary.model
             marks = ", ".join("?" for _ in COLUMNS)
             with closing(self.connect()) as connection:
                 with connection:
@@ -1807,6 +1816,9 @@ class Session:
                         account=self.account,
                     )
                     self._record_limit(connection)
+                    was = None if model is None else exposure.report_model(connection, self.job_id, model)
+            if was is not None:
+                self._warn("model", f"exposure: model {model} from the harness's report (was {was})")
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
 
