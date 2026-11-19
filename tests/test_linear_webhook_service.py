@@ -45,7 +45,9 @@ time.sleep(300)
 FAKE_SSH = """#!/usr/bin/env python3
 import fcntl, os, subprocess, sys, time
 if "-G" in sys.argv:
-    print("hostname " + (os.environ.get("FAKE_SSH_G_HOSTNAME") or sys.argv[-1]))
+    target = os.path.join(os.environ["HOME"], "ssh-g-hostname")
+    named = open(target).read().strip() if os.path.exists(target) else ""
+    print("hostname " + (named or os.environ.get("FAKE_SSH_G_HOSTNAME") or sys.argv[-1]))
     print("port 22")
     raise SystemExit(0)
 os.closerange(3, 1024)
@@ -967,7 +969,7 @@ def test_the_held_record_lands_where_health_reads_it_under_an_orch_db_override(
     _wait_for(lambda: len(_calls(home, "ssh")) > 1, timeout=20, what="ssh after start")
 
 
-def _own_address() -> str | None:
+def _own_address(family: str, scope: str) -> str | None:
     try:
         shown = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True, text=True,
                                check=False).stdout
@@ -975,19 +977,29 @@ def _own_address() -> str | None:
         return None
     for line in shown.splitlines():
         fields = line.split()
-        if len(fields) > 3 and fields[1] != "lo" and fields[2] == "inet":
-            return fields[3].partition("/")[0]
+        if (len(fields) > 5 and fields[1] != "lo" and fields[2] == family
+                and fields[4:6] == ["scope", scope]):
+            address = fields[3].partition("/")[0]
+            return address if scope == "global" else f"{address}%{fields[1]}"
     return None
 
 
+SAME_HOST = {
+    "loopback": lambda: "127.0.0.1",
+    "mapped loopback": lambda: "::ffff:127.0.0.1",
+    "own address": lambda: _own_address("inet", "global"),
+    "scoped own address": lambda: _own_address("inet6", "link"),
+}
+
+
 def _same_host(target: str) -> dict[str, str]:
-    hostname = "127.0.0.1" if target == "loopback" else _own_address()
+    hostname = SAME_HOST[target]()
     if hostname is None:
-        pytest.skip("this host has no non-loopback IPv4 address")
+        pytest.skip(f"this host has no {target}")
     return {"FAKE_SSH_G_HOSTNAME": hostname}
 
 
-@pytest.mark.parametrize("target", ["loopback", "own address"])
+@pytest.mark.parametrize("target", SAME_HOST)
 def test_a_tunnel_host_that_is_this_host_runs_the_listener_only(home: Path, target: str) -> None:
     same = _same_host(target)
     for command in ["ensure", "stop", "start", "restart"]:
@@ -1061,6 +1073,37 @@ HELD_RETRY = 1
 HELD_SETTINGS = dict(LINEAR_WEBHOOK_REFUSED_LIMIT="2", LINEAR_WEBHOOK_RETRY_SEC="0.1",
                      LINEAR_WEBHOOK_RETRY_MAX_SEC="0.2",
                      LINEAR_WEBHOOK_HELD_RETRY_SEC=str(HELD_RETRY))
+
+
+@pytest.mark.parametrize("command", ["start", "ensure"])
+@pytest.mark.parametrize("tunnel", ["forwarding", "held"])
+def test_a_tunnel_host_that_becomes_this_host_ends_the_running_tunnel(
+    home: Path, command: str, tunnel: str,
+) -> None:
+    held = _state(home) / "linear-webhook-tunnel.held"
+    settings = {**HELD_SETTINGS, **({"FAKE_SSH_FORWARD_FAIL": "1"} if tunnel == "held" else {})}
+    (home / "ssh-g-hostname").write_text("192.0.2.1")
+    assert _service(home, "start", **settings).returncode == 0
+    if tunnel == "held":
+        _wait_for(held.exists, what="the held record")
+    else:
+        _wait_for(lambda: _forward_owner(home) is not None, what="the forward")
+    forwarder = _forward_owner(home)
+
+    (home / "ssh-g-hostname").write_text("127.0.0.1")
+    result = _service(home, command, **settings)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _loops(home, "_tunnel-loop") == []
+    assert forwarder is None or not alive(forwarder)
+    calls = len(_calls(home, "ssh"))
+    time.sleep(2)
+    assert len(_calls(home, "ssh")) == calls
+    status = _service(home, "status", **settings)
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "listener: running" in status.stdout
+    assert "tunnel: not needed (test-host is this host)" in status.stdout
+    assert health.read_tunnel_held(_state(home) / "orch.db") is None
 
 
 TUNNEL_ID = "0123456789abcdef"

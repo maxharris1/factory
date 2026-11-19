@@ -114,7 +114,8 @@
 #                                pc-wsl-cursor-bot; empty runs no tunnel, and
 #                                so does a host whose `ssh -G` hostname
 #                                resolves to a loopback or own address, which
-#                                also removes the held record)
+#                                also ends a running tunnel loop and removes
+#                                the held record)
 #   LINEAR_WEBHOOK_RETRY_SEC, LINEAR_WEBHOOK_RETRY_MAX_SEC   backoff (above)
 #   ORCH_STATE_DIR               state directory (default ~/.local/state/factory)
 #   ORCH_DB                      default: the state directory's orch.db
@@ -187,6 +188,15 @@ lock_file() { printf '%s/linear-webhook-%s.lock' "$STATE" "$1"; }
 pid_file() { printf '%s/linear-webhook-%s.pid' "$STATE" "$1"; }
 log_file() { printf '%s/linear-webhook-%s.log' "$STATE" "$1"; }
 
+# Print address $1 as connect(2) sees it: no zone, lowercase, and an
+# IPv4-mapped IPv6 address as its IPv4 address.
+plain_address() {
+    local address="${1%%\%*}"
+    address="${address,,}"
+    [[ "$address" =~ ^::ffff:([0-9.]+)$ ]] && address="${BASH_REMATCH[1]}"
+    printf '%s\n' "$address"
+}
+
 tunnel_target() {
     local name addresses own address
     if [[ -z "$TUNNEL_HOST" ]]; then
@@ -200,8 +210,11 @@ tunnel_target() {
     fi
     addresses="$(getent ahosts "$name" 2>/dev/null | awk '{ print $1 }' | sort -u)" || addresses=""
     own="$(ip -o addr show 2>/dev/null | awk '{ sub("/.*", "", $4); print $4 }')" || own=""
+    own="$(for address in $own; do plain_address "$address"; done)"
     for address in $addresses; do
-        if [[ "$address" == 127.* || "$address" == ::1 ]] || grep -qxF -- "$address" <<<"$own"; then
+        address="$(plain_address "$address")"
+        if [[ "$address" == 127.* || "$address" == ::1 || "$address" == 0.0.0.0 || "$address" == :: ]] ||
+            grep -qxF -- "$address" <<<"$own"; then
             echo local
             return 0
         fi
@@ -560,7 +573,10 @@ launch() {
     local mode status=0 target
     mkdir -p "$STATE"
     target="$(tunnel_target)"
-    [[ "$target" == remote ]] || rm -f "$HELD"
+    if [[ "$target" != remote ]]; then
+        end_tunnel "$target" || status=1
+        rm -f "$HELD" "$HOLDER"
+    fi
     for mode in $(modes "$target"); do
         launch_one "$mode" "${1:-}" || status=1
     done
@@ -578,15 +594,16 @@ ensure() {
     launch
 }
 
-# The state directory loop $1 serves, if pid $1 is a loop of this script.
+# The state directory pid $1 serves, if it is a loop of this script, and one
+# of the loops in $2 (default: both).
 loop_state_of() {
-    local i kv home="" state=""
+    local i kv home="" state="" loops="${2:-_listener-loop _tunnel-loop}"
     local -a argv=() environ=()
     mapfile -d '' -t argv 2>/dev/null <"${PROC}/$1/cmdline" || return 1
     for i in 0 1; do
         ((${#argv[@]} > i + 1)) || continue
         [[ "${argv[i]}" =~ (^|/)linear-webhook-service\.sh$ ]] || continue
-        [[ "${argv[i + 1]}" == _listener-loop || "${argv[i + 1]}" == _tunnel-loop ]] || continue
+        [[ " ${loops} " == *" ${argv[i + 1]} "* ]] || continue
         if [[ "${argv[i + 2]:-}" == --state && -n "${argv[i + 3]:-}" ]]; then
             printf '%s\n' "${argv[i + 3]}"
             return 0
@@ -610,14 +627,14 @@ loop_pids() {
     for entry in "$PROC"/[0-9]*; do
         pid="${entry##*/}"
         [[ "$pid" != "$$" ]] || continue
-        [[ "$(loop_state_of "$pid")" == "$STATE" ]] && printf '%s\n' "$pid"
+        [[ "$(loop_state_of "$pid" "${1:-}")" == "$STATE" ]] && printf '%s\n' "$pid"
     done
     return 0
 }
 
 lock_holders() {
     local mode file fd
-    for mode in listener tunnel listener-child tunnel-child; do
+    for mode in ${*:-listener tunnel listener-child tunnel-child}; do
         file="$(lock_file "$mode")"
         [[ -e "$file" ]] || continue
         file="$(readlink -f "$file")"
@@ -765,25 +782,49 @@ end_child() {
     rm -f "$(child_file "$1")"
 }
 
+# SIGTERM the pids given and all their descendants, then SIGKILL any left
+# after STOP_WAIT.
+end_tree() {
+    local pid
+    local -a pids=() left=()
+    mapfile -t pids < <(with_descendants "$@" | grep -vx "$$")
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    if ! wait_gone "$STOP_WAIT" "${pids[@]}"; then
+        for pid in "${pids[@]}"; do
+            alive "$pid" && left+=("$pid")
+        done
+        say "killing ${left[*]}: still running ${STOP_WAIT}s after SIGTERM"
+        kill -KILL "${left[@]}" 2>/dev/null || true
+        wait_gone 5 "${left[@]}" || true
+    fi
+}
+
+# End a tunnel loop and its ssh child left from when the tunnel host needed
+# one (target $1 says why it needs none now), so neither keeps forwarding
+# nor writes the held record again.
+end_tunnel() {
+    local -a roots=()
+    mapfile -t roots < <({ loop_pids _tunnel-loop; lock_holders tunnel tunnel-child; owned_child tunnel || true; } |
+        grep -vx "$$" | sort -un)
+    ((${#roots[@]} == 0)) && return 0
+    end_tree "${roots[@]}"
+    say "stopped tunnel loop ${roots[*]}: $(tunnel_not_needed_why "$1")"
+    if owned_child tunnel >/dev/null || lock_held tunnel || lock_held tunnel-child; then
+        say "the tunnel loop or its ssh child is still running; its forward or held record may come back" >&2
+        return 1
+    fi
+}
+
 stop() {
     local mode status=0 pid found
-    local -a roots=() pids=() left=()
+    local -a roots=()
     mkdir -p "$STATE"
     : >"$STOPPED"
     mapfile -t roots < <({ loop_pids; lock_holders; owned_children; } | grep -vx "$$" | sort -un)
     if ((${#roots[@]} == 0)); then
         say "no linear webhook loop is running"
     else
-        mapfile -t pids < <(with_descendants "${roots[@]}" | grep -vx "$$")
-        kill -TERM "${pids[@]}" 2>/dev/null || true
-        if ! wait_gone "$STOP_WAIT" "${pids[@]}"; then
-            for pid in "${pids[@]}"; do
-                alive "$pid" && left+=("$pid")
-            done
-            say "killing ${left[*]}: still running ${STOP_WAIT}s after SIGTERM"
-            kill -KILL "${left[@]}" 2>/dev/null || true
-            wait_gone 5 "${left[@]}" || true
-        fi
+        end_tree "${roots[@]}"
         say "stopped linear webhook loop(s) ${roots[*]}"
     fi
     for mode in listener tunnel; do
