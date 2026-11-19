@@ -238,6 +238,7 @@ class JobsMixin:
     def reconcile_jobs(self) -> None:
         deferred_grok_jobs: set[str] = set()
         self._close_abandoned_jobs()
+        self._backstop_driver_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
         self._check_devices()
         self._check_job_states()
@@ -285,7 +286,6 @@ class JobsMixin:
         for job in self.queue.unhandled_failures():
             self._t6(job)
         self._ensure_all_stuck_wakes()
-        self._backstop_driver_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
         self._drain_driver_inbox()
 

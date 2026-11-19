@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.attention import DRIVER_WAKE_UNANSWERED
+from lib.dispatcher import Dispatcher, PollCycleFailed
+from lib.github_actions import GitHubAdapterError
 from lib.job_state import JobStateConfig
+from lib.orch_yml import DriverInbox, Project
 from lib.queue import Job
 from tests.test_approver_credential import MAX, load, orch_text
-from tests.test_dispatcher import ANSWERS, GO, QUESTIONS, comment
+from tests.test_dispatcher import ANSWERS, GO, QUESTIONS, FailOnceGrokDelivery, comment, handled_outcome
+from tests.test_driver_inbox import InboxIssue
+from tests.test_poll_once_errors import BrokenSource
 from tests.test_plan_size import SizeFlow
 from tests.test_resume_plan import ResumeFlow
 from tests.test_rounds_and_caps import HEADS
@@ -122,9 +128,8 @@ def test_second_timeout_flags_once(tmp_path: Path) -> None:
         (ANSWERS, "grok-login"),
         (GO.format(state="building"), "grok-login"),
         ("/go\nKeep going.", MAX),
-        (OK, "grok-login"),
     ],
-    ids=["answers", "go", "slash-go", "ok"],
+    ids=["answers", "go", "slash-go"],
 )
 def test_answer_before_timeout_cancels(tmp_path: Path, body: str, author: str) -> None:
     flow, t0 = asked(tmp_path)
@@ -135,6 +140,28 @@ def test_answer_before_timeout_cancels(tmp_path: Path, body: str, author: str) -
 
     assert len(clarify_deliveries(flow)) == 1
     assert flags(flow) == []
+
+
+def test_ok_is_not_an_answer(tmp_path: Path) -> None:
+    flow, t0 = asked(tmp_path)
+    post(flow, t0 + 10 * MINUTE, "ok", OK, "grok-login")
+
+    poll(flow, t0 + 20 * MINUTE)
+    assert len(clarify_deliveries(flow)) == 2
+
+
+def test_edited_answers_does_not_cancel(tmp_path: Path) -> None:
+    flow, t0 = asked(tmp_path)
+    at = t0 + 10 * MINUTE
+    flow.now[0] = at
+    flow.comments.append(replace(comment("answer", ANSWERS, author="grok-login", created_at=at), edited_at=at + 1))
+    flow.dispatcher.process(flow.snapshot())
+    assert handled_outcome(flow.queue, "answer") == "rejected-edited"
+
+    for minutes in (20, 40, 60):
+        poll(flow, t0 + minutes * MINUTE)
+    assert len(clarify_deliveries(flow)) == 2
+    assert len(flags(flow)) == 1
 
 
 def test_answer_after_rewake_clears_flag(tmp_path: Path) -> None:
@@ -157,6 +184,150 @@ def test_untrusted_answers_does_not_cancel(tmp_path: Path) -> None:
 
     poll(flow, t0 + 20 * MINUTE)
     assert len(clarify_deliveries(flow)) == 2
+
+
+def test_retried_first_wake_gets_its_own_rewake(tmp_path: Path) -> None:
+    flow = ResumeFlow(tmp_path, enabled=True)
+    flow.start_build(planned=False)
+    flow.finish_with("10")
+    assert flow.say("10", QUESTIONS, "claude-login") == "waiting-max"
+    delivery = flow.dispatcher.grok_delivery
+
+    class FailFirstAttempt:
+        jobs = delivery.jobs
+
+        def deliver(self, job: Job, *, logical_key: str) -> str:
+            if job.request.attempt == 1:
+                raise RuntimeError("transport down")
+            return delivery.deliver(job, logical_key=logical_key)
+
+    flow.dispatcher.grok_delivery = FailFirstAttempt()
+    flow.dispatcher.reconcile_jobs()
+    poll(flow, flow.now[0] + flow.snapshot().job_timeout_minutes * MINUTE)
+    [retry] = clarify_deliveries(flow)
+    assert retry.request.attempt == 2
+
+    poll(flow, finished_at(flow, retry) + 20 * MINUTE)
+    assert len(clarify_deliveries(flow)) == 2
+    assert flags(flow) == []
+
+
+def settle_by_answer(flow: ResumeFlow) -> None:
+    post(flow, flow.now[0] + MINUTE, "answer", ANSWERS, "grok-login")
+    assert handled_outcome(flow.queue, "answer") == "resumed-build"
+
+
+def settle_by_stuck(flow: ResumeFlow) -> None:
+    with flow.queue.connect() as connection:
+        connection.execute("UPDATE ticket_state SET stuck = 1, stuck_reason = 'manual'")
+
+
+def settle_to(state: str):
+    def settle(flow: ResumeFlow) -> None:
+        with flow.queue.connect() as connection:
+            connection.execute("UPDATE ticket_state SET workflow_state = ?", (state,))
+
+    return settle
+
+
+@pytest.mark.parametrize(
+    "settle",
+    [settle_by_answer, settle_by_stuck, settle_to("capped"), settle_to("awaiting-ok")],
+    ids=["answer", "stuck", "capped", "awaiting-ok"],
+)
+def test_queued_rewake_is_cancelled_once_settled(tmp_path: Path, settle) -> None:
+    flow, t0 = asked(tmp_path)
+    delivery = flow.dispatcher.grok_delivery
+    flow.dispatcher.grok_delivery = FailOnceGrokDelivery()
+    poll(flow, t0 + 20 * MINUTE)
+    [failed] = flow.dispatcher.grok_delivery.jobs
+    with flow.queue.connect() as connection:
+        assert connection.execute("SELECT state FROM jobs WHERE id = ?", (failed.id,)).fetchone()[0] == "queued"
+
+    settle(flow)
+    flow.dispatcher.grok_delivery = delivery
+    poll(flow, t0 + 22 * MINUTE)
+    assert len(clarify_deliveries(flow)) == 1
+
+
+def inbox_flow(tmp_path: Path, issue: InboxIssue) -> ResumeFlow:
+    flow = ResumeFlow(tmp_path, enabled=True)
+    flow.dispatcher.review_actions = issue
+    flow.dispatcher.wake_routes = {
+        "owner/repo": Project("owner/repo", driver_inbox=DriverInbox("owner/repo", 7), grok_webhook=False)
+    }
+    flow.start_build(planned=False)
+    flow.finish_with("10")
+    assert flow.say("10", QUESTIONS, "claude-login") == "waiting-max"
+    flow.dispatcher.reconcile_jobs()
+    return flow
+
+
+def clarify_posts(issue: InboxIssue) -> list[str]:
+    return [body for _, _, body in issue.posts if "**Wake: clarify**" in body]
+
+
+def test_inbox_timeout_starts_at_the_post(tmp_path: Path) -> None:
+    issue = InboxIssue()
+    issue.fail = GitHubAdapterError("inbox down")
+    flow = inbox_flow(tmp_path, issue)
+    t0 = flow.now[0]
+
+    for minutes in (20, 40):
+        poll(flow, t0 + minutes * MINUTE)
+    assert grok_job_count(flow) == 1
+    assert flags(flow) == []
+
+    issue.fail = None
+    poll(flow, t0 + 50 * MINUTE)
+    assert len(clarify_posts(issue)) == 1
+
+    poll(flow, t0 + 70 * MINUTE - 1)
+    assert len(clarify_posts(issue)) == 1
+    poll(flow, t0 + 70 * MINUTE)
+    assert len(clarify_posts(issue)) == 2
+
+
+def test_rewake_waiting_in_the_inbox_is_dropped_once_answered(tmp_path: Path) -> None:
+    issue = InboxIssue()
+    flow = inbox_flow(tmp_path, issue)
+    t0 = flow.now[0]
+    assert len(clarify_posts(issue)) == 1
+
+    issue.fail = GitHubAdapterError("inbox down")
+    poll(flow, t0 + 20 * MINUTE)
+    assert grok_job_count(flow) == 2
+
+    settle_by_answer(flow)
+    issue.fail = None
+    poll(flow, t0 + 25 * MINUTE)
+    assert len(clarify_posts(issue)) == 1
+
+
+def test_failed_read_never_rewakes(tmp_path: Path) -> None:
+    flow, t0 = asked(tmp_path)
+    flow.now[0] = t0 + 20 * MINUTE
+    with pytest.raises(PollCycleFailed):
+        flow.dispatcher.poll_once(BrokenSource(broken="tracked"))
+    assert len(clarify_deliveries(flow)) == 1
+    assert flags(flow) == []
+
+
+def test_restarts_keep_one_rewake_and_one_flag(tmp_path: Path) -> None:
+    flow, t0 = asked(tmp_path)
+    for minutes in (20, 40, 60):
+        prior = flow.dispatcher
+        flow.dispatcher = Dispatcher(
+            flow.queue.path,
+            flow.queue,
+            trusted_logins=prior.trusted_logins,
+            review_actions=prior.review_actions,
+            grok_delivery=prior.grok_delivery,
+            approvals=prior.approvals,
+        )
+        poll(flow, t0 + minutes * MINUTE)
+    assert len(clarify_deliveries(flow)) == 2
+    assert len(flags(flow)) == 1
 
 
 def capped(tmp_path: Path) -> ResumeFlow:
