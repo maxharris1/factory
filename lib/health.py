@@ -24,7 +24,10 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   port another owner holds on the tunnel host (`linear-webhook-tunnel.held`
   beside orch.db, written by deploy/linear-webhook-service.sh, issue #427),
   it runs no ssh, so the tunnel is down whatever answers the public URL, with
-  the reason "port held by another owner: PORT on HOST".
+  the reason "port held by another owner: PORT on HOST". When the tunnel host
+  is this machine, deploy/linear-webhook-service.sh runs no tunnel and removes
+  the held record (#934), so the row is up from the listener's own 405 like
+  any reachable tunnel.
 
 A row (`_COLUMNS`) is one per process: the key holds the pid, so one waiter
 exiting never removes another's row. Every value is an allowlisted name, a
