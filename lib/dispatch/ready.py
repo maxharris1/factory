@@ -752,6 +752,30 @@ class ReadyMixin:
                 f"with no ready or verdict on it: {outcome}"
             )
 
+    def _resume_unannounced_review(self, ticket: TrackedTicket) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._polled.get(key, ticket)
+        head = ticket.current_head
+        state, completed = self._review_context(ticket)
+        if head is None or state not in _UNANNOUNCED_GREEN_STATES or state == "review":
+            return
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT head, detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                  AND state IN ('queued', 'running', 'done')
+                """,
+                key,
+            ).fetchall()
+        if any(
+            _matching_head(str(row["head"] or ""), head)
+            and _detail_field(row["detail"], "source") == _UNANNOUNCED_GREEN_SOURCE
+            and _detail_round_number(row["detail"]) == completed + 1
+            for row in rows
+        ):
+            self._set_workflow_state(ticket, "review")
+
     def _review_unannounced_green(self, ticket: TrackedTicket) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
         ticket = self._polled.get(key, ticket)
@@ -775,7 +799,7 @@ class ReadyMixin:
             ).fetchone()
             jobs = connection.execute(
                 """
-                SELECT action, head, state, detail FROM jobs
+                SELECT action, head, detail FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action IN ('build', 'review')
                 """,
                 key,
@@ -789,12 +813,6 @@ class ReadyMixin:
             if row["action"] == "review" and _matching_head(str(row["head"] or ""), head)
         ]
         if reviews:
-            if state != "review" and any(
-                row["state"] in ("queued", "running")
-                and _detail_field(row["detail"], "source") == _UNANNOUNCED_GREEN_SOURCE
-                for row in reviews
-            ):
-                self._set_workflow_state(ticket, "review")
             return
         if active or any(
             row["action"] == "build"
