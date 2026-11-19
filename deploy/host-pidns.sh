@@ -18,9 +18,47 @@ factory_in_host_pidns() (
         exit 0
     fi
     hint=""
-    [ "${depth:-0}" -gt 1 ] || hint="; if the record is stale, delete ${file} and rerun deploy/install.sh --update from a host shell"
+    [ "${depth:-0}" -gt 1 ] || hint="; if the host restarted without a reboot (for example wsl --terminate), delete ${file} and rerun deploy/install.sh --update from a host shell"
     echo "not the host PID namespace (NSpid: ${nspid:-none}; pid namespace: ${current:-unknown}; recorded host: ${recorded:-none})${hint}" >&2
     exit 1
+)
+
+factory_record_host_pidns() (
+    proc="${ORCH_PROC_DIR:-/proc}"
+    file="${1:-${HOME}/.config/factory/host-pidns}"
+    readlink "${proc}/self/ns/pid" >"$file" || exit 1
+    boot="$(cat "${proc}/sys/kernel/random/boot_id" 2>/dev/null)" || boot=""
+    if [ -n "$boot" ]; then
+        printf '%s\n' "$boot" >"${file}.boot"
+    else
+        rm -f "${file}.boot"
+    fi
+)
+
+# A reboot renumbers namespaces. A sandbox on the same kernel sees the same
+# boot id, and a live service in the recorded namespace means the host is
+# still up, so neither may move the record.
+factory_refresh_host_pidns() (
+    proc="${ORCH_PROC_DIR:-/proc}"
+    file="${1:-${HOME}/.config/factory/host-pidns}"
+    [ -z "${ORCH_JOB_PROOF:-}" ] && [ -z "${CODEX_SANDBOX:-}" ] || exit 1
+    [ -r "${proc}/self/status" ] || exit 1
+    depth="$(awk '/^NSpid:/ { print NF - 1 }' "${proc}/self/status")"
+    [ "${depth:-0}" -le 1 ] || exit 1
+    recorded="$(cat "$file" 2>/dev/null)" || exit 1
+    current="$(readlink "${proc}/self/ns/pid" 2>/dev/null)" || exit 1
+    [ -n "$recorded" ] && [ -n "$current" ] && [ "$recorded" != "$current" ] || exit 1
+    old_boot="$(cat "${file}.boot" 2>/dev/null)" || exit 1
+    boot="$(cat "${proc}/sys/kernel/random/boot_id" 2>/dev/null)" || exit 1
+    [ -n "$old_boot" ] && [ -n "$boot" ] && [ "$old_boot" != "$boot" ] || exit 1
+    for pidfile in "${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"/*.pid; do
+        [ -r "$pidfile" ] || continue
+        pid="$(awk 'NR == 1 { print $1 }' "$pidfile")"
+        case "$pid" in '' | *[!0-9]*) continue ;; esac
+        [ "$(readlink "${proc}/${pid}/ns/pid" 2>/dev/null)" != "$recorded" ] || exit 1
+    done
+    factory_record_host_pidns "$file" || exit 1
+    echo "refreshed ${file} after a reboot: pid namespace ${recorded} -> ${current}, boot id ${old_boot} -> ${boot}" >&2
 )
 
 factory_may_autostart() {
@@ -28,6 +66,7 @@ factory_may_autostart() {
 }
 
 factory_host_pidns_or_refuse() {
+    factory_refresh_host_pidns || true
     factory_in_host_pidns && return 0
     echo "refusing to $1 from a non-host PID namespace" >&2
     exit 4

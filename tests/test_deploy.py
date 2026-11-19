@@ -1176,11 +1176,18 @@ def test_install_update_keeps_the_venv_running_processes_use(
     assert not witness.exists()
 
 
-def _fake_proc(tmp_path: Path, nspid: str, ns: str) -> Path:
+def _fake_proc(tmp_path: Path, nspid: str, ns: str, boot_id: str | None = None,
+               pids: dict[int, str] | None = None) -> Path:
     proc = tmp_path / "fake-proc"
     (proc / "self/ns").mkdir(parents=True)
     (proc / "self/status").write_text(f"Name:\tsh\nNSpid:\t{nspid}\n", encoding="utf-8")
     (proc / "self/ns/pid").symlink_to(ns)
+    if boot_id is not None:
+        (proc / "sys/kernel/random").mkdir(parents=True)
+        (proc / "sys/kernel/random/boot_id").write_text(boot_id + "\n", encoding="utf-8")
+    for pid, pid_ns in (pids or {}).items():
+        (proc / str(pid) / "ns").mkdir(parents=True)
+        (proc / str(pid) / "ns/pid").symlink_to(pid_ns)
     return proc
 
 
@@ -1192,6 +1199,9 @@ def test_install_records_the_host_pid_namespace(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     record = tmp_path / ".config/factory/host-pidns"
     assert record.read_text(encoding="utf-8").strip() == os.readlink("/proc/self/ns/pid")
+    boot = tmp_path / ".config/factory/host-pidns.boot"
+    assert boot.read_text(encoding="utf-8") == Path(
+        "/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8")
     helper = tmp_path / ".local/share/factory/host-pidns.sh"
     assert helper.read_bytes() == (ROOT / "deploy/host-pidns.sh").read_bytes()
 
@@ -1221,6 +1231,35 @@ def test_install_update_keeps_the_host_record_outside_the_host(
     assert again.returncode == 0, again.stderr
     assert "not recording the host PID namespace" in again.stderr
     assert record.read_text(encoding="utf-8").strip() == host
+
+
+@pytest.mark.parametrize(("pids", "refreshed"), [({}, True), ({4242: "pid:[4026531111]"}, False)],
+                         ids=["no-live-service", "live-service-in-recorded-namespace"])
+def test_install_update_refreshes_a_stale_record_after_a_reboot(
+    tmp_path: Path, pids: dict[int, str], refreshed: bool,
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    record = tmp_path / ".config/factory/host-pidns"
+    boot = tmp_path / ".config/factory/host-pidns.boot"
+    record.write_text("pid:[4026531111]\n", encoding="utf-8")
+    boot.write_text("6b1c0c1e-4f0e-4d4a-9b7e-0d3f2a1b9c01\n", encoding="utf-8")
+    (tmp_path / ".local/state/factory/poller.pid").write_text("4242\n", encoding="utf-8")
+    new_boot = "e2a7d9f4-1c3b-4a5e-8f60-7b9d0c2e4a13"
+    environment["ORCH_PROC_DIR"] = str(
+        _fake_proc(tmp_path, "4484", "pid:[4026531836]", new_boot, pids))
+
+    again = _install(environment, "--update")
+
+    assert again.returncode == 0, again.stderr
+    if refreshed:
+        assert record.read_text(encoding="utf-8") == "pid:[4026531836]\n"
+        assert boot.read_text(encoding="utf-8") == new_boot + "\n"
+        assert "not recording" not in again.stderr
+    else:
+        assert record.read_text(encoding="utf-8") == "pid:[4026531111]\n"
+        assert boot.read_text(encoding="utf-8") == "6b1c0c1e-4f0e-4d4a-9b7e-0d3f2a1b9c01\n"
+        assert "not recording the host PID namespace" in again.stderr
 
 
 @pytest.mark.parametrize(
@@ -1297,5 +1336,32 @@ def test_profile_hook_still_runs_in_the_recorded_host_namespace(tmp_path: Path) 
         while not log.exists():
             assert time.monotonic() < deadline, "the hook did not run poller-service.sh ensure"
             time.sleep(0.1)
+    finally:
+        reap_home(tmp_path)
+
+
+def test_profile_hook_refreshes_a_stale_record_after_a_reboot(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
+    record = tmp_path / ".config/factory/host-pidns"
+    record.write_text("pid:[4026531111]\n", encoding="utf-8")
+    (tmp_path / ".config/factory/host-pidns.boot").write_text(
+        "6b1c0c1e-4f0e-4d4a-9b7e-0d3f2a1b9c01\n", encoding="utf-8")
+    env = _profile_env(tmp_path)
+    env.pop("ORCH_JOB_PROOF", None)
+    env.pop("CODEX_SANDBOX", None)
+    env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "4484", "pid:[4026531836]",
+                                          "e2a7d9f4-1c3b-4a5e-8f60-7b9d0c2e4a13"))
+
+    try:
+        sourced = subprocess.run(
+            ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+
+        assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+        assert sourced.stderr == ""
+        assert record.read_text(encoding="utf-8") == "pid:[4026531836]\n"
     finally:
         reap_home(tmp_path)

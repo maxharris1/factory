@@ -1137,15 +1137,23 @@ and `deploy/linear-webhook-service.sh install-autostart` when `orch.yml` or
 source is a no-op) and creates the state directory before any hook writes
 a log there. Its hooks run only in the host PID namespace and outside
 factory jobs (issue #308): `install.sh` records the host namespace in
-`~/.config/factory/host-pidns` once and never replaces a record that
-differs from its own namespace, and a shell whose `NSpid` has more than one
+`~/.config/factory/host-pidns` and the kernel boot id in
+`~/.config/factory/host-pidns.boot`. A shell whose `NSpid` has more than one
 entry, whose namespace differs from that record, or that has `ORCH_JOB_PROOF`
 or `CODEX_SANDBOX` set starts nothing. The poller, waiter, Linear webhook and
 self-heal scripts refuse `start`, `stop`, `restart`, `ensure` and their
 internal loops in a non-host namespace (exit 4), so a sandboxed shell never
-writes its own pids into the host's pidfiles. After a host restart that
-renumbers namespaces (WSL), delete that record and rerun
-`deploy/install.sh --update` from a host shell.
+writes its own pids into the host's pidfiles. A reboot renumbers namespaces
+(issue #932). The profile hook, the service scripts and `install.sh` then
+rewrite both files when the boot id has changed, the shell is not a factory
+job, its `NSpid` has one entry, and no pid in a state-directory `*.pid` file
+still runs in the recorded namespace. A sandbox on the same kernel sees the
+same boot id, so it never moves the record. Two cases still need a hand fix.
+`wsl --terminate` restarts the namespaces but keeps the boot id. A record
+written before #932 has no `.boot` file and never refreshes itself, though
+the next `deploy/install.sh --update` from the host writes one. In either
+case, delete the record and rerun `deploy/install.sh --update` from a host
+shell.
 
 It also retires the launchers that lived outside the repository (issue
 #107): for `~/.local/share/factory/run-poller.sh` and, unless it is already
