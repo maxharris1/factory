@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import getpass
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from types import FrameType
 from typing import Any
 
 from lib import (
+    account_home,
     codex_sandbox,
     containers,
     exposure,
@@ -191,6 +193,7 @@ commands:
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
   trace            read-only: every job attempt on a ticket and its handoff verdict
   usage            per-account usage readings: migrate orch.db, record an external reading (#772)
+  accounts         prepare a bot's account folders (issue #1065)
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
              [--allow-placeholders] [--digest]
@@ -556,6 +559,13 @@ usage record --account ID --window five_hour|seven_day|weekly --used FRACTION
   unknown or non-external account, a bad value, an unknown option, or a
   usage_readings table without the account column (run orch usage
   migrate first); 1 when the database cannot be written.
+
+accounts prepare --device NAME [--account ID] [--machines PATH]
+  Run as each bot on its device. Makes ~/.factory-accounts/<id> mode 700
+  for each account machines.yml signs in there; for claude, links skills,
+  agents, docs, rules and settings.json to ~/.claude. Never replaces an
+  existing file or link and never reads the folder. Exits 2 when refused
+  (another user, unknown device or account, home mismatch), 1 on a conflict.
 """
 
 
@@ -625,6 +635,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_trace, argv[1:])
     if argv[0] == "usage":
         return _call(_usage, argv[1:])
+    if argv[0] == "accounts":
+        return _call(_accounts, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -2837,6 +2849,34 @@ def _usage(argv: list[str]) -> int:
         return 1
     print(f"recorded {reading.account} {reading.window}" if written else "kept newer reading")
     return 0
+
+
+def _accounts(argv: list[str]) -> int:
+    parser = _Parser(prog="orch accounts", add_help=True, allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    prepare = commands.add_parser("prepare", allow_abbrev=False)
+    prepare.add_argument("--device", required=True)
+    prepare.add_argument("--account")
+    prepare.add_argument("--machines", type=Path)
+    args = parser.parse_args(argv)
+    prog = f"orch accounts {args.command}"
+    try:
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        changes = account_home.prepare(
+            machines, args.device, getpass.getuser(), Path.home(), args.account
+        )
+    except ValueError as exc:
+        print(f"{prog}: refused: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 1
+    for change in changes:
+        print(f"{change.action} {change.path}" + (f" ({change.detail})" if change.detail else ""))
+    if not changes:
+        print("ok: nothing to change")
+    return 1 if any(change.action == "conflict" for change in changes) else 0
 
 
 def _db_path(path: Path | None) -> Path:
