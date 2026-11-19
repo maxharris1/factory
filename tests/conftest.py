@@ -30,10 +30,29 @@ import pytest
 LIVE_STATE_ENV_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
 _live_state_env: dict[str, str] = {}
 
+FAST_TEST_FILES: frozenset[str] = frozenset({
+    "test_factory_md.py",
+    "test_orch_yml.py",
+    "test_machines_yml.py",
+    "test_router_skills.py",
+    "test_brief_snapshot.py",
+    "test_brief_wording.py",
+    "test_spec_approved_ready.py",
+    "test_fast_tests.py",
+})
+
 
 def pytest_configure(config: pytest.Config) -> None:
     _live_state_env.update({name: os.environ.pop(name) for name in list(os.environ)
                             if name.startswith(LIVE_STATE_ENV_PREFIXES)})
+    config.addinivalue_line("markers", "fast: a cross-cutting test review.pre_ready runs before a ready counts (#1026)")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if item.path.name in FAST_TEST_FILES:
+            item.add_marker(pytest.mark.fast)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
