@@ -523,3 +523,52 @@ def test_ops_criteria_get_their_own_brief_section(tmp_path: Path) -> None:
     ops = head.split("### Ops step (operator action, not the builder's)")[1]
     assert "It works." in builder and "restarts" not in builder
     assert "Max restarts the poller." in ops
+
+
+
+@pytest.mark.parametrize("value", ["feature", "bug-fix", "refactoring", "perf-issue"])
+def test_a_known_type_line_parses(value: str) -> None:
+    parsed = parse_intake(body(extra=f"Type: {value}"), ())
+    assert parsed.defects == ()
+    assert parsed.ticket_type == value
+
+
+def test_no_type_line_is_accepted_with_no_type() -> None:
+    parsed = parse_intake(body(), ())
+    assert parsed.defects == ()
+    assert parsed.ticket_type is None
+
+
+@pytest.mark.parametrize("value", ["bugfix", "Bug", "fix", ""])
+def test_an_unknown_type_is_refused_naming_the_valid_values(value: str) -> None:
+    parsed = parse_intake(body(extra=f"Type: {value}"), ())
+    (defect,) = parsed.defects
+    assert defect.code == "bad-type"
+    assert "`feature`, `bug-fix`, `refactoring`, `perf-issue`" in defect.reason
+
+
+def test_the_brief_carries_the_type_line(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=body(extra="Type: bug-fix"), template=False)]
+    feeder.feed_once()
+    _, brief = go_and_brief(github)
+    assert "\n- Type: bug-fix\n" in brief
+
+
+def test_a_brief_with_no_type_line_has_none(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=body(), template=False)]
+    feeder.feed_once()
+    _, brief = go_and_brief(github)
+    assert "- Type:" not in brief
+
+
+@pytest.mark.parametrize("example", [
+    "Schema example:\n\n    type: object\n    properties:\n      name:\n        type: string\n",
+    "- A list item.\n\n      Type: object\n",
+    "Config example:\n\n    Risk: high\n    Plan first: yes\n    Depends on: #9\n",
+])
+def test_an_indented_code_example_is_not_ticket_metadata(example: str) -> None:
+    parsed = parse_intake(body(extra=example), ())
+    assert parsed.defects == ()
+    assert (parsed.ticket_type, parsed.risk, parsed.plan_first, parsed.depends_on) == (None, "low", False, "none")

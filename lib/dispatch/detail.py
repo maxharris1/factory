@@ -32,6 +32,7 @@ from lib.handoff import HandoffError, parse_comment
 from lib.max_actions import wait_facts, wait_of
 from lib.queue import Job, JobRequest, job_from_row
 from lib.queue import plan_round as _plan_round
+from lib.ticket_type import ticket_type_of
 from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
@@ -687,6 +688,9 @@ class DetailMixin:
             context["start_head"] = ticket.current_head
         if action in ("plan", "build") and ticket.brief_text:
             context.update(brief_text=ticket.brief_text, brief_url=ticket.brief_url)
+        if action in ("plan", "build", "fix") and ticket.brief_comment is not None:
+            if (ticket_type := ticket_type_of(ticket.brief_comment.body)) is not None:
+                context["ticket_type"] = ticket_type
         if plan_text is not None:
             context["plan_text"] = plan_text
         if action in ("plan", "build") and (answers := self._answers(ticket)):

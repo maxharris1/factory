@@ -108,7 +108,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import NamedTuple, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -150,6 +150,7 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
+from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
@@ -217,6 +218,7 @@ _FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|_
 _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
 _DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
+_TYPE_LINE = re.compile(_FIELD.format(name=r"type"), re.IGNORECASE)
 _OTHER_PRS = (
     re.compile(
         r"\b(?:other|every|all|any)\s+(?:other\s+)?(?:open\s+)?(?:PRs?|pull\s+requests?)\b",
@@ -237,7 +239,7 @@ _OPS_ACTION = re.compile(
 
 @dataclass(frozen=True)
 class Defect:
-    code: str  # no-criteria, other-prs-criterion, no-risk, no-plan-first, no-depends-on
+    code: Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type"]
     reason: str
 
 
@@ -251,13 +253,22 @@ class IntakeTemplate:
     risk_source: str | None = None  # "Risk line" or "risk:high label"
     plan_first: bool | None = None
     depends_on: str | None = None
+    ticket_type: str | None = None
     defects: tuple[Defect, ...] = ()
 
 
 def _unfenced(body: str) -> list[str]:
+    indented = {
+        index
+        for token in _MARKDOWN.parse(body or "")
+        if token.type == "code_block" and token.map
+        for index in range(*token.map)
+    }
     lines: list[str] = []
     fenced = False
-    for line in (body or "").splitlines():
+    for index, line in enumerate((body or "").splitlines()):
+        if index in indented:
+            continue
         if _FENCE.match(line):
             fenced = not fenced
             continue
@@ -374,6 +385,11 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
     depends = _field(lines, _DEPENDS_LINE) or None
     if depends is None:
         defects.append(Defect("no-depends-on", "no `Depends on:` line (`Depends on: none` is fine)"))
+    ticket_type = _field(lines, _TYPE_LINE)
+    if ticket_type is not None and ticket_type not in TICKET_TYPES:
+        valid = ", ".join(f"`{name}`" for name in TICKET_TYPES)
+        defects.append(Defect("bad-type", f"`Type: {ticket_type}` is not one of {valid} (no line means feature)"))
+        ticket_type = None
     return IntakeTemplate(
         criteria=tuple(criteria),
         ops_criteria=tuple(ops),
@@ -381,6 +397,7 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         risk_source=source,
         plan_first=plan_first,
         depends_on=depends,
+        ticket_type=ticket_type,
         defects=tuple(defects),
     )
 
@@ -1685,6 +1702,7 @@ def _brief(
             f"- Ticket: {issue.url or _ticket_name(issue)}",
             f"- PR: #{number} on branch `{branch}` off `{base}`",
             f"- Risk: {risk} (from the ticket's {source or 'intake record'})",
+            *([f"- Type: {template.ticket_type}"] if template.ticket_type else []),
             f"- Start: {state} ({why})",
             f"- Builder: {config.builder_harness}; reviewer: {config.reviewer_harness}",
             "- Questions: the chat that filed this ticket was its questions step. "

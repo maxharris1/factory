@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
-from lib.brief.skills import BUILDER_FILES, REVIEWER_FILES
+from lib.brief.skills import ACTION_FILES, PLAYBOOKS, REVIEWER_FILES, builder_files
+from lib.ticket_type import ticket_type_of
 from lib.pstack_models import brief_lines
 from lib.pstack_pin import load_pin
 from tests.test_brief import job
@@ -65,7 +66,7 @@ def test_the_router_comes_first_and_the_adapter_follows_the_harness() -> None:
     assert f"{FACTORY_ROOT}/skills/pstack/docs/harness/claude-code.md" in claude
     assert f"{FACTORY_ROOT}/skills/factory/harness/codex.md" in codex
     assert f"{FACTORY_ROOT}/skills/factory/harness/codex.md" not in claude
-    assert len(claude) == len(BUILDER_FILES) + 1
+    assert len(claude) == len(builder_files("build", None)) + 1
     assert len(review) == len(REVIEWER_FILES) + 1
 
 
@@ -285,3 +286,94 @@ def test_the_brief_accepts_exactly_the_factory_roots_the_machines_schema_accepts
     if schema_ok:
         named = _named(_brief("build", "claude", {}, factory_root=root))
         assert named and all(path.startswith(root + "/skills/") for path in named)
+
+
+PSTACK = f"{FACTORY_ROOT}/skills/pstack/skills"
+PLAYBOOK_PATH = re.compile(r"/poteto-mode/playbooks/(feature|bug-fix|refactoring|perf-issue)\.md$")
+BUILDER_JOBS = [job_ for job_ in ROUTER_JOBS if job_[0] != "review"]
+HOW = f"{PSTACK}/how/SKILL.md"
+ARCHITECT = f"{PSTACK}/architect/SKILL.md"
+TDD = f"{PSTACK}/tdd/SKILL.md"
+
+
+def _playbooks(text: str) -> list[str]:
+    return [path for path in _named(text) if PLAYBOOK_PATH.search(path)]
+
+
+@pytest.mark.parametrize("ticket_type", ["feature", "bug-fix", "refactoring", "perf-issue"])
+@pytest.mark.parametrize(("action", "recipient", "extra"), BUILDER_JOBS)
+def test_the_ticket_type_picks_exactly_one_pinned_playbook(
+    ticket_type: str, action: str, recipient: str, extra: dict
+) -> None:
+    text = _brief(action, recipient, {**extra, "ticket_type": ticket_type})
+    assert _playbooks(text) == [f"{PSTACK}/poteto-mode/playbooks/{ticket_type}.md"]
+
+
+@pytest.mark.parametrize("ticket_type", [None, "bugfix", "../feature", 3])
+@pytest.mark.parametrize(("action", "recipient", "extra"), BUILDER_JOBS)
+def test_no_type_or_an_unknown_one_reads_the_feature_playbook(
+    ticket_type: object, action: str, recipient: str, extra: dict
+) -> None:
+    typed = {} if ticket_type is None else {"ticket_type": ticket_type}
+    text = _brief(action, recipient, {**extra, **typed})
+    assert _playbooks(text) == [f"{PSTACK}/poteto-mode/playbooks/feature.md"]
+
+
+def test_a_review_brief_names_no_playbook_whatever_the_type() -> None:
+    assert _playbooks(_brief("review", "codex", {"round": "2/3", "ticket_type": "bug-fix"})) == []
+
+
+@pytest.mark.parametrize(("action", "recipient", "extra"), BUILDER_JOBS)
+def test_build_and_fix_briefs_name_tdd_and_plans_name_how_and_architect(
+    action: str, recipient: str, extra: dict
+) -> None:
+    text = _brief(action, recipient, extra)
+    named = _named(text)
+    assert "Test first." not in text
+    if action == "plan":
+        assert HOW in named and ARCHITECT in named
+        assert TDD not in named
+    else:
+        assert TDD in named
+        assert HOW not in named and ARCHITECT not in named
+
+
+def test_the_build_task_points_at_the_tdd_skill() -> None:
+    assert "Write tests first, as the `tdd` skill says." in _brief("build", "claude", {})
+
+
+def test_every_playbook_and_action_file_is_pinned() -> None:
+    pinned = load_pin(ROOT).hashes()
+    for item in (*PLAYBOOKS.values(), *(entry for row in ACTION_FILES.values() for entry in row)):
+        assert item.section == "files"
+        assert item.rel in pinned, item.rel
+        assert (ROOT / "skills" / "pstack" / item.rel).is_file()
+
+
+@pytest.mark.parametrize(("dropped", "path"), [("skills/how/SKILL.md", HOW), ("skills/architect/SKILL.md", ARCHITECT)])
+def test_a_plan_whose_how_or_architect_is_unpinned_fails_closed(tmp_path: Path, dropped: str, path: str) -> None:
+    (tmp_path / "skills").mkdir()
+    lock = (ROOT / "skills" / "skills.lock").read_text(encoding="utf-8")
+    assert f"  {dropped}:" in lock
+    kept = "\n".join(line for line in lock.splitlines() if not line.startswith(f"  {dropped}:"))
+    (tmp_path / "skills" / "skills.lock").write_text(kept + "\n", encoding="utf-8")
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    setup = Path("skills/pstack/skills/setup-pstack/SKILL.md")
+    (tmp_path / setup).parent.mkdir(parents=True)
+    shutil.copy(ROOT / setup, tmp_path / setup)
+    _assert_questions_only(_brief("plan", "claude", {}, pin_root=tmp_path), path)
+    assert "kind=ready" in _brief("build", "claude", {}, pin_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("brief_text", "expected"),
+    [
+        ("**Brief for #7: X** (factory feeder)\n\n- Goal: X\n- Type: bug-fix\n- Start: building\n", "bug-fix"),
+        ("**Brief for #7: X** (factory feeder)\n\n- Goal: X\n- Start: building\n", None),
+        ("**Brief**\n\n- Type: bugfix\n", None),
+        ("**Brief**\n\n- Goal: X\n\n### Ticket\n```\n- Type: perf-issue\n```\n", None),
+        ("**Brief**\n\n### Acceptance criteria\n- Type: perf-issue\n", None),
+    ],
+)
+def test_the_type_comes_only_from_the_briefs_header_lines(brief_text: str, expected: str | None) -> None:
+    assert ticket_type_of(brief_text) == expected

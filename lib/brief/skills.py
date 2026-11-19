@@ -18,6 +18,7 @@ import yaml
 from lib.machines_yml import BOT_TOKEN, workdir_problem
 from lib.pstack_models import brief_lines
 from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
+from lib.ticket_type import TICKET_TYPES
 
 _SKILL_PATH = re.compile(r"^\.claude/skills/[a-z0-9-]+/SKILL\.md$")
 _UNREADABLE = (OSError, ValueError, yaml.YAMLError)
@@ -42,16 +43,12 @@ def _factory(rel: str) -> Pinned:
 
 
 AGENT_FILES = (_pstack("agents/comment-sicko.md"), _pstack("agents/poteto-agent.md"))
-BUILDER_FILES = (
-    _factory("factory-builder/SKILL.md"),
-    _pstack("skills/poteto-mode/SKILL.md"),
-    _pstack("skills/figure-it-out/SKILL.md"),
-    _pstack("skills/poteto-mode/playbooks/feature.md"),
-    _pstack("skills/poteto-mode/playbooks/opening-a-pr.md"),
-    _pstack("skills/principle-prove-it-works/SKILL.md"),
-    _pstack("skills/no-comments/SKILL.md"),
-    *AGENT_FILES,
-)
+PLAYBOOKS = {name: _pstack(f"skills/poteto-mode/playbooks/{name}.md") for name in TICKET_TYPES}
+ACTION_FILES = {
+    "plan": (_pstack("skills/how/SKILL.md"), _pstack("skills/architect/SKILL.md")),
+    "build": (_pstack("skills/tdd/SKILL.md"),),
+    "fix": (_pstack("skills/tdd/SKILL.md"),),
+}
 REVIEWER_FILES = (
     _factory("factory-reviewer/SKILL.md"),
     _pstack("skills/poteto-mode/SKILL.md"),
@@ -78,8 +75,21 @@ class Router:
     role: str
     bot: str
     paths: tuple[str, ...]
-    agents: tuple[str, ...]
     models: str
+
+
+def builder_files(action: str, ticket_type: str | None) -> tuple[Pinned, ...]:
+    return (
+        _factory("factory-builder/SKILL.md"),
+        _pstack("skills/poteto-mode/SKILL.md"),
+        _pstack("skills/figure-it-out/SKILL.md"),
+        PLAYBOOKS[ticket_type or "feature"],
+        *ACTION_FILES.get(action, ()),
+        _pstack("skills/poteto-mode/playbooks/opening-a-pr.md"),
+        _pstack("skills/principle-prove-it-works/SKILL.md"),
+        _pstack("skills/no-comments/SKILL.md"),
+        *AGENT_FILES,
+    )
 
 
 def skill_paths(value: object) -> list[str]:
@@ -88,7 +98,15 @@ def skill_paths(value: object) -> list[str]:
     return [item for item in value if isinstance(item, str) and _SKILL_PATH.fullmatch(item)]
 
 
-def resolve(role: str, bot: str, factory_root: str | None, pin_root: Path = ROOT) -> Router | str:
+def resolve(
+    role: str,
+    bot: str,
+    factory_root: str | None,
+    pin_root: Path = ROOT,
+    *,
+    action: str = "build",
+    ticket_type: str | None = None,
+) -> Router | str:
     """The router for role as bot runs it under factory_root, or why there is none."""
     if factory_root is None:
         return "the placed device has no factory_root"
@@ -103,7 +121,7 @@ def resolve(role: str, bot: str, factory_root: str | None, pin_root: Path = ROOT
     except _UNREADABLE as exc:
         return f"skills/skills.lock cannot be read ({exc})"
     pinned = {"files": pin.hashes(), "factory": pin.factory_hashes()}
-    files = (*(BUILDER_FILES if role == "builder" else REVIEWER_FILES), adapter)
+    files = (*(builder_files(action, ticket_type) if role == "builder" else REVIEWER_FILES), adapter)
     missing = [item.under(factory_root) for item in files if item.rel not in pinned[item.section]]
     if missing:
         return "not in skills/skills.lock: " + ", ".join(f"`{path}`" for path in missing)
@@ -111,8 +129,7 @@ def resolve(role: str, bot: str, factory_root: str | None, pin_root: Path = ROOT
         models = brief_lines(bot.removesuffix("-bot"), pin_root)
     except _UNREADABLE as exc:
         return f"the helper model map cannot be read ({exc})"
-    agents = tuple(item.under(factory_root) for item in AGENT_FILES) if role == "builder" else ()
-    return Router(role, bot, tuple(item.under(factory_root) for item in files), agents, models)
+    return Router(role, bot, tuple(item.under(factory_root) for item in files), models)
 
 
 def _root_problem(factory_root: str) -> str | None:
@@ -149,9 +166,7 @@ def section(router: Router) -> str:
         lines.append(
             "If your harness does not know an agent name the router uses (`comment-sicko`, "
             f"`poteto-agent`), start a general helper ({_GENERAL_HELPER[router.bot]}) and "
-            "tell it first to read and follow the agent file: "
-            + ", ".join(f"`{path}`" for path in router.agents)
-            + "."
+            "tell it first to read and follow the agent file listed above."
         )
     else:
         lines.append(
