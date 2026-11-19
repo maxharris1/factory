@@ -198,7 +198,11 @@ def test_the_closed_probe_reads_only_each_pulls_state(monkeypatch) -> None:
     actions = GitHubReviewActions()
     monkeypatch.setattr(actions, "_json", answer)
 
-    assert actions.closed_pulls("owner/repo", ["1", "2", "3", "4"]) == {"2", "3"}
+    assert actions.pull_states("owner/repo", ["1", "2", "3", "4"]) == {
+        "1": "OPEN",
+        "2": "CLOSED",
+        "3": "MERGED",
+    }
     assert len(queries) == 1
     assert "fragment pull on PullRequest { state }" in queries[0]
 
@@ -441,6 +445,37 @@ def test_a_closed_ref_skips_the_budget_only_on_its_first_read_after_closure() ->
     assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["1"]
 
 
+def test_a_closed_ref_seen_open_by_the_state_probe_skips_the_budget_on_its_next_closure() -> None:
+    now = [100.0]
+    pull = {"state": "closed", "merged": False, "commits": 1}
+    source = slow_source(now, seconds=4, pull=pull)
+    assert read_ids(source, (closed("9"),)) == ["9"]
+
+    pull["state"] = "open"
+    assert source.closed_pulls((active("9"),)) == frozenset()
+    pull["state"] = "closed"
+
+    assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["9", "1"]
+
+
+def _probe_failed(repo: str, numbers: list[str]) -> dict[str, str]:
+    raise GitHubAdapterError("probe failed")
+
+
+@pytest.mark.parametrize(
+    "probe", [_probe_failed, lambda repo, numbers: {}], ids=["probe-failed", "number-missing"]
+)
+def test_a_closed_ref_the_state_probe_did_not_observe_keeps_its_budget(probe) -> None:
+    now = [100.0]
+    source = slow_source(now, seconds=4)
+    assert read_ids(source, (closed("9"),)) == ["9"]
+
+    source.github.pull_states = probe
+    assert source.closed_pulls((active("9"),)) == frozenset()
+
+    assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["1", "2"]
+
+
 def test_a_linear_ticket_held_after_a_full_read_is_probed_by_that_reads_pr(tmp_path: Path) -> None:
     now = [100.0]
     dispatcher, queue = setup(tmp_path, now)
@@ -481,6 +516,60 @@ def test_a_held_linear_ticket_whose_branch_lost_its_pr_ends_from_its_stored_pr(
     assert_ended_from_an_uncached_read(
         dispatcher, queue, gh, "AUT-42", "repos/acme/widgets/pulls/12"
     )
+
+
+def test_a_pr_reopened_only_on_the_state_probe_ends_on_its_next_closure(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "9", "github", now[0])
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    phase = ["empty-closed"]
+    reads: list[str] = []
+
+    def runner(argv, timeout):
+        endpoint = next(
+            (part for part in argv if re.fullmatch(r"repos/acme/widgets/pulls/[0-9]+", part)),
+            None,
+        )
+        if endpoint:
+            reads.append(endpoint)
+            now[0] += 6
+        reopened = phase[0] == "open" or (endpoint and not endpoint.endswith("/9"))
+        gh.pull = {
+            "state": "open" if reopened else "closed",
+            "merged": False,
+            "commits": 0 if phase[0] == "empty-closed" else 1,
+        }
+        return gh(argv, timeout)
+
+    source = live_source(dispatcher, runner, now, tracked_read_budget_seconds=10)
+    dispatcher.poll_once(source)
+    assert outcome(queue, "9") == ("blocked", [])
+
+    phase[0] = "open"
+    now[0] = 160.0
+    reads.clear()
+    dispatcher.poll_once(source)
+    assert outcome(queue, "9") == ("blocked", [])
+    assert "repos/acme/widgets/pulls/9" not in reads
+
+    for number in ("1", "2"):
+        with queue.connect() as connection:
+            connection.execute(
+                "INSERT INTO tracked_tickets VALUES ('acme/widgets', ?, 'github', 0)", (number,)
+            )
+            connection.execute(
+                "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+                "VALUES ('acme/widgets', ?, 'review')",
+                (number,),
+            )
+    phase[0] = "closed-again"
+    now[0] = 220.0
+    dispatcher.poll_once(source)
+
+    assert outcome(queue, "9") == ABANDONED
 
 
 def test_a_newer_open_pr_on_the_branch_supersedes_the_stored_pr(tmp_path: Path) -> None:
