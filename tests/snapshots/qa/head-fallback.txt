@@ -45,7 +45,7 @@ If the health check fails, run the recover command once:
 bash scripts/qa/recover.sh
 ````
 
-Then run the health check again. If it still fails, stop and report `BLOCKED` with its output. Record the last health check result in `doctor`.
+Then run the health check again. If it still fails, stop and report `BLOCKED` with its output. A boot that never reports ready, or a health check that still fails, is never a failed scenario. Drive no further scenario, and mark each scenario not yet run `inconclusive`. Record the last health check result in `doctor`.
 
 ## Driving
 Give input only through the UI at `http://127.0.0.1:8080`. Clicks, typing and navigation in the browser are input. Nothing else is.
@@ -212,7 +212,7 @@ When every scenario is done, write `/tmp/swarm-42/worker-1/result.json` in this 
 }
 ````
 
-`status` is `PASS` when every scenario is verified or needs-human, `BLOCKED` when the health check failed after its one recovery, and `ISSUES` otherwise.
+`status` is `PASS` when every scenario is verified or needs-human, `BLOCKED` when the boot or the health check failed after its one recovery, and `ISSUES` otherwise.
 
 ## Hand-over
 Pack the worker folder into one bundle outside it. Post the bundle, then post `result.json`. Each goes through its own signed form. Run these commands in this order:

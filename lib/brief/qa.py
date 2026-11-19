@@ -248,6 +248,13 @@ def _health(facts: LaneFacts) -> str:
             "factory.md names no doctor command, so the health check is loading "
             f"{code_span(lane.base_url)} and confirming it answers."
         )
+    if facts.verify is not None:
+        check += (
+            f"\n\nThe verify skill `{facts.verify}` that the Driving section names has its own doctor. "
+            "Find the skill as the Driving section says, read its doctor steps, and run them in the second "
+            "worktree after the check above. The health check passes only when both pass. If the skill cannot "
+            "be found or names no doctor, the check above is the whole health check."
+        )
     if lane.recover is not None:
         recover = "If the health check fails, run the recover command once:\n\n" + fenced(lane.recover) + "\n\n"
     else:
@@ -261,6 +268,8 @@ def _health(facts: LaneFacts) -> str:
         "Never drive an instance that has not passed its health check.\n\n"
         f"{recover}"
         "Then run the health check again. If it still fails, stop and report `BLOCKED` with its output. "
+        "A boot that never reports ready, or a health check that still fails, is never a failed scenario. "
+        "Drive no further scenario, and mark each scenario not yet run `inconclusive`. "
         "Record the last health check result in `doctor`."
     )
 
@@ -418,8 +427,8 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
         f"When every scenario is done, write `{_folder(facts)}/{RESULT}` in this shape. Replace each `<...>` "
         "with its value. Give a scenario with no failure an empty `findings` list.\n\n"
         + fenced(json.dumps(skeleton, indent=2, ensure_ascii=False))
-        + "\n\n`status` is `PASS` when every scenario is verified or needs-human, `BLOCKED` when the health "
-        "check failed after its one recovery, and `ISSUES` otherwise."
+        + "\n\n`status` is `PASS` when every scenario is verified or needs-human, `BLOCKED` when the boot or "
+        "the health check failed after its one recovery, and `ISSUES` otherwise."
     )
 
 
