@@ -25,6 +25,7 @@ shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]
 feeder:
   max_holders_per_path: 4
   exclusive_paths: [model/, lib/dispatch/qa.py, lib/brief/review.py]
+  required_checks: ["test (*)"]
 hold:
   approver: maxharris1
   paths:

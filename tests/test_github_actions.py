@@ -2531,6 +2531,10 @@ def base_jobs(run_id: int, page: int = 1) -> tuple[str, ...]:
     return (f"{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}",)
 
 
+def base_run(run_id: int, workflow: int = 1) -> dict[str, object]:
+    return {"id": run_id, "workflow_id": workflow, "head_sha": f"sha{run_id}"}
+
+
 def json_result(document: object) -> GhResult:
     return GhResult(0, json.dumps(document), "")
 
@@ -2542,9 +2546,9 @@ def test_base_checks_reads_each_workflows_latest_completed_run_by_job_name() -> 
         json_result(
             {
                 "workflow_runs": [
-                    {"id": 503, "workflow_id": 1},
-                    {"id": 502, "workflow_id": 2},
-                    {"id": 501, "workflow_id": 1},
+                    base_run(503),
+                    base_run(502, 2),
+                    base_run(501),
                 ]
             }
         ),
@@ -2568,16 +2572,16 @@ def test_base_checks_reads_each_workflows_latest_completed_run_by_job_name() -> 
     checks = actions.base_checks("owner/repo", "release/1")
 
     assert checks == {
-        "test (3/3)": BaseCheck("test (3/3)", "failure", "503", "9001"),
-        "lint": BaseCheck("lint", "success", "503", "9002"),
-        "statechart": BaseCheck("statechart", "timed_out", "502", "9003"),
+        "test (3/3)": BaseCheck("test (3/3)", "failure", "503", "9001", "sha503"),
+        "lint": BaseCheck("lint", "success", "503", "9002", "sha503"),
+        "statechart": BaseCheck("statechart", "timed_out", "502", "9003", "sha502"),
     }
     assert gh.count(base_jobs(501)) == 0
 
 
 def test_base_checks_never_reads_a_run_still_going_on_the_base_tip() -> None:
     actions, gh = adapter()
-    gh.route(BASE_RUNS, json_result({"workflow_runs": [{"id": 501, "workflow_id": 1}]}))
+    gh.route(BASE_RUNS, json_result({"workflow_runs": [base_run(501)]}))
     gh.route(
         base_jobs(501),
         json_result({"jobs": [{"id": 9001, "name": "test (3/3)", "conclusion": "failure"}]}),
@@ -2585,7 +2589,7 @@ def test_base_checks_never_reads_a_run_still_going_on_the_base_tip() -> None:
 
     checks = actions.base_checks("owner/repo", "release/1")
 
-    assert checks == {"test (3/3)": BaseCheck("test (3/3)", "failure", "501", "9001")}
+    assert checks == {"test (3/3)": BaseCheck("test (3/3)", "failure", "501", "9001", "sha501")}
     assert gh.keys() == [BASE_RUNS, base_jobs(501)]
 
 
@@ -2599,7 +2603,7 @@ def test_base_checks_refuses_a_branch_that_is_not_a_plain_name() -> None:
 
 def test_base_checks_reads_a_check_on_the_second_page_of_jobs() -> None:
     actions, gh = adapter()
-    gh.route(BASE_RUNS, json_result({"workflow_runs": [{"id": 501, "workflow_id": 1}]}))
+    gh.route(BASE_RUNS, json_result({"workflow_runs": [base_run(501)]}))
     others = [{"id": 1000 + n, "name": f"other-{n}", "conclusion": "success"} for n in range(100)]
     gh.route(base_jobs(501), json_result({"total_count": 101, "jobs": others}))
     gh.route(
@@ -2612,13 +2616,13 @@ def test_base_checks_reads_a_check_on_the_second_page_of_jobs() -> None:
     checks = actions.base_checks("owner/repo", "release/1")
 
     assert len(checks) == 101
-    assert checks["pytest"] == BaseCheck("pytest", "failure", "501", "1100")
+    assert checks["pytest"] == BaseCheck("pytest", "failure", "501", "1100", "sha501")
 
 
 def test_base_checks_reads_a_workflow_whose_latest_run_is_past_twenty_newer_runs() -> None:
     actions, gh = adapter()
-    runs = [{"id": rid, "workflow_id": 1} for rid in range(522, 502, -1)]
-    gh.route(BASE_RUNS, json_result({"workflow_runs": [*runs, {"id": 502, "workflow_id": 2}]}))
+    runs = [base_run(rid) for rid in range(522, 502, -1)]
+    gh.route(BASE_RUNS, json_result({"workflow_runs": [*runs, base_run(502, 2)]}))
     gh.route(
         base_jobs(522),
         json_result({"jobs": [{"id": 5220, "name": "lint", "conclusion": "success"}]}),
@@ -2637,9 +2641,9 @@ def test_base_checks_reads_a_workflow_whose_latest_run_is_past_twenty_newer_runs
 
 def test_base_checks_reads_a_workflows_latest_run_on_the_second_page_of_runs() -> None:
     actions, gh = adapter()
-    runs = [{"id": rid, "workflow_id": 1} for rid in range(700, 600, -1)]
+    runs = [base_run(rid) for rid in range(700, 600, -1)]
     gh.route(base_runs(1), json_result({"workflow_runs": runs}))
-    gh.route(base_runs(2), json_result({"workflow_runs": [{"id": 600, "workflow_id": 2}]}))
+    gh.route(base_runs(2), json_result({"workflow_runs": [base_run(600, 2)]}))
     gh.route(
         base_jobs(700),
         json_result({"jobs": [{"id": 7000, "name": "lint", "conclusion": "success"}]}),
@@ -2652,8 +2656,8 @@ def test_base_checks_reads_a_workflows_latest_run_on_the_second_page_of_runs() -
     checks = actions.base_checks("owner/repo", "release/1")
 
     assert checks == {
-        "lint": BaseCheck("lint", "success", "700", "7000"),
-        "test": BaseCheck("test", "failure", "600", "6000"),
+        "lint": BaseCheck("lint", "success", "700", "7000", "sha700"),
+        "test": BaseCheck("test", "failure", "600", "6000", "sha600"),
     }
     assert gh.count(base_runs(3)) == 0
 
@@ -2662,7 +2666,7 @@ def test_base_checks_stops_paging_runs_after_three_full_pages() -> None:
     actions, gh = adapter()
     for page in (1, 2, 3, 4):
         first = 1000 - 100 * page
-        runs = [{"id": first + n, "workflow_id": 1} for n in range(100, 0, -1)]
+        runs = [base_run(first + n) for n in range(100, 0, -1)]
         gh.route(base_runs(page), json_result({"workflow_runs": runs}))
     gh.route(
         base_jobs(1000),
@@ -2671,13 +2675,13 @@ def test_base_checks_stops_paging_runs_after_three_full_pages() -> None:
 
     checks = actions.base_checks("owner/repo", "release/1")
 
-    assert checks == {"lint": BaseCheck("lint", "success", "1000", "9000")}
+    assert checks == {"lint": BaseCheck("lint", "success", "1000", "9000", "sha1000")}
     assert [gh.count(base_runs(page)) for page in (1, 2, 3, 4)] == [1, 1, 1, 0]
 
 
 def test_base_checks_has_no_evidence_for_a_workflow_with_no_completed_run() -> None:
     actions, gh = adapter()
-    runs = [{"id": rid, "workflow_id": 1} for rid in range(700, 600, -1)]
+    runs = [base_run(rid) for rid in range(700, 600, -1)]
     gh.route(base_runs(1), json_result({"workflow_runs": runs}))
     gh.route(base_runs(2), json_result({"workflow_runs": []}))
     gh.route(
@@ -2687,5 +2691,5 @@ def test_base_checks_has_no_evidence_for_a_workflow_with_no_completed_run() -> N
 
     checks = actions.base_checks("owner/repo", "release/1")
 
-    assert checks == {"lint": BaseCheck("lint", "success", "700", "7000")}
+    assert checks == {"lint": BaseCheck("lint", "success", "700", "7000", "sha700")}
     assert not base_red([FailedCheck("test", job_id="pr1")], {}, checks, {})

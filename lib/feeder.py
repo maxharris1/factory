@@ -79,6 +79,13 @@ A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
 its `Conflicts with` edges while it waits for a go, and takes its paths back
 on the poll after the round resumes (#270).
 
+Stop the line (#1025): for a project whose factory.md sets
+`feeder.required_checks`, each poll reads its base branch's checks once
+(GitHubIntake.base_checks). While a required check is red there, or the read
+fails, a ticket not started yet is `waiting-blocked` with the red checks and
+head, unless it is labelled `factory:main-fix`. Tickets already feeding or
+fed, and their jobs, go on.
+
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
 that PR merges, with one Grok `blocked` wake per set of such PRs. The branch
@@ -118,7 +125,9 @@ from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
+from lib.dispatch.types import BaseCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
+from lib.evidence.ci import main_red
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
     ATTENTION_REASONS,
@@ -133,6 +142,7 @@ from lib.feeder_gates import (
     blocker_waits,
     github_ref,
     labels,
+    line_stop,
     linear_status,
     parse_gate_lines,
     path_matches,
@@ -470,6 +480,8 @@ class GitHubIntake(Protocol):
 
     def ref_statuses(self, refs: Collection[Ref]) -> Mapping[Ref, RefStatus]: ...
 
+    def base_checks(self, repo: str, branch: str) -> Mapping[str, BaseCheck]: ...
+
 
 class LinearIntake(Protocol):
     def linear_intake(
@@ -514,6 +526,10 @@ class _Candidate:
         if intake is not None and intake.base_branches and self.issue.linear_project is None:
             return None
         return self.project.base_for(self.issue.linear_project) or self.context.config.base_branch
+
+    @property
+    def line(self) -> tuple[str, str | None]:
+        return (self.project.repo.lower(), self.base)
 
     @property
     def tier(self) -> int | None:
@@ -771,6 +787,7 @@ class Feeder:
             [c for c in candidates if c.ref in refused], read_repos, now
         )
         waits, holds, capped, gate_read, unblocks = self._gates(candidates, states, refused)
+        stops, stop_errors = self._line_stops(candidates, states, refused)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
         self._record_priority(candidates, now)
@@ -780,7 +797,7 @@ class Feeder:
         fed: list[TicketRef] = []
         waiting = 0
         blocked = 0
-        errors = read_errors + (0 if gate_read else 1)
+        errors = read_errors + stop_errors + (0 if gate_read else 1)
         for candidate in sorted(candidates, key=lambda item: (
             states[item.ref] not in IN_FLIGHT, *item.order()
         )):
@@ -790,7 +807,11 @@ class Feeder:
             if state in FINAL:
                 continue
             if state in UNSTARTED:
-                wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
+                wait = (
+                    line_stop(stops.get(candidate.line), candidate.issue.labels)
+                    or waits.get(candidate.ref)
+                    or holds.collision(candidate.ref, candidate.lines)
+                )
                 if wait is not None:
                     writes.append(_state_write(candidate, "waiting-blocked", reason=wait.reason))
                     blocked += 1
@@ -940,6 +961,37 @@ class Feeder:
         }
         with self.queue.connect() as connection:
             attention.sync(connection, (INTAKE_REFUSED,), repos, flags, now)
+
+    def _line_stops(
+        self,
+        candidates: Sequence[_Candidate],
+        states: Mapping[Ref, str],
+        refused: Collection[Ref],
+    ) -> tuple[dict[tuple[str, str | None], Wait | None], int]:
+        """Why each base stops the line, read once per poll, and how many
+        reads failed. A failed read stops the line on that base."""
+        stops: dict[tuple[str, str | None], Wait | None] = {}
+        errors = 0
+        for candidate in candidates:
+            required = candidate.context.config.required_checks
+            base = candidate.base
+            if (
+                base is None
+                or not required
+                or candidate.line in stops
+                or states[candidate.ref] not in UNSTARTED
+                or candidate.ref in refused
+            ):
+                continue
+            repo = candidate.project.repo
+            try:
+                red = main_red(self.github.base_checks(repo, base), required)
+                stops[candidate.line] = None if red is None else red.wait
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read main CI for {repo}@{base}: {safe_ship_error(exc)}")
+                stops[candidate.line] = Wait(f"main CI unreadable for {base}")
+        return stops, errors
 
     # -- gates (#156) ----------------------------------------------------------------
 

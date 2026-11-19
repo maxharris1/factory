@@ -170,10 +170,10 @@ def test_a_base_red_hold_that_ends_in_a_plain_red_raises_its_own_item(tmp_path: 
     assert two_hours_later(board) == [on("ci-base-red", pr.head)]
     assert dashboard(board, tmp_path) == {"base_red": 1, "stale": 1}
 
-    board.base = {"pytest-11": BaseCheck("pytest-11", "success", "902", "903")}
+    board.base = {"pytest-11": BaseCheck("pytest-11", "success", "902", "903", "base")}
     board.poll()
     board.red(pr, pr.head, "21", cause="code")
-    board.base = {"pytest-21": BaseCheck("pytest-21", "success", "904", "905")}
+    board.base = {"pytest-21": BaseCheck("pytest-21", "success", "904", "905", "base")}
     board.poll()
     board.finish("claude")
     board.poll()

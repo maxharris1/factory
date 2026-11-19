@@ -46,7 +46,7 @@ class RerunBoard(Board):
         self.base_reads: list[tuple[str, str]] = []
 
     def base_red(self, *names: str) -> None:
-        self.base = {name: BaseCheck(name, "failure", "900", f"9{name}") for name in names}
+        self.base = {name: BaseCheck(name, "failure", "900", f"9{name}", "base") for name in names}
         self.dispatcher.ci_base_checks = self.base_checks
 
     def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
@@ -1116,7 +1116,7 @@ def test_a_partial_batch_keeps_its_accepted_rerun_and_never_repeats_it(tmp_path:
 
 def test_the_base_branch_is_read_once_per_poll_for_every_ticket_on_it(tmp_path: Path) -> None:
     board = RerunBoard(tmp_path)
-    red = {"test (3/3)": BaseCheck("test (3/3)", "failure", "900", "9001")}
+    red = {"test (3/3)": BaseCheck("test (3/3)", "failure", "900", "9001", "base")}
     reads: list[tuple[str, str]] = []
 
     def base_checks(repo: str, base: str) -> dict[str, BaseCheck]:
@@ -1167,7 +1167,7 @@ def test_a_green_base_reruns_the_failed_jobs_then_charges_a_red_that_remains(
     tmp_path: Path,
 ) -> None:
     board, pr, ready = base_red_ready(tmp_path)
-    board.base = {"pytest-11": BaseCheck("pytest-11", "success", "902", "903")}
+    board.base = {"pytest-11": BaseCheck("pytest-11", "success", "902", "903", "base")}
     board.poll()
 
     assert board.reruns == [("owner/repo", RUN)]
@@ -1175,7 +1175,7 @@ def test_a_green_base_reruns_the_failed_jobs_then_charges_a_red_that_remains(
     assert board.state("42")["gate_count"] == 0
 
     board.red(pr, pr.head, "21", cause="code")
-    board.base = {"pytest-21": BaseCheck("pytest-21", "success", "904", "905")}
+    board.base = {"pytest-21": BaseCheck("pytest-21", "success", "904", "905", "base")}
     board.poll()
 
     assert board.outcome(ready) == "queued-ci-fix"
@@ -1235,7 +1235,8 @@ def test_a_third_red_with_a_green_base_still_sticks(tmp_path: Path) -> None:
     for number in (1, 2, 3):
         head = sha(number)
         pr.push(head)
-        board.base = {f"pytest-{number}2": BaseCheck(f"pytest-{number}2", "success", "9", "9")}
+        name = f"pytest-{number}2"
+        board.base = {name: BaseCheck(name, "success", "9", "9", "base")}
         board.red(pr, head, f"{number}1")
         ready = board.ready(pr, head)
         board.poll()
@@ -1401,7 +1402,7 @@ def pytest_failures(*names: str) -> str:
 def test_a_pr_failure_past_the_tenth_base_failure_is_still_held(tmp_path: Path) -> None:
     board, pr = built(tmp_path)
     shared = [f"test_common_{n}" for n in range(10)]
-    board.base = {"pytest-11": BaseCheck("pytest-11", "failure", "900", "9001")}
+    board.base = {"pytest-11": BaseCheck("pytest-11", "failure", "900", "9001", "base")}
     board.dispatcher.ci_base_checks = board.base_checks
     board.dispatcher.ci_logs = lambda repo, run: {
         "pytest-11": pytest_failures(*shared, "test_eleventh")
@@ -1423,7 +1424,7 @@ def test_a_pr_failure_past_the_tenth_base_failure_is_still_held(tmp_path: Path) 
 def test_an_eleventh_pr_failure_the_base_lacks_is_not_held(tmp_path: Path) -> None:
     board, pr = built(tmp_path)
     shared = [f"test_common_{n}" for n in range(10)]
-    board.base = {"pytest-11": BaseCheck("pytest-11", "failure", "900", "9001")}
+    board.base = {"pytest-11": BaseCheck("pytest-11", "failure", "900", "9001", "base")}
     board.dispatcher.ci_base_checks = board.base_checks
     board.dispatcher.ci_logs = lambda repo, run: {
         "pytest-11": pytest_failures(*shared)
@@ -1442,7 +1443,8 @@ def test_a_base_failure_on_the_second_page_of_jobs_holds_the_red(tmp_path: Path)
     def gh(argv, timeout: float) -> GhResult:
         path = next(arg for arg in argv if arg.startswith("repos/"))
         if "/actions/runs?" in path:
-            return GhResult(0, json.dumps({"workflow_runs": [{"id": 900, "workflow_id": 1}]}), "")
+            runs = [{"id": 900, "workflow_id": 1, "head_sha": "base"}]
+            return GhResult(0, json.dumps({"workflow_runs": runs}), "")
         assert "/actions/runs/900/jobs?" in path
         jobs = [{"id": 1000 + n, "name": f"other-{n}", "conclusion": "success"} for n in range(100)]
         jobs.append({"id": 1100, "name": "pytest-11", "conclusion": "failure"})

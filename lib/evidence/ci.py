@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from fnmatch import fnmatchcase
 
 from lib.dispatch.helpers import failed_checks
 from lib.dispatch.types import CHECK_FAILED, BaseCheck, Cause, CIResult, FailedCheck, result_cause
+from lib.feeder_gates import Wait
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
@@ -158,6 +160,35 @@ def base_red(
 
     return bool(failed) and all(map(explained, failed))
 
+
+
+@dataclass(frozen=True)
+class MainRed:
+    head: str
+    checks: tuple[BaseCheck, ...]
+
+    @property
+    def wait(self) -> Wait:
+        names = ", ".join(check.name for check in self.checks)
+        return Wait(f"main is red at {self.head[:8]}: {names}")
+
+
+def main_red(checks: Mapping[str, BaseCheck], required: Sequence[str]) -> MainRed | None:
+    """The base's red checks that match a required job-name glob, at the
+    head of the newest red run."""
+    red = sorted(
+        (
+            check
+            for name, check in checks.items()
+            if check.conclusion in CHECK_FAILED
+            and any(fnmatchcase(name, pattern) for pattern in required)
+        ),
+        key=lambda check: check.name,
+    )
+    if not red:
+        return None
+    newest = max(red, key=lambda check: int(check.run_id))
+    return MainRed(newest.head_sha, tuple(red))
 
 def _tail(text: str, limit: int) -> tuple[str, str | None]:
     from lib.dashboard import redact, redact_key_blocks
