@@ -103,6 +103,12 @@ list. The rest are lifetime counts:
   skill_reads value is counted in skill-reads-unrecorded-<kind> and left
   out of both means; a kind with no recorded job, or a snapshot from
   before the column, prints unrecorded
+- tokens per job kind (plan, build, fix, review), over the same jobs:
+  uncached input (tokens_in less tokens_cached), cached input and output
+  summed from job_telemetry. A job with no telemetry row or tokens_unknown
+  set is counted in tokens-unmeasured-<kind> and left out of the sums; a
+  kind with no measured job, or a snapshot from before tokens_unknown,
+  prints unrecorded
 - helpers per job: #100's job_telemetry tool counts (Agent and Task) over
   Claude jobs. D25 sets no helper cap, so the max is printed too
 - preflight failures: requeued-unstarted job events whose reason is one
@@ -1170,6 +1176,8 @@ REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
 HELPER_TOOLS = ("Agent", "Task")
 SKILL_KINDS = ("plan", "build", "fix", "review")
 SKILL_METRICS = ("router-read-share", "skill-files-per-job", "skill-reads-unrecorded")
+TOKEN_SUMS = ("tokens-input", "tokens-cached", "tokens-output")
+TOKEN_METRICS = (*TOKEN_SUMS, "tokens-unmeasured")
 ROUTER_SKILLS = frozenset({"factory/factory-builder/SKILL.md", "factory/factory-reviewer/SKILL.md"})
 GO_OUTCOMES = (
     *(
@@ -1375,6 +1383,7 @@ def _metric_values(
         )
     )
     values.extend(_skill_read_metrics(connection, tables))
+    values.extend(_token_metrics(connection, tables))
     values.extend(_tool_metrics(connection, tables))
     values.append(("preflight-failures", _preflight_failures(connection, tables)))
     lost = _scalar(
@@ -1859,6 +1868,42 @@ def _skill_read_metrics(
             (f"skill-files-per-job-{kind}", sum(map(len, jobs)) / len(jobs) if jobs else none),
             (f"skill-reads-unrecorded-{kind}", unrecorded[kind]),
         ]
+    return values
+
+
+def _token_metrics(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> list[tuple[str, MetricValue]]:
+    names = [f"{metric}-{kind}" for kind in SKILL_KINDS for metric in TOKEN_METRICS]
+    for table in ("job_telemetry", "jobs"):
+        if table not in tables:
+            return [(name, _missing(table)) for name in names]
+    if "tokens_unknown" not in _columns(connection, "job_telemetry"):
+        return [(name, Unrecorded("no-tokens_unknown-column")) for name in names]
+    sums = {kind: [0, 0, 0] for kind in SKILL_KINDS}
+    measured = dict.fromkeys(SKILL_KINDS, 0)
+    unmeasured = dict.fromkeys(SKILL_KINDS, 0)
+    for action, detail, unknown, *tokens in connection.execute(
+        "SELECT j.action, j.detail, t.job_id IS NULL OR t.tokens_unknown = 1, "
+        "t.tokens_in - t.tokens_cached, t.tokens_cached, t.tokens_out FROM jobs j "
+        "LEFT JOIN job_telemetry t ON t.job_id = j.id "
+        "WHERE j.state IN ('done', 'failed') "
+        f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))})",
+        SKILL_KINDS,
+    ):
+        if _merge_only(detail):
+            continue
+        if unknown:
+            unmeasured[action] += 1
+            continue
+        measured[action] += 1
+        sums[action] = [total + count for total, count in zip(sums[action], tokens)]
+    values: list[tuple[str, MetricValue]] = []
+    for kind in SKILL_KINDS:
+        totals = sums[kind] if measured[kind] else [Unrecorded("no-token-readings")] * 3
+        values += [(f"{metric}-{kind}", total) for metric, total in zip(TOKEN_SUMS, totals)]
+        values.append((f"tokens-unmeasured-{kind}", unmeasured[kind]))
     return values
 
 

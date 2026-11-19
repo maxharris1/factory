@@ -81,16 +81,18 @@ def _telemetry(
     harness: str = "claude",
     elapsed: float = 0.0,
     skill_reads: str | None = None,
+    tokens: tuple[int, int, int] = (0, 0, 0),
+    tokens_unknown: int | None = None,
 ) -> None:
     connection.execute(
         f"""
         INSERT INTO {telemetry.TABLE} (
             job_id, bot, harness, repo, started_at, updated_at, elapsed_seconds,
             events, turns, tool_calls, files_touched, commands, test_runs,
-            tokens_in, tokens_cached, tokens_out, steps, skill_reads
-        ) VALUES (?, 'bot', ?, 'owner/repo', 0, 0, ?, 0, 0, ?, 0, 0, 0, 0, 0, 0, '[]', ?)
+            tokens_in, tokens_cached, tokens_out, steps, skill_reads, tokens_unknown
+        ) VALUES (?, 'bot', ?, 'owner/repo', 0, 0, ?, 0, 0, ?, 0, 0, 0, ?, ?, ?, '[]', ?, ?)
         """,
-        (job_id, harness, elapsed, json.dumps(tools), skill_reads),
+        (job_id, harness, elapsed, json.dumps(tools), *tokens, skill_reads, tokens_unknown),
     )
 
 
@@ -381,6 +383,60 @@ def test_skill_reads_per_job_kind_come_from_files_read_not_the_skill_tool(
             ("router-read-share", "skill-files-per-job", "skill-reads-unrecorded"), values
         )
     }
+
+
+def _token_rows(lines: list[str]) -> dict[str, list[str]]:
+    return {line.split()[0]: line.split()[1:] for line in lines if line.startswith("tokens-")}
+
+
+def test_tokens_per_job_kind_split_input_cached_and_output_and_count_unmeasured_jobs(
+    tmp_path: Path,
+) -> None:
+    _dispatcher, queue = setup(tmp_path / "now")
+    review = _job(queue, "r1", "review", "r1")
+    unknown = _job(queue, "b1", "build", "b1")
+    _job(queue, "b2", "build", "b2", state="failed")
+    _job(queue, "b3", "build", "b3", state="queued")
+    merge_only = _job(queue, "f1", "fix", "f1")
+    with sqlite3.connect(queue.path) as connection:
+        connection.execute(
+            "UPDATE jobs SET detail = ? WHERE id = ?", (json.dumps({"kind": "merge-only"}), merge_only)
+        )
+        telemetry.ensure_table(connection)
+        _telemetry(connection, review, {}, tokens=(1000, 600, 50), tokens_unknown=0)
+        _telemetry(connection, unknown, {}, tokens=(7, 0, 7), tokens_unknown=1)
+        _telemetry(connection, merge_only, {}, tokens=(9, 0, 9), tokens_unknown=0)
+    _dispatcher, old = setup(tmp_path / "o4")
+    with sqlite3.connect(old.path) as connection:
+        telemetry.ensure_table(connection)
+        connection.execute(f"ALTER TABLE {telemetry.TABLE} DROP COLUMN tokens_unknown")
+
+    lines = render_metrics(build_metrics(queue.path), build_metrics(old.path)).splitlines()
+
+    none, old_none = "unrecorded(no-token-readings)", "unrecorded(no-tokens_unknown-column)"
+    assert _token_rows(lines) == {
+        f"{metric}-{kind}": [value, old_none]
+        for kind, values in (
+            ("plan", (none, none, none, "0")),
+            ("build", (none, none, none, "2")),
+            ("fix", (none, none, none, "0")),
+            ("review", ("400", "600", "50", "0")),
+        )
+        for metric, value in zip(
+            ("tokens-input", "tokens-cached", "tokens-output", "tokens-unmeasured"), values
+        )
+    }
+
+
+def test_tokens_without_a_telemetry_table_print_unrecorded(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    _job(queue, "r1", "review", "r1")
+
+    metrics = build_metrics(queue.path)
+    rows = _token_rows(render_metrics(metrics, metrics).splitlines())
+
+    assert len(rows) == 16
+    assert set(map(tuple, rows.values())) == {("unrecorded(no-job_telemetry-table)",) * 2}
 
 
 def test_a_missing_or_corrupt_snapshot_is_an_eval_error(tmp_path: Path) -> None:
