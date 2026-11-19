@@ -612,7 +612,14 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
 
     # The command is spawned behind lib/job_run.py's fixed gate (Codex r1
     # F1.4: it waits until its pid is recorded, then execs the argv as is).
-    from lib import containers, job_run
+    from lib import containers, exposure, job_run
+
+    probes = [argv for argv in started if argv[:2] == ["/bin/sh", "-c"] and argv[3] == exposure.SHELL_NAME]
+    started = [argv for argv in started if argv not in probes]
+    # #1014: the start reads its exposure; the bot's binary runs there only as `--version`.
+    harness_probes = [argv for argv in probes if command[0] in argv[4:]]
+    assert len(harness_probes) == 1, probes
+    assert harness_probes[0][2].endswith('exec "$1" --version') and harness_probes[0][4] == command[0]
 
     def ungated(argv: list[str]) -> list[str]:
         gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
