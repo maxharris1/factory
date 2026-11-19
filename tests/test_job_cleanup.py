@@ -27,6 +27,8 @@ NOW = 1_800_000_000.0
 OLD = NOW - 3 * 86400
 HOUR = 3600.0
 
+pytestmark = pytest.mark.serial
+
 
 class ShellTransport:
     def __init__(self, home: Path):
