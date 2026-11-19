@@ -40,12 +40,10 @@
 #   claim only their own sessions (issue #581).
 # Each loop holds an exclusive flock(1) on its own lock file for its whole
 # life (linear-webhook-listener.lock, linear-webhook-tunnel.lock) and exits 0
-# when the lock stays held for 2 seconds (lock_held takes the lock for a
-# moment to probe it, so a loop starting during a probe waits it out). Locks
-# belong to the open file, not to a pid, so they hold across PID namespaces
-# (sandboxed bot shells share the state directory but not pids). ensure,
-# start and status decide from the locks; the pidfiles are for people only.
-# flock(1) is required.
+# when the lock stays held for 2 seconds. Locks belong to the open file, not
+# to a pid, so they hold across PID namespaces (sandboxed bot shells share
+# the state directory but not pids). ensure, start and status decide from
+# the locks; the pidfiles are for people only. flock(1) is required.
 #
 # Each serve or ssh child also holds a lock of its own
 # (linear-webhook-listener-child.lock, linear-webhook-tunnel-child.lock),
