@@ -16,6 +16,7 @@ from lib.dispatch.constants import (
     CI_SILENT_SECONDS,
     CI_WAIT_REASONS,
     TERMINAL_STATES,
+    UNANNOUNCED_AFTER_CAP,
 )
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
 _CI_RED_READY = frozenset({"queued-ci-fix", "ci-red-in-flight"})
 _RERUN_STATES = (None, "building", "fixing", "review")
 _AFTER_BUILD_STATES = frozenset({"review", "fixing", "awaiting-ok", "handed-off", "merge-queue"})
+_UNANNOUNCED_GREEN_STATES = frozenset({"building", "fixing", "review"})
 _CI_LOG_READS = 64
 
 
@@ -554,11 +556,94 @@ class ReadyMixin:
                 f"with no ready or verdict on it: {outcome}"
             )
 
-    def _latest_trusted_comment(self, ticket: TrackedTicket) -> Comment | None:
+    def _review_unannounced_green(self, ticket: TrackedTicket) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        ticket = self._polled.get(key, ticket)
+        head = ticket.current_head
+        result = ticket.ci.get(head) if head is not None else None
+        if head is None or result is None or result.status != "success":
+            return
+        state, completed = self._review_context(ticket)
+        # Before the first round only the builder's ready starts review: the
+        # push may be its work in progress outside any queued job.
+        if state not in _UNANNOUNCED_GREEN_STATES or completed == 0:
+            return
+        if self._is_stuck(ticket) or self._names_head(ticket, head, ("ready", "verdict")):
+            return
+        with self._connect() as connection:
+            held = connection.execute(
+                """
+                SELECT 1 FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                  AND (paused_action IS NOT NULL OR update_from_head IS NOT NULL)
+                """,
+                key,
+            ).fetchone()
+            reviewed = connection.execute(
+                """
+                SELECT head FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                """,
+                key,
+            ).fetchall()
+            if held or _harness_job_active(connection, key):
+                return
+        if any(_matching_head(str(row["head"] or ""), head) for row in reviewed):
+            return
+        if self._open_job_at(ticket, head):
+            return
+        source = self._latest_trusted_comment(ticket, kinds=("ready", "go"))
+        if source is None:
+            return
+        if self.feeder is not None:
+            base = self.feeder.review_base_unless_stacked(ticket, head)
+            if base is None:
+                return
+            ticket = replace(ticket, factory=replace(ticket.factory, base_branch=base))
+        review_round = completed + 1
+        if review_round > self._effective_cap(ticket):
+            detail = (
+                f"head {head[:12]} was pushed with no ready and went green past the "
+                "review cap; nothing was queued"
+            )
+            with self._connect() as connection:
+                self._flag_attention_once(
+                    connection, ticket.repo, ticket.ticket_id, UNANNOUNCED_AFTER_CAP, detail
+                )
+            self.wake_grok_once(
+                ticket,
+                reason="capped",
+                source_comment_id=source.id,
+                head=head,
+                once_key=f"unannounced:{head}",
+                detail=self._project_wake_detail(ticket, detail),
+            )
+            outcome = f"review round {review_round} is past the cap; flagged"
+        else:
+            self._record_ci_result(ticket, head, "success")
+            self._queue_review(
+                ticket,
+                source,
+                head=head,
+                generation=self._generation(ticket.repo, ticket.ticket_id),
+                source="unannounced-green-head",
+            )
+            self._set_workflow_state(ticket, "review")
+            outcome = f"review round {review_round} queued"
+        if self.log is not None:
+            self.log(
+                f"unannounced green: {ticket.repo}#{ticket.ticket_id} at {head[:12]}: {outcome}"
+            )
+
+    def _latest_trusted_comment(
+        self, ticket: TrackedTicket, kinds: tuple[str, ...] | None = None
+    ) -> Comment | None:
         for comment in sorted(ticket.comments, key=_comment_order, reverse=True):
             try:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
+                continue
+            if kinds is not None and fields["kind"] not in kinds:
                 continue
             outcome = self._handled_outcome(ticket, comment.id)
             if self._trusted_session(ticket, comment, fields) and not (
@@ -969,6 +1054,7 @@ class ReadyMixin:
         generation: int,
         detail: str | None = None,
         update: UpdateScope | None = None,
+        source: str | None = None,
     ) -> tuple[bool, Comment | None]:
         """Queue the next review round for comment, with the later trusted
         verdict that already answered it (_enqueue_step); (False, None), with
@@ -1003,6 +1089,7 @@ class ReadyMixin:
                     round_number=review_round,
                     instruction=detail,
                     update=update,
+                    source=source,
                     rebase=(
                         self._rebase_scope(ticket, comment, head, review_round)
                         if review_round > 1 and update is None

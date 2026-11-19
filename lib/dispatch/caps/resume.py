@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
 from lib.dispatch.helpers import _comment_link, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -36,6 +37,7 @@ class ResumeMixin:
             return True, outcome
         if queued:
             self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
+            self.clear_attention(ticket.repo, ticket.ticket_id, UNANNOUNCED_AFTER_CAP)
         self._write_state_label(ticket, "fixing")
         return True, outcome
 
