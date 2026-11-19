@@ -97,6 +97,27 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           FACTORY_LINUX_POOL: ${{ vars.FACTORY_LINUX_POOL }}
         run: python3 -I lib/ci_route.py
+      - name: local test-1
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'test-1') }}
+        run: 'true'
+      - name: local test-2
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'test-2') }}
+        run: 'true'
+      - name: local test-3
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'test-3') }}
+        run: 'true'
+      - name: local statechart
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'statechart') }}
+        run: 'true'
+      - name: local checks
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'checks') }}
+        run: 'true'
+      - name: local py311-compile
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'py311-compile') }}
+        run: 'true'
+      - name: local macos-pickup
+        if: ${{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), 'macos-pickup') }}
+        run: 'true'
 
   macos:
     needs: changes

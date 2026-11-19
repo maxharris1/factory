@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib.ci_route import SLOTS
+from lib.ci_route import SLOTS, grant_step
 from lib.factory_md import load_factory_md
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,11 +136,23 @@ def test_the_changes_step_reads_the_pr_shas_from_env_and_fetches_full_history() 
     assert checkout["with"] == {"fetch-depth": 0}
     assert "if" not in checkout
     assert changes["if"] == FORK_GUARD
-    assert [each for each in changes["steps"] if "if" in each] == [step]
+    route_at = next(index for index, each in enumerate(changes["steps"]) if each.get("id") == "route")
+    assert [each for each in changes["steps"][:route_at] if "if" in each] == [step]
     assert step["if"] == "github.event_name == 'pull_request'"
-    route = changes["steps"][-1]
+    route = changes["steps"][route_at]
     assert route == {"id": "route", "env": ROUTE_ENV, "run": "python3 -I lib/ci_route.py"}
     assert not any(each.get("uses", "").startswith("astral-sh/setup-uv@") for each in changes["steps"])
+
+
+def test_the_changes_job_ends_by_marking_each_slot_the_route_kept_local() -> None:
+    steps = _workflow()["jobs"]["changes"]["steps"]
+    route_at = next(index for index, each in enumerate(steps) if each.get("id") == "route")
+    assert steps[route_at + 1:] == [
+        {"name": grant_step(slot),
+         "if": f"${{{{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), '{slot}') }}}}",
+         "run": "true"}
+        for slot in SLOTS
+    ]
 
 
 def test_macos_runs_on_every_non_pr_event_and_on_prs_the_changes_job_flags() -> None:

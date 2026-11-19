@@ -662,6 +662,8 @@ def test_the_runner_docs_state_the_per_run_routing_ci_uses(doc: str) -> None:
         "If a pool job has been queued over 3 minutes and no pool job is running, `free` is 0 and every slot goes hosted.",
         "The `changes` job runs on `ubuntu-latest` on every event, with `actions: read` and `contents: read` and only `github.token`.",
         "`changes` is one billed hosted job per run",
+        "A run whose `local <slot>` steps have all finished reserves the slots it kept local, so a run that sent every slot hosted reserves none.",
+        "An earlier run whose steps have not all finished has not routed yet and reserves all 7 slots.",
         '"Re-run failed jobs" reuses the earlier `changes` output, so each job goes back where it ran.',
         "`FACTORY_LINUX_POOL`",
         "`lib/ci_route.py`",

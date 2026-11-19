@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 import lib.ci_route as ci_route
-from lib.ci_route import SLOTS, STALL_AFTER, Job, Route, decide, parse_job, reserved_slots
+from lib.ci_route import SLOTS, STALL_AFTER, Job, Route, decide, grant_step, parse_job, reserved_slots
 
 NOW = datetime(2026, 11, 17, 22, 45, 0, tzinfo=timezone.utc)
 OWN = 500
@@ -31,6 +31,12 @@ RUNS = "/repos/maxharris1/factory/actions/runs"
 def job(name: str = "test (1/3)", status: str = "in_progress", *, run_id: int = EARLIER,
         labels: tuple[str, ...] = POOL, age: timedelta = timedelta(seconds=30)) -> Job:
     return Job(run_id=run_id, name=name, status=status, labels=labels, created_at=NOW - age)
+
+
+def routed(local: int, *, run_id: int = EARLIER) -> Job:
+    marks = tuple((grant_step(slot), "success" if rank < local else "skipped") for rank, slot in enumerate(SLOTS))
+    return dataclasses.replace(job("changes", run_id=run_id, labels=("ubuntu-latest",)),
+                               finished_steps=(("route", "success"), *marks))
 
 
 def busy(count: int) -> list[Job]:
@@ -101,6 +107,36 @@ def test_an_earlier_run_that_routed_but_lists_no_slot_jobs_reserves_every_slot()
     reserved = reserved_slots(OWN, earlier)
     assert reserved == len(SLOTS)
     assert hosted(3, earlier, reserved) == SLOTS
+
+
+def test_parse_job_keeps_only_finished_steps() -> None:
+    raw = {"run_id": 7, "name": "changes", "status": "in_progress", "labels": ["ubuntu-latest"],
+           "created_at": "2026-11-17T22:41:07Z", "steps": [
+               {"name": "route", "status": "completed", "conclusion": "success", "number": 4},
+               {"name": "local test-1", "status": "completed", "conclusion": "skipped", "number": 5},
+               {"name": "local test-2", "status": "queued", "conclusion": None, "number": 6}]}
+    assert parse_job(raw).finished_steps == (("route", "success"), ("local test-1", "skipped"))
+
+
+def test_an_earlier_run_that_routed_everything_hosted_reserves_nothing() -> None:
+    first = decide(SLOTS, 3, busy(3), reserved_slots(OWN, busy(3)), NOW)
+    assert first.hosted == SLOTS
+    earlier = [routed(len(SLOTS) - len(first.hosted))]
+    reserved = reserved_slots(OWN, earlier)
+    assert reserved == 0
+    assert hosted(3, earlier, reserved) == SLOTS[3:]
+
+
+@pytest.mark.parametrize("local", [0, 1, 3, 7])
+def test_a_routed_run_with_no_slot_jobs_reserves_exactly_its_local_grants(local: int) -> None:
+    assert reserved_slots(OWN, [routed(local)]) == local
+    assert reserved_slots(OWN, [routed(local, run_id=LATER)]) == local
+
+
+def test_a_run_whose_grants_are_not_all_marked_yet_still_reserves_every_slot() -> None:
+    partial = dataclasses.replace(routed(3), finished_steps=routed(3).finished_steps[:3])
+    assert reserved_slots(OWN, [partial]) == len(SLOTS)
+    assert reserved_slots(OWN, [dataclasses.replace(partial, run_id=LATER)]) == 0
 
 
 def test_a_later_run_never_reserves_for_an_earlier_one() -> None:
@@ -198,10 +234,17 @@ def api_run(run_id: int, status: str = "in_progress") -> dict:
     return {"id": run_id, "name": "ci", "status": status, "event": "pull_request", "run_attempt": 1}
 
 
-def api_job(name: str, status: str, run_id: int = EARLIER) -> dict:
+def api_job(name: str, status: str, run_id: int = EARLIER, *, labels: tuple[str, ...] = POOL,
+            steps: list[dict] | None = None) -> dict:
     created = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"id": run_id * 10 + len(name), "run_id": run_id, "name": name, "status": status, "conclusion": None,
-            "labels": list(POOL), "created_at": created, "started_at": created, "workflow_name": "ci"}
+            "labels": list(labels), "created_at": created, "started_at": created, "workflow_name": "ci",
+            "steps": steps or []}
+
+
+def api_marks(hosted: tuple[str, ...]) -> list[dict]:
+    return [{"name": grant_step(slot), "status": "completed", "number": rank + 5,
+             "conclusion": "skipped" if slot in hosted else "success"} for rank, slot in enumerate(SLOTS)]
 
 
 def github_env(api_url: str) -> dict[str, str]:
@@ -241,6 +284,17 @@ def test_main_routes_from_the_runs_it_reads(tmp_path: Path, api: SimpleNamespace
     assert "::warning::" not in result.stdout
     assert output == f"hosted={json.dumps(list(expected), separators=(',', ':'))}\n"
     assert api.methods and set(api.methods) == {"GET"}
+
+
+def test_main_gives_idle_runners_to_a_run_after_one_that_routed_all_hosted(tmp_path: Path,
+                                                                          api: SimpleNamespace) -> None:
+    serve_runs(api, [api_job("changes", "in_progress", labels=("ubuntu-latest",), steps=api_marks(SLOTS))])
+    result, output = run_router(tmp_path, github_env(api.url))
+    assert result.stdout.splitlines() == [
+        "ci_route: online=3 claimed=0 reserved=0 free=3 "
+        "hosted=['statechart', 'checks', 'py311-compile', 'macos-pickup']"
+    ]
+    assert output == f"hosted={json.dumps(list(SLOTS[3:]), separators=(',', ':'))}\n"
 
 
 def test_main_prints_the_route_it_took(tmp_path: Path, api: SimpleNamespace) -> None:

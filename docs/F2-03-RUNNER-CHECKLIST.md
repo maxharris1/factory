@@ -119,7 +119,7 @@ more. Max deletes it with
   admin), so no secret is added to Actions.
 - **Who reads it.** The `changes` job runs on `ubuntu-latest` on every
   event, with `actions: read` and `contents: read` and only `github.token`.
-  It holds no secret. Its last step, `route`, runs
+  It holds no secret. Its step `route` runs
   `python3 -I lib/ci_route.py`, which reads `vars.FACTORY_LINUX_POOL` and
   the Actions runs API. It writes the output `hosted`, a JSON list of slot
   names, and logs
@@ -128,8 +128,13 @@ more. Max deletes it with
   `test-1`, `test-2`, `test-3`, `statechart`, `checks`, `py311-compile`,
   `macos-pickup`. The router computes `free = online - claimed - reserved`.
   `claimed` counts other runs' pool jobs that are queued or in progress.
-  `reserved` holds 7 slots for each earlier run that lists `changes` but no
-  slot jobs yet. Jobs in the same run count by rank, so the first `free`
+  After `route`, the `changes` job runs one step `local <slot>` per slot,
+  and each step succeeds only when `route` kept its slot local. `reserved`
+  covers each other run that lists `changes` but no slot jobs yet. A run
+  whose `local <slot>` steps have all finished reserves the slots it kept
+  local, so a run that sent every slot hosted reserves none. An earlier run
+  whose steps have not all finished has not routed yet and reserves all 7
+  slots. Jobs in the same run count by rank, so the first `free`
   slots run local and the rest go into `hosted`.
 - **Stall guard.** If a pool job has been queued over 3 minutes and no pool
   job is running, `free` is 0 and every slot goes hosted. This catches a
