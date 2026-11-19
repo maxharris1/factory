@@ -483,6 +483,23 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
     assert state(queue, job_id) == "running"  # job run never finishes the job
 
 
+def test_a_remote_claude_runs_reported_model_lands_in_the_boxs_job_exposure(tmp_path: Path) -> None:
+    machines, queue, _pool, job_id, ssh = remote_setup(tmp_path, "claude")
+    init = '{"type":"system","subtype":"init","model":"claude-opus-5-5"}'
+    proc = orch(
+        "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"), "--machines", str(machines),
+        "--", sys.executable, "-c", f"print({init!r})",
+        env={**ssh.env(), "ORCH_TELEMETRY": "on"},
+    )
+    _, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, err
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job_id)
+    assert recorded is not None and recorded.model == "claude-opus-5-5", err
+    assert "exposure: model claude-opus-5-5 from the harness's report (was unknown)" in err
+
+
 def test_only_the_owning_bot_starts_a_remote_job(tmp_path: Path) -> None:
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
     marker = tmp_path / "ran"

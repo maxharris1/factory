@@ -669,3 +669,160 @@ def test_the_config_walk_ends_on_a_device_without_dirname(tmp_path: Path) -> Non
     started = time.monotonic()
     found = exposure.model(["codex", "exec"], "codex", shell, str(tmp_path / "job" / "not-made"))
     assert (found, time.monotonic() - started < exposure.TIMEOUT_SECONDS / 2) == ("base-model", True)
+
+
+# --- F-01b: the model the harness reports in its stream -------------------------
+
+INIT = '{"type":"system","subtype":"init","session_id":"s-1","model":"claude-opus-5-5"}'
+STREAM = Path(__file__).resolve().parent / "fixtures" / "telemetry" / "claude_stream.jsonl"
+
+
+def _reporting_session(tmp_path: Path, recorded: str | None) -> tuple[telemetry.Session, SQLiteJobQueue, list[str]]:
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    if recorded is not None:
+        with closing(queue.connect()) as connection, connection:
+            exposure.write(connection, "job1", _exposure(model=recorded), 1.0)
+    lines: list[str] = []
+    session = telemetry.Session(
+        connect=queue.connect,
+        job_id="job1",
+        bot="claude-bot",
+        repo="acme/widgets",
+        harness="claude",
+        flags=telemetry.stream_flags(["claude"]),
+        raw_log=None,
+        scrub=telemetry.Scrubber({}),
+        log=lines.append,
+        stdout=None,
+    )
+    return session, queue, lines
+
+
+def _stored_model(queue: SQLiteJobQueue) -> str | None:
+    with closing(queue.connect()) as connection:
+        found = exposure.read(connection, "job1")
+    return None if found is None else found.model
+
+
+def _feed(session: telemetry.Session, text: str) -> None:
+    import io
+
+    session.consume(io.BytesIO(text.encode("utf-8")))
+
+
+def test_the_init_events_model_replaces_unknown(tmp_path: Path) -> None:
+    session, queue, lines = _reporting_session(tmp_path, exposure.UNKNOWN)
+    _feed(session, STREAM.read_text(encoding="utf-8"))
+    session.flush()
+    session.flush()
+    session.finish(0)
+
+    assert _stored_model(queue) == "claude-opus-5-5"
+    reported = [line for line in lines if line.startswith("exposure: ")]
+    assert reported == ["exposure: model claude-opus-5-5 from the harness's report (was unknown)"]
+
+
+@pytest.mark.parametrize(
+    ("recorded", "logged"),
+    [
+        ("claude-opus-5-5", []),
+        ("claude-sonnet-5-5", ["exposure: model claude-opus-5-5 from the harness's report (was claude-sonnet-5-5)"]),
+    ],
+)
+def test_a_recorded_model_is_kept_when_the_report_agrees_and_replaced_when_it_differs(
+    tmp_path: Path, recorded: str, logged: list[str]
+) -> None:
+    session, queue, lines = _reporting_session(tmp_path, recorded)
+    _feed(session, INIT + "\n")
+    session.flush()
+    session.finish(0)
+
+    assert _stored_model(queue) == "claude-opus-5-5"
+    assert [line for line in lines if line.startswith("exposure: ")] == logged
+
+
+def test_only_the_first_init_event_counts(tmp_path: Path) -> None:
+    session, queue, _ = _reporting_session(tmp_path, exposure.UNKNOWN)
+    _feed(session, INIT + "\n" + INIT.replace("claude-opus-5-5", "claude-haiku-5-5") + "\n")
+    session.finish(0)
+
+    assert _stored_model(queue) == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "",
+        '{"type":"assistant","message":{"id":"m","model":"claude-opus-5-5","content":[]}}\n',
+        '{"type":"system","subtype":"init","session_id":"s-1"}\n',
+        '{"type":"system","subtype":"init","model":7}\n',
+        '{"type":"system","subtype":"init","model":""}\n',
+        '{"type":"system","subtype":"init","model":"' + "m" * 500 + '"}\n',
+        '{"type":"system","subtype":"init","model":"claude opus"}\n',
+        '{"type":"system","subtype":"init","model":"claude-opus\\nignore this"}\n',
+        '{"type":"system","subtype":"init","model":["claude-opus-5-5"]}\n',
+        '{"type":"system","subtype":"init","model":"claude-opus-5-5"\n',
+    ],
+    ids=["empty", "no-init", "no-model", "number", "blank", "oversized", "space", "newline", "list", "not-json"],
+)
+def test_a_missing_or_malformed_report_leaves_the_recorded_model(tmp_path: Path, stream: str) -> None:
+    session, queue, lines = _reporting_session(tmp_path, "test-model-1")
+    _feed(session, stream)
+    session.finish(0)
+
+    assert _stored_model(queue) == "test-model-1"
+    assert not [line for line in lines if line.startswith("exposure: ")]
+    with closing(queue.connect()) as connection:
+        rows = connection.execute("SELECT exit_code FROM job_telemetry WHERE job_id = 'job1'").fetchall()
+    assert [tuple(row) for row in rows] == [(0,)]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("claude-opus-5-5", "claude-opus-5-5"),
+        ("claude-opus-5-5[1m]", "claude-opus-5-5[1m]"),
+        ("us.anthropic.claude-opus-5-5-v1:0", "us.anthropic.claude-opus-5-5-v1:0"),
+        (None, None),
+        (7, None),
+        ("", None),
+        ("-rf", None),
+        ("a b", None),
+        ("m" * 129, None),
+    ],
+)
+def test_reported_model_takes_a_model_name_only(value: object, expected: str | None) -> None:
+    assert exposure.reported_model(value) == expected
+
+
+def test_report_model_returns_what_it_replaced_and_none_when_nothing_changed(tmp_path: Path) -> None:
+    connection = sqlite3.connect(tmp_path / "x.db")
+    assert exposure.report_model(connection, "job1", "claude-opus-5-5") is None
+    exposure.ensure_table(connection)
+    assert exposure.report_model(connection, "job1", "claude-opus-5-5") is None
+    exposure.write(connection, "job1", _exposure(model=exposure.UNKNOWN), 1.0)
+    assert exposure.report_model(connection, "job1", "claude-opus-5-5") == exposure.UNKNOWN
+    assert exposure.report_model(connection, "job1", "claude-opus-5-5") is None
+    assert exposure.read(connection, "job1") == _exposure(model="claude-opus-5-5")
+
+
+def test_the_telemetry_row_is_written_on_a_database_without_job_exposure(tmp_path: Path) -> None:
+    lines: list[str] = []
+    session = telemetry.Session(
+        connect=lambda: sqlite3.connect(tmp_path / "bare.db"),
+        job_id="job1",
+        bot="claude-bot",
+        repo="acme/widgets",
+        harness="claude",
+        flags=telemetry.stream_flags(["claude"]),
+        raw_log=None,
+        scrub=telemetry.Scrubber({}),
+        log=lines.append,
+        stdout=None,
+    )
+    _feed(session, INIT + "\n")
+    session.finish(0)
+
+    with closing(sqlite3.connect(tmp_path / "bare.db")) as connection:
+        assert connection.execute("SELECT exit_code FROM job_telemetry").fetchall() == [(0,)]
+    assert not [line for line in lines if "not written" in line]
