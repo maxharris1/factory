@@ -20,6 +20,7 @@ WRITERS = {
     "terminal": "lib/dispatch/tracking.py",
     "enter-merged": "lib/dispatch/tracking.py",
     "t5-abandoned": "lib/dispatch/jobs.py",
+    "answers-handoff": "lib/dispatch/jobs.py",
     "t5-questions": "lib/dispatch/questions.py",
     "t5-answers": "lib/dispatch/questions.py",
     "ship-intent": "lib/dispatch/ship.py",

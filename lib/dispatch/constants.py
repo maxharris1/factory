@@ -26,6 +26,8 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 HANDED_OFF_EXTERNALLY = "handed-off-externally"
+# #891: the states Max may hand off from the dashboard, besides any stuck started one.
+MAX_HANDOFF_FROM = ("waiting-max", "awaiting-ok", "capped", "blocked", "waiting-external")
 SETTLE_CLEARS = {
     "stuck": 0,
     "stuck_reason": None,

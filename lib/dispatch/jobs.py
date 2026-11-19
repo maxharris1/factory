@@ -21,7 +21,10 @@ from lib.device_pool import (
 )
 from lib.dispatch.constants import (
     HANDED_OFF_EXTERNALLY,
+    MAX_HANDOFF_FROM,
+    SETTLE_CLEARS,
     STUCK_WAKE_FAILURE_LIMIT,
+    TERMINAL_STATES,
     _ABANDONED_JOB_DETAIL,
 )
 from lib.dispatch.helpers import (
@@ -44,6 +47,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
+from lib.dispatch.linear_states import NOT_STARTED
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     BaseMismatch,
@@ -123,6 +127,19 @@ def _harnesses_a_lagging_source_checkout_refuses_everywhere(
     )
 
 
+def _may_hand_off(state: str | None, stuck: bool, paused_action: str | None) -> bool:
+    if state == "waiting-max" and paused_action is None:
+        return False
+    if state in MAX_HANDOFF_FROM:
+        return True
+    return (
+        stuck
+        and state not in NOT_STARTED
+        and state not in TERMINAL_STATES
+        and state not in ("handed-off", HANDED_OFF_EXTERNALLY)
+    )
+
+
 class JobsMixin:
     def _t5_abandoned(
         self,
@@ -151,6 +168,52 @@ class JobsMixin:
         self._log_abandoned_jobs(closed)
         self._write_state_label(ticket, "abandoned")
         return "abandoned"
+
+    def _t5_handed_off(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> str:
+        """#891: an approver's answers state=handed-off hands off a ticket that waits on Max."""
+        if not (
+            self.approvals.may_approve(comment.author)
+            and self._trusted(ticket, comment, fields, "grok-bot", role="orchestrator")
+        ):
+            return "rejected-handoff-author"
+        repo, ticket_id = ticket.repo.lower(), ticket.ticket_id
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_state, stuck, paused_action FROM ticket_state"
+                " WHERE repo = ? AND ticket_id = ?",
+                (repo, ticket_id),
+            ).fetchone()
+        if row is None:
+            return "rejected-handoff-state"
+        state, stuck = row["workflow_state"], bool(row["stuck"])
+        if state == "handed-off":
+            # A replay after the label write below failed.
+            self._write_state_label(ticket, "handed-off")
+            return "handed-off"
+        if not _may_hand_off(state, stuck, row["paused_action"]) or not self._settle(
+            repo,
+            ticket_id,
+            "handed-off",
+            lambda connection: write_workflow_state(
+                connection,
+                repo,
+                ticket_id,
+                "handed-off",
+                source="answers-handoff",
+                at=self.queue.now(),
+                also=SETTLE_CLEARS,
+                guard="workflow_state = ? AND stuck = ?",
+                guard_args=(state, int(stuck)),
+            ),
+        ):
+            return "rejected-handoff-state"
+        self._write_state_label(ticket, "handed-off")
+        return "handed-off"
 
     def _busy_recipients(self) -> frozenset[str]:
         """#18: harnesses whose every schedulable slot is in use.
