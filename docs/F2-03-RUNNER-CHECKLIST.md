@@ -113,7 +113,9 @@ overflow to GitHub". The switch is the repo Actions variable
   background unless a running loop holds its lock
   (`flock` on `~/.local/state/factory/runner-pool-sync.lock`). The kernel
   drops the lock when the loop exits, so a crash or restart never leaves a
-  stale claim, and a second loop exits at once. It is safe to run any time.
+  stale claim. A second loop waits up to 2 seconds for the lock, which
+  outlasts `ensure`'s own brief probe, then exits 0 if a running loop still
+  holds it. It is safe to run any time.
   Run it after a box restart, from the same place that runs
   `box-runner-ensure.sh`.
 - **Hold it.** `touch ~/.config/factory/runner-pool-sync-hold` stops the

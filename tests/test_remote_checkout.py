@@ -106,7 +106,7 @@ class Device:
         # the bot's login PATH holds exactly login_tools (plus the basics)
         self.bin = tmp_path / "remote-bin"
         self.bin.mkdir()
-        for name in ("sh", "cat", "mkdir", "printf", "env", "id", "uname", "grep"):
+        for name in ("sh", "cat", "mkdir", "printf", "env", "id", "uname", "grep", "touch", "mv"):
             found = _which(name)
             if found:
                 (self.bin / name).symlink_to(found)

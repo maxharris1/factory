@@ -129,13 +129,16 @@ _CHECKOUT = (
     'git branch -q --set-upstream-to=origin/main main || fail "cannot set the upstream"; '
 )
 _SYNCED = f"printf '{SYNC_MARK} ok %s\\n' \"$(git rev-parse HEAD)\""
-_DEPLOY = (
-    _CHECKOUT
-    + "py=python3; "
+PICK_PYTHON = (
+    "py=python3; "
     'if [ -f "$HOME/.local/bin/orch" ]; then '
     """w=$(sed -n 's/^exec "\\{0,1\\}\\([^" ]*\\)"\\{0,1\\} .*/\\1/p' "$HOME/.local/bin/orch" | head -n 1); """
     '[ -n "$w" ] && [ -x "$w" ] && py=$w; '
     "fi; "
+)
+_DEPLOY = (
+    _CHECKOUT
+    + PICK_PYTHON
     + '"$py" ./bin/orch install-skills >/dev/null 2>&1 || fail "install-skills exited $?"; '
     + _SYNCED
 )

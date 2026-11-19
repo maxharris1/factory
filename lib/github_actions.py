@@ -67,7 +67,7 @@ import os
 import re
 import signal
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -611,17 +611,41 @@ class GitHubReviewActions:
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
 
     def pull_fingerprints(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for chunk, pulls, broken in self._pull_batches(repo, numbers, PULL_FINGERPRINT_FIELDS):
+            for number in chunk:
+                pull = pulls.get(f"p{number}")
+                whole = isinstance(pull, dict) and _whole_fingerprint(pull)
+                if whole and f"p{number}" not in broken:
+                    found[number] = json.dumps(pull, sort_keys=True, separators=(",", ":"))
+        return found
+
+    def pull_states(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
+        """Each observed number's PR state: OPEN, CLOSED or MERGED. A number
+        missing from the result was not observed, never assumed open."""
+        states: dict[str, str] = {}
+        for chunk, pulls, broken in self._pull_batches(repo, numbers, "state"):
+            for number in chunk:
+                pull = pulls.get(f"p{number}")
+                if f"p{number}" not in broken and isinstance(pull, dict):
+                    state = pull.get("state")
+                    if isinstance(state, str):
+                        states[number] = state
+        return states
+
+    def _pull_batches(
+        self, repo: str, numbers: Sequence[str], fields: str
+    ) -> Iterator[tuple[list[str], dict[str, Any], set[str | None]]]:
         owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
         wanted = list(dict.fromkeys(_number(number) for number in numbers))
-        found: dict[str, str] = {}
         for start in range(0, len(wanted), PULL_FINGERPRINT_CHUNK):
             chunk = wanted[start : start + PULL_FINGERPRINT_CHUNK]
-            fields = " ".join(
+            aliases = " ".join(
                 f"p{number}: pullRequest(number: {number}) {{ ...pull }}" for number in chunk
             )
             query = (
                 "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) "
-                f"{{ {fields} }} }} fragment pull on PullRequest {{ {PULL_FINGERPRINT_FIELDS} }}"
+                f"{{ {aliases} }} }} fragment pull on PullRequest {{ {fields} }}"
             )
             document = _object(
                 self._json(
@@ -634,14 +658,8 @@ class GitHubReviewActions:
             )
             pulls = _object(document.get("data")).get("repository")
             broken = _error_aliases(document)
-            if not isinstance(pulls, dict) or None in broken:
-                continue
-            for number in chunk:
-                pull = pulls.get(f"p{number}")
-                whole = isinstance(pull, dict) and _whole_fingerprint(pull)
-                if whole and f"p{number}" not in broken:
-                    found[number] = json.dumps(pull, sort_keys=True, separators=(",", ":"))
-        return found
+            if isinstance(pulls, dict) and None not in broken:
+                yield chunk, pulls, broken
 
     def pull_labels(self, repo: str, number: str) -> tuple[str, ...]:
         """The PR's labels, all pages (issue #86 hold label)."""

@@ -56,12 +56,17 @@ class ReadyMixin:
     ) -> tuple[bool, str]:
         handled, outcome = self._ready(ticket, comment, fields)
         self._record_ci_wait(ticket, comment, fields["head"], outcome)
-        if outcome != CI_INFRA_WAIT:
-            with self._connect() as connection:
-                connection.execute(
-                    "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?",
-                    (ticket.repo.lower(), ticket.ticket_id, CI_INFRA_BLOCKED_REASON),
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason = ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM ci_waits WHERE repo = ? AND ticket_id = ? AND reason = ?
                 )
+                """,
+                (*key, CI_INFRA_BLOCKED_REASON, *key, CI_INFRA_WAIT),
+            )
         return handled, outcome
 
     def _ready_at_base(self, ticket: TrackedTicket, comment: Comment) -> None:

@@ -178,6 +178,7 @@ commands:
   wait             block until the dispatcher queues a job for a bot
   job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
+  cleanup          delete finished job checkouts on every device (issue #928)
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report or forget (issue #92)
@@ -595,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
         from lib import heal
 
         return heal.main(argv[1:])
+    if argv[0] == "cleanup":
+        from lib import job_cleanup
+
+        return job_cleanup.main(argv[1:])
     if argv[0] == "settings":
         from lib import settings_apply
 

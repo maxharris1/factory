@@ -31,7 +31,7 @@ if [ "${1:-}" = ensure ]; then
   exit 1
 fi
 exec 9>>"$LOCK"
-flock -n 9 || exit 0
+flock -w 2 9 || exit 0
 gh_() { env -u GH_TOKEN gh "$@" 9>&-; }
 set_var() {
   if gh_ api "repos/$REPO/actions/variables/$VAR" >/dev/null 2>&1; then

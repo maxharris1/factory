@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import replace
 
 from lib.dispatch.constants import (
     _NOT_FINISHED,
@@ -314,15 +315,19 @@ class TrackingMixin:
             and _matching_head(fields["head"], ticket.current_head) is not None
         )
 
-    def _tracked_refs(self, now: float | None = None) -> tuple[TicketRef, ...]:
+    def _tracked_refs(
+        self,
+        now: float | None = None,
+        closed: Callable[[tuple[TicketRef, ...]], Collection[tuple[str, str]]] | None = None,
+    ) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled, outbox, qa_open, read_at
+                       unsettled, outbox, qa_open, read_at, pr_number
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                           state.workflow_state, reads.read_at,
+                           state.workflow_state, reads.read_at, sources.pr_number,
                            COALESCE(state.stuck, 0) AS stuck,
                            EXISTS (
                                SELECT 1
@@ -392,6 +397,9 @@ class TrackingMixin:
                     LEFT JOIN ticket_reads AS reads
                       ON reads.repo = LOWER(tracked.repo)
                      AND reads.ticket_id = tracked.ticket_id
+                    LEFT JOIN {SOURCES_TABLE} AS sources
+                      ON sources.repo = LOWER(tracked.repo)
+                     AND sources.ticket_id = tracked.ticket_id
                 )
                 WHERE COALESCE(workflow_state, '') != ?
                   AND (
@@ -406,9 +414,24 @@ class TrackingMixin:
                 (HANDED_OFF_EXTERNALLY,),
             ).fetchall()
         refs: list[TicketRef] = []
+        held: list[TicketRef] = []
+        probed: list[TicketRef] = []
         first_reads: list[tuple[str, str, float]] = []
         for row in rows:
             state = row["workflow_state"]
+            ref = TicketRef(
+                repo=str(row["repo"]),
+                ticket_id=str(row["ticket_id"]),
+                tracker=str(row["tracker"]),
+                allow_merged=state == "merged"
+                or bool(row["outbox"])
+                or (state == "done" and bool(row["qa_open"]))
+                or (
+                    state in ("handed-off", *WATCHED_STATES)
+                    and bool(row["replay"])
+                ),
+                pr_number=row["pr_number"] if row["tracker"] == "linear" else None,
+            )
             catching_up = (
                 bool(row["replay"]) or bool(row["unsettled"]) or bool(row["outbox"])
             )
@@ -416,25 +439,20 @@ class TrackingMixin:
             if now is not None and stopped and not catching_up:
                 read_at = row["read_at"]
                 if read_at is None:
-                    key = (str(row["repo"]).lower(), str(row["ticket_id"]))
+                    key = (ref.repo.lower(), ref.ticket_id)
                     read_at = _staggered_first_read(now, key)
                     first_reads.append((*key, read_at))
+                probed.append(ref)
                 if now - read_at < STOPPED_POLL_SECONDS:
+                    held.append(ref)
                     continue
-            refs.append(
-                TicketRef(
-                    repo=str(row["repo"]),
-                    ticket_id=str(row["ticket_id"]),
-                    tracker=str(row["tracker"]),
-                    allow_merged=state == "merged"
-                    or bool(row["outbox"])
-                    or (state == "done" and bool(row["qa_open"]))
-                    or (
-                        state in ("handed-off", *WATCHED_STATES)
-                        and bool(row["replay"])
-                    ),
-                )
-            )
+            refs.append(ref)
+        shut = closed(tuple(probed)) if probed and closed is not None else ()
+        refs.extend(ref for ref in held if (ref.repo.lower(), ref.ticket_id) in shut)
+        refs = [
+            replace(ref, closed=True) if (ref.repo.lower(), ref.ticket_id) in shut else ref
+            for ref in refs
+        ]
         if first_reads:
             with self._connect() as connection:
                 connection.executemany(

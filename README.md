@@ -784,6 +784,17 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   `~/.config/factory/linear-webhook.port` (this device's setting), else 8787.
   `LINEAR_WEBHOOK_TUNNEL_HOST` defaults to `pc-wsl-cursor-bot`; an empty host
   runs no tunnel. The Funnel on the tunnel host must point at the same port.
+- The tunnel host may be this machine, as on the PC. The script reads the
+  host's `hostname` from `ssh -G`, resolves it with `getent ahosts`, and
+  checks each address. It drops an IPv6 zone such as `%eth0` and reads an
+  IPv4-mapped address such as `::ffff:127.0.0.1` as its IPv4 address. A
+  loopback address, `0.0.0.0` or `::`, or one of this machine's own
+  addresses from `ip -o addr`, means the host is this machine. Then `start`, `restart` and
+  `ensure` run the listener only, and end a tunnel loop and its `ssh` left
+  running from before. `status` prints `tunnel: not needed (HOST is this
+  host)` and exits 0 while the listener runs. Any
+  `linear-webhook-tunnel.held` record is removed. If a check fails, the
+  script runs the tunnel as before.
 
 Each loop is a singleton per state directory: it holds an exclusive `flock`
 on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its
@@ -1279,10 +1290,15 @@ deploy/orch-move.sh import box:<export>
 ```
 
 `export` writes `waiter-<bot>.drain` for the three bots, so no waiter claims a
-new job. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it writes back any
-drain file self-heal removed or replaced, copies `orch.db` with `orch
-backup-db` and asks `orch move-db drained` whether a job still runs or a
-device slot is still held. Once none is, it writes
+new job. A self-heal pass (the loop, the timer or `kick`)
+does nothing while any `waiter-<bot>.drain` reads `orch-move`. Before the
+drain starts, `export` runs `self-heal.sh wait-idle` once, so a pass already
+under way finishes first. That pass may have removed the drain files, so
+`export` writes them again while `wait-idle` still holds
+`self-heal-work.lock`, and every later pass finds them. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it
+writes the drain files again, copies `orch.db` with `orch backup-db` and asks
+`orch move-db drained` whether a job still runs or a device slot is still
+held. Once none is, it writes
 `~/.config/factory/orch-retired`. Only then does it stop the poller, the
 waiters, self-heal and the Linear listener through their service scripts.
 While `orch-retired` exists, the poller, waiter, self-heal and Linear service
@@ -1366,8 +1382,13 @@ Rollback is the same tool reversed. On the PC, run
 from `machines.<source>.yml` in the cutover export.
 
 An export that does not drain within `ORCH_MOVE_DRAIN_TIMEOUT` seconds
-(default 9000, 150 minutes) exits 75. It removes the drain files and their
-acks and stops nothing, so the host keeps running. A failure after
+(default 9000, 150 minutes) exits 75. Self-heal is never stopped before
+`orch-retired` is written. So on exit 75 (drain timeout), exit 1 (a failed
+probe or idle wait) or Ctrl-C, `export` removes the drain files and their
+acks and stops nothing. The host keeps running, and
+self-heal resumes on its next pass by itself. An export killed with SIGKILL
+leaves the drain files, and self-heal stays paused until someone removes
+`~/.local/state/factory/waiter-*.drain`. A failure after
 `orch-retired` is written leaves the host retired and stopped, which is the
 safe state. To undo it, remove `~/.config/factory/orch-retired` and start the
 services with `start`. `ORCH_MOVE_HOST` names this host (default
@@ -1609,11 +1630,15 @@ so the services it restarts outlive the run. Otherwise it writes
 `remove-autostart`. Passes never overlap: `self-heal.lock` makes a second
 pass exit at once. Each pass and the device deploy it starts detached hold
 `self-heal-work.lock` shared. `wait-idle` waits up to `ORCH_HEAL_IDLE_WAIT`
-seconds (default 900) until none does, and exits 1 if one still does. On a
+seconds (default 900) until none does, and exits 1 if one still does.
+`wait-idle <command>` then runs the command before releasing the lock, so no
+pass starts until it returns, and exits with its status. On a
 host retired as the orch host (`~/.config/factory/orch-retired`, see *Move
 the orch host*), `once`, `kick`, `start`, `restart` and `ensure` exit 79 and
 run nothing. `factory-self-heal.service` counts that exit 79 as success
-(`SuccessExitStatus=79`), so the timer's unit is not marked failed there.
+(`SuccessExitStatus=79`), so the timer's unit is not marked failed there. A
+pass skips, exiting 0, while an orch-move export drains (see *Move the orch
+host*).
 
 ### Self-deploy
 

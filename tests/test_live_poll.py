@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import math
+import re
 import subprocess
 import time
 from collections import Counter
@@ -110,6 +111,9 @@ class FakeGh:
         del timeout
         call = list(argv)
         self.calls.append(call)
+        query = next((part for part in call if part.startswith("query=")), "")
+        if query.endswith("fragment pull on PullRequest { state }"):
+            return GhResult(0, json.dumps(self.pull_states(query)), "")
         endpoint = next(
             part
             for part in call
@@ -153,6 +157,14 @@ class FakeGh:
         else:
             raise AssertionError(call)
         return GhResult(0, json.dumps(value), "")
+
+    def pull_states(self, query: str) -> dict:
+        if self.pull.get("merged") is True:
+            state = "MERGED"
+        else:
+            state = "CLOSED" if self.pull.get("state") == "closed" else "OPEN"
+        aliases = re.findall(r"(p[0-9]+): pullRequest", query)
+        return {"data": {"repository": {alias: {"state": state} for alias in aliases}}}
 
 
 def config(*, linear: bool = False) -> OrchConfig:
@@ -201,7 +213,11 @@ def linear_issue(
 def linear_states_page(variables: dict, state: str = "In Progress") -> HTTPResult:
     team = variables["team"]
     nodes = [
-        {"identifier": f"{team}-{number:04d}", "state": {"name": state, "type": "started"}}
+        {
+            "identifier": f"{team}-{number:04d}",
+            "branchName": f"max/{team.lower()}-{number}-fixture",
+            "state": {"name": state, "type": "started"},
+        }
         for number in variables["numbers"]
     ]
     return HTTPResult(200, json.dumps({"data": {"issues": {"nodes": nodes}}}))

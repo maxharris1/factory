@@ -252,6 +252,8 @@ class TicketRef:
     ticket_id: str
     tracker: str
     allow_merged: bool = False
+    pr_number: str | None = None
+    closed: bool = False
 
 
 @dataclass(frozen=True)
