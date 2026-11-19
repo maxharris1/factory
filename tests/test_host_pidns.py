@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import reap_home
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,33 +20,29 @@ HELPER = ROOT / "deploy" / "host-pidns.sh"
 HOST_NS = "pid:[4026531836]"
 SANDBOX_NS = "pid:[4026532782]"
 OLD_NS = "pid:[4026531111]"
-OLD_BOOT = "6b1c0c1e-4f0e-4d4a-9b7e-0d3f2a1b9c01"
-NEW_BOOT = "e2a7d9f4-1c3b-4a5e-8f60-7b9d0c2e4a13"
+INITIAL_USERNS = "         0          0 4294967295\n"
+SANDBOX_USERNS = "         0       1000          1\n"
 
 
 def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
-              boot_id: str | None = None, pids: dict[int, str] | None = None) -> Path:
+              uid_map: str | None = None, pids: dict[int, str] | None = None) -> Path:
     proc = tmp_path / "proc"
     (proc / "self" / "ns").mkdir(parents=True)
     lines = "Name:\tsh\n" + (f"NSpid:\t{nspid}\n" if nspid is not None else "")
     (proc / "self" / "status").write_text(lines, encoding="utf-8")
     (proc / "self" / "ns" / "pid").symlink_to(ns)
-    if boot_id is not None:
-        (proc / "sys" / "kernel" / "random").mkdir(parents=True)
-        (proc / "sys" / "kernel" / "random" / "boot_id").write_text(boot_id + "\n",
-                                                                     encoding="utf-8")
+    if uid_map is not None:
+        (proc / "self" / "uid_map").write_text(uid_map, encoding="utf-8")
     for pid, pid_ns in (pids or {}).items():
         (proc / str(pid) / "ns").mkdir(parents=True)
         (proc / str(pid) / "ns" / "pid").symlink_to(pid_ns)
     return proc
 
 
-def record(home: Path, value: str, boot: str | None = None) -> Path:
+def record(home: Path, value: str) -> Path:
     path = home / ".config" / "factory" / "host-pidns"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value + "\n", encoding="utf-8")
-    if boot is not None:
-        path.with_name("host-pidns.boot").write_text(boot + "\n", encoding="utf-8")
     return path
 
 
@@ -143,20 +142,74 @@ REFRESHING = {
 
 
 @pytest.mark.parametrize("command", REFRESHING.values(), ids=REFRESHING.keys())
-def test_service_refreshes_a_stale_record_after_a_reboot(tmp_path: Path,
-                                                         command: list[str]) -> None:
+def test_service_refreshes_a_stale_record_after_a_restart(tmp_path: Path,
+                                                          command: list[str]) -> None:
     home = tmp_path / "home"
-    (home / ".local" / "state" / "factory").mkdir(parents=True)
-    path = record(home, OLD_NS, OLD_BOOT)
-    proc = fake_proc(tmp_path, "4484", HOST_NS, NEW_BOOT)
+    state = home / ".local" / "state" / "factory"
+    state.mkdir(parents=True)
+    path = record(home, OLD_NS)
+    proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS)
 
     result = _run(command, home, proc)
 
     assert result.returncode == 0, result.stderr
     assert path.read_text(encoding="utf-8") == HOST_NS + "\n"
-    assert path.with_name("host-pidns.boot").read_text(encoding="utf-8") == NEW_BOOT + "\n"
     assert OLD_NS in result.stderr and HOST_NS in result.stderr
     assert "refusing" not in result.stderr
+
+
+def test_refresh_forgets_child_records_of_the_dead_namespace(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    state = home / ".local" / "state" / "factory"
+    state.mkdir(parents=True)
+    stale = state / "linear-webhook-listener-child.pid"
+    stale.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
+    other = state / "linear-webhook-tunnel-child.pid"
+    other.write_text(f"4343 200 {SANDBOX_NS}\n", encoding="utf-8")
+    record(home, OLD_NS)
+    proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS)
+
+    result = _run(REFRESHING["helper"], home, proc)
+
+    assert result.returncode == 0, result.stderr
+    assert not stale.exists()
+    assert other.read_text(encoding="utf-8") == f"4343 200 {SANDBOX_NS}\n"
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_linear_listener_starts_after_a_restart_left_its_child_record(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    state = home / ".local" / "state" / "factory"
+    state.mkdir(parents=True)
+    (state / "linear-webhook-listener-child.pid").write_text(f"4242 100 {OLD_NS}\n",
+                                                             encoding="utf-8")
+    record(home, OLD_NS)
+    proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS)
+    started = home / "serve-started"
+    serve = home / "fake-orch"
+    serve.write_text(f'#!/bin/sh\ntouch "{started}"\nsleep 1\n', encoding="utf-8")
+    serve.chmod(0o755)
+    extra = {"ORCH_BIN": str(serve), "LINEAR_WEBHOOK_TUNNEL_HOST": "",
+             "LINEAR_WEBHOOK_PORT": str(_free_port()), "LINEAR_WEBHOOK_START_WAIT": "2",
+             "LINEAR_WEBHOOK_RETRY_SEC": "0.1", "LINEAR_WEBHOOK_RETRY_MAX_SEC": "0.1"}
+
+    try:
+        result = _run(_service("linear-webhook-service.sh", "ensure"), home, proc, **extra)
+
+        assert result.returncode == 0, result.stderr
+        deadline = time.monotonic() + 10
+        while not started.exists():
+            assert time.monotonic() < deadline, (state / "linear-webhook-listener.log").read_text(
+                encoding="utf-8")
+            time.sleep(0.1)
+    finally:
+        _run(_service("linear-webhook-service.sh", "stop"), home, proc, **extra)
+        reap_home(home)
 
 
 GATED = [(s, [*a, c]) for s, a in [("waiter-service.sh", ["claude-bot"]), ("poller-service.sh", []),
@@ -172,45 +225,45 @@ def test_service_refuses_while_a_service_lives_in_the_recorded_namespace(
     state = home / ".local" / "state" / "factory"
     state.mkdir(parents=True)
     (state / "poller.pid").write_text("4242\n", encoding="utf-8")
-    path = record(home, OLD_NS, OLD_BOOT)
-    boot = path.with_name("host-pidns.boot")
-    before = (path.read_bytes(), boot.read_bytes())
-    proc = fake_proc(tmp_path, "4484", HOST_NS, NEW_BOOT, {4242: OLD_NS})
+    path = record(home, OLD_NS)
+    proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS, {4242: OLD_NS})
 
     result = _run(_service(script, *args), home, proc)
 
     assert result.returncode == 4, result.stderr
     assert f"refusing to {args[-1]} from a non-host PID namespace" in result.stderr
-    assert (path.read_bytes(), boot.read_bytes()) == before
+    assert "4242" in result.stderr
+    assert path.read_text(encoding="utf-8") == OLD_NS + "\n"
 
 
 @pytest.mark.parametrize(
-    ("nspid", "recorded_boot", "extra"),
+    ("nspid", "uid_map", "extra"),
     [
-        ("4484", OLD_BOOT, {"ORCH_JOB_PROOF": "x"}),
-        ("4484", OLD_BOOT, {"CODEX_SANDBOX": "seatbelt"}),
-        ("1728748\t61", OLD_BOOT, {}),
-        ("4484", NEW_BOOT, {}),
-        ("4484", None, {}),
+        ("4484", INITIAL_USERNS, {"ORCH_JOB_PROOF": "x"}),
+        ("4484", INITIAL_USERNS, {"CODEX_SANDBOX": "seatbelt"}),
+        ("1728748\t61", INITIAL_USERNS, {}),
+        ("61", SANDBOX_USERNS, {}),
+        ("61", None, {}),
     ],
-    ids=["job", "codex-sandbox", "two-field-nspid", "same-boot", "legacy-record"],
+    ids=["job", "codex-sandbox", "two-field-nspid", "own-proc-sandbox", "no-uid-map"],
 )
 def test_refresh_never_runs_outside_the_host(
-    tmp_path: Path, nspid: str, recorded_boot: str | None, extra: dict[str, str],
+    tmp_path: Path, nspid: str, uid_map: str | None, extra: dict[str, str],
 ) -> None:
     home = tmp_path / "home"
-    (home / ".local" / "state" / "factory").mkdir(parents=True)
-    path = record(home, OLD_NS, recorded_boot)
-    boot = path.with_name("host-pidns.boot")
-    before = boot.read_bytes() if recorded_boot else None
-    proc = fake_proc(tmp_path, nspid, HOST_NS, NEW_BOOT)
+    state = home / ".local" / "state" / "factory"
+    state.mkdir(parents=True)
+    child = state / "linear-webhook-listener-child.pid"
+    child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
+    path = record(home, OLD_NS)
+    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map)
 
-    result = _run(_service("poller-service.sh", "ensure"), home, proc, **extra)
+    result = _run(_service("poller-service.sh", "stop"), home, proc, **extra)
 
     assert result.returncode == 4, result.stderr
-    assert "refusing to ensure from a non-host PID namespace" in result.stderr
+    assert "refusing to stop from a non-host PID namespace" in result.stderr
     assert path.read_text(encoding="utf-8") == OLD_NS + "\n"
-    assert (boot.read_bytes() if boot.exists() else None) == before
+    assert child.read_text(encoding="utf-8") == f"4242 100 {OLD_NS}\n"
 
 
 def test_waiter_status_still_answers_outside_the_host_pid_namespace(tmp_path: Path) -> None:

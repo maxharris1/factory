@@ -17,46 +17,39 @@ factory_in_host_pidns() (
     if [ "${depth:-0}" -le 1 ] && { [ -z "$recorded" ] || [ "$recorded" = "$current" ]; }; then
         exit 0
     fi
-    hint=""
-    [ "${depth:-0}" -gt 1 ] || hint="; if the host restarted without a reboot (for example wsl --terminate), delete ${file} and rerun deploy/install.sh --update from a host shell"
-    echo "not the host PID namespace (NSpid: ${nspid:-none}; pid namespace: ${current:-unknown}; recorded host: ${recorded:-none})${hint}" >&2
+    echo "not the host PID namespace (NSpid: ${nspid:-none}; pid namespace: ${current:-unknown}; recorded host: ${recorded:-none})" >&2
     exit 1
 )
 
-factory_record_host_pidns() (
-    proc="${ORCH_PROC_DIR:-/proc}"
-    file="${1:-${HOME}/.config/factory/host-pidns}"
-    readlink "${proc}/self/ns/pid" >"$file" || exit 1
-    boot="$(cat "${proc}/sys/kernel/random/boot_id" 2>/dev/null)" || boot=""
-    if [ -n "$boot" ]; then
-        printf '%s\n' "$boot" >"${file}.boot"
-    else
-        rm -f "${file}.boot"
-    fi
-)
-
-# boot_id is per kernel: a sandbox on this kernel sees the host's, and only a reboot changes it.
+# An unprivileged sandbox must unshare its user namespace to get its own PID
+# namespace, so a one-field NSpid in the initial user namespace is the host
+# after a restart. Returns 2 while a pidfile's pid runs in the recorded one.
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
+    state="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
     [ -z "${ORCH_JOB_PROOF:-}" ] && [ -z "${CODEX_SANDBOX:-}" ] || exit 1
     [ -r "${proc}/self/status" ] || exit 1
     depth="$(awk '/^NSpid:/ { print NF - 1 }' "${proc}/self/status")"
     [ "${depth:-0}" -le 1 ] || exit 1
+    [ "$(awk '{ print $1, $2, $3 }' "${proc}/self/uid_map" 2>/dev/null)" = "0 0 4294967295" ] || exit 1
     recorded="$(cat "$file" 2>/dev/null)" || exit 1
     current="$(readlink "${proc}/self/ns/pid" 2>/dev/null)" || exit 1
     [ -n "$recorded" ] && [ -n "$current" ] && [ "$recorded" != "$current" ] || exit 1
-    old_boot="$(cat "${file}.boot" 2>/dev/null)" || exit 1
-    boot="$(cat "${proc}/sys/kernel/random/boot_id" 2>/dev/null)" || exit 1
-    [ -n "$old_boot" ] && [ -n "$boot" ] && [ "$old_boot" != "$boot" ] || exit 1
-    for pidfile in "${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"/*.pid; do
+    for pidfile in "$state"/*.pid; do
         [ -r "$pidfile" ] || continue
         pid="$(awk 'NR == 1 { print $1 }' "$pidfile")"
         case "$pid" in '' | *[!0-9]*) continue ;; esac
-        [ "$(readlink "${proc}/${pid}/ns/pid" 2>/dev/null)" != "$recorded" ] || exit 1
+        if [ "$(readlink "${proc}/${pid}/ns/pid" 2>/dev/null)" = "$recorded" ]; then
+            echo "kept ${file}: pid ${pid} in ${pidfile} still runs in ${recorded}" >&2
+            exit 2
+        fi
     done
-    factory_record_host_pidns "$file" || exit 1
-    echo "refreshed ${file} after a reboot: pid namespace ${recorded} -> ${current}, boot id ${old_boot} -> ${boot}" >&2
+    for pidfile in "$state"/*.pid; do
+        [ "$(awk 'NR == 1 { print $3 }' "$pidfile" 2>/dev/null)" != "$recorded" ] || rm -f "$pidfile"
+    done
+    printf '%s\n' "$current" >"$file" || exit 1
+    echo "refreshed ${file}: pid namespace ${recorded} -> ${current}" >&2
 )
 
 factory_may_autostart() {

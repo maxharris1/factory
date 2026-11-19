@@ -134,13 +134,19 @@ record_host_pidns() {
     # shellcheck source=deploy/host-pidns.sh
     . "${ROOT}/deploy/host-pidns.sh"
     [[ -r "${PROC}/self/status" ]] || return 0
-    factory_refresh_host_pidns "$HOST_PIDNS_RECORD" || true
+    local status=0
+    factory_refresh_host_pidns "$HOST_PIDNS_RECORD" || status=$?
+    if ((status == 2)); then
+        echo "refusing to install while a factory service runs in the recorded host PID namespace" >&2
+        exit 4
+    fi
     if ! factory_may_autostart "$HOST_PIDNS_RECORD"; then
         echo "warning: not recording the host PID namespace from here; kept ${HOST_PIDNS_RECORD}" >&2
         return 0
     fi
-    factory_record_host_pidns "$HOST_PIDNS_RECORD"
+    readlink "${PROC}/self/ns/pid" >"$HOST_PIDNS_RECORD"
 }
+record_host_pidns
 KEEP_VENV=0
 [[ "$UPDATE" == 1 && -x "${VENV}/bin/python" ]] && KEEP_VENV=1
 if command -v uv >/dev/null 2>&1; then
@@ -163,7 +169,6 @@ retire_legacy
 # a running loop is still reading.
 install -m 0755 "${ROOT}/deploy/linear-webhook-service.sh" "$LINEAR_SERVICE"
 install -m 0644 "${ROOT}/deploy/host-pidns.sh" "$HOST_PIDNS"
-record_host_pidns
 install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/webhook.env.example"
 cat >"${HOME}/.config/factory/profile.sh" <<EOF
 # Sourced once per shell: a second source (.profile and .bashrc) is a no-op.
