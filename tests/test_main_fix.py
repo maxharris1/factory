@@ -1,6 +1,6 @@
-"""Main-fix filing (issue #1061): the pure decision table and the issue body."""
-
 from __future__ import annotations
+
+import sys
 
 import pytest
 
@@ -64,7 +64,7 @@ def body_for(logs: dict[str, str]) -> tuple[str, str]:
         for check in CHECKS
     ]
     tag = marker(REPO, "main", 1000.0)
-    evidence = ci_evidence(failed=failed, logs=logs)
+    evidence = ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
     return issue_body(REPO, "main", ("test (*)",), RED, evidence, tag), tag
 
 

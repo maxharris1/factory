@@ -116,43 +116,35 @@ def issue_body(
     if tests:
         lines += ["", "## Failing tests", "", *(f"- `{test}`" for test in tests)]
     lines += ["", "## Logs"]
-    slots: list[tuple[int, str, str | None]] = []
+    slots: list[tuple[int, str]] = []
     for job in evidence.jobs[:LOGGED_JOBS]:
         lines += ["", f"### `{job.check}`", ""]
-        tail = _escaped(job.log_tail)
+        tail = _break_fences(job.log_tail)
         if tail is None:
             lines.append("Log unavailable.")
         else:
             fence = _fence(tail)
             lines += [fence, "", fence]
-            slots.append((len(lines) - 2, tail, job.cut))
+            slots.append((len(lines) - 2, tail))
     rest = evidence.jobs[LOGGED_JOBS:]
     if rest:
         lines += ["", "Other red jobs: " + ", ".join(f"`{job.check}`" for job in rest) + "."]
     if slots:
         room = (BODY_LIMIT - len("\n".join(lines)) - 1) // len(slots)
-        for slot, tail, cut in slots:
-            lines[slot] = _fit(tail, cut, room)
+        for slot, tail in slots:
+            lines[slot] = _fit(tail, room)
     return "\n".join(lines) + "\n"
 
 
-def _escaped(tail: str | None) -> str | None:
-    """The tail with fence-like lines broken, since lib/feeder._unfenced and
-    parse_gate_lines toggle on any of them whatever its length."""
+def _break_fences(tail: str | None) -> str | None:
     if tail is None:
         return None
     return "\n".join(_FENCE_LINE.sub(r"\1\\", line) for line in tail.splitlines())
 
 
-def _fit(tail: str, cut: str | None, room: int) -> str:
-    """The tail's last lines that fit room, under one cut line counting
-    every earlier line dropped here or by the log read."""
+def _fit(tail: str, room: int) -> str:
     lines = tail.splitlines()
-    earlier = 0
-    if cut is not None:
-        earlier = int(re.findall(r"\d+", cut)[0])
-        lines = lines[1:]
-    budget = max(0, room - len(f"[cut {earlier + len(lines)} earlier lines]") - 1)
+    budget = max(0, room - len(f"[cut {len(lines)} earlier lines]") - 1)
     kept: list[str] = []
     size = 0
     for line in reversed(lines):
@@ -162,5 +154,5 @@ def _fit(tail: str, cut: str | None, room: int) -> str:
         size += len(line) + 1
     if not kept and lines:
         kept = [lines[-1][max(0, len(lines[-1]) - budget):]]
-    dropped = earlier + len(lines) - len(kept)
+    dropped = len(lines) - len(kept)
     return "\n".join([*([f"[cut {dropped} earlier lines]"] if dropped else []), *reversed(kept)])

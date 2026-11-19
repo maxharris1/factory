@@ -1234,8 +1234,6 @@ def test_a_queued_review_only_another_device_can_run_leaves_the_builder_room(tmp
     assert feeder._room({"claude", "codex"}, 10_000.0) == {"claude": 2, "codex": 0}
 
 
-# --- #1061: one main-fix issue per red main streak ------------------------------
-
 RED_SHA = "c0ffee12" + "0" * 32
 MAIN = ("owner/app", "main")
 RED_LOG = "\n".join(

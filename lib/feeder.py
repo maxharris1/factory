@@ -137,6 +137,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Literal, NamedTuple, Protocol
@@ -567,8 +568,6 @@ class FeedReport:
 
 @dataclass(frozen=True)
 class _MainLine:
-    """One base whose required checks the feeder read this poll."""
-
     project: Project
     label: str
     required: tuple[str, ...]
@@ -969,7 +968,6 @@ class Feeder:
         )
 
     def _contexts(self) -> tuple[list[tuple[Project, FactoryContext]], int]:
-        """Each intake project's factory.md, read once per poll."""
         found: list[tuple[Project, FactoryContext]] = []
         errors = 0
         for project in self.projects:
@@ -1080,8 +1078,6 @@ class Feeder:
     def _main_reads(
         self, contexts: Sequence[tuple[Project, FactoryContext]]
     ) -> tuple[dict[tuple[str, str], _MainLine], int]:
-        """The required checks of each GitHub-ticket project's base, read
-        once per poll, and how many reads failed."""
         lines: dict[tuple[str, str], _MainLine] = {}
         errors = 0
         for project, context in contexts:
@@ -1110,7 +1106,6 @@ class Feeder:
         return lines, errors
 
     def _file_main_fixes(self, lines: Mapping[tuple[str, str], _MainLine], now: float) -> int:
-        """File, resume or retire each base's main-fix issue; how many failed."""
         errors = 0
         for (repo, base), line in lines.items():
             row = self._main_fix_row(repo, base)
@@ -1145,7 +1140,6 @@ class Feeder:
         return None if row is None else MainFixRow(*row)
 
     def _claim_main_fix(self, repo: str, base: str, head: str, now: float) -> MainFixRow | None:
-        """A new filing row, or None when another feeder already owns the streak."""
         row = MainFixRow(repo, base, marker(repo, base, now), "filing", None, head, now)
         try:
             with self.queue.connect() as connection:
@@ -1185,7 +1179,7 @@ class Feeder:
             for check in red.checks
         ]
         body = issue_body(repo, row.base, line.required, red,
-                          ci_evidence(failed=failed, logs=logs), row.marker)
+                          ci_evidence(failed=failed, logs=logs, limit=sys.maxsize), row.marker)
         number = self.github.file_repo_issue(
             repo, issue_title(red), body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at
         )
@@ -1200,8 +1194,7 @@ class Feeder:
         mains: Mapping[tuple[str, str], _MainLine],
     ) -> tuple[dict[tuple[str, str | None], Wait | None], int]:
         """Why each base stops the line, read once per poll, and how many
-        reads failed beyond those in mains. A failed read stops the line on
-        that base."""
+        reads failed. A failed read stops the line on that base."""
         stops: dict[tuple[str, str | None], Wait | None] = {}
         for key, main in mains.items():
             if main.read.failed:
