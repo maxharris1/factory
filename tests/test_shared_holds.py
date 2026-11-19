@@ -50,10 +50,13 @@ def test_feeder_settings_parse() -> None:
     assert config.exclusive_paths == ("model/", "lib/*.sql")
 
 
-def test_this_repos_factory_md_sets_four_holders_and_keeps_model_exclusive() -> None:
+def test_this_repos_factory_md_sets_four_holders_and_its_exclusive_paths() -> None:
     config, findings = load_factory_md(ROOT / "factory.md")
     assert config is not None, findings
-    assert (config.max_holders_per_path, config.exclusive_paths) == (4, ("model/",))
+    assert (config.max_holders_per_path, config.exclusive_paths) == (
+        4,
+        ("model/", "lib/dispatch/qa.py", "lib/brief/review.py"),
+    )
 
 
 @pytest.mark.parametrize(
