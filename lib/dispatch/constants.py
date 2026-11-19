@@ -73,6 +73,7 @@ GROK_WAKE_REASONS = (
     "go-not-from-approver",
     "qa-failed",
     "qa-env-failed",
+    "qa-skill-drift",
     "ci-rerun-refused",
     CI_STALE_REASON,
 )

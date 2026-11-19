@@ -70,6 +70,29 @@ def test_fallback_says_fallback_not_blocked(case: str) -> None:
     assert "BLOCKED" not in driving
 
 
+def test_health_check_runs_the_verify_skill_doctor_and_blocks_on_failure() -> None:
+    health = sections(render_qa_brief(QA_FACTS, "claude-cloud"))["Health check"]
+    assert all(phrase in health for phrase in (
+        "verify skill `verify-live`", "its own doctor", "read its doctor steps",
+        "The health check passes only when both pass", "report `BLOCKED`",
+        "A boot that never reports ready, or a health check that still fails, is never a failed scenario",
+        "Drive no further scenario", "mark each scenario not yet run `inconclusive`",
+    ))
+
+
+@pytest.mark.parametrize("case", [case for case in QA_CASES if case.endswith("-fallback")])
+def test_lane_without_verify_skill_keeps_only_factory_doctor(case: str) -> None:
+    health = sections(render_qa_brief(QA_CASES[case], "claude-cloud"))["Health check"]
+    assert "bash scripts/qa/doctor.sh" in health and "curl --fail http://127.0.0.1:8080/health" in health
+    assert "verify skill" not in health and "its own doctor" not in health
+    assert "report `BLOCKED`" in health
+
+
+def test_result_file_says_blocked_when_boot_or_health_check_failed() -> None:
+    result = sections(render_qa_brief(QA_FACTS, "claude-cloud"))["Result file"]
+    assert "`BLOCKED` when the boot or the health check failed after its one recovery" in result
+
+
 def test_brief_carries_every_point() -> None:
     brief = sections(render_qa_brief(QA_FACTS, "claude-cloud"))
     result = fenced_json(brief["Result file"])

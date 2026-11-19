@@ -9,6 +9,7 @@ import pytest
 from lib import job_detail
 from lib.update_check import HeadDiff
 from tests.qa_support import HEAD_A, HEAD_B, Harness, qa_config, qa_report, ready, scenarios, verdict
+from tests.test_qa_cloud import Lab, doctor_failed, drifted, with_verify
 from tests.test_qa_scope_table import SRC, FakeDiff
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
@@ -18,6 +19,11 @@ FAIL_BODY = (
     "Evidence: https://example.test/run/1\n"
     "| qa-1 | ac-1 | Failed | https://example.test/run/1 |\n"
 )
+DRIFT_LINE = (
+    "- [drift] qa-2 (ac-1): the verify skill or its map no longer matches the app; "
+    "maintain-verification-skill owns it, not a product change"
+)
+DRIFT_BODY = f"{DRIFT_LINE}\nEvidence: https://example.test/run/1\n| qa-2 | ac-1 | Drift | https://example.test/run/1 |\n"
 
 
 def blocking() -> object:
@@ -30,7 +36,11 @@ def _approved(run: Harness, *, qa_result: str | None) -> None:
     run.finish("codex", "v1")
     run.post("v1", verdict(HEAD_A, "APPROVE"))
     if qa_result is not None:
-        run.post("q1", qa_report(HEAD_A, qa_result, body=FAIL_BODY if qa_result == "FAIL" else ""))
+        failed = qa_result == "FAIL"
+        run.post(
+            "q1",
+            qa_report(HEAD_A, qa_result, body=FAIL_BODY if failed else "", cause="product" if failed else None),
+        )
     run.poll()
 
 
@@ -139,7 +149,66 @@ def test_approve_with_a_fail_spends_the_round_on_a_qa_fix(tmp_path: Path) -> Non
         "failed": ["qa-1"],
     }
     assert run.rows("SELECT workflow_state, review_round FROM ticket_state") == [("fixing", 1)]
-    assert run.rows("SELECT COUNT(*) FROM jobs WHERE action = 'qa-failed'") == [(0,)]
+    assert run.rows("SELECT result, cause FROM qa_runs WHERE arm = 'primary'") == [("FAIL", "product")]
+    assert run.rows("SELECT COUNT(*) FROM jobs WHERE action IN ('qa-failed', 'qa-skill-drift')") == [(0,)]
+
+
+def _drift_wakes(run: Harness) -> list[dict]:
+    return [json.loads(row[0]) for row in run.rows("SELECT detail FROM jobs WHERE action = 'qa-skill-drift'")]
+
+
+def _approved_with(tmp_path: Path, cause: str, body: str) -> Harness:
+    run = Harness(tmp_path, replace(blocking(), verify="verify-live"))
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1", "qa-2")), head=HEAD_A)
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("v1", verdict(HEAD_A, "APPROVE"))
+    run.post("q1", qa_report(HEAD_A, "FAIL", body=body, cause=cause))
+    run.poll(3)
+    return run
+
+
+def test_approve_with_a_drift_fail_parks_for_skill_maintenance_without_a_round(tmp_path: Path) -> None:
+    run = _approved_with(tmp_path, "drift", DRIFT_BODY)
+
+    assert _fix_jobs(run) == []
+    assert run.rows("SELECT workflow_state, review_round, paused_action FROM ticket_state") == [
+        ("waiting-max", 0, "qa")
+    ]
+    assert run.rows("SELECT recipient, source_comment_id FROM jobs WHERE action = 'qa-skill-drift'") == [
+        ("grok", "q1")
+    ]
+    wake = _drift_wakes(run)[0]
+    assert (wake["verify"], wake["drift"], wake["evidence_link"]) == (
+        "verify-live", [DRIFT_LINE.removeprefix("- ")], "https://example.test/run/1"
+    )
+    assert "maintain-verification-skill" in wake["ask"]
+    assert run.rows("SELECT COUNT(*) FROM jobs WHERE action IN ('qa-failed', 'qa-env-failed')") == [(0,)]
+    assert run.actions.handoffs == []
+
+
+def test_approve_with_a_mixed_fail_fixes_only_the_product_scenario_and_wakes_drift_once(tmp_path: Path) -> None:
+    run = _approved_with(tmp_path, "product", FAIL_BODY + DRIFT_BODY)
+    run.poll(2)
+
+    assert _fix_detail(run)["qa_findings"]["failed"] == ["qa-1"]
+    assert _ticket(run) == [("fixing", 1)]
+    assert [wake["drift"] for wake in _drift_wakes(run)] == [[DRIFT_LINE.removeprefix("- ")]]
+
+
+def test_revise_with_a_drift_fail_fixes_the_review_only_and_wakes_drift(tmp_path: Path) -> None:
+    run = Harness(tmp_path, blocking())
+    _reviewing(run)
+    run.post("q1", qa_report(HEAD_A, "FAIL", body=DRIFT_BODY, cause="drift"))
+    run.poll()
+    run.post("v1", verdict(HEAD_A, "REVISE"))
+    run.poll(3)
+
+    detail = _fix_detail(run)
+    assert detail["instruction"] == "comment:v1"
+    assert "qa_findings" not in detail
+    assert _ticket(run) == [("fixing", 1)]
+    assert len(_drift_wakes(run)) == 1
 
 
 def test_approve_while_qa_runs_waits_then_ships_on_pass(tmp_path: Path) -> None:
@@ -412,3 +481,105 @@ def test_report_mode_neither_waits_for_nor_cancels_running_qa(
     assert run.rows("SELECT qa_runs.state, jobs.state FROM qa_runs JOIN jobs ON qa_runs.job_id = jobs.id") == [
         ("queued", "queued")
     ]
+
+
+def _lane_doctor_fails(tmp_path: Path, review: str) -> Lab:
+    lab = Lab(tmp_path, lanes=1, gate="block")
+    lab.broken[(0, 1)] = doctor_failed
+    lab.run.post("r1", ready(HEAD_A, body=scenarios("qa-1", pack="demo")), head=HEAD_A)
+    lab.run.poll()
+    lab.run.finish("codex", "v1")
+    lab.run.post("v1", verdict(HEAD_A, review))
+    return lab
+
+
+def _post_newest_qa_comment(lab: Lab, comment_id: str) -> None:
+    lab.tick(4)
+    body = list(lab.posted.values())[-1][1]
+    assert "result=BLOCKED" in body and "reported BLOCKED" in body and "cause=" not in body
+    lab.run.post(comment_id, body)
+    lab.run.poll(3)
+
+
+def test_a_lane_doctor_failure_retries_then_parks_without_spending_a_round(tmp_path: Path) -> None:
+    lab = _lane_doctor_fails(tmp_path, "APPROVE")
+    run = lab.run
+    _post_newest_qa_comment(lab, "q1")
+
+    assert run.rows("SELECT attempt, head, state FROM jobs WHERE action = 'qa' ORDER BY rowid") == [
+        (1, HEAD_A, "done"),
+        (2, HEAD_A, "queued"),
+    ]
+    assert _ticket(run) == [("review", 0)]
+    assert _fix_jobs(run) == []
+    assert run.actions.handoffs == []
+
+    _post_newest_qa_comment(lab, "q2")
+
+    assert len(lab.posted) == 2
+    assert run.rows("SELECT workflow_state, review_round, paused_action FROM ticket_state") == [
+        ("waiting-max", 0, "qa")
+    ]
+    assert run.rows("SELECT recipient FROM jobs WHERE action = 'qa-env-failed'") == [("grok",)]
+    assert _fix_jobs(run) == []
+    assert run.actions.handoffs == []
+
+
+def test_revise_with_a_lane_doctor_failure_queues_a_fix_without_qa_findings(tmp_path: Path) -> None:
+    lab = _lane_doctor_fails(tmp_path, "REVISE")
+    lab.run.poll()
+    _post_newest_qa_comment(lab, "q1")
+
+    detail = _fix_detail(lab.run)
+    assert detail["instruction"] == "comment:v1"
+    assert "qa_findings" not in detail
+    assert _ticket(lab.run) == [("fixing", 1)]
+    assert len(lab.run.qa_jobs()) == 1
+
+
+def test_a_verify_skill_lane_that_reports_drift_queues_no_product_fix(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1, gate="block")
+    with_verify(lab)
+    lab.broken[(0, 1)] = drifted()
+    run = lab.run
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1", pack="demo")), head=HEAD_A)
+    run.poll()
+    run.finish("codex", "v1")
+    run.post("v1", verdict(HEAD_A, "APPROVE"))
+    lab.tick(4)
+    body = lab.only_comment()
+    assert "result=FAIL cause=drift" in body and "[blocking]" not in body
+    run.post("q1", body)
+    run.poll(3)
+
+    assert _fix_jobs(run) == []
+    assert run.rows("SELECT workflow_state, review_round, paused_action FROM ticket_state") == [
+        ("waiting-max", 0, "qa")
+    ]
+    assert [wake["verify"] for wake in _drift_wakes(run)] == ["verify-live"]
+    assert run.actions.handoffs == []
+
+
+def test_report_mode_revise_after_a_verify_lane_drift_fixes_the_review_only_and_wakes_drift_once(
+    tmp_path: Path,
+) -> None:
+    lab = Lab(tmp_path, lanes=1, gate="report")
+    with_verify(lab)
+    lab.broken[(0, 1)] = drifted()
+    run = lab.run
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1", pack="demo")), head=HEAD_A)
+    run.poll()
+    run.finish("codex", "v1")
+    lab.tick(4)
+    body = lab.only_comment()
+    assert "result=FAIL cause=drift" in body
+    run.post("q1", body)
+    run.poll()
+    run.post("v1", verdict(HEAD_A, "REVISE"))
+    run.poll(4)
+
+    assert [wake["verify"] for wake in _drift_wakes(run)] == ["verify-live"]
+    detail = _fix_detail(run)
+    assert detail["instruction"] == "comment:v1"
+    assert "qa_findings" not in detail
+    assert _ticket(run) == [("fixing", 1)]

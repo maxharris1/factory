@@ -7,7 +7,8 @@ A go's builder and reviewer route that ticket (issue #206). A verdict may
 name repeat=<ac-n|f-n> and unsat=<ac-n>. A plan may name lines=<n>, its
 expected changed lines, and unsat=<ac-n>, the criterion it left unmapped.
 A qa reports a QA run at a full 40-character head (issue #758). It alone
-carries the QA_KEYS: result, scope, lanes, env, runner, arm and attempt.
+carries the QA_KEYS: result, cause, scope, lanes, env, runner, arm and attempt.
+cause (product or drift) says what a FAIL was.
 
 labels_for returns the labels a later dispatcher would apply. It does
 not write anything. tickets linear, and the Aut0 repo, return no labels.
@@ -44,6 +45,7 @@ def _one_of(*values: str) -> re.Pattern[str]:
 
 QA_KEYS = {
     "result": _one_of("PASS", "FAIL", "BLOCKED"),
+    "cause": _one_of("product", "drift"),
     "scope": _one_of("full", "targeted", "smoke"),
     "lanes": re.compile(r"[1-3]"),
     "env": _one_of("full-stack", "supabase", "none"),

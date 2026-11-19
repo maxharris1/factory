@@ -79,6 +79,19 @@ def test_an_approve_after_the_fail_still_wakes_once(tmp_path: Path) -> None:
     assert [row[:3] for row in _wakes(run)] == [("grok", HEAD_A, "q1")]
 
 
+def test_a_drift_fail_wakes_skill_maintenance_and_not_qa_failed(tmp_path: Path) -> None:
+    run = Harness(tmp_path, qa_config())
+    _approved(run)
+    drift = "[drift] qa-1 (ac-1): the verify skill or its map no longer matches the app"
+    run.post("q1", qa_report(HEAD_A, "FAIL", body=f"- {drift}\nEvidence: https://example.test/run/1\n", cause="drift"))
+    run.poll(12)
+
+    assert _wakes(run) == []
+    wakes = run.rows("SELECT recipient, head, source_comment_id, detail FROM jobs WHERE action = 'qa-skill-drift'")
+    assert [row[:3] for row in wakes] == [("grok", HEAD_A, "q1")]
+    assert json.loads(wakes[0][3])["drift"] == [drift]
+
+
 def test_a_fail_without_a_blocking_line_wakes_nobody(tmp_path: Path) -> None:
     run = Harness(tmp_path, qa_config())
     _approved(run)
