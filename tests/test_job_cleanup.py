@@ -60,23 +60,70 @@ def flock_on_path(tmp_path_factory, monkeypatch) -> None:
     monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
 
 
+def _this_test_and_its_descendants() -> set[str]:
+    parent_of = {}
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            parent_of[stat.parent.name] = stat.read_text().rsplit(")", 1)[1].split()[1]
+        except OSError:
+            continue
+    family = {str(os.getpid())}
+    for pid in parent_of:
+        chain = []
+        while pid in parent_of and pid not in family:
+            chain.append(pid)
+            pid = parent_of[pid]
+        if pid in family:
+            family.update(chain)
+    return family
+
+
+@pytest.fixture(autouse=True)
+def _only_this_tests_processes(monkeypatch) -> None:
+    real_mine = job_cleanup._mine
+
+    def mine(process: Path) -> bool | None:
+        found = real_mine(process)
+        if job_cleanup.PROC != Path("/proc") or process.name in _this_test_and_its_descendants():
+            return found
+        return None if found is None else False
+
+    monkeypatch.setattr(job_cleanup, "_mine", mine)
+
+
 def device_path() -> str:
     return (f"{Path(sys.executable).parent}:{Path(shutil.which('flock')).parent}"
             ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+
+
+DEVICE_ORCH = """import os, sys
+from pathlib import Path
+sys.path.insert(0, os.getcwd())
+from lib import job_cleanup
+from lib.cli import main
+job_cleanup.PROC = Path(os.environ["FAKE_PROC"])
+sys.exit(main())
+"""
 
 
 class ShellTransport:
     def __init__(self, home: Path):
         self.home = home
         self.offline: set[str] = set()
+        device = home / "shell-device"
+        self.proc = fake_proc(device, {"1": ("0", device)})
+        self.orch = device / "orch.py"
+        self.orch.write_text(DEVICE_ORCH)
 
     def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
         alias, script = argv[-2], argv[-1]
         if alias in self.offline:
             return Called(SSH_UNREACHABLE, "", "")
+        assert script.count("./bin/orch") == 1, script
         done = subprocess.run(
-            ["sh", "-c", script], input=input or b"", capture_output=True, timeout=timeout,
-            env={"HOME": str(self.home), "PATH": device_path()},
+            ["sh", "-c", script.replace("./bin/orch", str(self.orch))], input=input or b"",
+            capture_output=True, timeout=timeout,
+            env={"HOME": str(self.home), "PATH": device_path(), "FAKE_PROC": str(self.proc)},
         )
         return Called(done.returncode, done.stdout.decode(), done.stderr.decode())
 
@@ -485,36 +532,112 @@ NON_DUMPABLE = (
 )
 
 
-@pytest.mark.skipif(not Path("/proc/self/cwd").exists(), reason="needs Linux /proc")
-def test_a_live_process_of_this_user_that_hides_its_cwd_keeps_every_folder(tmp_path: Path) -> None:
+def fake_proc(tmp_path: Path, processes: dict[str, tuple[str, Path | None]]) -> Path:
+    proc = tmp_path / "proc"
+    uid = os.getuid()
+    for pid, (parent, cwd) in processes.items():
+        process = proc / pid
+        (process / "fd").mkdir(parents=True)
+        (process / "cwd").symlink_to(cwd or tmp_path)
+        (process / "status").write_text(f"Name:\tp\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nVmSize:\t1 kB\n")
+        (process / "stat").write_text(f"{pid} (p) S {parent} 1 1 0\n")
+        if cwd is None:
+            (process / "fd").chmod(0)
+    (proc / "self").symlink_to(proc / "1")
+    return proc
+
+
+def test_a_hidden_process_keeps_every_folder_and_does_not_stop_the_scan(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = work_root(tmp_path)
-    job_folder(root, "held")
+    for job_id in ("held", "free"):
+        job_folder(root, job_id)
     jobs = root / "jobs"
-    child = subprocess.Popen([sys.executable, "-c", NON_DUMPABLE], cwd=jobs / "held" / "repo",
-                             stdout=subprocess.PIPE, text=True)
+    proc = fake_proc(tmp_path, {
+        "1": ("0", tmp_path),
+        "10": ("1", jobs / "held" / "repo"),
+        "11": ("10", None),
+        "12": ("1", None),
+    })
+    if os.access(proc / "11" / "fd", os.R_OK):
+        pytest.skip("this user can read a directory with no permissions (root)")
+    monkeypatch.setattr(job_cleanup, "PROC", proc)
     try:
-        assert child.stdout.readline().strip() == "ready"
+        assert job_cleanup.jobs_held_open(jobs) == set(os.listdir(jobs))
+        report = device_pass(root, Plan(frozenset({"held", "free"}), NOW - 6 * HOUR, False))
+    finally:
+        for pid in ("11", "12"):
+            (proc / pid / "fd").chmod(0o700)
+
+    assert report.removed == {} and report.kept == {"held": "held-open", "free": "held-open"}
+    assert (jobs / "held" / "repo" / "README").exists()
+
+
+@pytest.mark.parametrize("parents", [
+    pytest.param({"1": "0", "10": "1", "11": "10"}, id="parent-outside-the-jobs-root"),
+    pytest.param({"1": "0", "11": "1"}, id="parent-exited"),
+])
+def test_a_hidden_process_keeps_the_folder_no_readable_process_holds(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parents: dict[str, str]) -> None:
+    root = work_root(tmp_path)
+    folder = job_folder(root, "held")
+    proc = fake_proc(tmp_path, {
+        pid: (parent, folder / "repo" if pid == "11" else tmp_path) for pid, parent in parents.items()
+    })
+    fd = proc / "11" / "fd"
+    fd.chmod(0)
+    real_readlink = os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if Path(path) == proc / "11" / "cwd":
+            raise PermissionError("non-dumpable")
+        return real_readlink(path, *args, **kwargs)
+
+    try:
+        if os.access(fd, os.R_OK):
+            pytest.skip("this user can read a directory with no permissions (root)")
+        monkeypatch.setattr(job_cleanup, "PROC", proc)
+        monkeypatch.setattr(job_cleanup, "runner_locks", lambda: True)
+        monkeypatch.setattr(os, "readlink", readlink)
+        report = device_pass(root, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
+    finally:
+        fd.chmod(0o700)
+
+    assert report.removed == {} and report.kept == {"held": "held-open"}
+    assert (folder / "repo" / "README").exists()
+
+
+@pytest.mark.skipif(not Path("/proc/self/cwd").exists(), reason="needs Linux /proc")
+def test_a_live_hidden_process_keeps_every_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    for job_id in ("held", "free"):
+        job_folder(root, job_id)
+    jobs = root / "jobs"
+    hidden = subprocess.Popen([sys.executable, "-c", NON_DUMPABLE], cwd=tmp_path,
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert hidden.stdout.readline().strip() == "ready"
         try:
-            os.readlink(f"/proc/{child.pid}/cwd")
+            os.readlink(f"/proc/{hidden.pid}/cwd")
             pytest.skip("this user can read a non-dumpable process's cwd (root or CAP_SYS_PTRACE)")
         except PermissionError:
             pass
-        assert job_cleanup.jobs_held_open(jobs) is None
-        report = device_pass(root, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
-        assert child.poll() is None
+        assert job_cleanup.jobs_held_open(jobs) == set(os.listdir(jobs))
+        report = device_pass(root, Plan(frozenset({"held", "free"}), NOW - 6 * HOUR, False))
+        assert hidden.poll() is None
     finally:
-        child.kill()
-        child.wait()
+        hidden.kill()
+        hidden.wait()
 
-    assert report.removed == {} and report.kept == {"held": "cannot-scan"}
+    assert report.removed == {} and report.kept == {"held": "held-open", "free": "held-open"}
     assert (jobs / "held" / "repo" / "README").exists()
     assert job_cleanup.jobs_held_open(jobs) == set()
 
 
 def test_a_process_that_exits_while_the_scan_walks_its_parents_does_not_fail_the_scan(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    jobs = work_root(tmp_path) / "jobs"
-    jobs.mkdir(parents=True)
+    root = work_root(tmp_path)
+    job_folder(root, "free")
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     gone = f"/proc/{child.pid}"
     read_paths, read_parent = job_cleanup._process_paths, job_cleanup._parent
@@ -531,7 +654,7 @@ def test_a_process_that_exits_while_the_scan_walks_its_parents_does_not_fail_the
     monkeypatch.setattr(job_cleanup, "_process_paths", paths)
     monkeypatch.setattr(job_cleanup, "_parent", parent)
     try:
-        assert job_cleanup.jobs_held_open(jobs) == set()
+        assert job_cleanup.jobs_held_open(root / "jobs") == set()
     finally:
         child.kill()
         child.wait()

@@ -17,8 +17,10 @@ it, or a process of this user has its cwd or an open file inside it. The
 host reads orch.db again and confirms only the ids still finished, so a
 job requeued and claimed since the first read is moved back. The device
 empties each confirmed folder, keeping only its `.orch-worker*` records,
-and moves it back. A device that cannot scan for such processes, or finds
-one of this user's it cannot inspect, removes nothing.
+and moves it back. A device that cannot scan for such processes removes
+nothing. A process of this user whose cwd or open files the scan cannot
+read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
+job folder. So while one lives, every folder is kept as held-open.
 
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a
@@ -73,6 +75,7 @@ FINISH = "finish"
 SET_ASIDE = ".cleanup"
 CLAIMED = ".claimed"
 LOCK = ".lock"
+PROC = Path("/proc")
 
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -257,18 +260,12 @@ def _process_paths(process: Path) -> list[str] | None:
 
 def jobs_held_open(jobs: Path) -> set[str] | None:
     prefix = f"{os.path.realpath(jobs)}/"
-    proc = Path("/proc")
-    if (proc / "self" / "cwd").exists():
-        paths = []
-        for process in proc.iterdir():
-            if not process.name.isdigit():
-                continue
-            found = _process_paths(process)
-            if found is None:
-                if _mine(process) and not _started_by_another_user(process):
-                    return None
-                continue
-            paths.extend(found)
+    if (PROC / "self" / "cwd").exists():
+        paths_of = {process: _process_paths(process) for process in PROC.iterdir()
+                    if process.name.isdigit()}
+        paths = [path for listed in paths_of.values() if listed for path in listed]
+        blind = any(listed is None and _mine(process) and not _started_by_another_user(process)
+                    for process, listed in paths_of.items())
     else:
         try:
             found = subprocess.run(
@@ -280,7 +277,11 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
         if found.returncode != 0:
             return None
         paths = [line[1:] for line in found.stdout.splitlines() if line.startswith("n")]
-    return {path[len(prefix):].split("/", 1)[0] for path in paths if path.startswith(prefix)}
+        blind = False
+    held = {path[len(prefix):].split("/", 1)[0] for path in paths if path.startswith(prefix)}
+    if blind and jobs.is_dir():
+        held |= {entry.name for entry in jobs.iterdir()}
+    return held
 
 
 def _newer(path: Path, cutoff: float) -> bool:
