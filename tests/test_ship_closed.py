@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from lib.dashboard import _read_db
+from lib.dispatch.types import TicketRef
 from lib.github_actions import GitHubAdapterError
 from lib.poll_source import HTTPResult, LivePollSource
 from lib.pr_title import SOURCES_TABLE
@@ -384,3 +386,56 @@ def test_after_a_restart_a_closed_linear_pr_is_not_read_from_gh_cache(tmp_path: 
         dispatcher, queue, gh, "AUT-42", "repos/acme/widgets/pulls/12"
     )
 
+
+def slow_source(now, seconds: float, budget: float = 10.0) -> LivePollSource:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "closed", "merged": False, "commits": 1}
+
+    def runner(argv, timeout):
+        if any(re.fullmatch(r"repos/acme/widgets/pulls/[0-9]+", part) for part in argv):
+            now[0] += seconds
+        return gh(argv, timeout)
+
+    return LivePollSource(
+        config(),
+        environ={"LINEAR_KEY": "test-only"},
+        gh_runner=runner,
+        clock=lambda: now[0],
+        sleep=lambda _: None,
+        tracked_read_budget_seconds=budget,
+    )
+
+
+def active(number: str) -> TicketRef:
+    return TicketRef("acme/widgets", number, "github", pr_number=number)
+
+
+def closed(number: str) -> TicketRef:
+    return TicketRef("acme/widgets", number, "github", pr_number=number, closed=True)
+
+
+def read_ids(source: LivePollSource, refs: tuple[TicketRef, ...]) -> list[str]:
+    source.begin_cycle()
+    return [ticket.ticket_id for ticket in source.tracked_tickets(refs)]
+
+
+def test_a_closed_ref_is_read_even_when_active_reads_spend_the_budget() -> None:
+    now = [100.0]
+    source = slow_source(now, seconds=4)
+
+    assert read_ids(source, (active("1"), active("2"), active("3"), closed("9"))) == ["9", "1"]
+
+
+def test_every_newly_closed_ref_is_read_past_the_budget() -> None:
+    now = [100.0]
+    source = slow_source(now, seconds=12)
+
+    assert read_ids(source, (closed("8"), closed("9"))) == ["8", "9"]
+
+
+def test_a_closed_ref_skips_the_budget_only_on_its_first_read_after_closure() -> None:
+    now = [100.0]
+    source = slow_source(now, seconds=6)
+
+    assert read_ids(source, (closed("9"),)) == ["9"]
+    assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["1"]

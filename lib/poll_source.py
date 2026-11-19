@@ -537,6 +537,7 @@ class LivePollSource:
         self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._linear_branches: dict[str, str] = {}
         self._linear_branch_pulls: dict[str, str | None] = {}
+        self._closed_reads: set[tuple[str, str, str | None]] = set()
         self._backoff_until = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
@@ -984,12 +985,16 @@ class LivePollSource:
     ) -> tuple[TrackedTicket, ...]:
         found: list[TrackedTicket] = []
         projects = {project.repo.lower(): project for project in self.config.projects}
+        urgent = [
+            ref for ref in tickets if ref.closed and _closed_key(ref) not in self._closed_reads
+        ]
+        rest = [ref for ref in tickets if ref not in urgent]
         # Between Linear cycles tracked Linear tickets wait for the next one:
         # no Linear read, and nothing rebuilt from an older read.
         linear_refs = sorted(
             (
                 ref
-                for ref in tickets
+                for ref in rest
                 if ref.tracker == "linear" and self._linear_due
             ),
             key=_linear_ref_key,
@@ -1001,10 +1006,11 @@ class LivePollSource:
             else 0
         )
         ordered = (
-            linear_refs[start:]
+            urgent
+            + linear_refs[start:]
             + linear_refs[:start]
             + sorted(
-                (ref for ref in tickets if ref.tracker != "linear"),
+                (ref for ref in rest if ref.tracker != "linear"),
                 key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
             )
         )
@@ -1018,24 +1024,34 @@ class LivePollSource:
                     self._note_unread(ref.ticket_id)
                 continue
             repo = ref.repo.lower()
+            first_closed_read = ref in urgent
             left = self.tracked_read_budget_seconds - spent.get(repo, 0.0)
-            if left <= 0:
+            if left <= 0 and not first_closed_read:
                 self._defer(f"tracked-read budget deferred {project.repo}")
                 continue
             started = self.clock()
-            self._budget_deadline = started + left
+            self._budget_deadline = started + (
+                self.read_deadline_seconds if first_closed_read else left
+            )
             self._budget_spent = False
+            cursor = self._linear_tracked_cursor
             try:
                 ticket = self._tracked_ticket(ref, project, probes.get((repo, ref.ticket_id)))
             except Exception as exc:
                 if not isinstance(exc, _TerminalTicket):
                     self._record(ref.repo, ref.ticket_id, exc)
+                elif first_closed_read:
+                    self._closed_reads.add(_closed_key(ref))
             else:
                 if ticket is not None and not self._budget_spent:
                     found.append(ticket)
+                    if first_closed_read:
+                        self._closed_reads.add(_closed_key(ref))
             finally:
                 self._budget_deadline = None
                 spent[repo] = spent.get(repo, 0.0) + self.clock() - started
+                if first_closed_read:
+                    self._linear_tracked_cursor = cursor
             if self._budget_spent:
                 self._budget_spent = False
                 self._defer(f"tracked-read budget deferred {project.repo}")
@@ -2569,6 +2585,10 @@ def _linear_terms(query: str) -> tuple[str, ...]:
 
 def _linear_candidate_key(issue: Mapping[str, Any]) -> tuple[str, str]:
     return (_ticket_hint(issue), str(issue.get("id", "")))
+
+
+def _closed_key(ref: TicketRef) -> tuple[str, str, str | None]:
+    return ref.repo.lower(), ref.ticket_id, ref.pr_number
 
 
 def _linear_ref_key(ref: TicketRef) -> tuple[str, str]:
