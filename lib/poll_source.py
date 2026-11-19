@@ -1109,11 +1109,16 @@ class LivePollSource:
                     closed.add((repo, ref.ticket_id))
         for repo, numbers in wanted.items():
             try:
-                found = self.github.closed_pulls(projects[repo].repo, list(numbers))
+                states = self.github.pull_states(projects[repo].repo, list(numbers))
             except Exception:
                 self._defer(f"GitHub closed probe failed for {projects[repo].repo}")
                 continue
-            closed.update((repo, ticket_id) for number in found for ticket_id in numbers[number])
+            for number, state in states.items():
+                for ticket_id in numbers[number]:
+                    if state == "OPEN":
+                        self._closed_reads.discard((repo, ticket_id))
+                    elif state in ("CLOSED", "MERGED"):
+                        closed.add((repo, ticket_id))
         return frozenset(closed)
 
     def _probe_number(self, repo: str, ref: TicketRef) -> str | None:
@@ -1132,6 +1137,8 @@ class LivePollSource:
             self._defer(f"GitHub branch lookup failed for {repo}")
             return False
         self._linear_branch_pulls[identifier] = None if pull is None else str(pull["number"])
+        if pull is not None and pull.get("state") == "open":
+            self._closed_reads.discard((repo.lower(), identifier))
         return pull is not None and pull.get("state") != "open"
 
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:

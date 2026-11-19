@@ -198,7 +198,11 @@ def test_the_closed_probe_reads_only_each_pulls_state(monkeypatch) -> None:
     actions = GitHubReviewActions()
     monkeypatch.setattr(actions, "_json", answer)
 
-    assert actions.closed_pulls("owner/repo", ["1", "2", "3", "4"]) == {"2", "3"}
+    assert actions.pull_states("owner/repo", ["1", "2", "3", "4"]) == {
+        "1": "OPEN",
+        "2": "CLOSED",
+        "3": "MERGED",
+    }
     assert len(queries) == 1
     assert "fragment pull on PullRequest { state }" in queries[0]
 
@@ -439,6 +443,37 @@ def test_a_closed_ref_skips_the_budget_only_on_its_first_read_after_closure() ->
 
     assert read_ids(source, (closed("9"),)) == ["9"]
     assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["1"]
+
+
+def test_a_closed_ref_seen_open_by_the_state_probe_skips_the_budget_on_its_next_closure() -> None:
+    now = [100.0]
+    pull = {"state": "closed", "merged": False, "commits": 1}
+    source = slow_source(now, seconds=4, pull=pull)
+    assert read_ids(source, (closed("9"),)) == ["9"]
+
+    pull["state"] = "open"
+    assert source.closed_pulls((active("9"),)) == frozenset()
+    pull["state"] = "closed"
+
+    assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["9", "1"]
+
+
+def _probe_failed(repo: str, numbers: list[str]) -> dict[str, str]:
+    raise GitHubAdapterError("probe failed")
+
+
+@pytest.mark.parametrize(
+    "probe", [_probe_failed, lambda repo, numbers: {}], ids=["probe-failed", "number-missing"]
+)
+def test_a_closed_ref_the_state_probe_did_not_observe_keeps_its_budget(probe) -> None:
+    now = [100.0]
+    source = slow_source(now, seconds=4)
+    assert read_ids(source, (closed("9"),)) == ["9"]
+
+    source.github.pull_states = probe
+    assert source.closed_pulls((active("9"),)) == frozenset()
+
+    assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["1", "2"]
 
 
 def test_a_linear_ticket_held_after_a_full_read_is_probed_by_that_reads_pr(tmp_path: Path) -> None:
