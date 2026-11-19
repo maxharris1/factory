@@ -15,8 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib.device_pool import SLOTS_TABLE
-from lib.dispatch.helpers import _REGISTERING_ACTIONS
-from lib.job_state import RUN_DIED, RUN_EXITED
+from lib.dispatch.helpers import (
+    _REGISTERING_ACTIONS,
+    _REJECTED_OUTCOMES,
+    _UPDATE_NO_HANDOFF_OUTCOMES,
+)
+from lib.job_state import RELEASED_UNSTARTED, RUN_DIED, RUN_EXITED
 from lib.queue import PRE_READY_FAILED, PRE_READY_PASSED, SUBMITTED_INVALID
 
 HANDOFF_EVENTS = (SUBMITTED_INVALID, PRE_READY_PASSED, PRE_READY_FAILED)
@@ -38,6 +42,7 @@ class Attempt:
     host: str | None
     exit: str | None
     exit_code: int | None
+    earlier_exits: tuple[str, ...]
     comment_id: str | None
     comment_url: str | None
     linked_by: str | None
@@ -85,16 +90,19 @@ def attempts(db: Path, repo: str, ticket_id: str) -> list[Attempt]:
         links = by_comment("comment_links", "link")
 
     ended: dict[str, str] = {}
+    earlier: dict[str, list[str]] = {}
     handed: dict[str, str] = {}
-    invalid: dict[tuple[str, str], str] = {}
+    failed: dict[str, str] = {}
     for job_id, event, detail in events:
         if event in (RUN_EXITED, RUN_DIED):
             ended[job_id] = detail
+        elif (event == RELEASED_UNSTARTED or "requeued" in event) and job_id in ended:
+            earlier.setdefault(job_id, []).append(ended.pop(job_id))
         handoff = _HANDOFF.fullmatch(detail) if event in HANDOFF_EVENTS else None
         if handoff is not None:
             handed[job_id] = handoff["comment"]
-            if event == SUBMITTED_INVALID:
-                invalid[(job_id, handoff["comment"])] = handoff["reason"]
+            if event in (SUBMITTED_INVALID, PRE_READY_FAILED):
+                failed[handoff["comment"]] = f"{event}: {handoff['reason']}"
 
     linked: dict[str, tuple[str, str]] = {}
     for job in jobs:
@@ -108,25 +116,14 @@ def attempts(db: Path, repo: str, ticket_id: str) -> list[Attempt]:
         for comment, outcome in outcomes.items()
         if outcome.startswith(UNREGISTERED) and comment not in claimed and comment in times
     )
-    for index, job in enumerate(jobs):
-        if job["id"] in linked:
-            continue
-        kinds = {kind for kind, actions in _REGISTERING_ACTIONS.items() if job["action"] in actions}
-        same = [later for later in jobs[index + 1 :] if later["action"] == job["action"]]
-        end = same[0]["created_at"] if same else None
-        found = next(
-            (
-                (at, comment)
-                for at, comment in unregistered
-                if outcomes[comment].removeprefix(UNREGISTERED) in kinds
-                and job["created_at"] <= at
-                and (end is None or at < end)
-            ),
+    for at, comment in unregistered:
+        actions = _REGISTERING_ACTIONS.get(outcomes[comment].removeprefix(UNREGISTERED), ())
+        producer = next(
+            (job for job in reversed(jobs) if job["action"] in actions and job["created_at"] <= at),
             None,
         )
-        if found is not None:
-            unregistered.remove(found)
-            linked[job["id"]] = (found[1], "time")
+        if producer is not None and producer["id"] not in linked:
+            linked[producer["id"]] = (comment, "time")
 
     result = []
     for job in jobs:
@@ -136,9 +133,7 @@ def attempts(db: Path, repo: str, ticket_id: str) -> list[Attempt]:
         ran = (detail.partition(": ")[2] or detail) or None
         code = _EXIT_CODE.search(detail)
         comment, linked_by = linked.get(job_id, (None, None))
-        verdict, reason = _verdict(
-            outcomes.get(comment), invalid.get((job_id, comment)), comment, job["state"]
-        )
+        verdict, reason = _verdict(outcomes.get(comment), failed.get(comment), comment, job["state"])
         result.append(
             Attempt(
                 job_id=job_id,
@@ -150,6 +145,7 @@ def attempts(db: Path, repo: str, ticket_id: str) -> list[Attempt]:
                 host=host["host"] if host else slots.get(job_id),
                 exit=ran,
                 exit_code=int(code["code"]) if code else None,
+                earlier_exits=tuple(earlier.get(job_id, ())),
                 comment_id=comment,
                 comment_url=links.get(comment),
                 linked_by=linked_by,
@@ -161,13 +157,15 @@ def attempts(db: Path, repo: str, ticket_id: str) -> list[Attempt]:
 
 
 def _verdict(
-    outcome: str | None, invalid: str | None, comment: str | None, state: str
+    outcome: str | None, failed: str | None, comment: str | None, state: str
 ) -> tuple[str, str]:
+    if outcome is not None and outcome.startswith(_REJECTED_OUTCOMES + _UPDATE_NO_HANDOFF_OUTCOMES):
+        return "rejected", outcome
+    # A failed check means the ready settles no job, whatever outcome the comment got.
+    if failed is not None:
+        return "rejected", failed
     if outcome is not None:
-        refused = outcome.startswith(("rejected-", "refused-"))
-        return ("rejected" if refused else "accepted"), outcome
-    if invalid is not None:
-        return "rejected", f"{SUBMITTED_INVALID}: {invalid}"
+        return "accepted", outcome
     if comment is not None:
         return "pending", "not-yet-handled"
     if state in ("queued", "running"):

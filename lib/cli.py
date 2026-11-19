@@ -529,7 +529,8 @@ retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH] [--machines PATH]
 trace <owner/repo>#<n> [--db PATH] [--json]
   Print one line per job attempt on the ticket (owner/repo#n or its PR or
   issue URL): job id, action and recipient, attempt, state, host, exit, the
-  handoff comment, and the dispatcher's result and reason (issue #1016).
+  handoff comment, the dispatcher's result and reason (issue #1016), and the
+  exits of earlier executions a requeue resumed.
   Read-only: opens --db (default $ORCH_DB) with mode=ro, no GitHub call.
   --json prints a JSON list. Exits 2 on a bad ticket, 1 when the database
   cannot be read.
@@ -1913,6 +1914,7 @@ def _trace(argv: list[str]) -> int:
             row.comment_url or row.comment_id,
             row.result,
             row.reason,
+            "; ".join(row.earlier_exits),
         )
         print("\t".join(field or "-" for field in fields))
     return 0

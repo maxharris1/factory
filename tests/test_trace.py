@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from lib import cli, trace
-from lib.queue import SQLiteJobQueue
+from lib.device_pool import DevicePool
+from lib.job_state import requeue_usage_limited
+from lib.machines_yml import Device, MachinesConfig
+from lib.placed_run import PlacedRun
+from lib.queue import PRE_READY_FAILED, JobRequest, SQLiteJobQueue, _ensure_job_events
+from tests import test_dispatcher
+from tests.test_job_bound_accept import OLD_HEAD, _claim, _enqueue, _ready
 
 REPO = "maxharris1/factory"
 TICKET = "1056"
@@ -255,3 +261,114 @@ def test_cli_json(db: Db, capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_cli_rejects_a_bad_ticket(db: Db) -> None:
     assert cli.main(["trace", "not-a-ticket", "--db", str(db.path)]) == 2
+
+
+@pytest.mark.job_bound
+def test_a_stale_ready_head_is_rejected(tmp_path: Path) -> None:
+    dispatcher, queue = test_dispatcher.setup(tmp_path)
+    _enqueue(queue, "build", "claude")
+    build = _claim(queue, "claude")
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-old")
+    dispatcher.process(_ready("ready-old", head=OLD_HEAD))
+    assert test_dispatcher.handled_outcome(queue, "ready-old") == "stale-ready-head"
+
+    [item] = trace.attempts(queue.path, "owner/repo", "42")
+
+    assert item.comment_id == "ready-old"
+    assert (item.result, item.reason) == ("rejected", "stale-ready-head")
+
+
+def test_a_failed_pre_ready_check_rejects_the_ready(tmp_path: Path) -> None:
+    _, queue = test_dispatcher.setup(tmp_path)
+    _enqueue(queue, "build", "claude")
+    build = _claim(queue, "claude")
+    queue.record_invalid_handoff(
+        build.id,
+        owner="claude",
+        comment_id="ready-failed",
+        detail="pre_ready failed: exit 1",
+        event=PRE_READY_FAILED,
+    )
+    queue.finish(build.id, owner="claude", handoff_comment_id=None)
+
+    [item] = trace.attempts(queue.path, "owner/repo", "42")
+
+    assert item.comment_id == "ready-failed"
+    assert (item.result, item.reason) == ("rejected", "pre-ready-failed: pre_ready failed: exit 1")
+
+
+@pytest.mark.job_bound
+def test_an_unregistered_ready_goes_to_the_fix_that_followed_the_build(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = test_dispatcher.setup(tmp_path, now)
+    _enqueue(queue, "build", "claude")
+    build = _claim(queue, "claude")
+    now[0] = 150.0
+    queue.finish(build.id, owner="claude", handoff_comment_id=None)
+    queue.mark_failure_handled(build.id)
+    now[0] = 300.0
+    _enqueue(queue, "fix", "claude")
+    fix = _claim(queue, "claude")
+    now[0] = 350.0
+    queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    queue.mark_failure_handled(fix.id)
+    now[0] = 400.0
+    dispatcher.process(_ready("ready-from-fix", created_at=340.0))
+    assert test_dispatcher.handled_outcome(queue, "ready-from-fix") == "rejected-unregistered-ready"
+
+    found = {item.job_id: item for item in trace.attempts(queue.path, "owner/repo", "42")}
+
+    assert (found[build.id].comment_id, found[build.id].reason) == (None, "no-handoff")
+    assert found[fix.id].comment_id == "ready-from-fix"
+    assert (found[fix.id].result, found[fix.id].reason) == ("rejected", "rejected-unregistered-ready")
+
+
+def _device(name: str) -> Device:
+    return Device(
+        name=name,
+        slot_max=1,
+        harnesses={"codex": "codex-bot"},
+        tailscale_name=f"{name}.example.ts.net",
+        workdir_root="/home/work",
+    )
+
+
+def test_a_requeued_job_shows_its_current_host_and_the_earlier_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "orch.db"
+    now = [100.0]
+    queue = SQLiteJobQueue(db, clock=lambda: now[0])
+    old = _device("old-host")
+    pool = DevicePool(queue, MachinesConfig(devices=(old,)))
+    job = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="7",
+            action="build",
+            recipient="codex",
+            source_comment_id="go",
+            timeout_seconds=5400,
+        ),
+        dedupe_key="retry",
+    )
+    _, placement = pool.claim("codex")
+    with queue.connect() as connection:
+        _ensure_job_events(connection)
+    now[0] = 150.0
+    PlacedRun(pool, placement, old, "codex", print, None).ended(1)
+    queue.finish(job.id, owner="codex", handoff_comment_id=None)
+    now[0] = 200.0
+    with queue.connect() as connection:
+        assert requeue_usage_limited(connection, job.id, now=now[0], reason="usage limit lifted")
+    current, _ = DevicePool(queue, MachinesConfig(devices=(_device("current-host"),))).claim("codex")
+    assert current.state == "running"
+    capsys.readouterr()
+
+    [item] = trace.attempts(db, "owner/repo", "7")
+
+    assert (item.state, item.host, item.exit, item.exit_code) == ("running", "current-host", None, None)
+    assert len(item.earlier_exits) == 1
+    assert "old-host" in item.earlier_exits[0] and "exit 1" in item.earlier_exits[0]
+    assert cli.main(["trace", "owner/repo#7", "--db", str(db)]) == 0
+    assert capsys.readouterr().out.rstrip("\n").endswith("\t" + item.earlier_exits[0])
