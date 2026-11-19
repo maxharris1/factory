@@ -2,6 +2,8 @@
 
 Each field is read on the job's own device and is `unknown` when it cannot be
 told; recording never delays the job past its reads' timeouts or fails it.
+The model is replaced by the one the harness reports in its stream, when it
+reports one (lib/telemetry.py).
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 _REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 # A binary that ignores --version may print anything, a secret included.
 _VERSION = re.compile(r"[\w .,:;()/+@~-]*\d+\.\d+[\w .,:;()/+@~-]*")
+_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}")
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,23 @@ def read(connection: sqlite3.Connection, job_id: str) -> Exposure | None:
     model, cli, brief, skills, host, revision = row
     paths = None if skills == UNKNOWN else tuple(json.loads(skills))
     return Exposure(model, cli, brief, paths, host, revision)
+
+
+def reported_model(value: object) -> str | None:
+    return value if isinstance(value, str) and _MODEL.fullmatch(value) else None
+
+
+def replace_model(connection: sqlite3.Connection, job_id: str, model: str) -> str | None:
+    try:
+        row = connection.execute(f"SELECT model FROM {TABLE} WHERE job_id = ?", (job_id,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+    if row is None or row[0] == model:
+        return None
+    connection.execute(f"UPDATE {TABLE} SET model = ? WHERE job_id = ?", (model, job_id))
+    return row[0]
 
 
 def local_shell(environ: Mapping[str, str]) -> Shell:

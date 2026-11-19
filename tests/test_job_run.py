@@ -1202,6 +1202,35 @@ def test_cli_job_run_records_unknown_and_still_runs_when_it_cannot_tell(tmp_path
     )
 
 
+@pytest.mark.parametrize(
+    ("printed", "expected"),
+    [
+        ('{"type":"system","subtype":"init","model":"claude-opus-5-5"}', "claude-opus-5-5"),
+        ("no init event here", exposure.UNKNOWN),
+    ],
+)
+def test_cli_job_run_records_the_model_a_claude_harness_reports(
+    tmp_path: Path, printed: str, expected: str
+) -> None:
+    factory = tmp_path / "factory"
+    factory.mkdir()
+    machines = _box_only(tmp_path, factory)
+    queue = _queue(tmp_path)
+    job = _running_job(queue, recipient="claude", action="build", machines=machines)
+    proc = _orch(
+        "job", "run", "claude-bot", job.id, "--machines", str(machines), "--db", str(tmp_path / "orch.db"),
+        "--", sys.executable, "-c", f"print({printed!r})",
+        env={"ORCH_JOB_BRIEF": str(tmp_path / "no-brief.md"), "ORCH_TELEMETRY": "on"},
+        stdin=subprocess.DEVNULL,
+    )
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr
+    with queue.connect() as connection:
+        recorded = exposure.read(connection, job.id)
+    assert recorded is not None and recorded.model == expected, stderr
+
+
 def test_cli_job_run_records_the_harness_and_project_config_of_the_job_worktree(tmp_path: Path) -> None:
     template, _head = _origin(tmp_path)
     seed = tmp_path / "seed"
