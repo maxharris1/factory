@@ -119,8 +119,9 @@ class Lab:
         shootout: bool = False,
         shares_usage_with: dict[str, str] | None = None,
         linear: LinearClient | None = None,
+        gate: str = "report",
     ):
-        qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5)
+        qa = replace(qa_config(shootout=shootout), lanes=lanes, timeout_minutes=5, gate=gate)
         qa = replace(qa, runners=tuple(item for name in runners for item in qa.runners if item.name == name))
         self.run = Harness(tmp_path, qa)
         self.fakes = {name: FakeRunner(name) for name in ("claude-cloud", "cursor-cloud")}
@@ -356,6 +357,26 @@ def test_second_miss_makes_the_run_blocked(tmp_path: Path) -> None:
     assert [row[3:5] for row in lab.lanes()] == [("dropped", "wrong-commit"), ("gap", "dropped-twice:wrong-method")]
     assert len(lab.launched()) == 2
     assert lab.header()["result"] == "BLOCKED"
+
+
+def doctor_failed(result: dict) -> None:
+    result.update(status="BLOCKED", doctor="verify-live doctor: exit 1, the app answered 502 on /health")
+    for item in result["scenarios"]:
+        item["result"] = "inconclusive"
+
+
+def test_lane_whose_doctor_failed_reports_blocked_and_no_finding(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    lab.enqueue(ids=2)
+    lab.broken[(0, 1)] = doctor_failed
+    lab.tick(4)
+
+    comment = lab.only_comment()
+    assert [row[1:5] for row in lab.lanes()] == [("head", 1, "reported", None)]
+    assert len(lab.launched()) == 1
+    assert lab.header()["result"] == "BLOCKED" and "cause" not in lab.header()
+    assert "lane 1 (head): reported BLOCKED" in comment
+    assert "[blocking]" not in comment
 
 
 def test_lane_ended_without_result_is_blocked(tmp_path: Path) -> None:

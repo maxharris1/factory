@@ -9,6 +9,7 @@ import pytest
 from lib import job_detail
 from lib.update_check import HeadDiff
 from tests.qa_support import HEAD_A, HEAD_B, Harness, qa_config, qa_report, ready, scenarios, verdict
+from tests.test_qa_cloud import Lab, doctor_failed
 from tests.test_qa_scope_table import SRC, FakeDiff
 
 pytestmark = pytest.mark.usefixtures("every_wake_reaches_grok")
@@ -412,3 +413,57 @@ def test_report_mode_neither_waits_for_nor_cancels_running_qa(
     assert run.rows("SELECT qa_runs.state, jobs.state FROM qa_runs JOIN jobs ON qa_runs.job_id = jobs.id") == [
         ("queued", "queued")
     ]
+
+
+def _lane_doctor_fails(tmp_path: Path, review: str) -> Lab:
+    lab = Lab(tmp_path, lanes=1, gate="block")
+    lab.broken[(0, 1)] = doctor_failed
+    lab.run.post("r1", ready(HEAD_A, body=scenarios("qa-1", pack="demo")), head=HEAD_A)
+    lab.run.poll()
+    lab.run.finish("codex", "v1")
+    lab.run.post("v1", verdict(HEAD_A, review))
+    return lab
+
+
+def _post_newest_qa_comment(lab: Lab, comment_id: str) -> None:
+    lab.tick(4)
+    body = list(lab.posted.values())[-1][1]
+    assert "result=BLOCKED" in body and "reported BLOCKED" in body and "cause=" not in body
+    lab.run.post(comment_id, body)
+    lab.run.poll(3)
+
+
+def test_a_lane_doctor_failure_retries_then_parks_without_spending_a_round(tmp_path: Path) -> None:
+    lab = _lane_doctor_fails(tmp_path, "APPROVE")
+    run = lab.run
+    _post_newest_qa_comment(lab, "q1")
+
+    assert run.rows("SELECT attempt, head, state FROM jobs WHERE action = 'qa' ORDER BY rowid") == [
+        (1, HEAD_A, "done"),
+        (2, HEAD_A, "queued"),
+    ]
+    assert _ticket(run) == [("review", 0)]
+    assert _fix_jobs(run) == []
+    assert run.actions.handoffs == []
+
+    _post_newest_qa_comment(lab, "q2")
+
+    assert len(lab.posted) == 2
+    assert run.rows("SELECT workflow_state, review_round, paused_action FROM ticket_state") == [
+        ("waiting-max", 0, "qa")
+    ]
+    assert run.rows("SELECT recipient FROM jobs WHERE action = 'qa-env-failed'") == [("grok",)]
+    assert _fix_jobs(run) == []
+    assert run.actions.handoffs == []
+
+
+def test_revise_with_a_lane_doctor_failure_queues_a_fix_without_qa_findings(tmp_path: Path) -> None:
+    lab = _lane_doctor_fails(tmp_path, "REVISE")
+    lab.run.poll()
+    _post_newest_qa_comment(lab, "q1")
+
+    detail = _fix_detail(lab.run)
+    assert detail["instruction"] == "comment:v1"
+    assert "qa_findings" not in detail
+    assert _ticket(lab.run) == [("fixing", 1)]
+    assert len(lab.run.qa_jobs()) == 1
