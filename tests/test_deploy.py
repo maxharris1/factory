@@ -739,7 +739,8 @@ def test_ci_byte_compiles_lib_and_bin_on_python_311() -> None:
     assert any("sys.version_info[:2] == (3, 11)" in run for run in runs)
 
     steps = _ci_jobs()["test"]["steps"]
-    assert steps[1]["with"]["python-version"] == "3.12"
+    setup_uv = next(step for step in steps if step.get("uses", "").startswith("astral-sh/setup-uv@"))
+    assert setup_uv["with"]["python-version"] == "3.12"
     assert any("uv python install 3.11" in step.get("run", "") for step in steps)
 
 

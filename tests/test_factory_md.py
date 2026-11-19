@@ -626,7 +626,7 @@ def test_f2_03_runner_checklist_holds_no_token_and_names_the_wiring() -> None:
     assert re.search(r"--token\b", text) is None
     for needle in (
         "ci_runner: factory-linux",
-        """runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}""",
+        """runs-on: ${{ contains(fromJSON(needs.changes.outputs.hosted || '[]'), 'checks') && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","factory-linux"]') }}""",
         "deploy/runner-pool-sync.sh",
         "factory-mac",
         "Credential-holding deploy workflows stay on hosted runners",
@@ -640,6 +640,37 @@ def test_f2_03_runner_checklist_holds_no_token_and_names_the_wiring() -> None:
     )
     assert [item for item in findings if item.severity == "error"] == []
     assert config is not None and config.ci_runner == "factory-pc-wsl"
+
+
+def _checks_runs_on_line() -> str:
+    lines = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("  checks:") + 1
+    for line in lines[start:]:
+        if re.match(r"  \S", line):
+            break
+        if line.strip().startswith("runs-on:"):
+            return line.strip()
+    raise AssertionError("the checks job has no runs-on line")
+
+
+@pytest.mark.parametrize("doc", ["docs/F2-03-RUNNER-CHECKLIST.md", "docs/decisions/711-self-hosted-runners.md"])
+def test_the_runner_docs_state_the_per_run_routing_ci_uses(doc: str) -> None:
+    raw = (ROOT / doc).read_text(encoding="utf-8")
+    text = " ".join(raw.split())
+    for needle in (
+        "Each Linux job takes a free local `factory-linux` runner first and runs on `ubuntu-latest` only when no local slot is free.",
+        "If a pool job has been queued over 3 minutes and no pool job is running, `free` is 0 and every slot goes hosted.",
+        "The `changes` job runs on `ubuntu-latest` on every event, with `actions: read` and `contents: read` and only `github.token`.",
+        "`changes` is one billed hosted job per run",
+        "A run whose `local <slot>` steps have all finished reserves the slots it kept local, so a run that sent every slot hosted reserves none.",
+        "An earlier run whose steps have not all finished has not routed yet and reserves all 7 slots.",
+        '"Re-run failed jobs" reuses the earlier `changes` output, so each job goes back where it ran.',
+        "`FACTORY_LINUX_POOL`",
+        "`lib/ci_route.py`",
+        _checks_runs_on_line(),
+    ):
+        assert needle in text, needle
+    assert not any("runs-on" in line and "vars.FACTORY_LINUX_RUNNER" in line for line in raw.splitlines())
 
 
 def with_pre_ready(value: object) -> dict:
