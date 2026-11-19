@@ -130,7 +130,7 @@ def _defuse_gate_lines(text: str) -> str:
 
 
 SPLIT_LIMIT = 4_000
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*(?:(?<=\s)#+\s*)?$")
 _SPLIT_CRITERION = re.compile(r"^\s*[-*+]\s+(ac-\w+:.*\S)\s*$", re.IGNORECASE)
 _SPLIT_DEPENDS = re.compile(r"\bdepends\s+on:\s*(.*?)\s*\.?\s*$", re.IGNORECASE)
 _SPLIT_REFS = re.compile(r"(?:parts?\s*)?\d+(?:\s*(?:,|and|&)\s*(?:parts?\s*)?\d+)*", re.IGNORECASE)

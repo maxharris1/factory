@@ -801,6 +801,14 @@ def test_a_split_with_two_titled_parts_parses_each_part() -> None:
     )
 
 
+def test_a_part_title_keeps_a_trailing_hash_that_is_not_a_closing_sequence() -> None:
+    plan = (
+        "## Proposed split ##\n### Support C#\n- ac-1: Parse source.\n### Port F# ###\n- ac-2: Port.\n"
+        "### Add tests #\n- ac-3: Verify parsing.\n### ##\n- ac-4: Untitled.\n"
+    )
+    assert [part.title for part in split_parts(plan)] == ["Support C#", "Port F#", "Add tests", ""]
+
+
 def test_fewer_than_two_parts_is_no_split() -> None:
     one = SPLIT_PLAN.split("### #1052b")[0]
     assert split_parts(one) == ()
