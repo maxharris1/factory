@@ -3190,6 +3190,8 @@ def test_an_account_start_refuses_when_a_profile_account_token_cannot_be_dropped
         pytest.param({}, ("A B",), id="space"),
         pytest.param({}, ("$(touch pwn)",), id="substitution"),
         pytest.param({}, ("",), id="empty"),
+        pytest.param({}, (remote.TAG_ENV,), id="worker-tag"),
+        pytest.param({}, ("ORCH_JOB_WORKDIR",), id="job-workdir"),
     ],
 )
 def test_a_start_refuses_an_unset_name_that_is_not_plain_or_is_also_set(

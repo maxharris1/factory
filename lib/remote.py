@@ -671,7 +671,7 @@ def start_script(
         if not _ENV_NAME.fullmatch(name) or name == TAG_ENV:
             raise RemoteError(f"environment name {name!r} is not plain")
     for name in unset:
-        if not _ENV_NAME.fullmatch(name) or name in env:
+        if not _ENV_NAME.fullmatch(name) or name in {*env, "ORCH_JOB_WORKDIR", TAG_ENV}:
             raise RemoteError(f"cannot drop environment name {name!r}")
     dropped = (*TOKEN_VARIABLES, *unset)
     assignments = [f"{name}={shlex.quote(value)}" for name, value in sorted(env.items())]
