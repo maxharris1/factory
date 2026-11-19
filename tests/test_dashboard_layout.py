@@ -534,7 +534,12 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     assert job["round"] == "2/3"
     assert job["tracker"] == "github"
     keys = ("state", "who", "started_at", "duration_seconds", "time_known", "off_chart",
-            "reason", "current")
+            "reason", "current", "jobs")
+    unknown = dict.fromkeys(
+        ("model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"), "unknown")
+
+    def ran(job: str, action: str, recipient: str) -> list[dict]:
+        return [{"job": job, "action": action, "recipient": recipient, "exposure": unknown}]
     assert job["flow"] == {
         "state": "review",
         "path": ["intake", "building", "review", "fixing", "review"],
@@ -543,12 +548,16 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         "next": ["blocked", "ship", "fixing", "waiting-max", "stuck", "capped"],
         "terminal": False,
         "visits": [dict(zip(keys, row)) for row in (
-            ("intake", "script", None, None, False, False, None, False),
-            ("building", "claude", NOW - 5000, 1000, True, True, flow.OFF_CHART, False),
-            ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False),
+            ("intake", "script", None, None, False, False, None, False, []),
+            ("building", "claude", NOW - 5000, 1000, True, True, flow.OFF_CHART, False,
+             ran("h-build", "build", "claude")),
+            ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False,
+             ran("h-review", "review", "codex")),
             ("fixing", "claude", NOW - 3000, 1000, True, False,
-             "APPROVE on red CI, CI fix or REVISE, under the round cap", False),
-            ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True),
+             "APPROVE on red CI, CI fix or REVISE, under the round cap", False,
+             ran("h-fix", "fix", "claude")),
+            ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True,
+             ran("h-review", "review", "codex")),
         )],
         "hops_to_shipped": 2,
         "all_durations_known": False,

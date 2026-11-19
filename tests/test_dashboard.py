@@ -1746,3 +1746,40 @@ def test_attention_items_carry_the_ticket_wait_and_actions(tmp_path: Path) -> No
         assert (item["state"], item["wait"], item["actions"]) == (
             ticket["state"], ticket["wait"], ticket["actions"]
         )
+
+
+def test_tickets_json_carries_a_finished_job_s_exposure(tmp_path: Path) -> None:
+    from lib import exposure
+    from lib.queue import JobRequest
+
+    db = tmp_path / "orch.db"
+    queue = make_db(db)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/factory", "1014", state="review")
+    queue.enqueue(JobRequest(repo="maxharris1/factory", ticket_id="1014", action="build", recipient="claude",
+                             source_comment_id="c1", timeout_seconds=600), dedupe_key="k1")
+    job = queue.claim("claude")
+    assert job is not None
+    brief, revision = "c" * 64, "d" * 40
+    with sqlite3.connect(db) as connection:
+        exposure.write(connection, job.id, exposure.Exposure(
+            "opus", "claude 2.1.0", brief, ("/skills/a/SKILL.md",), "pc", revision), NOW)
+    queue.finish(job.id, owner="claude", handoff_comment_id="h1")
+
+    snapshot = collect_snapshot(db, tmp_path / "missing.log", now=NOW)
+    assert snapshot["running"] == []
+    path = dashboard.write_snapshot_pages(tmp_path / "out", snapshot)[-1]
+    (record,) = json.loads(path.read_text(encoding="utf-8"))["tickets"].values()
+    assert [visit["jobs"] for visit in record["visits"] if visit["state"] == "building"] == [[{
+        "job": job.id[:8],
+        "action": "build",
+        "recipient": "claude",
+        "exposure": {
+            "model": "opus",
+            "cli_version": "claude 2.1.0",
+            "brief_sha256": ["c" * 16] * 4,
+            "skill_paths": ["/skills/a/SKILL.md"],
+            "host": "pc",
+            "factory_revision": ["d" * 16, "d" * 16, "d" * 8],
+        },
+    }]]

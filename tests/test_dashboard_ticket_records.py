@@ -35,6 +35,7 @@ RECORD_KEYS = {
 }
 VISIT_KEYS = {
     "state", "who", "started_at", "duration_seconds", "time_known", "off_chart", "reason", "current",
+    "jobs",
 }
 SHIPPED_KEYS = {
     "at", "how", "intake_to_ship_seconds", "revise_rounds", "jobs", "tokens_in", "tokens_out",

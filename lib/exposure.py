@@ -76,19 +76,19 @@ def write(connection: sqlite3.Connection, job_id: str, exposure: Exposure, at: f
     )
 
 
-def read(connection: sqlite3.Connection, job_id: str) -> Exposure | None:
+_COLUMNS = "model, cli_version, brief_sha256, skill_paths, host, factory_revision"
+
+
+def _rows(connection: sqlite3.Connection, where: str = "", args: tuple = ()) -> list:
     try:
-        row = connection.execute(
-            f"SELECT model, cli_version, brief_sha256, skill_paths, host, factory_revision "
-            f"FROM {TABLE} WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()
+        return connection.execute(f"SELECT job_id, {_COLUMNS} FROM {TABLE}{where}", args).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
-            return None
+            return []
         raise
-    if row is None:
-        return None
+
+
+def _parsed(row: Sequence[str]) -> Exposure:
     model, cli, brief, skills, host, revision = row
     paths = None if skills == UNKNOWN else tuple(json.loads(skills))
     return Exposure(model, cli, brief, paths, host, revision)
@@ -109,6 +109,15 @@ def replace_model(connection: sqlite3.Connection, job_id: str, model: str) -> st
         return None
     connection.execute(f"UPDATE {TABLE} SET model = ? WHERE job_id = ?", (model, job_id))
     return row[0]
+
+
+def read(connection: sqlite3.Connection, job_id: str) -> Exposure | None:
+    rows = _rows(connection, " WHERE job_id = ?", (job_id,))
+    return _parsed(rows[0][1:]) if rows else None
+
+
+def read_all(connection: sqlite3.Connection) -> dict[str, Exposure]:
+    return {str(row[0]): _parsed(row[1:]) for row in _rows(connection)}
 
 
 def local_shell(environ: Mapping[str, str]) -> Shell:
