@@ -206,16 +206,14 @@ def _parent(process: Path) -> Path | None:
 
 
 def _started_by_another_user(process: Path) -> bool:
-    """Walk up through this user's processes we cannot inspect.
-
-    Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
+    """Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
     then drops them to this user, which leaves them non-dumpable, so their
-    cwd cannot be read. Reaching another user's process means the line was
-    started by it; reaching one of ours we can inspect means a process of
-    this user hid itself, and the scan cannot vouch for it.
-    """
+    cwd cannot be read."""
     seen = {process.name}
-    while (parent := _parent(process)) is not None and parent.name not in seen:
+    while True:
+        parent = _parent(process)
+        if parent is None or parent.name in seen:
+            return False
         seen.add(parent.name)
         if parent.name == "0":
             return True
@@ -227,7 +225,6 @@ def _started_by_another_user(process: Path) -> bool:
         if _process_paths(parent) is not None:
             return False
         process = parent
-    return _mine(process) is None
 
 
 def _process_paths(process: Path) -> list[str] | None:
@@ -460,15 +457,15 @@ def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Pl
     hold = _device_call(transport, target, plan)
     if isinstance(hold, str):
         return hold
-    first = label_unnamed(hold, reasons)
+    held = label_unnamed(hold, reasons)
     if plan.dry_run or not hold.held:
-        return first
-    fresh = keep_reasons(read_jobs(db), plan.cutoff)
-    still = frozenset(i for i in hold.held if i in fresh and fresh[i] is None)
-    done = _device_call(transport, target, Plan(still, plan.cutoff, False, FINISH))
-    if isinstance(done, str):
-        return f"set aside {len(hold.held)} checkouts, then {done}"
-    return Report(done.removed, {**first.kept, **label_unnamed(done, fresh).kept}, False)
+        return held
+    reread = keep_reasons(read_jobs(db), plan.cutoff)
+    confirmed = frozenset(i for i in hold.held if i in reread and reread[i] is None)
+    finish = _device_call(transport, target, Plan(confirmed, plan.cutoff, False, FINISH))
+    if isinstance(finish, str):
+        return f"set aside {len(hold.held)} checkouts, then {finish}"
+    return Report(finish.removed, {**held.kept, **label_unnamed(finish, reread).kept}, False)
 
 
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,

@@ -359,8 +359,6 @@ def test_a_failing_target_does_not_stop_the_others(tmp_path: Path, capsys, monke
 
 
 class RequeueAndClaim:
-    """Requeues and claims the job just before or just after the hold step."""
-
     def __init__(self, root: Path, db: Path, job_id: str, *, when: str):
         self.device = InProcessTransport(root)
         self.queue = SQLiteJobQueue(db, clock=lambda: NOW)
