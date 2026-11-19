@@ -578,7 +578,7 @@ files:
   skills/why/references/synthesizer-prompt.md: 11c62671aa7b7a6e3d36929ffe2b59bf95e6ca664eee4d93e6ee527dd3390ddb
 factory:
   factory-builder/SKILL.md: 2de9140125d82185fd9bc9eae3433a800ed2d6ea81681471d83efe9482124d2d
-  factory-qa/SKILL.md: 53bafb9b608098cb04faad8224cd48056274336bbededaed78cc94b5618b2c74
+  factory-qa/SKILL.md: b54bc93fb0307685c1a28bef2b2c47c2e907c56210ce22370183aac2a262da29
   factory-reviewer/SKILL.md: cd3a59259abcc0bbb5dacc439eb670a4be1caa4436f59626b629678b429ae590
   harness/codex.md: 7990a6deb21566e3036d8c2e2c12486cd78f1760bdd0fc450c354fe3c786be26
 kit:

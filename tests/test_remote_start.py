@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, job_run, live_settings, process_tree, remote
+from lib import device_monitor, exposure, job_run, live_settings, process_tree, remote
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
@@ -118,7 +118,9 @@ class Ssh:
         }
 
     def calls(self) -> list[dict]:
-        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        """Every call but the start's exposure reads (lib/exposure.py)."""
+        calls = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        return [call for call in calls if exposure.SHELL_NAME not in call["script"].split()]
 
     def offline(self, alias: str) -> Path:
         return self.hosts / f"{alias}.offline"

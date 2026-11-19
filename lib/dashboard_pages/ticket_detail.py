@@ -34,14 +34,19 @@ ET = ZoneInfo("America/New_York")
 TRACKER_NAMES = {"github": "GitHub", "linear": "Linear"}
 SECTION_ORDER = ("liverun", "journey", "next", "chart")
 PHONE = "(max-width:699.98px)"
-PHONE_ORDER = ("liverun", "summary", "journey", "runlog", "next", "ended", "chart")
+PHONE_ORDER = ("liverun", "summary", "journey", "runlog", "next", "exposure", "ended", "chart")
+EXPOSURE_FIELDS = (("model", "model", ""), ("cli_version", "CLI version", ""), ("brief_sha256", "brief sha256", ""),
+                   ("skill_paths", "skill paths", ", "), ("host", "host", ""),
+                   ("factory_revision", "factory revision", ""))
+EXPOSURE_SUB = "what this job runs under"
 LIVE_KINDS = ("running", "queued")
 RECORD_FLAGS = ("stopped", "shipped")
 ROW_FROM_TICKET = ("tracker", "source", "pr")
 _ENDED = ("journey", "chart")
 TICKET_KINDS = {
     "running": {"started": True, "still": False, "tail": "device", "strip": {},
-                "tiles": ("elapsed", "heartbeat", "round", "hops"), "sections": SECTION_ORDER},
+                "tiles": ("elapsed", "heartbeat", "round", "hops"),
+                "sections": ("liverun", "journey", "next", "exposure", "chart")},
     "queued": {"started": False, "still": True, "tail": "queued", "strip": {},
                "tiles": ("waiting", "not_started", "round", "hops"), "sections": SECTION_ORDER},
     "stopped": {"started": False, "still": True, "tail": "", "line": "stopped",
@@ -178,6 +183,8 @@ CSS = """\
 .why-facts{width:100%;border-collapse:collapse;font-size:13px}
 .why-facts th{width:96px;padding:6px 12px 6px 0;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-family:var(--mono);font-size:12px;font-weight:500;color:var(--muted)}
 .why-facts td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top;color:var(--text-2);overflow-wrap:anywhere}
+.jd-exp .why-facts th{width:136px}
+.jd-exp .why-facts td{font-family:var(--mono);font-size:12px}
 .why-col .jd-next .head{flex-wrap:wrap;gap:2px 8px}
 .jd-next .card.end{border-color:var(--bad)}.jd-next .end .to{color:var(--bad)}
 .why-ro{margin:0;font:12px/1.5 var(--mono);color:var(--muted)}
@@ -901,6 +908,20 @@ def _why(model: dict) -> str:
     )
 
 
+def _exposed(value: str | list[str], joiner: str) -> str:
+    return value if isinstance(value, str) else joiner.join(value) or "none"
+
+
+def _exposure(row: dict) -> str:
+    found = row.get("exposure")
+    head = f'<section class="jd-panel jd-exp" data-sec="exposure"><h2>{_span("t", "Exposure")}{_span("count", EXPOSURE_SUB)}</h2>'
+    if not found:
+        return head + '<p class="empty">not recorded</p></section>'
+    rows = "".join(f'<tr><th scope="row">{label}</th><td>{_e(_exposed(found[key], joiner))}</td></tr>'
+                   for key, label, joiner in EXPOSURE_FIELDS)
+    return head + f'<table class="why-facts"><tbody>{rows}</tbody></table></section>'
+
+
 def _journey_label(model: dict) -> str:
     path = " → ".join(v["state"] for v in model["visits"]) or "no visits"
     if model["ended"]:
@@ -1058,6 +1079,7 @@ SECTIONS = {
     "summary": lambda part: _summary(part["model"]),
     "ended": lambda part: _ended(part["model"]),
     "why": lambda part: _why(part["model"]),
+    "exposure": lambda part: _exposure(part["row"]),
 }
 
 
@@ -1164,7 +1186,8 @@ _SCRIPT = r"""
                 kinds: __KINDS__, liveKinds: __LIVEKINDS__, recordFlags: __RECORDFLAGS__, rowFromTicket: __ROWFROMTICKET__,
                 panels: __PANELS__, chartKeys: __CHARTKEYS__, endTint: __ENDTINT__, how: __HOW__,
                 endPhases: __ENDPHASES__, readOnly: __READONLY__,
-                phone: __PHONE__, journeySub: __JOURNEYSUB__, journeyTap: __JOURNEYTAP__};
+                phone: __PHONE__, journeySub: __JOURNEYSUB__, journeyTap: __JOURNEYTAP__,
+                exposure: __EXPOSURE__, exposureSub: __EXPOSURESUB__};
   var SEL = {};
   var chartScroll = {};
   var journeys = [];
@@ -1790,6 +1813,19 @@ _SCRIPT = r"""
     add(right, el('p', 'why-ro', DETAIL.readOnly[Math.min(ways.length, DETAIL.readOnly.length - 1)]));
     return sec;
   }
+  function exposurePanel(r) {
+    var sec = jdPanel('jd-exp', 'exposure', 'Exposure', DETAIL.exposureSub);
+    var found = r.exposure;
+    if (!found) { add(sec, el('p', 'empty', 'not recorded')); return sec; }
+    var tbody = add(add(sec, el('table', 'why-facts')), el('tbody'));
+    DETAIL.exposure.forEach(function (f) {
+      var v = found[f[0]];
+      var tr = add(tbody, el('tr'));
+      add(tr, el('th', null, f[1])).setAttribute('scope', 'row');
+      add(tr, el('td', null, typeof v === 'string' ? v : v.join(f[2]) || 'none'));
+    });
+    return sec;
+  }
   function legendItem(parent, cls, tint, text, bg) {
     var s = span(parent, null);
     var i = add(s, el('i', cls || null));
@@ -2033,7 +2069,8 @@ _SCRIPT = r"""
     chart: function (c) { c.cp = chartPanel(c.key, c.m, c.chart); return c.cp.sec; },
     summary: function (c) { return summaryPanel(c.m); },
     ended: function (c) { return endedPanel(c.m); },
-    why: function (c) { return whyPanel(c.m); }
+    why: function (c) { return whyPanel(c.m); },
+    exposure: function (c) { return exposurePanel(c.r); }
   };
   function detailContext(key, r, d, started) {
     var chart = d.statechart || null;
@@ -2192,6 +2229,7 @@ _DETAIL = {"VERBS": VERBS, "HB": HEARTBEAT_TONE, "CHARTSUB": CHART_SUB, "TRACKER
            "KINDS": TICKET_KINDS, "LIVEKINDS": LIVE_KINDS,
            "RECORDFLAGS": RECORD_FLAGS, "ROWFROMTICKET": ROW_FROM_TICKET, "PANELS": PANELS,
            "CHARTKEYS": CHART_KEYS, "ENDTINT": END_TINT, "HOW": HOW, "ENDPHASES": END_PHASES, "READONLY": READ_ONLY,
-           "PHONE": PHONE, "JOURNEYSUB": JOURNEY_SUB, "JOURNEYTAP": JOURNEY_TAP}
+           "PHONE": PHONE, "JOURNEYSUB": JOURNEY_SUB, "JOURNEYTAP": JOURNEY_TAP,
+           "EXPOSURE": EXPOSURE_FIELDS, "EXPOSURESUB": EXPOSURE_SUB}
 _SCRIPT = re.sub(r"__([A-Z]+)__", lambda m: json.dumps(_DETAIL[m.group(1)]), _SCRIPT)
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

@@ -248,6 +248,13 @@ def _health(facts: LaneFacts) -> str:
             "factory.md names no doctor command, so the health check is loading "
             f"{code_span(lane.base_url)} and confirming it answers."
         )
+    if facts.verify is not None:
+        check += (
+            f"\n\nThe verify skill `{facts.verify}` that the Driving section names has its own doctor. "
+            "Find the skill as the Driving section says, read its doctor steps, and run them in the second "
+            "worktree after the check above. The health check passes only when both pass. If the skill cannot "
+            "be found or names no doctor, the check above is the whole health check."
+        )
     if lane.recover is not None:
         recover = "If the health check fails, run the recover command once:\n\n" + fenced(lane.recover) + "\n\n"
     else:
@@ -261,6 +268,8 @@ def _health(facts: LaneFacts) -> str:
         "Never drive an instance that has not passed its health check.\n\n"
         f"{recover}"
         "Then run the health check again. If it still fails, stop and report `BLOCKED` with its output. "
+        "A boot that never reports ready, or a health check that still fails, is never a failed scenario. "
+        "Drive no further scenario, and mark each scenario not yet run `inconclusive`. "
         "Record the last health check result in `doctor`."
     )
 
@@ -292,7 +301,12 @@ def _driving(facts: LaneFacts) -> str:
         "The read-only diagnostics are:\n\n"
         "- reading the app's logs and the boot command's output;\n"
         "- a database query that reads and changes nothing.\n\n"
-        "Never write to the database, call the app's API directly, or change a file to make a scenario pass."
+        "Never write to the database, call the app's API directly, or change a file to make a scenario pass.\n\n"
+        "Give each failed scenario a `cause`. It is `product` when the app does not do what the criterion "
+        "says. It is `drift` when the app does what the criterion says, but the verify skill's steps, "
+        "selectors or feature map no longer match it. Only a lane whose method is the verify skill may "
+        "report `drift`. Under a fallback method every failure is `product`. Give a scenario that did not "
+        "fail no `cause`."
     )
 
 
@@ -395,6 +409,7 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
                 "id": scenario.id,
                 "criterion": scenario.criterion,
                 "result": "<verified|failed|inconclusive|needs-human>",
+                "cause": "<product|drift when failed, else null>",
                 "repeats": "<0 or 1>",
                 "artifacts": [
                     {"path": f"{scenario.id}/{name}", "sha256": "<hex>", "size": "<bytes, a number>"}
@@ -418,8 +433,8 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
         f"When every scenario is done, write `{_folder(facts)}/{RESULT}` in this shape. Replace each `<...>` "
         "with its value. Give a scenario with no failure an empty `findings` list.\n\n"
         + fenced(json.dumps(skeleton, indent=2, ensure_ascii=False))
-        + "\n\n`status` is `PASS` when every scenario is verified or needs-human, `BLOCKED` when the health "
-        "check failed after its one recovery, and `ISSUES` otherwise."
+        + "\n\n`status` is `PASS` when every scenario is verified or needs-human, `BLOCKED` when the boot or "
+        "the health check failed after its one recovery, and `ISSUES` otherwise."
     )
 
 

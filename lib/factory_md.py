@@ -82,7 +82,9 @@ integer of at least 1, default 2) and exclusive_paths (a list like
 shared_paths, default none). Up to max_holders_per_path tickets in flight
 may hold one Touches: path; a path matching exclusive_paths keeps one
 holder. A bad max_holders_per_path is an error under check-config and a
-warning elsewhere that falls back to 1.
+warning elsewhere that falls back to 1. required_checks (a list of job-name
+globs such as "test (*)", default none) stops the feeder starting new
+tickets while a matching check is red on the base branch (issue #1025).
 
 qa is optional (issue #759): what the project's QA lane runs. The block
 needs enabled, a boolean. Enabled, it also needs runners (one or two of
@@ -173,7 +175,7 @@ DEFAULT_PLAN_MAX_LINES = 400
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
 TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa")
-_FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths"}
+_FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths", "required_checks"}
 DEFAULT_MAX_HOLDERS_PER_PATH = 2
 QA_RUNNERS = ("claude-cloud", "cursor-cloud")
 QA_GATES = ("report", "block")
@@ -287,6 +289,7 @@ class FactoryConfig:
     verify_unavailable: bool = False
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
+    required_checks: tuple[str, ...] = ()
     pre_ready: PreReady | None = None
     plan_max_lines: int = DEFAULT_PLAN_MAX_LINES
     plan_max_criteria: int = DEFAULT_PLAN_MAX_CRITERIA
@@ -408,7 +411,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     hold = _hold(data, findings, unknown)
     finish_line = _finish_line(data, ship, findings)
     shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
-    max_holders_per_path, exclusive_paths = _feeder(data, findings, unknown)
+    max_holders_per_path, exclusive_paths, required_checks = _feeder(data, findings, unknown)
     plan_max_lines, plan_max_criteria = _plan(data, findings, unknown)
     ci_branches, ci_local_checks = _ci(data, findings, unknown)
     qa, qa_findings = _qa(data, strict)
@@ -486,6 +489,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         verify_unavailable=verify_unavailable,
         max_holders_per_path=max_holders_per_path,
         exclusive_paths=exclusive_paths,
+        required_checks=required_checks,
         plan_max_lines=plan_max_lines,
         plan_max_criteria=plan_max_criteria,
         ci_branches=ci_branches,
@@ -896,13 +900,15 @@ def _hold(data: dict, findings: list[Finding], unknown: str) -> HoldConfig | Non
     return HoldConfig(label=label, approver=approver, paths=tuple(paths))
 
 
-def _feeder(data: dict, findings: list[Finding], unknown: str) -> tuple[int, tuple[str, ...]]:
+def _feeder(
+    data: dict, findings: list[Finding], unknown: str
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     value = data.get("feeder")
     if value is None:
         value = {}
     if not isinstance(value, dict):
         findings.append(Finding("error", "feeder must be a mapping"))
-        return 1, ()
+        return 1, (), ()
     findings.extend(_unknown(value, _FEEDER_KEYS, "feeder", unknown))
     limit = value.get("max_holders_per_path", DEFAULT_MAX_HOLDERS_PER_PATH)
     if not is_strict_int(limit) or limit < 1:
@@ -911,7 +917,18 @@ def _feeder(data: dict, findings: list[Finding], unknown: str) -> tuple[int, tup
         )
         limit = 1
     exclusive = _path_list(value.get("exclusive_paths"), "feeder.exclusive_paths", findings)
-    return int(limit), exclusive
+    required = value.get("required_checks", [])
+    if not isinstance(required, list):
+        findings.append(Finding("error", "feeder.required_checks must be a list"))
+        required = []
+    checks: list[str] = []
+    for index, item in enumerate(required):
+        if isinstance(item, str) and item.strip():
+            checks.append(item)
+        else:
+            message = f"feeder.required_checks[{index}] must be a non-empty job name glob"
+            findings.append(Finding("error", message))
+    return int(limit), exclusive, tuple(checks)
 
 
 def _plan(data: dict, findings: list[Finding], unknown: str) -> tuple[int, int]:

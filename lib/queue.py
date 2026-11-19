@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from lib import attention, job_detail, job_token, lane_limit
+from lib import attention, exposure, job_detail, job_token, lane_limit
 from lib.state_backup import RESTORED, RESTORED_CLAIM
 
 ACTIONS = (
@@ -59,6 +59,7 @@ ACTIONS = (
     "qa",
     "qa-failed",
     "qa-env-failed",
+    "qa-skill-drift",
     "qa-head-moved",
     "ci-rerun-refused",
     "ci-stale",
@@ -735,6 +736,7 @@ class SQLiteJobQueue:
                 if "claim_token_hash" not in _columns(connection, "jobs"):
                     connection.execute("ALTER TABLE jobs ADD COLUMN claim_token_hash TEXT")
                 ensure_priority_table(connection)
+                exposure.ensure_table(connection)
         except sqlite3.DatabaseError as exc:
             raise QueueError("database file is not valid SQLite") from exc
 

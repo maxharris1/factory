@@ -12,14 +12,20 @@ from pathlib import Path
 import pytest
 import yaml
 
+from lib.ci_route import SLOTS, grant_step
 from lib.factory_md import load_factory_md
 
 ROOT = Path(__file__).resolve().parents[1]
 FORK_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
 MACOS_LABELS = ["self-hosted", "macOS", "factory-mac"]
-OVERFLOW = re.compile(
-    r"^\$\{\{ fromJSON\(vars\.\w+ \|\| '(?P<fallback>\[[^']*\])'\) \}\}$"
+POOL = ["self-hosted", "Linux", "X64", "factory-linux"]
+SHARD_SLOT = "format('test-{0}', matrix.shard)"
+ROUTED = re.compile(
+    r"^\$\{\{ contains\(fromJSON\(needs\.changes\.outputs\.hosted \|\| '\[\]'\), "
+    r"(?:'(?P<slot>[\w-]+)'|(?P<shard>format\('test-\{0\}', matrix\.shard\)))\) "
+    r"&& 'ubuntu-latest' \|\| fromJSON\('(?P<fallback>\[[^']*\])'\) \}\}$"
 )
+ROUTE_ENV = {"GITHUB_TOKEN": "${{ github.token }}", "FACTORY_LINUX_POOL": "${{ vars.FACTORY_LINUX_POOL }}"}
 
 
 def _workflow() -> dict:
@@ -27,7 +33,7 @@ def _workflow() -> dict:
 
 
 def _changes_step() -> dict:
-    steps = [step for step in _workflow()["jobs"]["changes"]["steps"] if "run" in step]
+    steps = [step for step in _workflow()["jobs"]["changes"]["steps"] if step.get("id") == "diff"]
     assert len(steps) == 1
     return steps[0]
 
@@ -114,7 +120,10 @@ def test_a_failed_diff_fails_the_changes_job_instead_of_skipping_macos(tmp_path:
 
 def test_the_changes_step_reads_the_pr_shas_from_env_and_fetches_full_history() -> None:
     changes = _workflow()["jobs"]["changes"]
-    assert changes["outputs"] == {"macos": "${{ steps.diff.outputs.macos }}"}
+    assert changes["outputs"] == {
+        "macos": "${{ steps.diff.outputs.macos }}",
+        "hosted": "${{ steps.route.outputs.hosted }}",
+    }
     step = _changes_step()
     assert step["id"] == "diff"
     assert step["env"] == {
@@ -125,9 +134,25 @@ def test_the_changes_step_reads_the_pr_shas_from_env_and_fetches_full_history() 
     checkout = changes["steps"][0]
     assert checkout["uses"].startswith("actions/checkout@")
     assert checkout["with"] == {"fetch-depth": 0}
+    assert "if" not in checkout
     assert changes["if"] == FORK_GUARD
-    for each in changes["steps"]:
-        assert each["if"] == "github.event_name == 'pull_request'"
+    route_at = next(index for index, each in enumerate(changes["steps"]) if each.get("id") == "route")
+    assert [each for each in changes["steps"][:route_at] if "if" in each] == [step]
+    assert step["if"] == "github.event_name == 'pull_request'"
+    route = changes["steps"][route_at]
+    assert route == {"id": "route", "env": ROUTE_ENV, "run": "python3 -I lib/ci_route.py"}
+    assert not any(each.get("uses", "").startswith("astral-sh/setup-uv@") for each in changes["steps"])
+
+
+def test_the_changes_job_ends_by_marking_each_slot_the_route_kept_local() -> None:
+    steps = _workflow()["jobs"]["changes"]["steps"]
+    route_at = next(index for index, each in enumerate(steps) if each.get("id") == "route")
+    assert steps[route_at + 1:] == [
+        {"name": grant_step(slot),
+         "if": f"${{{{ !contains(fromJSON(steps.route.outputs.hosted || '[]'), '{slot}') }}}}",
+         "run": "true"}
+        for slot in SLOTS
+    ]
 
 
 def test_macos_runs_on_every_non_pr_event_and_on_prs_the_changes_job_flags() -> None:
@@ -341,17 +366,42 @@ TOKEN_SHAPE = re.compile(r"\bA[A-Z0-9]{28}\b|--token\s+\S")
 WORKFLOWS = sorted((ROOT / ".github/workflows").glob("*.yml"))
 
 
+def _routed_slots(job: dict) -> list[str]:
+    routed = ROUTED.match(job.get("runs-on", ""))
+    if routed is None:
+        raise ValueError(f"not a routed runs-on: {job.get('runs-on')!r}")
+    if json.loads(routed["fallback"]) != POOL:
+        raise ValueError(f"routed runs-on falls back off the pool: {routed['fallback']}")
+    if routed["shard"]:
+        slots = [f"test-{shard}" for shard in job.get("strategy", {}).get("matrix", {}).get("shard", [])]
+    else:
+        slots = [routed["slot"]]
+    if not slots or not set(slots) <= set(SLOTS):
+        raise ValueError(f"routed runs-on names a slot outside SLOTS: {slots}")
+    return slots
+
+
 def _labels(job: dict) -> list[str]:
     runs_on = job.get("runs-on", [])
     if not isinstance(runs_on, str):
         return runs_on
-    overflow = OVERFLOW.match(runs_on)
-    return json.loads(overflow["fallback"]) if overflow else [runs_on]
+    if "${{" not in runs_on:
+        return [runs_on]
+    _routed_slots(job)
+    return POOL
 
 
-def _overflow_runs_on(pool: list[str]) -> str:
-    fallback = json.dumps(pool, separators=(",", ":"))
-    return f"${{{{ fromJSON(vars.FACTORY_LINUX_RUNNER || '{fallback}') }}}}"
+def _routed_runs_on(slot: str, fallback: list[str] = POOL) -> str:
+    named = slot if slot == SHARD_SLOT else f"'{slot}'"
+    return (
+        f"${{{{ contains(fromJSON(needs.changes.outputs.hosted || '[]'), {named}) && 'ubuntu-latest' "
+        f"|| fromJSON('{json.dumps(fallback, separators=(',', ':'))}') }}}}"
+    )
+
+
+def _needs(job: dict) -> list[str]:
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else needs
 
 
 def _grants_id_token(permissions: object) -> bool:
@@ -383,12 +433,46 @@ def _ci_runner_pool() -> list[str]:
 
 def test_every_linux_job_defaults_to_the_ci_runner_pool_and_macos_stays_on_the_mac() -> None:
     pool = _ci_runner_pool()
+    assert pool == POOL
     for name, job in _workflow()["jobs"].items():
         if name == "macos":
             assert job["runs-on"] == MACOS_LABELS
+        elif name == "changes":
+            assert job["runs-on"] == "ubuntu-latest"
         else:
-            assert job["runs-on"] == _overflow_runs_on(pool), name
             assert _labels(job) == pool, name
+
+
+def test_routed_slots_follow_the_router_rank_order_and_wait_for_changes() -> None:
+    jobs = _workflow()["jobs"]
+    routed = {name: job for name, job in jobs.items() if name not in {"changes", "macos"}}
+    assert sorted((slot for job in routed.values() for slot in _routed_slots(job)), key=SLOTS.index) == list(SLOTS)
+    for name, job in routed.items():
+        assert "changes" in _needs(job), name
+        assert job["runs-on"] == _routed_runs_on(SHARD_SLOT if name == "test" else name), name
+
+
+@pytest.mark.parametrize("name", ["test", "statechart", "checks", "py311-compile"])
+def test_every_routed_build_job_logs_which_runner_took_it(name: str) -> None:
+    first = _workflow()["jobs"][name]["steps"][0]
+    assert first == {"name": "Runner identity", "run": 'echo "runner $RUNNER_NAME as $(id -un)"'}
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        {"runs-on": "${{ fromJSON(vars.FACTORY_LINUX_RUNNER) }}"},
+        {"runs-on": "${{ vars.RUNNER }}"},
+        {"runs-on": _routed_runs_on("checks", ["ubuntu-latest"])},
+        {"runs-on": _routed_runs_on("checks", ["self-hosted", "Linux"])},
+        {"runs-on": _routed_runs_on("deploy")},
+        {"runs-on": _routed_runs_on(SHARD_SLOT), "strategy": {"matrix": {"shard": [1, 2, 3, 4]}}},
+        {"runs-on": _routed_runs_on(SHARD_SLOT)},
+    ],
+)
+def test_labels_refuses_a_runs_on_expression_it_cannot_prove_lands_on_the_pool(job: dict) -> None:
+    with pytest.raises(ValueError):
+        _labels(job)
 
 
 @pytest.mark.parametrize(
@@ -413,14 +497,29 @@ def test_the_runner_docs_put_the_sync_on_the_pc_and_no_box_runner_in_the_pool(do
         assert gone not in text, gone
 
 
-def test_no_ci_job_uses_a_github_hosted_runner() -> None:
-    hosted = re.compile(r"^(ubuntu|macos|windows)-")
+def test_only_the_changes_job_runs_hosted_and_it_holds_only_a_read_token() -> None:
+    jobs = _workflow()["jobs"]
+    assert {name for name, job in jobs.items() if "self-hosted" not in _labels(job)} == {"changes"}
+    changes = jobs["changes"]
+    assert changes["permissions"] == {"actions": "read", "contents": "read"}
+    text = yaml.safe_dump(changes, width=10**6)
+    expressions = re.findall(r"\$\{\{\s*(.*?)\s*\}\}", text)
+    assert [expr for expr in expressions if re.search(r"token|secret", expr, re.I)] == ["github.token"]
+    assert SECRET_REF.search(text) is None
+
+
+def test_no_self_hosted_job_reads_the_pool_or_runs_the_router() -> None:
     for name, job in _workflow()["jobs"].items():
-        assert not any(hosted.match(label) for label in _labels(job)), name
+        if "self-hosted" in _labels(job):
+            text = yaml.safe_dump(job, width=10**6)
+            for needle in ("FACTORY_LINUX_POOL", "actions/runners", "ci_route"):
+                assert needle not in text, (name, needle)
 
 
 def test_every_python_job_provisions_python_with_setup_uv_not_setup_python() -> None:
     for name, job in _workflow()["jobs"].items():
+        if "self-hosted" not in _labels(job):
+            continue
         uses = [step.get("uses", "") for step in job["steps"]]
         runs = " ".join(step.get("run", "") for step in job["steps"])
         assert not any(use.startswith("actions/setup-python@") for use in uses), name
@@ -451,7 +550,7 @@ def test_no_self_hosted_job_holds_a_credential(path: Path) -> None:
     assert _self_hosted_credential_jobs(yaml.safe_load(path.read_text(encoding="utf-8"))) == []
 
 
-@pytest.mark.parametrize("runs_on", [["self-hosted", "Linux"], _overflow_runs_on(["self-hosted", "Linux"])])
+@pytest.mark.parametrize("runs_on", [["self-hosted", "Linux"], _routed_runs_on("checks")])
 @pytest.mark.parametrize(
     "workflow",
     [
@@ -473,7 +572,6 @@ def test_a_self_hosted_job_holding_a_credential_is_flagged(workflow: dict, runs_
     "job",
     [
         {"runs-on": "ubuntu-latest", "env": {"KEY": "${{ secrets.DEPLOY_KEY }}"}},
-        {"runs-on": _overflow_runs_on(["ubuntu-latest"]), "env": {"KEY": "${{ secrets.DEPLOY_KEY }}"}},
         {"runs-on": ["self-hosted", "Linux"], "env": {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}},
     ],
 )
