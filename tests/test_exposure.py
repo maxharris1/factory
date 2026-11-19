@@ -30,8 +30,8 @@ EXPECTED_COLUMNS = [
 ]
 
 
-def _router(role: str, bot: str) -> Router:
-    router = resolve(role, bot, FACTORY_ROOT)
+def _router(role: str, bot: str, action: str = "build") -> Router:
+    router = resolve(role, bot, FACTORY_ROOT, action=action)
     assert isinstance(router, Router), router
     return router
 
@@ -90,7 +90,7 @@ def test_pinned_paths_reads_the_router_paths_from_a_full_rendered_brief(
     brief = render_brief(
         job(action, recipient, **extra), bot=f"{recipient}-bot", context=None, factory_root=FACTORY_ROOT
     )
-    assert pinned_paths(brief) == _router(role, f"{recipient}-bot").paths
+    assert pinned_paths(brief) == _router(role, f"{recipient}-bot", action).paths
 
 
 def test_pinned_paths_is_none_without_a_skills_section_or_any_path() -> None:
