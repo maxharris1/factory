@@ -29,7 +29,9 @@ covers, `verdict/shipped.py`, `verdict/preview.py` or `verdict/latest.py` for
 those lookups. Write the full path, for example `lib/dispatch/verdict/t4.py`.
 Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 `VerdictMixin` is composed names `lib/dispatch/verdict/__init__.py`. Inside
-`verdict/`, only `__init__.py` imports the rule modules.
+`verdict/`, only `__init__.py` imports the rule modules. `verdict/convergence.py` is
+not a rule mixin: it holds `converge`, a pure function over each round's
+blocking findings, with no caller yet (#1035).
 
 | Area | Module | Main contents |
 |---|---|---|
@@ -54,6 +56,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Verdicts: shipped approval | `verdict/shipped.py` (`ShippedApprovalMixin`) | `_shipped_approval`: the APPROVE whose ship intent completed last (T2) |
 | Verdicts: previewed head | `verdict/preview.py` (`PreviewedHeadMixin`) | `_previewed_head`: the head an ok of an `after:<approver>` APPROVE may ship |
 | Verdicts: latest verdict | `verdict/latest.py` (`LatestVerdictMixin`) | `_latest_review_verdict` |
+| Verdicts: convergence policy | `verdict/convergence.py` (pure, no mixin) | `converge`: whether a REVISE round continues, repeats a rule or stalls, from each round's blocking ids. No caller yet (#1035) |
 | Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the five rule mixins below and re-exports the old `caps.py` names |
 | Caps: go (T1) | `caps/t1.py` (`T1Mixin`) | `_t1`: route a go, resume a capped ticket, clarify, queue the plan or build; `_go_once`: the go's dedupe key, keyed on the go after a finished build (issue #808) |
 | Caps: resume after a cap or BLOCKED | `caps/resume.py` (`ResumeMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix, on a `capped` ticket or a `handed-off` one at the cap (issue #118). `_resume_after_blocked`: queue a fresh review at the same round |
