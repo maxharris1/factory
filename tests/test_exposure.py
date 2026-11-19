@@ -298,9 +298,9 @@ def test_gather_reads_the_version_and_the_project_config_in_the_launch_directory
     monkeypatch.chdir(waiter)
     shell = exposure.local_shell({"PATH": "/usr/bin:/bin", "CODEX_HOME": str(home)})
 
-    def gather(workdir: str | None) -> exposure.Exposure:
+    def gather(launch_dir: str | None) -> exposure.Exposure:
         return exposure.gather(argv=["./harness", "exec"], binary="./harness", harness="codex", brief=None,
-                               host="box", factory_root=None, shell=shell, workdir=workdir)
+                               host="box", factory_root=None, shell=shell, launch_dir=launch_dir)
 
     assert gather(str(job)) == exposure.Exposure(
         exposure.UNKNOWN, "harness-cli 2.0.0", exposure.UNKNOWN, None, "box", exposure.UNKNOWN
@@ -373,14 +373,14 @@ def test_gather_fills_every_field_and_says_unknown_where_it_cannot() -> None:
     shell = _shell({"--version": "codex-cli 1.2.3", "rev-parse": SHA})
     found = exposure.gather(
         argv=["codex", "exec", "-m", "gpt-5.5"], binary="codex", harness="codex",
-        brief=brief, host="box", factory_root="/f", shell=shell, workdir=None,
+        brief=brief, host="box", factory_root="/f", shell=shell, launch_dir=None,
     )
     assert found == exposure.Exposure(
         "gpt-5.5", "codex-cli 1.2.3", hashlib.sha256(brief).hexdigest(), router.paths, "box", SHA
     )
     nothing = exposure.gather(
         argv=["claude", "-p"], binary="claude", harness="claude",
-        brief=b"# Brief\n## Task\n", host="", factory_root=None, shell=_shell({}), workdir=None,
+        brief=b"# Brief\n## Task\n", host="", factory_root=None, shell=_shell({}), launch_dir=None,
     )
     assert nothing == exposure.Exposure(
         exposure.UNKNOWN, exposure.UNKNOWN, hashlib.sha256(b"# Brief\n## Task\n").hexdigest(),
@@ -601,3 +601,16 @@ def test_importing_the_queue_and_the_cli_first_has_no_cycle() -> None:
         done = subprocess.run([sys.executable, "-c", f"import {first}; import lib.cli, lib.queue"],
                               cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
+
+
+def test_the_config_walk_ends_on_a_device_without_dirname(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('model = "base-model"\n', encoding="utf-8")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "cat").symlink_to(shutil.which("cat"))
+    shell = exposure.local_shell({"PATH": str(tools), "CODEX_HOME": str(home)})
+    started = time.monotonic()
+    found = exposure.model(["codex", "exec"], "codex", shell, str(tmp_path / "job" / "not-made"))
+    assert (found, time.monotonic() - started < exposure.TIMEOUT_SECONDS / 2) == ("base-model", True)

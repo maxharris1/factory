@@ -143,8 +143,6 @@ def _toml_model(value: str) -> str:
 
 @dataclass(frozen=True)
 class _Selected:
-    """What a harness command line says about its model."""
-
     model: str | None = None
     profile: str | None = None
     cd: str | None = None
@@ -189,30 +187,28 @@ def _selected(argv: Sequence[str], harness: str | None) -> _Selected:
 
 
 _PROFILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
-# $1 marker, $2 launch directory (empty: the shell's own), $3 codex -C, $4 profile.
-# A launch directory not made yet has no .codex: its nearest existing ancestor is walked.
 _CODEX_CONFIGS = r"""
-m=$1 home=${CODEX_HOME:-$HOME/.codex} d=${2:-.}
-if [ -n "$3" ]; then
-  case $3 in /*) d=$3 ;; *) d=$d/$3 ;; esac
+m=$1 home=${CODEX_HOME:-$HOME/.codex} d=${2:-.} codex_cd=$3 profile=$4
+if [ -n "$codex_cd" ]; then
+  case $codex_cd in /*) d=$codex_cd ;; *) d=$d/$codex_cd ;; esac
   [ -d "$d" ] || exit 1
 else
-  until [ -d "$d" ]; do d=$(dirname -- "$d"); done
+  case $d in /*) ;; *) d=$PWD/$d ;; esac
+  until [ -d "$d" ]; do d=${d%/*}; d=${d:-/}; done
 fi
 cd -- "$d" && d=$(pwd -P) || exit 1
 show() { [ -e "$2" ] || return 0; printf '%s %s\n' "$m" "$1"; cat -- "$2" || exit 1; echo; }
 show base "$home/config.toml"
-[ -z "$4" ] || show profile "$home/$4.config.toml"
+[ -z "$profile" ] || show profile "$home/$profile.config.toml"
 while :; do
   [ "$d/.codex/config.toml" -ef "$home/config.toml" ] || show project "$d/.codex/config.toml"
   [ "$d" = / ] && break
-  d=$(dirname -- "$d")
+  d=${d%/*}; d=${d:-/}
 done
 """
 
 
 def _codex_configs(text: str | None, marker: str) -> list[tuple[str, dict]] | None:
-    """Each (kind, parsed file) the script showed; None if it failed or a file is not TOML."""
     if text is None:
         return None
     shown: list[tuple[str, list[str]]] = []
@@ -227,8 +223,7 @@ def _codex_configs(text: str | None, marker: str) -> list[tuple[str, dict]] | No
         return None
 
 
-def model(argv: Sequence[str], harness: str | None, shell: Shell, workdir: str | None = None) -> str:
-    """The model the harness runs; codex's from its config files as seen from workdir."""
+def model(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: str | None = None) -> str:
     chosen = _selected(argv, harness)
     if chosen.model:
         return chosen.model
@@ -238,7 +233,7 @@ def model(argv: Sequence[str], harness: str | None, shell: Shell, workdir: str |
         return UNKNOWN
     marker = f"{SHELL_NAME}-{secrets.token_hex(16)}"
     configs = _codex_configs(
-        shell(_CODEX_CONFIGS, (marker, workdir or "", chosen.cd or "", chosen.profile or "")), marker
+        shell(_CODEX_CONFIGS, (marker, launch_dir or "", chosen.cd or "", chosen.profile or "")), marker
     )
     if configs is None:
         return UNKNOWN
@@ -262,11 +257,10 @@ def model(argv: Sequence[str], harness: str | None, shell: Shell, workdir: str |
     return found if isinstance(found, str) and found else UNKNOWN
 
 
-def cli_version(binary: str, shell: Shell, workdir: str | None = None) -> str:
-    """The first line of `binary --version`, a relative path run from workdir."""
+def cli_version(binary: str, shell: Shell, launch_dir: str | None = None) -> str:
     out = shell(
         'case $1 in /*) ;; */*) [ -z "$2" ] || cd -- "$2" || exit 1 ;; esac; exec "$1" --version',
-        (binary, workdir or ""),
+        (binary, launch_dir or ""),
     )
     lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
     first = lines[0][:VERSION_LIMIT].rstrip() if lines else ""
@@ -303,15 +297,14 @@ def gather(
     host: str,
     factory_root: str | None,
     shell: Shell,
-    workdir: str | None,
+    launch_dir: str | None,
 ) -> Exposure:
-    """workdir: the directory the harness is launched in; None, the shell's own."""
     # lib.brief imports lib.queue, which imports this module.
     from lib.brief.skills import pinned_paths
 
     return Exposure(
-        model=model(argv, harness, shell, workdir),
-        cli_version=cli_version(binary, shell, workdir),
+        model=model(argv, harness, shell, launch_dir),
+        cli_version=cli_version(binary, shell, launch_dir),
         brief_sha256=brief_sha256(brief),
         skill_paths=None if brief is None else pinned_paths(brief.decode("utf-8", "replace")),
         host=host or UNKNOWN,

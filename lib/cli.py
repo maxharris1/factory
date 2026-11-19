@@ -2377,8 +2377,6 @@ def _job_run_command(argv: list[str]) -> int:
             environment["ORCH_JOB_WORKTREE"] = str(made.path)
             log(f"job worktree {made.path}")
         bot_harness = telemetry.HARNESS_BY_BOT.get(args.bot)
-        # Read where the harness launches: a relative binary or a project
-        # .codex/config.toml resolves against that directory.
         exposure.record(queue.connect, args.job_id, lambda: exposure.gather(
             argv=command,
             binary=codex_sandbox.for_device(command).argv[0] if placed.remote else command[0],
@@ -2388,7 +2386,7 @@ def _job_run_command(argv: list[str]) -> int:
             factory_root=factory_root,
             shell=exposure.remote_shell(placed.transport, placed.target)
             if placed.target is not None else exposure.local_shell(environment),
-            workdir=placed.target.job_dir if placed.target is not None
+            launch_dir=placed.target.job_dir if placed.target is not None
             else None if made is None else str(made.path),
         ), log)
         placed.before_start()

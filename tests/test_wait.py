@@ -616,7 +616,6 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
 
     probes = [argv for argv in started if argv[:2] == ["/bin/sh", "-c"] and argv[3] == exposure.SHELL_NAME]
     started = [argv for argv in started if argv not in probes]
-    # #1014: the start reads its exposure; the bot's binary runs there only as `--version`.
     harness_probes = [argv for argv in probes if command[0] in argv[4:]]
     assert len(harness_probes) == 1, probes
     assert harness_probes[0][2].endswith('exec "$1" --version') and harness_probes[0][4] == command[0]
