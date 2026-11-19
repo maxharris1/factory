@@ -107,7 +107,6 @@ def issue_problem(url: str) -> str | None:
     if gh.returncode:
         return "unreadable"
     issue = json.loads(gh.stdout)
-    # The issues endpoint also serves pull requests, marked by this key.
     if "pull_request" in issue:
         return "a pull request"
     return None if issue["state"] == "open" else issue["state"]
