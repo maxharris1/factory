@@ -12,7 +12,7 @@ from lib.evidence.scenarios import (
     parse_live,
 )
 
-PLAN_HEADER = "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met round=1/2 lines=120 -->"
+PLAN_HEADER = "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met round=1/2 -->"
 READY_HEADER = "<!-- orch:v1 kind=ready from=claude-bot role=builder head=" + "a" * 40 + " -->"
 
 EXAMPLE = """\
@@ -28,6 +28,7 @@ EXAMPLE = """\
 PLAN_BODY = f"""\
 {PLAN_HEADER}
 ## Plan
+Estimate: 120
 Map ac-1 and ac-2 to the upload form.
 
 {EXAMPLE}

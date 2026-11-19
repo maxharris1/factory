@@ -37,10 +37,10 @@ def _load(name: str) -> tuple[dict, list[Comment]]:
         Comment(
             id=comment_id,
             author=author,
-            body=header + "\n",
+            body=text + "\n",
             created_at=datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp(),
         )
-        for comment_id, author, at, header in data["comments"]
+        for comment_id, author, at, text in data["comments"]
     ]
     return data, comments
 

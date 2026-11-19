@@ -61,7 +61,6 @@ def filled(header: str, head: str, **choices: str) -> str:
     for field in FIELDS_LEFT_OUT_WHEN_UNUSED:
         header = header.replace(f" {field}=<id>", "")
     header = header.replace("<pushed-head-sha>", head).replace("<reviewed-head-sha>", head)
-    header = header.replace("lines=<n>", "lines=40")
 
     def pick(match: re.Match[str]) -> str:
         options = match.group(1).split("|")
@@ -182,6 +181,11 @@ def test_the_fix_ready_is_accepted_in_fixing(tmp_path: Path) -> None:
 PLAN_GO = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=planning -->\nGo.\n"
 
 
+def plan_body(brief: str, text: str) -> str:
+    assert "as `Estimate: <n>`" in brief, "the plan brief asks for no Estimate line"
+    return f"Estimate: 40\n{text}"
+
+
 def to_plan(flow: Flow) -> Job:
     assert flow.post("go-1", PLAN_GO, "grok-login") == "queued-plan"
     return claim(flow, "claude", "plan")
@@ -189,8 +193,9 @@ def to_plan(flow: Flow) -> Job:
 
 def to_second_plan(flow: Flow) -> Job:
     first = to_plan(flow)
-    unmet = filled(handoff_header(brief_for(first)), flow.head, ac="unmet")
-    assert post_header(flow, first, "plan-1", unmet, "ac-1: unmapped.\n") == "queued-plan-gap"
+    brief = brief_for(first)
+    unmet = filled(handoff_header(brief), flow.head, ac="unmet")
+    assert post_header(flow, first, "plan-1", unmet, plan_body(brief, "ac-1: unmapped.\n")) == "queued-plan-gap"
     return claim(flow, "claude", "plan")
 
 
@@ -215,8 +220,9 @@ def test_every_advertised_plan_is_accepted_in_planning(
         flow = Flow(tmp_path / str(index))
         plan = to_stage(flow)
         assert flow.state()["workflow_state"] == "planning"
-        header = filled(handoff_header(brief_for(plan)), flow.head, **choice)
-        got = post_header(flow, plan, "plan-x", header, f"ac-1: {choice['ac']}.\n")
+        brief = brief_for(plan)
+        header = filled(handoff_header(brief), flow.head, **choice)
+        got = post_header(flow, plan, "plan-x", header, plan_body(brief, f"ac-1: {choice['ac']}.\n"))
         assert got == PLAN_OUTCOMES[(plan_round, choice["ac"])], (got, choice)
 
 

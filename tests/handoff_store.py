@@ -52,6 +52,10 @@ def fitting_fields(job: Job, bot: str, head: str = HEAD) -> dict[str, str]:
     return fields
 
 
+def fitting_body(kind: str | None) -> str:
+    return "Estimate: 120\nprose\n" if kind == "plan" else "prose\n"
+
+
 def serve_handoff(
     store: Path,
     job: Job,
@@ -79,7 +83,7 @@ def serve_handoff(
             fields.pop(key, None)
         else:
             fields[key] = value
-    text = body if body is not None else format_header(fields) + "\nprose\n"
+    text = body if body is not None else format_header(fields) + "\n" + fitting_body(fields.get("kind"))
     serve(
         store,
         f"repos/{job.request.repo}/issues/comments/{comment_id}",

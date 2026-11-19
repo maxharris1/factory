@@ -1,12 +1,12 @@
 {
-  "source": "maxharris1/factory#580 orch:v1 headers, read 2026-11-16, up to Max's state=building go; the Codex questions comment 6927116713 the old re-review caused is left out. The plan predates #575, so lines=1 is added for today's plan check. The last ready at 2222... is synthetic: the handoff of the fix that go now queues",
+  "source": "maxharris1/factory#580 orch:v1 headers, read 2026-11-16, up to Max's state=building go; the Codex questions comment 6927116713 the old re-review caused is left out. The plan predates #575, so an Estimate: 1 body line is added for today's plan check. The last ready at 2222... is synthetic: the handoff of the fix that go now queues",
   "repo": "maxharris1/factory",
   "ticket_id": "580",
   "risk": "high",
   "comments": [
     ["6926276481", "maxharris1", "2026-11-16T19:08:16Z", "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=high -->"],
     ["6926276909", "maxharris1", "2026-11-16T19:08:17Z", "<!-- orch:v1 kind=go from=grok-bot role=orchestrator risk=high state=planning -->"],
-    ["6926409386", "maxharris1", "2026-11-16T19:13:18Z", "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met round=1/2 lines=1 -->"],
+    ["6926409386", "maxharris1", "2026-11-16T19:13:18Z", "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met round=1/2 -->\nEstimate: 1"],
     ["6926673895", "maxharris1", "2026-11-16T19:23:10Z", "<!-- orch:v1 kind=ready from=claude-bot role=builder head=1870b3b61486e62112c30d74d5efbcf2dbffa250 -->"],
     ["6926840543", "maxharris1", "2026-11-16T19:29:28Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=1870b3b61486e62112c30d74d5efbcf2dbffa250 ac=unmet verdict=REVISE risk=high unsat=ac-5 -->"],
     ["6926969018", "maxharris1", "2026-11-16T19:34:36Z", "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->"],

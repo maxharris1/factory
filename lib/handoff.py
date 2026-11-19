@@ -4,8 +4,9 @@ The header is one HTML comment. Canonical key order is KEYS. v1 keys are
 the example keys plus state and builder, which GitHub-issue repos also
 show as labels and which Aut0 carries in the header instead, and reviewer.
 A go's builder and reviewer route that ticket (issue #206). A verdict may
-name repeat=<ac-n|f-n> and unsat=<ac-n>. A plan may name lines=<n>, its
-expected changed lines, and unsat=<ac-n>, the criterion it left unmapped.
+name repeat=<ac-n|f-n> and unsat=<ac-n>. A plan may name unsat=<ac-n>, the
+criterion it left unmapped. A plan states its expected changed lines in the
+body as an Estimate: <n> line, which plan_estimate reads.
 A qa reports a QA run at a full 40-character head (issue #758). It alone
 carries the QA_KEYS: result, scope, lanes, env, runner, arm and attempt.
 
@@ -67,7 +68,6 @@ KEYS = (
     "reviewer",
     "repeat",
     "unsat",
-    "lines",
     *QA_KEYS,
 )
 
@@ -126,7 +126,7 @@ _ROUND = re.compile(r"^([1-9][0-9]{0,8})(?:/([1-9][0-9]{0,8}))?$")
 _HEAD = re.compile(r"^[0-9a-f]{7,40}$")
 _REPEAT = re.compile(r"^(?:ac|f)-[1-9][0-9]*$")
 _UNSAT = re.compile(r"^ac-[1-9][0-9]*$")
-_LINES = re.compile(r"^(?:0|[1-9][0-9]{0,8})$")
+_ESTIMATE = re.compile(r"^Estimate:\s*(0|[1-9][0-9]{0,8})\b")
 
 
 class HandoffError(ValueError):
@@ -176,8 +176,6 @@ def parse_header_line(line: str) -> dict[str, str]:
         raise HandoffError("repeat is only valid on kind=verdict")
     if kind not in ("plan", "verdict") and "unsat" in found:
         raise HandoffError("unsat is only valid on kind=plan or kind=verdict")
-    if kind != "plan" and "lines" in found:
-        raise HandoffError("lines is only valid on kind=plan")
     qa_only = [key for key in QA_KEYS if key in found]
     if kind != "qa" and qa_only:
         raise HandoffError(f"{qa_only[0]} is only valid on kind=qa")
@@ -254,6 +252,16 @@ def repeat_id(handoff: Handoff) -> str | None:
     first = next((line.strip() for line in handoff.body.splitlines() if line.strip()), "")
     key, _, value = first.partition("=")
     return value if key == "repeat" and _REPEAT.fullmatch(value) else None
+
+
+def plan_estimate(body: str) -> int | None:
+    """The changed lines a plan expects: the first body line that reads
+    Estimate: <n>, n at most 9 digits (issue #586). None when no line does."""
+    for line in body.splitlines():
+        match = _ESTIMATE.match(line.strip())
+        if match is not None:
+            return int(match.group(1))
+    return None
 
 
 def format_comment(handoff: Handoff, *, visible: bool = False) -> str:
@@ -337,10 +345,6 @@ def _check_value(key: str, value: str) -> None:
     if key == "repeat":
         if _REPEAT.fullmatch(value) is None:
             raise HandoffError(f"bad repeat {value!r}")
-        return
-    if key == "lines":
-        if _LINES.fullmatch(value) is None:
-            raise HandoffError(f"bad lines {value!r}")
         return
     if key == "unsat":
         if _UNSAT.fullmatch(value) is None:

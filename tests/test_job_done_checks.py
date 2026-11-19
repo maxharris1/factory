@@ -29,7 +29,7 @@ from lib.queue import (
 )
 from lib.job_token import PROOF_ENV
 from lib.handoff import format_header
-from tests.handoff_store import HEAD, LOGIN, fitting_fields, serve_handoff
+from tests.handoff_store import HEAD, LOGIN, fitting_body, fitting_fields, serve_handoff
 from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
 
 REPO = "owner/repo"
@@ -147,7 +147,8 @@ def test_a_handoff_completes_with_or_without_a_skills_read_line(
     tmp_path: Path, store: Path, action: str, recipient: str, bot: str, skills_line: str
 ) -> None:
     db, _, job = running_job(tmp_path, action=action, recipient=recipient)
-    body = format_header(fitting_fields(job, bot)) + "\nprose\n" + skills_line
+    fields = fitting_fields(job, bot)
+    body = format_header(fields) + "\n" + fitting_body(fields["kind"]) + skills_line
     serve_handoff(store, job, "1003", body=body)
 
     assert done(db, job, "1003", bot) == 0
@@ -677,3 +678,24 @@ def test_763_a_qa_handoff_does_not_fit_any_other_job(
     serve_handoff(store, job, "1203", body=qa_header(**{"from": bot}))
 
     assert message in handoff_problems(job, "1203", bot)
+
+
+@pytest.mark.parametrize("ac", ["met", "unmet"])
+def test_1021_a_plan_needs_an_estimate_line(tmp_path: Path, store: Path, ac: str) -> None:
+    _, _, job = running_job(tmp_path, action="plan")
+    header = format_header({**fitting_fields(job, "claude-bot"), "ac": ac})
+    serve_handoff(store, job, "1301", body=f"{header}\n## Plan\n- ac-1: the brief.\n")
+    serve_handoff(store, job, "1302", body=f"{header}\n## Plan\nEstimate: 120\n- ac-1: the brief.\n")
+
+    assert handoff_problems(job, "1301", "claude-bot") == ['plan has no "Estimate: <n>" line']
+    assert handoff_problems(job, "1302", "claude-bot") == []
+
+
+def test_1021_job_done_refuses_a_plan_without_an_estimate(tmp_path: Path, store: Path, capsys) -> None:
+    db, _, job = running_job(tmp_path, action="plan")
+    serve_handoff(store, job, "1303", body=format_header(fitting_fields(job, "claude-bot")) + "\nThe plan.\n")
+
+    assert done(db, job, "1303") == 1
+
+    assert 'plan has no "Estimate: <n>" line' in capsys.readouterr().err
+    assert row(db, job.id)["state"] == "running"
