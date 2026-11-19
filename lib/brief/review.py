@@ -168,8 +168,6 @@ def _delta_line(rebase: dict | None, head: str) -> str:
 def task_lines(facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
-    verify = facts["verify"]
-    unavailable = facts["verify_unavailable"]
     later_round = (facts["round_number"] or 1) > 1
     variant = followups_active(facts["followup_from"], facts["round_number"])
     user_impact = facts["block_on"] == "user-impact"
@@ -182,31 +180,24 @@ def task_lines(facts: dict) -> list[str]:
         unchanged_tag = "`[minor]`."
     if user_impact and later_round:
         gate = (
-            f"Run the verify skill `{verify}` (UI and database checks), and say which checks did not run. "
-            f"{_unreadable_verify(verify, unavailable)} "
-            if verify and verify != "none"
-            else f"{_no_verify(verify)}: say which checks did not run. "
-        ) + (
+            "In the verdict, say which checks did not run. "
             f"pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So run interrogate and "
             "blast-radius only when the merge resolution or the commits after it are new behavior, a redesign or "
             "a large new diff; otherwise say they were not run and why."
         )
-    elif verify and verify != "none":
-        gate = (
-            f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius, "
-            "and say which checks did not run. " + _unreadable_verify(verify, unavailable)
-        )
     else:
-        gate = f"{_no_verify(verify)}: run interrogate and blast-radius, and say which checks did not run."
+        gate = "Run interrogate and blast-radius, and say which checks did not run."
     steps = [
-        "Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above "
-        "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "
-        "shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about "
-        "other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox "
-        "has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to "
-        "live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, "
-        "request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it "
-        "never leads to `APPROVE`.",
+        "Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one "
+        "owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, "
+        "`unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means "
+        "no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the "
+        "header. A criterion needing a live provider without credentials here is `unverified`, not "
+        "`verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never "
+        "read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.",
+        "QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. "
+        "For each `review` criterion, write your own check (test, script or trace) before reading the builder's "
+        "proof, then compare. A `qa` criterion gets none.",
         *([_QA_GATE_STEPS[facts["qa_gate"]]] if facts["qa_gate"] else []),
         *(
             _update_steps(facts, base, head, unchanged_tag)
@@ -221,7 +212,7 @@ def task_lines(facts: dict) -> list[str]:
                 )
                 + _MERGEABLE,
                 *(
-                    [_fix_round_step(facts["rebase"], head, verify, unavailable)]
+                    [_fix_round_step(facts["rebase"], head)]
                     if fix_round
                     else [
                         "Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each "
@@ -236,8 +227,8 @@ def task_lines(facts: dict) -> list[str]:
             ]
         ),
         *([] if fix_round else [gate]),
-        "You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
-        "and seen it fail, and give the repro.",
+        "Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.",
+        "Give each helper a distinct question: one criterion group or one risk.",
         *([_bar_step(variant)] if user_impact else []),
         "Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same "
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "
@@ -248,8 +239,6 @@ def task_lines(facts: dict) -> list[str]:
             if later_round and not variant
             else ""
         ),
-        "When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, "
-        "and count it as unmet for `ac`.",
         *(
             [
                 "Mark a finding `[follow-up]` instead of `[blocking]` when it breaks a rule an earlier round "
@@ -288,35 +277,12 @@ def _bar_step(variant: bool) -> str:
     )
 
 
-def _no_verify(verify: str | None) -> str:
-    if verify == "none":
-        return "factory.md names no verify skill (`none`)"
-    return "Job data has no valid `verify_skill`, so the verify skill is unknown"
-
-
-def _unreadable_verify(verify: str, unavailable: bool) -> str:
-    if not unavailable:
-        return "A verify result you cannot read (unknown) is `verdict=BLOCKED`."
-    return (
-        f"factory.md sets `review.verify_unavailable`, so `{verify}` may not be available yet. "
-        f"If `{verify}` is not on the reviewed base, list it in the verdict as not run. A missing or unreadable "
-        "result from it is then not `verdict=BLOCKED`. If it is on the reviewed base, run it. A result you cannot "
-        "read there is `verdict=BLOCKED`."
-    )
-
-
-def _fix_round_step(rebase: dict | None, head: str, verify: str | None, unavailable: bool) -> str:
-    gates = (
-        f"the CI result and the verify skill `{verify}`, and say which checks did not run. "
-        f"{_unreadable_verify(verify, unavailable)}"
-        if verify and verify != "none"
-        else f"the CI result. {_no_verify(verify)}: say which checks did not run."
-    )
+def _fix_round_step(rebase: dict | None, head: str) -> str:
     return (
         "This is a fix round: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
         "above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as "
-        f"a `[closed]` item in the form below. (b) Confirm the gates pass on this head: {gates} (c) Read the fix "
-        "delta for a bug the fix introduced. "
+        "a `[closed]` item in the form below. (b) Confirm the gates pass on this head: the CI result. In the "
+        "verdict, say which checks did not run. (c) Read the fix delta for a bug the fix introduced. "
         + _delta_line(rebase, head)
         + f"(d) pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So rerun interrogate and "
         "blast-radius only when the fix is new behavior, a redesign or a large new diff; otherwise say they were "
@@ -341,10 +307,14 @@ def handoff(bot: str, facts: dict) -> tuple[str, str]:
         else ""
     )
     example = (
-        "**Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state and evidence, "
+        "**Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state, owner and evidence "
+        "in this form: `- ac-<n>: <state>. Owner: <review|qa>. <evidence>.`, "
         "then the findings as a numbered list, one item each, in exactly this form: "
         f"`1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.` The tag is one of {tags} "
         "and comes first, before the id. The dispatcher reads the tag, the id and the `Rule:` sentence from "
-        f"that form to carry the finding into later rounds.{closed}"
+        f"that form to carry the finding into later rounds.{closed} End with one line in exactly this form: "
+        "`Could delete: <code this PR could have deleted or left out, or nothing>. "
+        "Size: <lines changed> vs the plan's estimate of <estimate>.` Leave out ` vs the plan's estimate of "
+        "<estimate>` when the plan gives no estimate. This line never blocks."
     )
     return header, example

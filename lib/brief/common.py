@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import asdict
 
-from lib.brief.skills import skill_paths
+from lib.brief.skills import PLAYBOOKS, skill_paths
 from lib.factory_md import (
     CHECK_LABEL,
     DEFAULT_PLAN_MAX_CRITERIA,
@@ -98,6 +98,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     brief_text = detail.get("brief_text") if implement else None
     brief_url = detail.get("brief_url")
     no_ci_base = detail.get("no_ci_base")
+    ticket_type = detail.get("ticket_type")
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
@@ -129,6 +130,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "brief_text": brief_text if isinstance(brief_text, str) and brief_text else None,
         "brief_url": brief_url if isinstance(brief_url, str) and _URL.fullmatch(brief_url) else None,
         "skills": skill_paths(detail.get("repo_skill_paths")),
+        "ticket_type": ticket_type if isinstance(ticket_type, str) and ticket_type in PLAYBOOKS else None,
         "source": source,
         "plan_round": plan_round(job.request.detail),
         "plan_title": "Plan" if build else "First plan",

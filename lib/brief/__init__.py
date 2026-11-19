@@ -127,7 +127,9 @@ def render_brief(
     router = (
         None
         if kind == "merge-only"
-        else skills.resolve(role, bot, factory_root, pin_root)
+        else skills.resolve(
+            role, bot, factory_root, pin_root, action=job.request.action, ticket_type=facts["ticket_type"]
+        )
     )
     if isinstance(router, str):
         middle = [
