@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import shutil
 import sqlite3
@@ -677,14 +678,9 @@ INIT = '{"type":"system","subtype":"init","session_id":"s-1","model":"claude-opu
 STREAM = Path(__file__).resolve().parent / "fixtures" / "telemetry" / "claude_stream.jsonl"
 
 
-def _reporting_session(tmp_path: Path, recorded: str | None) -> tuple[telemetry.Session, SQLiteJobQueue, list[str]]:
-    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
-    if recorded is not None:
-        with closing(queue.connect()) as connection, connection:
-            exposure.write(connection, "job1", _exposure(model=recorded), 1.0)
-    lines: list[str] = []
-    session = telemetry.Session(
-        connect=queue.connect,
+def _claude_session(connect: telemetry.Connect, lines: list[str]) -> telemetry.Session:
+    return telemetry.Session(
+        connect=connect,
         job_id="job1",
         bot="claude-bot",
         repo="acme/widgets",
@@ -695,7 +691,15 @@ def _reporting_session(tmp_path: Path, recorded: str | None) -> tuple[telemetry.
         log=lines.append,
         stdout=None,
     )
-    return session, queue, lines
+
+
+def _reporting_session(tmp_path: Path, recorded: str | None) -> tuple[telemetry.Session, SQLiteJobQueue, list[str]]:
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    if recorded is not None:
+        with closing(queue.connect()) as connection, connection:
+            exposure.write(connection, "job1", _exposure(model=recorded), 1.0)
+    lines: list[str] = []
+    return _claude_session(queue.connect, lines), queue, lines
 
 
 def _stored_model(queue: SQLiteJobQueue) -> str | None:
@@ -705,8 +709,6 @@ def _stored_model(queue: SQLiteJobQueue) -> str | None:
 
 
 def _feed(session: telemetry.Session, text: str) -> None:
-    import io
-
     session.consume(io.BytesIO(text.encode("utf-8")))
 
 
@@ -795,31 +797,20 @@ def test_reported_model_takes_a_model_name_only(value: object, expected: str | N
     assert exposure.reported_model(value) == expected
 
 
-def test_report_model_returns_what_it_replaced_and_none_when_nothing_changed(tmp_path: Path) -> None:
+def test_replace_model_returns_what_it_replaced_and_none_when_nothing_changed(tmp_path: Path) -> None:
     connection = sqlite3.connect(tmp_path / "x.db")
-    assert exposure.report_model(connection, "job1", "claude-opus-5-5") is None
+    assert exposure.replace_model(connection, "job1", "claude-opus-5-5") is None
     exposure.ensure_table(connection)
-    assert exposure.report_model(connection, "job1", "claude-opus-5-5") is None
+    assert exposure.replace_model(connection, "job1", "claude-opus-5-5") is None
     exposure.write(connection, "job1", _exposure(model=exposure.UNKNOWN), 1.0)
-    assert exposure.report_model(connection, "job1", "claude-opus-5-5") == exposure.UNKNOWN
-    assert exposure.report_model(connection, "job1", "claude-opus-5-5") is None
+    assert exposure.replace_model(connection, "job1", "claude-opus-5-5") == exposure.UNKNOWN
+    assert exposure.replace_model(connection, "job1", "claude-opus-5-5") is None
     assert exposure.read(connection, "job1") == _exposure(model="claude-opus-5-5")
 
 
 def test_the_telemetry_row_is_written_on_a_database_without_job_exposure(tmp_path: Path) -> None:
     lines: list[str] = []
-    session = telemetry.Session(
-        connect=lambda: sqlite3.connect(tmp_path / "bare.db"),
-        job_id="job1",
-        bot="claude-bot",
-        repo="acme/widgets",
-        harness="claude",
-        flags=telemetry.stream_flags(["claude"]),
-        raw_log=None,
-        scrub=telemetry.Scrubber({}),
-        log=lines.append,
-        stdout=None,
-    )
+    session = _claude_session(lambda: sqlite3.connect(tmp_path / "bare.db"), lines)
     _feed(session, INIT + "\n")
     session.finish(0)
 

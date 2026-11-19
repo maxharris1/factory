@@ -2,8 +2,8 @@
 
 Each field is read on the job's own device and is `unknown` when it cannot be
 told; recording never delays the job past its reads' timeouts or fails it.
-The model may later be replaced by the harness's own report (lib/telemetry.py),
-because the stream names the model the run actually used.
+The model is replaced by the one the harness reports in its stream, when it
+reports one (lib/telemetry.py).
 """
 
 from __future__ import annotations
@@ -98,8 +98,7 @@ def reported_model(value: object) -> str | None:
     return value if isinstance(value, str) and _MODEL.fullmatch(value) else None
 
 
-def report_model(connection: sqlite3.Connection, job_id: str, model: str) -> str | None:
-    """Set job_id's model to the harness's report; return the model it replaced, if any."""
+def replace_model(connection: sqlite3.Connection, job_id: str, model: str) -> str | None:
     try:
         row = connection.execute(f"SELECT model FROM {TABLE} WHERE job_id = ?", (job_id,)).fetchone()
     except sqlite3.OperationalError as exc:

@@ -1816,7 +1816,7 @@ class Session:
                         account=self.account,
                     )
                     self._record_limit(connection)
-                    was = None if model is None else exposure.report_model(connection, self.job_id, model)
+                    was = None if model is None else exposure.replace_model(connection, self.job_id, model)
             if was is not None:
                 self._warn("model", f"exposure: model {model} from the harness's report (was {was})")
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
