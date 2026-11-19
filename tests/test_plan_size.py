@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
-from lib.dispatch.plan import _proposed_split
 from lib.evidence import TEXT_LIMIT
 from lib.factory_md import padded_estimate
+from lib.followups import proposed_split
 from lib.queue import Job
 from tests.test_approver_credential import APP_BOT, MAX, grok_wakes
 from tests.test_brief import FACTORY_ROOT
@@ -226,10 +226,10 @@ def test_a_round_2_plan_brief_names_the_unmapped_criterion_and_quotes_the_first_
 
 
 def test_the_split_section_ends_at_the_next_heading_of_its_level() -> None:
-    assert _proposed_split(PLAN_BODY) == SPLIT.strip()
-    assert _proposed_split("### Proposed split\nA.\n#### Detail\nB.\n## Next\nC.") == (
+    assert proposed_split(PLAN_BODY) == SPLIT.strip()
+    assert proposed_split("### Proposed split\nA.\n#### Detail\nB.\n## Next\nC.") == (
         "### Proposed split\nA.\n#### Detail\nB."
     )
-    assert _proposed_split("Plan.") == "no split proposed"
-    cut = _proposed_split("## Proposed split\n" + "x" * 5000)
+    assert proposed_split("Plan.") == "no split proposed"
+    cut = proposed_split("## Proposed split\n" + "x" * 5000)
     assert len(cut) < 4100 and cut.endswith("read the rest in the plan]")

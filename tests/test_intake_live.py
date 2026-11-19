@@ -62,6 +62,88 @@ def test_branch_sha_is_none_for_a_missing_branch() -> None:
     assert GitHubIntakeClient(gh).branch_sha("owner/app", "factory/issue-1") is None
 
 
+FEATURES = ".claude/skills/verify-app/features"
+
+
+def test_tree_paths_lists_the_files_at_a_sha() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/git/trees/{sha}?recursive=1",), ok({"truncated": False, "tree": [
+        {"path": ".cursor/skills/verify-app", "type": "tree"},
+        {"path": ".cursor/skills/verify-app/SKILL.md", "type": "blob"},
+    ]}))
+    assert GitHubIntakeClient(gh).tree_paths("owner/app", sha) == ((".cursor/skills/verify-app/SKILL.md",), False)
+
+
+def test_tree_paths_reads_one_folder_relative_to_it() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/git/trees/{sha}:apps/web?recursive=1",), ok({"truncated": False, "tree": [
+        {"path": ".cursor/skills/verify-app", "type": "tree"},
+        {"path": ".cursor/skills/verify-app/SKILL.md", "type": "blob"},
+    ]}))
+    assert GitHubIntakeClient(gh).tree_paths("owner/app", sha, "apps/web") == (
+        (".cursor/skills/verify-app/SKILL.md",), False,
+    )
+
+
+def test_tree_paths_says_when_the_tree_is_truncated() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/git/trees/{sha}?recursive=1",), ok({"truncated": True, "tree": []}))
+    assert GitHubIntakeClient(gh).tree_paths("owner/app", sha) == ((), True)
+
+
+@pytest.mark.parametrize(
+    ("result", "sha"),
+    [
+        (GhResult(1, "{}", "gh: Server Error (HTTP 502)\n"), "a" * 40),
+        (ok({"truncated": False}), "a" * 40),
+        (ok({"tree": []}), "main"),
+    ],
+    ids=["server-error", "no-tree", "not-a-sha"],
+)
+def test_tree_paths_fails_rather_than_guess(result: GhResult, sha: str) -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/git/trees/{sha}?recursive=1",), result)
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).tree_paths("owner/app", sha)
+
+
+def test_dir_names_lists_one_folder_at_a_sha() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/contents/{FEATURES}?ref={sha}",), ok([
+        {"name": "README.md", "type": "file"},
+        {"name": "search.md", "type": "file"},
+        {"name": "drafts", "type": "dir"},
+    ]))
+    assert GitHubIntakeClient(gh).dir_names("owner/app", FEATURES, sha) == ("README.md", "search.md", "drafts/")
+
+
+def test_dir_names_is_empty_for_a_missing_folder() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/contents/{FEATURES}?ref={sha}",), GhResult(1, "{}", "gh: Not Found (HTTP 404)\n"))
+    assert GitHubIntakeClient(gh).dir_names("owner/app", FEATURES, sha) == ()
+
+
+@pytest.mark.parametrize(
+    ("result", "sha"),
+    [
+        (GhResult(1, "{}", "gh: Server Error (HTTP 502)\n"), "a" * 40),
+        (ok({"name": "features", "type": "file"}), "a" * 40),
+        (ok([]), "main"),
+    ],
+    ids=["server-error", "not-a-folder", "not-a-sha"],
+)
+def test_dir_names_fails_rather_than_guess(result: GhResult, sha: str) -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/contents/{FEATURES}?ref={sha}",), result)
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).dir_names("owner/app", FEATURES, sha)
+
+
 def test_start_commit_reuses_the_base_tree_with_one_parent() -> None:
     gh = RecordedGh()
     base, tree, made = "a" * 40, "b" * 40, "c" * 40

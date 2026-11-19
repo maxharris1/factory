@@ -14,7 +14,17 @@ from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
 from lib.factory_md import load_factory_md, parse_factory_context, parse_factory_md
 from lib.feeder import parse_intake
 from lib.feeder_gates import GateLines, Holds, github_ref, parse_gate_lines
-from lib.followups import followup_findings, followup_issue
+from lib.followups import (
+    SplitPart,
+    followup_findings,
+    followup_issue,
+    has_marker,
+    split_comment,
+    split_issue,
+    split_link_marker,
+    split_marker,
+    split_parts,
+)
 from tests import regenerate_brief_snapshots as snapshots
 from tests.merge_queue_support import Board, sha
 from tests.test_hooks import FakeBot
@@ -748,3 +758,100 @@ def test_a_failed_filing_retries_after_the_ticket_leaves_the_loop(
 def test_a_follow_up_after_unusual_line_separators_survives(separator: str) -> None:
     body = f"1. [minor] a{separator}b{separator}c\r\n\r\n{FENCED_FINDING}\r\n"
     assert followup_findings(body) == (FENCED_FINDING,)
+
+
+SPLIT_PLAN = """Estimate: 425
+
+## Plan
+- ac-1: the whole thing.
+
+## Proposed split
+
+### #1052a: feat(followups): parse the split
+- ac-1a: `split_parts` returns the parts.
+- ac-1b: `split_issue` renders the body with its `Depends on:` line.
+
+Estimate: 155. Depends on: none.
+
+### #1052b: feat(dispatch): file the split
+- ac-1: the dispatcher files the parts.
+
+Estimate: 270
+Depends on: part 1
+
+## Throughput checkpoint
+- ac-9: not a part's criterion.
+"""
+
+
+def test_a_split_with_two_titled_parts_parses_each_part() -> None:
+    assert split_parts(SPLIT_PLAN) == (
+        SplitPart(
+            title="#1052a: feat(followups): parse the split",
+            criteria=("ac-1a: `split_parts` returns the parts.", "ac-1b: `split_issue` renders the body with its `Depends on:` line."),
+            estimate=155,
+            depends=(),
+        ),
+        SplitPart(
+            title="#1052b: feat(dispatch): file the split",
+            criteria=("ac-1: the dispatcher files the parts.",),
+            estimate=270,
+            depends=(1,),
+        ),
+    )
+
+
+def test_a_part_title_keeps_a_trailing_hash_that_is_not_a_closing_sequence() -> None:
+    plan = (
+        "## Proposed split ##\n### Support C#\n- ac-1: Parse source.\n### Port F# ###\n- ac-2: Port.\n"
+        "### Add tests #\n- ac-3: Verify parsing.\n### ##\n- ac-4: Untitled.\n"
+    )
+    assert [part.title for part in split_parts(plan)] == ["Support C#", "Port F#", "Add tests", ""]
+
+
+def test_fewer_than_two_parts_is_no_split() -> None:
+    one = SPLIT_PLAN.split("### #1052b")[0]
+    assert split_parts(one) == ()
+    assert split_parts("Estimate: 500\n\n## Plan\n- ac-1: x.\n") == ()
+    numbered = "## Proposed split\n1. `brief half` (ac-1, ac-2): about 200 lines.\n2. `dispatch half` (ac-3): 300.\n"
+    assert split_parts(numbered) == ()
+
+
+def test_a_part_without_criteria_is_dropped() -> None:
+    plan = "## Proposed split\n### A\n- ac-1: a.\n### Notes\nJust prose.\n### B\n- ac-2: b.\nDepends on: part 1\n"
+    assert [part.title for part in split_parts(plan)] == ["A", "B"]
+    assert split_parts("## Proposed split\n### A\n- ac-1: a.\n### Notes\nJust prose.\n") == ()
+
+
+def test_depends_on_reads_none_earlier_parts_or_the_previous_part() -> None:
+    plan = (
+        "## Proposed split\n### A\n- ac-1: a.\nDepends on: none\n### B\n- ac-2: b.\n"
+        "### C\n- ac-3: c.\nDepends on: part 1\n### D\n- ac-4: d.\nDepends on: parts 1 and 3\n"
+        "### E\n- ac-5: e.\nDepends on: part 7\n### F\n- ac-6: f.\nDepends on: whatever lands first\n"
+    )
+    assert [part.depends for part in split_parts(plan)] == [(), None, (1,), (1, 3), None, None]
+
+
+def test_a_split_issue_passes_the_intake_parse() -> None:
+    first, second = split_parts(SPLIT_PLAN)
+    plan_url = "https://github.com/o/r/pull/1114#issuecomment-77"
+    title, body = split_issue("1052", plan_url, "77", 2, second, "high", (1201,))
+    assert title == "#1052b: feat(dispatch): file the split"
+    assert body.startswith(f"Split from #1052 (plan {plan_url}).\n")
+    assert "Estimate: 270" in body
+    assert body.rstrip().endswith(split_marker("77", 2))
+    assert has_marker(body, "<!-- orch-split plan=77 part=2 -->")
+    intake = parse_intake(body, ("factory:ready",))
+    assert intake.defects == ()
+    assert (intake.risk, intake.plan_first, intake.depends_on) == ("high", False, "#1201")
+    assert intake.criteria == second.criteria
+    assert parse_gate_lines(body, "o/r") == GateLines(blocked_by=frozenset({github_ref("o/r", "1201")}))
+    _, body = split_issue("1052", plan_url, "77", 1, first, "low", ())
+    assert parse_intake(body, ()).depends_on == "none"
+
+
+def test_the_split_comment_links_every_part_once_by_marker() -> None:
+    text = split_comment("77", (1201, 1202))
+    assert "#1201" in text and "#1202" in text
+    assert has_marker(text, split_link_marker("77"))
+    assert split_link_marker("77") != split_marker("77", 1)

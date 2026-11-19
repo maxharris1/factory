@@ -33,7 +33,10 @@ def lead(job: Job, facts: dict) -> Lead:
         "4. The size check multiplies the estimate by 1.35 and rounds up, because estimates run "
         f"low. When that padded number is over {facts['plan_max_lines']} lines, or the ticket has "
         f"more than {facts['plan_max_criteria']} acceptance criteria, add a `## Proposed split` "
-        "section that names the smaller tickets, each with its criteria and its expected lines. "
+        "section with one `### <title>` block per smaller ticket. Under each title put its "
+        "criteria as `- ac-<n>: ...` lines, its expected lines as `Estimate: <n>`, and "
+        "`Depends on: part <k>` naming the earlier parts it builds on, or `Depends on: none`. "
+        "A part with no `Depends on:` line depends on the part before it. "
         "Such a plan does not start the build: it waits for Max, who answers or splits the ticket.",
         f"5. Post the plan handoff below with `round={facts['plan_round']}/2`: "
         "`ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, "
