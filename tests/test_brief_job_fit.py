@@ -68,11 +68,8 @@ def test_every_verify_setting_says_which_checks_did_not_run(
 ) -> None:
     text = task(render(case, {"round": round_text, "verify_skill": verify}, factory_md=factory_md))
     assert NOT_RUN in text
-    if verify is None:
-        assert "names no verify skill" not in text
-        assert "verify skill is unknown" in text
-    elif verify == "none":
-        assert "names no verify skill (`none`)" in text
+    assert "Do not boot or drive the app: `review.verify` is `none` for the reviewer" in text
+    assert "verify skill is unknown" not in text
 
 
 def test_no_snapshot_keeps_the_old_sentences() -> None:

@@ -55,10 +55,10 @@ def review_rules(facts: dict) -> str:
     else:
         followup = ""
     adversarial = (
-        "plus interrogate and blast-radius in round 1 (in a later round only for new behavior, a redesign or "
+        "interrogate and blast-radius in round 1 (in a later round only for new behavior, a redesign or "
         "a large new diff),"
         if user_impact
-        else "plus interrogate and blast-radius,"
+        else "interrogate and blast-radius,"
     )
     auto_extra = facts["auto_extra"]
     high_risk = (
@@ -70,7 +70,8 @@ def review_rules(facts: dict) -> str:
     return (
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
-        f"- That reviewer runs the project's verify skill when factory.md names one, {adversarial} "
+        "- That reviewer checks code and logic and never boots or drives the app (`review.verify` is `none`), "
+        f"runs {adversarial} "
         "and may run code in a throwaway copy, its containers labelled as the Rules say.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "
@@ -124,7 +125,7 @@ RULE_PHRASES = {
     "finish-remote-waiter": "The waiter on the box reads that line when you exit and runs `orch job done` there.",
     "finish-no-heartbeat": "never start a heartbeat loop. Never start another factory job.",
     "review-one-reviewer": "One reviewer, from a different model family than the builder, gives the final factory verdict.",
-    "review-verify-skill": "That reviewer runs the project's verify skill when factory.md names one,",
+    "review-no-app": "That reviewer checks code and logic and never boots or drives the app",
     "review-blocking-ran": "Mark a finding `[blocking]` only when you have run it and seen it fail",
     "review-no-judge": "There is no second factory reviewer and no factory Judge.",
     "review-low-risk-rounds": "Risk low: one review round;",

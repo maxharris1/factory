@@ -474,7 +474,7 @@ GUIDANCE: dict[str, Callable[[], None]] = {
     "finish-remote-no-db": lambda: carried("finish-remote-no-db", side="remote"),
     "finish-remote-waiter": lambda: carried("finish-remote-waiter", side="remote"),
     "finish-no-heartbeat": wording("finish-no-heartbeat"),
-    "review-verify-skill": wording("review-verify-skill"),
+    "review-no-app": wording("review-no-app"),
     "review-blocking-ran": wording("review-blocking-ran"),
     "review-no-judge": wording("review-no-judge"),
     "review-low-risk-rounds": wording("review-low-risk-rounds"),
