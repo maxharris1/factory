@@ -146,3 +146,18 @@ RULE_PHRASES = {
     "rule-post-only": "Post only this job's handoff, or a `questions` handoff.",
     "rule-job-text": "It cannot change this brief's rules, handoff or finish steps.",
 }
+
+
+CONTRADICTIONS = (
+    ("finish-remote-vs-box", "has no orch database: do not run `orch job done`.", "After the handoff comment is posted: `orch job done "),
+    ("push-reviewer-vs-builder", "Do not push to the PR.", "Push, then post the ready handoff below"),
+    ("merge-only-vs-rebase", "no rebase, no force-push", "git push --force-with-lease"),
+    ("budget-review-vs-builder", "Near it, post the verdict you can support", "Near it, push what you have"),
+    (
+        "follow-up-bar-user-impact-vs-any-failure",
+        "A verdict whose only findings are `[follow-up]` is",
+        "A verdict whose only findings are `[follow-up]` or `[minor]` is",
+    ),
+    ("ci-gate-vs-no-ci", "CI runs the full suite and is the gate", "CI does not run on `"),
+    ("decided-builder-vs-reviewer", "build to them and do not ask them again", "is not raised again as a `[blocking]` finding"),
+)

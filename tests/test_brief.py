@@ -11,9 +11,18 @@ from pathlib import Path
 import pytest
 
 from lib.brief import KINDS, BriefError, brief_kind, render_brief
+from lib.brief.rules import CONTRADICTIONS
 from lib.factory_md import CONTEXT_LIMIT, FactoryContext, parse_factory_context
 from lib.handoff import parse_header_line
 from lib.queue import Job, JobRequest
+from tests.regenerate_brief_snapshots import (
+    BOX_FACTORY_ROOT,
+    CASES as SNAPSHOT_CASES,
+    FACTORY_MD as SNAPSHOT_FACTORY_MD,
+    HEAD,
+    _job,
+    render_snapshot,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FACTORY_ROOT = "/home/claude-bot/factory"
@@ -484,3 +493,79 @@ def test_every_builder_brief_asks_for_the_title_once_and_the_review_brief_never(
         brief = render_brief(job(action, recipient), bot=f"{recipient}-bot", factory_root=FACTORY_ROOT, context=None)
         assert "Do not start the work" not in brief
         assert brief.count("Title the PR ") == count
+
+
+DECISION = {
+    "question": "Keep one PR?",
+    "choice": "Split it.",
+    "options": ["one PR", "split"],
+    "answerer": "max",
+    "answer_id": "c-1",
+    "answered_at": 1_700_000_000,
+}
+NO_CI = {"no_ci_base": "feature/no-ci", "local_checks": ["pytest"]}
+BUILD = ("build", "claude", None, {"gitBranchName": "factory/issue-42"})
+REVIEW_FIX = ("fix", "claude", HEAD, {"instruction": "https://github.com/owner/repo/pull/42#issuecomment-7", "round": "2/3"})
+CI_FIX = ("fix", "claude", HEAD, {"instruction": "failed: pytest", "round": "1/3"})
+REVIEW = ("review", "codex", HEAD, {"round": "1/3"})
+
+
+def _instructions(text: str) -> str:
+    return text.split("\n## Job data\n")[0]
+
+
+def _variant(variant: tuple, *, factory_root: str | None = BOX_FACTORY_ROOT, **extra: object) -> str:
+    action, recipient, head, detail_extra = variant
+    parsed, findings = parse_factory_context(SNAPSHOT_FACTORY_MD)
+    assert parsed is not None, findings
+    return render_brief(
+        _job(action, recipient, 1, head, {**detail_extra, **extra}),
+        bot=f"{recipient}-bot",
+        context=parsed,
+        context_ref="dev",
+        factory_root=factory_root,
+    )
+
+
+def _corpus() -> dict[str, str]:
+    texts = {}
+    for kind in SNAPSHOT_CASES:
+        box, remote = render_snapshot(kind).split("===== remote (")
+        texts[f"{kind}/box"] = box
+        texts[f"{kind}/remote"] = remote
+    variants = {"build": BUILD, "review-fix": REVIEW_FIX, "ci-fix": CI_FIX, "review": REVIEW}
+    for name, variant in variants.items():
+        texts[f"{name}/no-ci"] = _variant(variant, **NO_CI)
+        texts[f"{name}/decided"] = _variant(variant, decisions=[DECISION])
+    texts["build/questions-only"] = _variant(BUILD, factory_root=None)
+    texts["review/questions-only"] = _variant(REVIEW, factory_root=None)
+    return {name: _instructions(text) for name, text in texts.items()}
+
+
+def contradictions_in(text: str) -> list[str]:
+    return [rule for rule, first, second in CONTRADICTIONS if first in text and second in text]
+
+
+def test_no_brief_states_both_rules_of_a_contradicting_pair() -> None:
+    found = {name: pairs for name, text in _corpus().items() if (pairs := contradictions_in(text))}
+    assert found == {}
+
+
+def test_every_contradiction_phrase_is_still_rendered_somewhere() -> None:
+    corpus = _corpus().values()
+    missing = [phrase for _, *phrases in CONTRADICTIONS for phrase in phrases if not any(phrase in text for text in corpus)]
+    assert missing == []
+
+
+def test_a_brief_spliced_from_both_sides_of_a_pair_is_caught() -> None:
+    corpus = list(_corpus().values())
+    for rule, first, second in CONTRADICTIONS:
+        with_first = next(text for text in corpus if first in text)
+        with_second = next(text for text in corpus if second in text)
+        assert rule in contradictions_in(with_first + with_second)
+
+
+def test_the_contradiction_set_is_a_real_list() -> None:
+    ids = [rule for rule, _, _ in CONTRADICTIONS]
+    assert len(ids) >= 5
+    assert len(set(ids)) == len(ids)
