@@ -212,6 +212,30 @@ def test_retried_first_wake_gets_its_own_rewake(tmp_path: Path) -> None:
     assert flags(flow) == []
 
 
+def test_new_head_after_rewake_flags_instead_of_waking_again(tmp_path: Path) -> None:
+    flow, t0, t1 = rewoken(tmp_path)
+    assert t1 == t0 + 20 * MINUTE
+    flow.head = HEADS[1]
+
+    poll(flow, t0 + 40 * MINUTE)
+    assert len(clarify_deliveries(flow)) == 2
+    [flag] = flags(flow)
+    assert HEADS[1] in flag["detail"]
+
+
+def test_repeated_head_changes_keep_one_rewake_and_flag_on_time(tmp_path: Path) -> None:
+    flow, t0 = asked(tmp_path)
+    raised = []
+    for step, minutes in enumerate(range(5, 65, 5), start=1):
+        flow.head = HEADS[step % len(HEADS)]
+        poll(flow, t0 + minutes * MINUTE)
+        if flags(flow) and not raised:
+            raised.append(minutes)
+    assert [finished_at(flow, job) for job in clarify_deliveries(flow)] == [t0, t0 + 20 * MINUTE]
+    assert raised == [40]
+    assert len(flags(flow)) == 1
+
+
 def settle_by_answer(flow: ResumeFlow) -> None:
     post(flow, flow.now[0] + MINUTE, "answer", ANSWERS, "grok-login")
     assert handled_outcome(flow.queue, "answer") == "resumed-build"

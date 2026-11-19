@@ -176,7 +176,7 @@ class DetailMixin:
                 connection.commit()
                 return
             head = ticket.current_head or "-"
-            rewake_key = f"driver-rewake:{_scope(repo, ticket_id)}:{question_id}:{head}"
+            rewake_prefix = f"driver-rewake:{_scope(repo, ticket_id)}:{question_id}:"
             wakes = connection.execute(
                 """
                 SELECT jobs.*, CASE
@@ -193,7 +193,8 @@ class DetailMixin:
             ).fetchall()
             deliveries = [row["delivered_at"] for row in wakes]
             rewoken = connection.execute(
-                "SELECT 1 FROM jobs WHERE dedupe_key = ?", (rewake_key,)
+                "SELECT 1 FROM jobs WHERE substr(dedupe_key, 1, ?) = ?",
+                (len(rewake_prefix), rewake_prefix),
             ).fetchone() is not None
             now = self.queue.now()
             step = driver_wake_step(
@@ -205,7 +206,9 @@ class DetailMixin:
             latest = job_from_row(max(wakes, key=lambda row: row["delivered_at"]), connection)
             if step == "rewake":
                 self.queue.enqueue_in_transaction(
-                    connection, replace(latest.request, attempt=2), dedupe_key=rewake_key
+                    connection,
+                    replace(latest.request, attempt=2),
+                    dedupe_key=f"{rewake_prefix}{head}",
                 )
             else:
                 minutes = int((now - min(deliveries)) // 60)

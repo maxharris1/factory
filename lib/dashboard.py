@@ -2466,6 +2466,12 @@ def _every_service_uses(pending: object, version: int, live: live_settings.Live 
     )
 
 
+def _adopted_new(row: dict, live: live_settings.Live) -> bool:
+    device, name = row["device"], row["field"]
+    return (isinstance(device, str) and isinstance(name, str)
+            and live.adopted_holds(device, name, row["new"]))
+
+
 def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]:
     """The last SETTINGS_RESULTS entries of the settings audit log (#777),
     oldest first, each cut to the AuditEntry keys with its strings clipped."""
@@ -2480,11 +2486,12 @@ def _settings_results(path: Path, live: live_settings.Live | None) -> list[dict]
             row["result"] = _enum(entry.get("result"), AUDIT_RESULTS)
             version = row["version"]
             if row["result"] == "applied" and type(version) is int:
-                row["waiting"] = live is None or not live.is_applied(version)
+                row["waiting"] = (live is None or not live.is_applied(version)
+                                  or not _adopted_new(row, live))
                 if row["waiting"]:
                     row["result"] = "pending"
             elif row["result"] == "pending" and type(version) is int:
-                if _every_service_uses(row["pending"], version, live):
+                if _every_service_uses(row["pending"], version, live) and _adopted_new(row, live):
                     row["result"] = "applied"
             results.append(row)
     return results

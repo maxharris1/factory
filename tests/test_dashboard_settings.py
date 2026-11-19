@@ -40,7 +40,7 @@ IDS = BAR + ["hud", "settings"]
 
 
 def _snapshot(tmp_path: Path, audit: list | None = AUDIT, live: str | None = None,
-              seen: dict[str, int] | None = None) -> dict:
+              seen: dict[str, int] | None = None, pc_slots: int = 2) -> dict:
     db = tmp_path / "orch.db"
     make_db(db)
     with sqlite3.connect(db) as connection:
@@ -49,7 +49,8 @@ def _snapshot(tmp_path: Path, audit: list | None = AUDIT, live: str | None = Non
     machines = tmp_path / "machines.yml"
     machines.write_text(MACHINES, encoding="utf-8")
     if live is not None:
-        _settings_row(db, tmp_path / "live" / "machines.yml", adopt=live == "adopted", seen=seen or {})
+        _settings_row(db, tmp_path / "live" / "machines.yml", adopt=live == "adopted", seen=seen or {},
+                      pc_slots=pc_slots)
     if audit is not None:
         lines = [json.dumps(entry) for entry in audit]
         (tmp_path / "settings-audit.jsonl").write_text("\n".join([*lines, "not json"]) + "\n", encoding="utf-8")
@@ -97,10 +98,14 @@ def test_each_card_shows_its_device(tmp_path: Path) -> None:
     assert "local · orch host" in _card(page, "box")
     assert "remote" in _text(_card(page, "pc")) and "orch host" not in _card(page, "pc")
 
-def _settings_row(db: Path, machines: Path, *, adopt: bool, seen: dict[str, int]) -> None:
+def _settings_row(db: Path, machines: Path, *, adopt: bool, seen: dict[str, int], pc_slots: int) -> None:
     machines.parent.mkdir()
-    machines.write_text("devices:\n  - {name: box, local: true, slot_max: 3, harnesses: {claude: claude-bot}}\n",
-                        encoding="utf-8")
+    machines.write_text(
+        "devices:\n"
+        "  - {name: box, local: true, slot_max: 3, harnesses: {claude: claude-bot}}\n"
+        f"  - {{name: pc, tailscale_name: pc.example.ts.net, slot_max: {pc_slots}, harnesses: {{codex: codex-bot}},"
+        " workdir_root: '/srv/work/{bot}', ssh_alias: 'pc-{bot}', factory_root: /srv/factory}\n",
+        encoding="utf-8")
     with sqlite3.connect(db, isolation_level=None) as connection:
         connection.execute("BEGIN IMMEDIATE")
         assert live_settings.recorded(connection, machines).written == 1
@@ -160,6 +165,13 @@ def test_a_versioned_change_is_applied_once_the_poller_adopts_it(tmp_path: Path)
     pc = _card(_section(_no_script(render_pages(snapshot)["settings.html"]), "settings"), "pc")
     assert '<span class="chip ok">applied</span>' in pc
     assert "waiting" not in pc and "pending" not in pc
+
+
+@pytest.mark.parametrize("entry", [VERSIONED, {**PENDING, "pending": ["poller"], "version": 1}],
+                         ids=["applied", "pending-on-poller"])
+def test_a_change_stays_pending_while_the_adopted_value_differs(tmp_path: Path, entry: dict) -> None:
+    (row,) = _snapshot(tmp_path, [entry], "adopted", pc_slots=1)["settings"]["results"]
+    assert row["result"] == "pending", "the poller adopted slot_max 1, not the requested 2"
 
 
 def test_a_pending_change_stays_pending_once_the_poller_adopts_it(tmp_path: Path) -> None:
