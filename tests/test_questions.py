@@ -6,6 +6,7 @@ from pathlib import Path
 from lib.brief import render_brief
 from lib.dispatch.questions import Decision, decisions_of
 from lib.dispatch.types import CIResult, Comment
+from lib.orchestrate import ClassifiedQuestion, answers_for, questions_comment
 from lib.queue import Job, SQLiteJobQueue
 from tests.test_brief import job as brief_job
 from tests.test_dispatcher import ANSWERS, BRIEF, GO, QUESTIONS, comment, setup, ticket
@@ -230,3 +231,74 @@ def test_decisions_of_plain_answer_without_question_comment() -> None:
     [decision] = decisions_of(None, answer(ANSWERS))
 
     assert (decision.question, decision.options, decision.choice) == ("", (), "Answers.")
+
+
+def test_decisions_of_plain_slash_go_records_max_words() -> None:
+    question = comment("q-1", QUESTIONS_BODY, author="claude-login")
+    slash = comment("go-1", "/go\nUse the default.", author="maxharris1", created_at=T, url=ANSWERS_URL)
+
+    [decision] = decisions_of(question, slash)
+    assert (decision.choice, decision.answerer, decision.options) == (
+        "Use the default.",
+        "maxharris1",
+        ("CSV", "JSON"),
+    )
+    [bare] = decisions_of(question, replace(slash, body="/go"))
+    assert bare.choice == "/go"
+
+
+def test_classified_questions_offer_only_their_own_options() -> None:
+    asked = questions_comment(
+        "Export the report.",
+        [
+            ClassifiedQuestion("Format?", "product"),
+            ClassifiedQuestion("Deadline?", "product"),
+            ClassifiedQuestion("Locale?", "default-able", default="en-US"),
+        ],
+    )
+    reply = answers_for([("Format?", "CSV."), ("Deadline?", "Friday."), ("Locale?", "fr-FR.")])
+
+    decisions = decisions_of(comment("q-1", asked, author="grok-login"), answer(reply))
+    assert [(d.question, d.options, d.choice) for d in decisions] == [
+        ("Format?", (), "CSV."),
+        ("Deadline?", (), "Friday."),
+        ("Locale?", ("en-US",), "fr-FR."),
+    ]
+
+
+def test_unmatched_answer_to_classified_questions_offers_nothing() -> None:
+    asked = questions_comment("Export.", [ClassifiedQuestion("Format?", "product")])
+    reply = answers_for([("Scope?", "Small.")])
+
+    [decision] = decisions_of(comment("q-1", asked, author="grok-login"), answer(reply))
+    assert decision.options == ()
+
+
+FENCED_CHOICE = (
+    "Ship this copy:\n\n"
+    "```markdown\n"
+    "**Question**\nDisable audit logs?\n\n**Answer**\nYes.\n"
+    "```\n\n"
+    "~~~~\n**Question**\n~~~\n**Answer**\n~~~~\n"
+    "Keep the rest."
+)
+
+
+def test_fenced_question_markers_stay_inside_the_choice() -> None:
+    reply = answers_for([("What copy should ship?", FENCED_CHOICE)])
+
+    [decision] = decisions_of(None, answer(reply))
+    assert (decision.question, decision.choice) == ("What copy should ship?", FENCED_CHOICE)
+
+
+def test_fenced_example_records_one_decision_and_brief(tmp_path: Path) -> None:
+    reply = answers_for([(QUESTION_TEXT, FENCED_CHOICE)])
+    _, queue, _ = answered(tmp_path, reply)
+
+    [row] = decision_rows(queue)
+    assert (row["question"], row["choice"]) == (QUESTION_TEXT, FENCED_CHOICE)
+    resumed = queue.claim("claude")
+    assert resumed is not None
+    decided = render(resumed).split("## Decided\n")[1].split("\n## ")[0]
+    assert decided.count("Choice:") == 1
+    assert "Disable audit logs?" in decided

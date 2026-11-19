@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
+from lib.approver_commands import parse_slash_go
 from lib.dispatch.constants import FINISHED_STATES, HANDED_OFF_EXTERNALLY
 from lib.dispatch.helpers import (
     _ANSWERS,
@@ -40,11 +41,10 @@ _REFUSED_VERDICT_OUTCOMES = (
     "refused-",
     "woke-grok-unparsed",
 )
-_QUESTION_ANSWER = re.compile(
-    r"^\*\*Question\*\*\n(.+?)\n+\*\*Answer\*\*\n(.*?)(?=^\*\*Question\*\*$|\Z)",
-    re.M | re.S,
-)
 _LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|[0-9]+[.)])\s+(\S.*?)\s*$")
+_CLASSIFIED = re.compile(r"\[(?:observable|default-able|product)\]\s+(\S.*)")
+_DEFAULT = re.compile(r"^(\s*)Default:\s*(\S.*?)\s*$")
+_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _MAX_WORDS = "**Max's words**"
 
 
@@ -60,19 +60,36 @@ class Decision:
     position: int
 
 
+@dataclass(frozen=True)
+class _Offer:
+    text: str
+    classified: bool
+    depth: int
+    options: tuple[str, ...]
+
+
 def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
-    body = parse_comment(answer.body).body
+    body = _answer_text(answer.body)
     asked = _handoff_body(question)
-    pairs = [(text.strip(), choice.strip()) for text, choice in _QUESTION_ANSWER.findall(body)]
+    offers = _offers(asked)
+    pairs = _answer_blocks(body)
     entries = (
-        [(text, _options_under_or_all(asked, text), choice) for text, choice in pairs]
+        [(text, _options_for(offers, text), choice) for text, choice in pairs]
         if pairs
-        else [(asked.strip(), _options_under_or_all(asked, None), _unquoted(body))]
+        else [(asked.strip(), _every_option(offers), _unquoted(body))]
     )
     return [
         Decision(text, options, choice, answer.author, answer.created_at, answer.url, answer.id, position)
         for position, (text, options, choice) in enumerate(entries)
     ]
+
+
+def _answer_text(body: str) -> str:
+    try:
+        return parse_comment(body).body
+    except HandoffError:
+        slash = parse_slash_go(body)
+        return body.strip() if slash is None else slash.instruction or "/go"
 
 
 def _handoff_body(comment: Comment | None) -> str:
@@ -84,27 +101,75 @@ def _handoff_body(comment: Comment | None) -> str:
         return ""
 
 
-def _options_under_or_all(text: str, question: str | None) -> tuple[str, ...]:
-    lines = text.splitlines()
-    every = tuple(item.group(2) for line in lines if (item := _LIST_ITEM.match(line)))
-    if question is None:
-        return every
-    for index, line in enumerate(lines):
-        asked = _LIST_ITEM.match(line)
-        if (asked.group(2) if asked else line.strip()) != question:
+def _answer_blocks(body: str) -> list[tuple[str, str]]:
+    blocks: list[tuple[list[str], list[str] | None]] = []
+    fence: str | None = None
+    for line in body.splitlines():
+        marker = _FENCE.match(line)
+        if fence is None and line == "**Question**":
+            blocks.append(([], None))
             continue
-        depth = len(asked.group(1)) if asked else -1
-        under: list[str] = []
-        for later in lines[index + 1 :]:
-            item = _LIST_ITEM.match(later)
-            if item is None and later.strip():
+        if fence is None and line == "**Answer**" and blocks and blocks[-1][1] is None:
+            blocks[-1] = (blocks[-1][0], [])
+            continue
+        if marker is not None:
+            if fence is None:
+                fence = marker.group(1)[0] * len(marker.group(1))
+            elif marker.group(1).startswith(fence) and line.strip() == marker.group(1):
+                fence = None
+        if blocks:
+            question, choice = blocks[-1]
+            (question if choice is None else choice).append(line)
+    return [
+        ("\n".join(question).strip(), "\n".join(choice).strip())
+        for question, choice in blocks
+        if choice is not None
+    ]
+
+
+def _offers(asked: str) -> list[_Offer]:
+    lines = asked.splitlines()
+    offers: list[_Offer] = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        item = _LIST_ITEM.match(line)
+        classified = _CLASSIFIED.fullmatch(item.group(2)) if item else None
+        text = classified.group(1) if classified else item.group(2) if item else line.strip()
+        depth = len(item.group(1)) if item else -1
+        offers.append(_Offer(text, classified is not None, depth, _options_after(lines[index + 1 :], depth)))
+    return offers
+
+
+def _options_after(lines: list[str], depth: int) -> tuple[str, ...]:
+    options: list[str] = []
+    for line in lines:
+        item = _LIST_ITEM.match(line)
+        default = _DEFAULT.match(line)
+        found = item or default
+        if found is None:
+            if line.strip():
                 break
-            if item is not None:
-                if len(item.group(1)) <= depth:
-                    break
-                under.append(item.group(2))
-        return tuple(under) or every
-    return every
+            continue
+        if len(found.group(1)) <= depth or (item and _CLASSIFIED.fullmatch(item.group(2))):
+            break
+        options.append(found.group(2))
+    return tuple(options)
+
+
+def _options_for(offers: list[_Offer], question: str) -> tuple[str, ...]:
+    for offer in offers:
+        if offer.text == question:
+            return offer.options
+    if any(offer.classified for offer in offers):
+        return ()
+    return tuple(offer.text for offer in offers if offer.depth >= 0)
+
+
+def _every_option(offers: list[_Offer]) -> tuple[str, ...]:
+    loose = [offer.text for offer in offers if offer.depth >= 0 and not offer.classified]
+    nested = [option for offer in offers if offer.classified for option in offer.options]
+    return tuple(dict.fromkeys(loose + nested))
 
 
 def _unquoted(body: str) -> str:
