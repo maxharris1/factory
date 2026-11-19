@@ -47,7 +47,9 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   directory already holding a worker record still takes it) or reuse the
   job's checkout in `<workdir>/jobs/<job-id>` at the job's head, and copy
   the brief from stdin to `<workdir>/jobs/<job-id>.brief.md`. Job values
-  are passed as quoted positional arguments, never spliced into the script;
+  are passed as quoted positional arguments, never spliced into the script.
+  The checkout and the start first claim the job for `orch cleanup`
+  (#953, `_CLAIM`);
 * launched: exit 0 when the launch record holds this start's tag (it
   reached the harness), 1 when it does not, else unsure;
 * check: exit 1 while any process of the run lives (wherever its group or
@@ -724,6 +726,7 @@ def start_script(
     )
     inner = (
         f"d={directory}; "
+        f"lk=$({_FLOCK_ON_START_OR_LOGIN_PATH}); {_CLAIM} || exit {START_REFUSED}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
         f"{_CAN_SCAN} || exit {START_REFUSED}; "
         f"[ -r /proc/self/environ ] || exit {START_REFUSED}; "
@@ -1143,6 +1146,22 @@ _PREFLIGHT = (
 
 # $1 job dir, $2 git URL, $3 head (or empty), $4 base branch (or empty),
 # $5 the job's branch (or empty), $6 the brief's path (or empty: no brief).
+# #953: every runner entry (checkout and start) claims the job under
+# `flock` on `<job-dir>.lock`, the lock `orch cleanup device` takes around
+# each move or empty of the folder. The claim touches `<job-dir>.claimed`,
+# which cleanup reads under the lock, and moves `<job-dir>.cleanup` back to
+# `<job-dir>` when cleanup set the folder aside first. With no `flock` ($lk
+# empty) the claim runs unlocked; cleanup then leaves every folder alone.
+_CLAIM = (
+    '{ claim() { touch -- "$d.claimed" && { [ -e "$d" ] || [ -L "$d" ] '
+    '|| [ ! -d "$d.cleanup" ] || [ -L "$d.cleanup" ] || mv -- "$d.cleanup" "$d"; }; }; '
+    'mkdir -p -- "${d%/*}" && if [ -n "$lk" ]; then { "$lk" -w 600 9 && claim; } 9>>"$d.lock"; '
+    "else claim; fi; }"
+)
+_FLOCK_ON_START_OR_LOGIN_PATH = (
+    f"command -v flock 2>/dev/null || {LOGIN_SHELL} -lc 'command -v flock | sed s/^/orch-flock:/' "
+    "< /dev/null 2> /dev/null | sed -n 's/^orch-flock://p' | tail -n 1"
+)
 # Clones (git init + fetch, so a job directory that already holds orch's
 # worker record still takes the checkout) or reuses the job's checkout, puts
 # it at the head (on the job's branch when that branch's tip is exactly the
@@ -1154,6 +1173,8 @@ _CHECKOUT = (
     'd=$1; u=$2; h=$3; m=$4; n=$5; b=$6; '
     f"fail() {{ printf '{_CHECKOUT_MARK} %s\\n' \"$*\" >&2; exit 3; }}; "
     "export GIT_TERMINAL_PROMPT=0; "
+    'lk=$(command -v flock 2>/dev/null); '
+    f'{_CLAIM} || fail "cannot claim $d"; '
     'mkdir -p -- "$d" || fail "cannot make $d"; '
     'cd -- "$d" || fail "cannot enter $d"; '
     'if [ -n "$b" ]; then (umask 077 && cat > "$b") || fail "cannot write the brief $b"; fi; '
