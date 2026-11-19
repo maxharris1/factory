@@ -3103,6 +3103,7 @@ ACCOUNT_TOKENS = {
     "declare",
     [
         pytest.param("export {name}={value}", id="export"),
+        pytest.param("unset() {{ :; }}; export {name}={value}", id="unset-shadowed"),
         pytest.param(
             "declare -nrx {name}={value}",
             id="nameref",
@@ -3110,9 +3111,10 @@ ACCOUNT_TOKENS = {
         ),
     ],
 )
+@pytest.mark.parametrize("to_file", [False, True], ids=["report-stdout", "report-file"])
 @pytest.mark.parametrize("harness", sorted(ACCOUNT_TOKENS))
 def test_an_account_start_runs_from_its_home_and_never_passes_an_account_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str, declare: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str, declare: str, to_file: bool
 ) -> None:
     ssh = Ssh(tmp_path)
     home = tmp_path / "bot-home"
@@ -3128,12 +3130,14 @@ def test_an_account_start_runs_from_its_home_and_never_passes_an_account_token(
     report = tmp_path / "report.json"
     dump = f"import json, os\njson.dump(dict(os.environ), open({str(report)!r}, 'w'))\n"
     target = _token_target(tmp_path)
+    env_file = str(tmp_path / "worker.env") if to_file else None
     script = remote.start_script(
         target,
         [sys.executable, "-c", dump],
         harness_env(harness, account_home),
         unset=account_tokens(harness, account_home),
         report_env=True,
+        env_file=env_file,
     )
     argv = remote.ssh_argv(target, script)
     result = subprocess.run(
@@ -3144,7 +3148,8 @@ def test_an_account_start_runs_from_its_home_and_never_passes_an_account_token(
     seen = json.loads(report.read_text(encoding="utf-8"))
     assert seen[ACCOUNT_HOME_VARIABLE[harness]] == account_home
     assert not set(ACCOUNT_TOKENS[harness]) & set(seen)
-    [line] = [line for line in result.stdout.splitlines() if line.startswith(remote.WORKER_ENV_MARK)]
+    lines = Path(env_file).read_text(encoding="utf-8") if env_file else result.stdout
+    [line] = [line for line in lines.splitlines() if line.startswith(remote.WORKER_ENV_MARK)]
     reported = telemetry.worker_environ(line.encode())
     assert reported is not None
     assert reported[ACCOUNT_HOME_VARIABLE[harness]] == account_home

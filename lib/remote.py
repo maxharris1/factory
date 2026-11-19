@@ -209,23 +209,26 @@ START_REFUSED = 125
 # job's and the worker's environment values to stderr, so the start turns it
 # off first.
 _UNTRACE = "set +xvT; trap - DEBUG; "
-_REPORT_ENV = (
-    f'printf "%s " {WORKER_ENV_MARK}; '
-    'names=$(compgen -e) && { for n in $names; do printf "%s=%s\\0" "$n" "${!n}"; done; '
-    f'printf "%s\\0" {WORKER_ENV_END}; }} | od -An -v -tx1 | tr -d " \\n"; '
-    "echo; "
-)
 
 
-def _report_env(env_file: str | None) -> str:
+def _report_env(env_file: str | None, never_read: Sequence[str] = ()) -> str:
     """The report on stdout, or (#128) written to env_file, mode 600, whole or not at all,
     with only its line break left on stdout, so a profile's unended output stays apart."""
+    entry = 'printf "%s=%s\\0" "$n" "${!n}"; '
+    if never_read:
+        entry = f"case $n in {'|'.join(never_read)}) ;; *) {entry}esac; "
+    report = (
+        f'printf "%s " {WORKER_ENV_MARK}; '
+        f"names=$(compgen -e) && {{ for n in $names; do {entry}done; "
+        f'printf "%s\\0" {WORKER_ENV_END}; }} | od -An -v -tx1 | tr -d " \\n"; '
+        "echo; "
+    )
     if env_file is None:
-        return _REPORT_ENV
+        return report
     f = shlex.quote(env_file)
     part = shlex.quote(f"{env_file}.tmp")
     return (
-        f"(umask 077 && {{ {_REPORT_ENV}}} > {part}) 2>/dev/null "
+        f"(umask 077 && {{ {report}}} > {part}) 2>/dev/null "
         f"&& mv -f -- {part} {f} || rm -f -- {part}; echo; "
     )
 
@@ -702,7 +705,7 @@ def start_script(
         + 'command -v "$1" >/dev/null 2>&1 '
         + '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
         + f"echo {tag} > {shlex.quote(launch_record(target))} || exit {START_REFUSED}; "
-        + (_report_env(env_file) if report_env else "")
+        + (_report_env(env_file, dropped if unset else ()) if report_env else "")
         + "exec /usr/bin/env "
         + "".join(f"-u {name} " for name in dropped)
         + f'"${{@: -{count}}}" /bin/sh -c \'exec "$@"\' sh "${{@:1:$#-{count}}}"'
