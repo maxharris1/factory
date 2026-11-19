@@ -60,6 +60,7 @@ ACTIONS = (
     "qa-failed",
     "qa-env-failed",
     "qa-head-moved",
+    "ci-rerun-refused",
     "ci-stale",
 )
 QA_RECIPIENT = "qa"

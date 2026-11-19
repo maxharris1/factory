@@ -25,6 +25,7 @@ CI_INFRA_BLOCKED_REASON = "ci-infra-blocked"
 CI_SILENT_SECONDS = 600.0
 CI_SILENT_REASON = "ci-silent"
 UNANNOUNCED_AFTER_CAP = "unannounced-head-after-cap"
+CI_RERUN_REFUSED = "ci-rerun-refused"
 ORCHESTRATOR = "grok-bot"
 # #170: the kinds a worker bot's App login may post once the switch is on.
 WORKER_KINDS = frozenset({"plan", "questions", "ready", "verdict", "stuck"})
@@ -72,6 +73,7 @@ GROK_WAKE_REASONS = (
     "go-not-from-approver",
     "qa-failed",
     "qa-env-failed",
+    "ci-rerun-refused",
     CI_STALE_REASON,
 )
 GROK_WAKE_SKIP = frozenset({"done", "refused", "rejected", "unparsed", "stale"})

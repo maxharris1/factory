@@ -184,6 +184,7 @@ from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import (
     CI_BASE_RED,
     CI_INFRA_BLOCKED_REASON,
+    CI_RERUN_REFUSED,
     CI_STALE_REASON,
     CI_WAIT_REASONS,
     HANDED_OFF_EXTERNALLY,
@@ -265,7 +266,8 @@ HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
-    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_STALE_REASON, *FEEDER_ATTENTION_REASONS,
+    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON,
+    *FEEDER_ATTENTION_REASONS,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (
