@@ -1224,6 +1224,38 @@ def test_install_update_keeps_the_host_record_outside_the_host(
 
 
 @pytest.mark.parametrize(
+    ("attested", "holder", "refreshed"),
+    [(True, False, True), (True, True, False), (False, False, False)],
+    ids=["boot-record-agrees", "live-process-in-recorded-namespace", "no-boot-record"],
+)
+def test_install_update_refreshes_a_stale_record_only_from_the_boot_record(
+    tmp_path: Path, attested: bool, holder: bool, refreshed: bool,
+) -> None:
+    old, new = "pid:[4026531836]", "pid:[4026532250]"
+    environment = _install_environment(tmp_path, "venv")
+    record = tmp_path / ".config/factory/host-pidns"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(old + "\n", encoding="utf-8")
+    proc = _fake_proc(tmp_path, "4484", new)
+    if holder:
+        (proc / "4242/ns").mkdir(parents=True)
+        (proc / "4242/ns/pid").symlink_to(old)
+    boot = tmp_path / "factory-host-pidns"
+    if attested:
+        boot.write_text(new + "\n", encoding="utf-8")
+    environment |= {
+        "ORCH_PROC_DIR": str(proc), "ORCH_HOST_PIDNS_ATTESTATION": str(boot),
+        "ORCH_HOST_PIDNS_ATTESTATION_UID": str(os.getuid()), "WSL_DISTRO_NAME": "Ubuntu",
+    }
+
+    result = _install(environment, "--update")
+
+    assert result.returncode == 0, result.stderr
+    assert record.read_text(encoding="utf-8") == (new if refreshed else old) + "\n"
+    assert ("sudo deploy/wsl-boot.sh" in result.stderr) is not attested
+
+
+@pytest.mark.parametrize(
     ("nspid", "ns", "extra"),
     [
         ("1728748\t61", None, {}),

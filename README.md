@@ -1144,9 +1144,26 @@ entry, whose namespace differs from that record, or that has `ORCH_JOB_PROOF`
 or `CODEX_SANDBOX` set starts nothing. The poller, waiter, Linear webhook and
 self-heal scripts refuse `start`, `stop`, `restart`, `ensure` and their
 internal loops in a non-host namespace (exit 4), so a sandboxed shell never
-writes its own pids into the host's pidfiles. After a host restart that
-renumbers namespaces (WSL), delete that record and rerun
-`deploy/install.sh --update` from a host shell.
+writes its own pids into the host's pidfiles.
+
+After a host or WSL restart that renumbers namespaces (issue #984), `start`,
+`ensure`, `restart`, the profile hook and `install.sh --update` refresh a
+stale record by themselves. They trust only the root-owned boot record
+`/run/factory-host-pidns`, which WSL writes at each distro start, and refresh
+only when it names their own namespace, `NSpid` has one entry, no job or
+sandbox variable is set, and no process still runs in the recorded
+namespace (else exit 4). To install the boot record on WSL, run once from a
+host shell, then restart WSL (`wsl --shutdown` from Windows):
+
+```sh
+sudo deploy/wsl-boot.sh   # adds a [boot] command to /etc/wsl.conf
+cat /run/factory-host-pidns; readlink /proc/self/ns/pid   # after the restart, the two match
+```
+
+If `/etc/wsl.conf` already has a `[boot] command`, the script changes
+nothing and prints both commands; join them with `;` by hand. Without the
+boot record (native Linux, or WSL before this step), a stale record still
+refuses: delete it and rerun `deploy/install.sh --update` from a host shell.
 
 It also retires the launchers that lived outside the repository (issue
 #107): for `~/.local/share/factory/run-poller.sh` and, unless it is already

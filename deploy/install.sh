@@ -134,6 +134,10 @@ record_host_pidns() {
     # shellcheck source=deploy/host-pidns.sh
     . "${ROOT}/deploy/host-pidns.sh"
     [[ -r "${PROC}/self/status" ]] || return 0
+    local attestation="${ORCH_HOST_PIDNS_ATTESTATION:-/run/factory-host-pidns}"
+    if [[ -n "${WSL_DISTRO_NAME:-}" && ! ( -f "$attestation" && -r "$attestation" ) ]]; then
+        echo "note: run sudo deploy/wsl-boot.sh so a WSL restart refreshes ${HOST_PIDNS_RECORD} (README \"Install after merge\")" >&2
+    fi
     if ! factory_may_autostart "$HOST_PIDNS_RECORD"; then
         echo "warning: not recording the host PID namespace from here; kept ${HOST_PIDNS_RECORD}" >&2
         return 0
