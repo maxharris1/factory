@@ -20,9 +20,7 @@ empties each confirmed folder, keeping only its `.orch-worker*` records,
 and moves it back. A device that cannot scan for such processes removes
 nothing. A process of this user whose cwd or open files the scan cannot
 read (a non-dumpable one: ssh, an agent, a sandboxed shell) could be in any
-job folder. So while one lives, every folder is kept as held-open. Processes
-started by another user and dropped to this one (sshd's session process,
-`systemd --user`, `(sd-pam)`) are not counted.
+job folder. So while one lives, every folder is kept as held-open.
 
 The runner's checkout and start claim the job first under `flock` on
 `jobs/<job-id>.lock`: they touch `jobs/<job-id>.claimed` and move a

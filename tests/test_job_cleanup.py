@@ -81,7 +81,6 @@ def _this_test_and_its_descendants() -> set[str]:
 
 @pytest.fixture(autouse=True)
 def _only_this_tests_processes(monkeypatch) -> None:
-    """The CI runner is shared with other jobs' processes of this user. Count only this test's."""
     real_mine = job_cleanup._mine
 
     def mine(process: Path) -> bool | None:
@@ -95,7 +94,6 @@ def _only_this_tests_processes(monkeypatch) -> None:
 
 @functools.cache
 def own_pid_namespace() -> tuple[str, ...]:
-    """The device subprocess sees only its own processes where unshare works (Linux), not other jobs'."""
     argv = ("unshare", "--map-current-user", "--pid", "--fork", "--mount-proc")
     try:
         works = subprocess.run([*argv, "true"], capture_output=True, timeout=30).returncode == 0
