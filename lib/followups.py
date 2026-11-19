@@ -14,10 +14,12 @@ finds the earlier write instead of repeating it.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
 
 from lib.feeder_gates import FILE_PATH
+from lib.handoff import plan_estimate
 
 ISSUE_BODY_LIMIT = 65536
 _MARKDOWN = MarkdownIt("commonmark")
@@ -125,3 +127,123 @@ def has_marker(body: str | None, marker: str) -> bool:
 
 def _defuse_gate_lines(text: str) -> str:
     return "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())
+
+
+SPLIT_LIMIT = 4_000
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_SPLIT_CRITERION = re.compile(r"^\s*[-*+]\s+(ac-\w+:.*\S)\s*$", re.IGNORECASE)
+_SPLIT_DEPENDS = re.compile(r"\bdepends\s+on:\s*(.*?)\s*\.?\s*$", re.IGNORECASE)
+_SPLIT_REFS = re.compile(r"(?:parts?\s*)?\d+(?:\s*(?:,|and|&)\s*(?:parts?\s*)?\d+)*", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class SplitPart:
+    title: str
+    criteria: tuple[str, ...]
+    estimate: int | None
+    depends: tuple[int, ...] | None
+
+
+def _split_section(plan_text: str) -> list[str]:
+    section: list[str] = []
+    level = 0
+    for line in plan_text.splitlines():
+        heading = _HEADING.match(line.strip())
+        if level and heading and len(heading.group(1)) <= level:
+            break
+        if level:
+            section.append(line)
+        elif heading and heading.group(2).lower() == "proposed split":
+            level = len(heading.group(1))
+            section.append(line)
+    return section
+
+
+def proposed_split(plan_text: str) -> str:
+    section = _split_section(plan_text)
+    if not section:
+        return "no split proposed"
+    text = "\n".join(section).strip()
+    if len(text) > SPLIT_LIMIT:
+        return f"{text[:SPLIT_LIMIT]}\n[cut at {SPLIT_LIMIT} characters; read the rest in the plan]"
+    return text
+
+
+def split_parts(plan_text: str) -> tuple[SplitPart, ...]:
+    section = _split_section(plan_text)
+    if not section:
+        return ()
+    child = len(_HEADING.match(section[0].strip()).group(1)) + 1
+    blocks: list[tuple[str, list[str]]] = []
+    for line in section[1:]:
+        heading = _HEADING.match(line.strip())
+        if heading and len(heading.group(1)) == child:
+            blocks.append((heading.group(2), []))
+        elif blocks:
+            blocks[-1][1].append(line)
+    kept = {}
+    for number, (title, lines) in enumerate(blocks, 1):
+        criteria = tuple(match.group(1) for line in lines if (match := _SPLIT_CRITERION.match(line)))
+        if criteria:
+            kept[number] = (title, criteria, [line for line in lines if not _SPLIT_CRITERION.match(line)])
+    renumber = {old: new for new, old in enumerate(kept, 1)}
+    parts = []
+    for old, (title, criteria, lines) in kept.items():
+        depends = _split_depends(lines, old)
+        if depends is not None and not set(depends) <= renumber.keys():
+            depends = None
+        parts.append(SplitPart(
+            title=title,
+            criteria=criteria,
+            estimate=plan_estimate("\n".join(lines)),
+            depends=None if depends is None else tuple(renumber[number] for number in depends),
+        ))
+    return tuple(parts) if len(parts) >= 2 else ()
+
+
+def _split_depends(lines: list[str], number: int) -> tuple[int, ...] | None:
+    for line in lines:
+        match = _SPLIT_DEPENDS.search(line)
+        if match is None:
+            continue
+        value = match.group(1)
+        if value.lower() == "none":
+            return ()
+        if not _SPLIT_REFS.fullmatch(value):
+            return None
+        refs = tuple(sorted({int(ref) for ref in re.findall(r"\d+", value)}))
+        return refs if all(0 < ref < number for ref in refs) else None
+    return None
+
+
+def split_marker(comment_id: str, part: int) -> str:
+    return f"<!-- orch-split plan={comment_id} part={part} -->"
+
+
+def split_link_marker(comment_id: str) -> str:
+    return f"<!-- orch-split-link plan={comment_id} -->"
+
+
+def split_issue(
+    issue: str,
+    plan_url: str,
+    comment_id: str,
+    number: int,
+    part: SplitPart,
+    risk: str,
+    depends_on: tuple[int, ...],
+) -> tuple[str, str]:
+    depends = ", ".join(f"#{ref}" for ref in depends_on) or "none"
+    criteria = "".join(f"- {criterion}\n" for criterion in part.criteria)
+    estimate = "" if part.estimate is None else f"Estimate: {part.estimate}\n\n"
+    body = (
+        f"Split from #{issue} (plan {plan_url}).\n\n"
+        f"Risk: {risk}\nPlan first: no\nDepends on: {depends}\nConflicts with: none\n\n"
+        f"## Acceptance criteria\n\n{criteria}\n{estimate}{split_marker(comment_id, number)}"
+    )
+    return part.title, body
+
+
+def split_comment(comment_id: str, issues: tuple[int, ...]) -> str:
+    filed = ", ".join(f"#{issue}" for issue in issues)
+    return f"The plan's proposed split is filed as {filed}.\n\n{split_link_marker(comment_id)}"

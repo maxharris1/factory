@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import sys
 from collections.abc import Mapping
 
@@ -10,6 +9,7 @@ from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.factory_md import padded_estimate
+from lib.followups import proposed_split
 from lib.handoff import HandoffError, parse_comment, plan_estimate
 from lib.queue import JobRequest
 
@@ -103,7 +103,7 @@ class PlanMixin:
                             detail=self._project_wake_detail(
                                 ticket,
                                 f"plan-over-size: {over_size}, {_comment_link(comment)}\n"
-                                f"{_proposed_split(plan_text)}",
+                                f"{proposed_split(plan_text)}",
                             ),
                         )
                     ),
@@ -366,10 +366,6 @@ class PlanMixin:
         return str(row["recipient"]), int(row["generation"])
 
 
-SPLIT_LIMIT = 4_000
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-
-
 def gap_of(comment: Comment) -> tuple[str, str] | None:
     """A plan comment's text and the item it left unmapped, or None when the
     comment is not a plan."""
@@ -387,25 +383,3 @@ def _unmapped(fields: Mapping[str, str], body: str) -> str:
     if "unsat" in fields:
         return fields["unsat"]
     return "expected size" if plan_estimate(body) is None else "not named"
-
-
-def _proposed_split(plan_text: str) -> str:
-    """The plan's "Proposed split" section, up to the next heading of its
-    level or higher, cut at SPLIT_LIMIT characters."""
-    section: list[str] = []
-    level = 0
-    for line in plan_text.splitlines():
-        heading = _HEADING.match(line.strip())
-        if level and heading and len(heading.group(1)) <= level:
-            break
-        if level:
-            section.append(line)
-        elif heading and heading.group(2).lower() == "proposed split":
-            level = len(heading.group(1))
-            section.append(line)
-    if not section:
-        return "no split proposed"
-    text = "\n".join(section).strip()
-    if len(text) > SPLIT_LIMIT:
-        return f"{text[:SPLIT_LIMIT]}\n[cut at {SPLIT_LIMIT} characters; read the rest in the plan]"
-    return text
