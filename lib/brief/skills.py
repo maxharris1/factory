@@ -42,16 +42,18 @@ def _factory(rel: str) -> Pinned:
 
 
 AGENT_FILES = (_pstack("agents/comment-sicko.md"), _pstack("agents/poteto-agent.md"))
-BUILDER_FILES = (
-    _factory("factory-builder/SKILL.md"),
-    _pstack("skills/poteto-mode/SKILL.md"),
-    _pstack("skills/figure-it-out/SKILL.md"),
-    _pstack("skills/poteto-mode/playbooks/feature.md"),
-    _pstack("skills/poteto-mode/playbooks/opening-a-pr.md"),
-    _pstack("skills/principle-prove-it-works/SKILL.md"),
-    _pstack("skills/no-comments/SKILL.md"),
-    *AGENT_FILES,
-)
+PLAYBOOKS = {
+    "feature": _pstack("skills/poteto-mode/playbooks/feature.md"),
+    "bug-fix": _pstack("skills/poteto-mode/playbooks/bug-fix.md"),
+    "refactoring": _pstack("skills/poteto-mode/playbooks/refactoring.md"),
+    "perf-issue": _pstack("skills/poteto-mode/playbooks/perf-issue.md"),
+}
+ACTION_FILES = {
+    "plan": (_pstack("skills/how/SKILL.md"), _pstack("skills/architect/SKILL.md")),
+    "build": (_pstack("skills/tdd/SKILL.md"),),
+    "fix": (_pstack("skills/tdd/SKILL.md"),),
+}
+_TYPE_LINE = re.compile(r"^- Type: (?P<value>\S+)$")
 REVIEWER_FILES = (
     _factory("factory-reviewer/SKILL.md"),
     _pstack("skills/poteto-mode/SKILL.md"),
@@ -82,13 +84,46 @@ class Router:
     models: str
 
 
+def builder_files(action: str, ticket_type: str | None) -> tuple[Pinned, ...]:
+    return (
+        _factory("factory-builder/SKILL.md"),
+        _pstack("skills/poteto-mode/SKILL.md"),
+        _pstack("skills/figure-it-out/SKILL.md"),
+        PLAYBOOKS[ticket_type or "feature"],
+        *ACTION_FILES.get(action, ()),
+        _pstack("skills/poteto-mode/playbooks/opening-a-pr.md"),
+        _pstack("skills/principle-prove-it-works/SKILL.md"),
+        _pstack("skills/no-comments/SKILL.md"),
+        *AGENT_FILES,
+    )
+
+
+def ticket_type_of(brief_text: str) -> str | None:
+    """The `- Type:` line in the feeder brief's header, above its first heading."""
+    for line in brief_text.splitlines():
+        if line.startswith("#"):
+            break
+        match = _TYPE_LINE.fullmatch(line)
+        if match and match.group("value") in PLAYBOOKS:
+            return match.group("value")
+    return None
+
+
 def skill_paths(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str) and _SKILL_PATH.fullmatch(item)]
 
 
-def resolve(role: str, bot: str, factory_root: str | None, pin_root: Path = ROOT) -> Router | str:
+def resolve(
+    role: str,
+    bot: str,
+    factory_root: str | None,
+    pin_root: Path = ROOT,
+    *,
+    action: str = "build",
+    ticket_type: str | None = None,
+) -> Router | str:
     """The router for role as bot runs it under factory_root, or why there is none."""
     if factory_root is None:
         return "the placed device has no factory_root"
@@ -103,7 +138,7 @@ def resolve(role: str, bot: str, factory_root: str | None, pin_root: Path = ROOT
     except _UNREADABLE as exc:
         return f"skills/skills.lock cannot be read ({exc})"
     pinned = {"files": pin.hashes(), "factory": pin.factory_hashes()}
-    files = (*(BUILDER_FILES if role == "builder" else REVIEWER_FILES), adapter)
+    files = (*(builder_files(action, ticket_type) if role == "builder" else REVIEWER_FILES), adapter)
     missing = [item.under(factory_root) for item in files if item.rel not in pinned[item.section]]
     if missing:
         return "not in skills/skills.lock: " + ", ".join(f"`{path}`" for path in missing)

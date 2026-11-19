@@ -29,6 +29,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/figure-it-out/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/feature.md`
+- `/srv/orch/factory/skills/pstack/skills/tdd/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
 - `/srv/orch/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/no-comments/SKILL.md`
@@ -64,7 +65,7 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 Build the ticket. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). The plan handoff is quoted in the Plan section below (https://github.com/owner/repo/pull/42#issuecomment-5): it is the plan.
-2. Work on PR #42's branch (`gitBranchName` in Job data). Test first.
+2. Work on PR #42's branch (`gitBranchName` in Job data). Write each test first, as the `tdd` skill in Skills above says.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
 4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
 5. Push, then post the ready handoff below with the head you pushed.
@@ -211,6 +212,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/figure-it-out/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/feature.md`
+- `/home/claude-bot/factory/skills/pstack/skills/tdd/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
 - `/home/claude-bot/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/no-comments/SKILL.md`
@@ -246,7 +248,7 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 Build the ticket. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). The plan handoff is quoted in the Plan section below (https://github.com/owner/repo/pull/42#issuecomment-5): it is the plan.
-2. Work on PR #42's branch (`gitBranchName` in Job data). Test first.
+2. Work on PR #42's branch (`gitBranchName` in Job data). Write each test first, as the `tdd` skill in Skills above says.
 3. Run only the tests for the files you touched plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Before `ready`, run the router's "Before ready" steps.
 4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
 5. Push, then post the ready handoff below with the head you pushed.

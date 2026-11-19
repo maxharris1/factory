@@ -30,6 +30,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/figure-it-out/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/feature.md`
+- `/srv/orch/factory/skills/pstack/skills/tdd/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
 - `/srv/orch/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/srv/orch/factory/skills/pstack/skills/no-comments/SKILL.md`
@@ -214,6 +215,7 @@ Read the router (the first path) and the pstack files it names, at these absolut
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/figure-it-out/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/feature.md`
+- `/home/claude-bot/factory/skills/pstack/skills/tdd/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/poteto-mode/playbooks/opening-a-pr.md`
 - `/home/claude-bot/factory/skills/pstack/skills/principle-prove-it-works/SKILL.md`
 - `/home/claude-bot/factory/skills/pstack/skills/no-comments/SKILL.md`

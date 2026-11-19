@@ -15,7 +15,7 @@ The builder is the owner of one PR, as `<pstack>/skills/poteto-mode/playbooks/au
 
 ## Playbook
 
-poteto-mode's Playbooks list picks the playbook that fits the job. Feature (`<pstack>/skills/poteto-mode/playbooks/feature.md`) is for new or changed behavior. Bug fix (`<pstack>/skills/poteto-mode/playbooks/bug-fix.md`) is for a defect. Refactoring (`<pstack>/skills/poteto-mode/playbooks/refactoring.md`) is for a change of structure. `<pstack>/skills/figure-it-out/SKILL.md` is for large or cross-cutting work. A plan job stops after the playbook's design steps and posts the plan. A fix or CI-fix job keeps the plan's criteria and runs the same playbook from its verify step.
+The brief names one playbook, picked by the ticket's `Type:` line. No line means Feature. Feature (`<pstack>/skills/poteto-mode/playbooks/feature.md`) is for new or changed behavior. Bug fix (`<pstack>/skills/poteto-mode/playbooks/bug-fix.md`) is for a defect. Refactoring (`<pstack>/skills/poteto-mode/playbooks/refactoring.md`) is for a change of structure. Perf issue (`<pstack>/skills/poteto-mode/playbooks/perf-issue.md`) is for a measured slowness. `<pstack>/skills/figure-it-out/SKILL.md` is for large or cross-cutting work. A plan job also runs `<pstack>/skills/how/SKILL.md` and `<pstack>/skills/architect/SKILL.md`, stops after the playbook's design steps and posts the plan. A build or fix job writes each test first with `<pstack>/skills/tdd/SKILL.md`. A fix or CI-fix job keeps the plan's criteria and runs the same playbook from its verify step.
 
 ## Owner duties
 

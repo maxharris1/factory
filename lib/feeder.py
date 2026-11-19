@@ -115,6 +115,7 @@ from markdown_it.token import Token
 
 from lib import attention, live_settings
 from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
+from lib.brief.skills import PLAYBOOKS
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
@@ -217,6 +218,7 @@ _FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|_
 _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
 _DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
+_TYPE_LINE = re.compile(_FIELD.format(name=r"type"), re.IGNORECASE)
 _OTHER_PRS = (
     re.compile(
         r"\b(?:other|every|all|any)\s+(?:other\s+)?(?:open\s+)?(?:PRs?|pull\s+requests?)\b",
@@ -237,7 +239,7 @@ _OPS_ACTION = re.compile(
 
 @dataclass(frozen=True)
 class Defect:
-    code: str  # no-criteria, other-prs-criterion, no-risk, no-plan-first, no-depends-on
+    code: str  # no-criteria, other-prs-criterion, no-risk, no-plan-first, no-depends-on, bad-type
     reason: str
 
 
@@ -251,6 +253,7 @@ class IntakeTemplate:
     risk_source: str | None = None  # "Risk line" or "risk:high label"
     plan_first: bool | None = None
     depends_on: str | None = None
+    ticket_type: str | None = None  # a PLAYBOOKS key; None when the template has no Type line
     defects: tuple[Defect, ...] = ()
 
 
@@ -374,6 +377,11 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
     depends = _field(lines, _DEPENDS_LINE) or None
     if depends is None:
         defects.append(Defect("no-depends-on", "no `Depends on:` line (`Depends on: none` is fine)"))
+    ticket_type = _field(lines, _TYPE_LINE)
+    if ticket_type is not None and ticket_type not in PLAYBOOKS:
+        valid = ", ".join(f"`{name}`" for name in PLAYBOOKS)
+        defects.append(Defect("bad-type", f"`Type: {ticket_type}` is not one of {valid} (no line means feature)"))
+        ticket_type = None
     return IntakeTemplate(
         criteria=tuple(criteria),
         ops_criteria=tuple(ops),
@@ -381,6 +389,7 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
         risk_source=source,
         plan_first=plan_first,
         depends_on=depends,
+        ticket_type=ticket_type,
         defects=tuple(defects),
     )
 
@@ -1685,6 +1694,7 @@ def _brief(
             f"- Ticket: {issue.url or _ticket_name(issue)}",
             f"- PR: #{number} on branch `{branch}` off `{base}`",
             f"- Risk: {risk} (from the ticket's {source or 'intake record'})",
+            *([f"- Type: {template.ticket_type}"] if template.ticket_type else []),
             f"- Start: {state} ({why})",
             f"- Builder: {config.builder_harness}; reviewer: {config.reviewer_harness}",
             "- Questions: the chat that filed this ticket was its questions step. "
