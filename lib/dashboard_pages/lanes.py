@@ -461,8 +461,8 @@ SCRIPT = r"""
 
   function tierChip(parent, tier, own) {
     if (tier === null || tier === undefined) return;
-    var inherited = own !== null && own !== undefined && own !== tier;
-    add(parent, chip('tier ' + tier + (inherited ? ' (own ' + own + ')' : ''), 'accent'));
+    if (own === undefined) own = null;
+    add(parent, chip('tier ' + tier + (own !== tier ? ' (own ' + (own === null ? 'none' : own) + ')' : ''), 'accent'));
   }
 
   function intakeGroups(items) {
@@ -909,7 +909,7 @@ def _tier_chip(item: dict) -> str:
     tier, own = item.get("tier"), item.get("own_tier")
     if tier is None:
         return ""
-    return _chip(f"tier {tier}" + ("" if own is None or own == tier else f" (own {own})"), "accent")
+    return _chip(f"tier {tier}" + ("" if own == tier else f" (own {'none' if own is None else own})"), "accent")
 
 
 def _intake_row(item: dict, cls: str = "what", tail: str = "") -> str:

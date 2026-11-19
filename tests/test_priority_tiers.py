@@ -406,6 +406,43 @@ def test_the_script_draws_the_same_inherited_tier_chips(tmp_path: Path) -> None:
     assert out["html"]["lanes"].count(INHERITED) == 1
 
 
+def _fed_untiered_blocker(tmp_path: Path) -> Path:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=1, now=now)
+    dispatcher_for(tmp_path, queue)
+    github.statuses = {ref(1): OPEN}
+    github.issues[HOME] = [issue(1, created_at=1.0),
+                           issue(2, labels=(READY, "priority:p0"), created_at=2.0, body="Blocked by #1")]
+    feeder.feed_once()
+    _enqueue(queue, now, "501")
+    return tmp_path / "orch.db"
+
+
+def test_orch_status_says_an_inherited_tier_has_no_own_tier(tmp_path: Path) -> None:
+    reader = SQLiteStatusReader(_fed_untiered_blocker(tmp_path))
+    text = render(build_status(reader, reader, clock=lambda: 20_000.0,
+                               feeder=reader.feeder(), attention=reader.attention()))
+    assert "  owner/app#1 tier 0 (own none) fed -> PR #501\n" in text
+
+
+NO_OWN = '<span class="chip accent">tier 0 (own none)</span>'
+
+
+def test_the_dashboard_says_an_inherited_tier_has_no_own_tier(tmp_path: Path) -> None:
+    snapshot = collect_snapshot(_fed_untiered_blocker(tmp_path), tmp_path / "none.log", now=20_000.0)
+    index = _no_script(render_pages(snapshot)["index.html"])
+    assert _section(index, "intake").count(NO_OWN) == 1
+    assert _section(index, "queue").count(NO_OWN) == 1
+
+
+@needs_node
+def test_the_script_says_an_inherited_tier_has_no_own_tier(tmp_path: Path) -> None:
+    snapshot = collect_snapshot(_fed_untiered_blocker(tmp_path), tmp_path / "none.log", now=20_000.0)
+    out = _run_page(tmp_path, snapshot, "main", ["intake", "lanes"])
+    assert out["html"]["intake"].count(NO_OWN) == 1
+    assert out["html"]["lanes"].count(NO_OWN) == 1
+
+
 
 # The two tables exactly as they were before issue #258.
 OLD_PRIORITY = """

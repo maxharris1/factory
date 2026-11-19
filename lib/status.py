@@ -795,8 +795,8 @@ def render(status: Status) -> str:
             }.get(item.state, item.state)
             where = f" -> PR #{item.pr}" if item.pr else ""
             tier = "" if item.tier is None else f"tier {item.tier} "
-            if item.own_tier is not None and item.own_tier != item.tier:
-                tier = f"tier {item.tier} (own {item.own_tier}) "
+            if item.tier is not None and item.own_tier != item.tier:
+                tier = f"tier {item.tier} (own {'none' if item.own_tier is None else item.own_tier}) "
             lines.append(f"  {item.repo}#{item.issue} {tier}{label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
