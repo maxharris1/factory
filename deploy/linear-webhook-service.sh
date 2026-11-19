@@ -113,9 +113,9 @@
 #   LINEAR_WEBHOOK_TUNNEL_HOST   ssh alias for the tunnel (default
 #                                pc-wsl-cursor-bot; empty runs no tunnel, and
 #                                so does a host whose `ssh -G` hostname
-#                                resolves to a loopback or own address, which
-#                                also ends a running tunnel loop and removes
-#                                the held record)
+#                                resolves to a loopback, unspecified or own
+#                                address, which also ends a running tunnel
+#                                loop and removes the held record)
 #   LINEAR_WEBHOOK_RETRY_SEC, LINEAR_WEBHOOK_RETRY_MAX_SEC   backoff (above)
 #   ORCH_STATE_DIR               state directory (default ~/.local/state/factory)
 #   ORCH_DB                      default: the state directory's orch.db
@@ -188,8 +188,6 @@ lock_file() { printf '%s/linear-webhook-%s.lock' "$STATE" "$1"; }
 pid_file() { printf '%s/linear-webhook-%s.pid' "$STATE" "$1"; }
 log_file() { printf '%s/linear-webhook-%s.log' "$STATE" "$1"; }
 
-# Print address $1 as connect(2) sees it: no zone, lowercase, and an
-# IPv4-mapped IPv6 address as its IPv4 address.
 plain_address() {
     local address="${1%%\%*}"
     address="${address,,}"
@@ -594,8 +592,6 @@ ensure() {
     launch
 }
 
-# The state directory pid $1 serves, if it is a loop of this script, and one
-# of the loops in $2 (default: both).
 loop_state_of() {
     local i kv home="" state="" loops="${2:-_listener-loop _tunnel-loop}"
     local -a argv=() environ=()
@@ -782,8 +778,6 @@ end_child() {
     rm -f "$(child_file "$1")"
 }
 
-# SIGTERM the pids given and all their descendants, then SIGKILL any left
-# after STOP_WAIT.
 end_tree() {
     local pid
     local -a pids=() left=()
@@ -799,9 +793,6 @@ end_tree() {
     fi
 }
 
-# End a tunnel loop and its ssh child left from when the tunnel host needed
-# one (target $1 says why it needs none now), so neither keeps forwarding
-# nor writes the held record again.
 end_tunnel() {
     local -a roots=()
     mapfile -t roots < <({ loop_pids _tunnel-loop; lock_holders tunnel tunnel-child; owned_child tunnel || true; } |

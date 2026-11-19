@@ -788,8 +788,8 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   host's `hostname` from `ssh -G`, resolves it with `getent ahosts`, and
   checks each address. It drops an IPv6 zone such as `%eth0` and reads an
   IPv4-mapped address such as `::ffff:127.0.0.1` as its IPv4 address. A
-  loopback address, or one of this machine's own addresses from
-  `ip -o addr`, means the host is this machine. Then `start`, `restart` and
+  loopback address, `0.0.0.0` or `::`, or one of this machine's own
+  addresses from `ip -o addr`, means the host is this machine. Then `start`, `restart` and
   `ensure` run the listener only, and end a tunnel loop and its `ssh` left
   running from before. `status` prints `tunnel: not needed (HOST is this
   host)` and exits 0 while the listener runs. Any
