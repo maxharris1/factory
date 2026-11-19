@@ -105,14 +105,17 @@ def _prune(
     connection.executemany(
         f"""
         DELETE FROM ci_jobs
-        WHERE repo = ? AND ticket_id = ? AND head IS NOT ? AND {_NOT_FAILED}
+        WHERE repo = ? AND ticket_id = ? AND head IS NOT ? AND (? IS NOT NULL OR {_NOT_FAILED})
         """,
-        [(ticket.repo.lower(), ticket.ticket_id, ticket.current_head) for ticket in tickets],
+        [
+            (ticket.repo.lower(), ticket.ticket_id, ticket.current_head, ticket.current_head)
+            for ticket in tickets
+        ],
     )
     connection.execute(
-        f"""
+        """
         DELETE FROM ci_jobs
-        WHERE {_NOT_FAILED} AND NOT EXISTS (
+        WHERE NOT EXISTS (
             SELECT 1 FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id

@@ -7,10 +7,20 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from lib.dashboard import _ci_pool, _ci_runs
+import pytest
+
+from lib.ci_lane import ci_lane
+from lib.dashboard import _ci_pool, _ci_runs, collect_snapshot
 from lib.dashboard_pages.ci import ci_popup
 from lib.dispatch.cycle_clock import CycleClock
-from lib.dispatch.types import CheckRow, CIResult, PoolRunner, RunJob, TrackedTicket
+from lib.dispatch.types import (
+    CheckRow,
+    CIResult,
+    PoolRunner,
+    RunJob,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.dispatcher import Dispatcher
 from lib.github_actions import GitHubReviewActions
 from lib.project_rules import FactoryRead
@@ -411,9 +421,7 @@ def test_a_busy_board_never_spends_more_than_four_requests_a_cycle(tmp_path: Pat
     assert all(row["runner_kind"] == "github-hosted" for row in board.rows())
 
 
-def test_a_new_head_drops_the_old_heads_rows_but_keeps_a_failure_for_a_day(
-    tmp_path: Path,
-) -> None:
+def test_a_new_head_drops_every_row_of_the_old_head(tmp_path: Path) -> None:
     board = Board(tmp_path)
     board.track("1")
     board.cycle(
@@ -429,14 +437,128 @@ def test_a_new_head_drops_the_old_heads_rows_but_keeps_a_failure_for_a_day(
     board.cycle(pr("1", NEW_HEAD, check("pytest", "queued", run="901", job="3")))
 
     assert [(row["head"], row["check_name"], row["status"]) for row in board.rows()] == [
-        (HEAD, "pytest", "completed"),
         (NEW_HEAD, "pytest", "queued"),
     ]
 
-    board.now[0] += DAY
-    board.cycle(pr("1", NEW_HEAD, check("pytest", "queued", run="901", job="3")))
 
-    assert [(row["head"], row["check_name"]) for row in board.rows()] == [(NEW_HEAD, "pytest")]
+def test_a_ticket_with_no_head_keeps_its_last_failure(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
+
+    board.now[0] += 60
+    board.cycle(pr("1", None))
+
+    assert [(row["head"], row["conclusion"]) for row in board.rows()] == [(HEAD, "failure")]
+    assert [failure["job_id"] for failure in board.dashboard()["failures"]] == ["1"]
+
+
+def assert_no_stale_ci(board: Board) -> None:
+    dashboard = board.dashboard()
+    assert dashboard["failures"] == []
+    cards = ci_lane({"ci_runs": dashboard, "tickets": []})["cards"]
+    assert [
+        card
+        for card in cards.values()
+        if card["status"] == "failed" or card["head_short"] == HEAD[:7]
+    ] == []
+    assert [row for row in board.rows() if row["head"] == HEAD] == []
+    section = _popup(dashboard, "1")
+    assert "no CI failures in the last 24 h" in section
+    assert "actions/runs/900/job/1" not in section
+
+
+def red_then_green(board: Board) -> TrackedTicket:
+    board.track("1")
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
+    red = board.dashboard()
+    assert [failure["job_id"] for failure in red["failures"]] == ["1"]
+    assert [
+        (card["status"], card["head_short"])
+        for card in ci_lane({"ci_runs": red, "tickets": []})["cards"].values()
+    ] == [("failed", HEAD[:7])]
+    green = pr("1", NEW_HEAD, check("pytest", "completed", "success", run="901", job="2"))
+    board.now[0] += 60
+    board.cycle(green)
+    assert_no_stale_ci(board)
+    return green
+
+
+def test_a_merged_pr_never_shows_the_failure_of_a_head_it_replaced(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    green = red_then_green(board)
+    with board.queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, '1', 'merged')
+            ON CONFLICT (repo, ticket_id) DO UPDATE SET workflow_state = 'merged'
+            """,
+            (REPO.lower(),),
+        )
+
+    board.now[0] += 60
+    board.cycle(green)
+
+    assert_no_stale_ci(board)
+
+
+def test_an_open_pr_never_shows_the_failure_of_a_head_it_replaced(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    green = red_then_green(board)
+
+    board.now[0] += 60
+    board.cycle(green)
+
+    assert_no_stale_ci(board)
+
+
+class FreshSource(FakeSource):
+    def __init__(self, fresh: TrackedTicket, *tickets: TrackedTicket) -> None:
+        super().__init__(*tickets)
+        self.fresh = fresh
+
+    def fresh_ticket(self, ref: TicketRef) -> TrackedTicket | None:
+        return self.fresh
+
+
+@pytest.mark.parametrize(
+    ("observed", "state", "rows"),
+    [
+        ("new head", "merge-queue", [(NEW_HEAD, "success")]),
+        ("merged", "merged", []),
+        ("closed", "abandoned", []),
+    ],
+)
+def test_a_head_or_end_seen_late_in_the_cycle_replaces_the_old_heads_failure(
+    tmp_path: Path, observed: str, state: str, rows: list[tuple[str, str]]
+) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    red = pr("1", HEAD, check("pytest", "completed", "failure"))
+    red = replace(red, factory=replace(red.factory, finish_line="merge"))
+    green = replace(
+        pr("1", NEW_HEAD, check("pytest", "completed", "success", run="901", job="2")),
+        factory=red.factory,
+        merged=observed == "merged",
+        closed=observed == "closed",
+    )
+    with board.queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state
+                (repo, ticket_id, workflow_state, approved_head, approved_at, approve_comment_id)
+            VALUES (?, '1', 'merge-queue', ?, 0, 'approval')
+            """,
+            (REPO.lower(), HEAD),
+        )
+
+    board.dispatcher.poll_once(FreshSource(green, red))
+
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poll.log", now=board.now[0])
+    assert [ticket["state"] for ticket in snapshot["tickets"]] == [state]
+    assert snapshot["ci_runs"]["failures"] == []
+    assert ci_lane(snapshot)["cards"] == {}
+    assert [(row["head"], row["conclusion"]) for row in board.rows()] == rows
 
 
 def test_a_rerun_at_the_same_head_replaces_the_row_and_its_lookups(tmp_path: Path) -> None:
@@ -512,25 +634,27 @@ def test_two_workflows_sharing_a_check_name_keep_both_jobs(tmp_path: Path) -> No
     assert "actions/runs/901/job/1" in section and "actions/runs/902/job/2" in section
 
 
-def test_a_finished_ticket_keeps_only_its_failures(tmp_path: Path) -> None:
+def test_a_finished_ticket_keeps_no_rows(tmp_path: Path) -> None:
     board = Board(tmp_path)
-    board.track("1", "2")
+    board.track("1", "2", "3")
     board.cycle(
         pr("1", HEAD, check("pytest", "completed", "failure", run="901", job="1")),
         pr("2", HEAD, check("pytest", "completed", "success", run="902", job="2")),
+        pr("3", HEAD, check("pytest", "in_progress", run="903", job="3")),
     )
     with board.queue.connect() as connection:
         connection.executemany(
             """
-            INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, 'merged')
-            ON CONFLICT (repo, ticket_id) DO UPDATE SET workflow_state = 'merged'
+            INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, ?)
+            ON CONFLICT (repo, ticket_id) DO UPDATE SET workflow_state = excluded.workflow_state
             """,
-            [(REPO.lower(), "1"), (REPO.lower(), "2")],
+            [(REPO.lower(), "1", "merged"), (REPO.lower(), "2", "abandoned")],
         )
 
     board.cycle()
 
-    assert [(row["ticket_id"], row["conclusion"]) for row in board.rows()] == [("1", "failure")]
+    assert [row["ticket_id"] for row in board.rows()] == ["3"]
+    assert board.dashboard()["failures"] == []
 
 
 def test_an_adapter_error_spends_its_read_and_the_cycle_goes_on(tmp_path: Path) -> None:
@@ -690,24 +814,6 @@ def test_a_failure_leaves_the_dashboard_a_day_after_it_completed_though_still_po
     section = _popup(dashboard, "1")
     assert "no CI failures in the last 24 h" in section and "actions/runs/900/job/1" not in section
     assert board.github.spent() == 0
-
-
-def test_an_old_heads_failure_is_dropped_a_day_after_it_completed(tmp_path: Path) -> None:
-    board = Board(tmp_path)
-    board.track("1")
-    failed = pr("1", HEAD, check("pytest", "completed", "failure", job="1", completed=1000.0))
-    board.cycle(failed)
-    board.now[0] += 20 * 60 * 60
-    board.cycle(failed)
-    rerun = pr("1", NEW_HEAD, check("pytest", "queued", run="901", job="2"))
-    board.now[0] += 3 * 60 * 60
-    board.cycle(rerun)
-    assert [row["head"] for row in board.rows()] == [HEAD, NEW_HEAD]
-
-    board.now[0] += 2 * 60 * 60
-    board.cycle(rerun)
-
-    assert [row["head"] for row in board.rows()] == [NEW_HEAD]
 
 
 POOL_REPO = REPO.lower()

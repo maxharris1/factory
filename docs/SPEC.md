@@ -873,7 +873,11 @@ pytest log without it. A read that fails is not retried, so the job shows
 its log link without test names. At about 20 runs an hour that is
 about 60 to 80 requests an hour; the worst case is 480 an hour at
 `poll_seconds: 30`. Recent failures are listed for 24 hours from the time
-the job completed.
+the job completed, and only at the ticket's current head: a new head, a
+merge, `done`, `abandoned` or an untracked ticket clears them (issue #973).
+The board is written after `merge-queue`, `verify-handoffs` and
+`reconcile-jobs`, from each ticket's last read that cycle, so a head, merge
+or close those phases read clears the old head's failures in the same cycle.
 
 **State backup (issue #108, #66).** After every cycle `orch poll` backs
 `orch.db` up with SQLite's online backup API to `$ORCH_DB_BACKUP`, default
