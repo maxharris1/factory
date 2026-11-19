@@ -625,6 +625,27 @@ def test_a_stopped_github_ticket_due_for_its_read_ends_when_its_pr_closed(
     assert_ended_from_an_uncached_read(dispatcher, queue, gh, "7", "repos/acme/widgets/pulls/7")
 
 
+@pytest.mark.parametrize(
+    "closed_at, stored",
+    [("2027-01-12T08:00:00Z", 1_800_000_000.0 - 3 * 86400), (None, None), ("last tuesday", None)],
+)
+def test_a_pr_closed_unmerged_stores_when_github_closed_it(
+    tmp_path: Path, closed_at: str | None, stored: float | None
+) -> None:
+    now = [1_800_000_000.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "7", "github", now[0])
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "closed", "merged": False, "commits": 1, "closed_at": closed_at}
+    now[0] += 301
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert outcome(queue, "7") == ABANDONED
+    with queue.connect() as connection:
+        assert connection.execute("SELECT closed_at FROM ticket_state").fetchone()[0] == stored
+
+
 def test_a_pr_closed_again_after_a_read_saw_it_open_ends_its_ticket(tmp_path: Path) -> None:
     now = [100.0]
     dispatcher, queue = setup(tmp_path, now)

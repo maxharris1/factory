@@ -3184,6 +3184,42 @@ def linear_refs(count: int) -> tuple[TicketRef, ...]:
     )
 
 
+def test_state_reads_carry_when_linear_canceled_or_completed_the_issue() -> None:
+    at = "2027-01-12T08:00:00.000Z"
+    issues = {
+        0: ("Canceled", "canceled", at, None),
+        1: ("Done", "completed", None, at),
+        2: ("In Progress", "started", at, at),
+        3: ("Canceled", "canceled", "soon", None),
+    }
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        variables = json.loads(body)["variables"]
+        nodes = [
+            {
+                "identifier": f"{variables['team']}-{number:04d}",
+                "state": {"name": issues[number][0], "type": issues[number][1]},
+                "canceledAt": issues[number][2],
+                "completedAt": issues[number][3],
+            }
+            for number in variables["numbers"]
+        ]
+        return HTTPResult(200, json.dumps({"data": {"issues": {"nodes": nodes}}}))
+
+    source = LivePollSource(
+        config(linear=True), environ={"LINEAR_KEY": "key"}, linear_transport=transport
+    )
+    source.begin_cycle()
+    states = source.linear_states(linear_refs(4)).states
+    assert {key: state.closed_at for key, state in states.items()} == {
+        "AUT-0000": 1_800_000_000.0 - 3 * 86400,
+        "AUT-0001": 1_800_000_000.0 - 3 * 86400,
+        "AUT-0002": None,
+        "AUT-0003": None,
+    }
+
+
 def test_state_reads_cut_by_the_budget_reach_every_ticket_in_later_cycles() -> None:
     requests: list[dict] = []
     source = states_source(requests)

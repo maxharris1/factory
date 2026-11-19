@@ -270,6 +270,7 @@ class LinearStatesMixin:
     def _linear_canceled(
         self, repo: str, ticket_id: str, state: str, stuck: bool
     ) -> bool:
+        closed_at = self._linear_fresh[(repo, ticket_id)].closed_at
         return self._settle(
             repo,
             ticket_id,
@@ -281,7 +282,7 @@ class LinearStatesMixin:
                 "abandoned",
                 source="linear-canceled",
                 at=self.queue.now(),
-                also=SETTLE_CLEARS,
+                also={**SETTLE_CLEARS, "closed_at": closed_at},
                 guard="workflow_state = ?",
                 guard_args=(state,),
             ),
