@@ -727,7 +727,6 @@ class ReadyMixin:
         return logs
 
     def _base_checks_for(self, repo: str, base: str) -> Mapping[str, BaseCheck] | None:
-        """None when the read failed, so the failure is charged as today."""
         key = (repo.lower(), base)
         if key not in self._base_checks:
             self._base_checks[key] = None

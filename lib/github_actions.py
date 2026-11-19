@@ -893,11 +893,6 @@ class GitHubReviewActions:
         )
 
     def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
-        """The jobs of each workflow's latest completed push run on branch, by job name.
-
-        status=completed leaves out a run still going on the tip, so its
-        checks read as the run before it, never as green or red.
-        """
         path = _repo_path(repo)
         page = _object(
             self._json(

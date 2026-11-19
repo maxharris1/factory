@@ -141,13 +141,6 @@ def base_red(
     base: Mapping[str, BaseCheck],
     base_logs: Mapping[str, str | None],
 ) -> bool:
-    """True when the base branch explains every failed PR check (#955).
-
-    With failing tests named on both sides, a check is explained only when
-    each of its tests also fails somewhere on the base: a shard can move a
-    test, and a PR that broke one test while the base flakes on another is
-    still charged. Without them, the same-named base check must have failed.
-    """
     red = [check for check in base.values() if check.conclusion in CHECK_FAILED]
     base_tests = {
         test for check in red for test in failing_tests(base_logs.get(check.job_id) or "")
