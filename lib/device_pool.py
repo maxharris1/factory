@@ -70,9 +70,8 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from lib import lane_limit, live_settings
+from lib import device_sync, lane_limit, live_settings
 from lib.device_sync import NOTHING_BLOCKED, Blocked
-from lib.device_sync import blocked as sync_blocked
 from lib.machines_yml import (
     Device,
     MachinesConfig,
@@ -184,7 +183,8 @@ def choose_device(
     Utilization is slots held over slot_max, compared exactly. A tie goes to
     a remote device before the local box, remotes in machines.yml order
     (issue #223). A full device is never chosen, nor one whose factory
-    checkout for harness is out of sync or being updated (#297). A device
+    checkout for harness is out of sync or being updated (#297), or is
+    synced behind the box HEAD (#1018). A device
     in `avoid` is chosen only when no other has a free slot (#218).
     """
     candidates = []
@@ -223,6 +223,7 @@ class DevicePool:
         config: MachinesConfig,
         *,
         machines_path: Path | None = None,
+        head: Callable[[], str | None] = lambda: None,
     ):
         shared = shared_tailscale_names(config.devices)
         if shared:
@@ -233,6 +234,7 @@ class DevicePool:
         self.queue = queue
         self.config = config
         self.machines_path = machines_path
+        self.head = head
         if not self._needs_schema():
             return
         with self.queue.connect() as connection:
@@ -329,7 +331,7 @@ class DevicePool:
                 WHERE job_id IN (SELECT id FROM jobs WHERE state = 'queued')
                 """
             )
-            blocked = placement_blocked(connection, now, config)
+            blocked = placement_blocked(connection, now, config, self.head())
             device = choose_device(config, harness, _used(connection, config), blocked)
             if device is None:
                 connection.commit()
@@ -928,11 +930,17 @@ def orphan_slot(connection: sqlite3.Connection, job_id: str, now: float) -> None
 
 
 def placement_blocked(
-    connection: sqlite3.Connection, now: float, config: MachinesConfig | None
+    connection: sqlite3.Connection,
+    now: float,
+    config: MachinesConfig | None,
+    head: str | None = None,
 ) -> Blocked:
-    """Where a claim must not go now: device_sync's blocks, every backed-off
-    device, and each device's harness whose account is usage-limited."""
-    blocked = sync_blocked(connection)
+    """Where a claim must not go now: device_sync's blocks, each remote
+    checkout synced behind head, every backed-off device, and each device's
+    harness whose account is usage-limited."""
+    rows = device_sync.read(connection)
+    blocked = device_sync.blocked_by(rows)
+    stale = device_sync.behind(rows, head, orch_host(config))
     limited = lane_limit.account_limits(connection, now)
     pairs = {
         (device.name, harness)
@@ -948,12 +956,18 @@ def placement_blocked(
                 f"SELECT device FROM {BACKOFF_TABLE} WHERE until > ?", (now,)
             )
         }
-    return replace(blocked, pairs=blocked.pairs | pairs, devices=blocked.devices | backed_off)
+    return replace(
+        blocked,
+        pairs=blocked.pairs | stale.pairs | pairs,
+        devices=blocked.devices | backed_off,
+    )
 
 
-def placement_blocks(queue: SQLiteJobQueue, config: MachinesConfig | None) -> Blocked:
+def placement_blocks(
+    queue: SQLiteJobQueue, config: MachinesConfig | None, head: str | None = None
+) -> Blocked:
     with queue.connect() as connection:
-        return placement_blocked(connection, queue.now(), config)
+        return placement_blocked(connection, queue.now(), config, head)
 
 
 def backed_off_through(queue: SQLiteJobQueue, config: MachinesConfig) -> dict[str, float]:

@@ -1474,7 +1474,10 @@ def _device_pool(
 ) -> DevicePool:
     try:
         return retry_locked(
-            lambda: DevicePool(queue, machines, machines_path=_machines_path(path))
+            lambda: DevicePool(
+                queue, machines, machines_path=_machines_path(path),
+                head=lambda: health.checkout_sha(ROOT),
+            )
         )
     except (QueueError, sqlite3.Error, OSError) as exc:
         raise WaitError(f"cannot open the device pool: {' '.join(str(exc).split())}") from exc
