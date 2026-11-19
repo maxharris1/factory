@@ -1236,6 +1236,7 @@ class LivePollSource:
                 issue,
                 tracked=True,
                 allow_merged=ref.allow_merged,
+                uncached=ref.closed,
             )
         if ref.tracker != "github":
             return None
@@ -1245,6 +1246,7 @@ class LivePollSource:
             ref.ticket_id,
             allow_merged=ref.allow_merged,
             probed=probed,
+            uncached=ref.closed,
         )
 
     def _reusable_linear_issue(self, ref: TicketRef) -> dict[str, Any] | None:
@@ -1731,19 +1733,22 @@ class LivePollSource:
         allow_merged: bool = False,
         comments: tuple[Comment, ...] | None = None,
         probed: str | None = None,
+        uncached: bool = False,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
-        cached = None if fresh else self._ticket_cache.get(cache_key)
+        cached = None if fresh or uncached else self._ticket_cache.get(cache_key)
         if cached is not None:
             return cached
         read_at = self.clock()
-        last = None if fresh else self._last_reads.get((project.repo.lower(), number))
+        last = None if fresh or uncached else self._last_reads.get((project.repo.lower(), number))
         if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.hold_applies:
             last = None
         if last is None:
             # gh's --cache could serve a body older than the probe, which
             # would then be stored under the probe's fingerprint.
-            pull = self._github_pull(project.repo, number, fresh=fresh or probed is not None)
+            pull = self._github_pull(
+                project.repo, number, fresh=fresh or uncached or probed is not None
+            )
         else:
             pull = last.pull
         merged = pull.get("merged") is True
@@ -1980,12 +1985,13 @@ class LivePollSource:
         fresh: bool = False,
         tracked: bool = False,
         allow_merged: bool = False,
+        uncached: bool = False,
     ) -> TrackedTicket:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
             raise PollSourceError("Linear issue has no identifier")
         cache_key = ("linear", project.repo.lower(), identifier)
-        cached = None if fresh else self._ticket_cache.get(cache_key)
+        cached = None if fresh or uncached else self._ticket_cache.get(cache_key)
         if cached is not None:
             if cached.merged and tracked:
                 self._linear_merged(project, identifier, allow_merged)
@@ -2024,12 +2030,12 @@ class LivePollSource:
             project.repo,
             identifier,
             issue,
-            fresh=fresh,
+            fresh=fresh or uncached,
         )
         pull_facts: dict[str, Any] = {"merged": False}
         pull: Mapping[str, Any] = {}
         if pr_number is not None:
-            pull = self._github_pull(project.repo, pr_number, fresh=fresh)
+            pull = self._github_pull(project.repo, pr_number, fresh=fresh or uncached)
             # #108: a cached discovery read still carries the merge.
             pull_facts = {**_pull_facts(pull, fresh=fresh), "merged": pull.get("merged") is True}
             if pull_facts["merged"] and tracked:

@@ -328,3 +328,59 @@ def test_a_held_linear_ticket_with_an_open_pr_keeps_its_cadence(tmp_path: Path) 
     assert len(branch_lookups(gh)) == 1
     assert len(state_probes(gh)) == 1
 
+
+class StaleCacheGh(FakeGh):
+    """gh's on-disk --cache still holds the bodies from before the PR closed."""
+
+    def __call__(self, argv, timeout):
+        if "--cache" not in argv:
+            return super().__call__(argv, timeout)
+        pull, branch_pulls = self.pull, self.branch_pulls
+        self.pull = {**pull, "state": "open"}
+        self.branch_pulls = [{**item, "state": "open"} for item in branch_pulls]
+        try:
+            return super().__call__(argv, timeout)
+        finally:
+            self.pull, self.branch_pulls = pull, branch_pulls
+
+
+def assert_ended_from_an_uncached_read(dispatcher, queue, gh, ticket_id: str, read: str) -> None:
+    assert outcome(queue, ticket_id) == ABANDONED
+    with queue.connect() as connection:
+        flags = _read_db(connection, dispatcher.queue.now())["attention_flags"]
+    assert [flag for flag in flags if flag["reason"] == "ship-failed"] == []
+    with queue.connect() as connection:
+        assert connection.execute("SELECT id FROM jobs WHERE state = 'queued'").fetchall() == []
+    reads = [call for call in gh.calls if read in call]
+    assert reads
+    assert all("--cache" not in call for call in reads)
+
+
+def test_after_a_restart_a_closed_github_pr_is_not_read_from_gh_cache(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "7", "github", now[0])
+    dispatcher.flag_attention("acme/widgets", "7", "ship-failed", "handoff ship failed")
+    gh = StaleCacheGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "closed", "merged": False, "commits": 1}
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert_ended_from_an_uncached_read(dispatcher, queue, gh, "7", "repos/acme/widgets/pulls/7")
+
+
+def test_after_a_restart_a_closed_linear_pr_is_not_read_from_gh_cache(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0], pr_number="12")
+    dispatcher.flag_attention("acme/widgets", "AUT-42", "ship-failed", "handoff ship failed")
+    gh = StaleCacheGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.pull = linear_gh("closed").pull
+    gh.branch_pulls = linear_gh("closed").branch_pulls
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert_ended_from_an_uncached_read(
+        dispatcher, queue, gh, "AUT-42", "repos/acme/widgets/pulls/12"
+    )
+
