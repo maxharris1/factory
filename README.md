@@ -1830,8 +1830,8 @@ devices:
 ```
 
 An `id` is a stable, non-secret name: letters, digits, `.`, `_` and `-`,
-never an email, org ID or token. `harness` is `claude`, `codex`, `cursor`
-or `external`. A bare bot user, as in `codex: codex-bot`, is the account
+not `.` or `..`, never an email, org ID or token. `harness` is `claude`,
+`codex`, `cursor` or `external`. A bare bot user, as in `codex: codex-bot`, is the account
 `<harness>-default`: the CLI's own login on that device, signed in on every
 device that lists the harness. It needs no entry, so a file without
 `accounts:` loads unchanged.
@@ -1850,7 +1850,11 @@ integer, caps the account's running jobs once account choice lands
 
 The older device value `{bot: <bot user>, account: <id>}` still loads and
 means that account is the device's own login. `orch check-config` reports
-it as deprecated: use `signed_in_on` instead.
+it as deprecated. Still, keep {bot, account} until account placement
+(#1063 parts 2 and 3, then #1064) runs on every device. Until then, a bare
+bot runs and records its jobs as `<harness>-default`. Replacing the mapping
+with `signed_in_on` plus a bare bot today moves the device's jobs and
+pauses to the default account.
 
 Order matters. Deploy the code first, and add `accounts:` to `machines.yml`
 only after every device runs it: older code refuses the key. The poller

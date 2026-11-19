@@ -14,7 +14,11 @@ BOX = """
     harnesses:
       claude: claude-bot
 """
-LEGACY = "{bot, account} is deprecated in favour of accounts[].signed_in_on"
+LEGACY = (
+    "{bot, account} is deprecated, but keep {bot, account} until account placement "
+    "(#1063 parts 2 and 3, then #1064) runs on every device, then move the account "
+    "to accounts[].signed_in_on"
+)
 
 
 def write(tmp_path: Path, text: str) -> Path:
@@ -666,9 +670,12 @@ def test_draining_device_account_does_not_serve(tmp_path: Path) -> None:
             "devices:\n" + remote(),
             "duplicate account 'codex-a'",
         ),
-        (
-            "accounts:\n  - {id: max@example.com, harness: codex}\ndevices:\n" + remote(),
-            "accounts[0].id must be 1-64 letters, digits, '.', '_' or '-'",
+        *(
+            (
+                f"accounts:\n  - {{id: {account_id}, harness: codex}}\ndevices:\n" + remote(),
+                "accounts[0].id must be 1-64 letters, digits, '.', '_' or '-'",
+            )
+            for account_id in ("max@example.com", '"."', '".."', "a/b", '"../x"', "/x")
         ),
         (
             "accounts:\n  - {id: codex-a, harness: grok}\ndevices:\n" + remote(),
@@ -856,7 +863,7 @@ def signed_in(account: str, **device: str) -> str:
                 signed_in(f"signed_in_on: [pc], max_jobs: {value}"),
                 "accounts[0].max_jobs must be a positive integer",
             )
-            for value in ("true", "0", "-1", '"2"', "1.5")
+            for value in ("null", "~", "true", "0", "-1", '"2"', "1.5")
         ),
         *(
             (
@@ -974,3 +981,28 @@ def test_docs_describe_usage_accounts_and_the_grok_routine_approval(doc: str) ->
         "that needs Max's approval.",
     ):
         assert phrase in " ".join(text.split()), phrase
+
+
+LEGACY_PREREQUISITE = (
+    "keep {bot, account} until account placement (#1063 parts 2 and 3, then #1064) "
+    "runs on every device"
+)
+
+
+def test_legacy_mapping_guidance_keeps_the_mapping_until_account_placement(
+    tmp_path: Path,
+) -> None:
+    _config, findings = load_machines_yml(
+        write(
+            tmp_path,
+            ACCOUNTS + "devices:\n"
+            + remote(harnesses="{codex: {bot: codex-bot, account: codex-a}}"),
+        )
+    )
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    spec = " ".join((ROOT / "docs/SPEC.md").read_text(encoding="utf-8").split())
+
+    assert any(LEGACY_PREREQUISITE in item for item in warnings(findings)), findings
+    assert LEGACY_PREREQUISITE in readme
+    assert LEGACY_PREREQUISITE in spec
+    assert "use `signed_in_on` instead" not in readme

@@ -42,11 +42,12 @@ remote device may name an ssh_user: the login (`ssh -l`) the box uses for
 it in place of the job's bot user, which stays the job's identity.
 
 The top-level accounts list names each subscription: an id
-([A-Za-z0-9._-]{1,64}, never an email, org ID or token), its harness (a
-factory harness, or `external` for a plan no factory process runs, such
-as Grok's), and optional free-text plan and label. A device's harness
-value is its bot user, whose own login is the account `<harness>-default`,
-which needs no entry, so a file without accounts loads unchanged.
+([A-Za-z0-9._-]{1,64}, not `.` or `..`, never an email, org ID or
+token), its harness (a factory harness, or `external` for a plan no
+factory process runs, such as Grok's), and optional free-text plan and
+label. A device's harness value is its bot user, whose own login is the
+account `<harness>-default`, which needs no entry, so a file without
+accounts loads unchanged.
 signed_in_on lists the devices a claude or codex account is also signed
 in on; each such device names home, the bot's home folder there (the
 workdir_root path rules, but no {bot} beside ssh_user), and the account
@@ -85,7 +86,7 @@ _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _TOP_KEYS = {"devices", "orch_host", "accounts"}
 EXTERNAL = "external"
 ACCOUNT_HARNESSES = (*HARNESSES, EXTERNAL)
-_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
 _ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs"}
 ACCOUNTS_DIR = ".factory-accounts"
 _ACCOUNT_TEXT_MAX = 100
@@ -445,7 +446,7 @@ def _accounts(
                 )
             )
         max_jobs = item.get("max_jobs")
-        if max_jobs is not None and not (is_strict_int(max_jobs) and max_jobs >= 1):
+        if "max_jobs" in item and not (is_strict_int(max_jobs) and max_jobs >= 1):
             findings.append(
                 Finding("error", f"{prefix}.max_jobs must be a positive integer")
             )
@@ -866,7 +867,9 @@ def _device(
                     Finding(
                         "warning",
                         f"device {name!r} harness {harness!r} names its login account "
-                        "inline; {bot, account} is deprecated in favour of "
+                        "inline; {bot, account} is deprecated, but keep {bot, account} "
+                        "until account placement (#1063 parts 2 and 3, then #1064) "
+                        "runs on every device, then move the account to "
                         "accounts[].signed_in_on",
                     )
                 )
