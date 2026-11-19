@@ -508,6 +508,19 @@ def test_canceled_stuck_ticket_is_abandoned_and_unstuck(tmp_path: Path, start: s
     assert len(source.state_reads) == 1
 
 
+@pytest.mark.parametrize("closed_at", [700.0, None])
+def test_a_canceled_ticket_stores_when_linear_canceled_it(tmp_path: Path, closed_at) -> None:
+    dispatcher, queue = setup(tmp_path, [1000.0])
+    seed(queue, "AUT-6", "review")
+    source = LinearSource()
+    source.states = {"AUT-6": replace(CANCELED, closed_at=closed_at)}
+    dispatcher.poll_once(source)
+
+    row = state_of(queue, "AUT-6")
+    assert (row["workflow_state"], row["closed_at"]) == ("abandoned", closed_at)
+    assert transitions(queue, "AUT-6")[-1] == ("review", "abandoned", "linear-canceled")
+
+
 def reviewed(tmp_path: Path, verdict: str, linear: LinearState):
     dispatcher, queue = setup(tmp_path, [1000.0])
     head = "a" * 40

@@ -203,7 +203,10 @@ SCRIPT_TICKETS = r"""
       qa.get(joinKey(r)).push(r);
     });
     var generated = d.generated_at_epoch;
-    var cards = rows.filter(function (r) { return !project || r.repo === project; }).map(function (t) {
+    var mine = rows.filter(function (r) { return !project || r.repo === project; });
+    var cards = mine.filter(function (t) {
+      return !(t.state === 'abandoned' && known(t.state_age_seconds) && t.state_age_seconds >= BOARD.stopped_window);
+    }).map(function (t) {
       var key = joinKey(t);
       var charted = Object.prototype.hasOwnProperty.call(table.states, t.state);
       var lv = live.get(key) || null, q = queued.get(key) || null;
@@ -238,7 +241,7 @@ SCRIPT_TICKETS = r"""
     var tiles = cards.filter(function (c) { return c.phase === 'Shipped'; }).sort(byShip);
     var handed = tiles.filter(function (c) { return c.ticket.shipped_how === 'handed-off'; }).length;
     return {
-      projects: projects, total: rows.length, tracked: cards.length, available: table.columns.length > 0,
+      projects: projects, total: rows.length, tracked: mine.length, available: table.columns.length > 0,
       open: columns.reduce(function (n, col) { return n + col.cards.length; }, 0),
       shipped: tiles.length,
       columns: columns,
@@ -693,6 +696,7 @@ CAP = 6
 SHELF_NEWEST = 10
 SHELF_PHONE = 5
 SHELF_PAGE = 50
+STOPPED_WINDOW_SECONDS = 24 * 3600
 FIND_MAX = 8
 FIND = (
     '<div class="tk-find" role="search"><label for="find-ticket">Find a ticket</label>'
@@ -723,7 +727,7 @@ def board_constants() -> dict:
         "columns": COLUMNS, "names": COLUMN_NAMES, "phases": PHASES, "overrides": PHASE_OVERRIDES,
         "not_factory_steps": sorted(NOT_FACTORY_STEPS),
         "chips": JOB_CHIPS, "kinds": CARD_KINDS, "cap": CAP, "shelf_newest": SHELF_NEWEST, "shelf_page": SHELF_PAGE,
-        "shelf_phone": SHELF_PHONE, "find_max": FIND_MAX,
+        "shelf_phone": SHELF_PHONE, "find_max": FIND_MAX, "stopped_window": STOPPED_WINDOW_SECONDS,
         "qa_tones": QA_TONES,
         "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
     }
@@ -774,6 +778,11 @@ def _rank(card: dict) -> tuple:
     return kind["group"], age is None, -(age or 0)
 
 
+def _closed_long_ago(ticket: dict) -> bool:
+    age = ticket.get("state_age_seconds")
+    return ticket["state"] == "abandoned" and age is not None and age >= STOPPED_WINDOW_SECONDS
+
+
 def _ship_rank(card: dict) -> tuple:
     at = card["ticket"].get("shipped_at")
     return at is None, -(at or 0), _key(card["ticket"])
@@ -810,6 +819,8 @@ def board(snapshot: dict, project: str | None = None) -> dict:
         for row in rows
         if project in (None, row["repo"])
     ]
+    tracked = len(cards)
+    cards = [card for card in cards if not _closed_long_ago(card["ticket"])]
     columns = []
     for col in table["columns"]:
         ranked = sorted((c for c in cards if c["phase"] == col["phase"]), key=_rank)
@@ -821,7 +832,7 @@ def board(snapshot: dict, project: str | None = None) -> dict:
     return {
         "projects": sorted(counts.items(), key=lambda item: (-item[1], _short(item[0]), item[0])),
         "total": len(rows),
-        "tracked": len(cards),
+        "tracked": tracked,
         "available": bool(table["columns"]),
         "open": sum(len(col["cards"]) for col in columns),
         "shipped": len(tiles),

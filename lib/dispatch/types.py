@@ -70,6 +70,14 @@ CHECK_FAILED = (
 )
 
 
+@dataclass(frozen=True)
+class BaseCheck:
+    name: str
+    conclusion: str | None
+    run_id: str
+    job_id: str
+
+
 CIJobStatus = Literal["queued", "in_progress", "completed"]
 RerunOutcome = Literal["requested", "running"]
 RunnerKind = Literal["self-hosted", "github-hosted", "none"]
@@ -228,6 +236,7 @@ class TrackedTicket:
     mergeable: bool | None = None
     mergeable_state: str | None = None
     closed: bool = False
+    closed_at: float | None = None
     draft: bool | None = None
     intake_label: str | None = None
     changed_lines: int | None = None
@@ -262,6 +271,7 @@ class LinearState:
     name: str
     type: str
     handoff: bool
+    closed_at: float | None = None
 
 
 @dataclass(frozen=True)

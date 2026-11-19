@@ -88,6 +88,7 @@ class SchemaMixin:
                     update_failures INTEGER NOT NULL DEFAULT 0,
                     update_from_head TEXT,
                     update_failed_job TEXT,
+                    closed_at REAL,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
@@ -184,6 +185,7 @@ class SchemaMixin:
                     "external_from_state": "TEXT",
                     "external_from_stuck": "INTEGER",
                     "external_at": "REAL",
+                    "closed_at": "REAL",
                 },
             )
             connection.execute(
@@ -557,6 +559,18 @@ class SchemaMixin:
                 CREATE TABLE IF NOT EXISTS ci_silence (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    since REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ci_stale (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
                     head TEXT NOT NULL,
                     since REAL NOT NULL,
                     PRIMARY KEY (repo, ticket_id)

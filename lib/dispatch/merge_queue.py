@@ -563,8 +563,8 @@ class MergeQueueMixin:
                     f"{head[:12]}, its update job gone: {verdict.reason}"
                 )
             return True
-        settled = self._settled_red(ticket, head, ci)
-        if settled is None:
+        settled = self._settled_red(ticket, source, head, ci)
+        if isinstance(settled, str):
             return False
         _status, count = self._record_ci_result(ticket, head, settled.status)
         if self._mark_stuck_on_third_red(ticket, source, head, count):
@@ -818,6 +818,7 @@ class MergeQueueMixin:
                 "abandoned",
                 source="closed-unmerged",
                 at=self.queue.now(),
+                also={"closed_at": ticket.closed_at},
                 guard=_NOT_FINISHED,
             )
             if not written:

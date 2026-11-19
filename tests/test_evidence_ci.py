@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from lib.dispatch.types import CIResult, FailedCheck, result_cause
+from lib.dispatch.types import BaseCheck, CIResult, FailedCheck, result_cause
 from lib.evidence.ci import (
     LOG_LINES,
+    base_red,
     CIEvidence,
     CIJobLog,
     ci_evidence,
@@ -385,3 +386,50 @@ def test_a_log_naming_a_failing_test_stays_code_whatever_the_step_count():
     result = classify_logged(CIResult("failure", failed=(PYTEST,)), {"7": log}, {"7": 0})
 
     assert [(check.cause, check.signal) for check in result.failed] == [("code", None)]
+
+
+def _base(name: str, conclusion: str, job_id: str) -> BaseCheck:
+    return BaseCheck(name, conclusion, "900", job_id)
+
+
+def _failed(*tests: str) -> str:
+    return "".join(f"FAILED {test} - AssertionError\n" for test in tests)
+
+
+SHARD = FailedCheck("test (3/3)", run_id="42", job_id="7", cause="code")
+FLAKE = "tests/test_service.py::test_service_detach"
+BROKEN = "tests/test_x.py::test_z"
+
+
+def test_a_pr_failing_only_tests_the_base_fails_is_base_red_even_on_another_shard():
+    base = {"test (1/3)": _base("test (1/3)", "failure", "b1")}
+
+    assert base_red([SHARD], {"7": _failed(FLAKE)}, base, {"b1": _failed(FLAKE, BROKEN)})
+
+
+def test_a_pr_that_broke_a_test_while_the_base_flakes_on_another_is_charged():
+    base = {"test (3/3)": _base("test (3/3)", "failure", "b1")}
+
+    assert not base_red([SHARD], {"7": _failed(FLAKE, BROKEN)}, base, {"b1": _failed(FLAKE)})
+
+
+def test_missing_logs_fall_back_to_the_same_named_base_check():
+    red = {"test (3/3)": _base("test (3/3)", "failure", "b1")}
+    green = {"test (3/3)": _base("test (3/3)", "success", "b1")}
+
+    assert base_red([SHARD], {}, red, {})
+    assert base_red([SHARD], {"7": _failed(FLAKE)}, red, {"b1": None})
+    assert not base_red([SHARD], {}, green, {})
+
+
+def test_no_base_run_of_the_check_charges():
+    assert not base_red([SHARD], {"7": _failed(FLAKE)}, {}, {})
+    assert not base_red([SHARD], {}, {"lint": _base("lint", "failure", "b1")}, {})
+
+
+def test_every_failed_check_must_be_explained_by_the_base():
+    lint = FailedCheck("lint", run_id="42", job_id="8", cause="code")
+    base = {"test (3/3)": _base("test (3/3)", "failure", "b1")}
+
+    assert not base_red([SHARD, lint], {"7": _failed(FLAKE)}, base, {"b1": _failed(FLAKE)})
+    assert not base_red([], {}, base, {})

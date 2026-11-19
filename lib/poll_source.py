@@ -137,10 +137,11 @@ query FactoryStates($team: String!, $numbers: [Float!]!, $first: Int!) {
     first: $first,
     filter: { team: { key: { eq: $team } }, number: { in: $numbers } }
   ) {
-    nodes { identifier branchName state { name type } }
+    nodes { identifier branchName state { name type } canceledAt completedAt }
   }
 }
 """.strip()
+LINEAR_CLOSED_AT = {"canceled": "canceledAt", "completed": "completedAt"}
 LINEAR_READY_MUTATION = """
 mutation FactoryReadyForReview($issue: String!, $state: String!) {
   issueUpdate(id: $issue, input: {stateId: $state}) { success }
@@ -1231,7 +1232,10 @@ class LivePollSource:
                 name, kind = state.get("name"), state.get("type")
                 if isinstance(name, str) and isinstance(kind, str):
                     states[ref.ticket_id] = LinearState(
-                        name, kind, name in handoff[ref.repo.lower()]
+                        name,
+                        kind,
+                        name in handoff[ref.repo.lower()],
+                        _iso_time(node.get(LINEAR_CLOSED_AT.get(kind))),
                     )
             for key in page:
                 identifier = numbered[key].ticket_id
@@ -2753,11 +2757,13 @@ def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
     merged = pull.get("merged") is True
     mergeable = pull.get("mergeable")
     sizes = (pull.get("additions"), pull.get("deletions"))
+    closed = pull.get("state") == "closed" and not merged
     return {
         "merged": merged and fresh,
         "mergeable": mergeable if isinstance(mergeable, bool) else None,
         "mergeable_state": _optional_string(pull.get("mergeable_state")),
-        "closed": pull.get("state") == "closed" and not merged,
+        "closed": closed,
+        "closed_at": _iso_time(pull.get("closed_at")) if closed else None,
         "draft": pull["draft"] if isinstance(pull.get("draft"), bool) else None,
         "changed_lines": sum(sizes) if all(type(size) is int for size in sizes) else None,
         "pr_base": _pr_base(pull),
@@ -2870,6 +2876,14 @@ def _linear_time(value: object, field: str) -> float:
     if parsed is None or parsed.tzinfo is None:
         raise PollSourceError(f"Linear comment {field} is not ISO-8601")
     return parsed.timestamp()
+
+
+def _iso_time(value: object) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return parsed.timestamp() if parsed is not None and parsed.tzinfo is not None else None
 
 
 def _newest_comment_at(issue: Mapping[str, Any]) -> float | None:

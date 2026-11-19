@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from lib.dispatch.helpers import failed_checks
-from lib.dispatch.types import Cause, CIResult, FailedCheck, result_cause
+from lib.dispatch.types import CHECK_FAILED, BaseCheck, Cause, CIResult, FailedCheck, result_cause
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
@@ -122,17 +122,41 @@ def _infra_signal(texts: Iterable[str]) -> str | None:
     return None
 
 
-def failing_tests(log_text: str) -> list[str]:
-    """The test ids on pytest's FAILED and ERROR summary lines, first FAILING_TESTS distinct."""
+def failing_tests(log_text: str, limit: int | None = FAILING_TESTS) -> list[str]:
+    """The test ids on pytest's FAILED and ERROR summary lines, first limit distinct."""
     found: dict[str, None] = {}
     for line in log_text.splitlines():
         entry = _ACTIONS_TIMESTAMP.sub("", _JOB_STEP.sub("", _ANSI.sub("", line)))
         match = _PYTEST_SUMMARY.match(entry)
         if match is not None:
             found.setdefault(match.group(1))
-            if len(found) == FAILING_TESTS:
+            if len(found) == limit:
                 break
     return list(found)
+
+
+def base_red(
+    failed: Sequence[FailedCheck],
+    pr_logs: Mapping[str, str | None],
+    base: Mapping[str, BaseCheck],
+    base_logs: Mapping[str, str | None],
+) -> bool:
+    red = [check for check in base.values() if check.conclusion in CHECK_FAILED]
+    base_tests = {
+        test
+        for check in red
+        for test in failing_tests(base_logs.get(check.job_id) or "", limit=None)
+    }
+
+    def explained(check: FailedCheck) -> bool:
+        text = pr_logs.get(check.job_id) if check.job_id is not None else None
+        tests = failing_tests(text or "", limit=None)
+        if tests and base_tests:
+            return base_tests.issuperset(tests)
+        same = base.get(check.name)
+        return same is not None and same.conclusion in CHECK_FAILED
+
+    return bool(failed) and all(map(explained, failed))
 
 
 def _tail(text: str, limit: int) -> tuple[str, str | None]:

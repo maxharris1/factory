@@ -77,6 +77,10 @@ offline. age_seconds is the age of the oldest repo's read. state is unread
 with no rows, live while age_seconds is at most CI_POOL_STALE_SECONDS,
 else stale.
 
+CI attention (#955): `ci_attention` is {base_red, stale}: base_red counts
+the open tickets whose red CI is held because the PR base fails the same
+check, stale the open tickets flagged needs-attention `ci-stale`.
+
 CI lane (#823): `ci_lane` is lib/ci_lane.ci_lane(snapshot): the runner
 slots, the GitHub-hosted, queued and failed groups and one card per ticket
 with its progress counts. The script draws it; the server render works it
@@ -108,7 +112,8 @@ Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
 `shipped_at` and `shipped_how`, its record's `shipped.at` and `shipped.how`
 (both null when the ticket is not shipped; `shipped_at` is also null when
-the time is unknown).
+the time is unknown). An `abandoned` ticket with a stored `closed_at` (#991)
+counts its current visit, and so its age and `stopped.at`, from that close.
 
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
@@ -166,6 +171,7 @@ from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import (
     JobStep,
     Transition,
+    anchor_close,
     job_flow,
     load_chart,
     shipped_facts,
@@ -176,8 +182,10 @@ from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
 from lib.dispatch.constants import (
+    CI_BASE_RED,
     CI_INFRA_BLOCKED_REASON,
     CI_RERUN_REFUSED,
+    CI_STALE_REASON,
     CI_WAIT_REASONS,
     HANDED_OFF_EXTERNALLY,
 )
@@ -258,7 +266,7 @@ HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
-    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED,
+    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_RERUN_REFUSED, CI_STALE_REASON,
     *FEEDER_ATTENTION_REASONS,
 )
 
@@ -928,6 +936,7 @@ def collect_snapshot(
         "relay": db["relay"],
         "ci_runs": db["ci_runs"],
         "ci_pool": db["ci_pool"],
+        "ci_attention": db["ci_attention"],
         "qa": {**db["qa"], "cap": orch.qa.max_cloud_lanes if orch is not None else None},
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
@@ -1011,6 +1020,41 @@ def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str
             **({"round": int(row["next_round"])} if row["next_round"] is not None else {}),
         }
     return found
+
+
+def _ci_attention(connection: sqlite3.Connection, tables: set[str]) -> dict[str, int]:
+    open_ticket = (
+        """
+        NOT EXISTS (
+            SELECT 1 FROM ticket_state AS state
+            WHERE state.repo = row.repo AND state.ticket_id = row.ticket_id
+              AND COALESCE(state.workflow_state, '') IN ('merged', 'done')
+        )
+        """
+        if "ticket_state" in tables
+        else "1"
+    )
+    held = [
+        f"SELECT repo, ticket_id FROM {table} AS row WHERE {column} = ? AND {open_ticket}"
+        for table, column in (("ci_waits", "reason"), ("ci_stale", "state"))
+        if table in tables
+    ]
+    base_red = (
+        connection.execute(
+            f"SELECT COUNT(*) FROM ({' UNION '.join(held)})", (CI_BASE_RED,) * len(held)
+        ).fetchone()[0]
+        if held
+        else 0
+    )
+    stale = (
+        connection.execute(
+            f"SELECT COUNT(*) FROM needs_attention AS row WHERE reason = ? AND {open_ticket}",
+            (CI_STALE_REASON,),
+        ).fetchone()[0]
+        if "needs_attention" in tables
+        else 0
+    )
+    return {"base_red": int(base_red), "stale": int(stale)}
 
 
 def _no_ci_bases(connection: sqlite3.Connection) -> dict[tuple[str, str], dict]:
@@ -1788,6 +1832,7 @@ def _read_db(
             "NULL",
         ])
         external_at = "state.external_at" if "external_at" in state_columns else "NULL"
+        closed_at = "state.closed_at" if "closed_at" in state_columns else "NULL"
         linear = "linear_states" in tables
         for row in connection.execute(
             f"""
@@ -1799,6 +1844,7 @@ def _read_db(
                    state.stuck_reason, state.paused_action,
                    COALESCE({stuck_at}, NULL) AS stuck_at,
                    {external_at} AS external_at,
+                   {closed_at} AS closed_at,
                    {"linear.state_name" if linear else "NULL"} AS linear_state
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
@@ -1854,6 +1900,7 @@ def _read_db(
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
                 f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
                 row["stuck_at"],
+                _telemetry_time(row["closed_at"]),
             )
             tickets.append(
                 {
@@ -1898,6 +1945,8 @@ def _read_db(
         now,
         tables,
     )
+    for key, info in ticket_info.items():
+        flows[key] = anchor_close(flows[key], info.closed_at, now)
     for row, key in ticket_rows:
         row["state_age_seconds"] = flows[key]["state_age_seconds"]
         shipped = shipped_facts(chart, flows[key]) or {"at": None, "how": None}
@@ -2139,6 +2188,7 @@ def _read_db(
         "linear_webhook": linear_webhook,
         "feeder": feeder,
         "attention_flags": attention_flags,
+        "ci_attention": _ci_attention(connection, tables),
         "held": held,
         "verdicts": verdicts,
         "relay": _relay(connection, tables, sources, handled, ticket_records, waiting_on, len(tickets), now),
@@ -2177,6 +2227,7 @@ class TicketInfo(NamedTuple):
     reason: str | None = None
     key: str = ""
     stuck_at: float | None = None
+    closed_at: float | None = None
 
 
 def _record_keys(ticket_info: dict[tuple[str, str], TicketInfo]) -> dict[tuple[str, str], str]:

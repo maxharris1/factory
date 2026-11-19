@@ -1,8 +1,10 @@
-- **Decision:** Factory CI (`.github/workflows/ci.yml`) runs on self-hosted runners. Linux jobs use the `factory-linux` pool (3 PC WSL instances and 1 low-priority box instance), named in `factory.md` as `ci_runner: factory-linux`. When every pool runner is busy, new Linux jobs overflow to `ubuntu-latest` through the repo Actions variable `FACTORY_LINUX_RUNNER`. The `macos` job uses the Mac runner (`factory-mac`) and never overflows. Merges still need green checks on the current head. Cleffy stays on hosted runners.
+- **Decision:** Factory CI (`.github/workflows/ci.yml`) runs on self-hosted runners. Linux jobs use the `factory-linux` pool, the 3 PC WSL instances `pc-wsl-bots-1` to `-3`, named in `factory.md` as `ci_runner: factory-linux`. When every pool runner is busy, new Linux jobs overflow to `ubuntu-latest` through the repo Actions variable `FACTORY_LINUX_RUNNER`. The `macos` job uses the Mac runner (`maxs-macbook-pro`, label `factory-mac`) and never overflows. Merges still need green checks on the current head. Cleffy stays on hosted runners.
 - **When:** 2026-11-17 9:30 AM ET, by Max
 - **Source:** https://github.com/maxharris1/factory/pull/712#issuecomment-6951041562 (the go), on the plan at https://github.com/maxharris1/factory/pull/712#issuecomment-6950231924. Overflow: Max, 10:47 AM ET, relayed in https://github.com/maxharris1/factory/pull/712#issuecomment-6953668097
 
-Max approved the plan's defaults and changed one of them. The box runner comes now, not after a week on the PC. `grokbot-factory-box` gets no runner. The aut0 and Tracy follow-ups were not approved, and nothing here touches #708 or moves WSL. At 10:47 AM ET Max said: "Do whatever you need to do on either of my machines to set up the runners and get them wired into the factory, so we default to the local runners before we overflow to GitHub." Under that grant, Grok Bot registered `pc-wsl-bots-1` to `-3`, `box-1` and `maxs-macbook-pro` with short-lived registration tokens piped straight into `config.sh`. No token was printed or stored. Later registrations follow [docs/F2-03-RUNNER-CHECKLIST.md](../F2-03-RUNNER-CHECKLIST.md), by Max.
+Max approved the plan's defaults and changed one of them. The box runner comes now, not after a week on the PC. The aut0 and Tracy follow-ups were not approved, and nothing here touches #708 or moves WSL. At 10:47 AM ET Max said: "Do whatever you need to do on either of my machines to set up the runners and get them wired into the factory, so we default to the local runners before we overflow to GitHub." Under that grant, Grok Bot registered `pc-wsl-bots-1` to `-3`, a box runner and `maxs-macbook-pro` with short-lived registration tokens piped straight into `config.sh`. No token was printed or stored. Later registrations follow [docs/F2-03-RUNNER-CHECKLIST.md](../F2-03-RUNNER-CHECKLIST.md), by Max.
+
+**Update, 2026-11-19 (#996).** Max retired the box runner and moved the sync to the PC at 10:00 AM ET. The box runner is deregistered and its starter removed. It never carried the `factory-linux` label after the label change, so it was a dead fourth slot. The pool is the 3 PC instances, and the Mac runs `macos`.
 
 ## Overflow to hosted runners
 
@@ -12,12 +14,12 @@ Every Linux job says:
 runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
 ```
 
-Unset means the pool, so local is the default. [`deploy/runner-pool-sync.sh`](../../deploy/runner-pool-sync.sh) runs on the box as the orch login. Every 30 s it reads the runner list. It sets the variable to `"ubuntu-latest"` only after two checks in a row with no idle online `factory-linux` runner (or none online), and back to the pool on the first check with one idle. GitHub reads the variable when it queues each job, so jobs queued while the pool has room stay local and the rest overflow. The runner list is read with the orch login's own `gh`, so no secret is added to Actions.
+Unset means the pool, so local is the default. [`deploy/runner-pool-sync.sh`](../../deploy/runner-pool-sync.sh) runs on the orch host (the PC) as the `factory` user, from the deployed checkout. Every 30 s it reads the runner list. It sets the variable to `"ubuntu-latest"` only after two checks in a row with no idle online `factory-linux` runner (or none online), and back to the pool on the first check with one idle. GitHub reads the variable when it queues each job, so jobs queued while the pool has room stay local and the rest overflow. The runner list is read with the `factory` user's own `gh` (repo admin), so no secret is added to Actions.
 
 - **macOS** has no overflow. `macos` stays on `[self-hosted, macOS, factory-mac]`, and `macos-pickup` still cancels the run red after 10 minutes.
 - **Billing.** An overflowed job is billed like any hosted job. While the account is billing-blocked it fails in seconds and the run goes red; rerun failed jobs once the pool has room.
 - **D21 still holds.** The credential checks in `tests/test_ci_workflow.py` apply to every job whose fallback is self-hosted, since that is where it runs by default.
-- **Restarts.** `runner-pool-sync.sh ensure` starts the loop unless a running loop holds its `flock` lock, which the kernel drops when the loop exits. `box-1` is restarted by `~/.local/bin/box-runner-ensure.sh` from the box login's `.bashrc`. A hold file (`~/.config/factory/runner-pool-sync-hold`) stops the loop. The checklist has the commands.
+- **Restarts.** The `factory` user's crontab on the PC runs `runner-pool-sync.sh ensure`, which starts the loop unless a running loop holds its `flock` lock. The kernel drops the lock when the loop exits. A hold file (`~/.config/factory/runner-pool-sync-hold`) stops the loop. The checklist has the commands.
 
 ## Mac runner user
 
@@ -47,11 +49,11 @@ GitHub's docs, read 2026-11-17:
 
 Whether GitHub starts self-hosted jobs during a payment or spending-limit block is not stated in those docs. Max fixed billing before this build, so the build PR's run cannot test that case. If the block returns, the first self-hosted run after it is the test. Pass means the job logs show a runner name and the run finishes. Fail means the jobs fail in seconds with the billing annotation and no runner name. That live check is Max's follow-up, not a merge gate (ac-9 as Max amended it on 2026-11-17). Record its result on #711.
 
-Cost estimate (measured run counts, Nov 1 to 16): about 116 factory runs a day at about 29 Linux job-minutes each, about 85,000 minutes a month, or about $500 a month at hosted Linux rates after the included minutes. Self-hosted, GitHub charges $0 under today's terms (about $170 a month if the postponed platform charge returns). The load moves to the PC and the box: about 112 core-hours a day, about 20% of the PC's 24 cores on average. Power is not measured.
+Cost estimate (measured run counts, Nov 1 to 16): about 116 factory runs a day at about 29 Linux job-minutes each, about 85,000 minutes a month, or about $500 a month at hosted Linux rates after the included minutes. Self-hosted, GitHub charges $0 under today's terms (about $170 a month if the postponed platform charge returns). The load moves to the PC: about 112 core-hours a day, about 20% of the PC's 24 cores on average. Power is not measured.
 
 ## Capacity
 
-Runner instances are not factory slots, and `machines.yml` and `orch.yml` are unchanged. The PC instances run under systemd limits (`Nice=10`, `CPUWeight=20`, `CPUQuota=400%`, `MemoryMax=6G`, IOPS caps on the VHDX device). The box has no systemd, so `box-1` runs pinned to 2 cores at `nice 19`, one job at a time. The test shards run `pytest -n 4`, the worker count a 2-core hosted runner used, not `nproc * 2`, which would start 48 workers per shard on the PC. The checklist's first-week numbers decide whether instances go up or down.
+Runner instances are not factory slots, and `machines.yml` and `orch.yml` are unchanged. The PC instances run under systemd limits (`Nice=10`, `CPUWeight=20`, `CPUQuota=400%`, `MemoryMax=6G`, IOPS caps on the VHDX device). The test shards run `pytest -n 4`, the worker count a 2-core hosted runner used, not `nproc * 2`, which would start 48 workers per shard on the PC. The checklist's first-week numbers decide whether instances go up or down.
 
 ## Fallback merge rule (not enabled)
 

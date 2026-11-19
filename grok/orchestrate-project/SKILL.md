@@ -5,7 +5,7 @@ description: Intake, questions, routing, and stop handling for one factory ticke
 
 # orchestrate-project
 
-Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and a cross-family reviewer, and reports stops. Post every handoff with `lib.orchestrate`. Do not hand-write an `orch:v1` header.
+Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and a cross-family reviewer, and reports stops. Post every handoff with `lib.orchestrate`. Do not hand-write an `orch:v1` header. The dispatcher queues work. This skill does not start a harness.
 
 ## Do not
 
@@ -36,7 +36,7 @@ F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_st
 
 F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
 
-`choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError`. It then calls `route_job` once, forwarding `usage` and `request.built_by`, and builds a `FitChoice` from the route. A route that is not ok raises `RouteError`.
+`choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError`. It then calls `route_job` once, forwarding `usage` and `request.built_by`, and builds a `FitChoice` from the route.
 
 `built_by` is optional. On a later round, set it to the `(harness, model)` that actually built, so the builder is that one and the reviewer is outside its family.
 
@@ -91,15 +91,15 @@ Build a `RouteRequest` from `project.config`, the brief's risk, the likely files
 
 `urgent` is true only for a resumed paused step, past-ship work, or a ticket Max marked urgent. `choose_route` passes it as `marked_urgent` and passes no `usage`.
 
-Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence. `assert_cross_family` uses the same rule as `orch check-config`.
+Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
 
-Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory only, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` is already there, do not post another. The verify value is the skill name from `factory.md`, or `none`.
+Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` is there, do not post another. The verify value is the skill name from `factory.md`, or `none`.
 
 `post_go` writes `builder`, `risk`, and `state` (`planning` or `building`). Everything else is in the body. Posting `orch:go` is the handoff. Stop. The dispatcher enforces the round cap from `factory.md`.
 
 ## Mid-work questions
 
-Classify a builder's or reviewer's questions the same way, ask Max product questions one at a time, then post `answers_comment` with your default or his words. The dispatcher resumes the same step; that resume is not a review round. If an answer changes the ticket's scope, call `choose_route` again with `scope_changed=True` and post one go with `job=plan` (`state=planning`), unless the ticket already has a plan go.
+Classify a builder's or reviewer's questions the same way, ask Max product questions one at a time, then post `answers_comment` with your default or his words. The dispatcher resumes the same step; that resume is not a review round. If an answer changes the ticket's scope, call `choose_route` again with `scope_changed=True` and post one go with `job=plan` (`state=planning`), unless the ticket has a plan go.
 
 ## Wakes
 
@@ -115,7 +115,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `unparsed` | A trusted bot posted a header the dispatcher cannot parse. `detail` has the error. | Report stop `blocked` once with that text. Never repost the comment for the bot. |
 | `rejected` | The dispatcher refused a trusted comment (wrong author, edited, superseded, an unactionable retry). `detail.outcome` names why, and `detail.note` explains a refused retry. | Read the outcome and fix your own comment. |
 | `stale` | A verdict for a head or round no longer current, named in `detail.outcome`. | Nothing to post. The current head gets its own review. |
-| `go-not-from-approver` | With the GitHub App switch on (#122), a `go` on a capped, blocked or waiting ticket, or answers on a `repeat-block`, came from a login not in `approver_logins`. Nothing resumed. | Repost through the approver profile per Commands, or run Stalled ticket. |
+| `go-not-from-approver` | With the GitHub App on (#122), a `go` on a capped, blocked or waiting ticket, or answers on a `repeat-block`, came from a login not in `approver_logins`. Nothing resumed. | Repost through the approver profile per Commands, or run Stalled ticket. |
 | `clarify` | A `kind=questions` comment from a builder or reviewer. The dispatcher paused that step on the question. | Run Mid-work questions above. |
 | `kind=go must set state=planning or state=building` | A `clarify` wake whose `detail.instruction` is this text. A trusted `go` had no valid `state`, so nothing was queued and no question is paused. | Call `choose_route` again and post `go_comment(decision, verify)` once. It writes a valid `state`. Do not post `answers_comment`: with no paused question it is rejected. |
 | `repeat-block` | A `clarify` wake whose `detail` starts `repeat-block:` and carries `stops=` and `for=`. A reviewer blocked the same rule twice. Only an approver `go` or `/go` releases it; at the cap that go also adds one round. | `for=factory`: run Stalled ticket. `for=max`: tell Max once, with the rule, both verdict links and `stops=`. |
@@ -124,8 +124,9 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `awaiting-ok` | `factory.md`'s `hold:` holds a `ship: merge` pull request. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that it waits on his `ok` or `/ok <sha>`. |
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
-| `ci-rerun-refused` | GitHub refused the one rerun of a completed red run. The failure was charged. | Tell Max once. |
+| `ci-rerun-refused` | A completed red run's rerun was refused and charged. | Tell Max once. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
+| `ci-stale` | Two hours at one head in the CI state `detail.detail` names. | Run Stalled ticket. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |
 
 ## Stalled ticket
