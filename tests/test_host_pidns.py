@@ -22,12 +22,14 @@ SANDBOX_NS = "pid:[4026532782]"
 OLD_NS = "pid:[4026531111]"
 WSL_NS = "pid:[4026532216]"
 INITIAL_USERNS = "         0          0 4294967295\n"
+WSL_ROOTFS = "rootfs"
 SANDBOX_USERNS = "         0       1000          1\n"
 
 
 def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
               uid_map: str | None = None, pids: dict[int, str] | None = None,
-              init: str | None = None, procs: dict[int, tuple[str, int]] | None = None) -> Path:
+              init: str | None = None, procs: dict[int, tuple[str, int]] | None = None,
+              init_fs: str | None = None) -> Path:
     proc = tmp_path / "proc"
     (proc / "self" / "ns").mkdir(parents=True)
     lines = "Name:\tsh\n" + (f"NSpid:\t{nspid}\n" if nspid is not None else "")
@@ -46,6 +48,13 @@ def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
         (proc / str(pid) / "cmdline").write_text(cmdline + "\0", encoding="utf-8")
         (proc / str(pid) / "stat").write_text(f"{pid} (init-systemd(Ub) S {ppid} 0 0\n",
                                               encoding="utf-8")
+    if init_fs is not None:
+        for cmdline in proc.glob("[0-9]*/cmdline"):
+            if cmdline.read_text(encoding="utf-8").split("\0")[0] == "/init":
+                (cmdline.parent / "mountinfo").write_text(
+                    "80 65 8:48 / / rw,relatime - overlay overlay rw\n"
+                    f"109 80 0:2 /init /init ro - {init_fs} {init_fs} rw\n",
+                    encoding="utf-8")
     return proc
 
 
@@ -182,7 +191,8 @@ def test_wsl_distro_refreshes_a_stale_record_after_a_restart(
     home = tmp_path / "home"
     (home / ".local" / "state" / "factory").mkdir(parents=True)
     path = record(home, OLD_NS)
-    proc = fake_proc(tmp_path, "4484", WSL_NS, INITIAL_USERNS, init=init, procs=procs)
+    proc = fake_proc(tmp_path, "4484", WSL_NS, INITIAL_USERNS, init=init, procs=procs,
+                     init_fs=WSL_ROOTFS)
 
     result = _run(REFRESHING["helper"], home, proc)
 
@@ -325,29 +335,35 @@ def test_service_refuses_while_a_service_lives_in_the_recorded_namespace(
 
 
 @pytest.mark.parametrize(
-    ("nspid", "uid_map", "init", "extra", "procs"),
+    ("nspid", "uid_map", "init", "extra", "procs", "init_fs"),
     [
-        ("4484", INITIAL_USERNS, "/init", {"ORCH_JOB_PROOF": "x"}, None),
-        ("4484", INITIAL_USERNS, "/init", {"CODEX_SANDBOX": "seatbelt"}, None),
-        ("1728748\t61", INITIAL_USERNS, "/init", {}, None),
-        ("61", SANDBOX_USERNS, "/init", {}, None),
-        ("61", None, "/init", {}, None),
-        ("61", INITIAL_USERNS, None, {}, None),
-        ("61", INITIAL_USERNS, "/bin/sh -c poller-service.sh stop", {}, None),
-        ("61", INITIAL_USERNS, "/sbin/docker-init -- sh", {}, None),
-        ("61", INITIAL_USERNS, "bwrap --unshare-pid sh", {}, None),
-        ("61", INITIAL_USERNS, "/sbin/init", {}, None),
-        ("61", INITIAL_USERNS, "/usr/lib/systemd/systemd --system", {}, None),
-        ("61", INITIAL_USERNS, "/sbin/init", {}, {7: ("/init", 5)}),
+        ("4484", INITIAL_USERNS, "/init", {"ORCH_JOB_PROOF": "x"}, None, WSL_ROOTFS),
+        ("4484", INITIAL_USERNS, "/init", {"CODEX_SANDBOX": "seatbelt"}, None, WSL_ROOTFS),
+        ("1728748\t61", INITIAL_USERNS, "/init", {}, None, WSL_ROOTFS),
+        ("61", SANDBOX_USERNS, "/init", {}, None, WSL_ROOTFS),
+        ("61", None, "/init", {}, None, WSL_ROOTFS),
+        ("61", INITIAL_USERNS, None, {}, None, None),
+        ("61", INITIAL_USERNS, "/bin/sh -c poller-service.sh stop", {}, None, None),
+        ("61", INITIAL_USERNS, "/sbin/docker-init -- sh", {}, None, None),
+        ("61", INITIAL_USERNS, "bwrap --unshare-pid sh", {}, None, None),
+        ("61", INITIAL_USERNS, "/sbin/init", {}, None, None),
+        ("61", INITIAL_USERNS, "/usr/lib/systemd/systemd --system", {}, None, None),
+        ("61", INITIAL_USERNS, "/sbin/init", {}, {7: ("/init", 5)}, WSL_ROOTFS),
+        ("61", INITIAL_USERNS, "/init", {}, None, None),
+        ("61", INITIAL_USERNS, "/init", {}, None, "overlay"),
+        ("61", INITIAL_USERNS, "/sbin/init", {}, {2: ("/init", 1)}, None),
+        ("61", INITIAL_USERNS, "/sbin/init", {}, {2: ("/init", 1)}, "ext4"),
     ],
     ids=["job", "codex-sandbox", "two-field-nspid", "own-proc-sandbox", "no-uid-map",
          "privileged-sandbox-no-pid1", "privileged-sandbox-shell", "privileged-docker-init",
          "privileged-bwrap", "privileged-sbin-init", "privileged-systemd",
-         "privileged-init-not-child-of-pid1"],
+         "privileged-init-not-child-of-pid1", "privileged-pid1-named-init",
+         "privileged-pid1-init-from-image", "privileged-child-named-init",
+         "privileged-child-init-from-image"],
 )
 def test_refresh_never_runs_outside_the_host(
     tmp_path: Path, nspid: str, uid_map: str | None, init: str | None, extra: dict[str, str],
-    procs: dict[int, tuple[str, int]] | None,
+    procs: dict[int, tuple[str, int]] | None, init_fs: str | None,
 ) -> None:
     home = tmp_path / "home"
     state = home / ".local" / "state" / "factory"
@@ -355,7 +371,8 @@ def test_refresh_never_runs_outside_the_host(
     child = state / "linear-webhook-listener-child.pid"
     child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
     path = record(home, OLD_NS)
-    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map, init=init, procs=procs)
+    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map, init=init, procs=procs,
+                     init_fs=init_fs)
 
     result = _run(_service("poller-service.sh", "stop"), home, proc, **extra)
 

@@ -22,8 +22,9 @@ factory_in_host_pidns() (
 )
 
 # A WSL2 distro runs in its own PID namespace with WSL's /init as PID 1, or,
-# when systemd is enabled, as a child of PID 1. A privileged container's PID 1
-# may be /sbin/init too, but it has no /init. An unprivileged process can
+# when systemd is enabled, as a child of PID 1. WSL bind-mounts that /init
+# from the utility VM's rootfs; a container's PID 1, even one named /init,
+# runs from the container's own filesystem. An unprivileged process can
 # create a PID namespace only inside a new user namespace, so its uid_map is
 # not "0 0 4294967295".
 factory_refresh_host_pidns() (
@@ -45,7 +46,9 @@ factory_refresh_host_pidns() (
             stat="${stat##*) }"
             stat="${stat#* }"
             [ "${dir##*/}" = 1 ] || [ "${stat%% *}" = 1 ] || continue
-            [ "$(tr '\000' '\n' <"${dir}/cmdline" 2>/dev/null | head -n 1)" = /init ] && wsl=1 && break
+            [ "$(tr '\000' '\n' <"${dir}/cmdline" 2>/dev/null | head -n 1)" = /init ] || continue
+            awk '$5 == "/init" { for (i = 7; i < NF; i++) if ($i == "-") { if ($(i + 1) == "rootfs") found = 1; break } }
+                END { exit !found }' "${dir}/mountinfo" 2>/dev/null && wsl=1 && break
         done
         [ -n "$wsl" ] || exit 1
     fi
