@@ -1,0 +1,1 @@
+exec bash -lc 'exec python3 -I -S -c "$1" "$2"' orch-usage <codex_rollout source> thread-1
