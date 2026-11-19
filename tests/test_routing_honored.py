@@ -354,6 +354,8 @@ def test_obsolete_retry_created_last_cannot_build_or_review(tmp_path: Path) -> N
     board.ready(pr, pr.head, "new-ready")
     board.poll()
     assert _outcome(board.queue, "new-ready") == "queued-review"
+    review = board.claim("codex")
+    assert review.request.action == "review" and review.request.source_comment_id == "new-ready"
     retry = board.claim("codex")
     assert retry.request.action == "build" and retry.request.attempt == 2
     board.queue.finish(retry.id, owner="codex", handoff_comment_id="obsolete-ready")

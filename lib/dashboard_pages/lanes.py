@@ -335,7 +335,7 @@ SCRIPT = r"""
       var a = add(li, link(null, ticketPageHref(r)));
       add(a, bot(r.recipient));
       add(a, el('span', 'ticket', jobLabel(r)));
-      tierChip(a, r.tier);
+      tierChip(a, r.tier, r.own_tier);
       add(li, el('span', 'what', r.action));
       ticking(add(li, el('span', 'when')), r.age_seconds, 'waiting ');
       if (r.no_waiter) add(li, link('chip bad', healthLink(r.no_waiter_link))).textContent = 'no waiter for ' + r.no_waiter;
@@ -459,8 +459,10 @@ SCRIPT = r"""
     'waiting-blocked': 'waiting on a blocker', 'refused-intake': 'refused at intake', 'feeding': 'feeding',
     'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
 
-  function tierChip(parent, tier) {
-    if (tier !== null && tier !== undefined) add(parent, chip('tier ' + tier, 'accent'));
+  function tierChip(parent, tier, own) {
+    if (tier === null || tier === undefined) return;
+    if (own === undefined) own = null;
+    add(parent, chip('tier ' + tier + (own !== tier ? ' (own ' + (own === null ? 'none' : own) + ')' : ''), 'accent'));
   }
 
   function intakeGroups(items) {
@@ -476,7 +478,7 @@ SCRIPT = r"""
   function intakeRow(ul, x, cls) {
     var li = add(ul, el('li'));
     add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
-    tierChip(li, x.tier);
+    tierChip(li, x.tier, x.own_tier);
     add(li, el('span', cls || 'what', x.reason || FEEDER_STATE[x.state] || x.state));
     return li;
   }
@@ -724,7 +726,7 @@ def _queue_lane(snapshot: dict) -> str:
                 chip = ""
             items.append(
                 f'<li><a href="{_e(ticket_page_href(row))}">{_bot(row["recipient"])}'
-                f'{_span("ticket", _job_label(row))}{_tier_chip(row.get("tier"))}</a>'
+                f'{_span("ticket", _job_label(row))}{_tier_chip(row)}</a>'
                 f'{_span("what", row["action"])}'
                 f'{_when(row["age_seconds"], "waiting ")}{chip}'
                 f'<span class="belt" aria-hidden="true">{strip}</span></li>'
@@ -903,14 +905,17 @@ def _feeder(snapshot: dict) -> str:
     )
 
 
-def _tier_chip(tier: object) -> str:
-    return "" if tier is None else _chip(f"tier {tier}", "accent")
+def _tier_chip(item: dict) -> str:
+    tier, own = item.get("tier"), item.get("own_tier")
+    if tier is None:
+        return ""
+    return _chip(f"tier {tier}" + ("" if own == tier else f" (own {'none' if own is None else own})"), "accent")
 
 
 def _intake_row(item: dict, cls: str = "what", tail: str = "") -> str:
     state = item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"])
     ticket = f"{_short(item['repo'])}#{item['issue']}"
-    return f'<li>{_span("ticket", ticket)}{_tier_chip(item.get("tier"))}{_span(cls, state)}{tail}</li>'
+    return f'<li>{_span("ticket", ticket)}{_tier_chip(item)}{_span(cls, state)}{tail}</li>'
 
 
 def _fed_row(item: dict) -> str:

@@ -36,6 +36,7 @@ from lib.worktrees import pid_alive
 ROOT = Path(__file__).resolve().parent.parent
 
 MERGE_QUEUE_STATES = ("merge-queue", "updating")
+CRITICAL_PATH_BLOCKER = "critical-path-blocker"
 PAUSED_STATES = frozenset(
     {"waiting-max", "waiting-external", "awaiting-ok", "stuck", "blocked", "capped"}
 )
@@ -111,6 +112,7 @@ class FeederItem:
     pr: str | None = None
     reason: str | None = None  # why a waiting-blocked ticket waits (#156)
     tier: int | None = None
+    own_tier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,7 @@ class SQLiteStatusReader:
                     pr=str(item["pr_number"]) if item["pr_number"] is not None else None,
                     reason=str(item["waiting_reason"]) if item["waiting_reason"] else None,
                     tier=None if item["tier"] is None else int(item["tier"]),
+                    own_tier=None if item["own_tier"] is None else int(item["own_tier"]),
                 )
                 for item in items
             ),
@@ -769,9 +772,14 @@ def render(status: Status) -> str:
                 f"  {row.repo}#{row.ticket_id} {row.state}{_retried(row, status.observed_at)} "
                 f"{positions[key]} of {sizes[key]} [{row.tracker}]"
             )
-    if status.attention:
-        lines.extend(("", f"Needs attention ({len(status.attention)})"))
-        for flag in status.attention:
+    blockers = [flag for flag in status.attention if flag.reason == CRITICAL_PATH_BLOCKER]
+    flags = [flag for flag in status.attention if flag.reason != CRITICAL_PATH_BLOCKER]
+    if blockers:
+        lines.extend(("", f"Critical-path blockers ({len(blockers)})"))
+        lines.extend(f"  {_label(flag)} {flag.detail or ''}".rstrip() for flag in blockers)
+    if flags:
+        lines.extend(("", f"Needs attention ({len(flags)})"))
+        for flag in flags:
             detail = f": {flag.detail}" if flag.detail else ""
             lines.append(f"  {_label(flag)} {flag.reason}{detail}")
     if status.feeder is not None:
@@ -793,6 +801,8 @@ def render(status: Status) -> str:
             }.get(item.state, item.state)
             where = f" -> PR #{item.pr}" if item.pr else ""
             tier = "" if item.tier is None else f"tier {item.tier} "
+            if item.tier is not None and item.own_tier != item.tier:
+                tier = f"tier {item.tier} (own {'none' if item.own_tier is None else item.own_tier}) "
             lines.append(f"  {item.repo}#{item.issue} {tier}{label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))

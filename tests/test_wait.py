@@ -195,7 +195,7 @@ def test_wait_blocks_on_the_shell_until_the_dispatcher_queues_a_job(tmp_path: Pa
 def test_wait_delivers_one_job_per_call_oldest_first(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     first = queue.enqueue(request(), dedupe_key="a")
-    second = queue.enqueue(request(action="fix"), dedupe_key="b")
+    second = queue.enqueue(request(action="plan"), dedupe_key="b")
     queue.enqueue(request(recipient="codex", action="review"), dedupe_key="c")
     one = run(["wait", "claude-bot"], db)
     two = run(["wait", "claude-bot"], db)
@@ -302,7 +302,7 @@ def test_job_done_requires_exactly_one_outcome(tmp_path: Path) -> None:
 def test_heartbeat_keeps_a_running_job_out_of_t6(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     kept = queue.enqueue(request(), dedupe_key="a")
-    lapsed = queue.enqueue(request(action="fix"), dedupe_key="b")
+    lapsed = queue.enqueue(request(action="plan"), dedupe_key="b")
     proof = json.loads(run(["wait", "claude-bot"], db).stdout)["proof"]
     run(["wait", "claude-bot"], db)
     stale = time.time() - 5400 - 60

@@ -521,6 +521,38 @@ def test_dispatcher_stuck_flag_is_rendered_as_paused(tmp_path: Path) -> None:
     assert "owner/repo#42 stuck (ci-red-3) [github]" in output
 
 
+def test_critical_path_blockers_get_their_own_section(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE needs_attention (
+                repo TEXT NOT NULL, ticket_id TEXT NOT NULL, reason TEXT NOT NULL,
+                detail TEXT, raised_at REAL NOT NULL
+            );
+            INSERT INTO needs_attention VALUES
+                ('owner/repo', '780', 'critical-path-blocker', 'gates 2 candidates, best tier 0', 1),
+                ('owner/repo', '781', 'critical-path-blocker', 'gates 1 candidates, best tier 2', 2),
+                ('owner/repo', '42', 'blocker-cycle', 'blocked by #43, which is blocked by #42', 3);
+            """
+        )
+    reader = SQLiteStatusReader(path)
+
+    output = render(build_status(reader, reader, clock=lambda: 100, attention=reader.attention()))
+
+    assert (
+        "Critical-path blockers (2)\n"
+        "  owner/repo#780 gates 2 candidates, best tier 0\n"
+        "  owner/repo#781 gates 1 candidates, best tier 2\n"
+    ) in output
+    assert (
+        "Needs attention (1)\n"
+        "  owner/repo#42 blocker-cycle: blocked by #43, which is blocked by #42\n"
+    ) in output
+    assert output.count("#780") == 1
+
+
 def test_a_stuck_ticket_shows_its_accepted_retries(tmp_path: Path) -> None:
     path = tmp_path / "queue.sqlite3"
     create_database(path)

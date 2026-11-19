@@ -131,6 +131,7 @@ _INTAKE_KEYS = {
     "priority_labels",
     "priority_from_linear",
     "critical_path_order",
+    "capacity_share",
     "linear_assignees",
     "base_branches",
 }
@@ -152,6 +153,8 @@ class Intake:
     only assignees whose tickets the feeder takes from that project.
     base_branches maps a Linear project id to the branch its tickets'
     PRs open on, review against and ship to, in place of factory_ref.
+    capacity_share is the fraction of its builder's schedulable slots the
+    project's tickets are fed into first (#1050).
     """
 
     label: str | None = None
@@ -160,6 +163,7 @@ class Intake:
     priority_labels: tuple[str, ...] = ()
     priority_from_linear: bool = False
     critical_path_order: bool = True
+    capacity_share: float | None = None
     linear_assignees: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -903,6 +907,10 @@ def _projects(
                 )
             )
             ok = False
+    shares = [p.intake.capacity_share for p in projects if p.intake and p.intake.capacity_share]
+    if sum(shares) > 1:
+        findings.append(Finding("error", f"intake capacity_share values sum to {sum(shares):g}, more than 1"))
+        ok = False
     if not ok:
         return None
     return tuple(projects)
@@ -1035,6 +1043,12 @@ def _intake(
     if from_linear is True and not linear:
         findings.append(Finding("error", f"{where}.priority_from_linear requires linear_project_id"))
         ok = False
+    share = value.get("capacity_share")
+    if share is not None and (
+        isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 <= share <= 1
+    ):
+        findings.append(Finding("error", f"{where}.capacity_share must be a number from 0 to 1"))
+        ok = False
     assignees: Mapping[str, frozenset[str]] = MappingProxyType({})
     if "linear_assignees" in value:
         parsed = _linear_assignees(value["linear_assignees"], where, linear_project_ids, findings)
@@ -1058,6 +1072,7 @@ def _intake(
         priority_labels=priority_labels,
         priority_from_linear=from_linear,
         critical_path_order=critical_path,
+        capacity_share=None if share is None else float(share),
         linear_assignees=assignees,
         base_branches=base_branches,
     )
