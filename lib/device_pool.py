@@ -119,8 +119,6 @@ _SLOT_COLUMNS = (
     # (lib/process_tree.py), so a lost run is found after its parents exit.
     ("run_tag", "TEXT"),
     ("run_scope", "TEXT"),
-    # #1077: the account the job runs as. NULL on a row placed before it,
-    # read as the device's login account (placed_account).
     ("account", "TEXT"),
 )
 
@@ -176,8 +174,6 @@ class Orphan:
 
 
 def placed_account(config: MachinesConfig, placement: Placement) -> str | None:
-    """The account the slot recorded, else (a row from before #1077) the
-    placed device's login account for the harness as config lists it now."""
     if placement.account is not None:
         return placement.account
     device = config.device(placement.device)

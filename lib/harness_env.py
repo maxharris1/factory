@@ -17,7 +17,7 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from lib.github_app_token import TOKEN_VARIABLES
 
@@ -28,16 +28,19 @@ CLAUDE_BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
 
 _BY_HARNESS = {"claude": {CLAUDE_BG_WAIT_ENV: "0"}}
 
-# #1077: a signed-in account other than the device's own login runs with
-# the harness's home variable at its folder, and the token variables that
-# would override that folder's login are dropped from the run.
+
+class AccountIsolation(NamedTuple):
+    home: str
+    tokens: tuple[str, ...]
+
+
 ACCOUNT_ISOLATION = MappingProxyType(
     {
-        "claude": (
+        "claude": AccountIsolation(
             "CLAUDE_CONFIG_DIR",
             ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
         ),
-        "codex": ("CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY")),
+        "codex": AccountIsolation("CODEX_HOME", ("OPENAI_API_KEY", "CODEX_API_KEY")),
     }
 )
 
@@ -45,16 +48,15 @@ ACCOUNT_ISOLATION = MappingProxyType(
 def harness_env(harness: str, home: str | None = None) -> dict[str, str]:
     env = dict(_BY_HARNESS.get(harness, {}))
     if home is not None:
-        env[_isolation(harness)[0]] = home
+        env[_isolation(harness).home] = home
     return env
 
 
 def account_tokens(harness: str, home: str | None = None) -> tuple[str, ...]:
-    """The token variables a run from account folder home must not inherit."""
-    return () if home is None else _isolation(harness)[1]
+    return () if home is None else _isolation(harness).tokens
 
 
-def _isolation(harness: str) -> tuple[str, tuple[str, ...]]:
+def _isolation(harness: str) -> AccountIsolation:
     if harness not in ACCOUNT_ISOLATION:
         raise ValueError(f"harness {harness!r} cannot run from an account folder")
     return ACCOUNT_ISOLATION[harness]
