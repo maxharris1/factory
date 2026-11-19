@@ -189,6 +189,7 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
+from lib.followups import has_marker
 from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
@@ -213,6 +214,7 @@ from lib.main_fix import (
     decide,
     issue_body,
     issue_title,
+    marked_issue_fate,
     marker,
 )
 from lib.machines_yml import MachinesConfig
@@ -1085,6 +1087,7 @@ class Feeder:
         read: set[str] = set()
         errors = 0
         started = self._started()
+        rows = self._main_fix_rows()
         for project, context in contexts:
             intake = project.intake
             assert intake is not None
@@ -1107,6 +1110,23 @@ class Feeder:
             trusted = intake_trusted(self.config, project)
             for issue in issues:
                 if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
+                    continue
+                row = next((active for active in rows if has_marker(issue.body, active.marker)), None)
+                fate = "feed" if row is None else marked_issue_fate(row, int(issue.key))
+                if fate == "close":
+                    try:
+                        self.github.close_issue(
+                            project.repo,
+                            int(issue.key),
+                            f"Closing as a duplicate of #{row.issue}, the main-fix issue for this red streak.",
+                        )
+                    except Exception as exc:
+                        errors += 1
+                        self.log(
+                            f"feeder: cannot close main-fix duplicate {project.repo}#{issue.key}: "
+                            f"{safe_ship_error(exc)}"
+                        )
+                if fate != "feed":
                     continue
                 if (issue.repo.lower(), issue.key) in started:
                     continue
@@ -1301,6 +1321,14 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: main-fix for {repo}@{base} not filed yet: {safe_ship_error(exc)}")
         return errors
+
+    def _main_fix_rows(self) -> list[MainFixRow]:
+        with self.queue.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {', '.join(MainFixRow.__dataclass_fields__)} FROM {MAIN_FIX_TABLE} "
+                "WHERE state IN ('filing', 'open')"
+            ).fetchall()
+        return [MainFixRow(*row) for row in rows]
 
     def _main_fix_row(self, repo: str, base: str) -> MainFixRow | None:
         with self.queue.connect() as connection:

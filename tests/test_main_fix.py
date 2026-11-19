@@ -18,6 +18,7 @@ from lib.main_fix import (
     decide,
     issue_body,
     issue_title,
+    marked_issue_fate,
     marker,
 )
 
@@ -55,6 +56,14 @@ OPEN = MainFixRow(REPO, "main", "m", "open", 7, HEAD, 1.0, "t", "b")
 )
 def test_decide(row, read, issue_open, actions) -> None:
     assert decide(row, read, issue_open=issue_open) == actions
+
+
+@pytest.mark.parametrize(
+    ("row", "number", "fate"),
+    [(FILING, 7, "hold"), (OPEN, 7, "feed"), (OPEN, 8, "close")],
+)
+def test_marked_issue_fate(row, number, fate) -> None:
+    assert marked_issue_fate(row, number) == fate
 
 
 def body_for(logs: dict[str, str], checks: tuple[BaseCheck, ...] = CHECKS) -> tuple[str, str]:
