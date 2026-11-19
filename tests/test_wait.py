@@ -618,7 +618,7 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
     started = [argv for argv in started if argv not in probes]
     harness_probes = [argv for argv in probes if command[0] in argv[4:]]
     assert len(harness_probes) == 1, probes
-    assert harness_probes[0][2].endswith('exec "$1" --version') and harness_probes[0][4] == command[0]
+    assert harness_probes[0][2].rstrip().endswith('exec "$1" --version') and harness_probes[0][4] == command[0]
 
     def ungated(argv: list[str]) -> list[str]:
         gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
