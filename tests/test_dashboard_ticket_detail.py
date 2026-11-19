@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from lib.dashboard import RECORDS, render_pages, tickets_json
-from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED
+from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED, JobStep, Transition, job_flow, load_chart
 from lib.dashboard_pages import ticket_detail
 from lib.exposure import Exposure
 from lib.dashboard_pages.common import duration, ticket_page_href
@@ -2568,3 +2568,87 @@ def test_the_script_draws_the_server_s_run_log_exposure(tmp_path: Path, written:
     shown = _run_log_exposures(views["script"])
     assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(written["plan"] or UNKNOWN))]
     assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(written["build"] or UNKNOWN))]
+
+
+def _flow_jobs(result: dict) -> dict[str, str]:
+    jobs = [(job["job"], visit["state"]) for visit in result["visits"] for job in visit["jobs"]]
+    assert len(jobs) == len(dict(jobs)), "a job sits in more than one visit"
+    return dict(jobs)
+
+
+WALKED = [
+    JobStep("plan", "claude", 100.0, 101.0, 140.0, job="plan"),
+    JobStep("build", "claude", 200.0, 201.0, 280.0, job="build"),
+    JobStep("review", "codex", 300.0, 301.0, 380.0, job="review"),
+    JobStep("qa", "qa", 410.0, 411.0, None, job="qa"),
+    JobStep("not-an-action", "claude", 420.0, None, None, job="other"),
+]
+RECORDED = [
+    Transition(None, "intake", 50.0, "t"),
+    Transition("intake", "building", 150.0, "t"),
+    Transition("building", "review", 290.0, "t"),
+    Transition("review", "fixing", 400.0, "t"),
+]
+
+
+@pytest.mark.parametrize("chart", ["chart", "mini", "none"])
+@pytest.mark.parametrize("transitions", [[], RECORDED], ids=["walked", "recorded"])
+def test_every_job_sits_in_exactly_one_visit(chart: str, transitions: list[Transition]) -> None:
+    from tests.test_dashboard_layout import MINI
+
+    loaded = {"chart": load_chart(), "mini": load_chart(MINI), "none": None}[chart]
+    result = job_flow(loaded, WALKED, "fixing", 500.0, transitions)
+    placed = _flow_jobs(result)
+    assert set(placed) == {step.job for step in WALKED}
+    assert placed["qa"] == placed["other"] == ("fixing" if transitions else "review")
+
+
+def _qa_ticket(tmp_path: Path, written: Exposure | None) -> tuple[Path, str]:
+    from lib import exposure
+    from lib.queue import JobRequest
+    from tests.test_dashboard import add_ticket, make_db
+
+    db = tmp_path / "orch.db"
+    queue = make_db(db)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        add_ticket(connection, "maxharris1/factory", "1014", state="ship")
+    queue.enqueue(JobRequest(repo="maxharris1/factory", ticket_id="1014", action="qa", recipient="qa",
+                             source_comment_id="c-qa", timeout_seconds=600), dedupe_key="k-qa")
+    job = queue.claim("qa")
+    assert job is not None
+    if written is not None:
+        with closing(sqlite3.connect(db)) as connection, connection:
+            exposure.ensure_table(connection)
+            exposure.write(connection, job.id, written, NOW)
+    return db, job.id
+
+
+@pytest.mark.parametrize("written", [REAL, None], ids=["recorded", "missing"])
+def test_a_qa_job_keeps_its_exposure_on_the_run_log_after_it_finishes(tmp_path: Path, written: Exposure | None) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.queue import SQLiteJobQueue
+
+    db, job_id = _qa_ticket(tmp_path, written)
+    caption = (f"{job_id[:8]} · qa", _shown(written or UNKNOWN))
+    for phase in ("running", "finished"):
+        if phase == "finished":
+            SQLiteJobQueue(db, clock=lambda: NOW + 1).finish(job_id, owner="qa", handoff_comment_id="h-qa")
+        snapshot = collect_snapshot(db, tmp_path / "missing.log", now=1_800_000_003.0, alive=None)
+        assert [row["job"] for row in snapshot["running"]] == ([job_id[:8]] if phase == "running" else [])
+        assert _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))["ship"] == [caption], phase
+        assert set(_record_jobs(snapshot)) == {job_id[:8]}, phase
+        assert set(_record_jobs(snapshot)[job_id[:8]]["exposure"]) == SIX
+
+
+@needs_node
+def test_the_script_draws_a_finished_qa_job_s_exposure(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.queue import SQLiteJobQueue
+
+    (tmp_path / "db").mkdir()
+    db, job_id = _qa_ticket(tmp_path / "db", REAL)
+    SQLiteJobQueue(db, clock=lambda: NOW + 1).finish(job_id, owner="qa", handoff_comment_id="h-qa")
+    snapshot = collect_snapshot(db, tmp_path / "missing.log", now=1_800_000_003.0, alive=None)
+    views = _both(tmp_path, snapshot, EXPOSURE_ADDRESS)
+    assert views["script"] == views["server"]
+    assert _run_log_exposures(views["script"])["ship"] == [(f"{job_id[:8]} · qa", _shown(REAL))]

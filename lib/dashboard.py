@@ -135,7 +135,9 @@ every <, > and & is written as a JSON escape:
                off_chart_count, terminal, hops_to_shipped, all_durations_known,
                visits, shipped, stopped, jobs}
     visits:   job_flow's visits, unchanged: [{state, who, started_at,
-               duration_seconds, time_known, off_chart, reason, current}]
+               duration_seconds, time_known, off_chart, reason, current,
+               jobs: [{job, action, recipient, exposure}]}], every job
+               of the ticket in exactly one visit
     shipped:  null | {at, how: "merged" | "handed-off", intake_to_ship_seconds,
                revise_rounds, jobs, tokens_in, tokens_out, cost_usd}
     stopped:  null | {state, at, stopped_in, reason, ways_out: [{to, label}]}
@@ -2365,7 +2367,7 @@ def _ticket_flows(
             key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
             if key in histories:
                 histories[key].append(JobStep(
-                    str(row["action"]),
+                    _enum(row["action"], ACTIONS),
                     _enum(row["recipient"], RECIPIENTS),
                     float(row["created_at"]),
                     _telemetry_time(row["started_at"]),

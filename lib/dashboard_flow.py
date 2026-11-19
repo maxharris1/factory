@@ -499,6 +499,13 @@ def _recorded_walk(
     return walk, starts
 
 
+def _visit_at(starts: Sequence[float | None], at: int, created_at: float) -> int:
+    begun = [i for i, began in enumerate(starts) if began is not None and began <= created_at]
+    if begun:
+        return begun[-1]
+    return at if at >= 0 else len(starts) - 1
+
+
 def job_flow(
     chart: dict | None,
     history: Sequence[JobStep],
@@ -515,9 +522,10 @@ def job_flow(
     finished (is_terminal). `visits` holds one entry per `path` state:
     {state, who, started_at, duration_seconds, time_known, off_chart,
     reason, current, jobs}, where `jobs` is the visit's steps, oldest
-    first, as {job, action, recipient, exposure}. A visit ends when the
-    next one starts, else when its last job finished; the current visit
-    counts up to `now`. Unknown times are None."""
+    first, as {job, action, recipient, exposure}. When there is a visit,
+    every job in `history` sits in exactly one visit's `jobs`. A visit ends
+    when the next one starts, else when its last job finished; the current
+    visit counts up to `now`. Unknown times are None."""
     steps = [(JOB_STATES[step.action], step) for step in history if step.action in JOB_STATES]
     if chart is not None and current is not None and current not in {
         state["name"] for state in chart["states"]
@@ -545,6 +553,11 @@ def job_flow(
     labels = {} if chart is None else {
         (edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]
     }
+    jobs = [list(visit.steps) for visit in walk]
+    placed = {id(step) for visit in walk for step in visit.steps}
+    for step in history:
+        if walk and id(step) not in placed:
+            jobs[_visit_at(starts, at, step.created_at)].append(step)
     visits = []
     for i, visit in enumerate(walk):
         began = starts[i]
@@ -570,7 +583,7 @@ def job_flow(
             "current": i == at,
             "jobs": [
                 {"job": step.job, "action": step.action, "recipient": step.recipient, "exposure": step.exposure}
-                for step in visit.steps
+                for step in sorted(jobs[i], key=lambda step: step.created_at)
             ],
         })
     return {
