@@ -114,7 +114,7 @@ class PollMixin:
             self._discover(linear, tracker="linear")
         with self._phase("tracked-read"):
             read_at = self._read_started = self.queue.now()
-            refs = self._tracked_refs(read_at)
+            refs = self._tracked_refs(read_at, closed=self._closed_probe(source))
             self._source_errors = {}
             try:
                 tracked = source.tracked_tickets(refs)
@@ -192,6 +192,24 @@ class PollMixin:
             raise
         if self._cycle_failures:
             raise PollCycleFailed(failed)
+
+    def _closed_probe(
+        self, source: PollSource
+    ) -> Callable[[tuple[TicketRef, ...]], frozenset[tuple[str, str]]] | None:
+        """A stopped ticket waits STOPPED_POLL_SECONDS between full reads; a
+        cheap state probe still reads it the poll its PR closes (#931)."""
+        probe = getattr(source, "closed_pulls", None)
+        if probe is None:
+            return None
+
+        def closed(refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
+            try:
+                return frozenset(probe(refs))
+            except Exception as exc:
+                self.record_poll_exception("closed-probe", "-", exc)
+                return frozenset()
+
+        return closed
 
     def _verify_handoffs(self, source: PollSource, read_from: float) -> None:
         """#18: check each done job's handoff comment once, on the ticket read.

@@ -141,3 +141,50 @@ def test_a_pr_github_closed_for_an_emptied_branch_keeps_building(tmp_path: Path)
     assert state == "building"
     assert _outcomes(queue)["ready-base"] == "rejected-ready-at-base"
     assert _jobs_705(queue) == [("build", "done", 1), ("build", "queued", 1)]
+
+
+BLOCKED = APPROVE.replace("verdict=APPROVE", "verdict=BLOCKED")
+
+
+def test_a_pr_closed_while_its_ticket_is_blocked_ends_it_within_one_poll(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    pr = reviewed_once(board)
+    board.post(pr, "blocked-1", BLOCKED.format(round="1/3", head=pr.head), "codex-login")
+    board.poll()
+    board.poll()
+    assert board.state("42")["workflow_state"] == "blocked"
+
+    pr.closed = True
+    board.poll()
+
+    assert closed_state(board) == ("abandoned", "closed-unmerged")
+    assert ship_failed_rows(board) == []
+
+
+def test_the_closed_probe_reads_only_each_pulls_state(monkeypatch) -> None:
+    from lib.github_actions import GitHubReviewActions
+
+    queries: list[str] = []
+
+    def answer(*args: str, **kwargs) -> dict:
+        queries.append(next(arg for arg in args if arg.startswith("query=")))
+        return {
+            "data": {
+                "repository": {
+                    "p1": {"state": "OPEN"},
+                    "p2": {"state": "CLOSED"},
+                    "p3": {"state": "MERGED"},
+                    "p4": None,
+                }
+            },
+            "errors": [{"path": ["repository", "p4"], "message": "not found"}],
+        }
+
+    actions = GitHubReviewActions()
+    monkeypatch.setattr(actions, "_json", answer)
+
+    assert actions.closed_pulls("owner/repo", ["1", "2", "3", "4"]) == {"2", "3"}
+    assert len(queries) == 1
+    assert "fragment pull on PullRequest { state }" in queries[0]

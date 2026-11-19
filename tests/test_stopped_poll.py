@@ -179,3 +179,45 @@ def test_a_go_on_a_capped_ticket_is_handled_within_3_slow_cycles(tmp_path: Path)
     assert handled_at is not None and handled_at <= 3
     assert outcome(flow.queue, "go-2") == "queued-fix"
     assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("fixing", 1)
+
+
+class ClosingSource(RefSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed: set[str] = set()
+        self.probed: list[tuple[str, ...]] = []
+
+    def closed_pulls(self, refs) -> frozenset[tuple[str, str]]:
+        self.probed.append(tuple(ref.ticket_id for ref in refs))
+        return frozenset(
+            (ref.repo.lower(), ref.ticket_id) for ref in refs if ref.ticket_id in self.closed
+        )
+
+
+def test_a_stopped_ticket_is_read_the_poll_its_pr_closes(tmp_path: Path) -> None:
+    now = [1000.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _seed_states(queue, STOPPED)
+    source = ClosingSource()
+    _poll(dispatcher, source, now, 30, 2)
+    waiting = set(STOPPED) - set(source.refs[-1])
+    assert waiting
+
+    source.closed = waiting
+    offered = _poll(dispatcher, source, now, 30, 1)[0]
+
+    assert waiting <= set(offered)
+    assert waiting <= set(source.probed[-1])
+    assert not set(source.probed[-1]) & (set(offered) - waiting)
+
+
+def test_open_stopped_tickets_keep_the_300_second_cadence_under_the_probe(
+    tmp_path: Path,
+) -> None:
+    now = [1000.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _seed_states(queue, STOPPED)
+    offered = _poll(dispatcher, ClosingSource(), now, 30, 30)
+    for ticket_id in STOPPED:
+        cycles = [cycle for cycle, refs in enumerate(offered) if ticket_id in refs]
+        assert [later - earlier for earlier, later in zip(cycles, cycles[1:])] == [10, 10]
