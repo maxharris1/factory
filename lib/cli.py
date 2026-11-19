@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
@@ -32,6 +33,7 @@ from lib import (
     placed_run,
     skill_preflight,
     telemetry,
+    trace,
     usage_probe,
     usage_readings,
     usage_record,
@@ -186,6 +188,7 @@ commands:
   settings         apply device settings asked for in Mission Control (#777)
   status           read-only snapshot of the queue, devices and paused tickets
   retry            ask the dispatcher to restart a stuck ticket (kind=retry)
+  trace            read-only: every job attempt on a ticket and its handoff verdict
   usage            per-account usage readings: migrate orch.db, record an external reading (#772)
 
 check-config [--orch PATH] [--machines PATH] [--factory [owner/name=]PATH ...]
@@ -523,6 +526,15 @@ retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH] [--machines PATH]
   Prints the new comment id. Exits 2 on a bad ticket or empty reason, 1
   when refused or the post fails.
 
+trace <owner/repo>#<n> [--db PATH] [--json]
+  Print one line per job attempt on the ticket (owner/repo#n or its PR or
+  issue URL): job id, action and recipient, attempt, state, host, exit, the
+  handoff comment, the dispatcher's result and reason (issue #1016), and the
+  exits of earlier executions a requeue resumed.
+  Read-only: opens --db (default $ORCH_DB) with mode=ro, no GitHub call.
+  --json prints a JSON list. Exits 2 on a bad ticket, 1 when the database
+  cannot be read.
+
 usage migrate [--db PATH]
   Key the usage readings on the account (#772). Takes the labelled backup
   usage-accounts (as db-backup does) first, then adds usage_readings.account
@@ -608,6 +620,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(status_main, argv[1:])
     if argv[0] == "retry":
         return _call(_retry, argv[1:])
+    if argv[0] == "trace":
+        return _call(_trace, argv[1:])
     if argv[0] == "usage":
         return _call(_usage, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
@@ -1855,6 +1869,54 @@ def _retry(argv: list[str]) -> int:
             )
         return 1
     print(f"posted kind=retry comment {comment_id} on {repo}#{number}")
+    return 0
+
+
+def _trace(argv: list[str]) -> int:
+    prog = "orch trace"
+    parser = _Parser(prog=prog, add_help=True)
+    parser.add_argument("ticket")
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    match = _TICKET_REF.fullmatch(args.ticket) or _TICKET_URL.fullmatch(args.ticket)
+    if match is None:
+        print(
+            f"{prog}: {args.ticket!r} is not owner/repo#<n> or a GitHub PR or issue URL",
+            file=sys.stderr,
+        )
+        return 2
+    database = args.db or os.environ.get(DB_ENV)
+    if not database:
+        print(f"{prog}: no dispatcher database (pass --db or set {DB_ENV})", file=sys.stderr)
+        return 1
+    ticket = f"{match['repo']}#{match['ticket']}"
+    try:
+        rows = trace.attempts(Path(database), match["repo"], match["ticket"])
+    except (sqlite3.Error, OSError) as exc:
+        why = " ".join(str(exc).split()) or type(exc).__name__
+        print(f"{prog}: {database}: {why}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([asdict(row) for row in rows], indent=2))
+        return 0
+    if not rows:
+        print(f"no job attempts recorded for {ticket}")
+        return 0
+    for row in rows:
+        fields = (
+            row.job_id,
+            f"{row.action}->{row.recipient}",
+            f"attempt {row.attempt}",
+            row.state,
+            row.host,
+            row.exit,
+            row.comment_url or row.comment_id,
+            row.result,
+            row.reason,
+            "; ".join(row.earlier_exits),
+        )
+        print("\t".join(field or "-" for field in fields))
     return 0
 
 
