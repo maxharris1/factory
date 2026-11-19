@@ -729,30 +729,37 @@ def test_a_live_hidden_process_keeps_every_folder(tmp_path: Path) -> None:
     assert job_cleanup.jobs_held_open(jobs) == set()
 
 
-def test_a_process_that_exits_while_the_scan_walks_its_parents_does_not_fail_the_scan(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("name, exits_in, reads_first", [
+    ("python3", "_status", 1),
+    ("sshd-session", "_parent", 0),
+])
+def test_a_process_that_exits_mid_scan_does_not_hold_every_folder(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, exits_in: str,
+        reads_first: int) -> None:
     root = work_root(tmp_path)
     job_folder(root, "free")
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    gone = f"/proc/{child.pid}"
-    read_paths, read_parent = job_cleanup._process_paths, job_cleanup._parent
+    proc = roots_init(tmp_path)
+    add_process(proc, "21", "1", tmp_path, name="sh")
+    add_process(proc, "22", "21", None, name=name)
+    hidden_cwd(monkeypatch, proc)
+    if os.access(proc / "22" / "fd", os.R_OK):
+        pytest.skip("this user can read a directory with no permissions (root)")
+    gone = proc / "22"
+    step = getattr(job_cleanup, exits_in)
+    reads = 0
 
-    def paths(process: Path) -> list[str] | None:
-        return None if str(process) == gone else read_paths(process)
+    def exits_before(process: Path):
+        nonlocal reads
+        if process == gone and gone.exists():
+            reads += 1
+            if reads > reads_first:
+                unhide(proc)
+                shutil.rmtree(gone)
+        return step(process)
 
-    def parent(process: Path) -> Path | None:
-        if str(process) == gone and child.poll() is None:
-            child.kill()
-            child.wait()
-        return read_parent(process)
-
-    monkeypatch.setattr(job_cleanup, "_process_paths", paths)
-    monkeypatch.setattr(job_cleanup, "_parent", parent)
-    try:
-        assert job_cleanup.jobs_held_open(root / "jobs") == set()
-    finally:
-        child.kill()
-        child.wait()
+    monkeypatch.setattr(job_cleanup, exits_in, exits_before)
+    assert job_cleanup.jobs_held_open(root / "jobs") == set()
+    assert not gone.exists()
 
 
 GIT_ENV = {

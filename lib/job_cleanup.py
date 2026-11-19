@@ -225,13 +225,16 @@ def _parent(process: Path) -> Path | None:
     return process.with_name(stat.rsplit(")", 1)[1].split()[1])
 
 
-def _ssh_session(process: Path) -> bool:
+def _hides_from_scan(process: Path) -> bool:
     """Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
     then drops them to this user, which leaves them non-dumpable, so their
     cwd cannot be read."""
-    name = next((line.removeprefix("Name:").strip() for line in _status(process) or ()
+    status = _status(process) if _mine(process) else None
+    if status is None:
+        return False
+    name = next((line.removeprefix("Name:").strip() for line in status
                  if line.startswith("Name:")), None)
-    return name in SSH_SESSION and _started_by_another_user(process)
+    return name not in SSH_SESSION or not _started_by_another_user(process)
 
 
 def _started_by_another_user(process: Path) -> bool:
@@ -275,7 +278,7 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
         paths_of = {process: _process_paths(process) for process in PROC.iterdir()
                     if process.name.isdigit()}
         paths = [path for listed in paths_of.values() if listed for path in listed]
-        blind = any(listed is None and _mine(process) and not _ssh_session(process)
+        blind = any(listed is None and _hides_from_scan(process)
                     for process, listed in paths_of.items())
     else:
         try:
