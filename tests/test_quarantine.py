@@ -39,6 +39,10 @@ def test_times_out():
 @pytest.mark.parametrize("n", [1, 2])
 def test_param(n):
     assert n == 1
+
+@pytest.mark.xfail(strict=True)
+def test_strict_xfail_passes():
+    pass
 """
 
 
@@ -85,6 +89,13 @@ def test_a_quarantined_teardown_error_or_timeout_counts_as_a_quarantined_failure
         f"FAILED test_flakes.py::test_teardown_fails {ISSUE}",
         f"FAILED test_flakes.py::test_times_out {ISSUE}",
     ])
+
+
+def test_a_quarantined_pass_overrides_the_tests_own_strict_xfail(pytester):
+    path = quarantine(pytester, f"test_flakes.py::test_strict_xfail_passes {ISSUE}")
+    result = run(pytester, path, "-k", "test_strict_xfail_passes")
+    assert result.ret == pytest.ExitCode.OK
+    result.assert_outcomes(xpassed=1)
 
 
 def test_a_base_node_id_quarantines_every_parametrization(pytester):
