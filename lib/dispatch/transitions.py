@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 
 from lib.attention import DEDUPE_DROPPED
 from lib.dispatch.constants import (
+    CI_BASE_RED,
     CI_INFRA_BLOCKED_REASON,
     CI_SILENT_REASON,
     CI_STALE_REASON,
@@ -62,6 +63,10 @@ def write_workflow_state(
         connection.execute("DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ?", key)
         connection.execute("DELETE FROM ci_silence WHERE repo = ? AND ticket_id = ?", key)
         connection.execute("DELETE FROM ci_stale WHERE repo = ? AND ticket_id = ?", key)
+        connection.execute(
+            "DELETE FROM ci_reruns WHERE repo = ? AND ticket_id = ? AND outcome = ?",
+            (*key, CI_BASE_RED),
+        )
         connection.execute(
             "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ? AND reason IN (?, ?, ?)",
             (*key, CI_SILENT_REASON, CI_INFRA_BLOCKED_REASON, CI_STALE_REASON),

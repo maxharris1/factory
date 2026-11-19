@@ -975,6 +975,29 @@ def test_a_third_red_with_a_green_base_still_sticks(tmp_path: Path) -> None:
     assert board.state("42")["stuck"] == 1
 
 
+def test_a_base_red_hold_is_cleared_when_the_ticket_ends(tmp_path: Path) -> None:
+    board, pr = handed_off(tmp_path)
+    board.dispatcher.ci_base_checks = board.base_checks
+    pr.push(sha(2))
+    board.red(pr, sha(2), "31")
+    stopped_poll(board)
+    board.base_red("pytest-41")
+    pr.push(sha(3))
+    board.red(pr, sha(3), "41")
+    stopped_poll(board)
+    assert [row[:2] for row in board.reruns_table()] == [
+        (sha(2), "requested"),
+        (sha(3), "ci-base-red"),
+    ]
+
+    pr.closed = True
+    stopped_poll(board)
+
+    assert board.state("42")["workflow_state"] == "abandoned"
+    assert [row[:2] for row in board.reruns_table()] == [(sha(2), "requested")]
+    assert board.ci_wait() == []
+
+
 def stale_rows(board: RerunBoard) -> list[tuple[str, str]]:
     with board.queue.connect() as connection:
         return [
