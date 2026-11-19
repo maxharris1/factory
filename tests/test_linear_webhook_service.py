@@ -137,11 +137,15 @@ def _processes_of(home: Path) -> list[int]:
     return found
 
 
-def _ppid(pid: int) -> int:
+PF_FORKNOEXEC = 0x40
+
+
+def _ppid_and_flags(pid: int) -> tuple[int, int]:
     try:
-        return int(Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()[1])
+        fields = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()
+        return int(fields[1]), int(fields[6])
     except (OSError, IndexError, ValueError):
-        return 0
+        return 0, 0
 
 
 def _loops(home: Path, mode: str) -> list[int]:
@@ -156,9 +160,13 @@ def _loops(home: Path, mode: str) -> list[int]:
     }
 
     def forked_from_a_loop(pid: int) -> bool:
-        while (pid := _ppid(pid)) > 1:
+        pid, flags = _ppid_and_flags(pid)
+        if not flags & PF_FORKNOEXEC:
+            return False
+        while pid > 1:
             if pid in matching:
                 return True
+            pid = _ppid_and_flags(pid)[0]
         return False
 
     return sorted(pid for pid in matching if not forked_from_a_loop(pid))
@@ -372,6 +380,30 @@ def test_refused_forward_backs_off_doubling_to_the_cap(home: Path, tmp_path: Pat
                         out.read_text())
     assert delays[:4] == ["0.25", "0.5", "1", "1"]
     assert loop.returncode in (0, 143)
+
+
+def test_loop_count_sees_a_copy_a_loop_started_and_ignores_its_subshells(
+    home: Path, tmp_path: Path
+) -> None:
+    outer = tmp_path / "outer" / "linear-webhook-service.sh"
+    inner = tmp_path / "inner" / "linear-webhook-service.sh"
+    for script, body in ((outer, 'bash "$OTHER" _tunnel-loop &\n'), (inner, "")):
+        script.parent.mkdir()
+        script.write_text(f"#!/usr/bin/env bash\n{body}( sleep 300; : ) &\nwait\n")
+    loop = subprocess.Popen(
+        ["bash", str(outer), "_tunnel-loop"],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin", "OTHER": str(inner)},
+        start_new_session=True,
+    )
+    try:
+        _wait_for(
+            lambda: sum("_tunnel-loop" in _argv(pid) for pid in _processes_of(home)) >= 4,
+            what="two loops and their subshells",
+        )
+        assert len(_loops(home, "_tunnel-loop")) == 2
+    finally:
+        os.killpg(loop.pid, signal.SIGKILL)
+        loop.wait()
 
 
 def test_stop_ends_every_loop_including_old_copies_and_their_children(
