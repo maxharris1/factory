@@ -8,13 +8,16 @@ Can come next lists normal ways on, then human waits, then stops.
 
 import copy
 import functools
+import hashlib
 import html
 import http.server
 import json
 import re
+import sqlite3
 import threading
 import time
 import urllib.parse
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,7 @@ import pytest
 from lib.dashboard import RECORDS, render_pages, tickets_json
 from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED
 from lib.dashboard_pages import ticket_detail
+from lib.exposure import Exposure
 from lib.dashboard_pages.common import duration, ticket_page_href
 from lib.dashboard_pages.shell import PX_ACTIONS, PX_STATE
 from lib.dashboard_pages.journey_canvas import TINT
@@ -850,6 +854,8 @@ TICKET_IDS = BAR + ["hud", "ticketview"]
 AT_SNAPSHOT = [["advance", -3]]
 LIVE = {"running": ("maxharris1/cleffy#40", "h-review"), "queued": ("maxharris1/cleffy#12", "g-grok-c")}
 SECTIONS = ["Run log", "Live run", "Journey", "Can come next", "Full state chart"]
+RUNNING_SECTIONS = ["Run log", "Live run", "Journey", "Can come next", "Exposure", "Full state chart"]
+LIVE_SECTIONS = {"running": RUNNING_SECTIONS, "queued": SECTIONS}
 AWKWARD = ["a/b", "a#b", "50%", "a b", "!*'()", "Ünï-çødé", "~2"]
 
 
@@ -940,7 +946,7 @@ def test_a_live_ticket_has_the_job_page_s_sections_and_one_h1(tmp_path: Path, ki
     address, job = LIVE[kind]
     for render, markup in _both(tmp_path, snapshot, address).items():
         assert re.search(r'^<article class="jobpage ticketpage" data-ticket="maxharris1/cleffy#\d+">', markup), render
-        assert _sections(markup) == SECTIONS, render
+        assert _sections(markup) == LIVE_SECTIONS[kind], render
         assert _h1s(markup) == [f"cleffy#{address.rsplit('#')[1]}"], render
         assert f'id="liverun-job-{job}"' in markup, render
         assert '<nav class="jd-crumb" aria-label="Breadcrumb"><a href="job.html">Tickets</a>' in markup, render
@@ -1194,7 +1200,8 @@ RECORD = {"idle": "maxharris1/tracy-harris-coaching#5", "stopped": "aut0-code/au
 NO_JOB_SECTIONS = {"idle": ["Run log", "Journey", "Can come next", "Full state chart"],
                    "shipped": ["Run log", "Run summary", "Journey", "Ended", "Full state chart"],
                    "stopped": ["Why it stopped", "Run log", "Journey", "Full state chart"]}
-OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": SECTIONS, "maxharris1/cleffy#40": SECTIONS,
+OPENS = {"maxharris1/cleffy#12": SECTIONS, "maxharris1/cleffy#13": RUNNING_SECTIONS,
+         "maxharris1/cleffy#40": RUNNING_SECTIONS,
          **{address: NO_JOB_SECTIONS[kind] for kind, address in RECORD.items()}}
 POLLED = POLLING.replace(
     "    } else if (kind === 'poll') {",
@@ -1320,7 +1327,7 @@ def test_a_running_ticket_opened_by_its_record_key_stays_live_when_its_repo_is_c
     assert views["script"] == views["server"]
     assert ticket_detail.resolve_ticket(snapshot, key, snapshot[RECORDS])["kind"] == "running"
     assert views["server"].startswith(f'<article class="jobpage ticketpage" data-ticket="{key}">')
-    assert _sections(views["server"]) == SECTIONS
+    assert _sections(views["server"]) == RUNNING_SECTIONS
 
 
 @needs_node
@@ -1976,7 +1983,7 @@ def test_a_hostile_stop_reason_place_and_state_are_escaped_in_both_renders(tmp_p
 
 
 PHONE_ORDER = ["hero", "liverun", "journey", "runlog", "next", "chart"]
-PHONE_SECS = {"running": PHONE_ORDER, "queued": PHONE_ORDER, "idle": ["hero", "journey", "runlog", "next", "chart"],
+PHONE_SECS = {"running": ["hero", "liverun", "journey", "runlog", "next", "exposure", "chart"], "queued": PHONE_ORDER, "idle": ["hero", "journey", "runlog", "next", "chart"],
               "shipped": ["hero", "summary", "journey", "runlog", "ended", "chart"], "stopped": ["hero", "journey", "runlog", "chart"]}
 ADDRESS = {**{k: a for k, (a, _) in LIVE.items()}, **RECORD}
 
@@ -2390,3 +2397,72 @@ def test_under_reduced_motion_a_resize_refits_and_repaints_the_journey(tmp_path:
         want = [_fit(got["box"]), 240] if width < 700 else [1000, 336]
         assert got["canvas"] == want, (kind, width, height, got)
         assert got["drawn"] > 0, ("the refit canvas is painted", kind, width, height, got)
+
+
+EXPOSURE_ADDRESS = "maxharris1/factory#1014"
+INDEPENDENT = Exposure("independent-model", "independent-cli 1.2.3", "a" * 64, ("/review/SKILL.md",),
+                       "independent-host", "b" * 40)
+REAL = Exposure("gpt-5.5-codex", "codex-cli 0.98.0", hashlib.sha256(b"brief").hexdigest(),
+                ("/skills/factory-reviewer/SKILL.md", "/skills/poteto-mode/SKILL.md"), "mac-mini-2",
+                "d60fba4d163ee847997dad6036db1f19e26b2e4a")
+UNKNOWN = Exposure("unknown", "unknown", "unknown", None, "unknown", "unknown")
+
+
+def _shown(found: Exposure) -> list[tuple[str, str]]:
+    paths = "unknown" if found.skill_paths is None else ", ".join(found.skill_paths)
+    return [("model", found.model), ("CLI version", found.cli_version), ("brief sha256", found.brief_sha256),
+            ("skill paths", paths), ("host", found.host), ("factory revision", found.factory_revision)]
+
+
+def _exposed(tmp_path: Path, found: Exposure | None) -> dict:
+    from lib import exposure
+    from lib.dashboard import collect_snapshot
+    from lib.queue import JobRequest
+    from tests.test_dashboard import make_db
+
+    db = tmp_path / "orch.db"
+    queue = make_db(db)
+    queue.enqueue(JobRequest(repo="maxharris1/factory", ticket_id="1014", action="review", recipient="codex",
+                             source_comment_id="c1", timeout_seconds=600), dedupe_key="k1")
+    job = queue.claim("codex")
+    assert job is not None and job.state == "running"
+    if found is not None:
+        with closing(sqlite3.connect(db)) as connection, connection:
+            exposure.ensure_table(connection)
+            exposure.write(connection, job.id, found, NOW)
+    return collect_snapshot(db, tmp_path / "missing.log", now=1_800_000_002.0, alive=None)
+
+
+def _exposure_facts(markup: str) -> list[tuple[str, str]]:
+    match = re.search(r'<section class="jd-panel jd-exp" data-sec="exposure">.*?</section>', markup, re.S)
+    assert match, "no exposure section"
+    return [(name, html.unescape(value)) for name, value in
+            re.findall(r'<tr><th scope="row">([^<]*)</th><td>([^<]*)</td></tr>', match.group(0))]
+
+
+@pytest.mark.parametrize("found", [INDEPENDENT, REAL, UNKNOWN], ids=["independent", "real", "unknown"])
+def test_a_running_job_s_ticket_page_shows_its_six_exposure_fields(tmp_path: Path, found: Exposure) -> None:
+    from lib.dashboard import write_snapshot_pages
+
+    snapshot = _exposed(tmp_path, found)
+    (row,) = snapshot["running"]
+    assert set(row["exposure"]) == {"model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
+    status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
+    assert json.loads(status.read_text(encoding="utf-8"))["running"][0]["exposure"] == row["exposure"]
+    assert _exposure_facts(_ticket_server(snapshot, EXPOSURE_ADDRESS)) == _shown(found)
+
+
+def test_a_job_with_no_exposure_row_says_so(tmp_path: Path) -> None:
+    snapshot = _exposed(tmp_path, None)
+    assert snapshot["running"][0]["exposure"] is None
+    markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
+    assert _exposure_facts(markup) == []
+    assert "not recorded" in markup
+
+
+@needs_node
+@pytest.mark.parametrize("found", [INDEPENDENT, REAL, UNKNOWN, None], ids=["independent", "real", "unknown", "none"])
+def test_the_script_draws_the_server_s_exposure(tmp_path: Path, found: Exposure | None) -> None:
+    views = _both(tmp_path, _exposed(tmp_path / "db", found), EXPOSURE_ADDRESS)
+    assert views["script"] == views["server"]
+    assert _exposure_facts(views["script"]) == ([] if found is None else _shown(found))

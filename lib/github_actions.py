@@ -911,7 +911,7 @@ class GitHubReviewActions:
 
     def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
         path = _repo_path(repo)
-        latest: dict[object, int] = {}
+        latest: dict[object, tuple[int, str]] = {}
         for number in range(1, BASE_RUN_PAGES + 1):
             page = _object(
                 self._json(
@@ -926,12 +926,15 @@ class GitHubReviewActions:
                 run_id = run.get("id")
                 if isinstance(run_id, bool) or not isinstance(run_id, int):
                     raise GitHubAdapterError("workflow run has no numeric id")
+                head = run.get("head_sha")
+                if not isinstance(head, str):
+                    raise GitHubAdapterError("workflow run has no head sha")
                 workflow = run.get("workflow_id")
-                latest[workflow] = max(latest.get(workflow, run_id), run_id)
+                latest[workflow] = max(latest.get(workflow, (run_id, head)), (run_id, head))
             if len(runs) < 100:
                 break
         checks: dict[str, BaseCheck] = {}
-        for run_id in sorted(latest.values(), reverse=True):
+        for run_id, head in sorted(latest.values(), reverse=True):
             for job in map(_object, self._run_jobs(f"{path}/actions/runs/{run_id}/jobs")):
                 job_id, name, conclusion = job.get("id"), str(job.get("name")), job.get("conclusion")
                 if isinstance(job_id, bool) or not isinstance(job_id, int):
@@ -943,6 +946,7 @@ class GitHubReviewActions:
                         conclusion if isinstance(conclusion, str) else None,
                         str(run_id),
                         str(job_id),
+                        head,
                     ),
                 )
         return checks

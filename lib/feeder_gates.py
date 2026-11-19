@@ -24,12 +24,17 @@ hold colliding paths at once (issue #269). The limit is counted on both
 sides of a collision, so a held directory never gets more holders than the
 limit either. A path matching `feeder.exclusive_paths` keeps one holder,
 and a `Conflicts with` edge always does.
+
+Stop the line (issue #1025): while a check on the base branch that matches
+the project's factory.md `feeder.required_checks` is red on its latest
+completed run, or that read fails, no ticket whose feed has not begun starts,
+except one labelled factory:main-fix. A begun feed goes on.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
@@ -68,6 +73,7 @@ _PATH_TRAIL = "`'\")]>,;:.!?*"
 _PATH_WORDS = frozenset({"and", "or", "&"})
 _LINEAR_DONE = "completed"
 _LINEAR_UNFINISHED = "canceled"
+MAIN_FIX_LABEL = "factory:main-fix"
 
 
 @dataclass(frozen=True, order=True)
@@ -429,3 +435,11 @@ class Holds:
 
 def labels(refs: Iterable[Ref], home: str) -> str:
     return ", ".join(item.label(home) for item in sorted(refs, key=Ref.sort_key))
+
+
+def line_stop(stop: Wait | None, labels: Collection[str]) -> Wait | None:
+    """Why a new ticket waits on its base's red or unreadable CI. A
+    factory:main-fix ticket never waits."""
+    if MAIN_FIX_LABEL in {label.lower() for label in labels}:
+        return None
+    return stop

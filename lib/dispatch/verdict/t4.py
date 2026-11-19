@@ -12,7 +12,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.qa import EnsureQa, FixFromQa, ParkQa, RetryQa, Wait
+from lib.dispatch.qa import EnsureQa, FixFromQa, MaintainSkill, ParkQa, RetryQa, Wait
 from lib.dispatch.types import (
     AlreadyMergedShip,
     CIResult,
@@ -164,7 +164,12 @@ class T4Mixin:
             case ParkQa():
                 self._park_qa(ticket, comment, head)
                 return False, "waiting-max-qa"
+            case MaintainSkill(report_id):
+                self._pause_for_qa(ticket, comment, head)
+                self._wake_skill_drift(ticket, report_id, head)
+                return False, "waiting-max-qa"
             case FixFromQa(report_id):
+                self._wake_skill_drift(ticket, report_id, head)
                 qa = self._qa_fix(ticket, report_id)
                 repeat = self._repeat_trigger(ticket, comment, reported_round, frozenset(qa.failed))
                 if repeat is not None:

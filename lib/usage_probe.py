@@ -16,8 +16,8 @@
   lines fill in the numbers when `get_usage` has none (lib/usage_readings.py).
 * Codex on a remote device: when the run ends, lib/codex_rollout.py's own
   source runs there under `python3 -I -S -c` for the job's thread id and
-  prints that rollout's rate limits. On the box the session reads it in
-  process on each flush (lib/telemetry.py).
+  prints its rate limits and token totals. On the box the session
+  reads it in process on each flush (lib/telemetry.py).
 
 Nothing here reads a credential: the CLI and the rollout reader run with
 the bot's own login, and only their stdout comes back. The run's proof
@@ -40,7 +40,6 @@ from lib.usage_readings import (
     GET_USAGE_ID,
     MAX_REPLY_BYTES,
     Reading,
-    parse_codex,
     parse_get_usage,
 )
 
@@ -170,13 +169,12 @@ def start_claude(
 
 
 
-def remote_codex(
-    transport: Transport, target: RemoteTarget, harness: str, thread_id: str | None, now: float
-) -> list[Reading]:
-    """A finished remote Codex job's rollout readings; none for another harness or on any failure."""
+def remote_codex(transport: Transport, target: RemoteTarget, harness: str, thread_id: str | None) -> object:
+    """A finished remote Codex job's rollout read, as lib/codex_rollout.py
+    printed it; None for another harness or on any failure."""
     if harness != "codex" or thread_id is None:
-        return []
+        return None
     try:
-        return parse_codex(codex_remote(transport, target, thread_id), now)
+        return codex_remote(transport, target, thread_id)
     except Exception:  # a usage read never touches the job's end
-        return []
+        return None

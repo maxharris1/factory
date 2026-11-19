@@ -25,6 +25,9 @@ HOLD = Path(".config/factory/runner-pool-sync-hold")
 needs_proc = pytest.mark.skipif(
     not Path("/proc/self/stat").exists(), reason="finds loop processes in /proc"
 )
+needs_proc_locks = pytest.mark.skipif(
+    not Path("/proc/locks").exists(), reason="sees lock waiters in /proc/locks"
+)
 
 
 def sync_loops(home: Path) -> list[int]:
@@ -52,6 +55,14 @@ def _wait_for(predicate, what: str, seconds: float = 10.0):
         assert time.monotonic() < deadline, f"timed out waiting for {what}"
         time.sleep(0.05)
     return value
+
+
+def _lock_waiters(lock: Path) -> int:
+    inode = f":{lock.stat().st_ino}"
+    return sum(
+        "->" in line and line.split()[-3].endswith(inode)
+        for line in Path("/proc/locks").read_text().splitlines()
+    )
 
 
 def _kill_loops(home: Path) -> None:
@@ -345,6 +356,7 @@ def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: P
     assert _runner_reads(env) == []
 
 
+@needs_proc_locks
 def test_a_loop_outwaits_the_lock_probe_ensure_runs_while_it_starts(tmp_path: Path) -> None:
     env = _sync_env(tmp_path, START, [runners(3)])
     lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
@@ -352,7 +364,7 @@ def test_a_loop_outwaits_the_lock_probe_ensure_runs_while_it_starts(tmp_path: Pa
     with lock.open("a") as probe:
         fcntl.flock(probe, fcntl.LOCK_EX)
         loop = subprocess.Popen(["bash", str(SYNC_SCRIPT), "loop"], env=env)
-        time.sleep(0.3)
+        _wait_for(lambda: _lock_waiters(lock) or loop.poll() is not None, "the loop to wait on the lock or exit")
     assert loop.wait(timeout=30) == 0
     assert _runner_reads(env), "the loop gave up on a lock that ensure held for a moment"
 

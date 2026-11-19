@@ -19,7 +19,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, get_args
 
 from lib import lane_limit
 from lib.brief.qa import AFTER_SCREENSHOT, PASS_OUTPUT, LaneFacts, Scenario, pack_ids, render_qa_brief
@@ -39,6 +39,7 @@ from lib.qa_storage import LaneLinks, Storage, StorageError, links_for_lane, pac
 
 SliceKind = Literal["head", "regression", "base-check"]
 Result = Literal["PASS", "FAIL", "BLOCKED"]
+Cause = Literal["product", "drift"]
 
 OPEN = ("launching", "running")
 GAPS = ("gap", "timed-out")
@@ -53,6 +54,7 @@ LINEAR_ATTEMPTS = 3
 _WORDS = {
     "verified": "Verified",
     "failed": "Failed",
+    "drift": "Drift",
     "inconclusive": "Inconclusive",
     "needs-human": "Needs human",
 }
@@ -167,6 +169,12 @@ class Decision:
     findings: tuple[str, ...]
     gaps: tuple[str, ...]
 
+    @property
+    def cause(self) -> Cause | None:
+        if self.result != "FAIL":
+            return None
+        return "product" if any(word == "Failed" for _, _, word in self.table) else "drift"
+
 
 @dataclass(frozen=True)
 class Stale:
@@ -231,6 +239,9 @@ def rejection(lane: LaneRow, result: object, verify: str | None) -> str | None:
         return "wrong-scenarios"
     if any(item.get("result") not in SCENARIO_RESULTS for item in scenarios):
         return "wrong-scenario-result"
+    causes = get_args(Cause) if result["method"] == verify else ("product",)
+    if any((item.get("cause") in causes) != (item["result"] == "failed") for item in scenarios):
+        return "wrong-cause"
     return None
 
 
@@ -249,7 +260,7 @@ def _results(rows: Sequence[LaneRow]) -> tuple[dict[str, str], dict[str, str]]:
             continue
         target = base if row.kind in _ON_BASE else head
         for item in row.result["scenarios"]:
-            target[qa_id(item["id"])] = item["result"]
+            target[qa_id(item["id"])] = "drift" if item.get("cause") == "drift" else item["result"]
     return head, base
 
 
@@ -294,6 +305,11 @@ def decide(rows: Sequence[LaneRow], detail: Detail) -> Decision:
         else f"- [blocking] {item} ({criterion}): failed at the head commit and not on the base commit"
         for item, criterion, word in table
         if word == "Failed"
+    ) + tuple(
+        f"- [drift] {item} ({criterion}): the verify skill or its map no longer matches the app; "
+        "maintain-verification-skill owns it, not a product change"
+        for item, criterion, word in table
+        if word == "Drift"
     )
     if gaps:
         result: Result = "BLOCKED"
@@ -361,6 +377,7 @@ def render_comment(
 ) -> str:
     fields = [
         "kind=qa", f"from={ORCHESTRATOR}", "role=qa", f"head={detail.head}", f"result={decision.result}",
+        *((f"cause={decision.cause}",) if decision.cause else ()),
         f"scope={detail.scope}",
     ]
     launched = {row.slice for row, _ in lanes if row.kind != "base-check"}

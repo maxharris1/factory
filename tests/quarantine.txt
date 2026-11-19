@@ -1,0 +1,2 @@
+# One entry per line: <pytest node id> <open GitHub issue url>
+# A node id without [params] covers every parametrization.

@@ -51,6 +51,13 @@ waiting_on} (who a held PR waits on, or None), or None for a ticket with
 no record. A running or queued job is not in `now`: the page joins it
 from `running` and `queued`.
 
+Exposure (#1014): each `running` row's `exposure` is its job_exposure row
+(lib/exposure.py), or None when none was recorded: {model, cli_version,
+brief_sha256, skill_paths, host, factory_revision}. skill_paths is a list,
+or "unknown". A digest is a list of 16-character parts the page joins,
+since a whole one reads as an opaque token and would be redacted; a value
+that is not a digest is one part.
+
 CI (#717): `ci_runs` is {runs, failures} from the ci_jobs table the poller
 writes. A run is one ticket head's jobs, from every workflow; its status
 is derived, never stored: any job in progress, or some done and some
@@ -164,6 +171,7 @@ from typing import NamedTuple
 
 import yaml
 
+from lib import exposure
 from lib import health as component_health
 from lib import live_settings
 from lib.config_overlay import apply_overlay
@@ -1652,6 +1660,29 @@ def _relay(
     return {"tracked": tracked, "threads": list(threads.values())}
 
 
+_DIGEST = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _digest(value: str) -> list[str]:
+    if not _DIGEST.fullmatch(value):
+        return [_clean(value)]
+    return [value[i : i + 16] for i in range(0, len(value), 16)]
+
+
+def _exposure(connection: sqlite3.Connection, job_id: str) -> dict | None:
+    found = exposure.read(connection, job_id)
+    if found is None:
+        return None
+    return {
+        "model": _clean(found.model),
+        "cli_version": _clean(found.cli_version),
+        "brief_sha256": _digest(found.brief_sha256),
+        "skill_paths": exposure.UNKNOWN if found.skill_paths is None else [_clean(p) for p in found.skill_paths],
+        "host": _clean(found.host),
+        "factory_revision": _digest(found.factory_revision),
+    }
+
+
 def _detail_round(detail: object) -> str | None:
     """A job's review round ("2/3") from its detail JSON, or None."""
     if not isinstance(detail, str):
@@ -1786,6 +1817,7 @@ def _read_db(
                     "device": device,
                     "elapsed_seconds": _age(now, started) or 0,
                     "elapsed_from": elapsed_from,
+                    "exposure": _exposure(connection, str(row["id"])),
                 }
                 running.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
