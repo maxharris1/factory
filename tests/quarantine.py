@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,7 +23,7 @@ def parse(path: Path) -> dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        fields = line.split()
+        fields = line.rsplit(None, 1)
         where = f"{path}:{lineno}"
         if len(fields) != 2:
             raise pytest.UsageError(f"{where}: expected '<node id> <issue url>', got {line!r}")
@@ -99,6 +101,18 @@ class Quarantine:
                 out.write("\n".join(table) + "\n\n")
 
 
+def issue_problem(url: str) -> str | None:
+    gh = subprocess.run(["gh", "api", "repos/" + url.removeprefix("https://github.com/")],
+                        stdout=subprocess.PIPE, text=True)
+    if gh.returncode:
+        return "unreadable"
+    issue = json.loads(gh.stdout)
+    # The issues endpoint also serves pull requests, marked by this key.
+    if "pull_request" in issue:
+        return "a pull request"
+    return None if issue["state"] == "open" else issue["state"]
+
+
 def main(argv: list[str]) -> int:
     path = Path(argv[0]) if argv else DEFAULT_FILE
     try:
@@ -106,9 +120,13 @@ def main(argv: list[str]) -> int:
     except pytest.UsageError as e:
         print(e, file=sys.stderr)
         return 1
+    failed = False
     for url in dict.fromkeys(entries.values()):
-        print(url)
-    return 0
+        problem = issue_problem(url)
+        if problem:
+            print(f"::error title=quarantine::{url} is {problem}; fix the flake or drop its tests/quarantine.txt entry")
+            failed = True
+    return int(failed)
 
 
 if __name__ == "__main__":

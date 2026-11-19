@@ -161,18 +161,7 @@ jobs:
       - name: Quarantined tests link open issues
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          urls=$(python -m tests.quarantine)
-          failed=0
-          for url in $urls; do
-            state=$(gh api "repos/${url#https://github.com/}" --jq .state) || state="unreadable"
-            if [[ "$state" != open ]]; then
-              echo "::error title=quarantine::$url is $state; fix the flake or drop its tests/quarantine.txt entry"
-              failed=1
-            fi
-          done
-          exit "$failed"
+        run: python -m tests.quarantine
       - run: pytest -m serial -p no:xdist
       - name: Validate shipped config including install placeholders
         run: python bin/orch check-config --orch orch.yml --allow-placeholders
