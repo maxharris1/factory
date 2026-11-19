@@ -151,6 +151,8 @@ class FakeGitHub:
         self.status_reads: list[frozenset[Ref]] = []
         self.main_checks: dict[tuple[str, str], dict[str, BaseCheck]] = {}
         self.check_reads: list[tuple[str, str]] = []
+        self.dirs: dict[tuple[str, str], tuple[str, ...]] = {}
+        self.dir_reads: list[tuple[str, str, str]] = []
         self._next_pr = 500
         self._next_comment = 9000
 
@@ -262,6 +264,11 @@ class FakeGitHub:
         self.check_reads.append((repo, branch))
         self._maybe_fail("base_checks")
         return dict(self.main_checks.get((repo, branch), {}))
+
+    def dir_names(self, repo: str, path: str, sha: str) -> tuple[str, ...]:
+        self.dir_reads.append((repo, path, sha))
+        self._maybe_fail("dir_names")
+        return self.dirs.get((repo, path), ())
 
     def post_comment(self, repo: str, number: int, body: str) -> str:
         self._maybe_fail("comment")

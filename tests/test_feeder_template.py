@@ -15,7 +15,10 @@ import pytest
 
 from lib.feeder import parse_intake
 from lib.handoff import parse_comment
+from lib.journeys import Journey, QaCriterion
 from tests.test_feeder import (
+    BASE_SHA,
+    FACTORY_MD,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
     FakeLinear,
@@ -572,3 +575,131 @@ def test_an_indented_code_example_is_not_ticket_metadata(example: str) -> None:
     parsed = parse_intake(body(extra=example), ())
     assert parsed.defects == ()
     assert (parsed.ticket_type, parsed.risk, parsed.plan_first, parsed.depends_on) == (None, "low", False, "none")
+
+
+# --- QA journeys from the feature map (#1029, F-21a) -------------------------
+
+QA_FACTORY_MD = FACTORY_MD.replace(
+    "feeder:\n",
+    "qa:\n  enabled: true\n  runners: [claude-cloud]\n  profile: none\n  verify: verify-app\n"
+    "  claude_cloud:\n    environment: qa-env\n  lane:\n    boot: bash boot.sh\n"
+    "    base_url: http://127.0.0.1:8080\nfeeder:\n",
+)
+MAP = (HOME, ".claude/skills/verify-app/features")
+
+
+def journey_ticket(features: str | None, *criteria: str) -> str:
+    return body(
+        criteria=criteria or ("- [ ] It works.",),
+        extra=f"Features: {features}" if features is not None else "",
+    )
+
+
+def map_feeder(tmp_path: Path, factory_text: str = QA_FACTORY_MD):
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=factory_text)
+    github.dirs[MAP] = ("README.md", "create-note.md", "search.md")
+    return feeder, github
+
+
+def test_the_template_carries_journeys_and_qa_criteria() -> None:
+    parsed = parse_intake(journey_ticket(
+        "create-note, new:bulk-export",
+        "- [ ] qa: A note saves offline.",
+        "- [ ] qa(bulk-export): Export writes a zip.",
+        "- [ ] The API returns 201.",
+    ), ())
+    assert parsed.defects == ()
+    assert parsed.journeys == (Journey("create-note"), Journey("bulk-export", new=True))
+    assert parsed.qa_criteria == (
+        QaCriterion("A note saves offline."),
+        QaCriterion("Export writes a zip.", ("bulk-export",)),
+    )
+    assert parsed.criteria == (
+        "qa: A note saves offline.", "qa(bulk-export): Export writes a zip.", "The API returns 201.",
+    )
+
+
+def test_a_ticket_without_features_has_no_journeys() -> None:
+    parsed = parse_intake(body(), ())
+    assert (parsed.journeys, parsed.qa_criteria) == ((), ())
+
+
+@pytest.mark.parametrize(
+    ("features", "criterion", "code"),
+    [
+        (None, "- [ ] qa: A note saves.", "qa-no-features"),
+        ("search", "- [ ] qa(create-note): A note saves.", "features-unbound"),
+        ("Search_Page", "- [ ] It works.", "features-unknown"),
+    ],
+)
+def test_journey_defects_the_body_shows(features, criterion, code) -> None:
+    assert codes(journey_ticket(features, criterion)) == {code}
+
+
+def test_a_ticket_with_map_ids_is_fed_after_one_map_read_at_the_base(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket(
+        "create-note, search", "- [ ] qa(create-note): A note saves offline."))]
+    report = feeder.feed_once()
+    assert len(report.fed) == 1
+    assert github.dir_reads == [(*MAP, BASE_SHA)]
+    assert wakes(tmp_path) == []
+
+
+def test_a_ticket_that_adds_a_journey_is_fed(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket(
+        "create-note, new:bulk-export", "- [ ] qa(bulk-export): Export writes a zip."))]
+    assert len(feeder.feed_once().fed) == 1
+
+
+@pytest.mark.parametrize(
+    ("features", "code", "named"),
+    [("create-note, typo", "features-unknown", "typo"), ("new:search", "features-exists", "search")],
+)
+def test_a_ticket_the_map_contradicts_is_refused(tmp_path: Path, features, code, named) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket(features))]
+    report = feeder.feed_once()
+    assert report.fed == () and report.refused == 1
+    assert nothing_written(github)
+    row = rows(tmp_path / "orch.db")["7"]
+    assert row["state"] == "refused-intake"
+    assert named in row["waiting_reason"]
+    assert json.loads(wakes(tmp_path)[0]["detail"])["defects"] == [code]
+
+
+def test_features_with_no_verify_skill_is_refused_with_no_read(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path, factory_text=FACTORY_MD)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    feeder.feed_once()
+    assert github.dir_reads == []
+    assert json.loads(wakes(tmp_path)[0]["detail"])["defects"] == ["features-no-verify"]
+
+
+def test_a_failed_map_read_leaves_the_ticket_eligible_until_a_read_works(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    github.fail["dir_names"] = 1
+    report = feeder.feed_once()
+    assert report.fed == () and report.refused == 0 and report.errors == 1
+    assert nothing_written(github)
+    assert rows(tmp_path / "orch.db")["7"]["state"] == "eligible"
+    assert wakes(tmp_path) == [] and flags(tmp_path) == set()
+    assert len(feeder.feed_once().fed) == 1
+
+
+def test_a_ticket_without_features_reads_no_map(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=body())]
+    assert len(feeder.feed_once().fed) == 1
+    assert github.dir_reads == []
+
+
+def test_the_map_is_read_once_per_base_in_a_poll(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.issues[HOME] = [
+        issue(number, template=False, body=journey_ticket("search")) for number in (7, 8)
+    ]
+    feeder.feed_once()
+    assert len(github.dir_reads) == 1
