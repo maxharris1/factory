@@ -271,6 +271,7 @@ def blocked_lead(reason: str) -> Lead:
         "2. Then stop: no branch, no commit, no push, no other handoff.",
     ))
 
+
 def opening(bot: str, kind: str) -> str:
     return (
         f"# Factory job brief: {kind}\n\n"

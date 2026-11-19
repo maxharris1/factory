@@ -14,14 +14,14 @@ def variants() -> list[str]:
     return render_snapshot("merge-only").split("===== ")[1:]
 
 
-def what_to_do(text: str) -> str:
+def method(text: str) -> str:
     return text.split("## Method\n", 1)[1].split("\n## ", 1)[0]
 
 
 @pytest.fixture(params=["box", "remote (mac)"])
 def section(request: pytest.FixtureRequest) -> str:
     (text,) = [v for v in variants() if v.startswith(request.param + " =====")]
-    return what_to_do(text)
+    return method(text)
 
 
 def test_runs_only_touched_tests_plus_a_smoke_set(section: str) -> None:
