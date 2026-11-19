@@ -23,10 +23,11 @@ factory_in_host_pidns() (
 
 # A WSL2 distro runs in its own PID namespace with WSL's /init as PID 1, or,
 # when systemd is enabled, as a child of PID 1. WSL bind-mounts that /init
-# from the utility VM's rootfs; a container's PID 1, even one named /init,
-# runs from the container's own filesystem. An unprivileged process can
-# create a PID namespace only inside a new user namespace, so its uid_map is
-# not "0 0 4294967295".
+# from the utility VM's rootfs and names the process init(<distro>) or
+# init-systemd(<distro>), cut to 15 bytes. A sandbox inherits the mount, so
+# the refresh also needs that name and, when this user can read it, /init as
+# the exe. An unprivileged process can create a PID namespace only inside a
+# new user namespace, so its uid_map is not "0 0 4294967295".
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
@@ -43,9 +44,14 @@ factory_refresh_host_pidns() (
         for dir in "$proc"/[0-9]*; do
             stat=""
             read -r stat 2>/dev/null <"${dir}/stat"
+            comm="${stat#*(}"
+            comm="${comm%) *}"
             stat="${stat##*) }"
             stat="${stat#* }"
             [ "${dir##*/}" = 1 ] || [ "${stat%% *}" = 1 ] || continue
+            case "$comm" in "init("* | "init-systemd("*) ;; *) continue ;; esac
+            exe="$(readlink "${dir}/exe" 2>/dev/null)" || exe=/init
+            [ "$exe" = /init ] || continue
             [ "$(tr '\000' '\n' <"${dir}/cmdline" 2>/dev/null | head -n 1)" = /init ] || continue
             awk '$5 == "/init" { for (i = 7; i < NF; i++) if ($i == "-") { if ($(i + 1) == "rootfs") found = 1; break } }
                 END { exit !found }' "${dir}/mountinfo" 2>/dev/null && wsl=1 && break

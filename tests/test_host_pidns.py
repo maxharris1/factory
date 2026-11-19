@@ -29,7 +29,8 @@ SANDBOX_USERNS = "         0       1000          1\n"
 def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
               uid_map: str | None = None, pids: dict[int, str] | None = None,
               init: str | None = None, procs: dict[int, tuple[str, int]] | None = None,
-              init_fs: str | None = None) -> Path:
+              init_fs: str | None = None, init_comm: str | None = None,
+              init_exe: str | None = None) -> Path:
     proc = tmp_path / "proc"
     (proc / "self" / "ns").mkdir(parents=True)
     lines = "Name:\tsh\n" + (f"NSpid:\t{nspid}\n" if nspid is not None else "")
@@ -43,11 +44,17 @@ def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
     if init is not None:
         (proc / "1").mkdir(exist_ok=True)
         (proc / "1" / "cmdline").write_text(init.replace(" ", "\0") + "\0", encoding="utf-8")
+        comm = (init_comm or "init(Ubuntu)") if init == "/init" else "systemd"
+        (proc / "1" / "stat").write_text(f"1 ({comm}) S 0 0 0\n", encoding="utf-8")
     for pid, (cmdline, ppid) in (procs or {}).items():
         (proc / str(pid)).mkdir(exist_ok=True)
         (proc / str(pid) / "cmdline").write_text(cmdline + "\0", encoding="utf-8")
-        (proc / str(pid) / "stat").write_text(f"{pid} (init-systemd(Ub) S {ppid} 0 0\n",
+        comm = init_comm or "init-systemd(Ub"
+        (proc / str(pid) / "stat").write_text(f"{pid} ({comm}) S {ppid} 0 0\n",
                                               encoding="utf-8")
+    for cmdline in proc.glob("[0-9]*/cmdline"):
+        if init_exe is not None and cmdline.read_text(encoding="utf-8").split("\0")[0] == "/init":
+            (cmdline.parent / "exe").symlink_to(init_exe)
     if init_fs is not None:
         for cmdline in proc.glob("[0-9]*/cmdline"):
             if cmdline.read_text(encoding="utf-8").split("\0")[0] == "/init":
@@ -185,14 +192,15 @@ WSL_INIT = {2: ("/init", 1)}
     [("/init", None), ("/sbin/init", WSL_INIT), ("/usr/lib/systemd/systemd --system", WSL_INIT)],
     ids=["wsl-init", "wsl-systemd-sbin-init", "wsl-systemd"],
 )
+@pytest.mark.parametrize("exe", [None, "/init"], ids=["exe-unreadable", "exe-init"])
 def test_wsl_distro_refreshes_a_stale_record_after_a_restart(
-    tmp_path: Path, init: str, procs: dict[int, tuple[str, int]] | None,
+    tmp_path: Path, init: str, procs: dict[int, tuple[str, int]] | None, exe: str | None,
 ) -> None:
     home = tmp_path / "home"
     (home / ".local" / "state" / "factory").mkdir(parents=True)
     path = record(home, OLD_NS)
     proc = fake_proc(tmp_path, "4484", WSL_NS, INITIAL_USERNS, init=init, procs=procs,
-                     init_fs=WSL_ROOTFS)
+                     init_fs=WSL_ROOTFS, init_exe=exe)
 
     result = _run(REFRESHING["helper"], home, proc)
 
@@ -365,6 +373,30 @@ def test_refresh_never_runs_outside_the_host(
     tmp_path: Path, nspid: str, uid_map: str | None, init: str | None, extra: dict[str, str],
     procs: dict[int, tuple[str, int]] | None, init_fs: str | None,
 ) -> None:
+    _assert_sandbox_refused(tmp_path, nspid, uid_map, init, extra, procs, init_fs)
+
+
+@pytest.mark.parametrize(("init", "procs"), [("/init", None), ("/sbin/init", WSL_INIT)],
+                         ids=["pid1", "child-of-pid1"])
+@pytest.mark.parametrize(("comm", "exe"),
+                         [("sleep", None), ("init", None), ("sleep", "/usr/bin/sleep"),
+                          ("init(Ubuntu)", "/usr/bin/sleep"),
+                          ("init-systemd(Ub", "/usr/bin/sleep")],
+                         ids=["comm-sleep", "comm-init", "exe-sleep", "renamed-init",
+                              "renamed-init-systemd"])
+def test_refresh_refuses_a_sandbox_that_inherits_wsl_init_mount(
+    tmp_path: Path, init: str, procs: dict[int, tuple[str, int]] | None, comm: str,
+    exe: str | None,
+) -> None:
+    _assert_sandbox_refused(tmp_path, "61", INITIAL_USERNS, init, {}, procs, WSL_ROOTFS, comm,
+                            exe)
+
+
+def _assert_sandbox_refused(
+    tmp_path: Path, nspid: str, uid_map: str | None, init: str | None, extra: dict[str, str],
+    procs: dict[int, tuple[str, int]] | None, init_fs: str | None, init_comm: str | None = None,
+    init_exe: str | None = None,
+) -> None:
     home = tmp_path / "home"
     state = home / ".local" / "state" / "factory"
     state.mkdir(parents=True)
@@ -372,7 +404,7 @@ def test_refresh_never_runs_outside_the_host(
     child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
     path = record(home, OLD_NS)
     proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map, init=init, procs=procs,
-                     init_fs=init_fs)
+                     init_fs=init_fs, init_comm=init_comm, init_exe=init_exe)
 
     result = _run(_service("poller-service.sh", "stop"), home, proc, **extra)
 
