@@ -248,7 +248,7 @@ class DetailMixin:
         if once_key is None:
             if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
                 once_key = source_comment_id
-            elif reason in ("blocked", "capped", "done", "awaiting-ok"):
+            elif reason in ("blocked", "capped", "done", "awaiting-ok", "ci-rerun-refused"):
                 once_key = head or "-"
             else:
                 once_key = "-"

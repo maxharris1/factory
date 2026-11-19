@@ -79,6 +79,7 @@ class BaseCheck:
 
 
 CIJobStatus = Literal["queued", "in_progress", "completed"]
+RerunOutcome = Literal["requested", "running"]
 RunnerKind = Literal["self-hosted", "github-hosted", "none"]
 RunnerStatus = Literal["online", "offline"]
 
