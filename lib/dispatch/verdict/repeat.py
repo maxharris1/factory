@@ -1,15 +1,73 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from lib.dispatch.constants import REVISE_ROUND_STATES
-from lib.dispatch.helpers import _comment_link, _comment_order, _round_number, _scope
+from lib.dispatch.decisions import Decision, chosen_words
+from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment, repeat_id
+from lib.markdown_items import MARKDOWN
 from lib.queue import JobRequest
+
+Stop = Literal["repeat", "capped", "unsat"]
+
+
+@dataclass(frozen=True)
+class StopOption:
+    name: str
+    consequence: str
+
+
+_SPLIT = StopOption("Split", "Close this PR and file smaller tickets. No more rounds run here.")
+STOP_OPTIONS: dict[Stop, tuple[StopOption, ...]] = {
+    "repeat": (
+        StopOption(
+            "Another round",
+            "An approver's /go resumes the paused fix on this finding. At the review cap it also adds one round.",
+        ),
+        StopOption(
+            "Overrule the finding",
+            "An approver's /go that names this option resumes the fix. "
+            "Later briefs quote the decision, so the reviewer does not block on it again.",
+        ),
+        _SPLIT,
+    ),
+    "capped": (
+        StopOption("Another round", "An approver's /go adds one round and queues the fix."),
+        StopOption(
+            "Overrule the finding",
+            "An approver's /go that names this option adds the round too. "
+            "Later briefs quote the decision, so the reviewer does not block on it again.",
+        ),
+        _SPLIT,
+    ),
+    "unsat": (
+        StopOption(
+            "Change the criterion",
+            "An answers, a planning go or an approver's /go with the new wording "
+            "resumes the review at the same round against it. "
+            "No round is spent.",
+        ),
+        StopOption(
+            "Fix round",
+            "An approver's go with state=building sends the builder a fix round. The round counts.",
+        ),
+        _SPLIT,
+    ),
+}
+_STOP_OPENINGS: dict[Stop, str] = {
+    "repeat": "The reviewer blocked {ids} again in round {round}.",
+    "capped": "Round {round} reached the review cap with {ids} still blocking.",
+    "unsat": "The reviewer called {ids} unsatisfiable in round {round}.",
+}
+_QUOTE_LIMIT = 800
 
 _ACCEPTED_REVISE = (
     "queued-review-fix",
@@ -31,6 +89,84 @@ class _EarlierRevise:
     round: int
     comment: Comment
     blocking: frozenset[str]
+
+
+@dataclass(frozen=True)
+class StopExchange:
+    round: int
+    verdict: Comment
+    response: Comment | None
+    ids: frozenset[str]
+
+
+def _handoff(body: str) -> tuple[dict[str, str], str]:
+    try:
+        handoff = parse_comment(body)
+    except HandoffError:
+        return {}, body
+    return handoff.as_dict(), handoff.body
+
+
+_ACCEPTED_READY = ("queued-review", "answered-review")
+_LIST_OPENS = ("bullet_list_open", "ordered_list_open")
+
+
+def _blocks(text: str) -> list[list[str]]:
+    lines = text.splitlines()
+    blocks: list[list[str]] = []
+    for token in MARKDOWN.parse(text):
+        top = token.level == 0 and token.nesting != -1 and token.type not in (*_LIST_OPENS, "hr")
+        if token.map is None or not (top or (token.type == "list_item_open" and token.level == 1)):
+            continue
+        block = lines[token.map[0] : token.map[1]]
+        while block and not block[-1].strip():
+            block.pop()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _quote(body: str, ids: frozenset[str]) -> str:
+    blocks = _blocks(_handoff(body)[1])
+    token = re.compile(rf"(?<![\w-])(?:{'|'.join(map(re.escape, sorted(ids)))})(?![\w-])") if ids else None
+    named = [block for block in blocks if token is not None and token.search("\n".join(block))]
+    quoted = []
+    for block in named or blocks[:1]:
+        text = "\n".join(block)
+        if len(text) > _QUOTE_LIMIT:
+            text = text[:_QUOTE_LIMIT].rstrip() + " ..."
+        quoted.append("\n".join(f"> {line}".rstrip() for line in text.splitlines()))
+    return "\n>\n".join(quoted)
+
+
+def stop_question(
+    stop: Stop, disputed: frozenset[str], round_number: int, exchanges: Sequence[StopExchange]
+) -> str:
+    named = ", ".join(sorted(disputed)) or "findings"
+    parts = [f"{_STOP_OPENINGS[stop].format(ids=named, round=round_number)} Which option settles it?"]
+    for exchange in exchanges:
+        parts.append(
+            f"Round {exchange.round} verdict ({_comment_link(exchange.verdict)}):\n"
+            f"{_quote(exchange.verdict.body, exchange.ids)}"
+        )
+        if exchange.response is not None:
+            parts.append(
+                f"Builder's response ({_comment_link(exchange.response)}):\n"
+                f"{_quote(exchange.response.body, exchange.ids)}"
+            )
+    options = "\n".join(f"- {option.name}: {option.consequence}" for option in STOP_OPTIONS[stop])
+    parts.append(f"Options:\n{options}")
+    return "\n\n".join(parts)
+
+
+def _stop_choice(stop: Stop, words: str, default: str) -> str:
+    names = [option.name for option in STOP_OPTIONS[stop]]
+    leading = [name for name in names if words.lower().startswith(name.lower())]
+    named = leading or [name for name in names if name.lower() in words.lower()]
+    name = named[0] if len(named) == 1 else default
+    if not words:
+        return name
+    return words if words.lower().startswith(name.lower()) else f"{name}: {words}"
 
 
 def _qa_failed(connection: sqlite3.Connection, ticket: TrackedTicket, comment_id: str) -> set[str]:
@@ -103,6 +239,105 @@ class RepeatBlockMixin:
                 found.append(_EarlierRevise(number, item, blocking))
         return sorted(found, key=lambda entry: (entry.round, _comment_order(entry.comment)), reverse=True)
 
+    def _stop_question(
+        self, ticket: TrackedTicket, verdict: Comment, stop: Stop, disputed: frozenset[str]
+    ) -> str:
+        round_number = _round_number(_handoff(verdict.body)[0].get("round")) or 0
+        scoped = stop != "capped" and bool(disputed)
+        rounds = [
+            (item.round, item.comment, disputed if scoped else item.blocking)
+            for item in reversed(self._accepted_revises(ticket, round_number))
+            if not scoped or item.blocking & disputed
+        ]
+        rounds.append((round_number, verdict, disputed))
+        exchanges = [
+            StopExchange(
+                number,
+                comment,
+                self._builder_response(ticket, comment, rounds[index + 1][1])
+                if index + 1 < len(rounds)
+                else None,
+                ids,
+            )
+            for index, (number, comment, ids) in enumerate(rounds)
+        ]
+        return stop_question(stop, disputed, round_number, exchanges)
+
+    def _builder_response(self, ticket: TrackedTicket, verdict: Comment, before: Comment) -> Comment | None:
+        builder = f"{ticket.factory.builder_harness}-bot"
+        reviewed = _handoff(before.body)[0].get("head")
+        readies = [
+            item
+            for item in sorted(ticket.comments, key=_comment_order)
+            if _comment_order(verdict) < _comment_order(item) < _comment_order(before)
+            and (fields := _handoff(item.body)[0]).get("kind") == "ready"
+            and self._trusted(ticket, item, fields, builder, role="builder")
+        ]
+        accepted = [item for item in readies if self._handled_outcome(ticket, item.id) in _ACCEPTED_READY]
+        if not accepted:
+            accepted = [
+                item for item in readies if _matching_head(_handoff(item.body)[0].get("head") or "", reviewed)
+            ]
+        return accepted[-1] if accepted else None
+
+    def _stop_disputed(self, ticket: TrackedTicket, verdict: Comment, stop: Stop) -> frozenset[str]:
+        from lib.evidence.findings import blocking_ids
+
+        fields, body = _handoff(verdict.body)
+        if stop == "capped":
+            return blocking_ids(body)
+        if stop == "unsat":
+            return frozenset({fields["unsat"]} if fields.get("unsat") else ())
+        with self._connect() as connection:
+            wake = connection.execute(
+                "SELECT detail FROM jobs WHERE dedupe_key = ?",
+                (f"t3-repeat:{_scope(ticket.repo, ticket.ticket_id)}:{verdict.id}",),
+            ).fetchone()
+        return frozenset() if wake is None else frozenset({_stopped_rule(str(wake["detail"]))})
+
+    def _stop_decision(
+        self, ticket: TrackedTicket, verdict: Comment, stop: Stop, answer: Comment, default: str
+    ) -> Decision:
+        words = chosen_words(answer.body)
+        return Decision(
+            self._stop_question(ticket, verdict, stop, self._stop_disputed(ticket, verdict, stop)),
+            tuple(option.name for option in STOP_OPTIONS[stop]),
+            _stop_choice(stop, "" if words == "/go" else words, default),
+            answer.author,
+            answer.created_at,
+            answer.url,
+            answer.id,
+            0,
+        )
+
+    def _held_stop(self, ticket: TrackedTicket) -> tuple[Stop, Comment] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT review_events.outcome, review_events.comment_id FROM ticket_state
+                JOIN review_events
+                  ON review_events.repo = ticket_state.repo
+                 AND review_events.ticket_id = ticket_state.ticket_id
+                WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
+                  AND (
+                    (ticket_state.workflow_state = 'waiting-max'
+                     AND review_events.comment_id = ticket_state.paused_question_id
+                     AND review_events.outcome IN ('waiting-max-repeat', 'waiting-max-unsat'))
+                    OR (ticket_state.workflow_state = 'capped'
+                        AND review_events.outcome = 'capped-review')
+                  )
+                ORDER BY review_events.rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None:
+            return None
+        stop: Stop = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}.get(
+            str(row["outcome"]), "capped"
+        )
+        verdict = next((item for item in ticket.comments if item.id == row["comment_id"]), None)
+        return None if verdict is None else (stop, verdict)
+
     def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
         with self._connect() as connection:
             wakes = connection.execute(
@@ -141,6 +376,7 @@ class RepeatBlockMixin:
     ) -> tuple[bool, str]:
         key = (ticket.repo.lower(), ticket.ticket_id)
         detail = self._repeat_detail(ticket, comment, block)
+        question = self._stop_question(ticket, comment, "repeat", frozenset({block.rule_id}))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -205,7 +441,7 @@ class RepeatBlockMixin:
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
                         head=ticket.current_head,
-                        detail=self._project_wake_detail(ticket, detail),
+                        detail=self._project_wake_detail(ticket, detail, question=question),
                     )
                 ),
                 dedupe_key=f"t3-repeat:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",

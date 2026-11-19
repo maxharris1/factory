@@ -8,7 +8,7 @@ working. In a ticket's `Touches:` line, name the module here, not
 `helpers.py`, `constants.py`, `types.py` or `transitions.py`.
 
 No module here imports `lib.dispatcher` at run time, and no mixin imports
-another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
+another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`, `decisions.py`,
 `types.py` and `errors_text.py`.
 
 The caps rules live in the `caps/` package, one module per rule. For a change
@@ -37,6 +37,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Constants | `constants.py` | state sets, grace periods, wake reasons, poll and ship error limits |
 | Error text | `errors_text.py` | `_redact*`, `poll_error_detail`, `poll_error_text`, `safe_ship_error`, `scrub_detail` |
 | Shared functions | `helpers.py` | `trusted_bots`, `_spread`, `_scope`, rounds, `_matching_head`, `_holds`, `ship_mode`, `_comment_order`, questions text, state names |
+| Decision record | `decisions.py` | `Decision`, `record_decisions`, `chosen_words`: the F-04 (#1017) record of what an answer chose |
 | State writes | `transitions.py` | `write_workflow_state`: the one writer of `ticket_state.workflow_state`, which appends a `ticket_transitions` row in the same transaction (#150) |
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
@@ -44,7 +45,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | QA runs | `qa.py` (`QaMixin`) | `decide_scope`, the pure scope decision over `ScopeInput` (git facts from the injected `qa_diff`); `_queue_qa`, called where a review is queued, which writes the head's `qa_runs` rows and queues the `qa` jobs; `_qa_record`, a trusted `kind=qa` comment on its run; `_qa_follow`, once per poll, which cancels open runs at an old head, follows each run's job and wakes Grok once with `qa-failed` for a blocking primary FAIL at an approved head unless `qa.gate` is `block`; `_qa_job_failed`, T6 for a `qa` job; under `qa.gate: block`, `_qa_gate` reads the head's newest primary run with `_qa_status` and T4, T3, BLOCKED and the merge queue do what the pure `decide_gate` table says: ship only on a covering result, spend the review round on a FAIL, retry an environment failure once with `_retry_qa` and then park with `_park_qa`, and cancel open runs on BLOCKED with `_cancel_open_qa` (issue #765). The only writer of `qa_runs` except the QA worker, which sets `evidence_dir` when it accepts a lane's result (issue #874), the runner when a lane moves, and `stale` through `record_stale` when the PR head moved before the run posted, and a no-op when `factory.md` has no `qa` block (issue #763) |
 | Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the ten rule mixins below and re-exports the old `verdict.py` names |
 | Verdicts: REVISE (T3) | `verdict/t3.py` (`T3Mixin`) | `ReviseCIGate`, `_t3`, `_revise_ci_gate` |
-| Verdicts: repeat block (T3) | `verdict/repeat.py` (`RepeatBlockMixin`) | `_repeat_trigger`, `_accepted_revises`, `_t3_repeat`: park a REVISE that blocks on the same rule again at waiting-max |
+| Verdicts: repeat block (T3) | `verdict/repeat.py` (`RepeatBlockMixin`) | `_repeat_trigger`, `_accepted_revises`, `_t3_repeat`: park a REVISE that blocks on the same rule again at waiting-max. `_stop_question`, `_stop_decision`, `_held_stop`: the question a repeat, capped or unsat stop asks, and the option its answer chose |
 | Verdicts: APPROVE (T4) | `verdict/t4.py` (`T4Mixin`) | `_t4`, `_approve_ci_red_fix`, `_held_ci_red`, `_held_ci_fix_out`, `_held_approve_covers`, `_latest_fix_answer`, `_ship_approval`: T4's ship tail, which T2 also runs for a covered ready |
 | Verdicts: BLOCKED | `verdict/blocked.py` (`BlockedMixin`) | `_t_blocked`: stop the ticket and wake Grok once. `_blocked_by_another`: whether a verdict other than this comment blocked the ticket |
 | Verdicts: approval recording | `verdict/record.py` (`ApprovalRecordMixin`) | `_record_approval`: the covering APPROVE the merge queue orders and gates on |

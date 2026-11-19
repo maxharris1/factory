@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Literal
 
 from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
+from lib.dispatch.decisions import record_decisions
 from lib.dispatch.helpers import _comment_link, _scope, red_checks
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -92,10 +93,15 @@ class ResumeMixin:
             ).fetchone()
             verdict = _comment_link(comment) if handed_off else None
             if capping is not None and not handed_off:
-                verdict = next(
-                    (_comment_link(item) for item in ticket.comments if item.id == capping["comment_id"]),
-                    f"comment:{capping['comment_id']}",
-                )
+                stop = next((item for item in ticket.comments if item.id == capping["comment_id"]), None)
+                verdict = _comment_link(stop) if stop is not None else f"comment:{capping['comment_id']}"
+                if stop is not None:
+                    record_decisions(
+                        connection,
+                        ticket,
+                        stop.id,
+                        [self._stop_decision(ticket, stop, "capped", comment, "Another round")],
+                    )
             self._enqueue_step(
                 connection,
                 ticket,
@@ -118,6 +124,7 @@ class ResumeMixin:
                         instruction=verdict,
                         resume=True,
                         ci_failure=red_checks(ticket, ticket.current_head),
+                        connection=connection,
                     ),
                 ),
                 dedupe_key=f"t1:{scope}:fix:{comment.id}",
@@ -305,10 +312,15 @@ class ResumeMixin:
                 counted_round = int(row["review_round"]) + 1
                 at_cap = counted_round >= self._effective_cap(ticket, connection)
                 cap_extra = int(row["cap_extra"]) + (1 if at_cap else 0)
-                verdict = next(
-                    (_comment_link(item) for item in ticket.comments if item.id == row["paused_question_id"]),
-                    f"comment:{row['paused_question_id']}",
-                )
+                stop = next((item for item in ticket.comments if item.id == row["paused_question_id"]), None)
+                verdict = _comment_link(stop) if stop is not None else f"comment:{row['paused_question_id']}"
+                if stop is not None:
+                    record_decisions(
+                        connection,
+                        ticket,
+                        stop.id,
+                        [self._stop_decision(ticket, stop, "unsat", comment, "Fix round")],
+                    )
                 self._enqueue_step(
                     connection,
                     ticket,
@@ -331,6 +343,7 @@ class ResumeMixin:
                             instruction=verdict,
                             resume=True,
                             ci_failure=red_checks(ticket, ticket.current_head),
+                            connection=connection,
                         ),
                     ),
                     dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:fix:{comment.id}",

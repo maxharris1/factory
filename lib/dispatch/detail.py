@@ -657,6 +657,7 @@ class DetailMixin:
         unmapped: str | None = None,
         qa_findings: QaFix | None = None,
         source: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -695,7 +696,7 @@ class DetailMixin:
             context["plan_text"] = plan_text
         if action in ("plan", "build") and (answers := self._answers(ticket)):
             context["answers"] = answers
-        if action in ("plan", "build", "fix", "review") and (decisions := self._decisions(ticket)):
+        if action in ("plan", "build", "fix", "review") and (decisions := self._decisions(ticket, connection)):
             context["decisions"] = decisions
         if ticket.factory_md is not None:
             context["routing"] = {
@@ -776,12 +777,15 @@ class DetailMixin:
         self,
         ticket: TrackedTicket,
         detail: str,
+        *,
+        question: str | None = None,
     ) -> str:
         return json.dumps(
             {
                 "project_bot": ticket.grok_bot,
                 "detail": detail,
-            },
+            }
+            | ({} if question is None else {"question": question}),
             separators=(",", ":"),
             sort_keys=True,
         )

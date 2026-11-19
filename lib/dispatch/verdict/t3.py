@@ -225,6 +225,7 @@ class T3Mixin:
         reported_round: int | None,
     ) -> tuple[bool, str]:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        question = self._stop_question(ticket, comment, "unsat", frozenset({criterion_id}))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -293,6 +294,7 @@ class T3Mixin:
                             "criterion-unsatisfiable: "
                             f"{self._criterion_text(connection, ticket, comment, criterion_id)}, "
                             f"{_comment_link(comment)}",
+                            question=question,
                         ),
                     )
                 ),
