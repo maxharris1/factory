@@ -478,8 +478,11 @@ class ReadyMixin:
                     outcome = "requested"
                 except Exception as exc:
                     outcome, detail, why = "refused", *_refusal(exc)
-        logs = self._failed_job_logs(ticket.repo, result)
-        result = classify_logged(result, logs, self._unlogged_job_steps(ticket.repo, result, logs))
+        if not rerun or outcome != "requested":
+            logs = self._failed_job_logs(ticket.repo, result)
+            result = classify_logged(
+                result, logs, self._unlogged_job_steps(ticket.repo, result, logs)
+            )
         if not rerun:
             return result
         with self._connect() as connection:
@@ -496,7 +499,7 @@ class ReadyMixin:
             self.log(
                 f"ci rerun: {ticket.repo}#{ticket.ticket_id} at {head[:12]} "
                 + (
-                    f"rerunning the failed jobs of run {runs} (cause {result.cause})"
+                    f"rerunning the failed jobs of run {runs}"
                     if outcome == "requested"
                     else f"rerun of run {runs} refused ({detail}); charging the failure"
                 )

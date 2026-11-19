@@ -197,9 +197,8 @@ def test_the_red_the_dispatcher_acts_on_is_classified_from_its_fetched_logs(
     board.poll()
 
     assert board.outcome(ready) is None
-    [rerun_line] = [line for line in board.log if "rerunning the failed jobs" in line]
-    assert "(cause infra)" in rerun_line
-    assert reads == [RUN]
+    assert [line for line in board.log if "rerunning the failed jobs" in line]
+    assert reads == []
 
     board.red(pr, pr.head, "21", cause="code")
     board.poll()
@@ -210,7 +209,7 @@ def test_the_red_the_dispatcher_acts_on_is_classified_from_its_fetched_logs(
     assert [result.cause for result in charged] == ["infra"]
     [fix] = board.jobs("fix")
     assert json.loads(fix["detail"])["evidence"]["ci"]["cause"] == "infra"
-    assert reads == [RUN, RUN]
+    assert reads == [RUN]
 
 
 def test_the_same_failed_jobs_past_the_settle_window_charge(tmp_path: Path) -> None:
