@@ -35,7 +35,7 @@ from lib.approve_rule import approve_refusal
 from lib.brief import brief_kind
 from lib.brief.common import BriefError, detail_of, facts_of
 from lib.github_actions import GH
-from lib.handoff import HandoffError, parse_comment, plan_estimate
+from lib.handoff import HandoffError, parse_comment, plan_estimate, plan_estimate_text
 from lib.queue import Job
 
 GH_TIMEOUT_SECONDS = 30.0
@@ -226,7 +226,11 @@ def problems(
     if kind == "qa" and fields["head"] != expected.head:
         found.append(f"head={fields['head']} is not the job's head {expected.head}")
     if kind == "plan" and plan_estimate(handoff.body) is None:
-        found.append('plan has no "Estimate: <n>" line')
+        text = plan_estimate_text(handoff.body)
+        found.append(
+            'plan has no "Estimate: <n>" line' if text is None
+            else f"plan Estimate {text!r} is not a whole number of lines, 0 to 999999999"
+        )
     refusal = approve_refusal(fields, handoff.body)
     if refusal is not None:
         found.append(refusal.message)

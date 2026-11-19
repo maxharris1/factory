@@ -167,6 +167,16 @@ def test_an_estimate_past_nine_digits_is_no_estimate_and_nine_digits_park(
         assert json.loads(flow.claim("plan").request.detail)["unmapped"] == "expected size"
 
 
+@pytest.mark.parametrize("estimate", ["1,000", "1 000", "1.000", "1k"])
+def test_a_malformed_estimate_never_builds_on_its_prefix(tmp_path: Path, estimate: str) -> None:
+    flow = SizeFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", f"Estimate: {estimate}\n\n{PLAN_BODY}") == "queued-plan-gap"
+
+    assert job_count(flow.queue, "build") == 0
+    assert json.loads(flow.claim("plan").request.detail)["unmapped"] == "expected size"
+
+
 def test_a_go_from_a_bot_leaves_the_size_wait(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path)
     assert flow.plan("500", "ac=met", estimated(760)) == "waiting-max-size"

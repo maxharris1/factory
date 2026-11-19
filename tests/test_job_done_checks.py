@@ -699,3 +699,15 @@ def test_1021_job_done_refuses_a_plan_without_an_estimate(tmp_path: Path, store:
 
     assert 'plan has no "Estimate: <n>" line' in capsys.readouterr().err
     assert row(db, job.id)["state"] == "running"
+
+
+@pytest.mark.parametrize("estimate", ["1,000", "1 000", "1k"])
+def test_1021_job_done_refuses_a_malformed_estimate(tmp_path: Path, store: Path, capsys, estimate: str) -> None:
+    db, _, job = running_job(tmp_path, action="plan")
+    header = format_header({**fitting_fields(job, "claude-bot"), "ac": "met"})
+    serve_handoff(store, job, "1304", body=f"{header}\nEstimate: {estimate}\nThe plan.\n")
+
+    assert done(db, job, "1304") == 1
+
+    assert f"plan Estimate {estimate!r} is not a whole number of lines, 0 to 999999999" in capsys.readouterr().err
+    assert row(db, job.id)["state"] == "running"

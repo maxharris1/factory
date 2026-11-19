@@ -126,7 +126,8 @@ _ROUND = re.compile(r"^([1-9][0-9]{0,8})(?:/([1-9][0-9]{0,8}))?$")
 _HEAD = re.compile(r"^[0-9a-f]{7,40}$")
 _REPEAT = re.compile(r"^(?:ac|f)-[1-9][0-9]*$")
 _UNSAT = re.compile(r"^ac-[1-9][0-9]*$")
-_ESTIMATE = re.compile(r"^Estimate:\s*(0|[1-9][0-9]{0,8})\b")
+_ESTIMATE_LINE = re.compile(r"^Estimate:\s*([-+]?[0-9]\S*(?:\s+[0-9]\S*)*)")
+_ESTIMATE = re.compile(r"0|[1-9][0-9]{0,8}")
 
 
 class HandoffError(ValueError):
@@ -254,14 +255,24 @@ def repeat_id(handoff: Handoff) -> str | None:
     return value if key == "repeat" and _REPEAT.fullmatch(value) else None
 
 
-def plan_estimate(body: str) -> int | None:
-    """The changed lines a plan expects: the first body line that reads
-    Estimate: <n>, n at most 9 digits (issue #586). None when no line does."""
+def plan_estimate_text(body: str) -> str | None:
+    """The text of the first Estimate: line that starts with a digit or a
+    sign: its digit-led words, trailing periods dropped, so 1,000 and 1 000
+    stay whole (issue #1021). None when no line does."""
     for line in body.splitlines():
-        match = _ESTIMATE.match(line.strip())
+        match = _ESTIMATE_LINE.match(line.strip())
         if match is not None:
-            return int(match.group(1))
+            return match.group(1).rstrip(".")
     return None
+
+
+def plan_estimate(body: str) -> int | None:
+    """The changed lines a plan expects: plan_estimate_text when it is a
+    whole number of at most 9 digits (issue #586). None otherwise."""
+    text = plan_estimate_text(body)
+    if text is None or _ESTIMATE.fullmatch(text) is None:
+        return None
+    return int(text)
 
 
 def format_comment(handoff: Handoff, *, visible: bool = False) -> str:
