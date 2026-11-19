@@ -519,3 +519,138 @@ def test_a_database_from_before_tiers_still_reads_and_then_migrates(tmp_path: Pa
         assert list(connection.execute("SELECT issue, urgent, tier, own_tier, unblocks FROM feeder_items")) == [
             ("8", 1, None, None, 0)
         ]
+
+
+def test_a_fed_ticket_that_gains_a_blocker_passes_it_its_tier(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=3, now=now)
+    first = issue(1, labels=(READY, "priority:p1"), created_at=1.0)
+    second = issue(2, labels=(READY, "priority:p0"), created_at=2.0)
+    third = issue(3, labels=(READY, "urgent", "priority:p1"), created_at=3.0)
+    github.issues[HOME] = [first, second, third]
+    feeder.feed_once()
+    pull = {key: row["ticket_id"] for key, row in rows(tmp_path / "orch.db").items()}
+    _enqueue(queue, now, pull["1"], pull["2"], pull["3"])
+    github.issues[HOME] = [first, replace(second, body="Blocked by #1\n" + second.body), third]
+    github.statuses = {ref(1): OPEN, **{ref(int(number)): OPEN_PULL for number in pull.values()}}
+    now[0] += 1
+    feeder.feed_once()
+    assert _tiers(queue)["1"] == (0, 1)
+    assert _claim_tickets(queue) == [pull["1"], pull["2"], pull["3"]]
+
+
+def test_a_ticket_whose_feed_failed_passes_its_tier_to_its_blocker(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=2)
+    dependent = issue(2, labels=(READY, "priority:p0"), created_at=2.0)
+    github.issues[HOME] = [dependent]
+    github.fail["pull"] = 1
+    assert feeder.feed_once().fed == ()
+    assert states(tmp_path)["2"][0] == "error"
+    github.statuses = {ref(1): OPEN}
+    github.issues[HOME] = [
+        issue(1, labels=(READY, "priority:p2"), created_at=1.0),
+        replace(dependent, body="Blocked by #1\n" + dependent.body),
+        issue(3, labels=(READY, "priority:p1"), created_at=3.0),
+    ]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2", "factory/issue-1"]
+    assert _tiers(queue)["1"] == (0, 2)
+
+
+def _critical_flags(queue: SQLiteJobQueue) -> list[tuple[str, str, str]]:
+    with queue.connect() as connection:
+        return [tuple(row) for row in connection.execute(
+            "SELECT repo, ticket_id, detail FROM needs_attention WHERE reason = 'critical-path-blocker'"
+        )]
+
+
+def test_an_open_blocker_that_is_not_a_candidate_raises_one_flag_until_it_closes(tmp_path: Path) -> None:
+    from tests.test_feeder_gates import DONE
+
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=2)
+    github.issues[HOME] = [
+        issue(1, labels=(READY, "priority:p2"), body="Blocked by: #780"),
+        issue(2, labels=(READY, "priority:p1"), body="Blocked by: #780"),
+        issue(3, body="Blocked by: #781"),
+    ]
+    github.statuses = {ref(780): OPEN, ref(781): OPEN}
+    feeder.feed_once()
+    assert sorted(_critical_flags(queue)) == [
+        (HOME, "780", "gates 2 candidates, best tier 1"),
+        (HOME, "781", "gates 1 candidates, best tier none"),
+    ]
+    github.fail["statuses"] = 1
+    github.statuses = {ref(780): DONE, ref(781): DONE}
+    feeder.feed_once()
+    assert len(_critical_flags(queue)) == 2
+    feeder.feed_once()
+    assert _critical_flags(queue) == []
+
+
+def test_blockers_off_the_critical_path_raise_no_flag(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    github.issues[HOME] = [issue(1)]
+    feeder.feed_once()
+    github.issues[HOME] = [issue(2, body="Blocked by: #1\nBlocked by: other/lib#5")]
+    github.statuses = {ref(1): OPEN, ref(5, "other/lib"): OPEN, ref(501): OPEN_PULL}
+    feeder.feed_once()
+    assert states(tmp_path)["2"][0] == "waiting-blocked"
+    assert _critical_flags(queue) == []
+
+
+SHARE_ORCH = GITHUB_ORCH + """  - repo: owner/aut
+    factory_ref: main
+    intake:
+      label: factory:ready
+"""
+
+
+def _share_feeder(tmp_path: Path, share: str):
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(SHARE_ORCH, TIERS) + share, box=4)
+    github.issues[HOME] = [issue(n, labels=(READY, "priority:p0"), created_at=float(n)) for n in (1, 2, 3, 4)]
+    github.issues["owner/aut"] = [issue(n, repo="owner/aut", created_at=0.5) for n in (11, 12, 13)]
+    return feeder, queue, github
+
+
+def _fed(github, report) -> list[str]:
+    return [f"{item.repo}#{github.pulls[(item.repo, int(item.ticket_id))]['head'].split('-')[-1]}"
+            for item in report.fed]
+
+
+@pytest.mark.parametrize(("share", "fed"), [
+    ("", ["owner/app#1", "owner/app#2", "owner/app#3", "owner/app#4"]),
+    ("      capacity_share: 0.5\n", ["owner/aut#11", "owner/aut#12", "owner/app#1", "owner/app#2"]),
+])
+def test_a_project_under_its_capacity_share_is_fed_first(tmp_path: Path, share: str, fed: list[str]) -> None:
+    feeder, _, github = _share_feeder(tmp_path, share)
+    assert _fed(github, feeder.feed_once()) == fed
+
+
+def test_queued_jobs_count_toward_a_projects_capacity_share(tmp_path: Path) -> None:
+    feeder, queue, github = _share_feeder(tmp_path, "      capacity_share: 0.5\n")
+    for ticket in ("901", "902"):
+        queue.enqueue(JobRequest(repo="owner/aut", ticket_id=ticket, action="build", recipient="claude",
+                                 source_comment_id=ticket, timeout_seconds=600), dedupe_key=ticket)
+    assert _fed(github, feeder.feed_once()) == ["owner/app#1", "owner/app#2"]
+
+
+@pytest.mark.parametrize(("value", "message"), [
+    ("1.5", "capacity_share must be a number from 0 to 1"),
+    ("-0.1", "capacity_share must be a number from 0 to 1"),
+    ("true", "capacity_share must be a number from 0 to 1"),
+])
+def test_a_bad_capacity_share_is_refused(tmp_path: Path, value: str, message: str) -> None:
+    messages = _refused(tmp_path, _with(GITHUB_ORCH, f"      capacity_share: {value}\n"))
+    assert any(message in item for item in messages), messages
+
+
+def test_capacity_shares_summing_over_one_are_refused(tmp_path: Path) -> None:
+    anchor = "      label: factory:ready\n"
+    orch = SHARE_ORCH.replace(anchor, anchor + "      capacity_share: 0.6\n", 1) + "      capacity_share: 0.5\n"
+    messages = _refused(tmp_path, orch)
+    assert any("capacity_share values sum to 1.1, more than 1" in item for item in messages), messages
+
+
+def test_a_capacity_share_of_one_half_is_accepted(tmp_path: Path) -> None:
+    intake = orch_config(tmp_path, _with(GITHUB_ORCH, "      capacity_share: 0.5\n")).projects[0].intake
+    assert intake.capacity_share == 0.5
+    assert orch_config(tmp_path, GITHUB_ORCH).projects[0].intake.capacity_share is None

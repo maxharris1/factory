@@ -41,7 +41,9 @@ Tracker = Literal["github", "linear"]
 ATTENTION_CYCLE = "blocker-cycle"
 ATTENTION_CLOSED = "blocker-closed"
 ATTENTION_MISSING = "blocker-missing"
-ATTENTION_REASONS = (ATTENTION_CYCLE, ATTENTION_CLOSED, ATTENTION_MISSING)
+ATTENTION_CRITICAL_PATH = "critical-path-blocker"
+WAIT_REASONS = (ATTENTION_CYCLE, ATTENTION_CLOSED, ATTENTION_MISSING)
+ATTENTION_REASONS = (*WAIT_REASONS, ATTENTION_CRITICAL_PATH)
 
 FILE_PATH = re.compile(
     r"(?<![\w/.-])((?:[\w.-]+/)*[\w-][\w.-]*\.(?:py|md|mmd|yml|yaml|json|toml|ini|cfg|txt|"

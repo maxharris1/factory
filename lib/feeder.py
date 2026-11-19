@@ -53,9 +53,11 @@ A feed that resumes on a recorded PR first checks that PR is still open; one
 closed or merged meanwhile ends the feed (`closed`) with nothing posted.
 
 Room for a harness h is the free slots on every schedulable device that
-lists h (machines.yml, minus held slots), minus the jobs queued for h,
-minus the tickets this feeder fed for h in the last FED_PENDING_SECONDS
-whose job is not queued yet. Every ticket fed this poll takes one unit of
+lists h (machines.yml, minus held slots), minus the jobs queued for any
+harness listed on a device that takes new work for h (a queued codex review
+waits for the same shared slot, #1050), minus the tickets this feeder fed
+for those harnesses in the last FED_PENDING_SECONDS whose job is not queued
+yet. Every ticket fed this poll takes one unit of
 room, a resumed one (some steps already done) as much as a new one; resumed
 tickets only go first. So the queue never holds more work for a harness
 than it has free slots.
@@ -75,6 +77,9 @@ open, or one selected earlier in this poll. A ticket that waits is
 poll. Blocker and holder statuses come from one batched, cached read per
 poll, and none when no ticket has a gate line. A blocker cycle, a blocker
 closed without finishing and one that does not exist raise needs-attention.
+So does an open blocker in a tracked repo that is neither a candidate nor
+fed (`critical-path-blocker`, `gates N candidates, best tier T`), until it
+closes; a failed status read keeps the flag.
 A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
 its `Conflicts with` edges while it waits for a go, and takes its paths back
 on the poll after the round resumes (#270).
@@ -93,8 +98,16 @@ urgent, then bug, then how many of this poll's candidates it unblocks
 A ticket's own tier is the first of the project's `priority_labels` it
 carries, or its Linear priority when the project sets `priority_from_linear`,
 or 0 when it has neither and is urgent. It ranks on its effective tier: the
-best own tier of itself and every candidate it transitively unblocks through
-Blocked by / Depends on (effective_tiers). No tier sorts after every tier.
+best own tier of itself and every candidate, fed or not, it transitively
+unblocks through Blocked by / Depends on (effective_tiers). No tier sorts
+after every tier.
+
+Project share (#1050): while a project with `intake.capacity_share` holds
+fewer tickets in flight than its share of its builder's schedulable slots,
+its best eligible ticket is fed before any other project's. In flight is a
+ticket with a queued or running non-Grok job, one fed in the last
+FED_PENDING_SECONDS with no job yet, or one fed earlier in this poll. With no
+share set, the order is the priority order above.
 
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
 the feeder has a ticket id for, so a label or blocker change after the feed
@@ -120,12 +133,14 @@ from lib import attention, live_settings
 from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
+from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
-    ATTENTION_REASONS,
+    ATTENTION_CRITICAL_PATH,
     FILE_PATH,
+    WAIT_REASONS,
     GateLines,
     Holds,
     PathPolicy,
@@ -205,6 +220,16 @@ PLANNING_FILE_COUNT = 3  # SPEC section 4.1 (D36): over 3 files starts with a pl
 # the poller never acts on (say, an untrusted author) must not stall the
 # feeder for its harness forever.
 FED_PENDING_SECONDS = 600
+_FED_WITHOUT_JOB = f"""
+    SELECT COUNT(*) FROM {FEEDER_TABLE} AS item
+    WHERE item.state = 'fed' AND item.fed_at > ?
+      AND NOT EXISTS (
+        SELECT 1 FROM jobs
+        WHERE lower(jobs.repo) = item.repo
+          AND jobs.ticket_id = item.ticket_id
+          AND jobs.recipient != 'grok'
+      )
+"""
 BODY_LIMIT = 20_000
 
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
@@ -776,21 +801,28 @@ class Feeder:
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
-        waits, holds, capped, gate_read, unblocks, tiers = self._gates(candidates, states, refused)
+        waits, critical, holds, capped, gate_read, unblocks, tiers = self._gates(
+            candidates, states, refused
+        )
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
         self._record_priority(candidates, now)
         if gate_read:
-            self._sync_attention(waits, read_repos, now)
+            self._sync_attention(waits, critical, read_repos, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
+        share_room = self._share_room(candidates, now)
         fed: list[TicketRef] = []
         waiting = 0
         blocked = 0
         errors = read_errors + (0 if gate_read else 1)
-        for candidate in sorted(candidates, key=lambda item: (
-            states[item.ref] not in IN_FLIGHT, *item.order()
-        )):
+        order = sorted(candidates, key=lambda item: (states[item.ref] not in IN_FLIGHT, *item.order()))
+        while order:
+            candidate = next(
+                (c for c in order if states[c.ref] in IN_FLIGHT or share_room.get(c.ref.repo, 0) > 0),
+                order[0],
+            )
+            order.remove(candidate)
             if candidate.ref in refused:
                 continue
             state = self._state(candidate)
@@ -835,6 +867,8 @@ class Feeder:
                 )
                 continue
             fed.append(ref)
+            if candidate.ref.repo in share_room:
+                share_room[candidate.ref.repo] -= 1
             self.log(f"feeder: fed {candidate.issue.repo}#{candidate.issue.key} as {ref.ticket_id}")
             if sharing:
                 shares = "; ".join(
@@ -955,11 +989,21 @@ class Feeder:
         candidates: Sequence[_Candidate],
         states: Mapping[Ref, str],
         refused: Collection[Ref] = frozenset(),
-    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool, dict[Ref, int], dict[Ref, int | None]]:
-        """Blocker waits, the holds of tickets in flight, the holders that
-        hold as capped, whether the status read (when one was needed)
-        succeeded, how many tickets each candidate unblocks, and each
-        candidate's effective tier. A ticket refused at intake is not gated."""
+    ) -> tuple[
+        dict[Ref, Wait],
+        dict[tuple[str, str, str], str],
+        Holds,
+        set[Ref],
+        bool,
+        dict[Ref, int],
+        dict[Ref, int | None],
+    ]:
+        """Blocker waits, the critical-path blocker flags, the holds of
+        tickets in flight, the holders that hold as capped, whether the
+        status read (when one was needed) succeeded, how many tickets each
+        candidate unblocks, and each candidate's effective tier. A ticket
+        refused at intake is not gated, but every candidate, fed or not,
+        passes its tier to its blockers."""
         rows = self._feeder_rows()
         unstarted = [
             c for c in candidates if states[c.ref] in UNSTARTED and c.ref not in refused
@@ -970,14 +1014,15 @@ class Feeder:
         def linear_ref(repo: str, key: str) -> Ref:
             return linear_refs.get(key) or Ref("linear", repo.lower(), key)
 
-        gated = {
+        lines_of = {
             c.ref: replace(c.lines, blocked_by=frozenset(
                 linear_ref(ref.repo, ref.key) if ref.tracker == "linear" else ref
                 for ref in c.lines.blocked_by
             ))
-            for c in unstarted
+            for c in candidates
             if c.lines.blocked_by
         }
+        gated = {c.ref: lines_of[c.ref] for c in unstarted if c.ref in lines_of}
         conflicts = {ref for c in unstarted for ref in c.lines.conflicts_with}
         pull_of = {ref: row.pull for ref, row in rows.items() if row.pull is not None}
         known = set(rows) | set(pull_of.values()) | {c.ref for c in candidates}
@@ -1043,8 +1088,25 @@ class Feeder:
         shared = {repo: policy.shared for repo, policy in holds.policies.items()}
         blocks = _dependents_by_blocker(candidates, gated, pull_of)
         unblocks = critical_path_counts(candidates, blocks, {c.ref for c in unstarted}, shared)
-        tiers = effective_tiers(candidates, blocks)
-        return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks, tiers
+        tiers = effective_tiers(candidates, _dependents_by_blocker(candidates, lines_of, pull_of))
+        tracked = {project.repo.lower() for project in self.config.projects}
+        outside: dict[Ref, set[Ref]] = {}
+        for dependent, lines in gated.items():
+            for blocker in lines.blocked_by:
+                if (
+                    blocker not in known
+                    and blocker.repo in tracked
+                    and _progress(statuses, blocker) is Progress.OPEN
+                ):
+                    outside.setdefault(blocker, set()).add(dependent)
+        critical: dict[tuple[str, str, str], str] = {}
+        for blocker, dependents in outside.items():
+            found = _with_dependents(blocks, dependents)
+            best = min((tier for ref in found if (tier := tiers[ref]) is not None), default=None)
+            critical[(blocker.repo, blocker.key, ATTENTION_CRITICAL_PATH)] = (
+                f"gates {len(found)} candidates, best tier {'none' if best is None else best}"
+            )
+        return blocker_waits(gated, statuses), critical, holds, capped_refs, ok, unblocks, tiers
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
         """Tickets fed or feeding."""
@@ -1146,46 +1208,88 @@ class Feeder:
                 [(ref.repo, ref.key) for ref in refs],
             )
 
-    def _sync_attention(self, waits: Mapping[Ref, Wait], repos: set[str], now: float) -> None:
+    def _sync_attention(
+        self,
+        waits: Mapping[Ref, Wait],
+        critical: Mapping[tuple[str, str, str], str],
+        repos: set[str],
+        now: float,
+    ) -> None:
         flags = {
             (ref.repo, ref.key, wait.attention): wait.reason
             for ref, wait in waits.items()
             if wait.attention is not None
         }
+        tracked = {project.repo for project in self.config.projects}
         with self.queue.connect() as connection:
-            attention.sync(connection, ATTENTION_REASONS, repos, flags, now)
+            attention.sync(connection, WAIT_REASONS, repos, flags, now)
+            attention.sync(connection, (ATTENTION_CRITICAL_PATH,), tracked, critical, now)
 
     # -- capacity --------------------------------------------------------------
 
+    def _placement(
+        self, connection: sqlite3.Connection, now: float
+    ) -> tuple[MachinesConfig | None, Blocked]:
+        machines = self.machines
+        live = live_settings.peek(connection)
+        if live is not None and machines is not None:
+            machines = live.placement_config(machines)
+        return machines, placement_blocked(connection, now, machines, self.head())
+
     def _room(self, harnesses: set[str], now: float) -> dict[str, int]:
         room: dict[str, int] = {}
-        machines = self.machines
         with self.queue.connect() as connection:
-            live = live_settings.peek(connection)
-            if live is not None and machines is not None:
-                machines = live.placement_config(machines)
+            machines, blocked = self._placement(connection, now)
             used = slots_in_use(connection, machines)
-            blocked = placement_blocked(connection, now, machines, self.head())
             for harness in harnesses:
                 free = free_slots(machines, harness, used, blocked) if machines else 0
+                sharing = sorted({harness, *(
+                    other
+                    for device in (machines.devices if machines else ())
+                    if device.takes_new(harness)
+                    for other in device.harnesses
+                )})
+                marks = ",".join("?" * len(sharing))
                 queued = connection.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE state = 'queued' AND recipient = ?",
-                    (harness,),
+                    f"SELECT COUNT(*) FROM jobs WHERE state = 'queued' AND recipient IN ({marks})",
+                    sharing,
                 ).fetchone()[0]
                 pending = connection.execute(
-                    f"""
-                    SELECT COUNT(*) FROM {FEEDER_TABLE} AS item
-                    WHERE item.harness = ? AND item.state = 'fed' AND item.fed_at > ?
-                      AND NOT EXISTS (
-                        SELECT 1 FROM jobs
-                        WHERE lower(jobs.repo) = item.repo
-                          AND jobs.ticket_id = item.ticket_id
-                          AND jobs.recipient != 'grok'
-                      )
-                    """,
-                    (harness, now - FED_PENDING_SECONDS),
+                    f"{_FED_WITHOUT_JOB} AND item.harness IN ({marks})",
+                    (now - FED_PENDING_SECONDS, *sharing),
                 ).fetchone()[0]
                 room[harness] = free - int(queued) - int(pending)
+        return room
+
+    def _share_room(self, candidates: Sequence[_Candidate], now: float) -> dict[str, float]:
+        """For each project with a capacity_share, how many more tickets it
+        is fed before other projects' tickets: its share of the schedulable
+        slots of its builder harness, minus its tickets in flight."""
+        shares: dict[str, tuple[float, str]] = {}
+        for c in candidates:
+            assert c.project.intake is not None
+            if c.project.intake.capacity_share is not None:
+                shares[c.ref.repo] = (c.project.intake.capacity_share, c.harness)
+        room: dict[str, float] = {}
+        if not shares:
+            return room
+        with self.queue.connect() as connection:
+            machines, blocked = self._placement(connection, now)
+            for repo, (share, harness) in shares.items():
+                slots = sum(
+                    device.slot_max or 0
+                    for device in (machines.devices if machines else ())
+                    if device.takes_new(harness) and not blocked.blocks(device.name, harness)
+                )
+                running = connection.execute(
+                    "SELECT COUNT(DISTINCT ticket_id) FROM jobs WHERE lower(repo) = ?"
+                    " AND state IN ('queued', 'running') AND recipient != 'grok'",
+                    (repo,),
+                ).fetchone()[0]
+                pending = connection.execute(
+                    f"{_FED_WITHOUT_JOB} AND item.repo = ?", (now - FED_PENDING_SECONDS, repo)
+                ).fetchone()[0]
+                room[repo] = share * slots - int(running) - int(pending)
         return room
 
     # -- bookkeeping -------------------------------------------------------------

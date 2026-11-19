@@ -1153,3 +1153,31 @@ def test_status_and_dashboard_show_an_empty_latest_poll(tmp_path: Path) -> None:
     assert snapshot["feeder"] == {
         "eligible": 0, "fed": 0, "waiting_capacity": 0, "waiting_blocked": 0, "items": []
     }
+
+
+def _review(queue: SQLiteJobQueue, recipient: str) -> None:
+    queue.enqueue(JobRequest(repo="owner/app", ticket_id="1", action="review", recipient=recipient,
+                             source_comment_id="1", timeout_seconds=600), dedupe_key="review")
+
+
+def test_a_queued_review_on_a_device_the_builder_shares_takes_its_room(tmp_path: Path) -> None:
+    feeder, queue, _, _ = make_feeder(tmp_path, box=2)
+    _review(queue, "codex")
+    assert feeder._room({"claude"}, 10_000.0) == {"claude": 1}
+
+
+def test_a_queued_review_only_another_device_can_run_leaves_the_builder_room(tmp_path: Path) -> None:
+    feeder, queue, _, _ = make_feeder(tmp_path)
+    path = tmp_path / "split.yml"
+    path.write_text(
+        "devices:\n"
+        "  - name: box\n    local: true\n    slot_max: 2\n    harnesses: {claude: claude-bot}\n"
+        "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 1\n"
+        "    harnesses: {codex: codex-bot}\n    workdir_root: /home/{bot}/factory-work\n"
+        "    ssh_alias: pc-{bot}\n    factory_root: /home/{bot}/factory\n",
+        encoding="utf-8",
+    )
+    feeder.machines, findings = load_machines_yml(path)
+    assert feeder.machines is not None, findings
+    _review(queue, "codex")
+    assert feeder._room({"claude", "codex"}, 10_000.0) == {"claude": 2, "codex": 0}
