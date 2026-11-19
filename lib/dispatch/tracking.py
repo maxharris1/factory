@@ -415,6 +415,7 @@ class TrackingMixin:
             ).fetchall()
         refs: list[TicketRef] = []
         held: list[TicketRef] = []
+        probed: list[TicketRef] = []
         first_reads: list[tuple[str, str, float]] = []
         for row in rows:
             state = row["workflow_state"]
@@ -441,17 +442,17 @@ class TrackingMixin:
                     key = (ref.repo.lower(), ref.ticket_id)
                     read_at = _staggered_first_read(now, key)
                     first_reads.append((*key, read_at))
+                probed.append(ref)
                 if now - read_at < STOPPED_POLL_SECONDS:
                     held.append(ref)
                     continue
             refs.append(ref)
-        if held and closed is not None:
-            shut = closed(tuple(held))
-            refs.extend(
-                replace(ref, closed=True)
-                for ref in held
-                if (ref.repo.lower(), ref.ticket_id) in shut
-            )
+        shut = closed(tuple(probed)) if probed and closed is not None else ()
+        refs.extend(ref for ref in held if (ref.repo.lower(), ref.ticket_id) in shut)
+        refs = [
+            replace(ref, closed=True) if (ref.repo.lower(), ref.ticket_id) in shut else ref
+            for ref in refs
+        ]
         if first_reads:
             with self._connect() as connection:
                 connection.executemany(

@@ -537,7 +537,7 @@ class LivePollSource:
         self._last_reads: dict[tuple[str, str], LastRead] = {}
         self._linear_branches: dict[str, str] = {}
         self._linear_branch_pulls: dict[str, str | None] = {}
-        self._closed_reads: set[tuple[str, str, str | None]] = set()
+        self._closed_reads: set[tuple[str, str]] = set()
         self._backoff_until = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
@@ -1045,7 +1045,9 @@ class LivePollSource:
             else:
                 if ticket is not None and not self._budget_spent:
                     found.append(ticket)
-                    if first_closed_read:
+                    if not (ticket.closed or ticket.merged):
+                        self._closed_reads.discard(_closed_key(ref))
+                    elif first_closed_read:
                         self._closed_reads.add(_closed_key(ref))
             finally:
                 self._budget_deadline = None
@@ -1253,6 +1255,7 @@ class LivePollSource:
                 tracked=True,
                 allow_merged=ref.allow_merged,
                 uncached=ref.closed,
+                known_pr=ref.pr_number,
             )
         if ref.tracker != "github":
             return None
@@ -2002,6 +2005,7 @@ class LivePollSource:
         tracked: bool = False,
         allow_merged: bool = False,
         uncached: bool = False,
+        known_pr: str | None = None,
     ) -> TrackedTicket:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
@@ -2046,6 +2050,7 @@ class LivePollSource:
             identifier,
             issue,
             fresh=fresh or uncached,
+            known_pr=known_pr,
         )
         self._linear_branch_pulls[identifier] = pr_number
         pull_facts: dict[str, Any] = {"merged": False}
@@ -2230,15 +2235,16 @@ class LivePollSource:
         issue: Mapping[str, Any],
         *,
         fresh: bool = False,
+        known_pr: str | None = None,
     ) -> str | None:
         recorded = self.fed_pulls.get(repo, identifier)
         if recorded is not None:
             return recorded
         branch = _optional_string(issue.get("gitBranchName"))
-        if branch is None:
-            return None
-        factory_pull = self._branch_pull(repo, branch, fresh=fresh)
-        return None if factory_pull is None else str(factory_pull["number"])
+        factory_pull = None if branch is None else self._branch_pull(repo, branch, fresh=fresh)
+        if factory_pull is not None and (known_pr is None or factory_pull.get("state") == "open"):
+            return str(factory_pull["number"])
+        return known_pr
 
     def _branch_pull(self, repo: str, branch: str, *, fresh: bool) -> dict[str, Any] | None:
         pulls = _array(
@@ -2587,8 +2593,8 @@ def _linear_candidate_key(issue: Mapping[str, Any]) -> tuple[str, str]:
     return (_ticket_hint(issue), str(issue.get("id", "")))
 
 
-def _closed_key(ref: TicketRef) -> tuple[str, str, str | None]:
-    return ref.repo.lower(), ref.ticket_id, ref.pr_number
+def _closed_key(ref: TicketRef) -> tuple[str, str]:
+    return ref.repo.lower(), ref.ticket_id
 
 
 def _linear_ref_key(ref: TicketRef) -> tuple[str, str]:

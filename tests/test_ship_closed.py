@@ -385,9 +385,11 @@ def test_after_a_restart_a_closed_linear_pr_is_not_read_from_gh_cache(tmp_path: 
     )
 
 
-def slow_source(now, seconds: float, budget: float = 10.0) -> LivePollSource:
+def slow_source(
+    now, seconds: float, budget: float = 10.0, pull: dict | None = None
+) -> LivePollSource:
     gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
-    gh.pull = {"state": "closed", "merged": False, "commits": 1}
+    gh.pull = {"state": "closed", "merged": False, "commits": 1} if pull is None else pull
 
     def runner(argv, timeout):
         if any(re.fullmatch(r"repos/acme/widgets/pulls/[0-9]+", part) for part in argv):
@@ -461,3 +463,125 @@ def test_a_linear_ticket_held_after_a_full_read_is_probed_by_that_reads_pr(tmp_p
     assert outcome(queue, "AUT-42")[0] == "abandoned"
     assert len(state_probes(gh)) == 1
     assert gh.calls.index(state_probes(gh)[0]) < gh.calls.index(branch_lookups(gh)[1])
+
+
+def test_a_held_linear_ticket_whose_branch_lost_its_pr_ends_from_its_stored_pr(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0], pr_number="12")
+    dispatcher.flag_attention("acme/widgets", "AUT-42", "ship-failed", "handoff ship failed")
+    gh = StaleCacheGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.pull = linear_gh("closed").pull
+    gh.branch_pulls = []
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert_ended_from_an_uncached_read(
+        dispatcher, queue, gh, "AUT-42", "repos/acme/widgets/pulls/12"
+    )
+
+
+def test_a_newer_open_pr_on_the_branch_supersedes_the_stored_pr(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0], pr_number="12")
+    gh = linear_gh("closed")
+    gh.branch_pulls = [{**gh.branch_pulls[0], "number": 15, "state": "open"}]
+    closed_pull, open_pull = gh.pull, {**gh.pull, "state": "open"}
+
+    def runner(argv, timeout):
+        gh.pull = open_pull if "repos/acme/widgets/pulls/15" in argv else closed_pull
+        return gh(argv, timeout)
+
+    dispatcher.poll_once(live_source(dispatcher, runner, now))
+
+    assert outcome(queue, "AUT-42") == ("blocked", [])
+    assert [call for call in gh.calls if "repos/acme/widgets/pulls/15" in call]
+    assert pull_reads(gh) == []
+
+
+def test_a_stopped_linear_ticket_due_for_its_read_ends_when_its_pr_closed(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0], pr_number="12")
+    dispatcher.flag_attention("acme/widgets", "AUT-42", "ship-failed", "handoff ship failed")
+    gh = StaleCacheGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.pull = linear_gh("closed").pull
+    gh.branch_pulls = linear_gh("closed").branch_pulls
+    now[0] = 401.0
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert_ended_from_an_uncached_read(
+        dispatcher, queue, gh, "AUT-42", "repos/acme/widgets/pulls/12"
+    )
+
+
+def test_a_stopped_github_ticket_due_for_its_read_ends_when_its_pr_closed(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "7", "github", now[0])
+    gh = StaleCacheGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "closed", "merged": False, "commits": 1}
+    now[0] = 401.0
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert_ended_from_an_uncached_read(dispatcher, queue, gh, "7", "repos/acme/widgets/pulls/7")
+
+
+def test_a_pr_closed_again_after_a_read_saw_it_open_ends_its_ticket(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "9", "github", now[0])
+    for number in ("1", "2"):
+        with queue.connect() as connection:
+            connection.execute(
+                "INSERT INTO tracked_tickets VALUES ('acme/widgets', ?, 'github', 0)", (number,)
+            )
+            connection.execute(
+                "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+                "VALUES ('acme/widgets', ?, 'review')",
+                (number,),
+            )
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    reopened = [True]
+
+    def runner(argv, timeout):
+        read = next(
+            (part for part in argv if re.fullmatch(r"repos/acme/widgets/pulls/[0-9]+", part)),
+            None,
+        )
+        if read is None:
+            state = "closed"
+        else:
+            now[0] += 6
+            state = "closed" if read.endswith("/9") and not reopened[0] else "open"
+        gh.pull = {"state": state, "merged": False, "commits": 1}
+        return gh(argv, timeout)
+
+    source = live_source(dispatcher, runner, now, tracked_read_budget_seconds=10)
+    dispatcher.poll_once(source)
+    assert outcome(queue, "9") == ("blocked", [])
+
+    reopened[0] = False
+    now[0] = 160.0
+    dispatcher.poll_once(source)
+
+    assert outcome(queue, "9") == ABANDONED
+
+
+def test_a_closed_ref_whose_read_saw_its_pr_open_keeps_its_exemption() -> None:
+    now = [100.0]
+    pull = {"state": "open", "merged": False, "commits": 1}
+    source = slow_source(now, seconds=4, pull=pull)
+
+    assert read_ids(source, (closed("9"),)) == ["9"]
+    pull["state"] = "closed"
+    assert read_ids(source, (active("1"), active("2"), closed("9"))) == ["9", "1"]
