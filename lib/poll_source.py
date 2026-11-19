@@ -136,7 +136,7 @@ query FactoryStates($team: String!, $numbers: [Float!]!, $first: Int!) {
     first: $first,
     filter: { team: { key: { eq: $team } }, number: { in: $numbers } }
   ) {
-    nodes { identifier state { name type } }
+    nodes { identifier branchName state { name type } }
   }
 }
 """.strip()
@@ -161,6 +161,7 @@ LINEAR_SEARCH_COMPLEXITY = 116
 LINEAR_ISSUE_COMPLEXITY = 779
 LINEAR_STATES_COMPLEXITY = 250
 LINEAR_STATES_PAGE = 100
+BRANCH_LOOKUPS_PER_REPO = 10
 ORCHESTRATOR = "grok-bot"
 RISKY_PATH = re.compile(r"migration|realtime")
 RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
@@ -534,6 +535,9 @@ class LivePollSource:
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
         self._last_reads: dict[tuple[str, str], LastRead] = {}
+        self._linear_branches: dict[str, str] = {}
+        self._linear_branch_pulls: dict[str, str | None] = {}
+        self._closed_reads: set[tuple[str, str]] = set()
         self._backoff_until = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
@@ -626,6 +630,7 @@ class LivePollSource:
         self._factory_cache.clear()
         self._ticket_cache.clear()
         self._linear_issue_cache.clear()
+        self._linear_branches.clear()
         self._linear_due = self._cycles_until_linear <= 0
         if self._linear_due:
             self._cycles_until_linear = self._linear_every
@@ -980,12 +985,16 @@ class LivePollSource:
     ) -> tuple[TrackedTicket, ...]:
         found: list[TrackedTicket] = []
         projects = {project.repo.lower(): project for project in self.config.projects}
+        urgent = [
+            ref for ref in tickets if ref.closed and _closed_key(ref) not in self._closed_reads
+        ]
+        rest = [ref for ref in tickets if ref not in urgent]
         # Between Linear cycles tracked Linear tickets wait for the next one:
         # no Linear read, and nothing rebuilt from an older read.
         linear_refs = sorted(
             (
                 ref
-                for ref in tickets
+                for ref in rest
                 if ref.tracker == "linear" and self._linear_due
             ),
             key=_linear_ref_key,
@@ -997,10 +1006,11 @@ class LivePollSource:
             else 0
         )
         ordered = (
-            linear_refs[start:]
+            urgent
+            + linear_refs[start:]
             + linear_refs[:start]
             + sorted(
-                (ref for ref in tickets if ref.tracker != "linear"),
+                (ref for ref in rest if ref.tracker != "linear"),
                 key=lambda ref: self._tracked_turns.get((ref.repo.lower(), ref.ticket_id), 0),
             )
         )
@@ -1014,24 +1024,36 @@ class LivePollSource:
                     self._note_unread(ref.ticket_id)
                 continue
             repo = ref.repo.lower()
+            first_closed_read = ref in urgent
             left = self.tracked_read_budget_seconds - spent.get(repo, 0.0)
-            if left <= 0:
+            if left <= 0 and not first_closed_read:
                 self._defer(f"tracked-read budget deferred {project.repo}")
                 continue
             started = self.clock()
-            self._budget_deadline = started + left
+            self._budget_deadline = started + (
+                self.read_deadline_seconds if first_closed_read else left
+            )
             self._budget_spent = False
+            cursor = self._linear_tracked_cursor
             try:
                 ticket = self._tracked_ticket(ref, project, probes.get((repo, ref.ticket_id)))
             except Exception as exc:
                 if not isinstance(exc, _TerminalTicket):
                     self._record(ref.repo, ref.ticket_id, exc)
+                elif first_closed_read:
+                    self._closed_reads.add(_closed_key(ref))
             else:
                 if ticket is not None and not self._budget_spent:
                     found.append(ticket)
+                    if not (ticket.closed or ticket.merged):
+                        self._closed_reads.discard(_closed_key(ref))
+                    elif first_closed_read:
+                        self._closed_reads.add(_closed_key(ref))
             finally:
                 self._budget_deadline = None
                 spent[repo] = spent.get(repo, 0.0) + self.clock() - started
+                if first_closed_read:
+                    self._linear_tracked_cursor = cursor
             if self._budget_spent:
                 self._budget_spent = False
                 self._defer(f"tracked-read budget deferred {project.repo}")
@@ -1066,20 +1088,51 @@ class LivePollSource:
 
     def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
         projects = {project.repo.lower(): project for project in self.config.projects}
-        wanted: dict[str, list[str]] = {}
+        wanted: dict[str, dict[str, list[str]]] = {}
+        lookups: dict[str, int] = {}
+        closed: set[tuple[str, str]] = set()
         for ref in refs:
             repo = ref.repo.lower()
-            if ref.tracker == "github" and repo in projects:
-                wanted.setdefault(repo, []).append(ref.ticket_id)
-        closed: set[tuple[str, str]] = set()
+            project = projects.get(repo)
+            if project is None or ref.tracker not in ("github", "linear"):
+                continue
+            number = self._probe_number(project.repo, ref)
+            if number is not None:
+                wanted.setdefault(repo, {}).setdefault(number, []).append(ref.ticket_id)
+            elif (
+                ref.ticket_id in self._linear_branches
+                and ref.ticket_id not in self._linear_branch_pulls
+                and lookups.get(repo, 0) < BRANCH_LOOKUPS_PER_REPO
+            ):
+                lookups[repo] = lookups.get(repo, 0) + 1
+                if self._branch_pull_closed(project.repo, ref.ticket_id):
+                    closed.add((repo, ref.ticket_id))
         for repo, numbers in wanted.items():
             try:
-                found = self.github.closed_pulls(projects[repo].repo, numbers)
+                found = self.github.closed_pulls(projects[repo].repo, list(numbers))
             except Exception:
                 self._defer(f"GitHub closed probe failed for {projects[repo].repo}")
                 continue
-            closed.update((repo, number) for number in found)
+            closed.update((repo, ticket_id) for number in found for ticket_id in numbers[number])
         return frozenset(closed)
+
+    def _probe_number(self, repo: str, ref: TicketRef) -> str | None:
+        if ref.tracker == "github":
+            return ref.ticket_id
+        return (
+            ref.pr_number
+            or self.fed_pulls.get(repo, ref.ticket_id)
+            or self._linear_branch_pulls.get(ref.ticket_id)
+        )
+
+    def _branch_pull_closed(self, repo: str, identifier: str) -> bool:
+        try:
+            pull = self._branch_pull(repo, self._linear_branches[identifier], fresh=True)
+        except Exception:
+            self._defer(f"GitHub branch lookup failed for {repo}")
+            return False
+        self._linear_branch_pulls[identifier] = None if pull is None else str(pull["number"])
+        return pull is not None and pull.get("state") != "open"
 
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
         if not self._linear_due:
@@ -1148,6 +1201,9 @@ class LivePollSource:
                 ref = numbered.get(parsed) if parsed and parsed[0] == team else None
                 if ref is None or not isinstance(state, dict):
                     continue
+                branch = node.get("branchName")
+                if isinstance(branch, str) and branch:
+                    self._linear_branches[ref.ticket_id] = branch
                 name, kind = state.get("name"), state.get("type")
                 if isinstance(name, str) and isinstance(kind, str):
                     states[ref.ticket_id] = LinearState(
@@ -1198,6 +1254,8 @@ class LivePollSource:
                 issue,
                 tracked=True,
                 allow_merged=ref.allow_merged,
+                uncached=ref.closed,
+                known_pr=ref.pr_number,
             )
         if ref.tracker != "github":
             return None
@@ -1207,6 +1265,7 @@ class LivePollSource:
             ref.ticket_id,
             allow_merged=ref.allow_merged,
             probed=probed,
+            uncached=ref.closed,
         )
 
     def _reusable_linear_issue(self, ref: TicketRef) -> dict[str, Any] | None:
@@ -1693,19 +1752,22 @@ class LivePollSource:
         allow_merged: bool = False,
         comments: tuple[Comment, ...] | None = None,
         probed: str | None = None,
+        uncached: bool = False,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
-        cached = None if fresh else self._ticket_cache.get(cache_key)
+        cached = None if fresh or uncached else self._ticket_cache.get(cache_key)
         if cached is not None:
             return cached
         read_at = self.clock()
-        last = None if fresh else self._last_reads.get((project.repo.lower(), number))
+        last = None if fresh or uncached else self._last_reads.get((project.repo.lower(), number))
         if not reusable(last, probed, read_at) or bool(last.hold_inputs) != factory.hold_applies:
             last = None
         if last is None:
             # gh's --cache could serve a body older than the probe, which
             # would then be stored under the probe's fingerprint.
-            pull = self._github_pull(project.repo, number, fresh=fresh or probed is not None)
+            pull = self._github_pull(
+                project.repo, number, fresh=fresh or uncached or probed is not None
+            )
         else:
             pull = last.pull
         merged = pull.get("merged") is True
@@ -1942,12 +2004,14 @@ class LivePollSource:
         fresh: bool = False,
         tracked: bool = False,
         allow_merged: bool = False,
+        uncached: bool = False,
+        known_pr: str | None = None,
     ) -> TrackedTicket:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
             raise PollSourceError("Linear issue has no identifier")
         cache_key = ("linear", project.repo.lower(), identifier)
-        cached = None if fresh else self._ticket_cache.get(cache_key)
+        cached = None if fresh or uncached else self._ticket_cache.get(cache_key)
         if cached is not None:
             if cached.merged and tracked:
                 self._linear_merged(project, identifier, allow_merged)
@@ -1985,12 +2049,14 @@ class LivePollSource:
             project.repo,
             identifier,
             issue,
-            fresh=fresh,
+            fresh=fresh or uncached,
+            known_pr=known_pr,
         )
+        self._linear_branch_pulls[identifier] = pr_number
         pull_facts: dict[str, Any] = {"merged": False}
         pull: Mapping[str, Any] = {}
         if pr_number is not None:
-            pull = self._github_pull(project.repo, pr_number, fresh=fresh)
+            pull = self._github_pull(project.repo, pr_number, fresh=fresh or uncached)
             # #108: a cached discovery read still carries the merge.
             pull_facts = {**_pull_facts(pull, fresh=fresh), "merged": pull.get("merged") is True}
             if pull_facts["merged"] and tracked:
@@ -2169,13 +2235,18 @@ class LivePollSource:
         issue: Mapping[str, Any],
         *,
         fresh: bool = False,
+        known_pr: str | None = None,
     ) -> str | None:
         recorded = self.fed_pulls.get(repo, identifier)
         if recorded is not None:
             return recorded
         branch = _optional_string(issue.get("gitBranchName"))
-        if branch is None:
-            return None
+        factory_pull = None if branch is None else self._branch_pull(repo, branch, fresh=fresh)
+        if factory_pull is not None and (known_pr is None or factory_pull.get("state") == "open"):
+            return str(factory_pull["number"])
+        return known_pr
+
+    def _branch_pull(self, repo: str, branch: str, *, fresh: bool) -> dict[str, Any] | None:
         pulls = _array(
             _json(
                 self._gh_call(
@@ -2192,12 +2263,11 @@ class LivePollSource:
             ),
             "GitHub branch pulls",
         )
-        factory_pull = max(
+        return max(
             (item for item in pulls if isinstance(item, dict) and _on_branch(item, repo, branch)),
             key=_open_then_newest,
             default=None,
         )
-        return None if factory_pull is None else str(factory_pull["number"])
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
@@ -2521,6 +2591,10 @@ def _linear_terms(query: str) -> tuple[str, ...]:
 
 def _linear_candidate_key(issue: Mapping[str, Any]) -> tuple[str, str]:
     return (_ticket_hint(issue), str(issue.get("id", "")))
+
+
+def _closed_key(ref: TicketRef) -> tuple[str, str]:
+    return ref.repo.lower(), ref.ticket_id
 
 
 def _linear_ref_key(ref: TicketRef) -> tuple[str, str]:
