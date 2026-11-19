@@ -62,8 +62,8 @@ stdout on a pipe and hands the pipe to a `Session` here:
   `get_usage` probe at the job's start (lib/usage_probe.py, `add_usage`)
   and from each `rate_limit_event` in the stream (`parse_rate_limit_event`);
   a box Codex run's come from its own session rollout, found by the
-  `thread.started` thread id and read on each flush, before the row is
-  built (lib/codex_rollout.py); a remote one's once when the run ends
+  `thread.started` thread id and read on each flush
+  (lib/codex_rollout.py); a remote one's once when the run ends
   (`add_rollout`). They are written to `usage_readings` in the same
   transaction as the telemetry row, per harness, bot and device, with the
   placed device's usage account.
@@ -1469,7 +1469,6 @@ class Summary:
                 self._codex_item(item, now, done=kind == "item.completed")
 
     def codex_total(self, tokens: object) -> None:
-        """Codex's own session total from its rollout (#1015); later turn sums no longer change it."""
         if not isinstance(tokens, dict):
             return
         self._totals = True
@@ -1835,7 +1834,7 @@ class Session:
             self.add_usage(parse_codex(found, self.clock()))
             with self._lock:
                 self.summary.codex_total(found.get("tokens") if isinstance(found, dict) else None)
-        except Exception as exc:  # orch job run calls this right before the job's final write
+        except Exception as exc:
             self._warn("rollout", f"telemetry: rollout not read ({type(exc).__name__})")
 
     def _read_rollout(self) -> None:

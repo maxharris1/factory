@@ -2492,7 +2492,7 @@ def _job_run_command(argv: list[str]) -> int:
         if usage_read is not None:
             usage_read.join(usage_probe.TIMEOUT_SECONDS)
         if session is not None:
-            if placed.target is not None:  # #151, #1015: a remote Codex job's rollout limits and tokens
+            if placed.target is not None:
                 session.add_rollout(usage_probe.remote_codex(
                     placed.transport, placed.target, session.harness, session.summary.thread_id,
                 ))

@@ -1,5 +1,4 @@
-"""The rate limits and token total in one Codex job's own session rollout
-(issues #151 and #1015).
+"""The rate limits and token total in one Codex job's own session rollout.
 
 Codex CLI writes each session to
 `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`, and

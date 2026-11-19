@@ -16,8 +16,7 @@
   lines fill in the numbers when `get_usage` has none (lib/usage_readings.py).
 * Codex on a remote device: when the run ends, lib/codex_rollout.py's own
   source runs there under `python3 -I -S -c` for the job's thread id and
-  prints that rollout's rate limits and session token total, which the
-  session takes whole (`Session.add_rollout`, #1015). On the box the session
+  prints that rollout's rate limits and session token total. On the box the session
   reads it in process on each flush (lib/telemetry.py).
 
 Nothing here reads a credential: the CLI and the rollout reader run with
