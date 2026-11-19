@@ -54,13 +54,12 @@ closed or merged meanwhile ends the feed (`closed`) with nothing posted.
 
 Room for a harness h is the free slots on every schedulable device that
 lists h (machines.yml, minus held slots), minus the jobs queued for any
-harness listed on a device that takes new work for h (a queued codex review
-waits for the same shared slot, #1050), minus the tickets this feeder fed
-for those harnesses in the last FED_PENDING_SECONDS whose job is not queued
-yet. Every ticket fed this poll takes one unit of
-room, a resumed one (some steps already done) as much as a new one; resumed
-tickets only go first. So the queue never holds more work for a harness
-than it has free slots.
+harness listed on a device that takes new work for h, minus the tickets this
+feeder fed for those harnesses in the last FED_PENDING_SECONDS whose job is
+not queued yet. Every ticket fed this poll takes one unit of room, a resumed
+one (some steps already done) as much as a new one; resumed tickets only go
+first. So the queue never holds more work for a harness than it has free
+slots.
 
 Gates (#156, lib/feeder_gates.py): a ticket not started yet is fed only
 once every ticket or PR its `Blocked by` or `Depends on` lines (and, on
@@ -104,10 +103,11 @@ after every tier.
 
 Project share (#1050): while a project with `intake.capacity_share` holds
 fewer tickets in flight than its share of its builder's schedulable slots,
-its best eligible ticket is fed before any other project's. In flight is a
-ticket with a queued or running non-Grok job, one fed in the last
-FED_PENDING_SECONDS with no job yet, or one fed earlier in this poll. With no
-share set, the order is the priority order above.
+its best eligible ticket is fed before any other project's, after the
+tickets whose feed is already under way. In flight is a ticket with a queued
+or running non-Grok job, one fed in the last FED_PENDING_SECONDS with no job
+yet, or one fed earlier in this poll. With no share set, the order is the
+priority order above.
 
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
 the feeder has a ticket id for, so a label or blocker change after the feed

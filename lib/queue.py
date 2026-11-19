@@ -8,15 +8,15 @@ Claim order (issues #85, #258): a job on a ticket with a priority tier first,
 lower tier first; then, inside a tier and among tickets with none, a job that
 finishes a ticket already past intake (FINISHING_ACTIONS, decision 1050)
 before one that starts a ticket; then a job on a ticket marked urgent, then a
-job resuming a paused step (its detail says `"resume": true`), then a job on a ticket marked bug, then the ticket that
-unblocks more open intake tickets, then the oldest. `ticket_priority` holds
-those marks (the backlog feeder writes them each poll); a database without
-that table orders on resume and age alone, and one without the tier and
-unblocks columns orders as if no ticket had them. The tier is the ticket's
-effective tier (decision 1050): the best of its own and those of the tickets
-it gates, with an urgent ticket that has no tier at tier 0.
-A queued job on a ticket whose `ticket_state` is abandoned (issue #109) or
-handed-off-externally (issue #749) is never claimed.
+job resuming a paused step (its detail says `"resume": true`), then a job on a
+ticket marked bug, then the ticket that unblocks more open intake tickets,
+then the oldest. `ticket_priority` holds those marks (the backlog feeder
+writes them each poll); a database without that table orders on resume and age
+alone, and one without the tier and unblocks columns orders as if no ticket
+had them. The tier is the ticket's effective tier (decision 1050): the best of
+its own and those of the tickets it gates, with an urgent ticket that has no
+tier at tier 0. A queued job on a ticket whose `ticket_state` is abandoned
+(issue #109) or handed-off-externally (issue #749) is never claimed.
 
 A handoff that `orch job done` finds does not fit its job (lib/handoff_check.py,
 #191) is recorded by record_invalid_handoff: a `submitted-invalid` job event
