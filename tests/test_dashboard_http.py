@@ -1043,17 +1043,17 @@ def _row(ticket_id: str, state: str, why: str | None, actions: list[str], *,
 
 
 ROWS = {
-    "12": _row("12", "awaiting-ok", "awaiting-ok", ["ok", "close"], pr="34", comment_id="7001"),
+    "12": _row("12", "awaiting-ok", "awaiting-ok", ["ok", "close", "hand-off"], pr="34", comment_id="7001"),
     "13": _row("13", "building", None, [], pr="35"),
-    "40": _row("40", "waiting-max", "plan-size", ["approve-plan", "split", "close"],
+    "40": _row("40", "waiting-max", "plan-size", ["approve-plan", "split", "close", "hand-off"],
                comment_id="9001"),
-    "41": _row("41", "waiting-max", "plan-size", ["approve-plan", "split", "close"]),
-    "42": _row("42", "capped", "capped", ["another-round", "close"], pr="52"),
-    "43": _row("43", "waiting-max", "question", ["answer", "close"], comment_id="9003"),
-    "44": _row("44", "fixing", "stuck", ["retry", "close"]),
-    "AUT-7": _row("AUT-7", "waiting-external", "waiting-external", ["close"],
+    "41": _row("41", "waiting-max", "plan-size", ["approve-plan", "split", "close", "hand-off"]),
+    "42": _row("42", "capped", "capped", ["another-round", "close", "hand-off"], pr="52"),
+    "43": _row("43", "waiting-max", "question", ["answer", "close", "hand-off"], comment_id="9003"),
+    "44": _row("44", "fixing", "stuck", ["retry", "close", "hand-off"]),
+    "AUT-7": _row("AUT-7", "waiting-external", "waiting-external", ["close", "hand-off"],
                   repo=LINEAR_REPO, source="AUT-7"),
-    "AUT-8": _row("AUT-8", "blocked", "blocked", ["resume", "close"], repo=LINEAR_REPO,
+    "AUT-8": _row("AUT-8", "blocked", "blocked", ["resume", "close", "hand-off"], repo=LINEAR_REPO,
                   pr="56", source="AUT-8"),
 }
 ACT_SNAPSHOT = {**SNAPSHOT, "tickets": list(ROWS.values())}
@@ -1063,6 +1063,7 @@ WINTER_WORDS = "**Max's words** (Max 2026-01-15 3:04 PM ET)\n> first line\n> sec
 SUMMER_WORDS = "**Max's words** (Max 2026-07-15 9:05 AM ET)\n> first line\n> second line\n"
 GO_LINE = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->"
 CLOSE_LINE = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->"
+HANDOFF_LINE = "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=handed-off -->"
 
 
 def act(client: Client, ticket_id: str, action: str,
@@ -1110,6 +1111,8 @@ def act_client(serve_actions, fake_github, actions_site: Path, audit: Path, monk
      f"<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->\n\n{WINTER_WORDS}"),
     ("AUT-8", "resume", SUMMER, {}, LINEAR_REPO, 56, f"{GO_LINE}\n\n{SUMMER_WORDS}"),
     ("43", "close", SUMMER, {}, REPO, 43, f"{CLOSE_LINE}\n\n{SUMMER_WORDS}"),
+    ("42", "hand-off", WINTER, {}, REPO, 52, f"{HANDOFF_LINE}\n\n{WINTER_WORDS}"),
+    ("43", "hand-off", SUMMER, {}, REPO, 43, f"{HANDOFF_LINE}\n\n{SUMMER_WORDS}"),
 ])
 def test_each_action_posts_its_body_as_max(
     act_client: Client, fake_github, audit: Path, monkeypatch,

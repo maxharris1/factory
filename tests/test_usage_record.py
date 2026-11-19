@@ -42,6 +42,11 @@ RESETS = NOW + 3 * 24 * 3600
 OBSERVED = NOW - 600
 
 
+@pytest.fixture(autouse=True)
+def clock_pinned_to_now(monkeypatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: float(NOW))
+
+
 @pytest.fixture
 def machines(tmp_path: Path) -> Path:
     path = tmp_path / "machines.yml"
@@ -123,13 +128,11 @@ def test_database_comes_from_orch_db(db: Path, machines: Path, monkeypatch) -> N
 
 
 def test_observed_at_defaults_to_now(db: Path, machines: Path) -> None:
-    before = time.time()
-
     assert record(db, machines, observed_at=None) == 0
 
     (row,) = rows(db)
-    assert before <= row[6] <= time.time()
-    assert row[9] == row[6]
+    assert row[6] == float(NOW)
+    assert row[9] == float(NOW)
 
 
 def test_weekly_is_stored_as_seven_day(db: Path, machines: Path) -> None:

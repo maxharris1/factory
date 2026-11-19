@@ -646,17 +646,23 @@ MaxOkAnotherRound ==
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0, !.extra = 1]
   /\ QaFollowsHead
 
+\* #891. Max can hand a ticket off before its first review, when the model
+\* has drawn no cap yet. orch.db always has the risk cap, so leaving
+\* handed-off draws it here as T2ReadyGreen does.
+HandoffCaps == IF cap = 0 THEN {1, 3} ELSE {cap}
+
 \* #118. An approver's go on a handed-off ticket whose next round would pass
 \* the effective cap is the same extra round, and the approved round counts as
 \* completed. Bounded at 1 for TLC: a go at the cap after a second handoff is
 \* not modeled.
 MaxOkAfterHandoff ==
   /\ state = "handed-off"
-  /\ counts.round + 1 >= cap + counts.extra
+  /\ cap' \in HandoffCaps
+  /\ counts.round + 1 >= cap' + counts.extra
   /\ counts.extra = 0
   /\ state' = "fixing"
-  /\ keep
-  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ configOk' = configOk /\ paused' = "none" /\ external' = external
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.byHand = FALSE]
   /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0, !.extra = 1]
   /\ QaFollowsHead
 
@@ -688,10 +694,11 @@ T1UnsatFix ==
 ReenterAfterHandoff ==
   /\ "T2" \notin Omit
   /\ state \in {"handed-off", "merge-queue"}
-  /\ counts.round + 1 < cap + counts.extra
+  /\ cap' \in HandoffCaps
+  /\ counts.round + 1 < cap' + counts.extra
   /\ state' = "review"
-  /\ keep
-  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ configOk' = configOk /\ paused' = "none" /\ external' = external
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.byHand = FALSE]
   /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0]
   /\ QaFollowsHead
 
@@ -893,10 +900,27 @@ LinearCanceled ==
   /\ state' = "abandoned"
   /\ flags' = flags
 
+\* #891. Max hands off a ticket that waits on him (answers state=handed-off,
+\* approver only). A ticket with a running job is not a source: that job's
+\* ready would re-enter review behind him. The move is Max's, not the
+\* factory's, so byHand exempts it from the covered-ship rules.
+MaxHandoffFrom == {"awaiting-ok", "capped", "blocked", "waiting-external", "stuck"}
+
+T5Handoff ==
+  /\ "T5" \notin Omit
+  /\ \/ state \in MaxHandoffFrom
+     \/ state = "waiting-max" /\ PastGo
+  /\ state' = "handed-off"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.byHand = TRUE]
+  /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
+       !.planGaps = 0, !.updates = 0]
+  /\ qa' = QaReset
+
 \* Every step but Linear's leaves a parked ticket alone.
 Factory ==
   \/ IntakeBrief \/ IntakeRefused
-  \/ T5Ask \/ T5Answer \/ QaParkAnswered \/ T5Abandon
+  \/ T5Ask \/ T5Answer \/ QaParkAnswered \/ T5Abandon \/ T5Handoff
   \/ T1KindGoPlan \/ T1KindGoBuild
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
   \/ T1PPlanOverSize
@@ -1025,6 +1049,7 @@ T5Decided ==
   /\ state \in {"questions", "building", "fixing"} => ENABLED T5Ask
   /\ state = "waiting-max" /\ paused # "ship" => ENABLED T5Answer
   /\ state = "waiting-max" => ENABLED T5Abandon
+  /\ state \in MaxHandoffFrom \/ (state = "waiting-max" /\ PastGo) => ENABLED T5Handoff
 
 T6Decided ==
   /\ state \in JobStates /\ counts.deaths = 0 => ENABLED T6JobRetry
@@ -1041,6 +1066,7 @@ T8Decided ==
 
 HandedOffDecided ==
   /\ state = "handed-off" => ENABLED MergeObserved
+  /\ state = "handed-off" /\ cap = 0 => ENABLED ReenterAfterHandoff
   /\ state = "handed-off" /\ counts.round + 1 < cap + counts.extra =>
        ENABLED ReenterAfterHandoff
   /\ state = "handed-off" /\ counts.round + 1 >= cap + counts.extra
@@ -1139,5 +1165,12 @@ ChartLinear ==
     /\ state \in {"capped", "stuck"}
     /\ counts.declines = 0
     /\ state = "capped" \/ (counts.round = 0 /\ counts.gate = 0 /\ counts.planGaps = 0)
+
+\* Drawing bound for abandoned (#891). A dropped ticket is a leaf, and its
+\* every round and counter was a state of its own. Drawing only first-round
+\* drops keeps every arrow into abandoned and leaves room under statechart's
+\* 500-state drawing limit for Max's hand-off.
+ChartAbandoned ==
+  state' = "abandoned" /\ state # "abandoned" => counts.round = 0
 
 ====
