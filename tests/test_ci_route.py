@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import json
+import socket
+import subprocess
 import sys
+import threading
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -16,6 +24,8 @@ OWN = 500
 EARLIER = 400
 LATER = 600
 POOL = ("self-hosted", "Linux", "X64", "factory-linux")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNS = "/repos/maxharris1/factory/actions/runs"
 
 
 def job(name: str = "test (1/3)", status: str = "in_progress", *, run_id: int = EARLIER,
@@ -128,3 +138,104 @@ def test_decide_does_not_flip_flop() -> None:
     assert locals_seen == [0, 1, 0]
     assert dict(vars(ci_route)) == before
 
+
+@pytest.fixture
+def api() -> Iterator[SimpleNamespace]:
+    routes: dict[str, dict] = {}
+    methods: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def serve(self) -> None:
+            methods.append(self.command)
+            url = urlsplit(self.path)
+            body = routes.get(url.path)
+            if body is None:
+                self.send_error(500)
+                return
+            statuses = parse_qs(url.query).get("status")
+            if statuses and "workflow_runs" in body:
+                body = {"workflow_runs": [run for run in body["workflow_runs"] if run["status"] in statuses]}
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = serve
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}", routes=routes, methods=methods)
+    server.shutdown()
+    server.server_close()
+
+
+def api_run(run_id: int, status: str = "in_progress") -> dict:
+    return {"id": run_id, "name": "ci", "status": status, "event": "pull_request", "run_attempt": 1}
+
+
+def api_job(name: str, status: str, run_id: int = EARLIER) -> dict:
+    created = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"id": run_id * 10 + len(name), "run_id": run_id, "name": name, "status": status, "conclusion": None,
+            "labels": list(POOL), "created_at": created, "started_at": created, "workflow_name": "ci"}
+
+
+def github_env(api_url: str) -> dict[str, str]:
+    return {"GITHUB_API_URL": api_url, "GITHUB_REPOSITORY": "maxharris1/factory", "GITHUB_RUN_ID": str(OWN),
+            "GITHUB_TOKEN": "ghs_test", "FACTORY_LINUX_POOL": '{"online":3}'}
+
+
+def run_router(tmp_path: Path, env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], str]:
+    output = tmp_path / "github_output"
+    output.touch()
+    result = subprocess.run([sys.executable, "-I", "lib/ci_route.py"], cwd=REPO_ROOT, capture_output=True,
+                            text=True, timeout=30, env={**env, "GITHUB_OUTPUT": str(output)})
+    return result, output.read_text()
+
+
+def serve_runs(api: SimpleNamespace, jobs: list[dict]) -> None:
+    api.routes[RUNS] = {"total_count": 2, "workflow_runs": [api_run(OWN), api_run(EARLIER)]}
+    api.routes[f"{RUNS}/{EARLIER}/jobs"] = {"total_count": len(jobs), "jobs": jobs}
+
+
+def test_main_without_github_env_writes_no_hosted_slots_and_warns(tmp_path: Path) -> None:
+    result, output = run_router(tmp_path, {})
+    assert result.returncode == 0
+    assert output == "hosted=[]\n"
+    assert "::warning::" in result.stdout
+
+
+@pytest.mark.parametrize(("jobs", "expected"), [
+    ([api_job(f"test ({i}/3)", "in_progress") for i in (1, 2, 3)], SLOTS),
+    ([api_job("test (1/3)", "queued")], SLOTS[2:]),
+])
+def test_main_routes_from_the_runs_it_reads(tmp_path: Path, api: SimpleNamespace, jobs: list[dict],
+                                            expected: tuple[str, ...]) -> None:
+    serve_runs(api, jobs)
+    result, output = run_router(tmp_path, github_env(api.url))
+    assert result.returncode == 0
+    assert "::warning::" not in result.stdout
+    assert output == f"hosted={json.dumps(list(expected), separators=(',', ':'))}\n"
+    assert api.methods and set(api.methods) == {"GET"}
+
+
+def test_main_on_an_api_error_writes_no_hosted_slots_and_warns(tmp_path: Path, api: SimpleNamespace) -> None:
+    api.routes[RUNS] = {"total_count": 2, "workflow_runs": [api_run(OWN), api_run(EARLIER)]}
+    result, output = run_router(tmp_path, github_env(api.url))
+    assert result.returncode == 0
+    assert output == "hosted=[]\n"
+    assert "::warning::" in result.stdout
+
+
+def test_main_on_an_unreachable_api_writes_no_hosted_slots_and_warns(tmp_path: Path) -> None:
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+    result, output = run_router(tmp_path, github_env(f"http://127.0.0.1:{port}"))
+    assert result.returncode == 0
+    assert output == "hosted=[]\n"
+    assert "::warning::" in result.stdout

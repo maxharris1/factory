@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import sys
+import urllib.request
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -59,3 +63,43 @@ def decide(slots: Sequence[str], online: int, other_jobs: Iterable[Job], reserve
     claimed = sum(job.status in _CLAIMING for job in pool)
     free = 0 if stalled and not running else max(0, online - claimed - reserved)
     return tuple(slots[free:])
+
+
+def _http_get_json(url: str, token: str) -> dict:
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
+def _write_output(hosted: HostedSlots) -> None:
+    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+        output.write(f"hosted={json.dumps(list(hosted), separators=(',', ':'))}\n")
+
+
+def main() -> int:
+    try:
+        token = os.environ["GITHUB_TOKEN"]
+        own = int(os.environ["GITHUB_RUN_ID"])
+        online = int(json.loads(os.environ["FACTORY_LINUX_POOL"])["online"])
+        runs_url = (f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}"
+                    f"/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs")
+        run_ids = {run["id"] for status in _CLAIMING
+                   for run in _http_get_json(f"{runs_url}?status={status}&per_page=100", token)["workflow_runs"]}
+        jobs = [parse_job(raw) for run_id in sorted(run_ids - {own})
+                for raw in _http_get_json(f"{runs_url}/{run_id}/jobs?per_page=100", token)["jobs"]]
+        reserved = reserved_slots(own, jobs)
+        hosted = decide(SLOTS, online, jobs, reserved, datetime.now(timezone.utc))
+        _write_output(hosted)
+        print(f"ci_route: online={online} reserved={reserved} hosted={list(hosted)}")
+    except Exception as error:
+        if "GITHUB_OUTPUT" in os.environ:
+            _write_output(())
+        print(f"::warning::ci_route: {type(error).__name__}: {error}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
