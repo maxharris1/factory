@@ -1,4 +1,4 @@
-"""Today's default-account job scripts, pinned byte for byte (#1063)."""
+"""Today's default-account job scripts, pinned byte for byte."""
 
 from __future__ import annotations
 

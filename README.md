@@ -1809,28 +1809,48 @@ table shows `no telemetry`.
 
 Each subscription is its own usage account (issue #772), with its own
 readings, its own pause and its own Efficiency row. Declare accounts in
-`machines.yml` and name the one each bot login uses:
+`machines.yml` and list the devices each one is signed in on (issue #1063):
 
 ```yaml
 accounts:
-  - {id: claude-max-1, harness: claude, plan: max, label: "Claude Max"}
-  - {id: claude-max-2, harness: claude, plan: max}
+  - {id: claude-max-1, harness: claude, plan: max, label: "Claude Max", signed_in_on: [pc, box]}
+  - {id: claude-max-2, harness: claude, plan: max, signed_in_on: [pc], max_jobs: 2}
   - {id: cursor-grok-ultra, harness: external, plan: ultra}
 devices:
   - name: pc
+    home: /home/{bot}
     harnesses:
-      claude: {bot: claude-bot, account: claude-max-1}
+      claude: claude-bot
       codex: codex-bot
   - name: box
+    home: /home/box
+    ssh_user: box
     harnesses:
-      claude: {bot: claude-bot, account: claude-max-2}
+      claude: claude-bot
 ```
 
 An `id` is a stable, non-secret name: letters, digits, `.`, `_` and `-`,
 never an email, org ID or token. `harness` is `claude`, `codex`, `cursor`
 or `external`. A bare bot user, as in `codex: codex-bot`, is the account
-`<harness>-default`, so a file without `accounts:` loads unchanged. A
-device may use only a declared account of its own harness.
+`<harness>-default`: the CLI's own login on that device, signed in on every
+device that lists the harness. It needs no entry, so a file without
+`accounts:` loads unchanged.
+
+`signed_in_on` lists the devices where Max signed the account in. Each must
+be a listed device that lists the account's harness, and must name a
+`home`: the bot's home folder on that device, an absolute path where
+`{bot}` is the bot user (refused with `ssh_user`, since every bot then logs
+in as that one user). The account's folder on that device is
+`<home>/.factory-accounts/<id>`. `machines.yml` refuses a declared Claude or
+Codex account no device lists, `signed_in_on` on an `external` or Cursor
+account, and a device named twice for one account (twice in `signed_in_on`,
+or there and as the device's own login). `max_jobs`, a positive
+integer, caps the account's running jobs once account choice lands
+(#1064); today it is only checked.
+
+The older device value `{bot: <bot user>, account: <id>}` still loads and
+means that account is the device's own login. `orch check-config` reports
+it as deprecated: use `signed_in_on` instead.
 
 Order matters. Deploy the code first, and add `accounts:` to `machines.yml`
 only after every device runs it: older code refuses the key. The poller

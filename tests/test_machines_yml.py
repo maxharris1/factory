@@ -14,6 +14,7 @@ BOX = """
     harnesses:
       claude: claude-bot
 """
+LEGACY = "{bot, account} is deprecated in favour of accounts[].signed_in_on"
 
 
 def write(tmp_path: Path, text: str) -> Path:
@@ -223,6 +224,10 @@ def test_example_passes_strict_check() -> None:
 
     assert findings == []
     assert config is not None
+    assert config.accounts_on("pc", "codex") == ("codex-default", "codex-pro-1")
+    assert config.account_home("pc", "codex", "codex-pro-1") == (
+        "/home/codex-bot/.factory-accounts/codex-pro-1"
+    )
     assert orch_host(config) == "pc"
     assert [device.name for device in config.devices] == ["pc", "box"]
     assert not any(device.local for device in config.devices)
@@ -296,6 +301,7 @@ def test_draining_device_stays_enabled_and_eligible_but_takes_no_new_jobs(
         ("slot_max", "REPLACE_WITH_PC_SLOT_MAX"),
         ("harnesses", "REPLACE_WITH_PC_HARNESSES"),
         ("workdir_root", "REPLACE_WITH_PC_WORKDIR_ROOT"),
+        ("home", "REPLACE_WITH_PC_HOME"),
     ],
 )
 def test_placeholder_device_loads_with_a_warning_and_is_never_eligible(
@@ -571,6 +577,9 @@ accounts:
   - {id: codex-b, harness: codex}
   - {id: cursor-grok-ultra, harness: external, plan: ultra}
 """
+SIGNED_IN = ACCOUNTS.replace('"Codex Pro (A)"}', '"Codex Pro (A)", signed_in_on: [pc]}').replace(
+    "{id: codex-b, harness: codex}", "{id: codex-b, harness: codex, signed_in_on: [pc]}"
+)
 
 
 def test_shipped_machines_yml_maps_every_bot_to_its_default_account() -> None:
@@ -582,6 +591,21 @@ def test_shipped_machines_yml_maps_every_bot_to_its_default_account() -> None:
             h: f"{h}-default" for h in device.harnesses
         }
     assert config.serving("codex") == frozenset({"codex-default"})
+
+
+def test_a_file_without_accounts_gives_every_device_its_default_account(tmp_path: Path) -> None:
+    text = "devices:\n" + BOX + remote(harnesses="{claude: claude-bot, codex: codex-bot}")
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert findings == []
+    assert config is not None
+    assert config.accounts_on("box", "claude") == ("claude-default",)
+    assert config.accounts_on("pc", "codex") == ("codex-default",)
+    assert config.accounts_on("box", "codex") == ()
+    assert config.account_home("pc", "claude", "claude-default") is None
+    assert config.serving("claude") == frozenset({"claude-default"})
+    assert config.devices[1].home is None and config.devices[1].home_for("claude") is None
 
 
 def test_bot_and_account_value_resolves_to_the_named_account(tmp_path: Path) -> None:
@@ -599,6 +623,10 @@ def test_bot_and_account_value_resolves_to_the_named_account(tmp_path: Path) -> 
     config, findings = load_machines_yml(write(tmp_path, text))
 
     assert config is not None, findings
+    assert warnings(findings) == [
+        f"device 'pc' harness 'codex' names its login account inline; {LEGACY}",
+        f"device 'mac' harness 'codex' names its login account inline; {LEGACY}",
+    ]
     pc, mac = config.device("pc"), config.device("mac")
     assert (pc.harnesses["codex"], pc.account_for("codex")) == ("codex-bot", "codex-a")
     assert (mac.harnesses["codex"], mac.account_for("codex")) == ("codex-bot", "codex-b")
@@ -606,20 +634,23 @@ def test_bot_and_account_value_resolves_to_the_named_account(tmp_path: Path) -> 
     assert config.account("codex-a").label == "Codex Pro (A)"
     assert config.serving("codex") == frozenset({"codex-a", "codex-b"})
     assert [a.id for a in config.external_accounts()] == ["cursor-grok-ultra"]
+    assert config.accounts_on("pc", "codex") == ("codex-a",)
+    assert config.account_home("pc", "codex", "codex-a") is None
 
 
 def test_bare_bot_value_beside_accounts_is_the_default_account(tmp_path: Path) -> None:
-    config, findings = load_machines_yml(write(tmp_path, ACCOUNTS + "devices:\n" + remote()))
+    config, findings = load_machines_yml(
+        write(tmp_path, SIGNED_IN + "devices:\n" + remote(home="/home/{bot}"))
+    )
 
-    assert config is not None, findings
+    assert findings == []
+    assert config is not None
     assert config.device("pc").account_for("codex") == "codex-default"
     assert config.account("codex-default").harness == "codex"
 
 
 def test_draining_device_account_does_not_serve(tmp_path: Path) -> None:
-    text = ACCOUNTS + "devices:\n" + remote(
-        drain="true", harnesses="{codex: {bot: codex-bot, account: codex-a}}"
-    )
+    text = SIGNED_IN + "devices:\n" + remote(drain="true", home="/home/{bot}")
 
     config, findings = load_machines_yml(write(tmp_path, text))
 
@@ -711,9 +742,15 @@ def test_account_errors(tmp_path: Path, text: str, message: str) -> None:
 
 def test_overlay_adds_an_account_by_id(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY")
-    path = write(tmp_path, ACCOUNTS + "devices:\n" + remote())
+    path = write(
+        tmp_path,
+        SIGNED_IN
+        + "devices:\n"
+        + remote(harnesses="{claude: claude-bot, codex: codex-bot}", home="/home/{bot}"),
+    )
     (tmp_path / "machines.local.yml").write_text(
-        "accounts:\n  - {id: codex-a, plan: plus}\n  - {id: claude-a, harness: claude}\n",
+        "accounts:\n  - {id: codex-a, plan: plus}\n"
+        "  - {id: claude-a, harness: claude, signed_in_on: [pc]}\n",
         encoding="utf-8",
     )
 
@@ -722,6 +759,203 @@ def test_overlay_adds_an_account_by_id(tmp_path: Path, monkeypatch) -> None:
     assert config is not None, findings
     assert config.account("codex-a").plan == "plus"
     assert config.account("claude-a").harness == "claude"
+    assert config.accounts_on("pc", "claude") == ("claude-default", "claude-a")
+
+
+TWO_CLAUDE_ACCOUNTS = (
+    "orch_host: pc\n"
+    "accounts:\n"
+    "  - {id: claude-a, harness: claude, signed_in_on: [pc, box]}\n"
+    "  - {id: codex-a, harness: codex, signed_in_on: [pc]}\n"
+    "  - {id: claude-b, harness: claude, signed_in_on: [mac], max_jobs: 2}\n"
+    "devices:\n"
+    + remote(harnesses="{claude: claude-bot, codex: codex-bot}", home="/home/{bot}")
+    + remote(
+        name="box",
+        tailscale_name="box.example.ts.net",
+        harnesses="{claude: claude-bot}",
+        ssh_alias="box-{bot}",
+        ssh_user="box",
+        home="/home/box",
+    )
+    + remote(
+        name="mac",
+        tailscale_name="mac.example.ts.net",
+        harnesses="{claude: claude-bot}",
+        drain="true",
+        home="/Users/{bot}",
+    )
+)
+
+
+def test_accounts_signed_in_on_devices_run_beside_each_devices_own_login(
+    tmp_path: Path,
+) -> None:
+    config, findings = load_machines_yml(write(tmp_path, TWO_CLAUDE_ACCOUNTS))
+
+    assert config is not None, findings
+    assert errors(findings) == []
+    assert warnings(findings) == [
+        "device 'mac' is draining (drain: true); "
+        "it takes no new jobs and its running jobs finish"
+    ]
+    assert config.account("claude-b").max_jobs == 2
+    assert config.account("claude-a").max_jobs is None
+    assert config.account("claude-a").signed_in_on == frozenset({"pc", "box"})
+
+    assert config.accounts_on("pc", "claude") == ("claude-default", "claude-a")
+    assert config.accounts_on("box", "claude") == ("claude-default", "claude-a")
+    assert config.accounts_on("mac", "claude") == ("claude-default", "claude-b")
+    assert config.accounts_on("pc", "codex") == ("codex-default", "codex-a")
+    assert config.accounts_on("box", "codex") == ()
+    assert config.accounts_on("lab", "claude") == ()
+
+    assert config.account_home("pc", "claude", "claude-default") is None
+    assert config.account_home("pc", "claude", "claude-a") == (
+        "/home/claude-bot/.factory-accounts/claude-a"
+    )
+    assert config.account_home("pc", "codex", "codex-a") == (
+        "/home/codex-bot/.factory-accounts/codex-a"
+    )
+    assert config.account_home("box", "claude", "claude-a") == (
+        "/home/box/.factory-accounts/claude-a"
+    )
+    assert config.account_home("mac", "claude", "claude-b") == (
+        "/Users/claude-bot/.factory-accounts/claude-b"
+    )
+    assert config.device("mac").home_for("claude") == "/Users/claude-bot"
+    assert config.device("mac").home_for("codex") is None
+    for device, harness, account in (
+        ("pc", "claude", "claude-b"),
+        ("pc", "claude", "codex-a"),
+        ("box", "codex", "codex-default"),
+        ("lab", "claude", "claude-default"),
+    ):
+        with pytest.raises(ValueError):
+            config.account_home(device, harness, account)
+
+    assert config.serving("claude") == frozenset({"claude-default", "claude-a"})
+    assert config.serving("codex") == frozenset({"codex-default", "codex-a"})
+
+
+def signed_in(account: str, **device: str) -> str:
+    fields = {"harnesses": "{claude: claude-bot}", "home": "/home/{bot}", **device}
+    return (
+        "orch_host: pc\naccounts:\n  - {id: claude-a, harness: claude"
+        + (f", {account}" if account else "")
+        + "}\ndevices:\n"
+        + remote(**fields)
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        *(
+            (
+                signed_in(f"signed_in_on: [pc], max_jobs: {value}"),
+                "accounts[0].max_jobs must be a positive integer",
+            )
+            for value in ("true", "0", "-1", '"2"', "1.5")
+        ),
+        *(
+            (
+                signed_in(f"signed_in_on: {value}"),
+                "accounts[0].signed_in_on must list device names",
+            )
+            for value in ("pc", "[PC]", "[pc, pc]", "[3]", "{pc: 1}", "[[pc]]")
+        ),
+        (
+            signed_in("signed_in_on: [lab]"),
+            "accounts[0].signed_in_on names unknown device 'lab'",
+        ),
+        (
+            signed_in("signed_in_on: [pc]", harnesses="{codex: codex-bot}"),
+            "device 'pc' does not list harness 'claude'",
+        ),
+        (
+            "orch_host: pc\naccounts:\n  - {id: grok, harness: external, signed_in_on: [pc]}\n"
+            "devices:\n" + remote(home="/home/{bot}"),
+            "an external account is not signed in on a device",
+        ),
+        (
+            "orch_host: pc\naccounts:\n  - {id: cursor-a, harness: cursor, signed_in_on: [pc]}\n"
+            "devices:\n" + remote(harnesses="{cursor: cursor-bot}", home="/home/{bot}"),
+            "accounts[0].signed_in_on is not supported for a cursor account",
+        ),
+        (
+            signed_in(
+                "signed_in_on: [pc]",
+                harnesses="{claude: {bot: claude-bot, account: claude-a}}",
+            ),
+            "accounts[0].signed_in_on names device 'pc', whose claude login is "
+            "already 'claude-a'",
+        ),
+        (
+            signed_in("signed_in_on: [pc]", home="-"),
+            "devices[0].home is required: account 'claude-a' is signed in on it",
+        ),
+        (
+            signed_in(""),
+            "account 'claude-a' is not signed in on any device; list it in signed_in_on",
+        ),
+        (
+            signed_in("signed_in_on: []"),
+            "account 'claude-a' is not signed in on any device; list it in signed_in_on",
+        ),
+        (
+            "accounts:\n  - {id: cursor-pro, harness: cursor}\ndevices:\n" + remote(),
+            "account 'cursor-pro' is not signed in on any device; "
+            "name it as a device's cursor login",
+        ),
+        (
+            signed_in("signed_in_on: [pc]", ssh_user="box"),
+            "devices[0].home may not use '{bot}' when ssh_user is set",
+        ),
+        (
+            signed_in("signed_in_on: [pc]", home='"/mnt/c/Users/{bot}"'),
+            "devices[0].home must not be under /mnt/",
+        ),
+        (
+            signed_in("signed_in_on: [pc]", home="home/{bot}"),
+            "devices[0].home must be an absolute POSIX path",
+        ),
+        (
+            signed_in("signed_in_on: [pc]", home='"/home/x{bot}"'),
+            "devices[0].home '{bot}' must be a whole path component",
+        ),
+    ],
+)
+def test_signed_in_on_errors(tmp_path: Path, text: str, message: str) -> None:
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is None
+    assert any(message in item for item in errors(findings)), findings
+
+
+@pytest.mark.parametrize("field", ["home", "harnesses"])
+def test_a_placeholder_device_may_be_named_in_signed_in_on(tmp_path: Path, field: str) -> None:
+    text = signed_in("signed_in_on: [pc]", **{field: f"REPLACE_WITH_PC_{field.upper()}"})
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is not None, findings
+    assert errors(findings) == []
+    assert config.serving("claude") == frozenset()
+    if field == "home":
+        assert config.accounts_on("pc", "claude") == ("claude-default", "claude-a")
+        with pytest.raises(ValueError):
+            config.account_home("pc", "claude", "claude-a")
+
+
+def test_signed_in_on_baseline_loads_clean(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(
+        write(tmp_path, signed_in("signed_in_on: [pc], max_jobs: 1"))
+    )
+
+    assert findings == []
+    assert config is not None
+    assert config.accounts_on("pc", "claude") == ("claude-default", "claude-a")
 
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/SPEC.md"])
@@ -732,6 +966,9 @@ def test_docs_describe_usage_accounts_and_the_grok_routine_approval(doc: str) ->
         "accounts:" if doc == "README.md" else "`accounts`",
         "orch usage migrate",
         "orch usage record",
+        "signed_in_on",
+        "max_jobs",
+        "<home>/.factory-accounts/<id>",
         "lane_account_limits",
         "A scheduled Grok Bot routine that calls `orch usage record` is a separate step "
         "that needs Max's approval.",
