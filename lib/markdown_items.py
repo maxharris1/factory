@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from markdown_it import MarkdownIt
 
-_MARKDOWN = MarkdownIt("commonmark").enable("table")
+MARKDOWN = MarkdownIt("commonmark").enable("table")
 
 
 def list_item_leads(body: str) -> list[str]:
-    tokens = _MARKDOWN.parse(body)
+    tokens = MARKDOWN.parse(body)
     leads: list[str] = []
     quoted = 0
     for index, token in enumerate(tokens):

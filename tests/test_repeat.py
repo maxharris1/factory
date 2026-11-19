@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from lib import job_detail
-from lib.dispatch.verdict.repeat import STOP_OPTIONS
+from lib.dispatch.verdict.repeat import STOP_OPTIONS, _quote
 from tests.test_approver_credential import MAX, AppFlow, grok_wakes
 from tests.test_dispatcher import ANSWERS, GO, READY
 from tests.test_rounds_and_caps import HEADS
@@ -223,6 +223,37 @@ def test_a_stop_quotes_each_findings_explanation_and_the_whole_response(tmp_path
 
     assert question.count("> 1. [blocking] f-1.\n>    Rule: the CLI rejects prose.\n>    cli.py:22 accepts prose") == 2
     assert "> Fixed f-1.\n> The parser now returns 2 for prose." in question
+
+
+def test_a_quote_keeps_a_findings_continuation_paragraph() -> None:
+    quoted = _quote(
+        "1. [blocking] f-1.\n   Rule: reject prose.\n\n   cli.py:22 accepts prose and returns success.",
+        frozenset({"f-1"}),
+    )
+
+    assert "cli.py:22 accepts prose and returns success." in quoted
+
+
+SPACED = "1. [blocking] f-1.\n   Rule: the CLI rejects prose.\n\n   cli.py:22 accepts prose and returns success.\n"
+
+
+def test_a_stop_quotes_the_continuation_paragraphs_of_a_finding_and_its_response(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_first_review(flow)
+    assert revise(flow, "1/3", "revise-1", body=SPACED + "2. [blocking] f-2.\n\n   help.py:9 is stale.\n") == (
+        "queued-review-fix"
+    )
+    respond(flow, 1, "- Fixed f-1.\n\n  The parser now returns 2 for prose.\n\nOther notes.\n")
+    assert revise(flow, "2/3", "revise-2", body=SPACED) == "waiting-max-repeat"
+
+    question = wake_detail(flow, "clarify", "repeat-block")["question"]
+
+    assert question.count(
+        "> 1. [blocking] f-1.\n>    Rule: the CLI rejects prose.\n>\n>    cli.py:22 accepts prose and returns success."
+    ) == 2
+    assert "> - Fixed f-1.\n>\n>   The parser now returns 2 for prose." in question
+    assert "help.py:9" not in question
+    assert "Other notes." not in question
 
 
 def test_a_long_finding_does_not_crowd_out_the_next_one(tmp_path: Path) -> None:

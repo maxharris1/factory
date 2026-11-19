@@ -13,6 +13,7 @@ from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, 
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment, repeat_id
+from lib.markdown_items import MARKDOWN
 from lib.queue import JobRequest
 
 Stop = Literal["repeat", "capped", "unsat"]
@@ -106,24 +107,23 @@ def _handoff(body: str) -> tuple[dict[str, str], str]:
     return handoff.as_dict(), handoff.body
 
 
-_LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|\d+[.)])\s")
 _ACCEPTED_READY = ("queued-review", "answered-review")
+_LIST_OPENS = ("bullet_list_open", "ordered_list_open")
 
 
 def _blocks(text: str) -> list[list[str]]:
+    lines = text.splitlines()
     blocks: list[list[str]] = []
-    depth = 0
-    for line in text.splitlines():
-        if not line.strip():
-            blocks.append([])
+    for token in MARKDOWN.parse(text):
+        top = token.level == 0 and token.nesting != -1 and token.type not in (*_LIST_OPENS, "hr")
+        if token.map is None or not (top or (token.type == "list_item_open" and token.level == 1)):
             continue
-        item = _LIST_ITEM.match(line)
-        indent = len(line) - len(line.lstrip())
-        if not blocks or not blocks[-1] or (item is not None and indent <= depth):
-            blocks.append([])
-            depth = indent
-        blocks[-1].append(line)
-    return [block for block in blocks if block]
+        block = lines[token.map[0] : token.map[1]]
+        while block and not block[-1].strip():
+            block.pop()
+        if block:
+            blocks.append(block)
+    return blocks
 
 
 def _quote(body: str, ids: frozenset[str]) -> str:
