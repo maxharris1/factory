@@ -818,6 +818,7 @@ class MergeQueueMixin:
                 "abandoned",
                 source="closed-unmerged",
                 at=self.queue.now(),
+                also={"closed_at": ticket.closed_at},
                 guard=_NOT_FINISHED,
             )
             if not written:

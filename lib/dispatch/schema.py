@@ -88,6 +88,7 @@ class SchemaMixin:
                     update_failures INTEGER NOT NULL DEFAULT 0,
                     update_from_head TEXT,
                     update_failed_job TEXT,
+                    closed_at REAL,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
@@ -184,6 +185,7 @@ class SchemaMixin:
                     "external_from_state": "TEXT",
                     "external_from_stuck": "INTEGER",
                     "external_at": "REAL",
+                    "closed_at": "REAL",
                 },
             )
             connection.execute(

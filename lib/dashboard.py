@@ -112,7 +112,8 @@ Ticket rows (#670, #671): each status.json `tickets` row carries
 `state_age_seconds`, its record's value below (null when unknown), and
 `shipped_at` and `shipped_how`, its record's `shipped.at` and `shipped.how`
 (both null when the ticket is not shipped; `shipped_at` is also null when
-the time is unknown).
+the time is unknown). An `abandoned` ticket with a stored `closed_at` (#991)
+counts its current visit, and so its age and `stopped.at`, from that close.
 
 Ticket records (#530): tickets.json holds one record per tracked ticket
 (the tickets in status.json's `tickets`), built from the database whether
@@ -170,6 +171,7 @@ from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import (
     JobStep,
     Transition,
+    anchor_close,
     job_flow,
     load_chart,
     shipped_facts,
@@ -1828,6 +1830,7 @@ def _read_db(
             "NULL",
         ])
         external_at = "state.external_at" if "external_at" in state_columns else "NULL"
+        closed_at = "state.closed_at" if "closed_at" in state_columns else "NULL"
         linear = "linear_states" in tables
         for row in connection.execute(
             f"""
@@ -1839,6 +1842,7 @@ def _read_db(
                    state.stuck_reason, state.paused_action,
                    COALESCE({stuck_at}, NULL) AS stuck_at,
                    {external_at} AS external_at,
+                   {closed_at} AS closed_at,
                    {"linear.state_name" if linear else "NULL"} AS linear_state
             FROM tracked_tickets AS tracked
             LEFT JOIN ticket_state AS state
@@ -1894,6 +1898,7 @@ def _read_db(
                 ref["repo"], ref["ticket_id"], int(row["review_round"]), reason,
                 f"{redact(str(row['repo']))}#{redact(str(row['ticket_id']))}",
                 row["stuck_at"],
+                _telemetry_time(row["closed_at"]),
             )
             tickets.append(
                 {
@@ -1938,6 +1943,8 @@ def _read_db(
         now,
         tables,
     )
+    for key, info in ticket_info.items():
+        flows[key] = anchor_close(flows[key], info.closed_at, now)
     for row, key in ticket_rows:
         row["state_age_seconds"] = flows[key]["state_age_seconds"]
         shipped = shipped_facts(chart, flows[key]) or {"at": None, "how": None}
@@ -2218,6 +2225,7 @@ class TicketInfo(NamedTuple):
     reason: str | None = None
     key: str = ""
     stuck_at: float | None = None
+    closed_at: float | None = None
 
 
 def _record_keys(ticket_info: dict[tuple[str, str], TicketInfo]) -> dict[tuple[str, str], str]:

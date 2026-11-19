@@ -378,6 +378,25 @@ def stop_facts(chart: dict | None, flow: dict, stored_state: str, stuck: bool) -
     }
 
 
+def anchor_close(flow: dict, closed_at: float | None, now: float) -> dict:
+    if closed_at is None or flow["state"] != "abandoned":
+        return flow
+    age = int(max(0.0, now - closed_at))
+    visits = [
+        {**visit, "started_at": closed_at, "duration_seconds": age, "time_known": True}
+        if visit["current"] and visit["state"] == "abandoned" else visit
+        for visit in flow["visits"]
+    ]
+    return {
+        **flow,
+        "state_age_seconds": age,
+        "visits": visits,
+        "all_durations_known": bool(visits) and all(
+            visit["duration_seconds"] is not None for visit in visits
+        ),
+    }
+
+
 def _started_at(visit: Visit) -> float | None:
     if not visit.steps:
         return None
