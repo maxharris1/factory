@@ -15,8 +15,10 @@
 #   self-heal.sh status            exit 0 if the loop runs, 3 if not
 #   self-heal.sh ensure            start unless running or held stopped; prints
 #                                  nothing when running (what autostart runs)
-#   self-heal.sh wait-idle         wait until no pass and none of its
-#                                  detached work runs (orch-move.sh export)
+#   self-heal.sh wait-idle [cmd]   wait until no pass and none of its
+#                                  detached work runs (orch-move.sh export),
+#                                  then run cmd, if given, before any pass
+#                                  can start
 #   self-heal.sh install-autostart run `once` on a timer (see below)
 #   self-heal.sh remove-autostart  turn that off
 #
@@ -26,9 +28,12 @@
 # wait-idle still work.
 #
 # `once` holds self-heal.lock, so passes never overlap; a pass that finds the
-# lock held exits 0 at once. It reads ~/.config/factory/webhook.env into the
-# environment when this user can read it (for the escalation POST; nothing
-# from it is printed), runs `orch heal deploy --state <state dir>` (#219:
+# lock held exits 0 at once. While any waiter-<bot>.drain reads orch-move
+# (orch-move.sh export is draining), a pass logs that it skips and exits 0
+# without healing. It reads
+# ~/.config/factory/webhook.env into the environment when this user can
+# read it (for the escalation POST; nothing from it is printed), runs
+# `orch heal deploy --state <state dir>` (#219:
 # the checkout owner fast-forwards the checkout to origin/main, keeping
 # local edits to machines.yml, orch.yml and deploy/install.sh; see
 # lib/self_deploy.py; a failure is logged and never blocks healing), then
@@ -59,9 +64,10 @@
 # dashboard push` inherit it, so it is held until the last of them exits.
 # `wait-idle` takes that lock exclusively, waiting up to ORCH_HEAL_IDLE_WAIT
 # seconds (default 900): exit 0 once nothing holds it, 1 on timeout, and 1
-# without flock(1), which cannot tell. A pass checks orch-retired again once
-# it holds the shared lock, so after orch-move.sh export writes orch-retired
-# and `wait-idle` returns, no pass writes to orch.db.
+# without flock(1), which cannot tell. Given a command, it runs it while it
+# still holds the lock and exits with its status. A pass checks orch-retired
+# again once it holds the shared lock, so after orch-move.sh export writes
+# orch-retired and `wait-idle` returns, no pass writes to orch.db.
 #
 # `kick` starts factory-self-heal.service with --no-block where the systemd
 # user timer is installed, and otherwise a detached `once` in its own
@@ -135,7 +141,7 @@ export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 say() { printf '%s self-heal: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 usage() {
-    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|wait-idle|install-autostart|remove-autostart}" >&2
+    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|wait-idle [cmd]|install-autostart|remove-autostart}" >&2
     exit 2
 }
 
@@ -238,9 +244,19 @@ head_sha() {
     git -C "$CHECKOUT" rev-parse -q --verify HEAD 2>/dev/null || true
 }
 
+orch_move_drain() {
+    local file
+    for file in "${STATE}"/waiter-*.drain; do
+        [[ -f "$file" && "$(head -n 1 "$file" 2>/dev/null)" == orch-move ]] || continue
+        printf '%s\n' "$file"
+        return 0
+    done
+    return 1
+}
+
 # One pass. Without flock(1) passes are not serialized.
 once() {
-    local statuses before after
+    local statuses before after drain
     refuse_if_retired once
     mkdir -p "$STATE"
     if command -v flock >/dev/null 2>&1; then
@@ -250,6 +266,10 @@ once() {
         flock -s 7
     fi
     refuse_if_retired once
+    if drain="$(orch_move_drain)"; then
+        say "skipping the pass: orch-move export is draining (${drain})" >>"$LOG"
+        return 0
+    fi
     if [[ -r "$WEBHOOK_ENV" ]]; then
         set -a
         # shellcheck disable=SC1090
@@ -424,6 +444,7 @@ wait_idle() {
         echo "self-heal: a pass or its detached work still holds ${WORK_LOCK} after ${IDLE_WAIT}s" >&2
         return 1
     fi
+    (($# == 0)) || "$@" 7>&-
 }
 
 ensure() {
@@ -545,7 +566,7 @@ case "$COMMAND" in
     restart) factory_host_pidns_or_refuse restart && not_from_a_job restart && refuse_if_retired restart && service_lock && refuse_if_retired restart && stop && start ;;
     status) status ;;
     ensure) factory_host_pidns_or_refuse ensure && not_from_a_job ensure && refuse_if_retired ensure && service_lock && refuse_if_retired ensure && ensure ;;
-    wait-idle) wait_idle ;;
+    wait-idle) shift && wait_idle "$@" ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

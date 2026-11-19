@@ -12,6 +12,9 @@ import pytest
 from lib import heal, health
 from lib.grok_delivery import WebhookResult
 from lib.heal import DEFER, DRAIN, ESCALATE, RESTART, SKIP, Facts, KeyState, Webhook
+from lib.queue import SQLiteJobQueue
+from tests.test_health import TUNNEL_URL
+from tests.test_health import orch as orch_config
 
 NOW = 1_800_000_000.0
 CHECKOUT = "ba9876543210"
@@ -468,6 +471,32 @@ def test_a_held_tunnel_that_needs_attention_alerts_once_and_is_never_restarted(
         passes.append(kinds(actions))
     assert passes[0] == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
     assert all(actions == [(SKIP, "tunnel @ box")] for actions in passes[1:])
+
+
+def test_a_same_host_tunnel_the_listener_answers_is_never_restarted_or_escalated(
+    tmp_path: Path,
+) -> None:
+    db, state_dir = tmp_path / "database" / "orch.db", tmp_path / "state"
+    db.parent.mkdir()
+    state_dir.mkdir()
+    SQLiteJobQueue(db, clock=lambda: NOW)
+    now = NOW
+    store = health.HealthStore(db, devices=frozenset({"box"}), clock=lambda: now)
+    tunnel = health.TunnelProber(store, "box", TUNNEL_URL, fetch=lambda url, t: 405, pid=7,
+                                 version="unknown")
+    for now in range(int(NOW), int(NOW + heal.WINDOW_SECONDS + 240), 120):
+        store.beat("linear-listener", "box", pid=7, started_at=NOW, version="unknown")
+        tunnel.probe_once()
+        data = health.report_json(health.load_report(db, now, orch=orch_config(listener=True)), now)
+        assert [(c["state"], c["reason"]) for c in data["components"]
+                if c["component"] == "tunnel"] == [("up", "")], now
+        actions, runs, posts = run_heal(state_dir, data, now=now,
+                                        host=facts(owned=frozenset({"linear-webhook"})))
+        assert [a.kind for a in actions
+                if a.label == "tunnel @ box" and a.kind in (RESTART, ESCALATE)] == [], now
+        assert runs.calls == [] and posts.calls == [], now
+    assert not [line for line in log_lines(state_dir)
+                if "restart tunnel" in line or "escalate tunnel" in line]
 
 
 # --- version updates and the restart budget (issue #748) --------------------------------------

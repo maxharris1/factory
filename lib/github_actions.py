@@ -621,15 +621,18 @@ class GitHubReviewActions:
                     found[number] = json.dumps(pull, sort_keys=True, separators=(",", ":"))
         return found
 
-    def closed_pulls(self, repo: str, numbers: Sequence[str]) -> frozenset[str]:
-        """The numbers whose PR is no longer open: closed or merged."""
-        closed: set[str] = set()
-        for chunk, pulls, _ in self._pull_batches(repo, numbers, "state"):
+    def pull_states(self, repo: str, numbers: Sequence[str]) -> dict[str, str]:
+        """Each observed number's PR state: OPEN, CLOSED or MERGED. A number
+        missing from the result was not observed, never assumed open."""
+        states: dict[str, str] = {}
+        for chunk, pulls, broken in self._pull_batches(repo, numbers, "state"):
             for number in chunk:
                 pull = pulls.get(f"p{number}")
-                if isinstance(pull, dict) and pull.get("state") in ("CLOSED", "MERGED"):
-                    closed.add(number)
-        return frozenset(closed)
+                if f"p{number}" not in broken and isinstance(pull, dict):
+                    state = pull.get("state")
+                    if isinstance(state, str):
+                        states[number] = state
+        return states
 
     def _pull_batches(
         self, repo: str, numbers: Sequence[str], fields: str

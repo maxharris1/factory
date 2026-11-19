@@ -28,11 +28,15 @@ from lib import health
 from lib.cli import main as cli_main
 from lib.dashboard import collect_snapshot
 from lib.dashboard_page import NAV_PAGES, render_pages
+from lib.linear_webhook import WebhookApp, make_server
 from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
 from tests.pool_helpers import LOCAL_BOX_MACHINES, poller_adopts, write_target_machines
+from tests.test_linear_webhook_service import _port_of, _same_host, _service
+from tests.test_linear_webhook_service import home  # noqa: F401  (fixture)
+from tests.test_linear_webhook_service import pytestmark as needs_flock_and_proc
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
@@ -2117,13 +2121,7 @@ def test_a_tunnel_never_checked_and_never_held_has_no_item() -> None:
     assert report.attention == ()
 
 
-def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
-        tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(health, "box_storage", functools.partial(
-        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
-    db, _ = make_db(tmp_path)
-    store(db, NOW).beat("poller", "box", pid=101, version="unknown")
-    hold_port(db, NOW - 22 * 3600)
+def tunnel_orch_yml(tmp_path: Path) -> Path:
     config = tmp_path / "orch.yml"
     config.write_text(
         "poll_seconds: 60\nlinear:\n  api_key_env: LINEAR_KEY\n"
@@ -2134,7 +2132,18 @@ def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
         "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
         f"  public_url: {TUNNEL_URL}\n  tunnel_alert_minutes: 30\n"
     )
-    args = ["--db", str(db), "--orch", str(config), "--machines", str(LOCAL_BOX_MACHINES)]
+    return config
+
+
+def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db, _ = make_db(tmp_path)
+    store(db, NOW).beat("poller", "box", pid=101, version="unknown")
+    hold_port(db, NOW - 22 * 3600)
+    args = ["--db", str(db), "--orch", str(tunnel_orch_yml(tmp_path)),
+            "--machines", str(LOCAL_BOX_MACHINES)]
 
     out = io.StringIO()
     assert health.main([*args, "--json"], stdout=out, clock=lambda: NOW,
@@ -2150,3 +2159,45 @@ def test_orch_health_json_lists_a_long_tunnel_outage_as_needs_attention(
     out = io.StringIO()
     assert health.main(args, stdout=out, clock=lambda: NOW, transport=DfTransport({})) == 3
     assert f"  needs attention: tunnel @ box down 22h ({HELD_REASON})" in out.getvalue().splitlines()
+
+
+@needs_flock_and_proc
+def test_a_same_host_tunnel_is_up_from_the_listeners_own_answer_once_ensure_drops_the_held_record(
+        home: Path, tmp_path: Path) -> None:
+    (tmp_path / "database").mkdir()
+    db, _ = make_db(tmp_path / "database")
+    held = db.parent / "linear-webhook-tunnel.held"
+    held.write_text(f"{_port_of(home)} test-host\n")
+    os.utime(held, (NOW - 3600, NOW - 3600))
+    assert health.read_tunnel_held(db) is not None, "a held record from before the host moved"
+
+    ensured = _service(home, "ensure", ORCH_DB=str(db), FAKE_SSH_FORWARD_FAIL="1",
+                       **_same_host("loopback"))
+    assert ensured.returncode == 0, ensured.stdout + ensured.stderr
+    assert health.read_tunnel_held(db) is None, "ensure on the tunnel host removes the held record"
+
+    app = WebhookApp(secret=b"same-host-secret", project_ids=frozenset({"p1"}), db_path=db,
+                     log=lambda line: None)
+    server = make_server(app, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}{app.path}"
+        health.TunnelProber(store(db), "box", url, pid=7, version="unknown").probe_once()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert [(c.state, c.reason) for c in _tunnel(report)] == [("up", "")], "the listener's 405 is seen"
+    assert [a for a in report.attention if a.kind == "tunnel-down"] == []
+
+    out = io.StringIO()
+    health.main(["--db", str(db), "--orch", str(tunnel_orch_yml(tmp_path)),
+                 "--machines", str(LOCAL_BOX_MACHINES), "--json"],
+                stdout=out, clock=lambda: NOW, transport=DfTransport({}))
+    data = json.loads(out.getvalue())
+    assert [(c["state"], c["reason"]) for c in data["components"]
+            if c["component"] == "tunnel"] == [("up", "")], "orch health --json shows the tunnel up"
+    assert [i for i in data["needs_attention"] if i["kind"] == "tunnel-down"] == []

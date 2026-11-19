@@ -7,20 +7,23 @@ device` runs from this checkout's bin/orch against a fixture work root.
 
 from __future__ import annotations
 
+import fcntl
 import io
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 
-from lib import job_cleanup
+from lib import job_cleanup, remote
 from lib.job_cleanup import Plan
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import SQLiteJobQueue
-from lib.remote import SSH_UNREACHABLE, Called
+from lib.remote import SSH_UNREACHABLE, Called, RemoteTarget
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1_800_000_000.0
@@ -29,20 +32,98 @@ HOUR = 3600.0
 
 pytestmark = pytest.mark.serial
 
+FLOCK = """#!{python}
+import fcntl, sys, time
+args = sys.argv[1:]
+wait = float(args[1]) if args[:1] == ["-w"] else None
+fd = int(args[-1])
+end = None if wait is None else time.monotonic() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if end is not None and time.monotonic() > end:
+            sys.exit(1)
+        time.sleep(0.02)
+"""
+
+
+@pytest.fixture(autouse=True)
+def flock_on_path(tmp_path_factory, monkeypatch) -> None:
+    """Linux has flock(1); a Mac without it gets this stand-in for `flock [-w s] fd`."""
+    if shutil.which("flock"):
+        return
+    shim = tmp_path_factory.mktemp("flock-bin")
+    (shim / "flock").write_text(FLOCK.format(python=sys.executable))
+    (shim / "flock").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
+
+
+def _this_test_and_its_descendants() -> set[str]:
+    parent_of = {}
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            parent_of[stat.parent.name] = stat.read_text().rsplit(")", 1)[1].split()[1]
+        except OSError:
+            continue
+    family = {str(os.getpid())}
+    for pid in parent_of:
+        chain = []
+        while pid in parent_of and pid not in family:
+            chain.append(pid)
+            pid = parent_of[pid]
+        if pid in family:
+            family.update(chain)
+    return family
+
+
+@pytest.fixture(autouse=True)
+def _only_this_tests_processes(monkeypatch) -> None:
+    real_mine = job_cleanup._mine
+
+    def mine(process: Path) -> bool | None:
+        found = real_mine(process)
+        if job_cleanup.PROC != Path("/proc") or process.name in _this_test_and_its_descendants():
+            return found
+        return None if found is None else False
+
+    monkeypatch.setattr(job_cleanup, "_mine", mine)
+
+
+def device_path() -> str:
+    return (f"{Path(sys.executable).parent}:{Path(shutil.which('flock')).parent}"
+            ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+
+
+DEVICE_ORCH = """import os, sys
+from pathlib import Path
+sys.path.insert(0, os.getcwd())
+from lib import job_cleanup
+from lib.cli import main
+job_cleanup.PROC = Path(os.environ["FAKE_PROC"])
+sys.exit(main())
+"""
+
 
 class ShellTransport:
     def __init__(self, home: Path):
         self.home = home
         self.offline: set[str] = set()
+        device = home / "shell-device"
+        self.proc = fake_proc(device, {"1": ("0", device)})
+        self.orch = device / "orch.py"
+        self.orch.write_text(DEVICE_ORCH)
 
     def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
         alias, script = argv[-2], argv[-1]
         if alias in self.offline:
             return Called(SSH_UNREACHABLE, "", "")
+        assert script.count("./bin/orch") == 1, script
         done = subprocess.run(
-            ["sh", "-c", script], input=input or b"", capture_output=True, timeout=timeout,
-            env={"HOME": str(self.home),
-                 "PATH": f"{Path(sys.executable).parent}:/usr/local/bin:/usr/bin:/bin"},
+            ["sh", "-c", script.replace("./bin/orch", str(self.orch))], input=input or b"",
+            capture_output=True, timeout=timeout,
+            env={"HOME": str(self.home), "PATH": device_path(), "FAKE_PROC": str(self.proc)},
         )
         return Called(done.returncode, done.stdout.decode(), done.stderr.decode())
 
@@ -451,36 +532,112 @@ NON_DUMPABLE = (
 )
 
 
-@pytest.mark.skipif(not Path("/proc/self/cwd").exists(), reason="needs Linux /proc")
-def test_a_live_process_of_this_user_that_hides_its_cwd_keeps_every_folder(tmp_path: Path) -> None:
+def fake_proc(tmp_path: Path, processes: dict[str, tuple[str, Path | None]]) -> Path:
+    proc = tmp_path / "proc"
+    uid = os.getuid()
+    for pid, (parent, cwd) in processes.items():
+        process = proc / pid
+        (process / "fd").mkdir(parents=True)
+        (process / "cwd").symlink_to(cwd or tmp_path)
+        (process / "status").write_text(f"Name:\tp\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nVmSize:\t1 kB\n")
+        (process / "stat").write_text(f"{pid} (p) S {parent} 1 1 0\n")
+        if cwd is None:
+            (process / "fd").chmod(0)
+    (proc / "self").symlink_to(proc / "1")
+    return proc
+
+
+def test_a_hidden_process_keeps_every_folder_and_does_not_stop_the_scan(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = work_root(tmp_path)
-    job_folder(root, "held")
+    for job_id in ("held", "free"):
+        job_folder(root, job_id)
     jobs = root / "jobs"
-    child = subprocess.Popen([sys.executable, "-c", NON_DUMPABLE], cwd=jobs / "held" / "repo",
-                             stdout=subprocess.PIPE, text=True)
+    proc = fake_proc(tmp_path, {
+        "1": ("0", tmp_path),
+        "10": ("1", jobs / "held" / "repo"),
+        "11": ("10", None),
+        "12": ("1", None),
+    })
+    if os.access(proc / "11" / "fd", os.R_OK):
+        pytest.skip("this user can read a directory with no permissions (root)")
+    monkeypatch.setattr(job_cleanup, "PROC", proc)
     try:
-        assert child.stdout.readline().strip() == "ready"
+        assert job_cleanup.jobs_held_open(jobs) == set(os.listdir(jobs))
+        report = device_pass(root, Plan(frozenset({"held", "free"}), NOW - 6 * HOUR, False))
+    finally:
+        for pid in ("11", "12"):
+            (proc / pid / "fd").chmod(0o700)
+
+    assert report.removed == {} and report.kept == {"held": "held-open", "free": "held-open"}
+    assert (jobs / "held" / "repo" / "README").exists()
+
+
+@pytest.mark.parametrize("parents", [
+    pytest.param({"1": "0", "10": "1", "11": "10"}, id="parent-outside-the-jobs-root"),
+    pytest.param({"1": "0", "11": "1"}, id="parent-exited"),
+])
+def test_a_hidden_process_keeps_the_folder_no_readable_process_holds(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parents: dict[str, str]) -> None:
+    root = work_root(tmp_path)
+    folder = job_folder(root, "held")
+    proc = fake_proc(tmp_path, {
+        pid: (parent, folder / "repo" if pid == "11" else tmp_path) for pid, parent in parents.items()
+    })
+    fd = proc / "11" / "fd"
+    fd.chmod(0)
+    real_readlink = os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if Path(path) == proc / "11" / "cwd":
+            raise PermissionError("non-dumpable")
+        return real_readlink(path, *args, **kwargs)
+
+    try:
+        if os.access(fd, os.R_OK):
+            pytest.skip("this user can read a directory with no permissions (root)")
+        monkeypatch.setattr(job_cleanup, "PROC", proc)
+        monkeypatch.setattr(job_cleanup, "runner_locks", lambda: True)
+        monkeypatch.setattr(os, "readlink", readlink)
+        report = device_pass(root, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
+    finally:
+        fd.chmod(0o700)
+
+    assert report.removed == {} and report.kept == {"held": "held-open"}
+    assert (folder / "repo" / "README").exists()
+
+
+@pytest.mark.skipif(not Path("/proc/self/cwd").exists(), reason="needs Linux /proc")
+def test_a_live_hidden_process_keeps_every_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    for job_id in ("held", "free"):
+        job_folder(root, job_id)
+    jobs = root / "jobs"
+    hidden = subprocess.Popen([sys.executable, "-c", NON_DUMPABLE], cwd=tmp_path,
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert hidden.stdout.readline().strip() == "ready"
         try:
-            os.readlink(f"/proc/{child.pid}/cwd")
+            os.readlink(f"/proc/{hidden.pid}/cwd")
             pytest.skip("this user can read a non-dumpable process's cwd (root or CAP_SYS_PTRACE)")
         except PermissionError:
             pass
-        assert job_cleanup.jobs_held_open(jobs) is None
-        report = device_pass(root, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
-        assert child.poll() is None
+        assert job_cleanup.jobs_held_open(jobs) == set(os.listdir(jobs))
+        report = device_pass(root, Plan(frozenset({"held", "free"}), NOW - 6 * HOUR, False))
+        assert hidden.poll() is None
     finally:
-        child.kill()
-        child.wait()
+        hidden.kill()
+        hidden.wait()
 
-    assert report.removed == {} and report.kept == {"held": "cannot-scan"}
+    assert report.removed == {} and report.kept == {"held": "held-open", "free": "held-open"}
     assert (jobs / "held" / "repo" / "README").exists()
     assert job_cleanup.jobs_held_open(jobs) == set()
 
 
 def test_a_process_that_exits_while_the_scan_walks_its_parents_does_not_fail_the_scan(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    jobs = work_root(tmp_path) / "jobs"
-    jobs.mkdir(parents=True)
+    root = work_root(tmp_path)
+    job_folder(root, "free")
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     gone = f"/proc/{child.pid}"
     read_paths, read_parent = job_cleanup._process_paths, job_cleanup._parent
@@ -497,7 +654,203 @@ def test_a_process_that_exits_while_the_scan_walks_its_parents_does_not_fail_the
     monkeypatch.setattr(job_cleanup, "_process_paths", paths)
     monkeypatch.setattr(job_cleanup, "_parent", parent)
     try:
-        assert job_cleanup.jobs_held_open(jobs) == set()
+        assert job_cleanup.jobs_held_open(root / "jobs") == set()
     finally:
         child.kill()
         child.wait()
+
+
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+}
+TAG = "0123456789abcdef" * 2
+
+
+def wall_clock_days_ago(days: float = 3) -> float:
+    return time.time() - days * 86400
+WORKER = (
+    'printf "%s %s\\n" "$(test -d .git && echo True || echo False)" '
+    '"$(test -f README && echo True || echo False)" > "$1"'
+)
+
+
+class Runner:
+    def __init__(self, tmp_path: Path, root: Path, job_id: str):
+        self.tmp = tmp_path
+        self.target = RemoteTarget("pc", "pc-claude-bot", "claude-bot", str(root), job_id, TAG)
+        self.report = tmp_path / "worker-saw"
+        origin = tmp_path / "origin.git"
+        seed = tmp_path / "seed"
+        for argv in (["init", "-q", "--bare", "-b", "main", str(origin)],
+                     ["init", "-q", "-b", "main", str(seed)]):
+            self.git(*argv)
+        (seed / "README").write_text("checkout\n")
+        self.git("-C", str(seed), "add", "README")
+        self.git("-C", str(seed), "commit", "-q", "-m", "one")
+        self.git("-C", str(seed), "push", "-q", str(origin), "HEAD:main")
+        self.url = f"file://{origin}"
+
+    def git(self, *args: str) -> None:
+        subprocess.run(["git", *args], env={**os.environ, **GIT_ENV}, check=True,
+                       capture_output=True)
+
+    def sh(self, script: str, **options) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["sh", "-c", script], capture_output=True, text=True, timeout=60,
+            env={"HOME": str(self.tmp), "PATH": device_path(), **GIT_ENV}, **options)
+
+    def checkout_script(self) -> str:
+        return remote.checkout_script(self.target, url=self.url, head=None, base_branch="main",
+                                      branch=None, brief=False)
+
+    def checkout(self) -> str:
+        done = self.sh(self.checkout_script())
+        assert done.returncode == 0, done.stderr
+        return done.stdout
+
+    def start(self) -> str:
+        script = remote.start_script(self.target, ["/bin/sh", "-c", WORKER, "worker",
+                                                   str(self.report)], {})
+        done = self.sh(script, start_new_session=True)
+        assert done.returncode == 0, done.stderr
+        return self.report.read_text().strip()
+
+
+def checkout_folder(tmp_path: Path, root: Path, job_id: str) -> Runner:
+    runner = Runner(tmp_path, root, job_id)
+    assert "new" in runner.checkout()
+    jobs = root / "jobs"
+    (jobs / f"{job_id}.launched").write_text("launched\n")
+    for path in jobs.iterdir():
+        age(path, wall_clock_days_ago())
+    return runner
+
+
+CLAIM_POINTS = ("before the hold", "between the hold and the reread", "after the reread")
+
+
+class ClaimAndStart:
+    def __init__(self, root: Path, db: Path, runner: Runner, *, when: str):
+        self.device = InProcessTransport(root)
+        self.claimer = RequeueAndClaim(root, db, runner.target.job_id, when=when)
+        self.runner = runner
+        self.when = when
+        self.saw: str | None = None
+
+    def claim_and_check_out(self) -> None:
+        self.claimer.claim()
+        assert "reused" in self.runner.checkout()
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        step = Plan.parse(input.decode()).step
+        if (self.when, step) in (("before the hold", job_cleanup.HOLD),
+                                 ("after the reread", job_cleanup.FINISH)):
+            self.claim_and_check_out()
+        said = self.device.call(argv, timeout=timeout, input=input)
+        if self.when == "between the hold and the reread" and step == job_cleanup.HOLD:
+            self.claim_and_check_out()
+        if self.saw is None and (step == job_cleanup.HOLD) == (self.when != "after the reread"):
+            self.saw = self.runner.start()
+        return said
+
+
+@pytest.mark.parametrize("when", CLAIM_POINTS)
+def test_a_job_claimed_during_the_pass_keeps_its_checkout_and_its_worker_sees_it(
+    tmp_path: Path, when: str
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    runner = checkout_folder(tmp_path, root, "j")
+    db = database(tmp_path, [("j", "t1", "cancelled", wall_clock_days_ago())])
+    transport = ClaimAndStart(root, db, runner, when=when)
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), transport,
+                                    now=time.time(), grace_hours=6, dry_run=False)
+
+    assert transport.saw == "True True"
+    assert (jobs / "j" / "README").read_text() == "checkout\n"
+    assert not (jobs / "j.cleanup").exists()
+    assert job_cleanup.read_jobs(db)[0].state == "running"
+    assert report.removed == {} and report.kept["j"] in ("live", "recent")
+
+
+def hold_lock(path: Path, seconds: float, then_touch: Path | None = None) -> subprocess.Popen:
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, pathlib, sys, time\n"
+         "lock = open(sys.argv[1], 'a'); fcntl.flock(lock, fcntl.LOCK_EX)\n"
+         "print('locked', flush=True); time.sleep(float(sys.argv[2]))\n"
+         "sys.argv[3] and pathlib.Path(sys.argv[3]).touch()\n",
+         str(path), str(seconds), str(then_touch or "")],
+        stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "locked"
+    return holder
+
+
+def test_a_checkout_waits_while_cleanup_holds_the_job_lock(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    runner = checkout_folder(tmp_path, root, "j")
+    (jobs / "j").rename(jobs / "j.cleanup")
+
+    with open(jobs / "j.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        checkout = subprocess.Popen(
+            ["sh", "-c", runner.checkout_script()], stdout=subprocess.PIPE, text=True,
+            env={"HOME": str(tmp_path), "PATH": device_path(), **GIT_ENV})
+        time.sleep(0.5)
+        assert checkout.poll() is None
+        assert (jobs / "j.claimed").stat().st_mtime < wall_clock_days_ago(1) and not (jobs / "j").exists()
+    out, _ = checkout.communicate(timeout=60)
+
+    assert checkout.returncode == 0 and "reused" in out
+    assert (jobs / "j" / "README").exists() and not (jobs / "j.cleanup").exists()
+    assert (jobs / "j.claimed").stat().st_mtime > wall_clock_days_ago(1 / 24)
+
+
+def test_the_hold_waits_for_a_claim_in_progress_and_keeps_the_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    folder = job_folder(root, "j", when=wall_clock_days_ago())
+    jobs = root / "jobs"
+    holder = hold_lock(jobs / "j.lock", 1.0, then_touch=jobs / "j.claimed")
+    began = time.monotonic()
+
+    hold = job_cleanup.device_step(root, Plan(frozenset({"j"}), wall_clock_days_ago(0.25), False))
+
+    assert time.monotonic() - began >= 0.8
+    holder.wait(timeout=10)
+    assert hold.kept == {"j": "recent"} and hold.held == ()
+    assert (folder / "repo" / "README").exists() and not (jobs / "j.cleanup").exists()
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_device_without_flock_keeps_every_named_folder(
+    tmp_path: Path, monkeypatch, dry_run: bool
+) -> None:
+    root = work_root(tmp_path)
+    folder = job_folder(root, "j")
+    monkeypatch.setattr(job_cleanup.shutil, "which", lambda name: None)
+
+    hold = job_cleanup.device_step(root, Plan(frozenset({"j"}), NOW - 6 * HOUR, dry_run))
+
+    assert hold.removed == {} and hold.kept == {"j": "cannot-lock"} and hold.held == ()
+    assert (folder / "repo" / "README").exists() and not (root / "jobs" / "j.cleanup").exists()
+
+
+def test_a_claim_moves_a_set_aside_checkout_back_and_leaves_one_beside_a_present_folder(
+    tmp_path: Path,
+) -> None:
+    root = work_root(tmp_path)
+    jobs = root / "jobs"
+    runner = checkout_folder(tmp_path, root, "j")
+    (jobs / "j").rename(jobs / "j.cleanup")
+
+    assert "reused" in runner.checkout()
+    assert (jobs / "j" / "README").exists() and not (jobs / "j.cleanup").exists()
+
+    (jobs / "j.cleanup").mkdir()
+    (jobs / "j.cleanup" / "stale").write_text("x")
+    assert "reused" in runner.checkout()
+    assert (jobs / "j.cleanup" / "stale").exists() and (jobs / "j" / "README").exists()
