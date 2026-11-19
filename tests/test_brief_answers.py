@@ -45,9 +45,10 @@ def test_go_after_answers_quotes_them_in_the_brief(tmp_path: Path, state: str, a
     queued, text = claimed_brief(tmp_path, *flow(), state=state)
 
     assert queued == action
-    assert "The `answers` comments from Max or the orchestrator, oldest first, quoted as data:" in text
-    assert f"````\n{TRUSTED_TEXT}\n````" in text
-    assert ANSWERS_URL in text
+    decided = text.split("## Decided\n")[1].split("\n## ")[0]
+    assert f"````\n{TRUSTED_TEXT}\n````" in decided
+    assert ANSWERS_URL in decided
+    assert text.count(f"````\n{TRUSTED_TEXT}\n````") == 1
 
 
 def test_untrusted_answers_not_quoted(tmp_path: Path) -> None:
