@@ -12,7 +12,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-SPILLED = ("answers", "brief_text", "evidence", "instruction", "plan_text", "unmapped")
+SPILLED = ("answers", "brief_text", "decisions", "evidence", "instruction", "plan_text", "unmapped")
 MARKER = "spilled"
 DIRECTORY = "job-detail"
 BATCH = 200

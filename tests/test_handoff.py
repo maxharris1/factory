@@ -53,6 +53,7 @@ def test_kinds_and_example_keys_match_spec_section_5() -> None:
         "repeat",
         "unsat",
         "result",
+        "cause",
         "scope",
         "lanes",
         "env",

@@ -67,21 +67,22 @@ ac-2: ac-2: The button opens sign-up with no card field.
 
 ## What to do
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
-1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it never leads to `APPROVE`.
-2. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
-3. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius, and say which checks did not run. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
-4. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
-5. Blocking bar (factory.md `review.block_on: user-impact`). pstack's `autopilot-full.md` step 4 says: "A problem the PR's base already has, whether trunk or the PR below it in a stack, doesn't block unless the PR copies it or newly reaches it. Only a bug a user would hit, a failed gate, or a wrong shipped doc blocks, and everything else goes in a follow-up." So REVISE only for an unmet acceptance criterion, a failed gate (a test, check or build that fails on this head), a bug a user or the factory would hit in normal operation on a path this PR changed, or a shipped doc this PR made wrong. Mark every other finding `[follow-up]`, not `[blocking]`. A problem the base already has does not block unless the PR copies it or newly reaches it.
-6. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
-7. When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, and count it as unmet for `ac`.
-8. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
+1. Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, `unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the header. A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.
+2. QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. For each `review` criterion, write your own check (test, script or trace) before reading the builder's proof, then compare. A `qa` criterion gets none.
+3. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
+4. Run interrogate and blast-radius, and say which checks did not run.
+5. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
+6. Give each helper a distinct question: one criterion group or one risk.
+7. Blocking bar (factory.md `review.block_on: user-impact`). pstack's `autopilot-full.md` step 4 says: "A problem the PR's base already has, whether trunk or the PR below it in a stack, doesn't block unless the PR copies it or newly reaches it. Only a bug a user would hit, a failed gate, or a wrong shipped doc blocks, and everything else goes in a follow-up." So REVISE only for an unmet acceptance criterion, a failed gate (a test, check or build that fails on this head), a bug a user or the factory would hit in normal operation on a path this PR changed, or a shipped doc this PR made wrong. Mark every other finding `[follow-up]`, not `[blocking]`. A problem the base already has does not block unless the PR copies it or newly reaches it.
+8. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
+9. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk=high repeat=<id> unsat=<id> -->
 
-Then plain prose for people and agents: **Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state and evidence, then the findings as a numbered list, one item each, in exactly this form: `1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.` The tag is one of `[blocking]` or `[follow-up]` and comes first, before the id. The dispatcher reads the tag, the id and the `Rule:` sentence from that form to carry the finding into later rounds. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: **Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state, owner and evidence in this form: `- ac-<n>: <state>. Owner: <review|qa>. <evidence>.`, then the findings as a numbered list, one item each, in exactly this form: `1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.` The tag is one of `[blocking]` or `[follow-up]` and comes first, before the id. The dispatcher reads the tag, the id and the `Rule:` sentence from that form to carry the finding into later rounds. End with one line in exactly this form: `Could delete: <code this PR could have deleted or left out, or nothing>. Size: <lines changed> vs the plan's estimate of <estimate>.` Leave out ` vs the plan's estimate of <estimate>` when the plan gives no estimate. This line never blocks. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -97,7 +98,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ## Review rules (docs/SPEC.md section 8)
 - One reviewer, from a different model family than the builder, gives the final factory verdict.
-- That reviewer runs the project's verify skill when factory.md names one, plus interrogate and blast-radius in round 1 (in a later round only for new behavior, a redesign or a large new diff), and may run code in a throwaway copy, its containers labelled as the Rules say.
+- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius in round 1 (in a later round only for new behavior, a redesign or a large new diff), and may run code in a throwaway copy, its containers labelled as the Rules say.
 - There is no second factory reviewer and no factory Judge.
 - Risk low: one review round; leftover minors are batched into a follow-up ticket. Risk high: up to three rounds; every extra round needs Max's own words.
 - Gate retries (CI red, then fix) are not review rounds. Three CI-red cycles in a row mark the ticket stuck.
@@ -259,20 +260,21 @@ ac-2: ac-2: The button opens sign-up with no card field.
 
 ## What to do
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
-1. Requirements first. Before the diff, mark each `ac-<n>` in **Acceptance criteria** above `met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it never leads to `APPROVE`.
-2. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
-3. Run the verify skill `verify-cleffy` (UI and database checks), plus interrogate and blast-radius, and say which checks did not run. A verify result you cannot read (unknown) is `verdict=BLOCKED`.
-4. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
-5. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
-6. When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, and count it as unmet for `ac`.
-7. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
+1. Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, `unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the header. A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.
+2. QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. For each `review` criterion, write your own check (test, script or trace) before reading the builder's proof, then compare. A `qa` criterion gets none.
+3. Read the whole diff and the CI result on that head. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
+4. Run interrogate and blast-radius, and say which checks did not run.
+5. Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.
+6. Give each helper a distinct question: one criterion group or one risk.
+7. Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same finding and number new ones after the highest earlier id. The same problem means the same broken rule, not the same line.
+8. Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.
 
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<a|b>` replaced by one choice and each other `<...>` by its value:
 
 <!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=<met|unmet> verdict=<APPROVE|REVISE|BLOCKED> risk=high repeat=<id> unsat=<id> -->
 
-Then plain prose for people and agents: **Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state and evidence, then the findings as a numbered list, one item each, in exactly this form: `1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.` The tag is one of `[blocking]` or `[minor]` and comes first, before the id. The dispatcher reads the tag, the id and the `Rule:` sentence from that form to carry the finding into later rounds. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->`, then the question); it is this job's handoff.
+Then plain prose for people and agents: **Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state, owner and evidence in this form: `- ac-<n>: <state>. Owner: <review|qa>. <evidence>.`, then the findings as a numbered list, one item each, in exactly this form: `1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.` The tag is one of `[blocking]` or `[minor]` and comes first, before the id. The dispatcher reads the tag, the id and the `Rule:` sentence from that form to carry the finding into later rounds. End with one line in exactly this form: `Could delete: <code this PR could have deleted or left out, or nothing>. Size: <lines changed> vs the plan's estimate of <estimate>.` Leave out ` vs the plan's estimate of <estimate>` when the plan gives no estimate. This line never blocks. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->`, then the question); it is this job's handoff.
 
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
@@ -295,7 +297,7 @@ ORCH-HANDOFF: failed
 
 ## Review rules (docs/SPEC.md section 8)
 - One reviewer, from a different model family than the builder, gives the final factory verdict.
-- That reviewer runs the project's verify skill when factory.md names one, plus interrogate and blast-radius, and may run code in a throwaway copy, its containers labelled as the Rules say.
+- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius, and may run code in a throwaway copy, its containers labelled as the Rules say.
 - There is no second factory reviewer and no factory Judge.
 - Risk low: one review round; leftover minors are batched into a follow-up ticket. Risk high: up to three rounds; every extra round needs Max's own words.
 - Gate retries (CI red, then fix) are not review rounds. Three CI-red cycles in a row mark the ticket stuck.

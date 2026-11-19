@@ -28,9 +28,10 @@ if TYPE_CHECKING:
     from lib.evidence.scenarios import LiveScenarios
 
 OPEN_STATES = ("queued", "running")
-_BLOCKING = re.compile(r"^\s*(?:[-*+]\s+)?(\[blocking\].*?)\s*$")
+_TAGGED = re.compile(r"^\s*(?:[-*+]\s+)?(\[(blocking|drift)\].*?)\s*$")
 _EVIDENCE = re.compile(r"^\s*(?:[-*+]\s+)?Evidence:\s*(\S+)", re.MULTILINE)
 _SCENARIO_ROW = re.compile(r"^\s*\|\s*(qa-[1-9][0-9]*)\s*\|(.*)\|\s*$")
+_RESULT_WORDS = ("Verified", "Failed", "Drift")
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,11 @@ class Failed:
 
 
 @dataclass(frozen=True)
+class Drifted:
+    report_id: str
+
+
+@dataclass(frozen=True)
 class EnvFailed:
     failures: int
 
@@ -101,7 +107,7 @@ class Missing:
     pass
 
 
-QaStatus = Covered | Failed | EnvFailed | Running | Missing
+QaStatus = Covered | Failed | Drifted | EnvFailed | Running | Missing
 
 
 @dataclass(frozen=True)
@@ -122,6 +128,7 @@ class FixFromQa:
 @dataclass(frozen=True)
 class ReviewFix:
     report_id: str | None
+    drift_report_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,11 +147,16 @@ class ParkQa:
 
 
 @dataclass(frozen=True)
+class MaintainSkill:
+    report_id: str
+
+
+@dataclass(frozen=True)
 class CancelQa:
     pass
 
 
-GateAction = Proceed | Wait | FixFromQa | ReviewFix | EnsureQa | RetryQa | ParkQa | CancelQa
+GateAction = Proceed | Wait | FixFromQa | ReviewFix | EnsureQa | RetryQa | ParkQa | MaintainSkill | CancelQa
 
 ENV_RETRIES = 1
 
@@ -162,6 +174,8 @@ def decide_gate(verdict: str, status: QaStatus, *, waited_out: bool = False) -> 
             return Proceed()
         case "APPROVE", Failed(report_id):
             return FixFromQa(report_id)
+        case "APPROVE", Drifted(report_id):
+            return MaintainSkill(report_id)
         case "APPROVE", EnvFailed(failures) if failures <= ENV_RETRIES:
             return RetryQa()
         case "APPROVE", EnvFailed():
@@ -171,7 +185,9 @@ def decide_gate(verdict: str, status: QaStatus, *, waited_out: bool = False) -> 
         case "APPROVE", Missing():
             return EnsureQa()
         case "REVISE", Failed(report_id):
-            return ReviewFix(report_id)
+            return ReviewFix(report_id, report_id)
+        case "REVISE", Drifted(report_id):
+            return ReviewFix(None, report_id)
         case "REVISE", Running() if not waited_out:
             return Wait("revise-qa-running")
         case "REVISE", _:
@@ -377,11 +393,11 @@ class QaMixin:
                 )
             ]
         bodies = {comment.id: comment.body for comment in ticket.comments}
-        latest: dict[str, bool] = {}
+        latest: dict[str, str | None] = {}
         for comment_id in reported:
-            for qa_id, passed in _scenario_rows(bodies.get(comment_id, "")):
-                latest.setdefault(qa_id, passed)
-        return tuple(qa_id for qa_id in live_ids if not latest.get(qa_id, False))
+            for qa_id, word in _scenario_rows(bodies.get(comment_id, "")):
+                latest.setdefault(qa_id, word)
+        return tuple(qa_id for qa_id in live_ids if latest.get(qa_id) != "Verified")
 
     def _qa_live(self, ticket: TrackedTicket) -> LiveScenarios | None:
         from lib.evidence.scenarios import InvalidSection, live_scenarios
@@ -431,12 +447,13 @@ class QaMixin:
                 connection.execute(
                     """
                     UPDATE qa_runs
-                    SET state = ?, result = ?, comment_id = ?, finished_at = ?
+                    SET state = ?, result = ?, cause = ?, comment_id = ?, finished_at = ?
                     WHERE run_id = ?
                     """,
                     (
                         "reported" if current else "stale",
                         fields["result"],
+                        fields.get("cause"),
                         comment.id,
                         self.queue.now(),
                         row["run_id"],
@@ -528,7 +545,7 @@ class QaMixin:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT state, result, reason, comment_id FROM qa_runs
+                SELECT state, result, cause, reason, comment_id FROM qa_runs
                 WHERE repo = ? AND ticket_id = ? AND head = ? AND arm = 'primary'
                 ORDER BY rowid DESC
                 """,
@@ -537,15 +554,15 @@ class QaMixin:
             if not rows:
                 return Missing()
             row = rows[0]
-            report_id, carried = row["comment_id"], row["reason"] or ""
+            report_id, cause, carried = row["comment_id"], row["cause"], row["reason"] or ""
             while row["result"] == "FAIL" and report_id is None and carried.startswith("carried:"):
                 source = connection.execute(
-                    "SELECT comment_id, reason FROM qa_runs WHERE run_id = ?",
+                    "SELECT comment_id, cause, reason FROM qa_runs WHERE run_id = ?",
                     (carried.removeprefix("carried:"),),
                 ).fetchone()
                 if source is None:
                     break
-                report_id, carried = source["comment_id"], source["reason"] or ""
+                report_id, cause, carried = source["comment_id"], source["cause"], source["reason"] or ""
         match (row["state"], row["result"]):
             case ("queued" | "running", _):
                 return Running()
@@ -553,6 +570,8 @@ class QaMixin:
                 return Covered()
             case ("reported", None) if row["reason"] == "qa-not-required":
                 return Covered()
+            case ("reported", "FAIL") if cause == "drift":
+                return Drifted(report_id or "")
             case ("reported", "FAIL"):
                 return Failed(report_id or "")
             case _:
@@ -592,6 +611,21 @@ class QaMixin:
             connection.commit()
 
     def _park_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
+        self._pause_for_qa(ticket, comment, head)
+        self.wake_grok_once(
+            ticket,
+            reason="qa-env-failed",
+            source_comment_id=comment.id,
+            detail=self._project_wake_detail(
+                ticket,
+                f"waiting-max-qa: QA at {head} failed on its environment {ENV_RETRIES + 1} times; "
+                f"the APPROVE {_comment_link(comment)} waits for Max",
+            ),
+            head=head,
+            once_key=head,
+        )
+
+    def _pause_for_qa(self, ticket: TrackedTicket, comment: Comment, head: str) -> None:
         generation = self._generation(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
             write_workflow_state(
@@ -611,18 +645,6 @@ class QaMixin:
                 guard="workflow_state IN ('review', 'awaiting-ok', 'fixing', 'merge-queue', 'waiting-external')",
             )
             connection.commit()
-        self.wake_grok_once(
-            ticket,
-            reason="qa-env-failed",
-            source_comment_id=comment.id,
-            detail=self._project_wake_detail(
-                ticket,
-                f"waiting-max-qa: QA at {head} failed on its environment {ENV_RETRIES + 1} times; "
-                f"the APPROVE {_comment_link(comment)} waits for Max",
-            ),
-            head=head,
-            once_key=head,
-        )
         self._write_state_label(ticket, "waiting-max")
 
     def _cancel_open_qa(self, ticket: TrackedTicket, reason: str) -> None:
@@ -655,7 +677,40 @@ class QaMixin:
         return QaFix(
             _comment_link(report),
             evidence.group(1) if evidence else None,
-            tuple(qa_id for qa_id, passed in _scenario_rows(report.body) if not passed),
+            tuple(qa_id for qa_id, word in _scenario_rows(report.body) if word == "Failed"),
+        )
+
+    def _wake_skill_drift(self, ticket: TrackedTicket, report_id: str, head: str) -> None:
+        report = next((comment for comment in ticket.comments if comment.id == report_id), None)
+        drift = () if report is None else _tagged(report.body, "drift")
+        if not drift:
+            return
+        qa = ticket.factory.qa
+        assert qa is not None
+        verify = qa.verify
+        evidence = _EVIDENCE.search(report.body)
+        self.wake_grok_once(
+            ticket,
+            reason="qa-skill-drift",
+            source_comment_id=report.id,
+            detail=json.dumps(
+                {
+                    "project_bot": ticket.grok_bot,
+                    "head": head,
+                    "verify": verify,
+                    "drift": list(drift),
+                    "evidence_link": evidence.group(1) if evidence else None,
+                    "link": _comment_link(report),
+                    "ask": (
+                        f"run maintain-verification-skill on the verify skill {verify} at the base branch "
+                        f"{ticket.factory.base_branch}; the product needs no change for these scenarios"
+                    ),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            head=head,
+            once_key=report.id,
         )
 
     def _wake_on_qa_fail(self, ticket: TrackedTicket, failed: list[sqlite3.Row]) -> None:
@@ -664,8 +719,11 @@ class QaMixin:
             report = comments.get(row["comment_id"])
             if report is None:
                 continue
-            blocking = _first_blocking(report.body)
-            if blocking is None or not self._approved_head(ticket, row["head"]):
+            self._wake_skill_drift(ticket, report.id, row["head"])
+            if not self._approved_head(ticket, row["head"]):
+                continue
+            blocking = next(iter(_tagged(report.body, "blocking")), None)
+            if blocking is None:
                 continue
             evidence = _EVIDENCE.search(report.body)
             self.wake_grok_once(
@@ -745,7 +803,7 @@ class QaMixin:
                 Comment(id=row["comment_id"], author="", body="", created_at=0.0),
             )
             rows = _scenario_rows(report.body)
-            passed = sum(verified for _qa_id, verified in rows)
+            passed = sum(word == "Verified" for _qa_id, word in rows)
             evidence = _EVIDENCE.search(report.body)
             link = evidence.group(1) if evidence else _comment_link(report)
             return {
@@ -817,22 +875,22 @@ def _prior(connection: sqlite3.Connection, where: str, args: tuple) -> Prior | N
     return None if row is None else Prior(row["run_id"], row["head"], row["result"])
 
 
-def _scenario_rows(body: str) -> list[tuple[str, bool]]:
+def _scenario_rows(body: str) -> list[tuple[str, str | None]]:
     rows = []
     for line in body.splitlines():
         match = _SCENARIO_ROW.match(line)
         if match:
             cells = [cell.strip() for cell in match.group(2).split("|")]
-            rows.append((match.group(1), "Verified" in cells))
+            rows.append((match.group(1), next((cell for cell in cells if cell in _RESULT_WORDS), None)))
     return rows
 
 
-def _first_blocking(body: str) -> str | None:
-    for line in body.splitlines():
-        match = _BLOCKING.match(line)
-        if match:
-            return match.group(1)
-    return None
+def _tagged(body: str, tag: str) -> tuple[str, ...]:
+    return tuple(
+        match.group(1)
+        for line in body.splitlines()
+        if (match := _TAGGED.match(line)) and match.group(2) == tag
+    )
 
 
 def _env_failure(row: sqlite3.Row) -> bool:

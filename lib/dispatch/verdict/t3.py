@@ -46,8 +46,11 @@ class T3Mixin:
         match self._qa_gate(ticket, "REVISE", ticket.current_head, since=comment.created_at):
             case Wait(outcome):
                 return False, outcome
-            case ReviewFix(report_id) if report_id is not None:
-                qa = self._qa_fix(ticket, report_id)
+            case ReviewFix(report_id, drift_report_id):
+                if drift_report_id is not None:
+                    self._wake_skill_drift(ticket, drift_report_id, ticket.current_head)
+                if report_id is not None:
+                    qa = self._qa_fix(ticket, report_id)
         qa_ids = frozenset(qa.failed) if qa is not None else frozenset()
         repeat = self._repeat_trigger(ticket, comment, reported_round, qa_ids)
         if repeat is not None:

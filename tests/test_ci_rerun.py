@@ -625,7 +625,7 @@ def test_an_unannounced_green_head_after_the_build_queues_the_first_review(
     assert board.state("42")["workflow_state"] == "review"
 
 
-def test_a_failed_state_write_after_the_unannounced_review_is_retried(tmp_path: Path) -> None:
+def review_write_failed(tmp_path: Path) -> tuple[RerunBoard, PR]:
     board, pr, _ready = fixing(tmp_path)
     pr.push(sha(2))
     set_state = board.actions.set_state
@@ -640,14 +640,106 @@ def test_a_failed_state_write_after_the_unannounced_review_is_retried(tmp_path: 
     board.actions.set_state = flaky
     board.poll()
     assert failed == ["review"]
+    assert board.state("42")["workflow_state"] == "fixing"
+    return board, pr
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_a_failed_state_write_after_the_unannounced_review_is_retried(
+    tmp_path: Path, running: bool
+) -> None:
+    board, pr = review_write_failed(tmp_path)
+    claimed = board.claim("codex") if running else None
     board.poll()
     assert board.state("42")["workflow_state"] == "review"
 
-    board.finish("codex")
+    job = claimed or board.claim("codex")
+    board.queue.finish(job.id, owner="codex", handoff_comment_id=f"handoff-{job.id}")
     verdict = board.revise(pr, "2/3")
     board.poll()
     assert board.outcome(verdict) == "queued-review-fix"
     assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
+
+
+def test_state_write_retry_after_review_finishes(tmp_path: Path) -> None:
+    board, pr = review_write_failed(tmp_path)
+    fixes = len(board.jobs("fix"))
+
+    board.finish("codex")
+    verdict = board.revise(pr, "2/3")
+    board.poll()
+
+    assert board.outcome(verdict) == "queued-review-fix"
+    row = board.state("42")
+    assert (row["workflow_state"], row["review_round"]) == ("fixing", 2)
+    new_fixes = board.jobs("fix")[fixes:]
+    assert [(job["head"], job["state"]) for job in new_fixes] == [(sha(2), "queued")]
+
+
+def test_a_counted_verdict_ends_the_unannounced_review_resume(tmp_path: Path) -> None:
+    board, pr = review_write_failed(tmp_path)
+    board.finish("codex")
+    board.revise(pr, "2/3")
+    board.poll()
+    board.poll()
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
+
+
+def test_an_approval_after_its_ci_fix_still_ships_past_the_unannounced_review(
+    tmp_path: Path,
+) -> None:
+    board = RerunBoard(tmp_path)
+    board.factory = replace(board.factory, start_before_ci=True)
+    board.dispatcher.ci_rerun = None
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    board.queue.finish(build.id, owner="claude", handoff_comment_id=board.ready(pr, sha(1)))
+    pr.push(sha(2))
+    board.poll()
+    review = board.claim("codex")
+    board.red(pr, pr.head, "11")
+    approve = board.approve(pr, "1/3")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=approve)
+    board.poll()
+    assert board.outcome(approve) == "approve-ci-red-fix"
+    board.poll()
+    assert board.state("42")["workflow_state"] == "fixing"
+
+    fix = board.claim("claude")
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head)
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert [job["head"] for job in board.jobs("review")] == [sha(2)]
+
+
+def test_a_newer_go_keeps_building_past_the_unannounced_review(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    pr.push(sha(2))
+    board.poll()
+    assert board.state("42")["workflow_state"] == "review"
+    board.finish("codex")
+    builds = len(board.jobs("build"))
+
+    board.go(pr, "go-2")
+    board.poll()
+    assert board.outcome("go-2") == "queued-build"
+    board.poll()
+    assert board.state("42")["workflow_state"] == "building"
+    assert len(board.jobs("build")) == builds + 1
+
+    board.revise(pr, "1/3")
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "building"
+    assert board.jobs("fix") == []
 
 
 def test_an_untrusted_ready_naming_the_head_does_not_hold_its_review(tmp_path: Path) -> None:

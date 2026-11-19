@@ -16,7 +16,6 @@ Grok Bot plans with Max, asks him product questions, decides technical ones, pic
 - Do not treat another agent's approval as Max's.
 - Do not create a GitHub issue or a GitHub label when `tickets` is `linear`, including on `aut0-code/aut0`. State stays in the `orch:v1` header and on the Linear ticket.
 - Do not add `orch:v1` keys. The keys already on main are the only keys.
-- Do not invent a third risk class. The classes are `low` and `high`.
 - Do not post `orch:go` twice for one intake, and do not post it again when a mid-work answer resumes the same step.
 - Read `factory.md` from the project's `factory_ref` in `orch.yml`, the trusted base branch the poller reads. Do not read it from a pull request head or the repository's default branch.
 
@@ -32,13 +31,13 @@ RouteDecision fields: `builder_harness`, `builder_model`, `reviewer_harness`, `r
 
 F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False, built_by=None) -> JobRoute`
 
-`JobRoute` has `builder`, `reviewer`, `reason`, and `ok`. `ok` is true only when both sides are set and `reason` is none. Each side has `harness` and `model`.
+`JobRoute` has `builder`, `reviewer`, `reason`, and `ok`. `ok` means both sides are set and `reason` is none. Each side has `harness` and `model`.
 
 F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
 
 `choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError`. It then calls `route_job` once, forwarding `usage` and `request.built_by`, and builds a `FitChoice` from the route.
 
-`built_by` is optional. On a later round, set it to the `(harness, model)` that actually built, so the builder is that one and the reviewer is outside its family.
+`built_by` is optional. On a later round, set it to the `(harness, model)` that built, so the reviewer is outside its family.
 
 The four `*_using_reserve` and `*_fallback` fields record a side in its usage reserve or off factory.md's harness. When any is true, the `orch:go` body ends with an informational **Routing** paragraph; they are not header keys. `lib.usage` must not import `FitChoice`. This skill does not rank harnesses and does not read a usage source.
 
@@ -89,9 +88,9 @@ Classify every question as one of:
 
 Build a `RouteRequest` from `project.config`, the brief's risk, the likely files, a one-line summary, `urgent`, and `scope_changed`.
 
-`urgent` is true only for a resumed paused step, past-ship work, or a ticket Max marked urgent. `choose_route` passes it as `marked_urgent` and passes no `usage`.
+`urgent` is true only for a resumed paused step, past-ship work, or a ticket Max marked urgent.
 
-Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
+Call `choose_route(request)` with no `usage`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
 
 Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` is there, do not post another. The verify value is the skill name from `factory.md`, or `none`.
 
@@ -124,6 +123,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `awaiting-ok` | `factory.md`'s `hold:` holds a `ship: merge` pull request. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that it waits on his `ok` or `/ok <sha>`. |
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
+| `qa-skill-drift` | A primary QA `FAIL` with `[drift]` lines, whatever the verdict. | Run `maintain-verification-skill` as `detail.ask` says. Tell Max once. |
 | `ci-rerun-refused` | A completed red run's rerun was refused and charged. | Tell Max once. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
 | `ci-stale` | Two hours at one head in the CI state `detail.detail` names. | Run Stalled ticket. |

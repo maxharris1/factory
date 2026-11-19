@@ -11,21 +11,23 @@ This skill routes to pstack and never replaces it. The brief wins over this skil
 
 ## Role
 
-The reviewer is pstack's verifier: the agent that did not write the code, as Autopilot-full step 4 (`<pstack>/skills/poteto-mode/playbooks/autopilot-full.md`) and Shipping step 1 (`<pstack>/skills/poteto-mode/playbooks/shipping.md`) define it. It re-runs the gates, proves the load-bearing behavior with a run, audits the diff, and writes the verdict alone.
+The reviewer is pstack's verifier: the agent that did not write the code, as Autopilot-full step 4 (`<pstack>/skills/poteto-mode/playbooks/autopilot-full.md`) and Shipping step 1 (`<pstack>/skills/poteto-mode/playbooks/shipping.md`) define it. It re-runs the gates, proves the load-bearing behavior with a test or code run, audits the diff, and writes the verdict alone.
+
+Do not boot or drive the app. `review.verify` is `none` for the reviewer, whatever verify skill factory.md names. The reviewer checks code and logic. The QA lane owns every live app check.
 
 The brief decides what blocks, what a later round checks, and when a verdict is BLOCKED or names an id it has seen before. Follow its Review rules and steps. This skill does not restate them.
 
 ## Steps
 
-1. Read the criteria first. Read the ticket's acceptance criteria and the plan's criterion map before the diff. They are the intent.
-2. Run `<pstack>/skills/interrogate/SKILL.md` over the PR diff at the head the brief names.
-3. Run `<pstack>/skills/blast-radius/SKILL.md` on the same diff.
-4. Run the verify skill when the brief names one. When it says `none`, say so.
-5. Write the verdict in the header the brief gives.
+1. Read the criteria first. Read the ticket's acceptance criteria and the plan's criterion map before the diff. They are the intent. Tag each criterion `review` or `qa`, exactly one owner each. A `review` criterion is one that code, tests or logic can show. A `qa` criterion is one that only the running app can show.
+2. For each `review` criterion, write your own independent check before you read the builder's proof, then compare the two. A `qa` criterion gets no independent check. Read the code and logic behind it and leave the live check to QA.
+3. Run `<pstack>/skills/interrogate/SKILL.md` over the PR diff at the head the brief names.
+4. Run `<pstack>/skills/blast-radius/SKILL.md` on the same diff.
+5. Write the verdict in the header the brief gives. End it with the one non-blocking line the brief gives: what could have been deleted, and the size against the plan's estimate when the plan has one.
 
 ## Helpers
 
-Helpers take their models from the brief's model lines: `interrogate reviewers` for interrogate's adversaries, and the role the skill names for every other helper. Helpers do research only. They read code, and they may run repros in a throwaway copy. They never edit the PR branch, push, or post. You review what they return and you alone write the verdict.
+Helpers take their models from the brief's model lines: `interrogate reviewers` for interrogate's adversaries, and the role the skill names for every other helper. Helpers do research only. They read code, and they may run repros in a throwaway copy. They never edit the PR branch, push, or post. Give each helper a distinct question: one criterion group or one risk. You review what they return and you alone write the verdict.
 
 ## Unclear intent
 

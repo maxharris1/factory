@@ -59,6 +59,7 @@ ACTIONS = (
     "qa",
     "qa-failed",
     "qa-env-failed",
+    "qa-skill-drift",
     "qa-head-moved",
     "ci-rerun-refused",
     "ci-stale",

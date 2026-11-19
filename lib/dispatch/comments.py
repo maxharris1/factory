@@ -76,6 +76,7 @@ class CommentsMixin:
         try:
             self._cancel_answered_jobs(ticket)
             self._redrive_handoffs(ticket)
+            self._resume_unannounced_review(ticket)
             self._process_comments(ticket, comments)
             if _base_mismatch(self._polled.get(key, ticket)) is not None:
                 return

@@ -378,6 +378,24 @@ class SchemaMixin:
             _add_missing_columns(connection, "followup_filings", {"addition": "TEXT"})
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS decisions (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    answer_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    question_id TEXT,
+                    question TEXT NOT NULL,
+                    options TEXT NOT NULL,
+                    choice TEXT NOT NULL,
+                    answerer TEXT NOT NULL,
+                    answered_at REAL NOT NULL,
+                    url TEXT,
+                    PRIMARY KEY (repo, ticket_id, answer_id, position)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS followup_wakes (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
@@ -639,6 +657,7 @@ class SchemaMixin:
                         state IN ('queued', 'running', 'reported', 'cancelled', 'stale')
                     ),
                     result TEXT CHECK (result IS NULL OR result IN ('PASS', 'FAIL', 'BLOCKED')),
+                    cause TEXT CHECK (cause IS NULL OR cause IN ('product', 'drift')),
                     reason TEXT,
                     comment_id TEXT,
                     started_at REAL NOT NULL,
@@ -660,6 +679,7 @@ class SchemaMixin:
                     "ruled_at": "REAL",
                     "ruling_reason": "TEXT",
                     "evidence_dir": "TEXT",
+                    "cause": "TEXT CHECK (cause IS NULL OR cause IN ('product', 'drift'))",
                 },
             )
             connection.execute(

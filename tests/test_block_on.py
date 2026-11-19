@@ -133,7 +133,7 @@ def test_round_one_states_the_bar_and_drops_minor() -> None:
     assert "A problem the base already has does not block unless the PR copies it or newly reaches it." in brief
     assert "The tag is one of `[blocking]` or `[follow-up]` and" in brief
     assert "[minor]" not in brief
-    assert "plus interrogate and blast-radius, and say which checks did not run. A verify result" in brief
+    assert "Run interrogate and blast-radius, and say which checks did not run." in brief
     assert "This is a fix round" not in brief
 
 
@@ -144,11 +144,11 @@ def test_round_two_checks_the_fix_only() -> None:
     assert "(c) Read the fix delta for a bug the fix introduced." in brief
     assert "So rerun interrogate and blast-radius only when the fix is new behavior" in brief
     assert "Close the earlier rounds first" not in brief
-    assert "plus interrogate and blast-radius, and say which checks did not run. A verify result" not in brief
+    assert "Run interrogate and blast-radius, and say which checks did not run." not in brief
     assert "[minor]" not in brief
 
 
-UNCONDITIONAL_PASS = ("plus interrogate and blast-radius,", "run interrogate and blast-radius, and say")
+UNCONDITIONAL_PASS = ("Run interrogate and blast-radius, and say",)
 MERGE = {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []}
 
 

@@ -112,10 +112,13 @@ def verdict(head: str, verdict_: str, round_: str = "1/3") -> str:
     )
 
 
-def qa_report(head: str, result: str, *, arm: str = "primary", runner: str = "claude-cloud", body: str = "") -> str:
+def qa_report(
+    head: str, result: str, *, arm: str = "primary", runner: str = "claude-cloud", body: str = "",
+    cause: str | None = None,
+) -> str:
     return (
         f"<!-- orch:v1 kind=qa from=grok-bot role=qa head={head} result={result}"
-        f" scope=full runner={runner} arm={arm} -->\n{body}"
+        f"{f' cause={cause}' if cause else ''} scope=full runner={runner} arm={arm} -->\n{body}"
     )
 
 
