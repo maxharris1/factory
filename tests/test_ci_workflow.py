@@ -521,6 +521,26 @@ def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: P
     assert _runner_reads(env) == []
 
 
+def test_a_loop_outwaits_the_lock_probe_ensure_runs_while_it_starts(tmp_path: Path) -> None:
+    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
+    lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
+    lock.parent.mkdir(parents=True)
+    with lock.open("a") as probe:
+        fcntl.flock(probe, fcntl.LOCK_EX)
+        loop = subprocess.Popen(["bash", str(SYNC_SCRIPT), "loop"], env=env)
+        time.sleep(0.3)
+    assert loop.wait(timeout=30) == 0
+    assert _runner_reads(env), "the loop gave up on a lock that ensure held for a moment"
+
+
+def test_the_checklist_states_how_long_a_second_loop_waits_for_the_lock() -> None:
+    wait = re.search(r"^flock -w (\d+) 9 \|\| exit 0$", SYNC_SCRIPT.read_text(encoding="utf-8"), re.M)
+    assert wait, "the loop no longer takes its lock with a bounded wait"
+    text = " ".join((ROOT / "docs/F2-03-RUNNER-CHECKLIST.md").read_text(encoding="utf-8").split())
+    assert f"A second loop waits up to {wait.group(1)} seconds for the lock" in text
+    assert "exits at once" not in text
+
+
 STALLING_SYNC_GH = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$GH_LOG"
 if [[ "$*" == *"$STALL"* && ! -e "$STALLED" ]]; then touch "$STALLED"; exec sleep 30; fi
