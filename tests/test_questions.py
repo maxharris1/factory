@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lib.brief import render_brief
@@ -9,7 +10,7 @@ from lib.queue import Job, SQLiteJobQueue
 from tests.test_brief import job as brief_job
 from tests.test_dispatcher import ANSWERS, BRIEF, GO, QUESTIONS, comment, setup, ticket
 
-T = 1795096800.0
+T = datetime(2026, 11, 19, 14, tzinfo=timezone.utc).timestamp()
 HEAD = "a" * 40
 QUESTION_TEXT = "Which export format ships first?"
 QUESTIONS_BODY = QUESTIONS.replace(

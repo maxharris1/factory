@@ -65,9 +65,9 @@ def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
     asked = _handoff_body(question)
     pairs = [(text.strip(), choice.strip()) for text, choice in _QUESTION_ANSWER.findall(body)]
     entries = (
-        [(text, _options(asked, text), choice) for text, choice in pairs]
+        [(text, _options_under_or_all(asked, text), choice) for text, choice in pairs]
         if pairs
-        else [(asked.strip(), _options(asked, None), _unquoted(body))]
+        else [(asked.strip(), _options_under_or_all(asked, None), _unquoted(body))]
     )
     return [
         Decision(text, options, choice, answer.author, answer.created_at, answer.url, answer.id, position)
@@ -84,7 +84,7 @@ def _handoff_body(comment: Comment | None) -> str:
         return ""
 
 
-def _options(text: str, question: str | None) -> tuple[str, ...]:
+def _options_under_or_all(text: str, question: str | None) -> tuple[str, ...]:
     lines = text.splitlines()
     every = tuple(item.group(2) for line in lines if (item := _LIST_ITEM.match(line)))
     if question is None:
