@@ -76,6 +76,7 @@ SET_ASIDE = ".cleanup"
 CLAIMED = ".claimed"
 LOCK = ".lock"
 PROC = Path("/proc")
+SSH_SESSION = frozenset({"sshd", "sshd-session", "systemd", "(sd-pam)"})
 
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -201,12 +202,16 @@ def disk_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
-def _mine(process: Path) -> bool | None:
+def _status(process: Path) -> list[str] | None:
     try:
-        status = (process / "status").read_text().splitlines()
+        return (process / "status").read_text().splitlines()
     except OSError:
         return None
-    if not any(line.startswith("VmSize:") for line in status):
+
+
+def _mine(process: Path) -> bool | None:
+    status = _status(process)
+    if status is None or not any(line.startswith("VmSize:") for line in status):
         return None
     uids = next((line.split()[1:] for line in status if line.startswith("Uid:")), [])
     return str(os.getuid()) in uids
@@ -220,10 +225,19 @@ def _parent(process: Path) -> Path | None:
     return process.with_name(stat.rsplit(")", 1)[1].split()[1])
 
 
-def _started_by_another_user(process: Path) -> bool:
+def _hides_from_scan(process: Path) -> bool:
     """Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
     then drops them to this user, which leaves them non-dumpable, so their
     cwd cannot be read."""
+    status = _status(process) if _mine(process) else None
+    if status is None:
+        return False
+    name = next((line.removeprefix("Name:").strip() for line in status
+                 if line.startswith("Name:")), None)
+    return name not in SSH_SESSION or not _started_by_another_user(process)
+
+
+def _started_by_another_user(process: Path) -> bool:
     seen = {process.name}
     while (parent := _parent(process)) is not None and parent.name not in seen:
         seen.add(parent.name)
@@ -264,7 +278,7 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
         paths_of = {process: _process_paths(process) for process in PROC.iterdir()
                     if process.name.isdigit()}
         paths = [path for listed in paths_of.values() if listed for path in listed]
-        blind = any(listed is None and _mine(process) and not _started_by_another_user(process)
+        blind = any(listed is None and _hides_from_scan(process)
                     for process, listed in paths_of.items())
     else:
         try:
