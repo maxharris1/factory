@@ -66,10 +66,12 @@ def filled(template: str) -> str:
 def test_every_verify_setting_says_which_checks_did_not_run(
     case: str, factory_md: str, round_text: str, verify: str | None
 ) -> None:
-    text = task(render(case, {"round": round_text, "verify_skill": verify}, factory_md=factory_md))
+    brief = render(case, {"round": round_text, "verify_skill": verify}, factory_md=factory_md)
+    text = task(brief)
     assert NOT_RUN in text
-    assert "Do not boot or drive the app: `review.verify` is `none` for the reviewer" in text
-    assert "verify skill is unknown" not in text
+    assert "QA owns live checks" in text
+    assert "never boots or drives the app: `review.verify` is `none`" in brief
+    assert "verify skill is unknown" not in brief
 
 
 def test_no_snapshot_keeps_the_old_sentences() -> None:

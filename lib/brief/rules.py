@@ -70,8 +70,8 @@ def review_rules(facts: dict) -> str:
     return (
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
-        "- That reviewer checks code and logic and never boots or drives the app (`review.verify` is `none`), "
-        f"runs {adversarial} "
+        "- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, "
+        f"whatever verify skill factory.md or Job data names. It runs {adversarial} "
         "and may run code in a throwaway copy, its containers labelled as the Rules say.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "

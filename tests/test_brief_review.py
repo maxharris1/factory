@@ -39,7 +39,7 @@ def header(brief: str) -> str:
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
 def test_criteria_come_first_with_four_states(round_text: str) -> None:
     first = steps(review_brief(round_text))[0]
-    assert first.startswith("1. Requirements first. Before the diff, take each `ac-<n>` in **Acceptance criteria** above.")
+    assert first.startswith("1. Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above")
     for state in ("`met`", "`unmet`", "`unverified`", "`unsatisfiable`"):
         assert state in first
     assert "evidence" in first
@@ -116,7 +116,7 @@ def test_follow_up_findings_in_the_briefs_form_are_filed() -> None:
 def test_header_template_names_repeat_and_unsat(round_text: str) -> None:
     brief = review_brief(round_text)
     assert header(brief).endswith(" repeat=<id> unsat=<id> -->")
-    assert any("set `unsat=<id>` in the header, for example `unsat=ac-3`" in step for step in steps(brief))
+    assert any("sets `unsat=<id>` in the header" in step for step in steps(brief))
 
 
 def test_the_filled_template_parses() -> None:
@@ -140,9 +140,10 @@ def test_merge_conflict_is_not_a_finding() -> None:
 
 
 NO_APP = (
-    "Check code and logic. Do not boot or drive the app: `review.verify` is `none` for the reviewer, "
-    "whatever verify skill factory.md or Job data names. The QA lane owns every live app check."
+    "That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, "
+    "whatever verify skill factory.md or Job data names."
 )
+QA_OWNS = "QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run."
 VERIFY_NONE_MD = snapshots.FACTORY_MD.replace("  verify: verify-cleffy\n", "  verify: none\n")
 USER_IMPACT = "review:\n  block_on: user-impact\n"
 
@@ -195,17 +196,15 @@ REVIEW_TASKS = {
 @pytest.mark.parametrize("case", list(REVIEW_TASKS))
 def test_the_reviewer_never_boots_the_app_and_runs_no_verify_skill(case: str) -> None:
     text = REVIEW_TASKS[case]()
-    assert NO_APP in text
+    assert QA_OWNS in text
     for gone in ("Run the verify skill", "verify result", "UI and database checks", "`verify-cleffy`"):
         assert gone not in text
 
 
 def test_the_review_rules_say_the_reviewer_never_boots_the_app() -> None:
     review_rules = review_brief("1/3").split("## Review rules", 1)[1].split("\n## ", 1)[0]
-    assert "That reviewer checks code and logic and never boots or drives the app (`review.verify` is `none`)," in (
-        review_rules
-    )
-    assert "verify skill" not in review_rules
+    assert NO_APP in review_rules
+    assert "runs the project's verify skill" not in review_rules
 
 
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
@@ -214,25 +213,23 @@ def test_each_criterion_has_exactly_one_owner_and_only_review_criteria_get_an_in
 ) -> None:
     listed = steps(review_brief(round_text))
     assert (
-        "Tag each `ac-<n>` with exactly one owner: `review` when code, tests or logic can show it, or `qa` "
-        "when only the running app can show it." in listed[0]
+        "tag each `ac-<n>` in **Acceptance criteria** above with one owner, `review` (code, tests or logic show "
+        "it) or `qa` (only the running app can)" in listed[0]
     )
-    independent = [step for step in listed if "independent check" in step]
+    independent = [step for step in listed if "write your own check" in step]
     assert len(independent) == 1
     assert (
-        "For each `review` criterion, write your own independent check (a test, a script or a trace through "
-        "the code) before you read the builder's proof in the ready handoff, then compare the two."
+        "For each `review` criterion, write your own check (test, script or trace) before reading the builder's "
+        "proof, then compare. A `qa` criterion gets none."
     ) in independent[0]
-    assert "Write no independent check for a `qa` criterion." in independent[0]
-    assert "A `qa` criterion is never `unverified` only because you did not boot the app." in "\n".join(listed)
+    assert QA_OWNS in independent[0]
 
 
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
 def test_each_helper_gets_a_distinct_question(round_text: str) -> None:
     helpers = [step for step in steps(review_brief(round_text)) if "helper" in step]
     assert len(helpers) == 1
-    assert "Give each helper a distinct question: one criterion group or one risk." in helpers[0]
-    assert "No two helpers get the same question." in helpers[0]
+    assert helpers[0].endswith("Give each helper a distinct question: one criterion group or one risk.")
 
 
 SIZE_LINE = (
@@ -326,8 +323,8 @@ def test_verify_unavailable_refuses_anything_but_a_boolean(value: str) -> None:
     assert [(f.severity, f.message) for f in lenient_findings] == [("warning", message)]
 
 LIVE_PROVIDER = (
-    "A criterion that needs a live provider (a hosted model or cloud service) this sandbox has no credentials "
-    "for is `unverified`, not `verdict=BLOCKED`."
+    "A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: "
+    "name what is missing and the builder's live-run evidence or a human check."
 )
 
 
@@ -335,11 +332,8 @@ LIVE_PROVIDER = (
 def test_a_live_provider_criterion_without_credentials_is_unverified_not_blocked(round_text: str) -> None:
     first = steps(review_brief(round_text))[0]
     assert LIVE_PROVIDER in first
-    assert "Name the missing environment." in first
-    assert "live-run evidence the builder posted on the PR" in first
-    assert "name the human step that would check it" in first
     assert "Never read, request or look for credentials." in first
-    assert "An `unverified` criterion is not met. Count it as unmet for `ac`, so it never leads to `APPROVE`." in first
+    assert "Count `unverified` and `unsatisfiable` as unmet for `ac`." in first
 
 
 def test_the_new_routing_names_no_project() -> None:

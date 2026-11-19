@@ -10,10 +10,6 @@ _CI_WHILE_RUNNING = (
     "CI may still be running on that head. Read its result if it has finished. "
     "Do not wait for it, and do not block or REVISE on its status alone. The poller ships only on green CI."
 )
-NO_APP = (
-    "Check code and logic. Do not boot or drive the app: `review.verify` is `none` for the reviewer, "
-    "whatever verify skill factory.md or Job data names. The QA lane owns every live app check."
-)
 _MERGEABLE = " A merge conflict with the base is `mergeable: no` in the verdict, not a finding."
 PSTACK_BAR = (
     "A problem the PR's base already has, whether trunk or the PR below it in a stack, doesn't block unless "
@@ -192,20 +188,16 @@ def task_lines(facts: dict) -> list[str]:
     else:
         gate = "Run interrogate and blast-radius, and say which checks did not run."
     steps = [
-        "Requirements first. Before the diff, take each `ac-<n>` in **Acceptance criteria** above. "
-        "Tag each `ac-<n>` with exactly one owner: `review` when code, tests or logic can show it, or `qa` "
-        "when only the running app can show it. Then mark it `met`, `unmet`, `unverified` or `unsatisfiable`, "
-        "with its evidence (the file:line, test or run that shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about "
-        "other PRs' state. A criterion that needs a live provider (a hosted model or cloud service) this sandbox "
-        "has no credentials for is `unverified`, not `verdict=BLOCKED`. Name the missing environment. Point to "
-        "live-run evidence the builder posted on the PR, or name the human step that would check it. Never read, "
-        "request or look for credentials. An `unverified` criterion is not met. Count it as unmet for `ac`, so it "
-        "never leads to `APPROVE`.",
-        NO_APP + " Mark a `qa` criterion from the code and logic behind it and leave the live check to QA. A "
-        "`qa` criterion is never `unverified` only because you did not boot the app.",
-        "For each `review` criterion, write your own independent check (a test, a script or a trace through "
-        "the code) before you read the builder's proof in the ready handoff, then compare the two. Write no "
-        "independent check for a `qa` criterion.",
+        "Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one "
+        "owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, "
+        "`unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means "
+        "no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the "
+        "header. A criterion needing a live provider without credentials here is `unverified`, not "
+        "`verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never "
+        "read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.",
+        "QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. "
+        "For each `review` criterion, write your own check (test, script or trace) before reading the builder's "
+        "proof, then compare. A `qa` criterion gets none.",
         *([_QA_GATE_STEPS[facts["qa_gate"]]] if facts["qa_gate"] else []),
         *(
             _update_steps(facts, base, head, unchanged_tag)
@@ -235,10 +227,8 @@ def task_lines(facts: dict) -> list[str]:
             ]
         ),
         *([] if fix_round else [gate]),
-        "You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
-        "and seen it fail, and give the repro.",
-        "Give each helper a distinct question: one criterion group or one risk. No two helpers get the same "
-        "question.",
+        "Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.",
+        "Give each helper a distinct question: one criterion group or one risk.",
         *([_bar_step(variant)] if user_impact else []),
         "Give each finding an id `f-<n>` and name the rule it breaks. Reuse an earlier round's id for the same "
         "finding and number new ones after the highest earlier id. The same problem means the same broken rule, "
@@ -249,8 +239,6 @@ def task_lines(facts: dict) -> list[str]:
             if later_round and not variant
             else ""
         ),
-        "When a criterion is `unsatisfiable`, set `unsat=<id>` in the header, for example `unsat=ac-3`, "
-        "and count it as unmet for `ac`.",
         *(
             [
                 "Mark a finding `[follow-up]` instead of `[blocking]` when it breaks a rule an earlier round "

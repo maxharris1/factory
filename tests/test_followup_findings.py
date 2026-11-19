@@ -216,7 +216,7 @@ def review_brief(round_text: str, followup: int | None) -> str:
     )
 
 
-FOLLOWUP_STEP = "11. Mark a finding `[follow-up]` instead of `[blocking]`"
+FOLLOWUP_STEP = "9. Mark a finding `[follow-up]` instead of `[blocking]`"
 FOLLOWUP_RULES = (
     "- From round 4 (`review.followup_from_round`), variants of an already-raised rule are follow-ups, "
     "not blockers. A real new failure still blocks at any round.",
@@ -241,7 +241,7 @@ def test_review_brief_before_the_follow_up_round_is_unchanged() -> None:
 def test_review_brief_from_the_follow_up_round_defines_the_tag(round_text: str) -> None:
     brief = review_brief(round_text, 4)
     assert FOLLOWUP_STEP in brief
-    assert "12. Pick `ac` and the verdict" in brief
+    assert "10. Pick `ac` and the verdict" in brief
     assert "`[blocking]`, `[follow-up]` or `[minor]`" in brief
     for rule in FOLLOWUP_RULES:
         assert rule in brief.splitlines()
