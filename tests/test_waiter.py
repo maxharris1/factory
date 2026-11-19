@@ -304,7 +304,7 @@ def test_on_claim_the_waiter_starts_orch_job_run_with_the_brief_on_stdin(tmp_pat
     assert kwargs["env"]["ORCH_JOB_BRIEF"] == str(brief)
     assert spawn.stdin[0] == brief.read_bytes()
     text = brief.read_text(encoding="utf-8")
-    assert "kind: implement" in text and f"job id: {job_id}" in text
+    assert "# Factory job brief: implement" in text and f"job id: {job_id}" in text
     assert stat.S_IMODE(brief.stat().st_mode) == 0o600
     assert stat.S_IMODE(brief.parent.stat().st_mode) == 0o700
     assert context.repos == ["owner/repo"]
@@ -1149,7 +1149,7 @@ def test_a_queued_job_goes_from_claimed_to_running_with_a_heartbeat_and_no_messa
     )
     # Exactly the configured command, the brief on stdin and as a file.
     assert record["argv"] == ["--from-config"]
-    assert "kind: implement" in record["stdin"]
+    assert "# Factory job brief: implement" in record["stdin"]
     assert "owner/repo factory.md at main" in record["stdin"]
     assert "Never apply migrations" in record["stdin"]
     assert Path(record["brief_env"]).read_text(encoding="utf-8") == record["stdin"]

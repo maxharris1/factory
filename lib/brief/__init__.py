@@ -18,9 +18,9 @@ brief, and the orch:v1 handoff header the job must end with (section 5). The tar
 additional-context section (lib/factory_md.py parse_factory_context), so
 project-specific behavior stays in each repo's factory.md.
 
-Job text is data. Free text from the row (the brief, a CI log, a verdict
-link) appears only inside one fenced "Job data" block, whose fence is longer
-than any backtick run in it. A value shown outside that block (repo, ticket,
+Job text is data. Free text from the row (a CI log, a verdict link)
+appears only inside one fenced "Job data" block, whose fence is longer than
+any backtick run in it. A value shown outside that block (repo, ticket,
 head, round, risk, base branch, PR number) is shown only when it matches its
 strict form; otherwise the brief says it is missing and points at the data.
 The brief is passed to the harness on stdin and as a file, never in an argv.
@@ -61,7 +61,7 @@ from lib.brief.common import (
     questions_handoff_section,
 )
 from lib.brief.context import context_section
-from lib.brief.inline import BRIEF_TEXT_LIMIT, PLAN_TEXT_LIMIT, quoted_section
+from lib.brief.inline import PLAN_TEXT_LIMIT, quoted_section, ticket_section
 from lib.brief.plan import PLAN_HANDOFF_LIMIT
 from lib.brief.rules import finish_section, review_rules, rules
 from lib.factory_md import FactoryContext
@@ -137,6 +137,11 @@ def render_brief(
         if kind != "merge-only" and not isinstance(router, str)
         else None
     )
+    ticket = (
+        ticket_section(facts["ticket_text"], review=kind == "review", criteria_url=review.criteria_url(detail, facts))
+        if kind != "merge-only" and not isinstance(router, str)
+        else None
+    )
     if isinstance(router, str):
         middle = [
             "## What to do\n" + "\n".join(skills.blocked_task_lines(router)),
@@ -147,6 +152,7 @@ def render_brief(
             *([skills.section(router)] if router is not None else []),
             *(review.evidence_sections(detail, facts) if kind == "review" else []),
             "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
+            *([ticket] if ticket is not None else []),
             *_quoted_sections(facts),
             *([decided] if decided is not None else []),
             _handoff(job, bot, kind, facts),
@@ -163,6 +169,7 @@ def render_brief(
                 kind == "fix" and not isinstance(router, str) and bool(fix.quoted_findings(detail, facts))
             ),
             decided=decided is not None,
+            ticket_quoted=ticket is not None,
         ),
         context_section(facts, context, context_ref, context_note, kind),
     ]
@@ -171,8 +178,6 @@ def render_brief(
 
 def _quoted_sections(facts: dict) -> list[str]:
     sections = []
-    if facts["brief_text"]:
-        sections.append(quoted_section("Ticket brief", facts["brief_text"], facts["brief_url"], BRIEF_TEXT_LIMIT))
     if facts["plan_text"]:
         sections.append(
             quoted_section(facts["plan_title"], facts["plan_text"], facts["plan"], PLAN_TEXT_LIMIT)
