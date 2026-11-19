@@ -701,3 +701,121 @@ def test_the_adapter_raises_a_refusal_of_a_completed_run() -> None:
     assert raised.value.api_message == "Resource not accessible by integration"
     assert "not accessible" not in raised.value.safe_detail
     assert calls[-1] == ["api", RUN_PATH]
+
+
+def check_runs_gh(posts: list[str], *, long_status: str):
+    def gh(argv, timeout: float) -> GhResult:
+        endpoint = argv[-1]
+        if "POST" in argv:
+            posts.append(endpoint)
+            return GhResult(0, "", "")
+        if "check-runs?" in endpoint:
+            long = {"status": long_status, "conclusion": None}
+            if long_status == "completed":
+                long["conclusion"] = "success"
+            runs = [
+                {"id": 11, "name": "failed", "status": "completed", "conclusion": "failure",
+                 "details_url": f"{RUN_URL}/job/11"},
+                {"id": 12, "name": "long", **long,
+                 "details_url": "https://github.com/owner/repo/actions/runs/888/job/12"},
+            ]
+            return GhResult(0, json.dumps({"total_count": 2, "check_runs": runs}), "")
+        if endpoint.endswith("/status"):
+            return GhResult(0, json.dumps({"total_count": 0, "state": "pending"}), "")
+        return GhResult(0, json.dumps({"status": "completed"}), "")
+
+    return gh
+
+
+def test_a_red_waits_for_the_other_checks_at_its_head_before_the_rerun(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    sent: list[str] = []
+    active = GitHubReviewActions(check_runs_gh(sent, long_status="in_progress"))
+    board.dispatcher.ci_rerun = active.rerun_failed_jobs
+    board.red(pr, pr.head, "11")
+    board.results[pr.head] = active.ci_status("owner/repo", pr.head)
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.poll()
+
+    assert board.results[pr.head].pending == ("long",)
+    assert sent == []
+    assert board.reruns_table() == []
+    assert board.state("42")["gate_count"] == 0
+    assert board.jobs("fix") == []
+
+    settled = GitHubReviewActions(check_runs_gh(sent, long_status="completed"))
+    board.results[pr.head] = settled.ci_status("owner/repo", pr.head)
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert sent == [f"{RUN_PATH}/rerun-failed-jobs"]
+    assert board.reruns_table() == [(pr.head, "requested", ["11"], None)]
+
+
+def test_a_failed_status_read_of_a_run_keeps_the_rerun_for_a_later_poll(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    board.red(pr, pr.head, "11")
+    reads: list[list[str]] = []
+
+    def gh(argv, timeout: float) -> GhResult:
+        reads.append(list(argv))
+        if len(reads) == 1:
+            return GhResult(1, json.dumps({"message": "Server Error"}), "gh: Server Error (HTTP 502)")
+        return GhResult(0, json.dumps({"status": "in_progress"}), "")
+
+    board.dispatcher.ci_rerun = GitHubReviewActions(gh).rerun_failed_jobs
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) is None
+    assert len(reads) == 2
+    assert board.reruns_table() == []
+    assert board.state("42")["gate_count"] == 0
+    assert board.jobs("fix") == []
+    assert board.attention("ci-rerun-refused") == []
+
+
+def test_the_adapter_raises_a_standing_refusal_of_a_status_read() -> None:
+    def gh(argv, timeout: float) -> GhResult:
+        return GhResult(1, json.dumps({"message": "Not Found"}), "gh: Not Found (HTTP 404)")
+
+    with pytest.raises(GitHubAdapterError) as raised:
+        GitHubReviewActions(gh).rerun_failed_jobs("owner/repo", [RUN])
+
+    assert raised.value.http_status == 404
+
+
+def test_a_partial_batch_keeps_its_accepted_rerun_and_never_repeats_it(tmp_path: Path) -> None:
+    sent: list[str] = []
+
+    def gh(argv, timeout: float) -> GhResult:
+        if "POST" in argv:
+            run = argv[-1].split("/")[-2]
+            sent.append(run)
+            if run == "888":
+                return ALREADY_RUNNING
+            return GhResult(0, "", "")
+        return GhResult(0, json.dumps({"status": "completed"}), "")
+
+    board, pr = built(tmp_path)
+    board.dispatcher.ci_rerun = GitHubReviewActions(gh).rerun_failed_jobs
+    board.red(pr, pr.head, "11")
+    board.results[pr.head] = CIResult(
+        "failure", failed=(FailedCheck("first", RUN, "11"), FailedCheck("second", "888", "12"))
+    )
+    ready = board.ready(pr, pr.head)
+    board.poll()
+
+    assert sent == [RUN, "888"]
+    assert board.reruns_table() == [(pr.head, "requested", ["11", "12"], None)]
+
+    board.results[pr.head] = CIResult(
+        "failure", failed=(FailedCheck("first", RUN, "21"), FailedCheck("second", "888", "22"))
+    )
+    board.poll()
+
+    assert sent == [RUN, "888"]
+    assert board.outcome(ready) == "queued-ci-fix"
+    assert board.state("42")["gate_count"] == 1

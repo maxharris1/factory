@@ -804,6 +804,7 @@ class GitHubReviewActions:
                 "failure",
                 "failed: " + ", ".join(check.name for check in failed),
                 failed=tuple(failed),
+                pending=tuple(pending),
                 checks=checks,
             )
         return CIResult(
@@ -909,29 +910,33 @@ class GitHubReviewActions:
             raise GitHubAdapterError("Actions run id is not a number")
         if not all(self._run_completed(repo, run_id) for run_id in run_ids):
             return "running"
+        requested = False
         for run_id in run_ids:
             try:
                 self._call(
                     "-X", "POST", f"{_repo_path(repo)}/actions/runs/{run_id}/rerun-failed-jobs"
                 )
             except GitHubAdapterError as exc:
-                if exc.http_status == 403 and "already running" in (exc.api_message or "").lower():
-                    return "running"
-                if not self._run_completed(repo, run_id):
-                    return "running"
-                raise
-        return "requested"
+                already = exc.http_status == 403 and "already running" in (
+                    exc.api_message or ""
+                ).lower()
+                if not already and self._run_completed(repo, run_id):
+                    raise
+            else:
+                requested = True
+        return "requested" if requested else "running"
 
     def _run_completed(self, repo: str, run_id: str) -> bool:
         endpoint = f"{_repo_path(repo)}/actions/runs/{run_id}"
-        text = self._gh(("api", endpoint), route=f"gh api {_route((endpoint,))}")
         try:
+            text = self._gh(("api", endpoint), route=f"gh api {_route((endpoint,))}")
             run = _object(json.loads(text))
-        except json.JSONDecodeError as exc:
-            raise GitHubAdapterError(
-                f"gh returned malformed JSON: {exc}",
-                safe_detail=f"gh api {_route((endpoint,))} returned malformed JSON",
-            ) from exc
+        except json.JSONDecodeError:
+            return False
+        except GitHubAdapterError as exc:
+            if _transient(exc):
+                return False
+            raise
         return run.get("status") == "completed"
 
     def _call(

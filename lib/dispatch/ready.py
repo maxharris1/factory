@@ -465,6 +465,8 @@ class ReadyMixin:
 
         rerun = self.ci_rerun is not None and row is None
         if rerun:
+            if result.pending:
+                return None
             failed = failed_checks(result)
             run_ids = list(
                 dict.fromkeys(check.run_id for check in failed if check.run_id is not None)
