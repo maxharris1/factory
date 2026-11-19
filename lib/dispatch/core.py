@@ -285,10 +285,7 @@ class DispatcherBase:
         )
 
     def _fresh_ticket(self, ticket: TrackedTicket) -> TrackedTicket | None:
-        """The ticket read again, uncached, or None when the source cannot.
-
-        A fresh read that shows a watched PR closed unmerged abandons it
-        (#130) before the caller acts on the read."""
+        """The ticket read again, uncached, or None when the source cannot."""
         if self._fresh_reader is None:
             return None
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
@@ -300,14 +297,10 @@ class DispatcherBase:
         return None if fresh is None else self._routed(fresh)
 
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
-        """Every read outside the poll's snapshot passes here: one showing
-        a watched PR closed unmerged abandons it (#130), and one showing an
-        open PR on another base becomes the poll's ticket and raises
-        BaseMismatch, before anything acts on the read."""
         if fresh is None or fresh.merged:
             return fresh
         if fresh.closed:
-            if self._watched(fresh):
+            if self._closed_unfinished(fresh):
                 self._abandon_closed(fresh)
             return fresh
         mismatch = self._sync_base_mismatch(fresh)

@@ -7,6 +7,7 @@ import sqlite3
 
 from lib.dispatch.constants import (
     BASE_UPDATE_GRACE_SECONDS,
+    TERMINAL_STATES,
     UPDATE_FAILURES_TO_STOP,
     UPDATE_READY_GRACE_SECONDS,
     _NOT_FINISHED,
@@ -807,13 +808,10 @@ class MergeQueueMixin:
         )
 
     def _abandon_closed(self, ticket: TrackedTicket) -> None:
-        """A watched PR closed without merging: the watch ends (#130)."""
-        if self._emptied_by_running_job(ticket):
-            return
         key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            write_workflow_state(
+            written = write_workflow_state(
                 connection,
                 ticket.repo,
                 ticket.ticket_id,
@@ -821,6 +819,12 @@ class MergeQueueMixin:
                 source="closed-unmerged",
                 at=self.queue.now(),
                 guard=_NOT_FINISHED,
+            )
+            if not written:
+                connection.rollback()
+                return
+            self.clear_attention(
+                ticket.repo, ticket.ticket_id, "ship-failed", connection=connection
             )
             for job in connection.execute(
                 """
@@ -1038,21 +1042,23 @@ class MergeQueueMixin:
                 (repo.lower(), ticket_id),
             ).fetchone() is not None
 
-    def _watched(self, ticket: TrackedTicket) -> bool:
-        """An approved ticket the merge queue still watches (#130), an
-        update paused on a builder's question included."""
+    def _closed_unfinished(self, ticket: TrackedTicket) -> bool:
+        if not ticket.closed:
+            return False
         with self._connect() as connection:
-            return connection.execute(
+            row = connection.execute(
                 """
-                SELECT 1 FROM ticket_state
+                SELECT workflow_state, approved_head FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
-                  AND workflow_state IN (
-                    'merge-queue', 'updating', 'waiting-external', 'waiting-max'
-                  )
-                  AND approved_head IS NOT NULL
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchone() is not None
+            ).fetchone()
+        if row is None or row["workflow_state"] in TERMINAL_STATES:
+            return False
+        # GitHub auto-closes a PR whose branch has no commits beyond base (#705).
+        if ticket.pr_commits == 0:
+            return row["approved_head"] is not None and not self._emptied_by_running_job(ticket)
+        return True
 
     def _merge_queue_members(self, repo: str | None = None) -> list[sqlite3.Row]:
         """Approved tickets still watched, oldest approval first (#130).

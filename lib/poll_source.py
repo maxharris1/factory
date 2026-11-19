@@ -1064,6 +1064,23 @@ class LivePollSource:
             probes.update({(repo, number): fingerprint for number, fingerprint in found.items()})
         return probes
 
+    def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
+        projects = {project.repo.lower(): project for project in self.config.projects}
+        wanted: dict[str, list[str]] = {}
+        for ref in refs:
+            repo = ref.repo.lower()
+            if ref.tracker == "github" and repo in projects:
+                wanted.setdefault(repo, []).append(ref.ticket_id)
+        closed: set[tuple[str, str]] = set()
+        for repo, numbers in wanted.items():
+            try:
+                found = self.github.closed_pulls(projects[repo].repo, numbers)
+            except Exception:
+                self._defer(f"GitHub closed probe failed for {projects[repo].repo}")
+                continue
+            closed.update((repo, number) for number in found)
+        return frozenset(closed)
+
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
         if not self._linear_due:
             return None

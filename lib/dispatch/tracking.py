@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Mapping
 
 from lib.dispatch.constants import (
     _NOT_FINISHED,
@@ -314,7 +314,11 @@ class TrackingMixin:
             and _matching_head(fields["head"], ticket.current_head) is not None
         )
 
-    def _tracked_refs(self, now: float | None = None) -> tuple[TicketRef, ...]:
+    def _tracked_refs(
+        self,
+        now: float | None = None,
+        closed: Callable[[tuple[TicketRef, ...]], Collection[tuple[str, str]]] | None = None,
+    ) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -406,9 +410,22 @@ class TrackingMixin:
                 (HANDED_OFF_EXTERNALLY,),
             ).fetchall()
         refs: list[TicketRef] = []
+        held: list[TicketRef] = []
         first_reads: list[tuple[str, str, float]] = []
         for row in rows:
             state = row["workflow_state"]
+            ref = TicketRef(
+                repo=str(row["repo"]),
+                ticket_id=str(row["ticket_id"]),
+                tracker=str(row["tracker"]),
+                allow_merged=state == "merged"
+                or bool(row["outbox"])
+                or (state == "done" and bool(row["qa_open"]))
+                or (
+                    state in ("handed-off", *WATCHED_STATES)
+                    and bool(row["replay"])
+                ),
+            )
             catching_up = (
                 bool(row["replay"]) or bool(row["unsettled"]) or bool(row["outbox"])
             )
@@ -416,25 +433,16 @@ class TrackingMixin:
             if now is not None and stopped and not catching_up:
                 read_at = row["read_at"]
                 if read_at is None:
-                    key = (str(row["repo"]).lower(), str(row["ticket_id"]))
+                    key = (ref.repo.lower(), ref.ticket_id)
                     read_at = _staggered_first_read(now, key)
                     first_reads.append((*key, read_at))
                 if now - read_at < STOPPED_POLL_SECONDS:
+                    held.append(ref)
                     continue
-            refs.append(
-                TicketRef(
-                    repo=str(row["repo"]),
-                    ticket_id=str(row["ticket_id"]),
-                    tracker=str(row["tracker"]),
-                    allow_merged=state == "merged"
-                    or bool(row["outbox"])
-                    or (state == "done" and bool(row["qa_open"]))
-                    or (
-                        state in ("handed-off", *WATCHED_STATES)
-                        and bool(row["replay"])
-                    ),
-                )
-            )
+            refs.append(ref)
+        if held and closed is not None:
+            shut = closed(tuple(held))
+            refs.extend(ref for ref in held if (ref.repo.lower(), ref.ticket_id) in shut)
         if first_reads:
             with self._connect() as connection:
                 connection.executemany(

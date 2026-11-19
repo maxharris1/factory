@@ -151,6 +151,14 @@ class Board:
             found.append(self.snapshot(pr))
         return tuple(found)
 
+    def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
+        return frozenset(
+            key
+            for ref in refs
+            if (pr := self.prs.get(key := (ref.repo.lower(), ref.ticket_id))) is not None
+            and (pr.closed or pr.merged)
+        )
+
     def fresh_ticket(self, ref: TicketRef) -> TrackedTicket | None:
         self.fresh_reads.append(ref.ticket_id)
         pr = self.prs.get((ref.repo.lower(), ref.ticket_id))
