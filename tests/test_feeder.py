@@ -22,6 +22,7 @@ from lib.dispatch.types import BaseCheck
 from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
 from lib.feeder import (
+    BODY_LIMIT,
     FEEDER_TABLE,
     Feeder,
     IntakeIssue,
@@ -32,6 +33,7 @@ from lib.feeder import (
 )
 from lib.feeder_gates import Progress, Ref, RefStatus
 from lib.followups import has_marker
+from lib.github_actions import GitHubReviewActions
 from lib.handoff import Handoff, format_comment, parse_comment
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -1339,8 +1341,9 @@ def test_two_feeders_on_one_database_file_one_issue(tmp_path: Path) -> None:
 
 def test_one_base_has_one_active_main_fix_row(tmp_path: Path) -> None:
     insert = (
-        "INSERT INTO feeder_main_fix (repo, base, marker, state, issue, last_head, filed_at) "
-        "VALUES ('owner/app', ?, ?, ?, NULL, 'h', 1)"
+        "INSERT INTO feeder_main_fix "
+        "(repo, base, marker, state, issue, last_head, filed_at, title, body) "
+        "VALUES ('owner/app', ?, ?, ?, NULL, 'h', 1, 't', 'b')"
     )
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         ensure_tables(connection)
@@ -1375,3 +1378,107 @@ def test_a_failed_main_read_files_and_retires_nothing_and_green_ends_the_streak(
     red_main(github, head="e" * 40, run_id="960")
     poll()
     assert main_fixes(github) == [900, 901]
+
+
+def another_feeder(feeder: Feeder, queue, github: FakeGitHub) -> Feeder:
+    return Feeder(queue, feeder.config, feeder.machines, github=github, linear=None,
+                  factory_for=feeder.factory_for, head=lambda: None)
+
+
+def test_a_second_feeder_never_posts_while_the_first_is_filing(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    other = another_feeder(feeder, queue, github)
+    red_main(github)
+    lines, _ = feeder._main_reads(feeder._contexts()[0])
+    issues: list[dict] = []
+    adapter = object.__new__(GitHubReviewActions)
+    adapter._login = lambda: "feeder-bot"
+    paused = [False]
+
+    def pages(endpoint: str) -> list[object]:
+        snapshot = list(issues)
+        if not paused[0]:
+            paused[0] = True
+            assert other._file_main_fixes(lines, 10_001.0) == 0
+        return [snapshot]
+
+    def post(*args: str) -> dict:
+        assert args[:3] == ("-X", "POST", "repos/owner/app/issues")
+        body = next(arg[5:] for arg in args if arg.startswith("body="))
+        item = {"number": len(issues) + 900, "body": body, "user": {"login": "feeder-bot"}}
+        issues.append(item)
+        return item
+
+    adapter._pages = pages
+    adapter._json = post
+    github.file_repo_issue = adapter.file_repo_issue
+
+    assert feeder._file_main_fixes(lines, 10_000.0) == 0
+
+    assert [item["number"] for item in issues] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_crashed_filer_is_resumed_by_another_feeder_once_its_claim_lapses(
+    tmp_path: Path,
+) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    lines, _ = feeder._main_reads(feeder._contexts()[0])
+
+    def crash(*args: object) -> int:
+        raise KeyboardInterrupt
+
+    github.file_repo_issue = crash
+    with pytest.raises(KeyboardInterrupt):
+        feeder._file_main_fixes(lines, now[0])
+    del github.file_repo_issue
+    restarted = another_feeder(feeder, queue, github)
+
+    now[0] += 60
+    assert restarted.feed_once().errors == 0
+    assert main_fixes(github) == []
+    now[0] += 900
+
+    assert restarted.feed_once().errors == 0
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_retried_filing_carries_the_first_red_head_and_its_log(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    red_main(github)
+    github.run_logs[MAIN[0], "900"] = {"test (2/3)": "FIRST_HEAD_LOG"}
+    github.fail["file_issue"] = 1
+    assert feeder.feed_once().errors == 1
+    red_main(github, head="d" * 40, run_id="901")
+    github.run_logs[MAIN[0], "901"] = {"test (2/3)": "SECOND_HEAD_LOG"}
+
+    assert another_feeder(feeder, queue, github).feed_once().errors == 0
+
+    filed = github.filed[MAIN[0], 900]
+    assert RED_SHA in filed["body"] and "FIRST_HEAD_LOG" in filed["body"]
+    assert "SECOND_HEAD_LOG" not in filed["body"]
+    assert filed["title"].startswith(f"Main is red at {RED_SHA[:8]}")
+
+
+def test_long_failing_test_ids_leave_every_log_tail_in_the_brief(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    checks, logs = {}, {}
+    for job in range(3):
+        name = f"test ({job + 1}/3)"
+        checks[name] = BaseCheck(name, "failure", "900", str(job + 1), RED_SHA)
+        ids = [f"tests/test_payload.py::test_payload[{'abc'[job]}{'defghijklm'[case]}{'x' * 700}]"
+               for case in range(10)]
+        logs[name] = "\n".join(
+            [*(f"FAILED {test_id} - AssertionError" for test_id in ids), f"TAIL_SENTINEL_JOB_{job}"]
+        )
+    github.main_checks[MAIN] = checks
+    github.run_logs[MAIN[0], "900"] = logs
+
+    dispatcher_for(tmp_path, queue, feeder).poll_once(FeederSource(github))
+
+    assert len(github.filed[MAIN[0], 900]["body"]) <= BODY_LIMIT
+    brief = github.posted[MAIN[0], 501][0].body
+    assert all(f"TAIL_SENTINEL_JOB_{job}" in brief for job in range(3))

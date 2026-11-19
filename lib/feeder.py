@@ -96,7 +96,9 @@ one issue labelled with the intake label and `factory:main-fix`, carrying the
 red checks and their log tails, and the same poll feeds it as `building`. A
 `feeder_main_fix` row per streak and a marker in the issue body keep it to one
 issue across crashes and feeders; a green read ends the streak, and an issue
-closed while main stays red starts a new one.
+closed while main stays red starts a new one. The row stores the title and body
+rendered from the streak's first red read, and a feeder posts or retires it
+only while it holds the row's claim, which lapses after CLAIM_SECONDS.
 
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
@@ -138,6 +140,7 @@ import json
 import re
 import sqlite3
 import sys
+import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Literal, NamedTuple, Protocol
@@ -177,13 +180,13 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
+from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.main_fix import (
     MAIN_FIX_TABLE,
     File,
     MainFixRow,
     MainRead,
-    Resume,
     Retire,
     decide,
     issue_body,
@@ -264,6 +267,7 @@ _FED_WITHOUT_JOB = f"""
       )
 """
 BODY_LIMIT = 20_000
+CLAIM_SECONDS = 15 * TIMEOUT_SECONDS
 
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
@@ -761,7 +765,11 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             state TEXT NOT NULL,
             issue INTEGER,
             last_head TEXT NOT NULL,
-            filed_at REAL NOT NULL
+            filed_at REAL NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            claimed_by TEXT,
+            claimed_at REAL
         )
         """
     )
@@ -847,6 +855,7 @@ class Feeder:
         self.log = log or (lambda line: None)
         self._base_notes: set[tuple[str, int, str, str, str]] = set()
         self.ledger: LockLedger | None = None
+        self.token = uuid.uuid4().hex
         with self.queue.connect() as connection:
             ensure_tables(connection)
 
@@ -1117,14 +1126,16 @@ class Feeder:
                     self.log(f"feeder: cannot read main-fix {repo}#{row.issue}: {safe_ship_error(exc)}")
             try:
                 for action in decide(row, line.read, issue_open=issue_open):
-                    if isinstance(action, Retire):
-                        self._set_main_fix(action.row.marker, state="closed")
-                    elif isinstance(action, File):
-                        filing = self._claim_main_fix(repo, base, action.red.head, now)
+                    if isinstance(action, File):
+                        filing = self._claim_main_fix(line, repo, base, action.red, now)
                         if filing is not None:
-                            self._post_main_fix(line, filing, action.red)
+                            self._post_main_fix(line, filing)
+                    elif action.row.state == "filing" and not self._take_main_fix(action.row.marker, now):
+                        continue
+                    elif isinstance(action, Retire):
+                        self._set_main_fix(action.row.marker, state="closed")
                     else:
-                        self._post_main_fix(line, action.row, action.red)
+                        self._post_main_fix(line, action.row)
             except Exception as exc:
                 errors += 1
                 self.log(f"feeder: main-fix for {repo}@{base} not filed yet: {safe_ship_error(exc)}")
@@ -1133,17 +1144,21 @@ class Feeder:
     def _main_fix_row(self, repo: str, base: str) -> MainFixRow | None:
         with self.queue.connect() as connection:
             row = connection.execute(
-                f"SELECT repo, base, marker, state, issue, last_head, filed_at FROM {MAIN_FIX_TABLE} "
+                f"SELECT {', '.join(MainFixRow.__dataclass_fields__)} FROM {MAIN_FIX_TABLE} "
                 "WHERE repo = ? AND base = ? AND state IN ('filing', 'open')",
                 (repo, base),
             ).fetchone()
         return None if row is None else MainFixRow(*row)
 
-    def _claim_main_fix(self, repo: str, base: str, head: str, now: float) -> MainFixRow | None:
-        row = MainFixRow(repo, base, marker(repo, base, now), "filing", None, head, now)
+    def _claim_main_fix(
+        self, line: _MainLine, repo: str, base: str, red: MainRed, now: float
+    ) -> MainFixRow | None:
+        tag = marker(repo, base, now)
+        body = self._main_fix_body(line, base, red, tag)
+        row = MainFixRow(repo, base, tag, "filing", None, red.head, now, issue_title(red), body)
         try:
             with self.queue.connect() as connection:
-                values = asdict(row)
+                values = {**asdict(row), "claimed_by": self.token, "claimed_at": now}
                 connection.execute(
                     f"INSERT INTO {MAIN_FIX_TABLE} ({', '.join(values)}) "
                     f"VALUES ({', '.join(':' + name for name in values)})",
@@ -1153,6 +1168,16 @@ class Feeder:
             return None
         return row
 
+    def _take_main_fix(self, marker: str, now: float) -> bool:
+        with self.queue.connect() as connection:
+            taken = connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = ?, claimed_at = ? "
+                "WHERE marker = ? AND state = 'filing' "
+                "AND (claimed_by IS NULL OR claimed_by = ? OR claimed_at <= ?)",
+                (self.token, now, marker, self.token, now - CLAIM_SECONDS),
+            ).rowcount
+        return taken == 1
+
     def _set_main_fix(self, marker: str, **values: object) -> None:
         assignments = ", ".join(f"{name} = ?" for name in values)
         with self.queue.connect() as connection:
@@ -1161,7 +1186,7 @@ class Feeder:
                 (*values.values(), marker),
             )
 
-    def _post_main_fix(self, line: _MainLine, row: MainFixRow, red: MainRed) -> None:
+    def _main_fix_body(self, line: _MainLine, base: str, red: MainRed, tag: str) -> str:
         repo = line.project.repo
         logs: dict[str, str | None] = {}
         for run_id in dict.fromkeys(check.run_id for check in red.checks):
@@ -1178,13 +1203,24 @@ class Feeder:
                         f"https://github.com/{repo}/actions/runs/{check.run_id}")
             for check in red.checks
         ]
-        body = issue_body(repo, row.base, line.required, red,
-                          ci_evidence(failed=failed, logs=logs, limit=sys.maxsize), row.marker)
-        number = self.github.file_repo_issue(
-            repo, issue_title(red), body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at
-        )
-        self._set_main_fix(row.marker, state="open", issue=number, last_head=red.head)
-        self.log(f"feeder: filed main-fix {repo}#{number} for red {row.base} at {red.head[:8]}")
+        evidence = ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
+        return issue_body(repo, base, line.required, red, evidence, tag)
+
+    def _post_main_fix(self, line: _MainLine, row: MainFixRow) -> None:
+        repo = line.project.repo
+        try:
+            number = self.github.file_repo_issue(
+                repo, row.title, row.body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at
+            )
+        except Exception:
+            with self.queue.connect() as connection:
+                connection.execute(
+                    f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = NULL WHERE marker = ? AND claimed_by = ?",
+                    (row.marker, self.token),
+                )
+            raise
+        self._set_main_fix(row.marker, state="open", issue=number)
+        self.log(f"feeder: filed main-fix {repo}#{number} for red {row.base} at {row.last_head[:8]}")
 
     def _line_stops(
         self,

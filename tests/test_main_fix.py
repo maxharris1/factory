@@ -31,16 +31,16 @@ RED = MainRed(HEAD, CHECKS)
 FAILED = MainRead(None, True)
 RED_READ = MainRead(RED, False)
 GREEN = MainRead(None, False)
-FILING = MainFixRow(REPO, "main", "m", "filing", None, HEAD, 1.0)
-OPEN = MainFixRow(REPO, "main", "m", "open", 7, HEAD, 1.0)
+FILING = MainFixRow(REPO, "main", "m", "filing", None, HEAD, 1.0, "t", "b")
+OPEN = MainFixRow(REPO, "main", "m", "open", 7, HEAD, 1.0, "t", "b")
 
 
 @pytest.mark.parametrize(
     ("row", "read", "issue_open", "actions"),
     [
         (FILING, FAILED, None, ()),
-        (FILING, RED_READ, None, (Resume(FILING, RED),)),
-        (FILING, RED_READ, False, (Resume(FILING, RED),)),
+        (FILING, RED_READ, None, (Resume(FILING),)),
+        (FILING, RED_READ, False, (Resume(FILING),)),
         (FILING, GREEN, None, (Retire(FILING),)),
         (None, FAILED, None, ()),
         (OPEN, FAILED, False, ()),
@@ -57,15 +57,15 @@ def test_decide(row, read, issue_open, actions) -> None:
     assert decide(row, read, issue_open=issue_open) == actions
 
 
-def body_for(logs: dict[str, str]) -> tuple[str, str]:
+def body_for(logs: dict[str, str], checks: tuple[BaseCheck, ...] = CHECKS) -> tuple[str, str]:
     failed = [
         FailedCheck(check.name, check.run_id, check.job_id,
                     f"https://github.com/{REPO}/actions/runs/{check.run_id}")
-        for check in CHECKS
+        for check in checks
     ]
     tag = marker(REPO, "main", 1000.0)
     evidence = ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
-    return issue_body(REPO, "main", ("test (*)",), RED, evidence, tag), tag
+    return issue_body(REPO, "main", ("test (*)",), MainRed(HEAD, checks), evidence, tag), tag
 
 
 def big_log(n: int, tail: tuple[str, ...] = ()) -> str:
@@ -96,6 +96,26 @@ def test_three_big_logs_fit_the_body_limit_keeping_each_last_line() -> None:
     assert (template.risk, template.plan_first, template.ticket_type) == ("high", False, "bug-fix")
     assert template.criteria == ("The required checks (`test (*)`) pass on `main`.",)
     assert parse_gate_lines(body, REPO) == GateLines()
+
+
+def test_long_check_names_and_test_ids_leave_every_log_tail_its_last_line() -> None:
+    checks = tuple(
+        BaseCheck(f"test ({n}) " + "c" * 900, "failure", "900", str(n), HEAD) for n in range(400)
+    )
+    logs = {
+        check.job_id: "\n".join(
+            [*(f"FAILED tests/test_x.py::test_{check.job_id}_{i}[{'p' * 800}]" for i in range(40)),
+             f"LAST-{check.job_id}"]
+        )
+        for check in checks[:3]
+    }
+
+    body, _ = body_for(logs, checks)
+
+    assert len(body) <= BODY_LIMIT
+    assert all(f"LAST-{n}" in body for n in range(3))
+    assert "Logs are shown for the first 3 red jobs only." in body
+    assert parse_intake(body, LABELS).defects == ()
 
 
 def test_a_job_with_no_log_says_so() -> None:

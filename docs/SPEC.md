@@ -1080,10 +1080,13 @@ label and `factory:main-fix`, `Risk: high`, carrying the red checks, their
 failing tests and their log tails cut to fit the 20,000-character body
 limit; the same poll feeds it as `building`. A `feeder_main_fix` row per
 streak and a marker line in the issue body keep it to one issue across
-crashes and two feeders. A green read ends the streak; an issue closed
-while main is still red starts a new one. A ticket that waits is
-`waiting-blocked` with its reason, takes no room and is re-checked every
-poll; a blocker cycle, a blocker closed without finishing and a blocker that
+crashes and two feeders. The row stores the title and body rendered from
+the streak's first red read, so a retry posts that head's logs. A feeder
+posts or retires a filing row only while it holds the row's claim, which a
+failed post releases and a crash leaves to lapse after 15 minutes. A green
+read ends the streak; an issue closed while main is still red starts a new
+one. A ticket that waits is `waiting-blocked` with its reason, takes no
+room and is re-checked every poll; a blocker cycle, a blocker closed without finishing and a blocker that
 does not exist are flagged needs-attention (`blocker-cycle`,
 `blocker-closed`, `blocker-missing`). An open issue in a tracked repo that a
 candidate names in `Blocked by` or `Depends on` but that is not itself a
