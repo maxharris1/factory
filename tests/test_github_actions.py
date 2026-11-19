@@ -2507,8 +2507,8 @@ BASE_RUNS = (
 )
 
 
-def base_jobs(run_id: int) -> tuple[str, ...]:
-    return (f"{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",)
+def base_jobs(run_id: int, page: int = 1) -> tuple[str, ...]:
+    return (f"{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}",)
 
 
 def json_result(document: object) -> GhResult:
@@ -2575,3 +2575,21 @@ def test_base_checks_refuses_a_branch_that_is_not_a_plain_name() -> None:
     with pytest.raises(GitHubAdapterError):
         actions.base_checks("owner/repo", "main..evil")
     assert gh.calls == []
+
+
+def test_base_checks_reads_a_check_on_the_second_page_of_jobs() -> None:
+    actions, gh = adapter()
+    gh.route(BASE_RUNS, json_result({"workflow_runs": [{"id": 501, "workflow_id": 1}]}))
+    others = [{"id": 1000 + n, "name": f"other-{n}", "conclusion": "success"} for n in range(100)]
+    gh.route(base_jobs(501), json_result({"total_count": 101, "jobs": others}))
+    gh.route(
+        base_jobs(501, 2),
+        json_result(
+            {"total_count": 101, "jobs": [{"id": 1100, "name": "pytest", "conclusion": "failure"}]}
+        ),
+    )
+
+    checks = actions.base_checks("owner/repo", "release/1")
+
+    assert len(checks) == 101
+    assert checks["pytest"] == BaseCheck("pytest", "failure", "501", "1100")

@@ -5,9 +5,7 @@ description: Intake, questions, routing, and stop handling for one factory ticke
 
 # orchestrate-project
 
-Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and a cross-family reviewer, and reports stops. Post every handoff with `lib.orchestrate`. Do not hand-write an `orch:v1` header.
-
-The dispatcher queues work. This skill does not start a harness.
+Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and a cross-family reviewer, and reports stops. Post every handoff with `lib.orchestrate`. Do not hand-write an `orch:v1` header. The dispatcher queues work. This skill does not start a harness.
 
 ## Do not
 
@@ -38,7 +36,7 @@ F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_st
 
 F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
 
-`choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError`. It then calls `route_job` once, forwarding `usage` and `request.built_by`, and builds a `FitChoice` from the route. A route that is not ok raises `RouteError`.
+`choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError`. It then calls `route_job` once, forwarding `usage` and `request.built_by`, and builds a `FitChoice` from the route.
 
 `built_by` is optional. On a later round, set it to the `(harness, model)` that actually built, so the builder is that one and the reviewer is outside its family.
 
@@ -95,7 +93,7 @@ Build a `RouteRequest` from `project.config`, the brief's risk, the likely files
 
 `urgent` is true only for a resumed paused step, past-ship work, or a ticket Max marked urgent. `choose_route` passes it as `marked_urgent` and passes no `usage`.
 
-Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence. `assert_cross_family` uses the same rule as `orch check-config`.
+Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
 
 Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory only, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` is already there, do not post another. The verify value is the skill name from `factory.md`, or `none`.
 
@@ -129,7 +127,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
-| `ci-stale` | A ticket has sat in one CI state (`ci-red-3`, `ci-infra-wait`, `ci-base-red` or `ci-failed`, in `detail.detail`) at one head for two hours with no progress. | Run Stalled ticket. A `ci-base-red` hold clears itself once the base goes green, so tell Max once only if the base stays red. |
+| `ci-stale` | Two hours at one head in the CI state `detail.detail` names. | Run Stalled ticket. |
 | `done` | The ticket finished. `detail.outcome` and `follow_up_owner` name what is left; `detail.followup_issue` names the parked follow-up issue. | Run Follow-up triage on `followup_issue`. Act by hand on a `detail.note`, such as an unmoved Linear issue. |
 
 ## Stalled ticket

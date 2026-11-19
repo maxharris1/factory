@@ -257,7 +257,7 @@ class ReadyMixin:
                 return False, "stacked-held"
             ticket = replace(ticket, factory=replace(ticket.factory, base_branch=base))
         if result is not None:
-            settled = self._settled_red(ticket, head, result)
+            settled = self._settled_red(ticket, comment, head, result)
             if isinstance(settled, str):
                 return False, settled
             result = settled
@@ -530,7 +530,7 @@ class ReadyMixin:
         return False
 
     def _settled_red(
-        self, ticket: TrackedTicket, head: str, result: CIResult
+        self, ticket: TrackedTicket, comment: Comment, head: str, result: CIResult
     ) -> CIResult | str:
         if result.status != "failure":
             return result
@@ -576,6 +576,7 @@ class ReadyMixin:
                     """,
                     (*key, head, CI_BASE_RED, json.dumps(job_ids), self.queue.now(), ticket.pr_base),
                 )
+            self._record_ci_wait(ticket, comment, head, CI_BASE_RED)
             if self.log is not None and not held:
                 self.log(
                     f"ci base red: {ticket.repo}#{ticket.ticket_id} at {head[:12]} fails "
@@ -587,6 +588,10 @@ class ReadyMixin:
                 connection.execute(
                     "DELETE FROM ci_reruns WHERE repo = ? AND ticket_id = ? AND head = ?",
                     (*key, head),
+                )
+                connection.execute(
+                    "DELETE FROM ci_waits WHERE repo = ? AND ticket_id = ? AND reason = ?",
+                    (*key, CI_BASE_RED),
                 )
             row = None
         if self.ci_rerun is None or row is not None:
@@ -678,7 +683,7 @@ class ReadyMixin:
         source = self._latest_trusted_comment(ticket)
         if source is None:
             return
-        settled = self._settled_red(ticket, head, result)
+        settled = self._settled_red(ticket, source, head, result)
         if isinstance(settled, str):
             return
         result = settled

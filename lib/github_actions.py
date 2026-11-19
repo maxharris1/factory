@@ -915,12 +915,7 @@ class GitHubReviewActions:
             latest[workflow] = max(latest.get(workflow, run_id), run_id)
         checks: dict[str, BaseCheck] = {}
         for run_id in sorted(latest.values(), reverse=True):
-            jobs = _object(
-                self._json(f"{path}/actions/runs/{run_id}/jobs?filter=latest&per_page=100")
-            ).get("jobs")
-            if not isinstance(jobs, list):
-                raise GitHubAdapterError("run jobs page has no jobs list")
-            for job in map(_object, jobs):
+            for job in map(_object, self._run_jobs(f"{path}/actions/runs/{run_id}/jobs")):
                 job_id, name, conclusion = job.get("id"), str(job.get("name")), job.get("conclusion")
                 if isinstance(job_id, bool) or not isinstance(job_id, int):
                     raise GitHubAdapterError("run job has no numeric id")
@@ -934,6 +929,19 @@ class GitHubReviewActions:
                     ),
                 )
         return checks
+
+    def _run_jobs(self, endpoint: str) -> list[object]:
+        jobs: list[object] = []
+        number = 1
+        while True:
+            page = _object(self._json(f"{endpoint}?filter=latest&per_page=100&page={number}"))
+            listed = page.get("jobs")
+            if not isinstance(listed, list):
+                raise GitHubAdapterError("run jobs page has no jobs list")
+            jobs.extend(listed)
+            if len(listed) < 100:
+                return jobs
+            number += 1
 
     def rerun_failed_jobs(self, repo: str, run_id: str) -> None:
         if not run_id.isdigit():

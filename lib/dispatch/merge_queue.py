@@ -563,7 +563,7 @@ class MergeQueueMixin:
                     f"{head[:12]}, its update job gone: {verdict.reason}"
                 )
             return True
-        settled = self._settled_red(ticket, head, ci)
+        settled = self._settled_red(ticket, source, head, ci)
         if isinstance(settled, str):
             return False
         _status, count = self._record_ci_result(ticket, head, settled.status)

@@ -345,7 +345,7 @@ class T3Mixin:
             return ReviseCIGate(outcome=(False, "revise-ci-pending"))
         if result.status == "not-run":
             return ReviseCIGate()
-        settled = self._settled_red(ticket, head, result)
+        settled = self._settled_red(ticket, comment, head, result)
         if isinstance(settled, str):
             return ReviseCIGate(outcome=(False, f"revise-{settled}"))
         _status, count = self._record_ci_result(ticket, head, settled.status)

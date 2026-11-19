@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.dashboard import collect_snapshot
 from lib.dispatch.constants import (
     CI_RERUN_SETTLE_SECONDS,
     CI_STALE_REASON,
@@ -706,6 +707,7 @@ def test_an_unannounced_red_the_base_shares_is_held(tmp_path: Path) -> None:
     assert board.reruns_table() == [(sha(2), "ci-base-red", ["31"], "main")]
     assert board.state("42")["gate_count"] == 0
     assert board.jobs("fix") == []
+    assert board.ci_wait() == ["ci-base-red"]
 
 
 def test_a_third_red_with_a_green_base_still_sticks(tmp_path: Path) -> None:
@@ -795,6 +797,15 @@ def test_an_approve_on_a_red_the_base_shares_holds_before_its_fix(tmp_path: Path
     assert board.reruns == []
     assert board.state("42")["gate_count"] == 0
     assert board.jobs("fix") == []
+    assert board.ci_wait() == ["ci-base-red"]
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "no-log", now=board.now[0])
+    assert [ticket["ci_wait"]["reason"] for ticket in snapshot["tickets"]] == ["ci-base-red"]
+
+    board.base = {}
+    board.poll()
+    assert board.reruns == [("owner/repo", RUN)]
+    assert board.ci_wait() == []
+    assert board.state("42")["gate_count"] == 0
 
 
 def test_a_revise_on_a_red_the_base_shares_holds_without_charging(tmp_path: Path) -> None:
@@ -810,7 +821,103 @@ def test_a_revise_on_a_red_the_base_shares_holds_without_charging(tmp_path: Path
     assert board.reruns == []
     assert board.state("42")["gate_count"] == 0
     assert board.jobs("fix") == []
+    assert board.ci_wait() == ["ci-base-red"]
 
     board.base = {}
     board.poll()
     assert board.reruns == [("owner/repo", RUN)]
+    assert board.ci_wait() == []
+
+
+def test_a_dead_updates_red_head_the_base_shares_holds_in_the_merge_queue(tmp_path: Path) -> None:
+    board = RerunBoard(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    job = board.claim("claude")
+    pr.push(sha(2))
+    board.base_red("pytest-71")
+    board.red(pr, sha(2), "71")
+    board.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    for _ in range(3):
+        board.poll()
+
+    assert board.reruns == []
+    assert board.state("42")["workflow_state"] == "merge-queue"
+    assert board.state("42")["gate_count"] == 0
+    assert board.ci_wait() == ["ci-base-red"]
+
+    board.base = {}
+    board.poll()
+    assert board.reruns == [("owner/repo", RUN)]
+    assert board.ci_wait() == []
+
+
+def pytest_failures(*names: str) -> str:
+    return "\n".join(f"FAILED tests/test_widget.py::{name} - AssertionError" for name in names)
+
+
+def test_a_pr_failure_past_the_tenth_base_failure_is_still_held(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    shared = [f"test_common_{n}" for n in range(10)]
+    board.base = {"pytest-11": BaseCheck("pytest-11", "failure", "900", "9001")}
+    board.dispatcher.ci_base_checks = board.base_checks
+    board.dispatcher.ci_logs = lambda repo, run: {
+        "pytest-11": pytest_failures(*shared, "test_eleventh")
+        if run == "900"
+        else pytest_failures("test_eleventh")
+    }
+    board.red(pr, pr.head, "11", cause="code")
+    board.ready(pr, pr.head)
+    board.poll()
+    board.now[0] += CI_RERUN_SETTLE_SECONDS
+    board.poll()
+
+    assert board.ci_wait() == ["ci-base-red"]
+    assert board.state("42")["gate_count"] == 0
+    assert board.jobs("fix") == []
+    assert board.reruns == []
+
+
+def test_an_eleventh_pr_failure_the_base_lacks_is_not_held(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    shared = [f"test_common_{n}" for n in range(10)]
+    board.base = {"pytest-11": BaseCheck("pytest-11", "failure", "900", "9001")}
+    board.dispatcher.ci_base_checks = board.base_checks
+    board.dispatcher.ci_logs = lambda repo, run: {
+        "pytest-11": pytest_failures(*shared)
+        if run == "900"
+        else pytest_failures(*shared, "test_new_regression")
+    }
+    board.red(pr, pr.head, "11", cause="code")
+    board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.ci_wait() == ["ci-rerun"]
+    assert board.reruns == [("owner/repo", RUN)]
+
+
+def test_a_base_failure_on_the_second_page_of_jobs_holds_the_red(tmp_path: Path) -> None:
+    def gh(argv, timeout: float) -> GhResult:
+        path = next(arg for arg in argv if arg.startswith("repos/"))
+        if "/actions/runs?" in path:
+            return GhResult(0, json.dumps({"workflow_runs": [{"id": 900, "workflow_id": 1}]}), "")
+        assert "/actions/runs/900/jobs?" in path
+        jobs = [{"id": 1000 + n, "name": f"other-{n}", "conclusion": "success"} for n in range(100)]
+        jobs.append({"id": 1100, "name": "pytest-11", "conclusion": "failure"})
+        page = 2 if "page=2" in path else 1
+        listed = jobs[100 * (page - 1) : 100 * page]
+        return GhResult(0, json.dumps({"total_count": 101, "jobs": listed}), "")
+
+    board, pr = built(tmp_path)
+    board.dispatcher.ci_base_checks = GitHubReviewActions(gh).base_checks
+    board.red(pr, pr.head, "11", cause="code")
+    board.ready(pr, pr.head)
+    board.poll()
+    board.results[pr.head] = CIResult(
+        "failure", failed=(FailedCheck("pytest-11", RUN, "21", cause="code"),)
+    )
+    board.poll()
+
+    assert board.ci_wait() == ["ci-base-red"]
+    assert board.state("42")["gate_count"] == 0
+    assert board.jobs("fix") == []

@@ -316,7 +316,7 @@ class T4Mixin:
                 "SELECT 1 FROM jobs WHERE dedupe_key = ?", (key,)
             ).fetchone()
         if queued is None:
-            settled = self._settled_red(ticket, head, result)
+            settled = self._settled_red(ticket, comment, head, result)
             if isinstance(settled, str):
                 return False, f"approve-{settled}"
             _status, count = self._record_ci_result(ticket, head, "failure")
@@ -380,7 +380,7 @@ class T4Mixin:
         result: CIResult,
         review_round: int,
     ) -> tuple[bool, str]:
-        settled = self._settled_red(ticket, head, result)
+        settled = self._settled_red(ticket, comment, head, result)
         if isinstance(settled, str):
             return False, f"approve-{settled}"
         _status, count = self._record_ci_result(ticket, head, "failure")

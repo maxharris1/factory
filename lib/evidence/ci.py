@@ -122,15 +122,15 @@ def _infra_signal(texts: Iterable[str]) -> str | None:
     return None
 
 
-def failing_tests(log_text: str) -> list[str]:
-    """The test ids on pytest's FAILED and ERROR summary lines, first FAILING_TESTS distinct."""
+def failing_tests(log_text: str, limit: int | None = FAILING_TESTS) -> list[str]:
+    """The test ids on pytest's FAILED and ERROR summary lines, first limit distinct."""
     found: dict[str, None] = {}
     for line in log_text.splitlines():
         entry = _ACTIONS_TIMESTAMP.sub("", _JOB_STEP.sub("", _ANSI.sub("", line)))
         match = _PYTEST_SUMMARY.match(entry)
         if match is not None:
             found.setdefault(match.group(1))
-            if len(found) == FAILING_TESTS:
+            if len(found) == limit:
                 break
     return list(found)
 
@@ -143,12 +143,14 @@ def base_red(
 ) -> bool:
     red = [check for check in base.values() if check.conclusion in CHECK_FAILED]
     base_tests = {
-        test for check in red for test in failing_tests(base_logs.get(check.job_id) or "")
+        test
+        for check in red
+        for test in failing_tests(base_logs.get(check.job_id) or "", limit=None)
     }
 
     def explained(check: FailedCheck) -> bool:
         text = pr_logs.get(check.job_id) if check.job_id is not None else None
-        tests = failing_tests(text or "")
+        tests = failing_tests(text or "", limit=None)
         if tests and base_tests:
             return base_tests.issuperset(tests)
         same = base.get(check.name)
