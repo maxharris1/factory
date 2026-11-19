@@ -2476,8 +2476,6 @@ def _record_jobs(snapshot: dict) -> dict[str, dict]:
 
 
 def _ticket_jobs(tmp_path: Path, written: dict[str, Exposure | None], *, table: bool = True) -> tuple[dict, dict]:
-    """A tracked #1014 whose plan job finished and whose build job runs, each
-    with its `written` exposure row (None: no row)."""
     from lib import exposure
     from lib.dashboard import collect_snapshot
     from lib.queue import JobRequest

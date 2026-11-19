@@ -132,9 +132,9 @@ CSS = """\
 .runlog .dur{font-size:11px;color:var(--text-2)}
 .runlog .offchip{padding:0 6px;border:1px solid rgba(255,158,100,0.4);background:rgba(255,158,100,0.09);color:#ff9e64;font-size:11px;line-height:1.6;font-weight:500;white-space:nowrap}
 .runlog .note{display:block;font:12px/1.5 var(--sans);color:var(--text-2)}
-.runlog .exp{margin:0 8px 8px 38px;border-collapse:collapse;font:11px/1.5 var(--mono);color:var(--text-2)}
+.runlog .exp{width:calc(100% - 46px);table-layout:fixed;margin:0 8px 8px 38px;border-collapse:collapse;font:11px/1.5 var(--mono);color:var(--text-2)}
 .runlog .exp caption{text-align:left;color:var(--muted);padding:0 0 2px}
-.runlog .exp th{width:120px;padding:0 8px 0 0;text-align:left;font-weight:400;color:var(--muted);vertical-align:top}
+.runlog .exp th{width:104px;padding:0 8px 0 0;text-align:left;font-weight:400;color:var(--muted);vertical-align:top}
 .runlog .exp td{padding:0;word-break:break-all}
 .jd-foot{margin:12px 0 0;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-box{position:relative;overflow-x:auto;box-shadow:var(--elev)}
