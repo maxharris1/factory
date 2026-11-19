@@ -1240,9 +1240,12 @@ def test_install_update_refreshes_a_stale_record_only_from_the_boot_record(
     if holder:
         (proc / "4242/ns").mkdir(parents=True)
         (proc / "4242/ns/pid").symlink_to(old)
+        (proc / "4243/ns").mkdir(parents=True)
+        (proc / "4243/ns/pid").touch(mode=0)
     boot = tmp_path / "factory-host-pidns"
     if attested:
         boot.write_text(new + "\n", encoding="utf-8")
+        boot.chmod(0o644)
     environment |= {
         "ORCH_PROC_DIR": str(proc), "ORCH_HOST_PIDNS_ATTESTATION": str(boot),
         "ORCH_HOST_PIDNS_ATTESTATION_UID": str(os.getuid()), "WSL_DISTRO_NAME": "Ubuntu",

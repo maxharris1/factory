@@ -301,6 +301,35 @@ def test_a_live_process_in_the_recorded_namespace_keeps_the_record(
     assert result.returncode == 4, result.stderr
 
 
+HOLDER_FIRST_OF_MANY = {4242: {"ns/pid": HOST_NS},
+                        **{pid: {"ns/pid": NEW_HOST_NS} for pid in range(5000, 11000)}}
+HOLDER_AND_UNREADABLE = {4242: {"ns/pid": HOST_NS}, 4243: {"ns/pid": None}}
+
+
+@pytest.mark.parametrize("entry", [*ENTRIES, "refresh-pipefail"],
+                         ids=[*ENTRY_IDS, "refresh-pipefail"])
+@pytest.mark.parametrize("pids", [HOLDER_FIRST_OF_MANY, HOLDER_AND_UNREADABLE],
+                         ids=["holder-first-of-many", "holder-and-unreadable"])
+def test_a_live_holder_keeps_the_record_under_pipefail(
+    tmp_path: Path, entry: str | tuple[str, str], pids: dict[int, dict[str, str | None]],
+) -> None:
+    proc = fake_proc(tmp_path, "4484", NEW_HOST_NS, pids=pids)
+    record(tmp_path, HOST_NS)
+    (tmp_path / RECORD).with_name("orch-retired").write_text("test\n", encoding="utf-8")
+    env = _env(tmp_path, proc, **attestation(tmp_path, NEW_HOST_NS + "\n"))
+
+    if entry == "refresh-pipefail":
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", '. "$1" && factory_refresh_host_pidns', "sh",
+             str(HELPER)], env=env, text=True, capture_output=True, timeout=30, check=False)
+        entry = "refresh"
+    else:
+        result = attempt(entry, tmp_path, proc, **attestation(tmp_path, NEW_HOST_NS + "\n"))
+
+    assert_refused(entry, result, tmp_path)
+    assert result.returncode == 4, result.stderr
+
+
 @pytest.mark.parametrize("entry", ENTRIES, ids=ENTRY_IDS)
 @pytest.mark.parametrize(
     ("nspid", "extra"),

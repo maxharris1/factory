@@ -33,7 +33,12 @@ factory_refresh_host_pidns() (
     recorded="$(cat "$file" 2>/dev/null)" || recorded=""
     current="$(readlink "${proc}/self/ns/pid" 2>/dev/null)" || current=""
     [ -n "$recorded" ] && [ "$recorded" != "$current" ] || exit 0
-    readlink "${proc}"/[0-9]*/ns/pid 2>/dev/null | grep -qxF "$recorded" && exit 4
+    holders="$(readlink "${proc}"/[0-9]*/ns/pid 2>/dev/null)" || :
+    case "
+${holders}
+" in *"
+${recorded}
+"*) exit 4 ;; esac
     att="${ORCH_HOST_PIDNS_ATTESTATION:-/run/factory-host-pidns}"
     [ -n "$(find "$att" -prune -type f -user "${ORCH_HOST_PIDNS_ATTESTATION_UID:-0}" ! -perm -g+w ! -perm -o+w 2>/dev/null)" ] || exit 1
     attested="$(tr -d '\r' <"$att" | awk 'NR == 1 && /^pid:\[[0-9]+\]$/ { v = $0 } END { if (NR == 1) print v }')"
