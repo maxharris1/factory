@@ -169,10 +169,13 @@ def _until(condition, what: str, seconds: float = 20) -> None:
 
 
 def _drains_are(host: Host, text: str) -> bool:
-    return all(
-        host.drain(bot).exists() and host.drain(bot).read_text(encoding="utf-8") == text
-        for bot in BOTS
-    )
+    for bot in BOTS:
+        try:
+            if host.drain(bot).read_text(encoding="utf-8") != text:
+                return False
+        except FileNotFoundError:
+            return False
+    return True
 
 
 PRE = ("self-heal.sh wait-idle tee "

@@ -272,13 +272,13 @@ def test_main_without_github_env_writes_no_hosted_slots_and_warns(tmp_path: Path
     assert "::warning::" in result.stdout
 
 
-@pytest.mark.parametrize(("jobs", "expected"), [
-    ([api_job(f"test ({i}/3)", "in_progress") for i in (1, 2, 3)], SLOTS),
-    ([api_job("test (1/3)", "queued")], SLOTS[2:]),
+@pytest.mark.parametrize(("specs", "expected"), [
+    ([(f"test ({i}/3)", "in_progress") for i in (1, 2, 3)], SLOTS),
+    ([("test (1/3)", "queued")], SLOTS[2:]),
 ])
-def test_main_routes_from_the_runs_it_reads(tmp_path: Path, api: SimpleNamespace, jobs: list[dict],
+def test_main_routes_from_the_runs_it_reads(tmp_path: Path, api: SimpleNamespace, specs: list[tuple[str, str]],
                                             expected: tuple[str, ...]) -> None:
-    serve_runs(api, jobs)
+    serve_runs(api, [api_job(*spec) for spec in specs])
     result, output = run_router(tmp_path, github_env(api.url))
     assert result.returncode == 0
     assert "::warning::" not in result.stdout
