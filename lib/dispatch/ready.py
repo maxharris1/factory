@@ -564,9 +564,8 @@ class ReadyMixin:
         if head is None or result is None or result.status != "success":
             return
         state, completed = self._review_context(ticket)
-        # Before the first round only the builder's ready starts review: the
-        # push may be its work in progress outside any queued job.
-        if state not in _UNANNOUNCED_GREEN_STATES or completed == 0:
+        builder_owns_first_review = completed == 0
+        if state not in _UNANNOUNCED_GREEN_STATES or builder_owns_first_review:
             return
         if self._is_stuck(ticket) or self._names_head(ticket, head, ("ready", "verdict")):
             return
