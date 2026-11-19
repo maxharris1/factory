@@ -86,8 +86,13 @@ def problems(
     return found
 
 
-def features_dir(verify: str) -> str:
-    return f".claude/skills/{verify}/features"
+SKILL_ROOTS = (".claude/skills", ".cursor/skills", ".agents/skills", ".codex/skills")
+
+
+def skill_dir(paths: Iterable[str], verify: str) -> str | None:
+    tail = f"/{verify}/SKILL.md"
+    found = min((path for path in paths if path.endswith(tail)), default=None)
+    return None if found is None else found.removesuffix("/SKILL.md")
 
 
 def map_ids(names: Iterable[str]) -> frozenset[str]:

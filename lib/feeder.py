@@ -172,16 +172,17 @@ from lib.feeder_gates import (
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
+    SKILL_ROOTS,
     Journey,
     NO_VERIFY,
     JourneyCode,
     QaCriterion,
-    features_dir,
     map_ids,
     map_problems,
     parse_features,
     problems,
     qa_tag,
+    skill_dir,
 )
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
@@ -411,13 +412,13 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
     qa: list[QaCriterion] = []
     for item in _criteria_items(lines):
         tagged = _OPS_TAG.match(item)
+        tag = None if tagged else qa_tag(item)
         if tagged:
             ops.append(item[tagged.end():].strip())
-        elif _OPS_ACTION.search(item):
+        elif tag is None and _OPS_ACTION.search(item):
             ops.append(item)
         else:
             criteria.append(item)
-            tag = qa_tag(item)
             if tag is not None:
                 qa.append(tag)
     if not criteria:
@@ -541,6 +542,8 @@ class GitHubIntake(Protocol):
     def ref_statuses(self, refs: Collection[Ref]) -> Mapping[Ref, RefStatus]: ...
 
     def base_checks(self, repo: str, branch: str) -> Mapping[str, BaseCheck]: ...
+
+    def tree_paths(self, repo: str, sha: str) -> tuple[Sequence[str], bool]: ...
 
     def dir_names(self, repo: str, path: str, sha: str) -> Sequence[str]: ...
 
@@ -1060,12 +1063,26 @@ class Feeder:
         try:
             sha = self.github.branch_sha(repo, base) if base else None
             if sha is not None:
-                return map_ids(self.github.dir_names(repo, features_dir(verify), sha))
+                skill = self._skill_dir(repo, verify, sha)
+                return frozenset() if skill is None else map_ids(
+                    self.github.dir_names(repo, f"{skill}/features", sha)
+                )
             why = f"no {base or 'base'} branch"
         except Exception as exc:
             why = safe_ship_error(exc)
         self.log(f"feeder: {repo}@{base} feature map unreadable: {why}")
         return None
+
+    def _skill_dir(self, repo: str, verify: str, sha: str) -> str | None:
+        paths, truncated = self.github.tree_paths(repo, sha)
+        found = skill_dir(paths, verify)
+        if found is not None or not truncated:
+            return found
+        return next(
+            (folder for folder in (f"{root}/{verify}" for root in SKILL_ROOTS)
+             if "SKILL.md" in self.github.dir_names(repo, folder, sha)),
+            None,
+        )
 
     def _sync_intake_attention(
         self, refused: Sequence[_Candidate], repos: set[str], now: float

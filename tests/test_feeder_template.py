@@ -585,7 +585,8 @@ QA_FACTORY_MD = FACTORY_MD.replace(
     "  claude_cloud:\n    environment: qa-env\n  lane:\n    boot: bash boot.sh\n"
     "    base_url: http://127.0.0.1:8080\nfeeder:\n",
 )
-MAP = (HOME, ".claude/skills/verify-app/features")
+SKILL = ".claude/skills/verify-app"
+MAP = (HOME, f"{SKILL}/features")
 
 
 def journey_ticket(features: str | None, *criteria: str) -> str:
@@ -595,9 +596,10 @@ def journey_ticket(features: str | None, *criteria: str) -> str:
     )
 
 
-def map_feeder(tmp_path: Path, factory_text: str = QA_FACTORY_MD):
+def map_feeder(tmp_path: Path, factory_text: str = QA_FACTORY_MD, skill: str = SKILL):
     feeder, queue, github, _ = make_feeder(tmp_path, factory_text=factory_text)
-    github.dirs[MAP] = ("README.md", "create-note.md", "search.md")
+    github.trees[HOME] = (("README.md", f"{skill}/SKILL.md", f"{skill}/features/search.md"), False)
+    github.dirs[(HOME, f"{skill}/features")] = ("README.md", "create-note.md", "search.md")
     return feeder, github
 
 
@@ -634,6 +636,55 @@ def test_a_ticket_without_features_has_no_journeys() -> None:
 )
 def test_journey_defects_the_body_shows(features, criterion, code) -> None:
     assert codes(journey_ticket(features, criterion)) == {code}
+
+
+@pytest.mark.parametrize("tag", ["qa(search):", "(qa)", "[qa]"])
+def test_a_qa_criterion_naming_an_operator_action_stays_a_builder_criterion(tag: str) -> None:
+    item = f"{tag} Help displays the command the operator runs to reset the index."
+    parsed = parse_intake(journey_ticket("search", f"- [ ] {item}"), ())
+    assert parsed.defects == ()
+    assert parsed.criteria == (item,) and parsed.ops_criteria == ()
+    assert [c.text for c in parsed.qa_criteria] == ["Help displays the command the operator runs to reset the index."]
+
+
+def test_a_qa_binding_on_an_operator_action_criterion_is_checked() -> None:
+    assert codes(journey_ticket(
+        "search",
+        "- [ ] qa(typo): Help displays the command the operator runs to reset the index.",
+        "- [ ] It works.",
+    )) == {"features-unbound"}
+
+
+@pytest.mark.parametrize(
+    "skill",
+    [".claude/skills/verify-app", ".cursor/skills/verify-app", ".agents/skills/verify-app",
+     "apps/web/.cursor/skills/verify-app"],
+)
+def test_the_map_is_read_where_the_verify_skill_lives_at_the_base(tmp_path: Path, skill: str) -> None:
+    feeder, github = map_feeder(tmp_path, skill=skill)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    report = feeder.feed_once()
+    assert len(report.fed) == 1 and report.refused == 0
+    assert github.tree_reads == [(HOME, BASE_SHA)]
+    assert github.dir_reads == [(HOME, f"{skill}/features", BASE_SHA)]
+
+
+def test_a_truncated_tree_finds_the_verify_skill_in_a_known_skill_folder(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path, skill=".cursor/skills/verify-app")
+    github.trees[HOME] = (("README.md",), True)
+    github.dirs[(HOME, ".cursor/skills/verify-app")] = ("SKILL.md",)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    assert len(feeder.feed_once().fed) == 1
+
+
+def test_a_verify_skill_missing_at_the_base_has_an_empty_map(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path)
+    github.trees[HOME] = (("README.md",), False)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    report = feeder.feed_once()
+    assert report.fed == () and report.refused == 1
+    assert github.dir_reads == []
+    assert json.loads(wakes(tmp_path)[0]["detail"])["defects"] == ["features-unknown"]
 
 
 def test_a_ticket_with_map_ids_is_fed_after_one_map_read_at_the_base(tmp_path: Path) -> None:
@@ -677,10 +728,11 @@ def test_features_with_no_verify_skill_is_refused_with_no_read(tmp_path: Path) -
     assert json.loads(wakes(tmp_path)[0]["detail"])["defects"] == ["features-no-verify"]
 
 
-def test_a_failed_map_read_leaves_the_ticket_eligible_until_a_read_works(tmp_path: Path) -> None:
+@pytest.mark.parametrize("read", ["tree_paths", "dir_names"])
+def test_a_failed_map_read_leaves_the_ticket_eligible_until_a_read_works(tmp_path: Path, read: str) -> None:
     feeder, github = map_feeder(tmp_path)
     github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
-    github.fail["dir_names"] = 1
+    github.fail[read] = 1
     report = feeder.feed_once()
     assert report.fed == () and report.refused == 0 and report.errors == 1
     assert nothing_written(github)

@@ -8,12 +8,12 @@ from lib.journeys import (
     NO_VERIFY,
     Journey,
     QaCriterion,
-    features_dir,
     map_ids,
     map_problems,
     parse_features,
     problems,
     qa_tag,
+    skill_dir,
 )
 
 
@@ -96,8 +96,22 @@ def test_features_with_no_qa_criteria_is_fine() -> None:
     assert problems(*parse_features("search"), ()) == []
 
 
-def test_the_map_is_the_verify_skills_features_folder() -> None:
-    assert features_dir("verify-app") == ".claude/skills/verify-app/features"
+@pytest.mark.parametrize(
+    ("paths", "expected"),
+    [
+        ((".cursor/skills/verify-app/SKILL.md", ".cursor/skills/verify-app/features/search.md"),
+         ".cursor/skills/verify-app"),
+        (("apps/web/.agents/skills/verify-app/SKILL.md",), "apps/web/.agents/skills/verify-app"),
+        ((".cursor/skills/verify-app/SKILL.md", ".claude/skills/verify-app/SKILL.md"),
+         ".claude/skills/verify-app"),
+        (("a/verify-app/SKILL.md", "a/verify-app-x/verify-app/SKILL.md"), "a/verify-app-x/verify-app"),
+        ((".claude/skills/verify-app-old/SKILL.md", ".claude/skills/xverify-app/SKILL.md", "verify-app/SKILL.md"),
+         None),
+    ],
+    ids=["cursor", "nested", "first-sorted", "ls-files-order", "no-match"],
+)
+def test_the_verify_skill_is_found_where_the_qa_lane_finds_it(paths, expected) -> None:
+    assert skill_dir(paths, "verify-app") == expected
 
 
 def test_map_ids_are_the_markdown_files_named_by_id() -> None:

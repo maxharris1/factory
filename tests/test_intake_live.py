@@ -65,6 +65,39 @@ def test_branch_sha_is_none_for_a_missing_branch() -> None:
 FEATURES = ".claude/skills/verify-app/features"
 
 
+def test_tree_paths_lists_the_files_at_a_sha() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/git/trees/{sha}?recursive=1",), ok({"truncated": False, "tree": [
+        {"path": ".cursor/skills/verify-app", "type": "tree"},
+        {"path": ".cursor/skills/verify-app/SKILL.md", "type": "blob"},
+    ]}))
+    assert GitHubIntakeClient(gh).tree_paths("owner/app", sha) == ((".cursor/skills/verify-app/SKILL.md",), False)
+
+
+def test_tree_paths_says_when_the_tree_is_truncated() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/git/trees/{sha}?recursive=1",), ok({"truncated": True, "tree": []}))
+    assert GitHubIntakeClient(gh).tree_paths("owner/app", sha) == ((), True)
+
+
+@pytest.mark.parametrize(
+    ("result", "sha"),
+    [
+        (GhResult(1, "{}", "gh: Server Error (HTTP 502)\n"), "a" * 40),
+        (ok({"truncated": False}), "a" * 40),
+        (ok({"tree": []}), "main"),
+    ],
+    ids=["server-error", "no-tree", "not-a-sha"],
+)
+def test_tree_paths_fails_rather_than_guess(result: GhResult, sha: str) -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/git/trees/{sha}?recursive=1",), result)
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).tree_paths("owner/app", sha)
+
+
 def test_dir_names_lists_one_folder_at_a_sha() -> None:
     gh = RecordedGh()
     sha = "a" * 40

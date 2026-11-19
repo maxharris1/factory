@@ -20,9 +20,10 @@ Reads:
   state (assigned to a listed user, for a project with linear_assignees),
   every page of them, and for each, who moved it there: the actor of the
   latest history entry whose toState is that state;
+* tree_paths: every file path at a commit (one recursive `git/trees` read)
+  and whether GitHub truncated it, to find the verify skill (#1029);
 * dir_names: the file names in one repo folder at a commit (`contents/`),
-  for the feature map check (#1029). One bounded read: a recursive tree
-  read truncates on a large repo.
+  for the feature map check (#1029).
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -310,6 +311,19 @@ class GitHubIntakeClient(GitHubReviewActions):
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise GitHubAdapterError(f"ref heads/{branch} has no commit sha")
         return sha
+
+    def tree_paths(self, repo: str, sha: str) -> tuple[tuple[str, ...], bool]:
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("tree read sha is not a full sha")
+        tree = self._json(f"{_repo_path(repo)}/git/trees/{sha}?recursive=1")
+        entries = tree.get("tree") if isinstance(tree, dict) else None
+        if not isinstance(entries, list):
+            raise GitHubAdapterError(f"tree {sha} has no entries")
+        paths = tuple(
+            entry["path"] for entry in entries
+            if isinstance(entry, dict) and entry.get("type") == "blob" and isinstance(entry.get("path"), str)
+        )
+        return paths, tree.get("truncated") is True
 
     def dir_names(self, repo: str, path: str, sha: str) -> tuple[str, ...]:
         if not _SHA.fullmatch(sha):
