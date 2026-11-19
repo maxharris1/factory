@@ -18,7 +18,7 @@ BUILDER_KINDS = ["build", "fix", "ci-fix", "merge-only", "resume", "retry"]
 def sections(kind: str) -> list[str]:
     variants = render_snapshot(kind).split("===== ")[1:]
     assert len(variants) == 2
-    return [v.split("## What to do\n", 1)[1].split("\n## ", 1)[0] for v in variants]
+    return [v.split("## Method\n", 1)[1].split("\n## ", 1)[0] for v in variants]
 
 
 @pytest.mark.parametrize("kind", BUILDER_KINDS)

@@ -15,7 +15,7 @@ def variants() -> list[str]:
 
 
 def what_to_do(text: str) -> str:
-    return text.split("## What to do\n", 1)[1].split("\n## ", 1)[0]
+    return text.split("## Method\n", 1)[1].split("\n## ", 1)[0]
 
 
 @pytest.fixture(params=["box", "remote (mac)"])
@@ -50,7 +50,7 @@ def test_keeps_merge_commit_no_rebase_no_force_push(section: str) -> None:
 def test_rules_and_finish_sections_stay() -> None:
     for text in variants():
         assert "Never start another factory job." in text
-        assert text.index("## What to do") < text.index("## Finish the job")
+        assert text.index("## Method") < text.index("## Job") < text.index("## Finish the job")
 
 
 def test_task_steps_stay_in_order(section: str) -> None:

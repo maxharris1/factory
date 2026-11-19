@@ -54,6 +54,11 @@ class BriefError(ValueError):
 
 
 @dataclass(frozen=True)
+class Lead:
+    method: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TicketText:
     brief: str | None
     brief_source: str
@@ -254,6 +259,18 @@ def local_checks(facts: dict) -> str:
     return checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + " and " + checks[-1]
 
 
+def lead_sections(lead: Lead) -> str:
+    return "## Method\n" + "\n".join(lead.method)
+
+
+def blocked_lead(reason: str) -> Lead:
+    return Lead((
+        f"Do not start the work. This brief cannot name the pinned skill files it needs: {reason}.",
+        "1. Post the `questions` handoff below. Name the problem above and ask Max to fix the "
+        "factory checkout or the pin.",
+        "2. Then stop: no branch, no commit, no push, no other handoff.",
+    ))
+
 def opening(bot: str, kind: str) -> str:
     return (
         f"# Factory job brief: {kind}\n\n"
@@ -396,7 +413,7 @@ def data_section(
             request["detail"]["evidence"] = {**evidence, "criteria": {**evidence["criteria"], **masked}}
         if findings_quoted:
             evidence = request["detail"]["evidence"]
-            findings = {**evidence["findings"], "findings": "(quoted in the What to do section)"}
+            findings = {**evidence["findings"], "findings": "(quoted in the Method section)"}
             request["detail"]["evidence"] = {**evidence, "findings": findings}
     else:
         request["detail"] = _cut(request["detail"])

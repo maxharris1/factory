@@ -190,12 +190,3 @@ def pinned_paths(brief: str) -> tuple[str, ...] | None:
         if match := _PINNED_LINE.match(line):
             paths.append(match.group(1))
     return tuple(paths) or None
-
-
-def blocked_task_lines(reason: str) -> list[str]:
-    return [
-        f"Do not start the work. This brief cannot name the pinned skill files it needs: {reason}.",
-        "1. Post the `questions` handoff below. Name the problem above and ask Max to fix the "
-        "factory checkout or the pin.",
-        "2. Then stop: no branch, no commit, no push, no other handoff.",
-    ]
