@@ -231,6 +231,13 @@ def _pidfile(home: Path) -> Path:
     return home / ".local" / "state" / "factory" / "poller.pid"
 
 
+def _wait_gone(pid: int, what: str) -> None:
+    deadline = time.monotonic() + 20
+    while alive(pid):
+        assert time.monotonic() < deadline, f"{what} {pid} outlived teardown"
+        time.sleep(0.05)
+
+
 def _kill_poller(home: Path) -> None:
     try:
         pid = int(_pidfile(home).read_text().strip())
@@ -239,7 +246,8 @@ def _kill_poller(home: Path) -> None:
     try:
         os.kill(pid, signal.SIGKILL)
     except OSError:
-        pass
+        return
+    _wait_gone(pid, "orch poll")
 
 
 def _service(
@@ -786,9 +794,13 @@ def _deploy_copy(tmp_path: Path, calls: Path) -> Path:
 def _stop_loop(home: Path) -> None:
     pidfile = home / ".local/state/factory/poller-ensure-loop.pid"
     try:
-        os.kill(int(pidfile.read_text().strip()), signal.SIGTERM)
+        pid = int(pidfile.read_text().strip())
+        os.kill(pid, signal.SIGTERM)
     except (OSError, ValueError):
         pass
+    else:
+        _wait_gone(pid, "ensure loop")
+    _kill_poller(home)
 
 
 def test_poller_ensure_also_ensures_every_autostarted_waiter(

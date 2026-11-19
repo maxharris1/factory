@@ -35,7 +35,14 @@ from lib.poll_source import (
     LivePollSource,
 )
 from lib.queue import SQLiteJobQueue
-from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue, linear_search_page
+from tests.test_live_poll import (
+    FACTORY,
+    FakeGh,
+    config,
+    linear_issue,
+    linear_search_page,
+    linear_states_page,
+)
 from tests.test_live_poll_no_webhook import (
     PINNED_GH_CALLS,
     PINNED_READS,
@@ -285,6 +292,8 @@ def _hour(tmp_path: Path, seconds: int, matching: int, active: int, done: int):
         del url, headers, timeout
         request = json.loads(body)
         requests.append((current, request))
+        if request["query"].startswith("query FactoryStates"):
+            return linear_states_page(request["variables"])
         if request["query"].startswith("query FactoryPoll"):
             start = int(request["variables"]["after"] or 0)
             end = min(start + 50, len(searchable))
@@ -309,6 +318,8 @@ def _hour(tmp_path: Path, seconds: int, matching: int, active: int, done: int):
         review_actions=Mock(),
         grok_delivery=Mock(),
     )
+    # process() makes no Linear call; skipping its per-ticket work keeps the hour fast.
+    dispatcher.process = lambda ticket: None
     with queue.connect() as connection:
         for index in range(active + done):
             identifier = f"AUT-{index:04d}"
@@ -333,6 +344,9 @@ def _hour(tmp_path: Path, seconds: int, matching: int, active: int, done: int):
     cycles = 3600 // seconds
     for current in range(cycles):
         dispatcher.poll_once(source)
+    with queue.connect() as connection:
+        errors = connection.execute("SELECT ticket_id, error FROM poll_errors").fetchall()
+    assert [tuple(row) for row in errors] == []
     return requests, cycles
 
 
