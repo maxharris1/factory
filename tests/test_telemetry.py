@@ -11,6 +11,7 @@ import ast
 import io
 import json
 import os
+import shutil
 import warnings
 import shlex
 import sqlite3
@@ -184,6 +185,120 @@ def test_codex_exec_json_fixture_parses_into_the_summary() -> None:
         ("command", "ok"), ("edit 2 files", "ok"), ("command", "ok"), ("mcp:github.get_pr", "ok"), ("command", "error"),
     ]
     no_secret(summary.row())
+
+
+def test_claude_tokens_are_the_session_total_over_every_model_helpers_included(tmp_path: Path) -> None:
+    session, db, _, _ = _session(tmp_path)
+    session.consume(io.BytesIO((FIXTURES / "claude_helpers_stream.jsonl").read_bytes()))
+    session.finish(0)
+    row = _row(db)
+    stored = (row["tokens_in"], row["tokens_cached"], row["tokens_out"])
+    assert stored == (7 + 58000 + 12700 + 4 + 20000 + 30000, 58000 + 20000, 350 + 120)
+    assert stored != (4 + 700 + 43000, 43000, 6)
+    assert row["tokens_unknown"] == 0 and row["cost_usd"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("model_usage", [{}, {"claude-opus-5-5": None}, None])
+def test_claude_without_model_usage_keeps_the_result_usage(model_usage: object) -> None:
+    usage = {"input_tokens": 100, "cache_read_input_tokens": 1000, "output_tokens": 200}
+    summary = _feed(Summary("claude", Scrubber({})),
+                    {"type": "result", "subtype": "success", "usage": usage, "modelUsage": model_usage})
+    assert (summary.tokens_in, summary.tokens_cached, summary.tokens_out) == (1100, 1000, 200)
+
+
+CODEX_154 = FIXTURES / "codex_154_review"
+
+
+def _codex_session(tmp_path: Path, home: Path) -> tuple[Session, Path]:
+    db = tmp_path / "orch.db"
+    session = Session(
+        connect=lambda: sqlite3.connect(db), job_id="job-154", bot="codex-bot", repo="acme/widgets",
+        harness="codex", flags=stream_flags(["codex", "exec", "-"]), raw_log=None, scrub=Scrubber({}),
+        log=lambda _m: None, stdout=io.BytesIO(), clock=lambda: 1794673532.0, rollout_home=str(home),
+    )
+    return session, db
+
+
+def test_a_codex_review_stores_codex_own_session_total_not_the_turn_sums(tmp_path: Path) -> None:
+    session, db = _codex_session(tmp_path, CODEX_154)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    session.finish(0)
+    row = _row(db, "job-154")
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (5_200_000, 4_900_000, 40_000)
+    assert row["tokens_in"] + row["tokens_out"] != 2100
+    assert row["tokens_unknown"] == 0
+
+
+def test_a_codex_turn_after_the_rollout_total_never_adds_to_it(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    shutil.copytree(CODEX_154, home)
+    [rollout] = (home / "sessions").rglob("rollout-*.jsonl")
+    session, db = _codex_session(tmp_path, home)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    session.flush()
+    with rollout.open("ab") as out:
+        out.write(b'{"timestamp":"2026-11-14T16:50:00.000Z","type":"event_msg","payload":'
+                  b'{"type":"token_count","info":null,"rate_limits":null}}\n')
+    session.consume(io.BytesIO(b'{"type":"turn.completed","usage":'
+                               b'{"input_tokens":900,"cached_input_tokens":800,"output_tokens":70}}\n'))
+    session.finish(0)
+    row = _row(db, "job-154")
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (5_200_000, 4_900_000, 40_000)
+
+
+NULL_TOKEN_COUNT = (b'{"timestamp":"2026-11-14T16:50:00.000Z","type":"event_msg","payload":'
+                    b'{"type":"token_count","info":null,"rate_limits":null}}\n')
+
+
+@pytest.mark.parametrize("prior_flush", [False, True])
+def test_a_last_token_count_without_info_keeps_the_last_session_total(tmp_path: Path, prior_flush: bool) -> None:
+    home = tmp_path / "codex-home"
+    shutil.copytree(CODEX_154, home)
+    [rollout] = (home / "sessions").rglob("rollout-*.jsonl")
+    session, db = _codex_session(tmp_path, home)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    if prior_flush:
+        session.flush()
+    with rollout.open("ab") as out:
+        out.write(NULL_TOKEN_COUNT)
+    session.finish(0)
+    row = _row(db, "job-154")
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (5_200_000, 4_900_000, 40_000)
+
+
+CODEX_154_THREAD = "00000000-0000-4000-8000-000000000154"
+
+
+def _helper_rollout(parent: Path, thread: str, meta: dict, name: str | None = None) -> Path:
+    lines = parent.read_text().splitlines()
+    first = json.loads(lines[0])
+    first["payload"].update(id=thread, **meta)
+    path = parent.with_name(name or parent.name.replace(CODEX_154_THREAD, thread))
+    path.write_text("\n".join([json.dumps(first), *lines[1:]]) + "\n")
+    return path
+
+
+def test_a_codex_job_total_includes_every_helper_agent_it_spawned(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    shutil.copytree(CODEX_154, home)
+    [parent] = (home / "sessions").rglob("rollout-*.jsonl")
+    root = CODEX_154_THREAD
+    child, grandchild = "00000000-0000-4000-8000-000000000155", "00000000-0000-4000-8000-000000000156"
+    _helper_rollout(parent, child, {"parent_thread_id": root})
+    later = parent.parent.parent / "15"
+    later.mkdir()
+    _helper_rollout(parent, grandchild,
+                    {"source": {"subagent": {"thread_spawn": {"parent_thread_id": child, "depth": 2}}}}
+                    ).rename(later / f"rollout-2026-11-15T00-10-00-{grandchild}.jsonl")
+    _helper_rollout(parent, "00000000-0000-4000-8000-000000000157",
+                    {"parent_thread_id": "00000000-0000-4000-8000-000000000999"})
+    _helper_rollout(parent, "00000000-0000-4000-8000-000000000158", {"parent_thread_id": root},
+                    name="rollout-2026-11-13T09-00-00-00000000-0000-4000-8000-000000000158.jsonl")
+    session, db = _codex_session(tmp_path, home)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    session.finish(0)
+    row = _row(db, "job-154")
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (15_600_000, 14_700_000, 120_000)
 
 
 def test_codex_turn_failures_and_errors_become_the_exit_reason() -> None:

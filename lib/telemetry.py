@@ -62,10 +62,19 @@ stdout on a pipe and hands the pipe to a `Session` here:
   `get_usage` probe at the job's start (lib/usage_probe.py, `add_usage`)
   and from each `rate_limit_event` in the stream (`parse_rate_limit_event`);
   a box Codex run's come from its own session rollout, found by the
-  `thread.started` thread id and read on each flush (lib/codex_rollout.py).
-  They are written to `usage_readings` in the same transaction as the
-  telemetry row, per harness, bot and device, with the placed device's
-  usage account.
+  `thread.started` thread id and read on each flush
+  (lib/codex_rollout.py); a remote one's once when the run ends
+  (`add_rollout`). They are written to `usage_readings` in the same
+  transaction as the telemetry row, per harness, bot and device, with the
+  placed device's usage account.
+* Tokens are the harness's own session total, cached input and helper
+  agents included (#1015); the first source present wins. Claude: the sum
+  over every model in the `result` event's `modelUsage`, else that event's
+  `usage`, else the sum of each assistant message's usage until a result
+  comes. Codex: the same rollout read's last `total_token_usage`, summed
+  with each helper agent's rollout, else the sum of each `turn.completed`
+  usage; once a rollout total is in, a later turn or a read with no total
+  no longer changes the count.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each
@@ -1394,14 +1403,31 @@ class Summary:
         if self.live is not None:
             self.live.tool_use(name, call_id, data, now)
 
+    @staticmethod
+    def _claude_models(models: object) -> tuple[int, int, int] | None:
+        """The session total in a result's `modelUsage`: every model, helper agents included."""
+        if not isinstance(models, dict):
+            return None
+        totals = [usage for usage in models.values() if isinstance(usage, dict)]
+        if not totals:
+            return None
+        cached = sum(_int(usage.get("cacheReadInputTokens")) for usage in totals)
+        total_in = cached + sum(
+            _int(usage.get("inputTokens")) + _int(usage.get("cacheCreationInputTokens")) for usage in totals
+        )
+        return total_in, cached, sum(_int(usage.get("outputTokens")) for usage in totals)
+
     def _claude_result(self, event: dict, now: float) -> None:
         self._totals = True
         if "num_turns" in event:
             self.turns = _int(event.get("num_turns"))
         usage = event.get("usage")
-        if isinstance(usage, dict):
+        totals = self._claude_models(event.get("modelUsage"))
+        if totals is None and isinstance(usage, dict):
+            totals = self._claude_usage(usage)
+        if totals is not None:
             self.usage_seen = True
-            self.tokens_in, self.tokens_cached, self.tokens_out = self._claude_usage(usage)
+            self.tokens_in, self.tokens_cached, self.tokens_out = totals
         cost = event.get("total_cost_usd", event.get("cost_usd"))
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             cost = float(cost)
@@ -1428,7 +1454,7 @@ class Summary:
             self.turns += 1
         elif kind == "turn.completed":
             usage = event.get("usage")
-            if isinstance(usage, dict):
+            if isinstance(usage, dict) and not self._totals:
                 self.usage_seen = True
                 self.tokens_in += _int(usage.get("input_tokens"))
                 self.tokens_cached += _int(usage.get("cached_input_tokens"))
@@ -1442,6 +1468,15 @@ class Summary:
             item = event.get("item")
             if isinstance(item, dict):
                 self._codex_item(item, now, done=kind == "item.completed")
+
+    def codex_total(self, tokens: object) -> None:
+        if not isinstance(tokens, dict):
+            return
+        self._totals = True
+        self.usage_seen = True
+        self.tokens_in = _int(tokens.get("input_tokens"))
+        self.tokens_cached = _int(tokens.get("cached_input_tokens"))
+        self.tokens_out = _int(tokens.get("output_tokens"))
 
     def _codex_item(self, item: dict, now: float, *, done: bool) -> None:
         item_type = item.get("type")
@@ -1740,8 +1775,8 @@ class Session:
 
     def _write(self, code: int | None, *, finished: bool) -> None:
         try:
-            data = self.row(code, finished=finished)
             self._read_rollout()
+            data = self.row(code, finished=finished)
             with self._lock:
                 readings = list(self.usage.values())
             marks = ", ".join("?" for _ in COLUMNS)
@@ -1793,13 +1828,23 @@ class Session:
                 if kept is None or reading.observed_at >= kept.observed_at:
                     self.usage[reading.window] = reading
 
+    def add_rollout(self, found: object) -> None:
+        """One Codex rollout read (lib/codex_rollout.py `latest`): its rate
+        limits as readings and its session token total; the next flush stores both."""
+        try:
+            self.add_usage(parse_codex(found, self.clock()))
+            with self._lock:
+                self.summary.codex_total(found.get("tokens") if isinstance(found, dict) else None)
+        except Exception as exc:
+            self._warn("rollout", f"telemetry: rollout not read ({type(exc).__name__})")
+
     def _read_rollout(self) -> None:
         if self.harness != "codex" or self.rollout_home is None:
             return
         with self._lock:
             thread_id = self.summary.thread_id
         if thread_id is not None:
-            self.add_usage(parse_codex(rollout_latest(self.rollout_home, thread_id), self.clock()))
+            self.add_rollout(rollout_latest(self.rollout_home, thread_id))
 
     def _send_handoff(self) -> None:
         """Copy the final message's ORCH-HANDOFF line to stdout, once (#87)."""
