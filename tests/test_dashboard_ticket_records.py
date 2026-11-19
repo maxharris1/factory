@@ -332,6 +332,23 @@ def test_an_abandoned_ticket_stopped_in_waiting_max(tmp_path: Path) -> None:
     }
 
 
+def test_an_abandoned_ticket_counts_its_stop_from_the_close_not_the_record(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, CLEFFY, "98", state="abandoned")
+        walk(connection, "98", ["intake", "building", "review"], NOW - 30 * 3600)
+        connection.execute(
+            "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+            "VALUES (?, '98', 'review', 'abandoned', ?, 'closed-unmerged')", (CLEFFY, NOW - 3600))
+        connection.execute(
+            "UPDATE ticket_state SET closed_at = ? WHERE repo = ? AND ticket_id = '98'",
+            (NOW - 23 * 3600, CLEFFY))
+    record = records(db, log, tmp_path)["maxharris1/cleffy#98"]
+    assert record["state_age_seconds"] == 23 * 3600
+    assert (record["stopped"]["at"], record["stopped"]["stopped_in"]) == (NOW - 23 * 3600, "review")
+    assert record["visits"][-1]["duration_seconds"] == 23 * 3600
+
+
 def test_a_capped_ticket_lists_its_ways_out_from_the_chart(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
