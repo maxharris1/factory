@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from lib.brief.common import _HEAD, _URL, evidence_part, fenced, local_checks
+from lib.factory_md import padded_estimate
 from lib.followups import followup_start, followups_active
 
 MAX_LISTED_COMMITS = 50
@@ -264,6 +265,7 @@ def task_lines(facts: dict) -> list[str]:
             if variant and not user_impact
             else []
         ),
+        *([_size_flag_step(facts)] if facts["size_flag"] else []),
         "Pick `ac` and the verdict by the definitions in the Review rules below. Leave `repeat=` and `unsat=` "
         "out of the header when they do not apply. Post the verdict handoff below on the head you reviewed. "
         "Do not merge. Do not push to the PR.",
@@ -274,6 +276,15 @@ def task_lines(facts: dict) -> list[str]:
         f"Mode: `{mode}`. {reason} {summary}",
         *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
     ]
+
+
+def _size_flag_step(facts: dict) -> str:
+    flag = facts["size_flag"]
+    return (
+        f"Size flag: the PR changes {flag['changed_lines']} lines, over both the plan's estimate of "
+        f"{flag['estimate']} x1.35 ({padded_estimate(flag['estimate'])}) and the {facts['plan_max_lines']}-line "
+        "plan line. It is not a finding and does not block. Use the estimate in your closing `Size:` line."
+    )
 
 
 def _local_checks_required(facts: dict) -> str:

@@ -173,6 +173,7 @@ def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
         "block_on": block_on,
         "update": {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []},
         "rebase": None,
+        "size_flag": None,
         "start_before_ci": False,
         "no_ci_base": None,
         "local_checks": (),
@@ -279,6 +280,33 @@ def test_the_size_line_is_not_read_as_a_finding() -> None:
         bases={},
     )
     assert [(f.id, f.rule) for f in evidence.findings] == [("f-1", "keep one owner per criterion")]
+
+
+def sized_review_steps(size_flag: object) -> list[str]:
+    action, recipient, attempt, head, extra = snapshots.CASES["review"]
+    job = snapshots._job(action, recipient, attempt, head, {**extra, "round": "1/3", "size_flag": size_flag})
+    factory_md = snapshots.FACTORY_MD.replace("ship: merge\n", "ship: merge\nplan:\n  max_lines: 500\n")
+    context, findings = parse_factory_context(factory_md)
+    assert context is not None and context.config.plan_max_lines == 500, findings
+    return steps(render_brief(job, bot="codex-bot", context=context, factory_root=snapshots.BOX_FACTORY_ROOT))
+
+
+def test_a_size_flag_is_one_step_that_never_blocks() -> None:
+    flagged = [step for step in sized_review_steps({"changed_lines": 777, "estimate": 290}) if "Size flag" in step]
+
+    assert len(flagged) == 1
+    assert flagged[0].endswith(
+        "Size flag: the PR changes 777 lines, over both the plan's estimate of 290 x1.35 (392) and the "
+        "500-line plan line. It is not a finding and does not block. Use the estimate in your closing `Size:` line."
+    )
+
+
+@pytest.mark.parametrize(
+    "size_flag", [None, {"changed_lines": True, "estimate": 290}, {"changed_lines": 777, "estimate": "290"}]
+)
+def test_no_valid_size_flag_leaves_the_steps_unchanged(size_flag: object) -> None:
+    assert sized_review_steps(size_flag) == sized_review_steps(None)
+    assert not any("Size flag" in step for step in sized_review_steps(size_flag))
 
 
 SKILL = Path(__file__).resolve().parents[1] / "skills/factory/factory-reviewer/SKILL.md"

@@ -169,6 +169,7 @@ class SchemaMixin:
                     "review_round": "INTEGER NOT NULL DEFAULT 0",
                     "plan_gap_count": "INTEGER NOT NULL DEFAULT 0",
                     "plan_check_comment_id": "TEXT",
+                    "plan_estimate": "INTEGER",
                     "paused_action": "TEXT",
                     "paused_recipient": "TEXT",
                     "paused_head": "TEXT",

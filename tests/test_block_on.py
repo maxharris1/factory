@@ -169,6 +169,7 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
         "block_on": "user-impact",
         "update": update,
         "rebase": None,
+        "size_flag": None,
         "start_before_ci": False,
         "no_ci_base": None,
         "local_checks": (),
