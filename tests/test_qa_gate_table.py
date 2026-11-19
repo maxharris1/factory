@@ -558,3 +558,28 @@ def test_a_verify_skill_lane_that_reports_drift_queues_no_product_fix(tmp_path: 
     ]
     assert [wake["verify"] for wake in _drift_wakes(run)] == ["verify-live"]
     assert run.actions.handoffs == []
+
+
+def test_report_mode_revise_after_a_verify_lane_drift_fixes_the_review_only_and_wakes_drift_once(
+    tmp_path: Path,
+) -> None:
+    lab = Lab(tmp_path, lanes=1, gate="report")
+    with_verify(lab)
+    lab.broken[(0, 1)] = drifted()
+    run = lab.run
+    run.post("r1", ready(HEAD_A, body=scenarios("qa-1", pack="demo")), head=HEAD_A)
+    run.poll()
+    run.finish("codex", "v1")
+    lab.tick(4)
+    body = lab.only_comment()
+    assert "result=FAIL cause=drift" in body
+    run.post("q1", body)
+    run.poll()
+    run.post("v1", verdict(HEAD_A, "REVISE"))
+    run.poll(4)
+
+    assert [wake["verify"] for wake in _drift_wakes(run)] == ["verify-live"]
+    detail = _fix_detail(run)
+    assert detail["instruction"] == "comment:v1"
+    assert "qa_findings" not in detail
+    assert _ticket(run) == [("fixing", 1)]

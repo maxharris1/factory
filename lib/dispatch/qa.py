@@ -717,9 +717,11 @@ class QaMixin:
         comments = {comment.id: comment for comment in ticket.comments}
         for row in failed:
             report = comments.get(row["comment_id"])
-            if report is None or not self._approved_head(ticket, row["head"]):
+            if report is None:
                 continue
             self._wake_skill_drift(ticket, report.id, row["head"])
+            if not self._approved_head(ticket, row["head"]):
+                continue
             blocking = next(iter(_tagged(report.body, "blocking")), None)
             if blocking is None:
                 continue
