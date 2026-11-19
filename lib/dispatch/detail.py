@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import asdict, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lib import job_detail
-from lib.attention import DEDUPE_DROPPED
+from lib.attention import DEDUPE_DROPPED, DRIVER_WAKE_UNANSWERED
 from lib.dispatch.constants import (
     APPROVE_REJECTION_NOTES,
     GROK_WAKE_REASONS,
@@ -28,13 +29,26 @@ from lib.dispatch.retry import _harness_job_active
 from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
-from lib.queue import Job, JobRequest
+from lib.max_actions import wait_facts, wait_of
+from lib.queue import Job, JobRequest, job_from_row
 from lib.queue import plan_round as _plan_round
 from lib.update_check import RebaseScope, UpdateScope
 
 if TYPE_CHECKING:
     from lib.dispatch.qa import QaFix
     from lib.evidence.ci import CIEvidence
+
+DriverWakeStep = Literal["wait", "rewake", "flag"]
+
+
+def driver_wake_step(
+    deliveries: Sequence[float | None], rewoken: bool, now: float, timeout: float
+) -> DriverWakeStep:
+    if not deliveries or None in deliveries:
+        return "wait"
+    if now - max(deliveries) < timeout:
+        return "wait"
+    return "flag" if rewoken else "rewake"
 
 
 class DetailMixin:
@@ -84,6 +98,125 @@ class DetailMixin:
                     self._record_job_error(
                         job, release_exc, prefix="grok-delivery-release:"
                     )
+
+    def _backstop_driver_wakes(self) -> None:
+        with self._connect() as connection:
+            facts = wait_facts(connection)
+            states = {
+                (str(row["repo"]).lower(), str(row["ticket_id"])): row
+                for row in connection.execute(
+                    "SELECT repo, ticket_id, workflow_state, stuck FROM ticket_state"
+                )
+            }
+            flagged = {
+                (str(row["repo"]), str(row["ticket_id"]))
+                for row in connection.execute(
+                    "SELECT repo, ticket_id FROM needs_attention WHERE reason = ?",
+                    (DRIVER_WAKE_UNANSWERED,),
+                )
+            }
+            rewakes = connection.execute(
+                """
+                SELECT jobs.id, jobs.repo, jobs.ticket_id, jobs.source_comment_id, jobs.state
+                FROM jobs LEFT JOIN driver_inbox AS inbox ON inbox.job_id = jobs.id
+                WHERE jobs.dedupe_key LIKE 'driver-rewake:%'
+                  AND (jobs.state = 'queued' OR (jobs.state = 'done' AND inbox.status != 'posted'))
+                """
+            ).fetchall()
+
+        def asking(key: tuple[str, str]) -> str | None:
+            state, fact = states.get(key), facts.get(key, {})
+            if state is None:
+                return None
+            wait = wait_of(
+                str(state["workflow_state"]),
+                bool(state["stuck"]),
+                question_id=fact.get("question_id"),
+                parked_outcome=fact.get("parked"),
+            )
+            return fact.get("question_id") if wait is not None and wait.why == "question" else None
+
+        for row in rewakes:
+            if asking((str(row["repo"]).lower(), str(row["ticket_id"]))) == row["source_comment_id"]:
+                continue
+            try:
+                with self._connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    if row["state"] == "queued":
+                        self.queue.cancel(row["id"], "question-settled", connection=connection)
+                    else:
+                        connection.execute(
+                            "DELETE FROM driver_inbox WHERE job_id = ? AND status != 'posted'",
+                            (row["id"],),
+                        )
+                    connection.commit()
+            except Exception as exc:
+                self.record_poll_exception(
+                    row["repo"], row["ticket_id"], exc, prefix="driver-wake:"
+                )
+        for key, ticket in list(self._polled.items()):
+            question_id = asking(key)
+            if question_id is None and key not in flagged:
+                continue
+            try:
+                self._backstop_driver_wake(ticket, question_id)
+            except Exception as exc:
+                self.record_poll_exception(
+                    ticket.repo, ticket.ticket_id, exc, prefix="driver-wake:"
+                )
+
+    def _backstop_driver_wake(self, ticket: TrackedTicket, question_id: str | None) -> None:
+        repo, ticket_id = ticket.repo, ticket.ticket_id
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if question_id is None:
+                self.clear_attention(
+                    repo, ticket_id, DRIVER_WAKE_UNANSWERED, connection=connection
+                )
+                connection.commit()
+                return
+            head = ticket.current_head or "-"
+            rewake_key = f"driver-rewake:{_scope(repo, ticket_id)}:{question_id}:{head}"
+            wakes = connection.execute(
+                """
+                SELECT jobs.*, CASE
+                    WHEN jobs.state != 'done' THEN NULL
+                    WHEN jobs.handoff_comment_id LIKE 'inbox:%' THEN inbox.posted_at
+                    ELSE jobs.finished_at
+                END AS delivered_at
+                FROM jobs LEFT JOIN driver_inbox AS inbox ON inbox.job_id = jobs.id
+                WHERE lower(jobs.repo) = ? AND jobs.ticket_id = ? AND jobs.recipient = 'grok'
+                  AND jobs.action = 'clarify' AND jobs.source_comment_id = ?
+                  AND jobs.state IN ('queued', 'running', 'done')
+                """,
+                (repo.lower(), ticket_id, question_id),
+            ).fetchall()
+            deliveries = [row["delivered_at"] for row in wakes]
+            rewoken = connection.execute(
+                "SELECT 1 FROM jobs WHERE dedupe_key = ?", (rewake_key,)
+            ).fetchone() is not None
+            now = self.queue.now()
+            step = driver_wake_step(
+                deliveries, rewoken, now, self.job_states.driver_wake_seconds
+            )
+            if step == "wait":
+                connection.commit()
+                return
+            latest = job_from_row(max(wakes, key=lambda row: row["delivered_at"]), connection)
+            if step == "rewake":
+                self.queue.enqueue_in_transaction(
+                    connection, replace(latest.request, attempt=2), dedupe_key=rewake_key
+                )
+            else:
+                minutes = int((now - min(deliveries)) // 60)
+                self._flag_attention_once(
+                    connection,
+                    repo,
+                    ticket_id,
+                    DRIVER_WAKE_UNANSWERED,
+                    f"clarify wake {latest.id} at head {head} unanswered for {minutes} min",
+                )
+            connection.commit()
 
     grok_wake_skip: frozenset[str] = GROK_WAKE_SKIP
 

@@ -12,6 +12,7 @@ from collections.abc import Collection, Mapping
 
 DETAIL_LIMIT = 500
 DEDUPE_DROPPED = "dedupe-dropped"
+DRIVER_WAKE_UNANSWERED = "driver-wake-unanswered"
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
