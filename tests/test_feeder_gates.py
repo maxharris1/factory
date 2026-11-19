@@ -34,6 +34,7 @@ from tests.test_feeder import (
     GITHUB_ORCH,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
+    REQUIRED_MD,
     TEMPLATE,
     FakeGitHub,
     FakeLinear,
@@ -847,7 +848,6 @@ def test_a_resumed_feed_whose_pr_closed_releases_its_hold_this_poll(tmp_path: Pa
 
 
 RED_SHA = "c0ffee12" + "0" * 32
-REQUIRED_MD = FACTORY_MD.replace("feeder:\n", "feeder:\n  required_checks: [\"test (*)\"]\n")
 MAIN = (HOME, "main")
 
 
@@ -891,8 +891,8 @@ def test_a_main_fix_ticket_passes_a_stopped_line() -> None:
     assert line_stop(red.wait, ("factory:ready", "Factory:Main-Fix")) is None
 
 
-def test_a_red_main_starts_no_new_ticket_but_finishes_one_in_flight(tmp_path: Path) -> None:
-    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+def test_a_red_main_starts_only_its_main_fix_but_finishes_one_in_flight(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, box=4)
     github.issues[HOME] = [issue(1, created_at=1000)]
     github.fail["pull"] = 1
     assert feeder.feed_once().fed == ()
@@ -903,7 +903,7 @@ def test_a_red_main_starts_no_new_ticket_but_finishes_one_in_flight(tmp_path: Pa
 
     report = feeder.feed_once()
 
-    assert fed_heads(github, report) == ["factory/issue-1"]
+    assert fed_heads(github, report) == ["factory/issue-1", "factory/issue-900"]
     assert report.blocked == 2
     stopped = ("waiting-blocked", "main is red at c0ffee12: test (2/3)")
     assert [states(tmp_path)[key] for key in ("2", "3")] == [stopped, stopped]
@@ -916,7 +916,7 @@ def test_a_main_fix_ticket_is_fed_while_main_is_red(tmp_path: Path) -> None:
     feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
     github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
     github.issues[HOME] = [issue(1), issue(2, labels=("factory:ready", "factory:main-fix"))]
-    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2", "factory/issue-900"]
 
 
 def test_an_unreadable_main_ci_keeps_the_line_stopped(tmp_path: Path) -> None:
@@ -949,7 +949,7 @@ def test_a_red_main_stops_a_ticket_whose_failed_feed_never_began(tmp_path: Path)
 
     report = feeder.feed_once()
 
-    assert (report.fed, report.blocked) == ((), 1)
+    assert (fed_heads(github, report), report.blocked) == (["factory/issue-900"], 1)
     assert github.check_reads == [MAIN]
     assert states(tmp_path)["1"] == ("waiting-blocked", "main is red at c0ffee12: test (1/3)")
 
@@ -973,5 +973,5 @@ def test_a_red_main_lets_a_begun_feed_finish_after_a_stack_hold(tmp_path: Path) 
 
     report = feeder.feed_once()
 
-    assert [ref.ticket_id for ref in report.fed] == ["501"]
+    assert [ref.ticket_id for ref in report.fed] == ["501", "502"]
     assert rows(tmp_path / "orch.db")["1"]["state"] == "fed"

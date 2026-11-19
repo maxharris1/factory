@@ -437,9 +437,11 @@ def labels(refs: Iterable[Ref], home: str) -> str:
     return ", ".join(item.label(home) for item in sorted(refs, key=Ref.sort_key))
 
 
+def is_main_fix(labels: Collection[str]) -> bool:
+    return MAIN_FIX_LABEL in {label.lower() for label in labels}
+
+
 def line_stop(stop: Wait | None, labels: Collection[str]) -> Wait | None:
     """Why a new ticket waits on its base's red or unreadable CI. A
     factory:main-fix ticket never waits."""
-    if MAIN_FIX_LABEL in {label.lower() for label in labels}:
-        return None
-    return stop
+    return None if is_main_fix(labels) else stop
