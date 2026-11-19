@@ -1709,16 +1709,16 @@ def test_each_waiting_ticket_says_why_it_waits_and_which_actions_apply(tmp_path:
         for ticket_id, row in rows["tickets"].items()
     }
     assert found == {
-        "1": (("awaiting-ok", "601"), ["ok", "close"]),
-        "2": (("plan-size", "602"), ["approve-plan", "split", "close"]),
-        "3": (("repeat-stop", "603"), ["another-round", "close"]),
-        "4": (("unsat", "604"), ["another-round", "close"]),
-        "5": (("question", "605"), ["answer", "close"]),
-        "6": (("capped", "606"), ["another-round", "close"]),
-        "7": (("blocked", "607"), ["resume", "close"]),
-        "8": (("waiting-external", None), ["close"]),
+        "1": (("awaiting-ok", "601"), ["ok", "close", "hand-off"]),
+        "2": (("plan-size", "602"), ["approve-plan", "split", "close", "hand-off"]),
+        "3": (("repeat-stop", "603"), ["another-round", "close", "hand-off"]),
+        "4": (("unsat", "604"), ["another-round", "close", "hand-off"]),
+        "5": (("question", "605"), ["answer", "close", "hand-off"]),
+        "6": (("capped", "606"), ["another-round", "close", "hand-off"]),
+        "7": (("blocked", "607"), ["resume", "close", "hand-off"]),
+        "8": (("waiting-external", None), ["close", "hand-off"]),
         "9": (None, []),
-        "10": (("stuck", "6010"), ["retry", "close"]),
+        "10": (("stuck", "6010"), ["retry", "close", "hand-off"]),
     }
     assert rows["tickets"]["10"]["wait"]["detail"] == "job-failed-2"
 

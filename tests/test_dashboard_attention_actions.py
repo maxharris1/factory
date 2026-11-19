@@ -29,15 +29,15 @@ LABEL = {"ok": "Merge OK", "approve-plan": "Approve plan as-is", "split": "Split
          "answer": "Answer", "retry": "Requeue", "resume": "Resume", "close": "Close"}
 # why, kind, state, ticket, source, pr, comment id, detail, actions as the snapshot lists them
 WAITS = (
-    ("awaiting-ok", "paused", "awaiting-ok", "31", "#30", "31", "1001", None, ["ok", "close"]),
+    ("awaiting-ok", "paused", "awaiting-ok", "31", "#30", "31", "1001", None, ["ok", "close", "hand-off"]),
     ("plan-size", "paused", "waiting-max", "32", "#32", None, "1002", None, ["close", "approve-plan", "split"]),
-    ("question", "paused", "waiting-max", "33", None, "33", "1003", None, ["answer", "close"]),
-    ("repeat-stop", "paused", "waiting-max", "34", None, "34", "1004", None, ["close"]),
-    ("unsat", "paused", "waiting-max", "35", None, "35", "1005", None, ["another-round", "close"]),
-    ("capped", "paused", "capped", "36", None, "36", "1006", None, ["another-round", "close"]),
-    ("blocked", "paused", "blocked", "37", None, "37", None, None, ["resume", "close"]),
-    ("stuck", "stuck", "stuck", "38", None, "38", "1008", "job-timeout", ["retry", "close"]),
-    ("waiting-external", "paused", "waiting-external", "39", None, None, "1009", None, ["close"]),
+    ("question", "paused", "waiting-max", "33", None, "33", "1003", None, ["answer", "close", "hand-off"]),
+    ("repeat-stop", "paused", "waiting-max", "34", None, "34", "1004", None, ["close", "hand-off"]),
+    ("unsat", "paused", "waiting-max", "35", None, "35", "1005", None, ["another-round", "close", "hand-off"]),
+    ("capped", "paused", "capped", "36", None, "36", "1006", None, ["another-round", "close", "hand-off"]),
+    ("blocked", "paused", "blocked", "37", None, "37", None, None, ["resume", "close", "hand-off"]),
+    ("stuck", "stuck", "stuck", "38", None, "38", "1008", "job-timeout", ["retry", "close", "hand-off"]),
+    ("waiting-external", "paused", "waiting-external", "39", None, None, "1009", None, ["close", "hand-off"]),
 )
 SAYS = {
     "awaiting-ok": "waits for your merge OK",
