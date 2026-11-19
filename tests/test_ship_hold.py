@@ -1124,7 +1124,7 @@ def test_orch_status_and_the_dashboard_show_waiting_on_the_approver(
             "detail": f"awaiting-ok (waiting on {APPROVER})",
             "state": "awaiting-ok",
             "wait": {"why": "awaiting-ok", "comment_id": "7001", "detail": None},
-            "actions": ["ok", "close"],
+            "actions": ["ok", "close", "hand-off"],
         }
     ]
 

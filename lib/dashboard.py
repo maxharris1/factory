@@ -1838,7 +1838,10 @@ def _read_db(
             )
             acting = {
                 "wait": wait.as_dict() if wait else None,
-                "actions": max_actions.applicable(wait),
+                "actions": max_actions.applicable(wait, hand_off=max_actions.may_hand_off(
+                    str(row["workflow_state"]), stuck, row["paused_action"],
+                    facts.get("running") is not None,
+                )),
             }
             ticket_info[key] = TicketInfo(
                 _enum(row["tracker"], TRACKERS), stuck, state,
