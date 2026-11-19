@@ -43,7 +43,7 @@ Grok `refused` wake per distinct defect set. It is re-checked every poll,
 so a fixed ticket feeds. A ticket already feeding or fed is not re-checked.
 An optional `Features:` line names QA journeys (lib/journeys.py, #1029); each
 poll reads the qa.verify skill's feature map at the base once, refuses ids the
-map contradicts, and leaves a ticket eligible while that read fails.
+map contradicts or a project with no qa.verify, and leaves a ticket eligible while that read fails.
 
 It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
@@ -173,6 +173,7 @@ from lib.feeder_gates import (
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
     Journey,
+    NO_VERIFY,
     JourneyCode,
     QaCriterion,
     features_dir,
@@ -841,7 +842,7 @@ class Feeder:
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
         begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
-        unread, map_errors = self._check_journeys(candidates, states)
+        unread, map_errors = self._add_map_defects(candidates, states)
         refused = {
             candidate.ref
             for candidate in candidates
@@ -1025,12 +1026,9 @@ class Feeder:
         self.log(f"feeder: {issue.repo}#{issue.key} refused at intake: {reason}")
         return _state_write(candidate, "refused-intake", reason=reason)
 
-    def _check_journeys(
+    def _add_map_defects(
         self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
     ) -> tuple[set[Ref], int]:
-        """Add the feature map's defects to each unstarted ticket naming
-        journeys, reading each map once per poll. Returns the tickets whose
-        map could not be read, and how many reads failed."""
         maps: dict[tuple[str, str | None, str], frozenset[str] | None] = {}
         unread: set[Ref] = set()
         errors = 0
@@ -1040,18 +1038,18 @@ class Feeder:
                 continue
             qa = candidate.context.config.qa
             verify = qa.verify if qa else None
-            ids = None
-            if verify is not None:
+            if verify is None:
+                found = [NO_VERIFY]
+            else:
                 key = (candidate.project.repo.lower(), candidate.base, verify)
                 if key not in maps:
                     maps[key] = self._map_ids(candidate.project.repo, candidate.base, verify)
-                    if maps[key] is None:
-                        errors += 1
+                    errors += maps[key] is None
                 ids = maps[key]
                 if ids is None:
                     unread.add(candidate.ref)
                     continue
-            found = map_problems(journeys, ids)
+                found = map_problems(journeys, ids)
             if found:
                 defects = tuple(Defect(code, reason) for code, reason in found)
                 template = candidate.template

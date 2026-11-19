@@ -577,7 +577,7 @@ def test_an_indented_code_example_is_not_ticket_metadata(example: str) -> None:
     assert (parsed.ticket_type, parsed.risk, parsed.plan_first, parsed.depends_on) == (None, "low", False, "none")
 
 
-# --- QA journeys from the feature map (#1029, F-21a) -------------------------
+# --- QA journeys from the feature map (#1029) --------------------------------
 
 QA_FACTORY_MD = FACTORY_MD.replace(
     "feeder:\n",

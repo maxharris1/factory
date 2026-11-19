@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from lib.journeys import (
+    NO_VERIFY,
     Journey,
     QaCriterion,
     features_dir,
@@ -118,6 +119,5 @@ def test_a_known_id_and_a_new_one_pass_the_map() -> None:
 
 
 def test_no_verify_skill_is_features_no_verify() -> None:
-    found = map_problems(parse_features("search")[0], None)
-    assert codes(found) == ["features-no-verify"]
-    assert "qa.verify" in found[0][1]
+    assert NO_VERIFY[0] == "features-no-verify"
+    assert "qa.verify" in NO_VERIFY[1]

@@ -35,7 +35,7 @@ class Journey:
 @dataclass(frozen=True)
 class QaCriterion:
     text: str
-    journeys: tuple[str, ...] = ()  # empty: every journey the ticket lists
+    journeys: tuple[str, ...] = ()
 
 
 def parse_features(value: str | None) -> tuple[tuple[Journey, ...], tuple[str, ...]]:
@@ -87,7 +87,6 @@ def problems(
 
 
 def features_dir(verify: str) -> str:
-    """The feature map: the verify skill's features folder in the repo."""
     return f".claude/skills/{verify}/features"
 
 
@@ -97,13 +96,13 @@ def map_ids(names: Iterable[str]) -> frozenset[str]:
     )
 
 
-def map_problems(journeys: tuple[Journey, ...], ids: frozenset[str] | None) -> list[Problem]:
-    """Where the journeys disagree with the feature map's ids; None: no qa.verify."""
-    if ids is None:
-        return [(
-            "features-no-verify",
-            "`Features:` names journeys but factory.md sets no `qa.verify` skill to hold the feature map",
-        )]
+NO_VERIFY: Problem = (
+    "features-no-verify",
+    "`Features:` names journeys but factory.md sets no `qa.verify` skill to hold the feature map",
+)
+
+
+def map_problems(journeys: tuple[Journey, ...], ids: frozenset[str]) -> list[Problem]:
     found: list[Problem] = []
     unknown = [journey.id for journey in journeys if not journey.new and journey.id not in ids]
     if unknown:
