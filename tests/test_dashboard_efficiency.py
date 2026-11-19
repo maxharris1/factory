@@ -408,7 +408,7 @@ def _values(value: object) -> list[object]:
 
 def test_machines_fixture_names_two_codex_accounts(tmp_path: Path) -> None:
     config, findings = load_machines_yml(_machines(tmp_path, ACCOUNTS))
-    assert config is not None and not [f for f in findings if f.level == "error"], findings
+    assert config is not None and not [f for f in findings if f.severity == "error"], findings
     assert [device.account_for("codex") for device in config.devices] == ["codex-a", "codex-b"]
 
 

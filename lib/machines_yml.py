@@ -42,14 +42,21 @@ remote device may name an ssh_user: the login (`ssh -l`) the box uses for
 it in place of the job's bot user, which stays the job's identity.
 
 The top-level accounts list names each subscription: an id
-([A-Za-z0-9._-]{1,64}, never an email, org ID or token), its harness (a
-factory harness, or `external` for a plan no factory process runs, such
-as Grok's), and optional free-text plan and label. A device's harness
-value is its bot user, or {bot, account} to name the account that login
-uses. A bare bot user means the account `<harness>-default`, which needs
-no entry, so a file without accounts loads unchanged. A device may not
-use an undeclared account, another harness's account or an external one.
-The device name `external` is reserved for external readings.
+([A-Za-z0-9._-]{1,64}, not `.` or `..`, never an email, org ID or
+token), its harness (a factory harness, or `external` for a plan no
+factory process runs, such as Grok's), and optional free-text plan and
+label. A device's harness value is its bot user, whose own login is the
+account `<harness>-default`, which needs no entry, so a file without
+accounts loads unchanged.
+signed_in_on lists the devices a claude or codex account is also signed
+in on; each such device names home, the bot's home folder there (the
+workdir_root path rules, but no {bot} beside ssh_user), and the account
+runs from <home>/.factory-accounts/<id>. Every declared account other
+than an external one must be signed in on some device. An optional
+max_jobs must be a positive integer. The older
+{bot, account} harness value, which names the device's own login
+account, still loads with a deprecation warning. The device name
+`external` is reserved for external readings.
 """
 
 from __future__ import annotations
@@ -79,8 +86,9 @@ _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _TOP_KEYS = {"devices", "orch_host", "accounts"}
 EXTERNAL = "external"
 ACCOUNT_HARNESSES = (*HARNESSES, EXTERNAL)
-_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_ACCOUNT_KEYS = {"id", "harness", "plan", "label"}
+_ACCOUNT_ID = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$")
+_ACCOUNT_KEYS = {"id", "harness", "plan", "label", "signed_in_on", "max_jobs"}
+ACCOUNTS_DIR = ".factory-accounts"
 _ACCOUNT_TEXT_MAX = 100
 _HARNESS_VALUE_KEYS = {"bot", "account"}
 _DEVICE_KEYS = {
@@ -95,6 +103,7 @@ _DEVICE_KEYS = {
     "ssh_alias",
     "factory_root",
     "ssh_user",
+    "home",
 }
 # An ssh_alias once {bot} is resolved: a bare Host alias. No user@, no
 # leading '-' (it would be read as an option), no spaces or shell syntax.
@@ -113,6 +122,8 @@ class Account:
     harness: str
     plan: str | None = None
     label: str | None = None
+    signed_in_on: frozenset[str] = frozenset()
+    max_jobs: int | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +141,7 @@ class Device:
     factory_root: str | None = None
     ssh_user: str | None = None
     accounts: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    home: str | None = None
 
     @property
     def placeholder(self) -> bool:
@@ -185,6 +197,12 @@ class Device:
             return None
         return self.factory_root.replace(BOT_TOKEN, self.harnesses[harness])
 
+    def home_for(self, harness: str) -> str | None:
+        """home with {bot} resolved; None when unset or the harness is not listed."""
+        if self.home is None or harness not in self.harnesses:
+            return None
+        return self.home.replace(BOT_TOKEN, self.harnesses[harness])
+
 
 def tailscale_key(name: str) -> str:
     """One host, one key: Tailscale (DNS) names are case-insensitive."""
@@ -221,13 +239,42 @@ class MachinesConfig:
                 return Account(account_id, harness)
         return None
 
+    def accounts_on(self, device_name: str, harness: str) -> tuple[str, ...]:
+        """The device's own login account, then those signed in on it, in file order."""
+        device = self.device(device_name)
+        login = None if device is None else device.account_for(harness)
+        if login is None:
+            return ()
+        return (
+            login,
+            *(
+                item.id
+                for item in self.accounts
+                if item.harness == harness and device_name in item.signed_in_on
+            ),
+        )
+
+    def account_home(self, device_name: str, harness: str, account: str) -> str | None:
+        """The folder account runs from; None for the device's own login."""
+        accounts = self.accounts_on(device_name, harness)
+        if account not in accounts:
+            raise ValueError(
+                f"account {account!r} is not signed in for {harness} on {device_name!r}"
+            )
+        if account == accounts[0]:
+            return None
+        home = self.device(device_name).home_for(harness)
+        if home is None:
+            raise ValueError(f"device {device_name!r} home is an install placeholder")
+        return posixpath.join(home, ACCOUNTS_DIR, account)
+
     def serving(self, harness: str) -> frozenset[str]:
         """The accounts of harness on devices that take new work."""
         return frozenset(
             account
             for device in self.devices
             if device.takes_new(harness)
-            and (account := device.account_for(harness)) is not None
+            for account in self.accounts_on(device.name, harness)
         )
 
     def external_accounts(self) -> tuple[Account, ...]:
@@ -283,8 +330,9 @@ def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
         findings.append(Finding("error", "devices must list at least one device"))
         return None, findings
 
-    accounts = _accounts(data.get("accounts", []), findings)
+    accounts, account_positions = _accounts(data.get("accounts", []), findings)
     devices: list[Device] = []
+    device_positions: dict[str, int] = {}
     seen: set[str] = set()
     local_names: list[str] = []
     for index, item in enumerate(value):
@@ -295,6 +343,7 @@ def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
             findings.append(Finding("error", f"duplicate device {device.name!r}"))
             continue
         seen.add(device.name)
+        device_positions[device.name] = index
         if device.local:
             local_names.append(device.name)
         devices.append(device)
@@ -313,6 +362,7 @@ def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
                 "only one device may be local; got " + ", ".join(local_names),
             )
         )
+    _check_sign_ins(accounts, account_positions, devices, device_positions, findings)
     if any(item.severity == "error" for item in findings):
         return None, findings
     host = _orch_host(data, seen, local_names, findings)
@@ -326,11 +376,14 @@ def _validate(data: dict) -> tuple[MachinesConfig | None, list[Finding]]:
     )
 
 
-def _accounts(value: object, findings: list[Finding]) -> dict[str, Account]:
+def _accounts(
+    value: object, findings: list[Finding]
+) -> tuple[dict[str, Account], dict[str, int]]:
     if not isinstance(value, list):
         findings.append(Finding("error", "accounts must be a list of accounts"))
-        return {}
+        return {}, {}
     accounts: dict[str, Account] = {}
+    positions: dict[str, int] = {}
     for index, item in enumerate(value):
         prefix = f"accounts[{index}]"
         if not isinstance(item, dict):
@@ -367,15 +420,116 @@ def _accounts(value: object, findings: list[Finding]) -> dict[str, Account]:
                         f"{_ACCOUNT_TEXT_MAX} printable characters",
                     )
                 )
+        signed_in_on = item.get("signed_in_on", [])
+        if not (
+            isinstance(signed_in_on, list)
+            and all(isinstance(name, str) and _NAME.fullmatch(name) for name in signed_in_on)
+            and len(set(signed_in_on)) == len(signed_in_on)
+        ):
+            findings.append(
+                Finding("error", f"{prefix}.signed_in_on must list device names")
+            )
+        elif signed_in_on and harness == EXTERNAL:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{prefix}.signed_in_on must be omitted: "
+                    "an external account is not signed in on a device",
+                )
+            )
+        elif signed_in_on and harness == "cursor":
+            findings.append(
+                Finding(
+                    "error",
+                    f"{prefix}.signed_in_on is not supported for a cursor account: "
+                    "Cursor has no setting that keeps a second login in its own folder",
+                )
+            )
+        max_jobs = item.get("max_jobs")
+        if "max_jobs" in item and not (is_strict_int(max_jobs) and max_jobs >= 1):
+            findings.append(
+                Finding("error", f"{prefix}.max_jobs must be a positive integer")
+            )
         if _error_count(findings) > errors_before:
             continue
         if account_id in accounts:
             findings.append(Finding("error", f"duplicate account {account_id!r}"))
             continue
+        positions[account_id] = index
         accounts[account_id] = Account(
-            account_id, harness, item.get("plan"), item.get("label")
+            account_id,
+            harness,
+            item.get("plan"),
+            item.get("label"),
+            frozenset(signed_in_on),
+            max_jobs,
         )
-    return accounts
+    return accounts, positions
+
+
+def _check_sign_ins(
+    accounts: Mapping[str, Account],
+    account_positions: Mapping[str, int],
+    devices: Sequence[Device],
+    device_positions: Mapping[str, int],
+    findings: list[Finding],
+) -> None:
+    by_name = {device.name: device for device in devices}
+    needs_home: dict[str, str] = {}
+    for account in accounts.values():
+        prefix = f"accounts[{account_positions[account.id]}].signed_in_on"
+        for name in sorted(account.signed_in_on):
+            device = by_name.get(name)
+            if device is None:
+                findings.append(
+                    Finding("error", f"{prefix} names unknown device {name!r}")
+                )
+            elif "harnesses" in device.placeholders:
+                continue
+            elif account.harness not in device.harnesses:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"{prefix} names device {name!r}, but device {name!r} "
+                        f"does not list harness {account.harness!r}",
+                    )
+                )
+            elif device.account_for(account.harness) == account.id:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"{prefix} names device {name!r}, whose {account.harness} "
+                        f"login is already {account.id!r}; declare an account "
+                        "on a device once",
+                    )
+                )
+            else:
+                needs_home.setdefault(name, account.id)
+    for device in devices:
+        account_id = needs_home.get(device.name)
+        if account_id is not None and device.home is None and "home" not in device.placeholders:
+            findings.append(
+                Finding(
+                    "error",
+                    f"devices[{device_positions[device.name]}].home is required: "
+                    f"account {account_id!r} is signed in on it",
+                )
+            )
+    for account in accounts.values():
+        if account.harness == EXTERNAL or account.signed_in_on:
+            continue
+        if not any(device.account_for(account.harness) == account.id for device in devices):
+            findings.append(
+                Finding(
+                    "error",
+                    f"account {account.id!r} is not signed in on any device; "
+                    + (
+                        "name it as a device's cursor login"
+                        if account.harness == "cursor"
+                        else "list it in signed_in_on"
+                    ),
+                )
+            )
 
 
 def _account_text(value: object) -> bool:
@@ -647,6 +801,22 @@ def _device(
             )
         )
 
+    home: str | None = None
+    raw_home = item.get("home")
+    if is_placeholder(raw_home):
+        placeholder("home")
+    elif "home" in item:
+        problem = workdir_problem(raw_home)
+        if problem is None and ssh_user is not None and BOT_TOKEN in raw_home:
+            problem = (
+                f"may not use '{BOT_TOKEN}' when ssh_user is set: every bot logs "
+                f"in as {ssh_user!r} there, so '{BOT_TOKEN}' names no bot's home"
+            )
+        if problem is None:
+            home = raw_home
+        else:
+            findings.append(Finding("error", f"{prefix}.home {problem}"))
+
     slot_max: int | None = None
     raw_slots = item.get("slot_max")
     if "slot_max" not in item:
@@ -692,6 +862,17 @@ def _device(
             if resolved is None:
                 continue
             harnesses[harness], device_accounts[harness] = resolved
+            if isinstance(user, dict) and "account" in user:
+                findings.append(
+                    Finding(
+                        "warning",
+                        f"device {name!r} harness {harness!r} names its login account "
+                        "inline; {bot, account} is deprecated, but keep {bot, account} "
+                        "until account placement (#1063 parts 2 and 3, then #1064) "
+                        "runs on every device, then move the account to "
+                        "accounts[].signed_in_on",
+                    )
+                )
         if not raw_harnesses and enabled:
             findings.append(
                 Finding(
@@ -730,6 +911,7 @@ def _device(
         factory_root=factory_root,
         ssh_user=ssh_user,
         accounts=MappingProxyType(device_accounts),
+        home=home,
     )
 
 
