@@ -65,10 +65,9 @@
 # `wait-idle` takes that lock exclusively, waiting up to ORCH_HEAL_IDLE_WAIT
 # seconds (default 900): exit 0 once nothing holds it, 1 on timeout, and 1
 # without flock(1), which cannot tell. Given a command, it runs it while it
-# still holds the lock and exits with its status; orch-move.sh export writes
-# its drain files that way. A pass checks orch-retired again once it holds
-# the shared lock, so after orch-move.sh export writes orch-retired and
-# `wait-idle` returns, no pass writes to orch.db.
+# still holds the lock and exits with its status. A pass checks orch-retired
+# again once it holds the shared lock, so after orch-move.sh export writes
+# orch-retired and `wait-idle` returns, no pass writes to orch.db.
 #
 # `kick` starts factory-self-heal.service with --no-block where the systemd
 # user timer is installed, and otherwise a detached `once` in its own
