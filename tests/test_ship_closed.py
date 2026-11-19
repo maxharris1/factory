@@ -483,6 +483,60 @@ def test_a_held_linear_ticket_whose_branch_lost_its_pr_ends_from_its_stored_pr(
     )
 
 
+def test_a_pr_reopened_only_on_the_state_probe_ends_on_its_next_closure(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "9", "github", now[0])
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    phase = ["empty-closed"]
+    reads: list[str] = []
+
+    def runner(argv, timeout):
+        endpoint = next(
+            (part for part in argv if re.fullmatch(r"repos/acme/widgets/pulls/[0-9]+", part)),
+            None,
+        )
+        if endpoint:
+            reads.append(endpoint)
+            now[0] += 6
+        reopened = phase[0] == "open" or (endpoint and not endpoint.endswith("/9"))
+        gh.pull = {
+            "state": "open" if reopened else "closed",
+            "merged": False,
+            "commits": 0 if phase[0] == "empty-closed" else 1,
+        }
+        return gh(argv, timeout)
+
+    source = live_source(dispatcher, runner, now, tracked_read_budget_seconds=10)
+    dispatcher.poll_once(source)
+    assert outcome(queue, "9") == ("blocked", [])
+
+    phase[0] = "open"
+    now[0] = 160.0
+    reads.clear()
+    dispatcher.poll_once(source)
+    assert outcome(queue, "9") == ("blocked", [])
+    assert "repos/acme/widgets/pulls/9" not in reads
+
+    for number in ("1", "2"):
+        with queue.connect() as connection:
+            connection.execute(
+                "INSERT INTO tracked_tickets VALUES ('acme/widgets', ?, 'github', 0)", (number,)
+            )
+            connection.execute(
+                "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+                "VALUES ('acme/widgets', ?, 'review')",
+                (number,),
+            )
+    phase[0] = "closed-again"
+    now[0] = 220.0
+    dispatcher.poll_once(source)
+
+    assert outcome(queue, "9") == ABANDONED
+
+
 def test_a_newer_open_pr_on_the_branch_supersedes_the_stored_pr(tmp_path: Path) -> None:
     now = [100.0]
     dispatcher, queue = setup(tmp_path, now)
