@@ -1,6 +1,6 @@
 """The CI lane on index.html (#823), worked out from a snapshot's ci_pool, ci_runs and tickets.
 
-    {pool: {state, age_seconds}, running, queued, failed_24h,
+    {pool: {state, age_seconds}, running, queued, failed_24h, base_red, stale,
      slots: [{runner, os, state: lead|cont|idle|offline|busy, card, job}],
      groups: [{name: hosted|queued|failed, cards: [key]}],
      cards: {key: {repo, ticket_id, source, tracker, pr, head_short, status: running|queued|failed,
@@ -24,6 +24,7 @@ STEP_AFTER_CI = {
     "approved-ci-pending": "merge",
     "ci-rerun": "review",
     "ci-infra-wait": "review",
+    "ci-base-red": "review",
 }
 LOCAL_POOL = "factory-linux"
 _REF = ("repo", "ticket_id", "source", "tracker", "pr", "head_short")
@@ -145,6 +146,8 @@ def ci_lane(snapshot: dict) -> dict:
         "running": sum(card["status"] == "running" for card in cards.values()),
         "queued": sum(card["status"] == "queued" for card in cards.values()),
         "failed_24h": len(failed),
+        "base_red": (snapshot.get("ci_attention") or {}).get("base_red", 0),
+        "stale": (snapshot.get("ci_attention") or {}).get("stale", 0),
         "slots": slots,
         "groups": groups,
         "cards": cards,

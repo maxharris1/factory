@@ -565,6 +565,18 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ci_stale (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    since REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ci_reruns (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

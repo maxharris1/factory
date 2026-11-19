@@ -556,3 +556,46 @@ if __name__ == "__main__":
         sys.exit("usage: python -m tests.test_dashboard_ci --shots <dir>  (needs Chrome or Chromium)")
     for written in write_screenshots(Path(sys.argv[2])):
         print(written)
+
+
+def ci_attention_fixture(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO ci_waits (repo, ticket_id, comment_id, head, reason, checks, since) "
+        "VALUES (?, '12', 'r', ?, 'ci-base-red', '[]', ?)",
+        (REPO, HEAD_A, NOW - 60),
+    )
+    connection.execute(
+        "INSERT INTO ci_stale (repo, ticket_id, state, head, since) "
+        "VALUES (?, '13', 'ci-base-red', ?, ?)",
+        (REPO, HEAD_B, NOW - 60),
+    )
+    connection.execute(
+        "INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at) "
+        "VALUES (?, '13', 'ci-stale', 'CI ci-base-red for 2.0 hours', ?)",
+        (REPO, NOW - 30),
+    )
+
+
+def test_the_lane_counts_base_red_and_stale_ci_tickets(tmp_path: Path) -> None:
+    snapshot = snapshot_with(tmp_path, ci_attention_fixture)
+
+    assert snapshot["ci_attention"] == {"base_red": 2, "stale": 1}
+    assert json.loads(json.dumps(snapshot))["ci_attention"] == {"base_red": 2, "stale": 1}
+    text = " ".join(_text(_lane(snapshot)).split())
+    assert "base red 2" in text and "stale 1" in text
+
+
+def test_a_quiet_lane_shows_no_ci_attention_counts(tmp_path: Path) -> None:
+    snapshot = ci_snapshot(tmp_path)
+
+    assert snapshot["ci_attention"] == {"base_red": 0, "stale": 0}
+    assert "base red" not in _text(_lane(snapshot)) and "stale " not in _text(_lane(snapshot))
+
+
+@needs_node
+def test_the_script_draws_the_ci_attention_counts_as_the_server_does(tmp_path: Path) -> None:
+    snapshot = snapshot_with(tmp_path, ci_attention_fixture)
+    html = render_pages(snapshot)["index.html"]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    out = run_harness(tmp_path, activity.HARNESS, script, snapshot, "main", IDS, [["snap", ["lanes"]]])
+    assert _ci_lane(out["steps"][0]["snap"]["lanes"]) == _lane(snapshot)
