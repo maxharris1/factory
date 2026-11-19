@@ -39,7 +39,7 @@ def header(brief: str) -> str:
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
 def test_criteria_come_first_with_four_states(round_text: str) -> None:
     first = steps(review_brief(round_text))[0]
-    assert first.startswith("1. Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above")
+    assert first.startswith("1. Requirements first. Before the diff, tag each `ac-<n>` in the Ticket section below")
     for state in ("`met`", "`unmet`", "`unverified`", "`unsatisfiable`"):
         assert state in first
     assert "evidence" in first
@@ -214,7 +214,7 @@ def test_each_criterion_has_exactly_one_owner_and_only_review_criteria_get_an_in
 ) -> None:
     listed = steps(review_brief(round_text))
     assert (
-        "tag each `ac-<n>` in **Acceptance criteria** above with one owner, `review` (code, tests or logic show "
+        "tag each `ac-<n>` in the Ticket section below with one owner, `review` (code, tests or logic show "
         "it) or `qa` (only the running app can)" in listed[0]
     )
     independent = [step for step in listed if "write your own check" in step]

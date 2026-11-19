@@ -30,7 +30,7 @@ BRIEFS = briefs()
 
 
 def kind_of(text: str) -> str:
-    return re.search(r"^- kind: (\S+)$", text, re.MULTILINE).group(1)
+    return re.search(r"^# Factory job brief: (\S+)$", text, re.MULTILINE).group(1)
 
 
 def title_lines(text: str) -> list[str]:
