@@ -65,8 +65,8 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 Fix the red CI on this PR. These checks failed on 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6: `pytest`, `check-config`. They ran in Actions run 123456 (https://github.com/owner/repo/actions/runs/123456). Follow the router in Skills above.
 The factory read this failure as a code failure on this head.
-The `pytest` log is unavailable. Read it at https://github.com/owner/repo/actions/runs/123456.
-The `check-config` log is unavailable. Read it at https://github.com/owner/repo/actions/runs/123456.
+The factory could not fetch the `pytest` log. Get it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run view 123456 --repo owner/repo --log-failed`.
+The factory could not fetch the `check-config` log. Get it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run view 123456 --repo owner/repo --log-failed`.
 1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; rerun the failed check and post `ready` at the same head. Rerun it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run rerun 123456 --failed`, once, and skip steps 3 to 5.
 3. If this PR caused it: a test that fails on the current head and covers the whole class of the failure. Then fix the class. Run only that test and the tests for the files you touched, plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Then run the router's "Before ready" steps.
@@ -249,8 +249,8 @@ If your harness does not know an agent name the router uses (`comment-sicko`, `p
 ## What to do
 Fix the red CI on this PR. These checks failed on 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6: `pytest`, `check-config`. They ran in Actions run 123456 (https://github.com/owner/repo/actions/runs/123456). Follow the router in Skills above.
 The factory read this failure as a code failure on this head.
-The `pytest` log is unavailable. Read it at https://github.com/owner/repo/actions/runs/123456.
-The `check-config` log is unavailable. Read it at https://github.com/owner/repo/actions/runs/123456.
+The factory could not fetch the `pytest` log. Get it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run view 123456 --repo owner/repo --log-failed`.
+The factory could not fetch the `check-config` log. Get it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run view 123456 --repo owner/repo --log-failed`.
 1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; rerun the failed check and post `ready` at the same head. Rerun it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run rerun 123456 --failed`, once, and skip steps 3 to 5.
 3. If this PR caused it: a test that fails on the current head and covers the whole class of the failure. Then fix the class. Run only that test and the tests for the files you touched, plus a short smoke set, in the foreground; never the whole suite, in the background or in chunks. Then run the router's "Before ready" steps.
