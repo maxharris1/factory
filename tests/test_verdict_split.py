@@ -29,7 +29,7 @@ RULE_MODULE = {
     "_t3_unsat": "t3",
     "_criterion_text": "t3",
     "_revise_ci_gate": "t3",
-    "_repeat_trigger": "repeat",
+    "_convergence": "repeat",
     "_accepted_revises": "repeat",
     "_repeat_stops": "repeat",
     "_repeat_detail": "repeat",
@@ -113,7 +113,7 @@ def test_no_rule_module_imports_another_mixin_or_the_dispatcher() -> None:
     for path in RULE_FILES:
         imports = _runtime_imports(path)
         assert "lib.dispatcher" not in imports, path
-        assert not {name for name in imports if name.startswith("lib.dispatch.verdict")}, path
+        assert not imports & own_rules, path
         assert not DISPATCH_MIXIN_MODULES & imports, path
     init_imports = _runtime_imports(VERDICT / "__init__.py")
     assert "lib.dispatcher" not in init_imports

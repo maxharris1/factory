@@ -48,6 +48,11 @@ user-impact. user-impact gives the review brief pstack's blocking bar from
 round 1, files [follow-up] findings from round 1, and limits a later round
 to a check of the fix. Refused with tickets: linear, which has no filer.
 
+review.stop_on is optional (issue #1110): rounds (the default) or
+convergence. convergence lets a REVISE that cuts the open blocking findings
+to a new low, or a first flat round, go on past the cap;
+review.auto_extra_rounds is not read under it.
+
 review.verify_unavailable is optional (issue #596): a boolean, default
 false. True says the review.verify skill may not be on the reviewed base
 yet: the review brief tells the reviewer to list it as not run there
@@ -149,6 +154,7 @@ DEFAULT_HOLD_LABEL = "factory:hold"
 DEFAULT_HOLD_APPROVER = "max"
 FINISH_LINES = ("ready-for-review", "merge")
 BLOCK_ON = ("any-failure", "user-impact")
+STOP_ON = ("rounds", "convergence")
 
 # The most factory.md prose a brief carries (about four screens).
 CONTEXT_LIMIT = 16_000
@@ -290,6 +296,7 @@ class FactoryConfig:
     auto_extra_rounds: int = 0
     start_before_ci: bool = False
     block_on: str = "any-failure"
+    stop_on: str = "rounds"
     verify_unavailable: bool = False
     max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
     exclusive_paths: tuple[str, ...] = ()
@@ -407,6 +414,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         start_before_ci,
         pre_ready,
         block_on,
+        stop_on,
         verify_unavailable,
     ) = _review(
         data, findings, unknown
@@ -494,6 +502,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         start_before_ci=start_before_ci,
         pre_ready=pre_ready,
         block_on=block_on,
+        stop_on=stop_on,
         verify_unavailable=verify_unavailable,
         max_holders_per_path=max_holders_per_path,
         exclusive_paths=exclusive_paths,
@@ -577,16 +586,16 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None, str, bool]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool, PreReady | None, str, str, bool]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None, 0, False, None, "any-failure", False
+        return None, None, None, None, 0, False, None, "any-failure", "rounds", False
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None, 0, False, None, "any-failure", False
+        return None, None, None, None, 0, False, None, "any-failure", "rounds", False
     findings.extend(
         _unknown(
             review,
@@ -598,6 +607,7 @@ def _review(
                 "start_before_ci",
                 "pre_ready",
                 "block_on",
+                "stop_on",
                 "verify_unavailable",
             },
             "review",
@@ -636,6 +646,7 @@ def _review(
         _start_before_ci(review, findings, unknown),
         _pre_ready(review, findings, unknown),
         _block_on(review, findings, unknown),
+        _stop_on(review, findings, unknown),
         _verify_unavailable(review, findings, unknown),
     )
 
@@ -671,6 +682,14 @@ def _block_on(review: dict, findings: list[Finding], unknown: str) -> str:
     if not isinstance(value, str) or value not in BLOCK_ON:
         findings.append(Finding(unknown, "review.block_on must be any-failure or user-impact"))
         return "any-failure"
+    return value
+
+
+def _stop_on(review: dict, findings: list[Finding], unknown: str) -> str:
+    value = review.get("stop_on", "rounds")
+    if not isinstance(value, str) or value not in STOP_ON:
+        findings.append(Finding(unknown, "review.stop_on must be rounds or convergence"))
+        return "rounds"
     return value
 
 
