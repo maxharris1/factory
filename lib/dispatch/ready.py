@@ -20,6 +20,7 @@ from lib.dispatch.constants import (
     CI_STALE_REASON,
     CI_STALE_SECONDS,
     CI_WAIT_REASONS,
+    HARNESS_WORK,
     TERMINAL_STATES,
     UNANNOUNCED_AFTER_CAP,
     CIHold,
@@ -761,12 +762,22 @@ class ReadyMixin:
             return
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT head, detail FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
-                  AND state IN ('queued', 'running', 'done')
+                f"""
+                SELECT review.head, review.detail FROM jobs AS review
+                WHERE lower(review.repo) = ? AND review.ticket_id = ?
+                  AND review.action = 'review'
+                  AND review.state IN ('queued', 'running', 'done')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ticket_transitions
+                      WHERE repo = ? AND ticket_id = ? AND at >= review.created_at
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs
+                      WHERE lower(repo) = ? AND ticket_id = ? AND {HARNESS_WORK}
+                        AND id != review.id AND created_at >= review.created_at
+                  )
                 """,
-                key,
+                key * 3,
             ).fetchall()
         if any(
             _matching_head(str(row["head"] or ""), head)

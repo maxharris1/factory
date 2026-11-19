@@ -688,6 +688,60 @@ def test_a_counted_verdict_ends_the_unannounced_review_resume(tmp_path: Path) ->
     assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
 
 
+def test_an_approval_after_its_ci_fix_still_ships_past_the_unannounced_review(
+    tmp_path: Path,
+) -> None:
+    board = RerunBoard(tmp_path)
+    board.factory = replace(board.factory, start_before_ci=True)
+    board.dispatcher.ci_rerun = None
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    board.queue.finish(build.id, owner="claude", handoff_comment_id=board.ready(pr, sha(1)))
+    pr.push(sha(2))
+    board.poll()
+    review = board.claim("codex")
+    board.red(pr, pr.head, "11")
+    approve = board.approve(pr, "1/3")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=approve)
+    board.poll()
+    assert board.outcome(approve) == "approve-ci-red-fix"
+    board.poll()
+    assert board.state("42")["workflow_state"] == "fixing"
+
+    fix = board.claim("claude")
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head)
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=ready)
+    board.poll()
+
+    assert board.outcome(ready) == "approval-covers:merge-queue"
+    assert [job["head"] for job in board.jobs("review")] == [sha(2)]
+
+
+def test_a_newer_go_keeps_building_past_the_unannounced_review(tmp_path: Path) -> None:
+    board, pr = built(tmp_path)
+    pr.push(sha(2))
+    board.poll()
+    assert board.state("42")["workflow_state"] == "review"
+    board.finish("codex")
+    builds = len(board.jobs("build"))
+
+    board.go(pr, "go-2")
+    board.poll()
+    assert board.outcome("go-2") == "queued-build"
+    board.poll()
+    assert board.state("42")["workflow_state"] == "building"
+    assert len(board.jobs("build")) == builds + 1
+
+    board.revise(pr, "1/3")
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "building"
+    assert board.jobs("fix") == []
+
+
 def test_an_untrusted_ready_naming_the_head_does_not_hold_its_review(tmp_path: Path) -> None:
     board, pr, _ready = fixing(tmp_path)
     pr.push(sha(2))
