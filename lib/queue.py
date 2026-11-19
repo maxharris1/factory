@@ -5,8 +5,9 @@ Claim is non-blocking; F1-06 may block around it without changing this
 interface. A finish with no handoff comment is a failed job for T6.
 
 Claim order (issues #85, #258): a job on a ticket with a priority tier first,
-lower tier first; then, inside a tier and among tickets with none, a job on
-a ticket marked urgent, then a job resuming a paused step (its detail says
+lower tier first; then, inside a tier and among tickets with none, a job that
+finishes a ticket already past intake (FINISHING_ACTIONS, decision 1050) before
+one that starts a ticket; then a job on a ticket marked urgent, then a job resuming a paused step (its detail says
 `"resume": true`), then a job on a ticket marked bug, then the ticket that
 unblocks more open intake tickets, then the oldest. `ticket_priority` holds
 those marks (the backlog feeder writes them each poll); a database without
@@ -65,6 +66,7 @@ ACTIONS = (
     "ci-rerun-refused",
     "ci-stale",
 )
+FINISHING_ACTIONS = ("review", "fix", "update-from-main", "qa")
 QA_RECIPIENT = "qa"
 RECIPIENTS = ("claude", "codex", "cursor", "grok", QA_RECIPIENT)
 STATES = ("queued", "running", "done", "failed", "cancelled")
@@ -822,10 +824,10 @@ def priority_marks(connection: sqlite3.Connection) -> dict[tuple[str, str], Prio
 
 
 def rank(
-    *, tier: int | None, urgent: bool, resume: bool, bug: bool, unblocks: int
-) -> tuple[bool, int, int, int]:
+    *, tier: int | None, urgent: bool, resume: bool, bug: bool, unblocks: int, finishing: bool = False
+) -> tuple[bool, int, bool, int, int]:
     base = 0 if urgent else 1 if resume else 2 if bug else 3
-    return tier is None, tier or 0, base, -unblocks
+    return tier is None, tier or 0, not finishing, base, -unblocks
 
 
 def is_resume(detail: str | None) -> bool:
@@ -892,11 +894,11 @@ def claim_order(
     ).fetchall()
     marks = priority_marks(connection) if rows else {}
 
-    def key(row: sqlite3.Row) -> tuple[bool, int, int, int, float, str]:
+    def key(row: sqlite3.Row) -> tuple[bool, int, bool, int, int, float, str]:
         mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
         return (
             *rank(tier=mark.tier, urgent=mark.urgent, resume=is_resume(row["detail"]),
-                  bug=mark.bug, unblocks=mark.unblocks),
+                  bug=mark.bug, unblocks=mark.unblocks, finishing=row["action"] in FINISHING_ACTIONS),
             float(row["created_at"]),
             str(row["id"]),
         )

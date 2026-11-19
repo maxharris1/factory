@@ -16,7 +16,7 @@ import pytest
 from lib.dashboard import collect_snapshot, render_pages
 from lib.feeder import ensure_tables, feeder_items
 from lib.orch_yml import load_orch_yml
-from lib.queue import JobRequest, SQLiteJobQueue, claim_order, priority_marks
+from lib.queue import JobRequest, SQLiteJobQueue, claim_order, priority_marks, set_ticket_priority
 from lib.status import SQLiteStatusReader, build_status, render
 from tests.test_feeder import (
     GITHUB_ORCH,
@@ -129,6 +129,29 @@ def test_relabeling_a_queued_ticket_changes_its_claim_order_on_the_next_poll(tmp
     now[0] += 1
     feeder.feed_once()
     assert _claim_tickets(queue) == [pull["1"], pull["2"]]
+
+
+def _claim_actions(tmp_path: Path, *jobs: tuple[str, int]) -> list[str]:
+    """Queue one job per (action, tier) on its own ticket, oldest first."""
+    now = [10_000.0]
+    _, queue, _, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), now=now)
+    for number, (action, tier) in enumerate(jobs, start=1):
+        now[0] += 1
+        queue.enqueue(JobRequest(repo=HOME, ticket_id=str(number), action=action, recipient="claude",
+                                 source_comment_id=str(number), timeout_seconds=600), dedupe_key=str(number))
+        with queue.connect() as connection:
+            set_ticket_priority(connection, HOME, str(number), urgent=False, bug=False, at=now[0], tier=tier)
+    with queue.connect() as connection:
+        return [str(row["action"]) for row in claim_order(connection, "claude", now=now[0])]
+
+
+@pytest.mark.parametrize("finishing", ["review", "fix", "update-from-main", "qa"])
+def test_inside_a_tier_finishing_a_ticket_beats_starting_an_older_one(tmp_path: Path, finishing: str) -> None:
+    assert _claim_actions(tmp_path, ("plan", 2), ("build", 2), (finishing, 2)) == [finishing, "plan", "build"]
+
+
+def test_a_better_tier_build_still_beats_a_worse_tier_fix(tmp_path: Path) -> None:
+    assert _claim_actions(tmp_path, ("fix", 2), ("build", 0), ("plan", 3)) == ["build", "fix", "plan"]
 
 
 @pytest.mark.parametrize(("opt_in", "first"), [(False, "AUT-1"), (True, "AUT-2")])
