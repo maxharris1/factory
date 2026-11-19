@@ -473,3 +473,29 @@ def test_a_live_process_of_this_user_that_hides_its_cwd_keeps_every_folder(tmp_p
     assert report.removed == {} and report.kept == {"held": "cannot-scan"}
     assert (jobs / "held" / "repo" / "README").exists()
     assert job_cleanup.jobs_held_open(jobs) == set()
+
+
+def test_a_process_that_exits_while_the_scan_walks_its_parents_does_not_fail_the_scan(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs = work_root(tmp_path) / "jobs"
+    jobs.mkdir(parents=True)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    gone = f"/proc/{child.pid}"
+    read_paths, read_parent = job_cleanup._process_paths, job_cleanup._parent
+
+    def paths(process: Path) -> list[str] | None:
+        return None if str(process) == gone else read_paths(process)
+
+    def parent(process: Path) -> Path | None:
+        if str(process) == gone and child.poll() is None:
+            child.kill()
+            child.wait()
+        return read_parent(process)
+
+    monkeypatch.setattr(job_cleanup, "_process_paths", paths)
+    monkeypatch.setattr(job_cleanup, "_parent", parent)
+    try:
+        assert job_cleanup.jobs_held_open(jobs) == set()
+    finally:
+        child.kill()
+        child.wait()

@@ -210,10 +210,7 @@ def _started_by_another_user(process: Path) -> bool:
     then drops them to this user, which leaves them non-dumpable, so their
     cwd cannot be read."""
     seen = {process.name}
-    while True:
-        parent = _parent(process)
-        if parent is None or parent.name in seen:
-            return False
+    while (parent := _parent(process)) is not None and parent.name not in seen:
         seen.add(parent.name)
         if parent.name == "0":
             return True
@@ -225,6 +222,7 @@ def _started_by_another_user(process: Path) -> bool:
         if _process_paths(parent) is not None:
             return False
         process = parent
+    return _mine(process) is None
 
 
 def _process_paths(process: Path) -> list[str] | None:
