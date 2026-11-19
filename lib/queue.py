@@ -6,9 +6,9 @@ interface. A finish with no handoff comment is a failed job for T6.
 
 Claim order (issues #85, #258): a job on a ticket with a priority tier first,
 lower tier first; then, inside a tier and among tickets with none, a job that
-finishes a ticket already past intake (FINISHING_ACTIONS, decision 1050) before
-one that starts a ticket; then a job on a ticket marked urgent, then a job resuming a paused step (its detail says
-`"resume": true`), then a job on a ticket marked bug, then the ticket that
+finishes a ticket already past intake (FINISHING_ACTIONS, decision 1050)
+before one that starts a ticket; then a job on a ticket marked urgent, then a
+job resuming a paused step (its detail says `"resume": true`), then a job on a ticket marked bug, then the ticket that
 unblocks more open intake tickets, then the oldest. `ticket_priority` holds
 those marks (the backlog feeder writes them each poll); a database without
 that table orders on resume and age alone, and one without the tier and
