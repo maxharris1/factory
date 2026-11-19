@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import re
+import subprocess
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -466,6 +467,76 @@ def test_probes_that_spend_the_budget_still_let_tracked_tickets_progress(
     assert set().union(*cycles[:2]) == set(numbers)
     first = next(tickets["12"] for tickets in cycles if "12" in tickets)
     assert first.ci[first.current_head].failed
+
+
+OTHER = "acme/zzgadgets"
+
+
+class TimedOutWidgetsProbes(GitHub):
+    def __init__(self, *pulls: Pull):
+        super().__init__(*pulls)
+        self.now = 0.0
+        self.slow = False
+        self.widgets_probed: set[str] = set()
+
+    def __call__(self, argv, timeout) -> GhResult:
+        call = list(argv)
+        if "graphql" in call and "name=widgets" in call:
+            query = next(part for part in call if part.startswith("query="))
+            self.widgets_probed.update(number for _, number in ALIAS.findall(query))
+            if self.slow:
+                self.now += timeout
+                raise subprocess.TimeoutExpired(call, timeout)
+        return super().__call__(
+            [
+                part.replace(f"repos/{OTHER}/", f"repos/{REPO}/").replace(
+                    "name=zzgadgets", "name=widgets"
+                )
+                for part in call
+            ],
+            timeout,
+        )
+
+
+def test_a_repos_timed_out_probe_costs_no_other_repo_its_reads() -> None:
+    numbers = range(12, 38)
+    github = TimedOutWidgetsProbes(
+        *(Pull(number, head=f"{number:040x}") for number in numbers),
+        Pull(100, head=f"{100:040x}"),
+    )
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=30,
+            projects=(Project(REPO, factory_ref="main"), Project(OTHER, factory_ref="main")),
+        ),
+        gh_runner=github,
+        clock=lambda: github.now,
+        sleep=lambda seconds: setattr(github, "now", github.now + seconds),
+    )
+    refs = tuple(TicketRef(REPO, str(number), "github") for number in numbers) + (
+        TicketRef(OTHER, "100", "github"),
+    )
+
+    def cycle(at: float) -> dict[tuple[str, str], TrackedTicket]:
+        github.now = at
+        github.widgets_probed.clear()
+        source.begin_cycle()
+        tickets = source.tracked_tickets(refs)
+        source.end_cycle()
+        return {(ticket.repo, ticket.ticket_id): ticket for ticket in tickets}
+
+    cycle(0)
+    cycle(30)
+    github.slow = True
+    fail_check(github.pulls["100"])
+
+    for at in (60, 240, 420):
+        tickets = cycle(at)
+
+        assert len(tickets) == 27
+        assert len(github.widgets_probed) == 25
+        gadget = tickets[OTHER, "100"]
+        assert gadget.ci[gadget.current_head].status == "failure"
 
 
 def test_a_reopened_pr_is_read_in_full_and_open() -> None:

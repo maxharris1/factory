@@ -1017,6 +1017,7 @@ class LivePollSource:
         )
         probes: dict[tuple[str, str], str] = {}
         probed: set[tuple[str, str]] = set()
+        unprobed: set[str] = set()
         spent: dict[str, float] = {}
         for index, ref in enumerate(ordered):
             project = projects.get(ref.repo.lower())
@@ -1028,11 +1029,16 @@ class LivePollSource:
             repo = ref.repo.lower()
             first_closed_read = ref in urgent
             if self.tracked_read_budget_seconds - spent.get(repo, 0.0) > 0 and (
-                self._wants_probe(ref) and (repo, ref.ticket_id) not in probed
+                repo not in unprobed
+                and self._wants_probe(ref)
+                and (repo, ref.ticket_id) not in probed
             ):
                 started = self.clock()
                 try:
                     probes.update(self._pull_fingerprints(project, ordered[index:], probed))
+                except Exception:
+                    unprobed.add(repo)
+                    self._defer(f"GitHub probe failed for {project.repo}, read in full")
                 finally:
                     spent[repo] = spent.get(repo, 0.0) + self.clock() - started
             left = self.tracked_read_budget_seconds - spent.get(repo, 0.0)
@@ -1094,11 +1100,7 @@ class LivePollSource:
             and self._wants_probe(ref)
         ][:PULL_FINGERPRINT_CHUNK]
         probed.update((repo, number) for number in numbers)
-        try:
-            found = self.github.pull_fingerprints(project.repo, numbers)
-        except Exception:
-            self._defer(f"GitHub probe failed for {project.repo}, read in full")
-            return {}
+        found = self.github.pull_fingerprints(project.repo, numbers)
         return {(repo, number): fingerprint for number, fingerprint in found.items()}
 
     def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
