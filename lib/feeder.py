@@ -82,9 +82,10 @@ on the poll after the round resumes (#270).
 Stop the line (#1025): for a project whose factory.md sets
 `feeder.required_checks`, each poll reads its base branch's checks once
 (GitHubIntake.base_checks). While a required check is red there, or the read
-fails, a ticket not started yet is `waiting-blocked` with the red checks and
-head, unless it is labelled `factory:main-fix`. Tickets already feeding or
-fed, and their jobs, go on.
+fails, a ticket whose feed has not begun (no branch recorded yet, whatever
+its state, a failed first attempt included) is `waiting-blocked` with the red
+checks and head, unless it is labelled `factory:main-fix`. A begun feed, and
+its jobs, go on.
 
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
@@ -777,6 +778,7 @@ class Feeder:
             return FeedReport(eligible=len(candidates), errors=read_errors + 1)
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
+        begun = {c.ref for c in candidates if self._row(c)["branch"] is not None}
         refused = {
             candidate.ref
             for candidate in candidates
@@ -787,7 +789,7 @@ class Feeder:
             [c for c in candidates if c.ref in refused], read_repos, now
         )
         waits, holds, capped, gate_read, unblocks = self._gates(candidates, states, refused)
-        stops, stop_errors = self._line_stops(candidates, states, refused)
+        stops, stop_errors = self._line_stops(candidates, begun, refused)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
         self._record_priority(candidates, now)
@@ -806,16 +808,15 @@ class Feeder:
             state = self._state(candidate)
             if state in FINAL:
                 continue
-            if state in UNSTARTED:
-                wait = (
-                    line_stop(stops.get(candidate.line), candidate.issue.labels)
-                    or waits.get(candidate.ref)
-                    or holds.collision(candidate.ref, candidate.lines)
-                )
-                if wait is not None:
-                    writes.append(_state_write(candidate, "waiting-blocked", reason=wait.reason))
-                    blocked += 1
-                    continue
+            wait = None
+            if candidate.ref not in begun:
+                wait = line_stop(stops.get(candidate.line), candidate.issue.labels)
+            if wait is None and state in UNSTARTED:
+                wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
+            if wait is not None:
+                writes.append(_state_write(candidate, "waiting-blocked", reason=wait.reason))
+                blocked += 1
+                continue
             if room.get(candidate.harness, 0) <= 0:
                 if state not in IN_FLIGHT:
                     writes.append(_state_write(candidate, "waiting-capacity"))
@@ -965,7 +966,7 @@ class Feeder:
     def _line_stops(
         self,
         candidates: Sequence[_Candidate],
-        states: Mapping[Ref, str],
+        begun: Collection[Ref],
         refused: Collection[Ref],
     ) -> tuple[dict[tuple[str, str | None], Wait | None], int]:
         """Why each base stops the line, read once per poll, and how many
@@ -979,7 +980,7 @@ class Feeder:
                 base is None
                 or not required
                 or candidate.line in stops
-                or states[candidate.ref] not in UNSTARTED
+                or candidate.ref in begun
                 or candidate.ref in refused
             ):
                 continue

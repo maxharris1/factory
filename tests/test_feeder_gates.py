@@ -935,3 +935,43 @@ def test_a_project_without_required_checks_never_reads_main_ci(tmp_path: Path) -
     github.issues[HOME] = [issue(1)]
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1"]
     assert github.check_reads == []
+
+
+def test_a_red_main_stops_a_ticket_whose_failed_feed_never_began(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues[HOME] = [issue(1)]
+    github.fail["branch_sha"] = 1
+    assert feeder.feed_once().errors == 1
+    row = rows(tmp_path / "orch.db")["1"]
+    assert (row["state"], row["branch"], row["pr_number"]) == ("error", None, None)
+    github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
+    github.check_reads.clear()
+
+    report = feeder.feed_once()
+
+    assert (report.fed, report.blocked) == ((), 1)
+    assert github.check_reads == [MAIN]
+    assert states(tmp_path)["1"] == ("waiting-blocked", "main is red at c0ffee12: test (1/3)")
+
+
+def test_a_red_main_lets_a_begun_feed_finish_after_a_stack_hold(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues[HOME] = [issue(1)]
+    github.fail["labels"] = 1
+    assert feeder.feed_once().errors == 1
+    assert rows(tmp_path / "orch.db")["1"]["pr_number"] == "501"
+    shared = "a" * 40
+    github.branch_commits[(HOME, "factory/issue-1")] = (shared, "c" * 40)
+    github.branches[(HOME, "factory/issue-108")] = shared
+    github.branch_commits[(HOME, "factory/issue-108")] = (shared,)
+    github.pulls[(HOME, 113)] = {"head": "factory/issue-108", "base": "main", "title": "t",
+                                 "body": "", "draft": True}
+    feeder.feed_once()
+    assert states(tmp_path)["1"][0] == "waiting-blocked"
+    github.pulls[(HOME, 113)]["state"] = "closed"
+    github.main_checks[MAIN] = {"test (1/3)": check("test (1/3)", "failure")}
+
+    report = feeder.feed_once()
+
+    assert [ref.ticket_id for ref in report.fed] == ["501"]
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "fed"

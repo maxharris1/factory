@@ -167,6 +167,7 @@ class FakeGitHub:
 
     # writes
     def branch_sha(self, repo: str, branch: str) -> str | None:
+        self._maybe_fail("branch_sha")
         if branch == "main" or branch == "dev":
             return BASE_SHA
         return self.branches.get((repo, branch))
