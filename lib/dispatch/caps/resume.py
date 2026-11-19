@@ -4,8 +4,8 @@ from __future__ import annotations
 from typing import Literal
 
 from lib.dispatch.constants import UNANNOUNCED_AFTER_CAP
+from lib.dispatch.decisions import record_decisions
 from lib.dispatch.helpers import _comment_link, _scope, red_checks
-from lib.dispatch.questions import record_decisions
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.dispatch.verdict.shipped import _approved_round
@@ -124,6 +124,7 @@ class ResumeMixin:
                         instruction=verdict,
                         resume=True,
                         ci_failure=red_checks(ticket, ticket.current_head),
+                        connection=connection,
                     ),
                 ),
                 dedupe_key=f"t1:{scope}:fix:{comment.id}",
@@ -342,6 +343,7 @@ class ResumeMixin:
                             instruction=verdict,
                             resume=True,
                             ci_failure=red_checks(ticket, ticket.current_head),
+                            connection=connection,
                         ),
                     ),
                     dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:fix:{comment.id}",

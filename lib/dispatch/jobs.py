@@ -25,6 +25,7 @@ from lib.dispatch.constants import (
     STUCK_WAKE_FAILURE_LIMIT,
     _ABANDONED_JOB_DETAIL,
 )
+from lib.dispatch.decisions import record_decisions
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
     _REJECTED_OUTCOMES,
@@ -137,8 +138,11 @@ class JobsMixin:
             ticket, comment, fields, "grok-bot", role="orchestrator"
         ):
             return "rejected-answers-author"
+        held = self._held_stop(ticket)
+        split = [] if held is None else [self._stop_decision(ticket, held[1], held[0], comment, "Split")]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            record_decisions(connection, ticket, None if held is None else held[1].id, split)
             write_workflow_state(
                 connection,
                 ticket.repo,

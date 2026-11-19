@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-from lib.approver_commands import parse_slash_go
 from lib.dispatch.constants import FINISHED_STATES, HANDED_OFF_EXTERNALLY
+from lib.dispatch.decisions import Decision, answer_blocks, answer_text, record_decisions, unquoted
 from lib.dispatch.helpers import (
     _ANSWERS,
     _REGISTERING_ACTIONS,
@@ -44,21 +44,7 @@ _REFUSED_VERDICT_OUTCOMES = (
 _LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|[0-9]+[.)])\s+(\S.*?)\s*$")
 _CLASSIFIED = re.compile(r"\[(?:observable|default-able|product)\]\s+(\S.*)")
 _DEFAULT = re.compile(r"^(\s*)Default:\s*(\S.*?)\s*$")
-_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-_MAX_WORDS = "**Max's words**"
 _STOP_DEFAULTS = {"repeat": "Another round", "unsat": "Change the criterion"}
-
-
-@dataclass(frozen=True)
-class Decision:
-    question: str
-    options: tuple[str, ...]
-    choice: str
-    answerer: str
-    answered_at: float
-    url: str | None
-    answer_id: str
-    position: int
 
 
 @dataclass(frozen=True)
@@ -70,59 +56,19 @@ class _Offer:
 
 
 def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
-    body = _answer_text(answer.body)
+    body = answer_text(answer.body)
     asked = _handoff_body(question)
     offers = _offers(asked)
-    pairs = _answer_blocks(body)
+    pairs = answer_blocks(body)
     entries = (
         [(text, _options_for(offers, text), choice) for text, choice in pairs]
         if pairs
-        else [(asked.strip(), _every_option(offers), _unquoted(body))]
+        else [(asked.strip(), _every_option(offers), unquoted(body))]
     )
     return [
         Decision(text, options, choice, answer.author, answer.created_at, answer.url, answer.id, position)
         for position, (text, options, choice) in enumerate(entries)
     ]
-
-
-def record_decisions(
-    connection: sqlite3.Connection,
-    ticket: TrackedTicket,
-    question_id: str | None,
-    decisions: Iterable[Decision],
-) -> None:
-    connection.executemany(
-        """
-        INSERT OR IGNORE INTO decisions (
-            repo, ticket_id, answer_id, position, question_id, question,
-            options, choice, answerer, answered_at, url
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                ticket.repo.lower(),
-                ticket.ticket_id,
-                decision.answer_id,
-                decision.position,
-                question_id,
-                decision.question,
-                json.dumps(list(decision.options)),
-                decision.choice,
-                decision.answerer,
-                decision.answered_at,
-                decision.url,
-            )
-            for decision in decisions
-        ],
-    )
-
-
-def _answer_text(body: str) -> str:
-    try:
-        return parse_comment(body).body
-    except HandoffError:
-        slash = parse_slash_go(body)
-        return body.strip() if slash is None else slash.instruction or "/go"
 
 
 def _handoff_body(comment: Comment | None) -> str:
@@ -132,32 +78,6 @@ def _handoff_body(comment: Comment | None) -> str:
         return parse_comment(comment.body).body
     except HandoffError:
         return ""
-
-
-def _answer_blocks(body: str) -> list[tuple[str, str]]:
-    blocks: list[tuple[list[str], list[str] | None]] = []
-    fence: str | None = None
-    for line in body.splitlines():
-        marker = _FENCE.match(line)
-        if fence is None and line == "**Question**":
-            blocks.append(([], None))
-            continue
-        if fence is None and line == "**Answer**" and blocks and blocks[-1][1] is None:
-            blocks[-1] = (blocks[-1][0], [])
-            continue
-        if marker is not None:
-            if fence is None:
-                fence = marker.group(1)[0] * len(marker.group(1))
-            elif marker.group(1).startswith(fence) and line.strip() == marker.group(1):
-                fence = None
-        if blocks:
-            question, choice = blocks[-1]
-            (question if choice is None else choice).append(line)
-    return [
-        ("\n".join(question).strip(), "\n".join(choice).strip())
-        for question, choice in blocks
-        if choice is not None
-    ]
 
 
 def _offers(asked: str) -> list[_Offer]:
@@ -203,13 +123,6 @@ def _every_option(offers: list[_Offer]) -> tuple[str, ...]:
     loose = [offer.text for offer in offers if offer.depth >= 0 and not offer.classified]
     nested = [option for offer in offers if offer.classified for option in offer.options]
     return tuple(dict.fromkeys(loose + nested))
-
-
-def _unquoted(body: str) -> str:
-    first, _, rest = body.strip().partition("\n")
-    if not first.startswith(_MAX_WORDS):
-        return body.strip()
-    return "\n".join(line.removeprefix(">").removeprefix(" ") for line in rest.splitlines()).strip()
 
 
 class QuestionsMixin:
@@ -487,18 +400,22 @@ class QuestionsMixin:
         self._write_state_label(ticket, resumed_state)
         return True, f"resumed-{action}"
 
-    def _decisions(self, ticket: TrackedTicket) -> list[dict[str, object]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT question, options, choice, answerer, answered_at, url,
-                       answer_id, position
-                FROM decisions
-                WHERE repo = ? AND ticket_id = ?
-                ORDER BY answered_at, answer_id, position
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchall()
+    def _decisions(
+        self, ticket: TrackedTicket, connection: sqlite3.Connection | None = None
+    ) -> list[dict[str, object]]:
+        if connection is None:
+            with self._connect() as connection:
+                return self._decisions(ticket, connection)
+        rows = connection.execute(
+            """
+            SELECT question, options, choice, answerer, answered_at, url,
+                   answer_id, position
+            FROM decisions
+            WHERE repo = ? AND ticket_id = ?
+            ORDER BY answered_at, answer_id, position
+            """,
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchall()
         return [{**dict(row), "options": json.loads(row["options"])} for row in rows]
 
     def _answered_by(

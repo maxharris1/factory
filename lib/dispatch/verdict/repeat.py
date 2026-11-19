@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 from lib.dispatch.constants import REVISE_ROUND_STATES
-from lib.dispatch.helpers import _comment_link, _comment_order, _round_number, _scope
-from lib.dispatch.questions import Decision, _answer_text
+from lib.dispatch.decisions import Decision, chosen_words
+from lib.dispatch.helpers import _comment_link, _comment_order, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment, repeat_id
@@ -106,17 +106,37 @@ def _handoff(body: str) -> tuple[dict[str, str], str]:
     return handoff.as_dict(), handoff.body
 
 
+_LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|\d+[.)])\s")
+_ACCEPTED_READY = ("queued-review", "answered-review")
+
+
+def _blocks(text: str) -> list[list[str]]:
+    blocks: list[list[str]] = []
+    depth = 0
+    for line in text.splitlines():
+        if not line.strip():
+            blocks.append([])
+            continue
+        item = _LIST_ITEM.match(line)
+        indent = len(line) - len(line.lstrip())
+        if not blocks or not blocks[-1] or (item is not None and indent <= depth):
+            blocks.append([])
+            depth = indent
+        blocks[-1].append(line)
+    return [block for block in blocks if block]
+
+
 def _quote(body: str, ids: frozenset[str]) -> str:
-    text = _handoff(body)[1]
+    blocks = _blocks(_handoff(body)[1])
     token = re.compile(rf"(?<![\w-])(?:{'|'.join(map(re.escape, sorted(ids)))})(?![\w-])") if ids else None
-    lines = [line for line in text.splitlines() if token is not None and token.search(line)]
-    if not lines:
-        paragraph = text.strip().split("\n\n", 1)[0]
-        lines = paragraph.splitlines()
-    quoted = "\n".join(lines)
-    if len(quoted) > _QUOTE_LIMIT:
-        quoted = quoted[:_QUOTE_LIMIT].rstrip() + " ..."
-    return "\n".join(f"> {line}".rstrip() for line in quoted.splitlines())
+    named = [block for block in blocks if token is not None and token.search("\n".join(block))]
+    quoted = []
+    for block in named or blocks[:1]:
+        text = "\n".join(block)
+        if len(text) > _QUOTE_LIMIT:
+            text = text[:_QUOTE_LIMIT].rstrip() + " ..."
+        quoted.append("\n".join(f"> {line}".rstrip() for line in text.splitlines()))
+    return "\n>\n".join(quoted)
 
 
 def stop_question(
@@ -140,7 +160,9 @@ def stop_question(
 
 
 def _stop_choice(stop: Stop, words: str, default: str) -> str:
-    named = [option.name for option in STOP_OPTIONS[stop] if option.name.lower() in words.lower()]
+    names = [option.name for option in STOP_OPTIONS[stop]]
+    leading = [name for name in names if words.lower().startswith(name.lower())]
+    named = leading or [name for name in names if name.lower() in words.lower()]
     name = named[0] if len(named) == 1 else default
     if not words:
         return name
@@ -243,15 +265,20 @@ class RepeatBlockMixin:
 
     def _builder_response(self, ticket: TrackedTicket, verdict: Comment, before: Comment) -> Comment | None:
         builder = f"{ticket.factory.builder_harness}-bot"
-        for item in sorted(ticket.comments, key=_comment_order):
-            fields = _handoff(item.body)[0]
-            if (
-                _comment_order(verdict) < _comment_order(item) < _comment_order(before)
-                and fields.get("kind") == "ready"
-                and self._trusted(ticket, item, fields, builder, role="builder")
-            ):
-                return item
-        return None
+        reviewed = _handoff(before.body)[0].get("head")
+        readies = [
+            item
+            for item in sorted(ticket.comments, key=_comment_order)
+            if _comment_order(verdict) < _comment_order(item) < _comment_order(before)
+            and (fields := _handoff(item.body)[0]).get("kind") == "ready"
+            and self._trusted(ticket, item, fields, builder, role="builder")
+        ]
+        accepted = [item for item in readies if self._handled_outcome(ticket, item.id) in _ACCEPTED_READY]
+        if not accepted:
+            accepted = [
+                item for item in readies if _matching_head(_handoff(item.body)[0].get("head") or "", reviewed)
+            ]
+        return accepted[-1] if accepted else None
 
     def _stop_disputed(self, ticket: TrackedTicket, verdict: Comment, stop: Stop) -> frozenset[str]:
         from lib.evidence.findings import blocking_ids
@@ -271,7 +298,7 @@ class RepeatBlockMixin:
     def _stop_decision(
         self, ticket: TrackedTicket, verdict: Comment, stop: Stop, answer: Comment, default: str
     ) -> Decision:
-        words = _answer_text(answer.body).strip()
+        words = chosen_words(answer.body)
         return Decision(
             self._stop_question(ticket, verdict, stop, self._stop_disputed(ticket, verdict, stop)),
             tuple(option.name for option in STOP_OPTIONS[stop]),
@@ -282,6 +309,34 @@ class RepeatBlockMixin:
             answer.id,
             0,
         )
+
+    def _held_stop(self, ticket: TrackedTicket) -> tuple[Stop, Comment] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT review_events.outcome, review_events.comment_id FROM ticket_state
+                JOIN review_events
+                  ON review_events.repo = ticket_state.repo
+                 AND review_events.ticket_id = ticket_state.ticket_id
+                WHERE ticket_state.repo = ? AND ticket_state.ticket_id = ?
+                  AND (
+                    (ticket_state.workflow_state = 'waiting-max'
+                     AND review_events.comment_id = ticket_state.paused_question_id
+                     AND review_events.outcome IN ('waiting-max-repeat', 'waiting-max-unsat'))
+                    OR (ticket_state.workflow_state = 'capped'
+                        AND review_events.outcome = 'capped-review')
+                  )
+                ORDER BY review_events.rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None:
+            return None
+        stop: Stop = {"waiting-max-repeat": "repeat", "waiting-max-unsat": "unsat"}.get(
+            str(row["outcome"]), "capped"
+        )
+        verdict = next((item for item in ticket.comments if item.id == row["comment_id"]), None)
+        return None if verdict is None else (stop, verdict)
 
     def _repeat_stops(self, ticket: TrackedTicket, comment: Comment, rule_id: str) -> int:
         with self._connect() as connection:
