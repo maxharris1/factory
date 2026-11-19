@@ -105,8 +105,10 @@ list. The rest are lifetime counts:
   before the column, prints unrecorded
 - tokens per job kind (plan, build, fix, review), over the same jobs:
   uncached input (tokens_in less tokens_cached), cached input and output
-  summed from job_telemetry. A job with no telemetry row or tokens_unknown
-  set is counted in tokens-unmeasured-<kind> and left out of the sums; a
+  summed from job_telemetry. A job with no telemetry row, tokens_unknown
+  set, or a NULL tokens_unknown and no tokens (a row from before the flag,
+  read as lib/dashboard_telemetry.py reads it) is counted in
+  tokens-unmeasured-<kind> and left out of the sums; a
   kind with no measured job, or a snapshot from before tokens_unknown,
   prints unrecorded
 - helpers per job: #100's job_telemetry tool counts (Agent and Task) over
@@ -1885,8 +1887,12 @@ def _token_metrics(
     measured = dict.fromkeys(SKILL_KINDS, 0)
     unmeasured = dict.fromkeys(SKILL_KINDS, 0)
     for action, detail, unknown, *tokens in connection.execute(
-        "SELECT j.action, j.detail, t.job_id IS NULL OR t.tokens_unknown = 1, "
-        "t.tokens_in - t.tokens_cached, t.tokens_cached, t.tokens_out FROM jobs j "
+        "SELECT j.action, j.detail, CASE WHEN t.job_id IS NULL THEN 1 "
+        "WHEN t.tokens_unknown IS NULL THEN "
+        "COALESCE(t.tokens_in, 0) = 0 AND COALESCE(t.tokens_cached, 0) = 0 AND COALESCE(t.tokens_out, 0) = 0 "
+        "ELSE t.tokens_unknown != 0 END, "
+        "COALESCE(t.tokens_in, 0) - COALESCE(t.tokens_cached, 0), COALESCE(t.tokens_cached, 0), "
+        "COALESCE(t.tokens_out, 0) FROM jobs j "
         "LEFT JOIN job_telemetry t ON t.job_id = j.id "
         "WHERE j.state IN ('done', 'failed') "
         f"AND j.action IN ({', '.join('?' * len(SKILL_KINDS))})",

@@ -71,9 +71,10 @@ stdout on a pipe and hands the pipe to a `Session` here:
   agents included (#1015); the first source present wins. Claude: the sum
   over every model in the `result` event's `modelUsage`, else that event's
   `usage`, else the sum of each assistant message's usage until a result
-  comes. Codex: the same rollout read's last `total_token_usage`, else the
-  sum of each `turn.completed` usage; once a rollout total is in, a later
-  turn no longer changes the count.
+  comes. Codex: the same rollout read's last `total_token_usage`, summed
+  with each helper agent's rollout, else the sum of each `turn.completed`
+  usage; once a rollout total is in, a later turn or a read with no total
+  no longer changes the count.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each

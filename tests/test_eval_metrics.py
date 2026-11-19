@@ -428,6 +428,51 @@ def test_tokens_per_job_kind_split_input_cached_and_output_and_count_unmeasured_
     }
 
 
+def test_a_migrated_row_from_before_tokens_unknown_with_no_tokens_is_unmeasured(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    empty = _job(queue, "r1", "review", "r1")
+    counted = _job(queue, "r2", "review", "r2")
+    with sqlite3.connect(queue.path) as connection:
+        telemetry.ensure_table(connection)
+        _telemetry(connection, empty, {}, tokens=(0, 0, 0))
+        _telemetry(connection, counted, {}, tokens=(300, 100, 20))
+        connection.execute(f"ALTER TABLE {telemetry.TABLE} DROP COLUMN tokens_unknown")
+        telemetry.ensure_table(connection)
+        flags = connection.execute(f"SELECT tokens_unknown FROM {telemetry.TABLE}").fetchall()
+    assert flags == [(None,), (None,)]
+
+    metrics = build_metrics(queue.path)
+    rows = _token_rows(render_metrics(metrics, metrics).splitlines())
+
+    assert {name: values[0] for name, values in rows.items() if name.endswith("-review")} == {
+        "tokens-input-review": "200",
+        "tokens-cached-review": "100",
+        "tokens-output-review": "20",
+        "tokens-unmeasured-review": "1",
+    }
+
+
+def test_a_migrated_zero_row_alone_prints_no_token_readings(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    legacy = _job(queue, "r1", "review", "r1")
+    with sqlite3.connect(queue.path) as connection:
+        telemetry.ensure_table(connection)
+        _telemetry(connection, legacy, {}, tokens=(0, 0, 0))
+        connection.execute(f"ALTER TABLE {telemetry.TABLE} DROP COLUMN tokens_unknown")
+        telemetry.ensure_table(connection)
+
+    metrics = build_metrics(queue.path)
+    rows = _token_rows(render_metrics(metrics, metrics).splitlines())
+
+    none = "unrecorded(no-token-readings)"
+    assert {name: values[0] for name, values in rows.items() if name.endswith("-review")} == {
+        "tokens-input-review": none,
+        "tokens-cached-review": none,
+        "tokens-output-review": none,
+        "tokens-unmeasured-review": "1",
+    }
+
+
 def test_tokens_without_a_telemetry_table_print_unrecorded(tmp_path: Path) -> None:
     _dispatcher, queue = setup(tmp_path)
     _job(queue, "r1", "review", "r1")

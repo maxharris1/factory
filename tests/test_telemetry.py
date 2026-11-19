@@ -246,6 +246,61 @@ def test_a_codex_turn_after_the_rollout_total_never_adds_to_it(tmp_path: Path) -
     assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (5_200_000, 4_900_000, 40_000)
 
 
+NULL_TOKEN_COUNT = (b'{"timestamp":"2026-11-14T16:50:00.000Z","type":"event_msg","payload":'
+                    b'{"type":"token_count","info":null,"rate_limits":null}}\n')
+
+
+@pytest.mark.parametrize("prior_flush", [False, True])
+def test_a_last_token_count_without_info_keeps_the_last_session_total(tmp_path: Path, prior_flush: bool) -> None:
+    home = tmp_path / "codex-home"
+    shutil.copytree(CODEX_154, home)
+    [rollout] = (home / "sessions").rglob("rollout-*.jsonl")
+    session, db = _codex_session(tmp_path, home)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    if prior_flush:
+        session.flush()
+    with rollout.open("ab") as out:
+        out.write(NULL_TOKEN_COUNT)
+    session.finish(0)
+    row = _row(db, "job-154")
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (5_200_000, 4_900_000, 40_000)
+
+
+CODEX_154_THREAD = "00000000-0000-4000-8000-000000000154"
+
+
+def _helper_rollout(parent: Path, thread: str, meta: dict, name: str | None = None) -> Path:
+    lines = parent.read_text().splitlines()
+    first = json.loads(lines[0])
+    first["payload"].update(id=thread, **meta)
+    path = parent.with_name(name or parent.name.replace(CODEX_154_THREAD, thread))
+    path.write_text("\n".join([json.dumps(first), *lines[1:]]) + "\n")
+    return path
+
+
+def test_a_codex_job_total_includes_every_helper_agent_it_spawned(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    shutil.copytree(CODEX_154, home)
+    [parent] = (home / "sessions").rglob("rollout-*.jsonl")
+    root = CODEX_154_THREAD
+    child, grandchild = "00000000-0000-4000-8000-000000000155", "00000000-0000-4000-8000-000000000156"
+    _helper_rollout(parent, child, {"parent_thread_id": root})
+    later = parent.parent.parent / "15"
+    later.mkdir()
+    _helper_rollout(parent, grandchild,
+                    {"source": {"subagent": {"thread_spawn": {"parent_thread_id": child, "depth": 2}}}}
+                    ).rename(later / f"rollout-2026-11-15T00-10-00-{grandchild}.jsonl")
+    _helper_rollout(parent, "00000000-0000-4000-8000-000000000157",
+                    {"parent_thread_id": "00000000-0000-4000-8000-000000000999"})
+    _helper_rollout(parent, "00000000-0000-4000-8000-000000000158", {"parent_thread_id": root},
+                    name="rollout-2026-11-13T09-00-00-00000000-0000-4000-8000-000000000158.jsonl")
+    session, db = _codex_session(tmp_path, home)
+    session.consume(io.BytesIO((CODEX_154 / "exec.jsonl").read_bytes()))
+    session.finish(0)
+    row = _row(db, "job-154")
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (15_600_000, 14_700_000, 120_000)
+
+
 def test_codex_turn_failures_and_errors_become_the_exit_reason() -> None:
     summary = Summary("codex", Scrubber({}))
     summary.feed({"type": "turn.started"}, 1.0)

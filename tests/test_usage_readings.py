@@ -262,12 +262,19 @@ TOKEN_COUNT_BAD_RESET = (b'{"timestamp":"2026-11-14T16:26:00.000Z","type":"event
                          b'"window_minutes":300,"resets_at":1794684332},"secondary":{"used_percent":50.0,'
                          b'"window_minutes":10080,"resets_at":1}}}}\n')
 LATER = CAPTURED + 28  # 2026-11-14T16:26:00Z
+LAST_TOTAL = {"input_tokens": 2200, "cached_input_tokens": 1300, "output_tokens": 60, "total_tokens": 2260}
 
 
 @pytest.mark.parametrize("last", [TOKEN_COUNT_NULL, TOKEN_COUNT_MISSING])
-def test_a_last_token_count_without_rate_limits_is_no_reading_not_an_older_one(tmp_path: Path, last: bytes) -> None:
+def test_a_last_token_count_without_rate_limits_is_no_reading_but_keeps_the_last_total(
+    tmp_path: Path, last: bytes
+) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + last)), THREAD)
-    assert found == {"rate_limits": None, "tokens": None, "timestamp": "2026-11-14T16:26:00.000Z"}
+    assert found == {
+        "rate_limits": None,
+        "tokens": LAST_TOTAL,
+        "timestamp": "2026-11-14T16:26:00.000Z",
+    }
     assert parse_codex(found, CAPTURED + 60) == [
         Reading("five_hour", None, None, LATER, 0, LATER), Reading("seven_day", None, None, LATER, 0, LATER)]
 
@@ -278,9 +285,10 @@ def test_a_last_token_count_without_rate_limits_is_no_reading_not_an_older_one(t
         ({"total_token_usage": {"input_tokens": "5", "cached_input_tokens": True, "output_tokens": 7,
                                 "total_tokens": None, "reasoning_output_tokens": 3, "note": 1}},
          {"output_tokens": 7}),
-        ({"total_token_usage": None}, None),
-        ({"last_token_usage": {"input_tokens": 9}}, None),
-        ([], None),
+        ({"total_token_usage": None}, LAST_TOTAL),
+        ({"total_token_usage": {"input_tokens": "9"}}, LAST_TOTAL),
+        ({"last_token_usage": {"input_tokens": 9}}, LAST_TOTAL),
+        ([], LAST_TOTAL),
     ],
 )
 def test_the_reader_keeps_only_numeric_session_totals(tmp_path: Path, info: object, tokens: object) -> None:
