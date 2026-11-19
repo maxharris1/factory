@@ -1050,6 +1050,11 @@ def inode(path):
         return None
 
 marker = Path(sys.argv[1])
+pins = marker.with_name(marker.name + ".pins")
+pins.mkdir(exist_ok=True)
+for p in sys.argv[2:]:
+    if inode(p) is not None:
+        os.link(p, pins / Path(p).name)
 tmp = marker.with_name(marker.name + ".tmp")
 tmp.write_text(json.dumps({{Path(p).name: inode(p) for p in sys.argv[2:]}}))
 tmp.replace(marker)
