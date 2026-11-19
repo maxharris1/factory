@@ -30,7 +30,7 @@ file or orch config.
 | Linux pool label for a repo | that repo's `factory.md` front matter as `ci_runner:` | a normal repo PR |
 | Which jobs use it | that repo's workflow `runs-on:` | a normal repo PR |
 | Online `factory-linux` pool size | repo Actions variable `FACTORY_LINUX_POOL` | `deploy/runner-pool-sync.sh` on the orch host (the PC), as the `factory` user |
-| Overflow switch for factory's Linux jobs | repo Actions variable `FACTORY_LINUX_RUNNER` | Max, by hand (see "Overflow to hosted runners") |
+| Which of a run's Linux jobs go hosted | output `hosted` of the hosted `changes` job, from `lib/ci_route.py` | the router, once per run (see "Overflow to hosted runners") |
 | Device inventory (hosts, Tailscale names) | `machines.yml` (F2-01) | already there, unchanged |
 | Credential-holding deploy workflows | GitHub-hosted runners, unchanged (D21) | nobody moves them |
 
@@ -61,19 +61,22 @@ ci_runner: factory-linux
 
 `ci_runner` must be one token (letters, digits, `.`, `_`, `:`, `-`);
 `orch check-config` validates it. Linux jobs select the pool with every
-label, so a job can never land on some other self-hosted runner. They read
-the labels from the repo Actions variable `FACTORY_LINUX_RUNNER`, and fall
-back to the pool when it is unset:
+label, so a job can never land on some other self-hosted runner. Each Linux
+job has `needs: changes` and looks up its own slot name in the `hosted`
+output of the `changes` job:
 
 ```yaml
 jobs:
-  test:
-    runs-on: ${{ fromJSON(vars.FACTORY_LINUX_RUNNER || '["self-hosted","Linux","X64","factory-linux"]') }}
+  checks:
+    needs: changes
+    runs-on: ${{ contains(fromJSON(needs.changes.outputs.hosted || '[]'), 'checks') && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","factory-linux"]') }}
 ```
 
-The fallback is exactly the pool, `[self-hosted, Linux, X64, factory-linux]`,
-so local is the default. See "Overflow to hosted runners" below for who
-sets the variable.
+The test shards use `format('test-{0}', matrix.shard)` in place of
+`'checks'`. A job whose slot is not in `hosted` runs on exactly the pool,
+`[self-hosted, Linux, X64, factory-linux]`. An empty or missing output
+means the pool, so local is the default. See "Overflow to hosted runners"
+below for how `changes` fills `hosted`.
 
 The one macOS job uses `[self-hosted, macOS, factory-mac]`. The host label
 `factory-pc-wsl` is for pinning a job to the PC if that is ever needed. No
@@ -81,8 +84,9 @@ factory job pins today.
 
 `ci_runner` is repo policy that `check-config` validates and humans and
 bots read; the poller does not rewrite workflows. `tests/test_ci_workflow.py`
-checks that every factory Linux job uses that `runs-on:` expression with the
-`ci_runner` pool as its fallback, and that `macos` stays on
+checks that every routed Linux job uses that `runs-on:` expression with its
+own slot name and the `ci_runner` pool, that `changes` runs on
+`ubuntu-latest`, and that `macos` stays on
 `[self-hosted, macOS, factory-mac]`.
 
 ## Overflow to hosted runners
@@ -90,8 +94,15 @@ checks that every factory Linux job uses that `runs-on:` expression with the
 Max asked on 2026-11-17 that CI "default to the local runners before we
 overflow to GitHub". On 2026-11-19 he asked to stop the repo-wide
 flip-flop of `FACTORY_LINUX_RUNNER` (#996). The PC sync no longer writes
-that variable. It publishes the pool size instead, for a per-run router
-that #1012 wires into CI.
+that variable. It publishes the pool size instead, and since #1012 each run
+routes its own jobs from it.
+
+Each Linux job takes a free local `factory-linux` runner first and runs on
+`ubuntu-latest` only when no local slot is free. The hosted `changes` job
+decides this once per run with `lib/ci_route.py`, and each Linux job reads
+the answer in its `runs-on:`. Nothing reads `FACTORY_LINUX_RUNNER` any
+more. Max deletes it with
+`gh variable delete FACTORY_LINUX_RUNNER --repo maxharris1/factory`.
 
 - **What the sync publishes.** `deploy/runner-pool-sync.sh` runs on the
   orch host (the PC) as the `factory` user, from the deployed checkout at
@@ -106,16 +117,40 @@ that #1012 wires into CI.
   writes nothing, and the next count must then hold for two checks again.
   It reads the runner list with the `factory` user's own `gh` (repo
   admin), so no secret is added to Actions.
-- **Who reads it.** Nothing yet. Until #1012 lands, Linux jobs still read
-  `FACTORY_LINUX_RUNNER` in their `runs-on:`, and nothing sets that
-  variable any more. Once the new loop runs on the PC, Max deletes
-  `FACTORY_LINUX_RUNNER`, so every Linux job runs on the pool with no
-  overflow until #1012 lands.
+- **Who reads it.** The `changes` job runs on `ubuntu-latest` on every
+  event, with `actions: read` and `contents: read` and only `github.token`.
+  It holds no secret. Its last step, `route`, runs
+  `python3 -I lib/ci_route.py`, which reads `vars.FACTORY_LINUX_POOL` and
+  the Actions runs API. It writes the output `hosted`, a JSON list of slot
+  names, and logs
+  `ci_route: online=N claimed=C reserved=R free=F hosted=[...]`.
+- **How it routes.** `SLOTS` in `lib/ci_route.py` ranks the slots:
+  `test-1`, `test-2`, `test-3`, `statechart`, `checks`, `py311-compile`,
+  `macos-pickup`. The router computes `free = online - claimed - reserved`.
+  `claimed` counts other runs' pool jobs that are queued or in progress.
+  `reserved` holds 7 slots for each earlier run that lists `changes` but no
+  slot jobs yet. Jobs in the same run count by rank, so the first `free`
+  slots run local and the rest go into `hosted`.
+- **Stall guard.** If a pool job has been queued over 3 minutes and no pool
+  job is running, `free` is 0 and every slot goes hosted. This catches a
+  pool that is offline before `FACTORY_LINUX_POOL` says so.
+- **Router failure.** If the router fails, for example on a missing
+  environment variable or an API error, it writes `hosted=[]` and logs a
+  warning, so every job stays local. If the `changes` job itself fails,
+  GitHub skips every Linux job and the run goes red.
+- **Reruns.** "Re-run failed jobs" reuses the earlier `changes` output, so
+  each job goes back where it ran. A rerun local job waits for the pool
+  even when the pool is full, because the stall guard runs only in
+  `changes`. "Re-run all jobs" reruns `changes` and routes every job again.
 - **macOS never overflows.** `macos` stays on `factory-mac`, and
   `macos-pickup` still cancels the run red after 10 minutes with no Mac.
-- **Billing.** An overflowed job is a normal hosted job. It uses included
-  minutes, and while the account is billing-blocked it fails in seconds,
-  which turns the run red. Rerun failed jobs once the pool has room.
+  `macos-pickup` itself is routed like the other Linux jobs.
+- **Billing.** `changes` is one billed hosted job per run, about 1 minute,
+  or about 3,500 to 6,000 minutes a month at current volume. An overflowed
+  job is a normal hosted job and uses included minutes too. While the
+  account is billing-blocked, `changes` cannot start, so every run goes red
+  even with the pool idle. Rerun failed jobs once billing works again,
+  which reruns `changes` and routes the run.
 - **Log.** `~/.local/state/factory/runner-pool-sync.log` on the PC, one
   line per write (`online=N -> {"online":N}`) and one per failed list.
 - **Restarts.** `runner-pool-sync.sh ensure` starts the loop in the
@@ -131,10 +166,12 @@ that #1012 wires into CI.
   `touch ~/.config/factory/runner-pool-sync-hold` stops the
   loop at its next check and makes `ensure` a no-op. Remove the file and
   run `ensure` to resume.
-- **Pin local or hosted by hand.** Set the variable the jobs read:
-  `env -u GH_TOKEN gh variable set FACTORY_LINUX_RUNNER --repo maxharris1/factory --body '"ubuntu-latest"'`.
-  `gh variable delete FACTORY_LINUX_RUNNER --repo maxharris1/factory`
-  returns every Linux job to the pool, since unset means local.
+- **Pin hosted by hand.** Set the pool size the router reads to 0:
+  `env -u GH_TOKEN gh variable set FACTORY_LINUX_POOL --repo maxharris1/factory --body '{"online":0}'`.
+  Every new run then sends every Linux job to `ubuntu-latest`. The PC sync
+  overwrites the pin at its next held change of the online count, or
+  about a minute after the loop restarts. Hold the sync first to keep the
+  pin.
 
 ## Before registering (once)
 
@@ -302,11 +339,12 @@ before adding instances.
   `./config.sh remove` command carrying a one-time removal token. Paste it
   yourself in the runner's terminal, as above.
 - If you remove every Linux runner, the sync loop publishes
-  `{"online":0}` within about a minute, but no Linux job reads it until
-  #1012 lands. Set `FACTORY_LINUX_RUNNER` to `"ubuntu-latest"` by hand
-  first (see "Overflow to hosted runners"), or the jobs queue for a day and
-  then fail. `macos` has no overflow: with the Mac
-  runner removed, change its `runs-on:` in a PR.
+  `{"online":0}` within about a minute, and the router then sends every
+  new run's Linux jobs to `ubuntu-latest`. Before that, the stall guard
+  sends a new run hosted once a pool job has been queued 3 minutes with
+  none running. Jobs already routed to the pool stay queued. Cancel those
+  runs and use "Re-run all jobs" to route them again. `macos` has no
+  overflow. With the Mac runner removed, change its `runs-on:` in a PR.
 
 ## Acceptance (SPEC F2-03)
 

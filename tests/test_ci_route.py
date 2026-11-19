@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 import lib.ci_route as ci_route
-from lib.ci_route import SLOTS, STALL_AFTER, Job, decide, parse_job, reserved_slots
+from lib.ci_route import SLOTS, STALL_AFTER, Job, Route, decide, parse_job, reserved_slots
 
 NOW = datetime(2026, 11, 17, 22, 45, 0, tzinfo=timezone.utc)
 OWN = 500
@@ -38,7 +38,7 @@ def busy(count: int) -> list[Job]:
 
 
 def hosted(online: int, others: list[Job] | None = None, reserved: int = 0) -> tuple[str, ...]:
-    return decide(SLOTS, online, others or [], reserved, NOW)
+    return decide(SLOTS, online, others or [], reserved, NOW).hosted
 
 
 def test_slots_hold_the_rank_order() -> None:
@@ -132,6 +132,26 @@ def test_a_stale_queued_job_beside_a_running_pool_job_is_not_a_stall() -> None:
     assert hosted(3, [stale, job()]) == SLOTS[1:]
 
 
+@pytest.mark.parametrize(("online", "others", "reserved"), [
+    (3, [], 0),
+    (5, busy(2), 0),
+    (9, busy(1) + [job(status="queued")], 3),
+    (2, busy(3), 0),
+    (3, busy(1), 7),
+])
+def test_decide_reports_claimed_and_free_runners_that_add_up(online: int, others: list[Job], reserved: int) -> None:
+    route = decide(SLOTS, online, others, reserved, NOW)
+    assert route.claimed == len(others)
+    assert (route.online, route.reserved) == (online, reserved)
+    assert route.free == max(0, online - route.claimed - reserved)
+    assert route.hosted == SLOTS[route.free:]
+
+
+def test_a_stall_leaves_no_runner_free() -> None:
+    stale = job(status="queued", age=STALL_AFTER + timedelta(seconds=1))
+    assert decide(SLOTS, 3, [stale], 0, NOW) == Route(online=3, claimed=1, reserved=0, free=0, hosted=SLOTS)
+
+
 def test_decide_does_not_flip_flop() -> None:
     before = dict(vars(ci_route))
     locals_seen = [len(SLOTS) - len(hosted(3, busy(n))) for n in (3, 2, 3)]
@@ -221,6 +241,16 @@ def test_main_routes_from_the_runs_it_reads(tmp_path: Path, api: SimpleNamespace
     assert "::warning::" not in result.stdout
     assert output == f"hosted={json.dumps(list(expected), separators=(',', ':'))}\n"
     assert api.methods and set(api.methods) == {"GET"}
+
+
+def test_main_prints_the_route_it_took(tmp_path: Path, api: SimpleNamespace) -> None:
+    serve_runs(api, [api_job("test (1/3)", "queued")])
+    result, _ = run_router(tmp_path, github_env(api.url))
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "ci_route: online=3 claimed=1 reserved=0 free=2 "
+        "hosted=['test-3', 'statechart', 'checks', 'py311-compile', 'macos-pickup']"
+    ]
 
 
 def test_main_writes_only_its_own_output(tmp_path: Path, api: SimpleNamespace) -> None:

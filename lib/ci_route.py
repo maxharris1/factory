@@ -27,6 +27,15 @@ class Job:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class Route:
+    online: int
+    claimed: int
+    reserved: int
+    free: int
+    hosted: HostedSlots
+
+
 def parse_job(raw: dict) -> Job:
     return Job(
         run_id=int(raw["run_id"]),
@@ -56,13 +65,13 @@ def reserved_slots(own_run_id: int, other_jobs: Iterable[Job]) -> int:
 
 
 def decide(slots: Sequence[str], online: int, other_jobs: Iterable[Job], reserved: int,
-           now: datetime) -> HostedSlots:
+           now: datetime) -> Route:
     pool = [job for job in other_jobs if POOL_LABEL in job.labels]
     running = any(job.status == "in_progress" for job in pool)
     stalled = any(job.status == "queued" and now - job.created_at > STALL_AFTER for job in pool)
     claimed = sum(job.status in _CLAIMING for job in pool)
     free = 0 if stalled and not running else max(0, online - claimed - reserved)
-    return tuple(slots[free:])
+    return Route(online=online, claimed=claimed, reserved=reserved, free=free, hosted=tuple(slots[free:]))
 
 
 def _http_get_json(url: str, token: str) -> dict:
@@ -90,10 +99,10 @@ def main() -> int:
                    for run in _http_get_json(f"{runs_url}?status={status}&per_page=100", token)["workflow_runs"]}
         jobs = [parse_job(raw) for run_id in sorted(run_ids - {own})
                 for raw in _http_get_json(f"{runs_url}/{run_id}/jobs?per_page=100", token)["jobs"]]
-        reserved = reserved_slots(own, jobs)
-        hosted = decide(SLOTS, online, jobs, reserved, datetime.now(timezone.utc))
-        _write_output(hosted)
-        print(f"ci_route: online={online} reserved={reserved} hosted={list(hosted)}")
+        route = decide(SLOTS, online, jobs, reserved_slots(own, jobs), datetime.now(timezone.utc))
+        _write_output(route.hosted)
+        print(f"ci_route: online={route.online} claimed={route.claimed} reserved={route.reserved} "
+              f"free={route.free} hosted={list(route.hosted)}")
     except Exception as error:
         if "GITHUB_OUTPUT" in os.environ:
             _write_output(())
