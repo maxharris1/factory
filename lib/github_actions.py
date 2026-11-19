@@ -1026,7 +1026,7 @@ class GitHubReviewActions:
             ) from exc
         if result.returncode != 0 and partial_graphql and _has_graphql_data(result.stdout):
             return result.stdout
-        body = _without_headers(result.stdout)
+        body = _without_headers(result.stdout) if "--include" in args else result.stdout
         if result.returncode != 0:
             detail = " ".join(f"{result.stderr} {body}".split())[:500]
             safe = f"{route} exited {result.returncode}"
