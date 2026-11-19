@@ -61,7 +61,7 @@ head_short, status, age_seconds, jobs}. A job is {name, status,
 conclusion, run_id, job_id, runner_kind, runner_name, created_at,
 started_at, completed_at, elapsed_seconds, queue_seconds}; runner_kind None means not looked up yet.
 `failures` is the newest RECENT_CI_FAILURES failed jobs that completed in
-the last CI_FAILURE_WINDOW on any head: the ticket reference, head_short,
+the last CI_FAILURE_WINDOW at the current head: the ticket reference, head_short,
 name, conclusion, run_id, job_id, tests (the first CI_TESTS_SHOWN failing
 test names), more_tests, age_seconds since the job completed, and
 run_checks, the {status, conclusion} of every job at that head. No URL
