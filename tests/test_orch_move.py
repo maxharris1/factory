@@ -26,6 +26,7 @@ from tests.procs import alive
 from tests.test_deploy import _orch_poll_tokens
 from tests.test_dispatcher import setup
 from tests.test_poller_service import DRIVER
+from tests.test_waiter import FakeSpawn, enqueue, make_waiter
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "orch-move.sh"
@@ -1300,8 +1301,6 @@ elif sys.argv[1:3] == ["heal", "--health-json"]:
 def test_no_self_heal_pass_slips_in_between_the_idle_wait_and_the_drain_files(
     tmp_path: Path,
 ) -> None:
-    from tests.test_waiter import FakeSpawn, enqueue, make_waiter
-
     box = Host(tmp_path, "box")
     for name in ("self-heal.sh", "host-pidns.sh"):
         shutil.copy(ROOT / "deploy" / name, box.checkout / "deploy" / name)
