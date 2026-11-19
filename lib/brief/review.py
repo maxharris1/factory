@@ -20,6 +20,17 @@ PSTACK_FIX_ROUND = (
     "Another full swarm runs only for new behavior, a redesign, or a large new diff. A rebase, a "
     "merge-conflict resolution, or a minor fix gets a single verifier at the new head"
 )
+_MODES = {
+    "full": (
+        "A `full` review runs interrogate and blast-radius.",
+        "Run interrogate and blast-radius, and say which checks did not run.",
+    ),
+    "fix-check": (
+        "A `fix-check` closes each earlier `f-<n>`, reruns the gates and does not boot the app.",
+        "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`. "
+        "In the verdict, say which checks did not run.",
+    ),
+}
 _MISSING_SCENARIO = (
     "An acceptance criterion a user can observe in the UI that has no live QA scenario in the plan is "
 )
@@ -165,28 +176,33 @@ def _delta_line(rebase: dict | None, head: str) -> str:
     )
 
 
+def review_mode(facts: dict) -> tuple[str, str]:
+    round_number = facts["round_number"] or 1
+    if round_number == 1:
+        return "full", "Round 1 reviews the whole PR."
+    if facts["block_on"] == "user-impact":
+        return "fix-check", (
+            f"Round {round_number} under factory.md `review.block_on: user-impact` checks a fix, and pstack's "
+            f'`autopilot-full.md` step 4 says: "{PSTACK_FIX_ROUND}".'
+        )
+    return "full", "factory.md `review.block_on` is `any-failure`, so every round reviews the whole PR."
+
+
 def task_lines(facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
     later_round = (facts["round_number"] or 1) > 1
     variant = followups_active(facts["followup_from"], facts["round_number"])
     user_impact = facts["block_on"] == "user-impact"
-    fix_round = user_impact and later_round and not facts["update"]
+    mode, reason = review_mode(facts)
+    summary, gate = _MODES[mode]
+    read = "Read the fix delta" if mode == "fix-check" else "Read the whole diff"
     if user_impact:
         unchanged_tag = "`[follow-up]`."
     elif variant:
         unchanged_tag = "`[minor]`, or `[follow-up]`."
     else:
         unchanged_tag = "`[minor]`."
-    if user_impact and later_round:
-        gate = (
-            "In the verdict, say which checks did not run. "
-            f"pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So run interrogate and "
-            "blast-radius only when the merge resolution or the commits after it are new behavior, a redesign or "
-            "a large new diff; otherwise say they were not run and why."
-        )
-    else:
-        gate = "Run interrogate and blast-radius, and say which checks did not run."
     steps = [
         "Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one "
         "owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, "
@@ -204,16 +220,16 @@ def task_lines(facts: dict) -> list[str]:
             if facts["update"]
             else [
                 (
-                    "Read the whole diff. " + _local_checks_required(facts)
+                    f"{read}. " + _local_checks_required(facts)
                     if facts["no_ci_base"]
-                    else "Read the whole diff. " + _CI_WHILE_RUNNING
+                    else f"{read}. " + _CI_WHILE_RUNNING
                     if facts["start_before_ci"]
-                    else "Read the whole diff and the CI result on that head."
+                    else f"{read} and the CI result on that head."
                 )
                 + _MERGEABLE,
                 *(
-                    [_fix_round_step(facts["rebase"], head)]
-                    if fix_round
+                    [_fix_check_step(facts["rebase"], head)]
+                    if mode == "fix-check"
                     else [
                         "Close the earlier rounds first: for each `f-<n>` in **Earlier rounds** above, and each "
                         "earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a "
@@ -226,7 +242,7 @@ def task_lines(facts: dict) -> list[str]:
                 ),
             ]
         ),
-        *([] if fix_round else [gate]),
+        gate,
         "Mark a finding `[blocking]` only when you have run it and seen it fail, and give the repro.",
         "Give each helper a distinct question: one criterion group or one risk.",
         *([_bar_step(variant)] if user_impact else []),
@@ -255,6 +271,7 @@ def task_lines(facts: dict) -> list[str]:
     return [
         f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer. "
         "Follow the router in Skills above.",
+        f"Mode: `{mode}`. {reason} {summary}",
         *(f"{number}. {step}" for number, step in enumerate(steps, 1)),
     ]
 
@@ -277,17 +294,15 @@ def _bar_step(variant: bool) -> str:
     )
 
 
-def _fix_round_step(rebase: dict | None, head: str) -> str:
+def _fix_check_step(rebase: dict | None, head: str) -> str:
     return (
-        "This is a fix round: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
+        "Fix-check: check the fix, not the whole PR again. (a) For each `f-<n>` in **Earlier rounds** "
         "above, and each earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as "
-        "a `[closed]` item in the form below. (b) Confirm the gates pass on this head: the CI result. In the "
-        "verdict, say which checks did not run. (c) Read the fix delta for a bug the fix introduced. "
+        "a `[closed]` item in the form below. (b) Rerun the gates on this head: the tests for the files the fix "
+        "touched, in a throwaway copy, and the CI result. (c) Read the fix delta for a bug the fix introduced. "
         + _delta_line(rebase, head)
-        + f"(d) pstack's `autopilot-full.md` step 4 says: \"{PSTACK_FIX_ROUND}\". So rerun interrogate and "
-        "blast-radius only when the fix is new behavior, a redesign or a large new diff; otherwise say they were "
-        "not rerun and why. A new finding in code the delta did not change is `[follow-up]` unless it fails a "
-        "criterion."
+        + "Do not boot or drive the app. A new finding in code the delta did not change is `[follow-up]` unless "
+        "it fails a criterion."
     )
 
 

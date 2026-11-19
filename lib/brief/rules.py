@@ -54,12 +54,6 @@ def review_rules(facts: dict) -> str:
         )
     else:
         followup = ""
-    adversarial = (
-        "interrogate and blast-radius in round 1 (in a later round only for new behavior, a redesign or "
-        "a large new diff),"
-        if user_impact
-        else "interrogate and blast-radius,"
-    )
     auto_extra = facts["auto_extra"]
     high_risk = (
         f"Risk high: up to three rounds; the poller grants up to {auto_extra} more itself under factory.md "
@@ -71,7 +65,8 @@ def review_rules(facts: dict) -> str:
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
         "- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, "
-        f"whatever verify skill factory.md or Job data names. It runs {adversarial} "
+        "whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius in a `full` "
+        "review, not in a `fix-check`, "
         "and may run code in a throwaway copy, its containers labelled as the Rules say.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "

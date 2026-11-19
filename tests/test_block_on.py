@@ -134,15 +134,15 @@ def test_round_one_states_the_bar_and_drops_minor() -> None:
     assert "The tag is one of `[blocking]` or `[follow-up]` and" in brief
     assert "[minor]" not in brief
     assert "Run interrogate and blast-radius, and say which checks did not run." in brief
-    assert "This is a fix round" not in brief
+    assert "Mode: `full`." in brief
 
 
 def test_round_two_checks_the_fix_only() -> None:
     brief = box("review-user-impact-round-2")
-    assert "This is a fix round: check the fix, not the whole PR again." in brief
-    assert "(b) Confirm the gates pass on this head" in brief
+    assert "Mode: `fix-check`." in brief
+    assert "(b) Rerun the gates on this head" in brief
     assert "(c) Read the fix delta for a bug the fix introduced." in brief
-    assert "So rerun interrogate and blast-radius only when the fix is new behavior" in brief
+    assert "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`." in brief
     assert "Close the earlier rounds first" not in brief
     assert "Run interrogate and blast-radius, and say which checks did not run." not in brief
     assert "[minor]" not in brief
@@ -176,4 +176,5 @@ def test_a_later_user_impact_round_never_orders_the_full_pass(update: dict | Non
     }
     text = "\n".join(review_brief.task_lines(facts))
     assert not [phrase for phrase in UNCONDITIONAL_PASS if phrase in text]
-    assert "interrogate and blast-radius only when" in text
+    assert "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`." in text
+    assert "blast-radius only when" not in text
