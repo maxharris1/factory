@@ -61,7 +61,7 @@ interrogate reviewers: opus high, opus high
 ```
 
 You may start helper agents as pstack recommends. They never post to GitHub or push.
-If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file: `/srv/orch/factory/skills/pstack/agents/comment-sicko.md`, `/srv/orch/factory/skills/pstack/agents/poteto-agent.md`.
+If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file listed above.
 
 ## What to do
 This is a plan job. Follow the router in Skills above.
@@ -205,7 +205,7 @@ interrogate reviewers: opus high, opus high
 ```
 
 You may start helper agents as pstack recommends. They never post to GitHub or push.
-If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file: `/home/claude-bot/factory/skills/pstack/agents/comment-sicko.md`, `/home/claude-bot/factory/skills/pstack/agents/poteto-agent.md`.
+If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file listed above.
 
 ## What to do
 This is a plan job. Follow the router in Skills above.

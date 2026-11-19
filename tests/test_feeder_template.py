@@ -561,3 +561,14 @@ def test_a_brief_with_no_type_line_has_none(tmp_path: Path) -> None:
     feeder.feed_once()
     _, brief = go_and_brief(github)
     assert "- Type:" not in brief
+
+
+@pytest.mark.parametrize("example", [
+    "Schema example:\n\n    type: object\n    properties:\n      name:\n        type: string\n",
+    "- A list item.\n\n      Type: object\n",
+    "Config example:\n\n    Risk: high\n    Plan first: yes\n    Depends on: #9\n",
+])
+def test_an_indented_code_example_is_not_ticket_metadata(example: str) -> None:
+    parsed = parse_intake(body(extra=example), ())
+    assert parsed.defects == ()
+    assert (parsed.ticket_type, parsed.risk, parsed.plan_first, parsed.depends_on) == (None, "low", False, "none")

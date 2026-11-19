@@ -8,13 +8,13 @@ from lib import job_detail
 from lib.brief import render_brief
 from lib.brief.inline import BRIEF_TEXT_LIMIT, PLAN_TEXT_LIMIT, quoted_section
 from lib.brief_comment import before_factory_md
-from lib.dispatcher import Comment
+from lib.dispatcher import LINEAR_HANDOFF_QUERY, Comment
 from lib.factory_md import parse_factory_context
 from lib.feeder import IntakeIssue, _brief as feeder_brief, parse_intake
 from lib.poll_source import LivePollSource
 from tests.test_brief import FACTORY_ROOT, job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
-from tests.test_live_poll import FACTORY, FakeGh, config
+from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue, linear_transport_for
 
 URL = "https://github.com/owner/repo/pull/42#issuecomment-3"
 PLAN_URL = "https://github.com/owner/repo/pull/42#issuecomment-5"
@@ -215,3 +215,29 @@ def test_a_brief_with_no_type_line_sets_no_ticket_type(tmp_path) -> None:
     dispatcher, _ = setup(tmp_path)
     for action in ("plan", "build", "fix", "review"):
         assert "ticket_type" not in json.loads(dispatcher._job_detail(polled, action=action))
+
+
+def _linear_polled(brief: str):
+    issue = linear_issue()
+    issue["comments"]["nodes"].insert(0, {
+        "id": "brief-id", "body": brief, "createdAt": "2026-11-11T11:59:00Z", "user": {"id": "user-1"},
+    })
+    source = LivePollSource(
+        config(linear=True), environ={"LINEAR_KEY": "fixture-only"},
+        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
+        linear_transport=linear_transport_for(issue),
+    )
+    (polled,) = source.linear_candidates(LINEAR_HANDOFF_QUERY)
+    return polled
+
+
+@pytest.mark.parametrize("action", ["plan", "build", "fix"])
+def test_a_linear_tickets_type_reaches_every_builder_jobs_playbook(tmp_path, action: str) -> None:
+    polled = _linear_polled(_typed_feeder_comment("Type: bug-fix"))
+    dispatcher, _ = setup(tmp_path)
+    detail = dispatcher._job_detail(polled, action=action)
+    assert json.loads(detail)["ticket_type"] == "bug-fix"
+    text = render_brief(job(action, head=None, raw_detail=detail), bot="claude-bot",
+                        factory_root=FACTORY_ROOT, context=None)
+    assert f"- `{FACTORY_ROOT}/skills/pstack/skills/poteto-mode/playbooks/bug-fix.md`" in text
+    assert "playbooks/feature.md" not in text

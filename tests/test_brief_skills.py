@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
-from lib.brief.skills import ACTION_FILES, PLAYBOOKS, REVIEWER_FILES, builder_files, ticket_type_of
+from lib.brief.skills import ACTION_FILES, PLAYBOOKS, REVIEWER_FILES, builder_files
+from lib.ticket_type import ticket_type_of
 from lib.pstack_models import brief_lines
 from lib.pstack_pin import load_pin
 from tests.test_brief import job
@@ -338,7 +339,7 @@ def test_build_and_fix_briefs_name_tdd_and_plans_name_how_and_architect(
 
 
 def test_the_build_task_points_at_the_tdd_skill() -> None:
-    assert "Write each test first, as the `tdd` skill in Skills above says." in _brief("build", "claude", {})
+    assert "Write tests first, as the `tdd` skill says." in _brief("build", "claude", {})
 
 
 def test_every_playbook_and_action_file_is_pinned() -> None:

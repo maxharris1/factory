@@ -115,7 +115,6 @@ from markdown_it.token import Token
 
 from lib import attention, live_settings
 from lib.branch_stack import OpenPull, stack_wait, stacked_pulls
-from lib.brief.skills import PLAYBOOKS
 from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
@@ -151,6 +150,7 @@ from lib.queue import (
     rank,
     set_ticket_priority,
 )
+from lib.ticket_type import TICKET_TYPES
 
 FEEDER_TABLE = "feeder_items"
 POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
@@ -258,9 +258,17 @@ class IntakeTemplate:
 
 
 def _unfenced(body: str) -> list[str]:
+    indented = {
+        index
+        for token in _MARKDOWN.parse(body or "")
+        if token.type == "code_block" and token.map
+        for index in range(*token.map)
+    }
     lines: list[str] = []
     fenced = False
-    for line in (body or "").splitlines():
+    for index, line in enumerate((body or "").splitlines()):
+        if index in indented:
+            continue
         if _FENCE.match(line):
             fenced = not fenced
             continue
@@ -378,8 +386,8 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
     if depends is None:
         defects.append(Defect("no-depends-on", "no `Depends on:` line (`Depends on: none` is fine)"))
     ticket_type = _field(lines, _TYPE_LINE)
-    if ticket_type is not None and ticket_type not in PLAYBOOKS:
-        valid = ", ".join(f"`{name}`" for name in PLAYBOOKS)
+    if ticket_type is not None and ticket_type not in TICKET_TYPES:
+        valid = ", ".join(f"`{name}`" for name in TICKET_TYPES)
         defects.append(Defect("bad-type", f"`Type: {ticket_type}` is not one of {valid} (no line means feature)"))
         ticket_type = None
     return IntakeTemplate(

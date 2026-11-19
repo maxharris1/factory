@@ -37,7 +37,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
     return [
         "Build the ticket. Follow the router in Skills above.",
         f"1. {read_ticket_line(facts)} {plan_line}",
-        f"2. Work on {branch}. Write each test first, as the `tdd` skill in Skills above says.",
+        f"2. Work on {branch}. Write tests first, as the `tdd` skill says.",
         f"3. Run only the tests for the files you touched plus a short smoke set, {TEST_SCOPE} "
         "Before `ready`, run the router's \"Before ready\" steps.",
         base_step(4, facts),
