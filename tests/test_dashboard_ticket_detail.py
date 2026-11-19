@@ -2446,18 +2446,109 @@ def test_a_running_job_s_ticket_page_shows_its_six_exposure_fields(tmp_path: Pat
 
     snapshot = _exposed(tmp_path, found)
     (row,) = snapshot["running"]
-    assert set(row["exposure"]) == {"model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
+    assert set(row["exposure"]) == SIX
     status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
     assert json.loads(status.read_text(encoding="utf-8"))["running"][0]["exposure"] == row["exposure"]
     assert _exposure_facts(_ticket_server(snapshot, EXPOSURE_ADDRESS)) == _shown(found)
 
 
-def test_a_job_with_no_exposure_row_says_so(tmp_path: Path) -> None:
-    snapshot = _exposed(tmp_path, None)
-    assert snapshot["running"][0]["exposure"] is None
+SIX = {"model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"}
+
+
+def _run_log_exposures(markup: str) -> dict[str, list[tuple[str, list[tuple[str, str]]]]]:
+    log = re.search(r'<ol class="runlog">(.*?)</ol>', markup, re.S)
+    assert log, "no run log"
+    found: dict[str, list[tuple[str, list[tuple[str, str]]]]] = {}
+    for item in re.findall(r"<li>(.*?)</li>", log.group(1), re.S):
+        state = re.search(r'data-state="([^"]*)"', item).group(1)
+        found.setdefault(state, []).extend(
+            (html.unescape(caption), [(name, html.unescape(value)) for name, value in
+                                      re.findall(r'<tr><th scope="row">([^<]*)</th><td>([^<]*)</td></tr>', rows)])
+            for caption, rows in re.findall(
+                r'<table class="exp"><caption>([^<]*)</caption><tbody>(.*?)</tbody></table>', item, re.S)
+        )
+    return found
+
+
+def _record_jobs(snapshot: dict) -> dict[str, dict]:
+    (record,) = json.loads(tickets_json(snapshot))["tickets"].values()
+    return {job["job"]: job for visit in record["visits"] for job in visit["jobs"]}
+
+
+def _ticket_jobs(tmp_path: Path, written: dict[str, Exposure | None], *, table: bool = True) -> tuple[dict, dict]:
+    """A tracked #1014 whose plan job finished and whose build job runs, each
+    with its `written` exposure row (None: no row)."""
+    from lib import exposure
+    from lib.dashboard import collect_snapshot
+    from lib.queue import JobRequest
+    from tests.test_dashboard import add_ticket, make_db
+
+    db = tmp_path / "orch.db"
+    queue = make_db(db)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        add_ticket(connection, "maxharris1/factory", "1014", state="building")
+    ids = {}
+    for action in ("plan", "build"):
+        queue.enqueue(JobRequest(repo="maxharris1/factory", ticket_id="1014", action=action, recipient="claude",
+                                 source_comment_id=f"c-{action}", timeout_seconds=600), dedupe_key=f"k-{action}")
+        job = queue.claim("claude")
+        assert job is not None and job.request.action == action
+        ids[action] = job.id
+        if written[action] is not None:
+            with closing(sqlite3.connect(db)) as connection, connection:
+                exposure.ensure_table(connection)
+                exposure.write(connection, job.id, written[action], NOW)
+        if action == "plan":
+            queue.finish(job.id, owner="claude", handoff_comment_id="h-plan")
+    if not table:
+        with closing(sqlite3.connect(db)) as connection, connection:
+            connection.execute(f"DROP TABLE IF EXISTS {exposure.TABLE}")
+    return collect_snapshot(db, tmp_path / "missing.log", now=1_800_000_002.0, alive=None), ids
+
+
+def test_the_run_log_shows_each_job_s_exposure(tmp_path: Path) -> None:
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT})
+    shown = _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))
+    assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(REAL))]
+    assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(INDEPENDENT))]
+    assert all(not jobs for state, jobs in shown.items() if state not in ("planning", "building"))
+    jobs = _record_jobs(snapshot)
+    assert set(jobs) == {ids["plan"][:8], ids["build"][:8]}
+    assert all(set(job["exposure"]) == SIX for job in jobs.values())
+    assert jobs[ids["plan"][:8]]["exposure"]["brief_sha256"] == [REAL.brief_sha256[i:i + 16] for i in range(0, 64, 16)]
+
+
+@pytest.mark.parametrize("table", [True, False], ids=["no-row", "no-table"])
+def test_a_job_with_no_exposure_row_shows_six_unknowns(tmp_path: Path, table: bool) -> None:
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": None, "build": None}, table=table)
+    assert set(snapshot["running"][0]["exposure"]) == SIX
     markup = _ticket_server(snapshot, EXPOSURE_ADDRESS)
-    assert _exposure_facts(markup) == []
-    assert "not recorded" in markup
+    assert _exposure_facts(markup) == _shown(UNKNOWN)
+    shown = _run_log_exposures(markup)
+    assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(UNKNOWN))]
+    assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(UNKNOWN))]
+    assert all(set(job["exposure"]) == SIX and set(job["exposure"].values()) == {"unknown"}
+               for job in _record_jobs(snapshot).values())
+
+
+def test_exposure_stays_on_the_run_log_after_the_job_finishes(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.queue import SQLiteJobQueue
+
+    snapshot, ids = _ticket_jobs(tmp_path, {"plan": REAL, "build": INDEPENDENT})
+    build = ids["build"][:8]
+    assert [row["job"] for row in snapshot["running"]] == [build]
+    before = _run_log_exposures(_ticket_server(snapshot, EXPOSURE_ADDRESS))["building"]
+    assert before == [(f"{build} · build", _shown(INDEPENDENT))]
+    recorded = _record_jobs(snapshot)[build]["exposure"]
+
+    SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW + 1).finish(
+        ids["build"], owner="claude", handoff_comment_id="h-build")
+    after = collect_snapshot(tmp_path / "orch.db", tmp_path / "missing.log", now=1_800_000_003.0, alive=None)
+
+    assert after["running"] == []
+    assert _run_log_exposures(_ticket_server(after, EXPOSURE_ADDRESS))["building"] == before
+    assert _record_jobs(after)[build]["exposure"] == recorded
 
 
 @needs_node
@@ -2465,4 +2556,17 @@ def test_a_job_with_no_exposure_row_says_so(tmp_path: Path) -> None:
 def test_the_script_draws_the_server_s_exposure(tmp_path: Path, found: Exposure | None) -> None:
     views = _both(tmp_path, _exposed(tmp_path / "db", found), EXPOSURE_ADDRESS)
     assert views["script"] == views["server"]
-    assert _exposure_facts(views["script"]) == ([] if found is None else _shown(found))
+    assert _exposure_facts(views["script"]) == _shown(UNKNOWN if found is None else found)
+
+
+@needs_node
+@pytest.mark.parametrize("written", [{"plan": REAL, "build": INDEPENDENT}, {"plan": None, "build": None}],
+                         ids=["recorded", "missing"])
+def test_the_script_draws_the_server_s_run_log_exposure(tmp_path: Path, written: dict) -> None:
+    (tmp_path / "db").mkdir()
+    snapshot, ids = _ticket_jobs(tmp_path / "db", written)
+    views = _both(tmp_path, snapshot, EXPOSURE_ADDRESS)
+    assert views["script"] == views["server"]
+    shown = _run_log_exposures(views["script"])
+    assert shown["planning"] == [(f"{ids['plan'][:8]} · plan", _shown(written["plan"] or UNKNOWN))]
+    assert shown["building"] == [(f"{ids['build'][:8]} · build", _shown(written["build"] or UNKNOWN))]
