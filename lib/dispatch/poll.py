@@ -196,8 +196,6 @@ class PollMixin:
     def _closed_probe(
         self, source: PollSource
     ) -> Callable[[tuple[TicketRef, ...]], frozenset[tuple[str, str]]] | None:
-        """A stopped ticket waits STOPPED_POLL_SECONDS between full reads; a
-        cheap state probe still reads it the poll its PR closes (#931)."""
         probe = getattr(source, "closed_pulls", None)
         if probe is None:
             return None

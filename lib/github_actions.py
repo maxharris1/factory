@@ -621,7 +621,7 @@ class GitHubReviewActions:
         return found
 
     def closed_pulls(self, repo: str, numbers: Sequence[str]) -> frozenset[str]:
-        """The numbers whose PR is no longer open: closed or merged (#931)."""
+        """The numbers whose PR is no longer open: closed or merged."""
         closed: set[str] = set()
         for chunk, pulls, _ in self._pull_batches(repo, numbers, "state"):
             for number in chunk:
