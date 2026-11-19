@@ -431,6 +431,10 @@ def test_shipped_orch_yml_configures_intake_per_project() -> None:
     assert by_repo["maxharris1/Cleffy"].intake.label == "factory:ready"
     assert by_repo["aut0-code/aut0"].intake.linear_state == "In Progress"
     assert by_repo["maxharris1/tracy-harris-coaching"].intake is None
+    coo = by_repo["maxharris1/coo"]
+    assert coo.intake.label == "factory:ready"
+    assert coo.factory_ref == "main"
+    assert coo.grok_bot == "grok-bot"
 
 
 def test_feeder_code_hardcodes_no_project_or_signal() -> None:

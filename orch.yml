@@ -96,6 +96,10 @@ projects:
     intake:
       label: factory:ready
       priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]
+  - repo: maxharris1/coo
+    factory_ref: main
+    intake:
+      label: factory:ready
 # Host-specific values (the Linear project id, trusted_linear_users,
 # linear_webhook, a device's slots) go in the gitignored orch.local.yml
 # beside this file, merged in at load (config/orch.local.example.yml).
