@@ -21,13 +21,14 @@ factory_in_host_pidns() (
     exit 1
 )
 
-# A WSL2 distro runs in its own PID namespace with /init, or systemd when
-# enabled, as PID 1. An unprivileged process can create a PID namespace only
-# inside a new user namespace, so its uid_map is not "0 0 4294967295".
+# A WSL2 distro runs in its own PID namespace with WSL's /init as PID 1, or,
+# when systemd is enabled, as a child of PID 1. A privileged container's PID 1
+# may be /sbin/init too, but it has no /init. An unprivileged process can
+# create a PID namespace only inside a new user namespace, so its uid_map is
+# not "0 0 4294967295".
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
-    state="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
     [ -z "${ORCH_JOB_PROOF:-}" ] && [ -z "${CODEX_SANDBOX:-}" ] || exit 1
     [ -r "${proc}/self/status" ] || exit 1
     depth="$(awk '/^NSpid:/ { print NF - 1 }' "${proc}/self/status")"
@@ -36,20 +37,22 @@ factory_refresh_host_pidns() (
     recorded="$(cat "$file" 2>/dev/null)" || exit 1
     current="$(readlink "${proc}/self/ns/pid" 2>/dev/null)" || exit 1
     [ -n "$recorded" ] && [ -n "$current" ] && [ "$recorded" != "$current" ] || exit 1
-    initial_pidns="pid:[4026531836]"
-    if [ "$current" != "$initial_pidns" ]; then
-        init="$(tr '\000' '\n' <"${proc}/1/cmdline" 2>/dev/null | head -n 1)"
-        case "${init##*/}" in
-            init | systemd) ;;
-            *) exit 1 ;;
-        esac
+    if [ "$current" != "pid:[4026531836]" ]; then
+        wsl=""
+        for dir in "$proc"/[0-9]*; do
+            stat=""
+            read -r stat 2>/dev/null <"${dir}/stat"
+            stat="${stat##*) }"
+            stat="${stat#* }"
+            [ "${dir##*/}" = 1 ] || [ "${stat%% *}" = 1 ] || continue
+            [ "$(tr '\000' '\n' <"${dir}/cmdline" 2>/dev/null | head -n 1)" = /init ] && wsl=1 && break
+        done
+        [ -n "$wsl" ] || exit 1
     fi
-    for pidfile in "$state"/*.pid; do
-        [ -r "$pidfile" ] || continue
-        pid="$(awk 'NR == 1 { print $1 }' "$pidfile")"
-        case "$pid" in '' | *[!0-9]*) continue ;; esac
-        if [ "$(readlink "${proc}/${pid}/ns/pid" 2>/dev/null)" = "$recorded" ]; then
-            echo "kept ${file}: pid ${pid} in ${pidfile} still runs in ${recorded}" >&2
+    for ns in "$proc"/[0-9]*/ns/pid; do
+        if [ "$(readlink "$ns" 2>/dev/null)" = "$recorded" ]; then
+            pid="${ns%/ns/pid}"
+            echo "kept ${file}: pid ${pid##*/} still runs in ${recorded}" >&2
             exit 2
         fi
     done

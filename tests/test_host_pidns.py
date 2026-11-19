@@ -27,7 +27,7 @@ SANDBOX_USERNS = "         0       1000          1\n"
 
 def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
               uid_map: str | None = None, pids: dict[int, str] | None = None,
-              init: str | None = None) -> Path:
+              init: str | None = None, procs: dict[int, tuple[str, int]] | None = None) -> Path:
     proc = tmp_path / "proc"
     (proc / "self" / "ns").mkdir(parents=True)
     lines = "Name:\tsh\n" + (f"NSpid:\t{nspid}\n" if nspid is not None else "")
@@ -41,6 +41,11 @@ def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
     if init is not None:
         (proc / "1").mkdir(exist_ok=True)
         (proc / "1" / "cmdline").write_text(init.replace(" ", "\0") + "\0", encoding="utf-8")
+    for pid, (cmdline, ppid) in (procs or {}).items():
+        (proc / str(pid)).mkdir(exist_ok=True)
+        (proc / str(pid) / "cmdline").write_text(cmdline + "\0", encoding="utf-8")
+        (proc / str(pid) / "stat").write_text(f"{pid} (init-systemd(Ub) S {ppid} 0 0\n",
+                                              encoding="utf-8")
     return proc
 
 
@@ -163,12 +168,21 @@ def test_service_refreshes_a_stale_record_after_a_restart(tmp_path: Path,
     assert "refusing" not in result.stderr
 
 
-@pytest.mark.parametrize("init", ["/init", "/sbin/init", "/usr/lib/systemd/systemd --system"])
-def test_wsl_distro_refreshes_a_stale_record_after_a_restart(tmp_path: Path, init: str) -> None:
+WSL_INIT = {2: ("/init", 1)}
+
+
+@pytest.mark.parametrize(
+    ("init", "procs"),
+    [("/init", None), ("/sbin/init", WSL_INIT), ("/usr/lib/systemd/systemd --system", WSL_INIT)],
+    ids=["wsl-init", "wsl-systemd-sbin-init", "wsl-systemd"],
+)
+def test_wsl_distro_refreshes_a_stale_record_after_a_restart(
+    tmp_path: Path, init: str, procs: dict[int, tuple[str, int]] | None,
+) -> None:
     home = tmp_path / "home"
     (home / ".local" / "state" / "factory").mkdir(parents=True)
     path = record(home, OLD_NS)
-    proc = fake_proc(tmp_path, "4484", WSL_NS, INITIAL_USERNS, init=init)
+    proc = fake_proc(tmp_path, "4484", WSL_NS, INITIAL_USERNS, init=init, procs=procs)
 
     result = _run(REFRESHING["helper"], home, proc)
 
@@ -188,13 +202,57 @@ def test_linear_forgets_child_records_of_a_retired_namespace(tmp_path: Path) -> 
     proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS)
 
     refreshed = _run(REFRESHING["helper"], home, proc)
-    stopped = _run(_service("linear-webhook-service.sh", "stop"), home, proc)
-
     assert refreshed.returncode == 0, refreshed.stderr
     assert stale.exists(), refreshed.stderr
+    stopped = _run(_service("linear-webhook-service.sh", "stop"), home, proc)
+
     assert not stale.exists(), stopped.stderr
     assert other.read_text(encoding="utf-8") == f"4343 200 {SANDBOX_NS}\n"
     assert f"{other} names a process in another PID namespace" in stopped.stderr
+
+
+def test_refresh_keeps_a_namespace_where_a_linear_child_of_another_state_dir_runs(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".local" / "state" / "factory").mkdir(parents=True)
+    state = home / "custom-state"
+    state.mkdir()
+    child = state / "linear-webhook-listener-child.pid"
+    child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
+    path = record(home, OLD_NS)
+    proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS, {4242: OLD_NS})
+
+    refreshed = _run(REFRESHING["helper"], home, proc)
+    stopped = _run(_service("linear-webhook-service.sh", "stop"), home, proc,
+                   ORCH_STATE_DIR=str(state))
+
+    assert refreshed.returncode == 4, refreshed.stderr
+    assert f"pid 4242 still runs in {OLD_NS}" in refreshed.stderr
+    assert path.read_text(encoding="utf-8") == OLD_NS + "\n"
+    assert not (home / ".config" / "factory" / "host-pidns-retired").exists()
+    assert child.read_text(encoding="utf-8") == f"4242 100 {OLD_NS}\n", stopped.stderr
+
+
+@pytest.mark.parametrize("visible", [4242, 9999], ids=["same-pid", "other-pid"])
+def test_linear_keeps_a_retired_namespace_child_record_while_its_namespace_runs(
+    tmp_path: Path, visible: int,
+) -> None:
+    home = tmp_path / "home"
+    state = home / "custom-state"
+    state.mkdir(parents=True)
+    child = state / "linear-webhook-listener-child.pid"
+    child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
+    path = record(home, HOST_NS)
+    path.with_name("host-pidns-retired").write_text(OLD_NS + "\n", encoding="utf-8")
+    proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS, {visible: OLD_NS})
+
+    stopped = _run(_service("linear-webhook-service.sh", "stop"), home, proc,
+                   ORCH_STATE_DIR=str(state))
+
+    assert stopped.returncode != 0, stopped.stderr
+    assert "cannot verify it is gone" in stopped.stderr
+    assert child.read_text(encoding="utf-8") == f"4242 100 {OLD_NS}\n"
 
 
 def _free_port() -> int:
@@ -267,24 +325,29 @@ def test_service_refuses_while_a_service_lives_in_the_recorded_namespace(
 
 
 @pytest.mark.parametrize(
-    ("nspid", "uid_map", "init", "extra"),
+    ("nspid", "uid_map", "init", "extra", "procs"),
     [
-        ("4484", INITIAL_USERNS, "/init", {"ORCH_JOB_PROOF": "x"}),
-        ("4484", INITIAL_USERNS, "/init", {"CODEX_SANDBOX": "seatbelt"}),
-        ("1728748\t61", INITIAL_USERNS, "/init", {}),
-        ("61", SANDBOX_USERNS, "/init", {}),
-        ("61", None, "/init", {}),
-        ("61", INITIAL_USERNS, None, {}),
-        ("61", INITIAL_USERNS, "/bin/sh -c poller-service.sh stop", {}),
-        ("61", INITIAL_USERNS, "/sbin/docker-init -- sh", {}),
-        ("61", INITIAL_USERNS, "bwrap --unshare-pid sh", {}),
+        ("4484", INITIAL_USERNS, "/init", {"ORCH_JOB_PROOF": "x"}, None),
+        ("4484", INITIAL_USERNS, "/init", {"CODEX_SANDBOX": "seatbelt"}, None),
+        ("1728748\t61", INITIAL_USERNS, "/init", {}, None),
+        ("61", SANDBOX_USERNS, "/init", {}, None),
+        ("61", None, "/init", {}, None),
+        ("61", INITIAL_USERNS, None, {}, None),
+        ("61", INITIAL_USERNS, "/bin/sh -c poller-service.sh stop", {}, None),
+        ("61", INITIAL_USERNS, "/sbin/docker-init -- sh", {}, None),
+        ("61", INITIAL_USERNS, "bwrap --unshare-pid sh", {}, None),
+        ("61", INITIAL_USERNS, "/sbin/init", {}, None),
+        ("61", INITIAL_USERNS, "/usr/lib/systemd/systemd --system", {}, None),
+        ("61", INITIAL_USERNS, "/sbin/init", {}, {7: ("/init", 5)}),
     ],
     ids=["job", "codex-sandbox", "two-field-nspid", "own-proc-sandbox", "no-uid-map",
          "privileged-sandbox-no-pid1", "privileged-sandbox-shell", "privileged-docker-init",
-         "privileged-bwrap"],
+         "privileged-bwrap", "privileged-sbin-init", "privileged-systemd",
+         "privileged-init-not-child-of-pid1"],
 )
 def test_refresh_never_runs_outside_the_host(
     tmp_path: Path, nspid: str, uid_map: str | None, init: str | None, extra: dict[str, str],
+    procs: dict[int, tuple[str, int]] | None,
 ) -> None:
     home = tmp_path / "home"
     state = home / ".local" / "state" / "factory"
@@ -292,7 +355,7 @@ def test_refresh_never_runs_outside_the_host(
     child = state / "linear-webhook-listener-child.pid"
     child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
     path = record(home, OLD_NS)
-    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map, init=init)
+    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map, init=init, procs=procs)
 
     result = _run(_service("poller-service.sh", "stop"), home, proc, **extra)
 

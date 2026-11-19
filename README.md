@@ -1147,14 +1147,15 @@ namespaces (issue #932). The profile hook, the service scripts and
 `install.sh` then rewrite the record when the shell is not a factory job, its
 `NSpid` has one entry, it runs in the initial user namespace
 (`/proc/self/uid_map` is `0 0 4294967295`), its PID namespace is the initial
-one or has a system init (`init` or `systemd`, as in a WSL distro) as PID 1,
-and no pid in a state-directory `*.pid` file still runs in the recorded
-namespace. A sandbox's PID 1 is the command its runtime started, and an
+one or runs WSL's `/init` (as PID 1, or under systemd as a child of PID 1),
+and no visible process still runs in the recorded namespace. A sandbox has no
+`/init`, even a privileged one whose PID 1 is `/sbin/init` or systemd, and an
 unprivileged sandbox has its own user namespace, so neither moves the record.
 The refresh appends the old namespace to `~/.config/factory/host-pidns-retired`,
 and the Linear service drops a child record naming a retired namespace in any
-state directory. While a service still runs in the recorded namespace,
-`install.sh` and the service scripts refuse with exit 4 and keep the record.
+state directory, unless a visible process still runs in that namespace. While a process
+still runs in the recorded namespace, `install.sh` and the service scripts
+refuse with exit 4 and keep the record.
 
 It also retires the launchers that lived outside the repository (issue
 #107): for `~/.local/share/factory/run-poller.sh` and, unless it is already

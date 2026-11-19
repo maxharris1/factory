@@ -61,9 +61,10 @@
 # LINEAR_WEBHOOK_STOP_WAIT) and starts nothing if it survives. A record
 # from another PID namespace cannot be checked, so a loop keeps it and
 # starts nothing until the record is removed, unless a host restart retired
-# that namespace (~/.config/factory/host-pidns-retired, issue #932): then
-# the record is dropped. The loops, start, stop, restart and ensure exit 4
-# outside the host PID namespace (deploy/host-pidns.sh).
+# that namespace (~/.config/factory/host-pidns-retired, issue #932) and no
+# visible process runs in it: then the record is dropped. The loops,
+# start, stop, restart and ensure exit 4 outside the host PID namespace
+# (deploy/host-pidns.sh).
 #
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:
@@ -734,12 +735,15 @@ forget_child() {
 # none (removing a stale record), 2 when the record is from another PID
 # namespace and cannot be checked here.
 owned_child() {
-    local file pid start ns
+    local file pid start ns link
     file="$(child_file "$1")"
     [[ -e "$file" ]] || return 1
     read -r pid start ns 2>/dev/null <"$file" || true
     if [[ -n "$ns" && "$ns" != "$(pid_ns)" ]]; then
         factory_host_pidns_retired "$ns" || return 2
+        for link in "$PROC"/[0-9]*/ns/pid; do
+            [[ "$(readlink "$link" 2>/dev/null)" != "$ns" ]] || return 2
+        done
         rm -f "$file"
         return 1
     fi
