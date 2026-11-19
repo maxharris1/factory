@@ -22,14 +22,19 @@ from lib.dispatch.types import BaseCheck
 from lib.dispatcher import Comment, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import parse_factory_context
 from lib.feeder import (
+    BODY_LIMIT,
+    CLAIM_SECONDS,
     FEEDER_TABLE,
     Feeder,
     IntakeIssue,
+    ensure_tables,
     feeder_counts,
     feeder_items,
     go_state_for,
 )
 from lib.feeder_gates import Progress, Ref, RefStatus
+from lib.followups import has_marker
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import Handoff, format_comment, parse_comment
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -62,6 +67,8 @@ Project rule for every brief: run the suite with `make test`.
 LINEAR_FACTORY_MD = FACTORY_MD.replace("base_branch: main", "base_branch: dev").replace(
     "tickets: github", "tickets: linear"
 ).replace("ship: merge", "ship: handoff")
+
+REQUIRED_MD = FACTORY_MD.replace("feeder:\n", "feeder:\n  required_checks: [\"test (*)\"]\n")
 
 BASE_SHA = "a" * 40
 
@@ -155,7 +162,10 @@ class FakeGitHub:
         self.dir_reads: list[tuple[str, str, str]] = []
         self.trees: dict[str | tuple[str, str], tuple[tuple[str, ...], bool]] = {}
         self.tree_reads: list[tuple[str, str, str]] = []
+        self.filed: dict[tuple[str, int], dict] = {}
+        self.run_logs: dict[tuple[str, str], dict[str, str]] = {}
         self._next_pr = 500
+        self._next_issue = 899
         self._next_comment = 9000
 
     def _maybe_fail(self, step: str) -> None:
@@ -276,6 +286,45 @@ class FakeGitHub:
         self.dir_reads.append((repo, path, sha))
         self._maybe_fail("dir_names")
         return self.dirs.get((repo, path), ())
+
+    def file_repo_issue(self, repo: str, title: str, body: str, labels, marker: str,
+                        since: float, *, before_post=lambda: None) -> int:
+        self._maybe_fail("file_issue")
+        found = self.marked_issues(repo, marker, since)
+        if found:
+            return found[0]
+        before_post()
+        self._next_issue += 1
+        number = self._next_issue
+        self.filed[(repo, number)] = {"title": title, "body": body, "labels": tuple(labels),
+                                      "state": "open"}
+        if "factory:ready" in labels:
+            self.issues.setdefault(repo, []).append(
+                IntakeIssue(repo=repo, tracker="github", key=str(number), title=title, body=body,
+                            labels=tuple(labels), created_at=since, applied_by="maxharris1",
+                            url=f"https://github.com/{repo}/issues/{number}")
+            )
+        self._maybe_fail("file_issue_after")
+        return number
+
+    def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]:
+        return tuple(sorted(
+            number for (filed_repo, number), item in self.filed.items()
+            if filed_repo == repo and has_marker(item["body"], marker)
+        ))
+
+    def close_issue(self, repo: str, number: int, comment: str | None = None) -> None:
+        if comment is not None:
+            self.post_comment(repo, number, comment)
+        self.filed[(repo, number)]["state"] = "closed"
+        self.issues[repo] = [item for item in self.issues[repo] if item.key != str(number)]
+
+    def issue_state(self, repo: str, number: int) -> str:
+        return self.filed[(repo, number)]["state"]
+
+    def failed_run_logs(self, repo: str, run_id: str) -> dict[str, str]:
+        self._maybe_fail("run_logs")
+        return dict(self.run_logs.get((repo, run_id), {}))
 
     def post_comment(self, repo: str, number: int, body: str) -> str:
         self._maybe_fail("comment")
@@ -1209,3 +1258,359 @@ def test_a_queued_review_only_another_device_can_run_leaves_the_builder_room(tmp
     assert feeder.machines is not None, findings
     _review(queue, "codex")
     assert feeder._room({"claude", "codex"}, 10_000.0) == {"claude": 2, "codex": 0}
+
+
+RED_SHA = "c0ffee12" + "0" * 32
+MAIN = ("owner/app", "main")
+RED_LOG = "\n".join(
+    ["collected 3 items", *(f"step {i}" for i in range(300)), "FAILED tests/test_x.py::test_y - boom"]
+)
+
+
+def red_main(github: FakeGitHub, head: str = RED_SHA, run_id: str = "900") -> None:
+    github.main_checks[MAIN] = {"test (2/3)": BaseCheck("test (2/3)", "failure", run_id, "1", head)}
+    github.run_logs[("owner/app", run_id)] = {"test (2/3)": RED_LOG}
+
+
+def main_fix_rows(db: Path) -> list[tuple[str, int | None]]:
+    with sqlite3.connect(db) as connection:
+        return connection.execute(
+            "SELECT state, issue FROM feeder_main_fix ORDER BY filed_at"
+        ).fetchall()
+
+
+def main_fixes(github: FakeGitHub) -> list[int]:
+    return sorted(number for _, number in github.filed)
+
+
+def test_a_red_main_files_one_main_fix_that_feeds_as_one_build_job(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues["owner/app"] = [issue(1), issue(2)]
+    red_main(github)
+    dispatcher = dispatcher_for(tmp_path, queue, feeder)
+    source = FeederSource(github)
+
+    dispatcher.poll_once(source)
+
+    assert main_fixes(github) == [900]
+    assert github.filed[MAIN[0], 900]["labels"] == ("factory:ready", "factory:main-fix")
+    jobs = [job for job in queue.outstanding() if job.request.recipient == "claude"]
+    assert [(job.request.ticket_id, job.request.action) for job in jobs] == [("501", "build")]
+    assert github.pulls[MAIN[0], 501]["head"] == "factory/issue-900"
+    assert {"factory:main-fix", "orch:state/building"} <= set(github.labels[MAIN[0], 501])
+    brief, go = github.posted[MAIN[0], 501]
+    assert "FAILED tests/test_x.py::test_y - boom" in brief.body
+    assert parse_comment(go.body).as_dict()["state"] == "building"
+    assert [rows(tmp_path / "orch.db")[key]["state"] for key in ("1", "2")] == ["waiting-blocked"] * 2
+
+    dispatcher.poll_once(source)
+
+    assert main_fixes(github) == [900]
+    assert len([job for job in queue.outstanding() if job.request.recipient == "claude"]) == 1
+
+
+def test_a_closed_main_fix_with_main_still_red_files_one_new_issue(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    feeder.feed_once()
+    github.close_issue("owner/app", 900)
+    for _ in range(2):
+        now[0] += 60
+        feeder.feed_once()
+
+    assert main_fixes(github) == [900, 901]
+    first, second = (github.filed[MAIN[0], n]["body"].splitlines()[0] for n in (900, 901))
+    assert first != second
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900), ("open", 901)]
+
+
+@pytest.mark.parametrize("step", ["file_issue", "file_issue_after"])
+def test_a_crash_around_the_post_leaves_one_issue_after_the_next_poll(
+    tmp_path: Path, step: str
+) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    github.fail[step] = 1
+    assert feeder.feed_once().errors == 1
+    assert main_fix_rows(tmp_path / "orch.db") == [("filing", None)]
+    now[0] += 60
+
+    assert feeder.feed_once().errors == 0
+
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_two_feeders_on_one_database_file_one_issue(tmp_path: Path) -> None:
+    feeder, queue, github, linear = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    other = Feeder(queue, feeder.config, feeder.machines, github=github, linear=linear,
+                   factory_for=feeder.factory_for, head=lambda: None)
+    red_main(github)
+    post = github.file_repo_issue
+
+    def racing(*args, **kwargs):
+        github.file_repo_issue = post
+        other.feed_once()
+        return post(*args, **kwargs)
+
+    github.file_repo_issue = racing
+    feeder.feed_once()
+
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    assert len(github.pulls) == 1
+
+
+def test_one_base_has_one_active_main_fix_row(tmp_path: Path) -> None:
+    insert = (
+        "INSERT INTO feeder_main_fix "
+        "(repo, base, marker, state, issue, last_head, filed_at, title, body) "
+        "VALUES ('owner/app', ?, ?, ?, NULL, 'h', 1, 't', 'b')"
+    )
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        ensure_tables(connection)
+        connection.execute(insert, ("main", "a", "open"))
+        connection.execute(insert, ("main", "b", "closed"))
+        connection.execute(insert, ("dev", "c", "filing"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, ("main", "d", "filing"))
+
+
+def test_a_failed_main_read_files_and_retires_nothing_and_green_ends_the_streak(
+    tmp_path: Path,
+) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+
+    def poll(*, fail: bool = False) -> int:
+        now[0] += 60
+        github.fail["base_checks"] = int(fail)
+        return feeder.feed_once().errors
+
+    assert poll(fail=True) == 1
+    assert main_fixes(github) == []
+    poll()
+    assert poll(fail=True) == 1
+    poll()
+    assert main_fixes(github) == [900]
+    github.main_checks[MAIN] = {"test (2/3)": BaseCheck("test (2/3)", "success", "950", "1", "d" * 40)}
+    poll()
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+    red_main(github, head="e" * 40, run_id="960")
+    poll()
+    assert main_fixes(github) == [900, 901]
+
+
+def another_feeder(feeder: Feeder, queue, github: FakeGitHub) -> Feeder:
+    return Feeder(queue, feeder.config, feeder.machines, github=github, linear=None,
+                  factory_for=feeder.factory_for, head=lambda: None)
+
+
+def test_a_second_feeder_never_posts_while_the_first_is_filing(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    other = another_feeder(feeder, queue, github)
+    red_main(github)
+    lines, _ = feeder._main_reads(feeder._contexts()[0])
+    issues: list[dict] = []
+    adapter = object.__new__(GitHubReviewActions)
+    adapter._login = lambda: "feeder-bot"
+    paused = [False]
+
+    def pages(endpoint: str) -> list[object]:
+        snapshot = list(issues)
+        if not paused[0]:
+            paused[0] = True
+            assert other._file_main_fixes(lines, 10_001.0) == 0
+        return [snapshot]
+
+    def post(*args: str) -> dict:
+        assert args[:3] == ("-X", "POST", "repos/owner/app/issues")
+        body = next(arg[5:] for arg in args if arg.startswith("body="))
+        item = {"number": len(issues) + 900, "body": body, "user": {"login": "feeder-bot"}}
+        issues.append(item)
+        return item
+
+    adapter._pages = pages
+    adapter._json = post
+    github.file_repo_issue = adapter.file_repo_issue
+
+    assert feeder._file_main_fixes(lines, 10_000.0) == 0
+
+    assert [item["number"] for item in issues] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_crashed_filer_is_resumed_by_another_feeder_once_its_claim_lapses(
+    tmp_path: Path,
+) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    lines, _ = feeder._main_reads(feeder._contexts()[0])
+
+    def crash(*args: object, **kwargs: object) -> int:
+        raise KeyboardInterrupt
+
+    github.file_repo_issue = crash
+    with pytest.raises(KeyboardInterrupt):
+        feeder._file_main_fixes(lines, now[0])
+    del github.file_repo_issue
+    restarted = another_feeder(feeder, queue, github)
+
+    now[0] += 60
+    assert restarted.feed_once().errors == 0
+    assert main_fixes(github) == []
+    now[0] += 900
+
+    assert restarted.feed_once().errors == 0
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_retried_filing_carries_the_first_red_head_and_its_log(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    red_main(github)
+    github.run_logs[MAIN[0], "900"] = {"test (2/3)": "FIRST_HEAD_LOG"}
+    github.fail["file_issue"] = 1
+    assert feeder.feed_once().errors == 1
+    red_main(github, head="d" * 40, run_id="901")
+    github.run_logs[MAIN[0], "901"] = {"test (2/3)": "SECOND_HEAD_LOG"}
+
+    assert another_feeder(feeder, queue, github).feed_once().errors == 0
+
+    filed = github.filed[MAIN[0], 900]
+    assert RED_SHA in filed["body"] and "FIRST_HEAD_LOG" in filed["body"]
+    assert "SECOND_HEAD_LOG" not in filed["body"]
+    assert filed["title"].startswith(f"Main is red at {RED_SHA[:8]}")
+
+
+def test_long_failing_test_ids_leave_every_log_tail_in_the_brief(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    checks, logs = {}, {}
+    for job in range(3):
+        name = f"test ({job + 1}/3)"
+        checks[name] = BaseCheck(name, "failure", "900", str(job + 1), RED_SHA)
+        ids = [f"tests/test_payload.py::test_payload[{'abc'[job]}{'defghijklm'[case]}{'x' * 700}]"
+               for case in range(10)]
+        logs[name] = "\n".join(
+            [*(f"FAILED {test_id} - AssertionError" for test_id in ids), f"TAIL_SENTINEL_JOB_{job}"]
+        )
+    github.main_checks[MAIN] = checks
+    github.run_logs[MAIN[0], "900"] = logs
+
+    dispatcher_for(tmp_path, queue, feeder).poll_once(FeederSource(github))
+
+    assert len(github.filed[MAIN[0], 900]["body"]) <= BODY_LIMIT
+    brief = github.posted[MAIN[0], 501][0].body
+    assert all(f"TAIL_SENTINEL_JOB_{job}" in brief for job in range(3))
+
+
+def overlap(tmp_path: Path, *, advance: float = 0, slow_logs: bool = False,
+            during_post: bool = False):
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    if slow_logs:
+        github.main_checks[MAIN] = {
+            f"test ({i})": BaseCheck(f"test ({i})", "failure", str(100 + i), str(i), RED_SHA)
+            for i in range(16)
+        }
+
+        def read_logs(repo: str, run_id: str) -> dict[str, str]:
+            now[0] += 59
+            return {f"test ({int(run_id) - 100})": "FIRST_HEAD_LOG\nFIRST_TAIL"}
+
+        github.failed_run_logs = read_logs
+    other = another_feeder(feeder, queue, github)
+    remote: list[dict] = []
+    triggered = [False]
+
+    def interleave() -> None:
+        triggered[0] = True
+        now[0] += advance
+        assert other.feed_once().errors == 0
+
+    def runner(argv, timeout):
+        args = list(argv)[list(argv).index("api") + 1:]
+        if "--paginate" in args:
+            snapshot = list(remote)
+            if not during_post and not triggered[0]:
+                interleave()
+            return GhResult(0, json.dumps(snapshot), "")
+        if args == ["user"]:
+            return GhResult(0, json.dumps({"login": "maxharris1"}), "")
+        assert args[:2] == ["-X", "POST"], args
+        if during_post and not triggered[0]:
+            interleave()
+        fields = dict(arg.split("=", 1) for arg in args if "=" in arg)
+        number = 900 + len(remote)
+        remote.append({"number": number, "body": fields["body"], "user": {"login": "maxharris1"}})
+        github.filed[("owner/app", number)] = {**fields, "state": "open"}
+        github.issues.setdefault("owner/app", []).append(
+            issue(number, body=fields["body"], title=fields["title"],
+                  labels=("factory:ready", "factory:main-fix"), template=False))
+        return GhResult(0, json.dumps({"number": number}), "")
+
+    github.file_repo_issue = GitHubReviewActions(runner=runner).file_repo_issue
+    assert feeder.feed_once().errors == 0
+    return remote, github
+
+
+def open_main_fixes(github: FakeGitHub) -> list[int]:
+    return sorted(n for (_, n), item in github.filed.items() if item["state"] == "open")
+
+
+def test_review_overlapping_feeders(tmp_path: Path) -> None:
+    remote, github = overlap(tmp_path)
+    assert [item["number"] for item in remote] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_review_overlapping_feeders_after_claim_expiry(tmp_path: Path) -> None:
+    remote, github = overlap(tmp_path, advance=CLAIM_SECONDS + 1)
+    assert [item["number"] for item in remote] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_review_claim_already_expired_after_log_reads(tmp_path: Path) -> None:
+    remote, github = overlap(tmp_path, slow_logs=True)
+    assert [item["number"] for item in remote] == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_a_post_in_flight_past_its_lease_is_closed_as_a_duplicate_of_the_lowest(
+    tmp_path: Path,
+) -> None:
+    remote, github = overlap(tmp_path, advance=CLAIM_SECONDS + 1, during_post=True)
+
+    assert [item["number"] for item in remote] == [900, 901]
+    assert open_main_fixes(github) == [900]
+    assert "#900" in github.posted["owner/app", 901][-1].body
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_an_owner_whose_claim_lapsed_before_the_post_does_not_post(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    post = github.file_repo_issue
+
+    def stalled(*args, before_post):
+        github.file_repo_issue = post
+        now[0] += CLAIM_SECONDS + 1
+        before_post()
+        raise AssertionError("posted after its claim lapsed")
+
+    github.file_repo_issue = stalled
+
+    assert feeder.feed_once().errors == 0
+    assert main_fixes(github) == []
+    assert main_fix_rows(tmp_path / "orch.db") == [("filing", None)]
+
+    now[0] += 60
+    assert feeder.feed_once().errors == 0
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
