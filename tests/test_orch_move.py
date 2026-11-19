@@ -1040,23 +1040,12 @@ elif sys.argv[1:3] == ["heal", "--health-json"]:
 
 
 RECORD_DRAIN_INODES = f"""#!{sys.executable}
-import json, os, sys
+import json, sys
 from pathlib import Path
 
-def inode(path):
-    try:
-        return os.stat(path).st_ino
-    except FileNotFoundError:
-        return None
-
-marker = Path(sys.argv[1])
-pins = marker.with_name(marker.name + ".pins")
-pins.mkdir(exist_ok=True)
-for p in sys.argv[2:]:
-    if inode(p) is not None:
-        os.link(p, pins / Path(p).name)
+marker, pins = Path(sys.argv[1]), Path(sys.argv[2])
 tmp = marker.with_name(marker.name + ".tmp")
-tmp.write_text(json.dumps({{Path(p).name: inode(p) for p in sys.argv[2:]}}))
+tmp.write_text(json.dumps({{Path(p).name: (pins / Path(p).name).stat().st_ino for p in sys.argv[3:]}}))
 tmp.replace(marker)
 """
 
@@ -1077,14 +1066,16 @@ def _export_during_the_self_heal_loop(tmp_path: Path, heal_source: str) -> None:
                 (ROOT / "deploy/host-pidns.sh").read_text(encoding="utf-8"))
     real_heal = box.checkout / "real-deploy/self-heal.sh"
     _executable(real_heal, heal_source)
-    idle_returned = box.home / "idle-returned"
+    idle_returned, pins = box.home / "idle-returned", box.home / "drain-pins"
     record = tmp_path / "record-drain-inodes"
     _executable(record, RECORD_DRAIN_INODES)
     _executable(box.checkout / "deploy/self-heal.sh", f"""#!/bin/sh
 if [ "$1" = wait-idle ] && [ "$2" = tee ] && [ ! -e "$HOME/.config/factory/orch-retired" ]; then
-    bash {str(real_heal)!r} "$@" || exit $?
     shift 2
-    exec {str(record)!r} {str(idle_returned)!r} "$@"
+    bash {str(real_heal)!r} wait-idle \\
+        sh -c 'pins=$1 && shift && tee "$@" && mkdir "$pins" && ln "$@" "$pins"' tee {str(pins)!r} "$@" \\
+        || exit $?
+    exec {str(record)!r} {str(idle_returned)!r} {str(pins)!r} "$@"
 fi
 exec bash {str(real_heal)!r} "$@"
 """)
@@ -1168,8 +1159,10 @@ def test_export_drains_while_the_self_heal_loop_runs(tmp_path: Path) -> None:
         tmp_path, (ROOT / "deploy/self-heal.sh").read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("rewrite", ["", "printf 'orch-move\\n' >{drain}"],
+                         ids=["removed", "removed-and-rewritten"])
 def test_a_self_heal_pass_right_after_the_idle_wait_that_removes_a_drain_fails_the_drain_test(
-    tmp_path: Path,
+    tmp_path: Path, rewrite: str,
 ) -> None:
     released, removed = tmp_path / "idle-wait-released", tmp_path / "removed-by-a-pass"
     drain = tmp_path / "box/home/.local/state/factory/waiter-codex-bot.drain"
@@ -1180,6 +1173,7 @@ def test_a_self_heal_pass_right_after_the_idle_wait_that_removes_a_drain_fails_t
     source = source.replace(guard, (
         f'    if [[ -e {str(released)!r} && ! -e {str(removed)!r} ]]; then\n'
         f'        rm -f {str(drain)!r}\n'
+        f'        {rewrite.format(drain=repr(str(drain)))}\n'
         f'        touch {str(removed)!r}\n'
         '    fi\n' + guard))
     source = source.replace(tee, tee + (
