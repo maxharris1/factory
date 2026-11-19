@@ -12,6 +12,7 @@ import pytest
 from lib.dispatcher import Dispatcher
 from lib.handoff import parse_comment
 from lib.max_actions import ACTIONS, applicable, wait_of
+from lib.orch_yml import Approvals
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import (
     QUESTIONS,
@@ -44,18 +45,18 @@ AT = datetime(2026, 11, 18, 20, 4, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("state,stuck,facts,actions", [
-    ("awaiting-ok", False, {"approve_comment_id": "5"}, ["ok", "close"]),
+    ("awaiting-ok", False, {"approve_comment_id": "5"}, ["ok", "close", "hand-off"]),
     ("waiting-max", False, {"parked_outcome": "waiting-max-size", "question_id": "7"},
-     ["approve-plan", "split", "close"]),
-    ("waiting-max", False, {"parked_outcome": "waiting-max-repeat"}, ["another-round", "close"]),
-    ("waiting-max", False, {"parked_outcome": "waiting-max-unsat"}, ["another-round", "close"]),
-    ("waiting-max", False, {"question_id": "7"}, ["answer", "close"]),
-    ("capped", False, {}, ["another-round", "close"]),
-    ("blocked", False, {}, ["resume", "close"]),
-    ("fixing", True, {"stuck_reason": "job-failed-2"}, ["retry", "close"]),
-    ("building", True, {"stuck_reason": "ci-red-3"}, ["retry", "close"]),
-    ("waiting-max", True, {"stuck_reason": "job-failed-2"}, ["retry", "close"]),
-    ("waiting-external", False, {}, ["close"]),
+     ["approve-plan", "split", "close", "hand-off"]),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-repeat"}, ["another-round", "close", "hand-off"]),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-unsat"}, ["another-round", "close", "hand-off"]),
+    ("waiting-max", False, {"question_id": "7"}, ["answer", "close", "hand-off"]),
+    ("capped", False, {}, ["another-round", "close", "hand-off"]),
+    ("blocked", False, {}, ["resume", "close", "hand-off"]),
+    ("fixing", True, {"stuck_reason": "job-failed-2"}, ["retry", "close", "hand-off"]),
+    ("building", True, {"stuck_reason": "ci-red-3"}, ["retry", "close", "hand-off"]),
+    ("waiting-max", True, {"stuck_reason": "job-failed-2"}, ["retry", "close", "hand-off"]),
+    ("waiting-external", False, {}, ["close", "hand-off"]),
     ("building", False, {}, []),
 ])
 def test_each_waiting_state_offers_exactly_its_actions(state, stuck, facts, actions) -> None:
@@ -94,6 +95,7 @@ def body(action: str, words: str = "Ship it.", *, repo: str = "owner/repo",
     ("retry", {"kind": "retry", "from": "grok-bot", "role": "orchestrator"}),
     ("resume", GO),
     ("close", CLOSE),
+    ("hand-off", {**ANSWERS, "state": "handed-off"}),
 ])
 def test_each_body_parses_to_its_header(action: str, fields: dict) -> None:
     assert parse_comment(body(action, head=HEAD, plan_comment_id="9")).as_dict() == fields
@@ -115,7 +117,8 @@ def max_dispatcher(tmp_path: Path, delivery: FakeGrokDelivery | None = None):
     queue = SQLiteJobQueue(path, clock=lambda: 100.0)
     dispatcher = Dispatcher(path, queue, trusted_logins=MAX_TRUST,
                             review_actions=FakeReviewActions(),
-                            grok_delivery=delivery or FakeGrokDelivery())
+                            grok_delivery=delivery or FakeGrokDelivery(),
+                            approvals=Approvals(logins=frozenset({"maxharris1"})))
     return dispatcher, queue
 
 
@@ -128,6 +131,17 @@ def test_max_closing_from_the_dashboard_abandons_the_ticket(tmp_path: Path) -> N
 
     assert (workflow_state(queue), handled_outcome(queue, "close-1")) == (
         "abandoned", "abandoned")
+
+
+def test_max_handing_off_from_the_dashboard_parks_a_capped_ticket(tmp_path: Path) -> None:
+    dispatcher, queue = max_dispatcher(tmp_path)
+    seed_state(queue, state="capped")
+
+    dispatcher.process(ticket(comment("hand-off-1", body("hand-off", "I'll QA it myself."),
+                                      author="maxharris1", created_at=9)))
+
+    assert (workflow_state(queue), handled_outcome(queue, "hand-off-1")) == (
+        "handed-off", "handed-off")
 
 
 def test_max_splitting_from_the_dashboard_abandons_the_ticket(tmp_path: Path) -> None:

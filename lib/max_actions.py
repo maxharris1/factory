@@ -41,7 +41,8 @@ WHYS: tuple[Why, ...] = (
 )
 
 ActionName = Literal[
-    "ok", "approve-plan", "split", "another-round", "answer", "retry", "resume", "close"
+    "ok", "approve-plan", "split", "another-round", "answer", "retry", "resume", "close",
+    "hand-off",
 ]
 
 
@@ -61,6 +62,7 @@ ACTIONS: dict[ActionName, ActionSpec] = {
     "retry": ActionSpec("Requeue", frozenset({"stuck"})),
     "resume": ActionSpec("Resume", frozenset({"blocked"})),
     "close": ActionSpec("Close", frozenset(WHYS)),
+    "hand-off": ActionSpec("Hand off", frozenset(WHYS)),
 }
 
 _PARKED: dict[str, Why] = {
