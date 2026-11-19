@@ -216,6 +216,7 @@ class PlanMixin:
                     "plan_gap_count": gap_count,
                     "plan_check_comment_id": None,
                     **paused,
+                    **({"plan_estimate": estimate} if mapped else {}),
                 },
             )
             connection.execute(

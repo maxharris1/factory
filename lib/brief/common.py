@@ -144,6 +144,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         ),
         "update": _update_scope(detail) if job.request.action == "review" else None,
         "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
+        "size_flag": _size_flag(detail) if job.request.action == "review" else None,
         "qa": context is not None and context.config.qa is not None,
     }
 
@@ -156,6 +157,16 @@ def _rebase_scope(detail: dict[str, object]) -> dict | None:
     if not all(isinstance(rebase.get(key), str) and _HEAD.fullmatch(rebase[key]) for key in keys):
         return None
     return {key: rebase[key] for key in keys}
+
+
+def _size_flag(detail: dict[str, object]) -> dict[str, int] | None:
+    flag = detail.get("size_flag")
+    if not isinstance(flag, dict):
+        return None
+    values = (flag.get("changed_lines"), flag.get("estimate"))
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+        return None
+    return {"changed_lines": values[0], "estimate": values[1]}
 
 
 def _update_scope(detail: dict[str, object]) -> dict | None:

@@ -52,6 +52,7 @@ from lib.dispatch.types import (
     TrackedTicket,
 )
 from lib.dispatch.verdict.shipped import _approved_round
+from lib.factory_md import padded_estimate
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest, _job
 from lib.update_check import RebaseScope, UpdateScope
@@ -1350,12 +1351,29 @@ class ReadyMixin:
                         if review_round > 1 and update is None
                         else None
                     ),
+                    size_flag=self._size_flag(ticket),
                 ),
             ),
             dedupe_key=self._review_dedupe_key(ticket, head, review_round),
         )
         self._queue_qa(ticket, comment, head=head, review_round=review_round)
         return True, answered
+
+    def _size_flag(self, ticket: TrackedTicket) -> dict[str, int] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT plan_estimate FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        estimate = None if row is None else row["plan_estimate"]
+        changed = ticket.changed_lines
+        if (
+            estimate is None
+            or changed is None
+            or changed <= max(ticket.factory.plan_max_lines, padded_estimate(estimate))
+        ):
+            return None
+        return {"changed_lines": changed, "estimate": estimate}
 
     def _review_dedupe_key(
         self, ticket: TrackedTicket, head: str, review_round: int

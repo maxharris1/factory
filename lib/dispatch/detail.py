@@ -657,6 +657,7 @@ class DetailMixin:
         unmapped: str | None = None,
         qa_findings: QaFix | None = None,
         source: str | None = None,
+        size_flag: dict[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
     ) -> str:
         if round_number is not None and cap is None:
@@ -718,6 +719,8 @@ class DetailMixin:
             )
         if rebase is not None:
             context["rebase"] = asdict(rebase)
+        if size_flag is not None:
+            context["size_flag"] = size_flag
         if ci_failure:
             context["ci_failure"] = {"failed_checks": list(ci_failure)}
         if qa_findings is not None:
