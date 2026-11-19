@@ -22,7 +22,7 @@ from lib.dispatcher import (
     TrackedTicket,
     _comment_order,
 )
-from lib.dispatch.types import CheckRow, PoolRunner, RunJob
+from lib.dispatch.types import BaseCheck, CheckRow, PoolRunner, RunJob
 from lib.github_actions import (
     GH,
     GhResult,
@@ -2500,3 +2500,78 @@ def test_a_failed_test_that_names_the_spending_limit_stays_code() -> None:
     result = actions.ci_status("owner/repo", HEAD)
 
     assert [(check.cause, check.signal) for check in result.failed] == [("code", None)]
+
+
+BASE_RUNS = (
+    f"{REPO}/actions/runs?branch=release%2F1&event=push&status=completed&per_page=20",
+)
+
+
+def base_jobs(run_id: int) -> tuple[str, ...]:
+    return (f"{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",)
+
+
+def json_result(document: object) -> GhResult:
+    return GhResult(0, json.dumps(document), "")
+
+
+def test_base_checks_reads_each_workflows_latest_completed_run_by_job_name() -> None:
+    actions, gh = adapter()
+    gh.route(
+        BASE_RUNS,
+        json_result(
+            {
+                "workflow_runs": [
+                    {"id": 503, "workflow_id": 1},
+                    {"id": 502, "workflow_id": 2},
+                    {"id": 501, "workflow_id": 1},
+                ]
+            }
+        ),
+    )
+    gh.route(
+        base_jobs(503),
+        json_result(
+            {
+                "jobs": [
+                    {"id": 9001, "name": "test (3/3)", "conclusion": "failure"},
+                    {"id": 9002, "name": "lint", "conclusion": "success"},
+                ]
+            }
+        ),
+    )
+    gh.route(
+        base_jobs(502),
+        json_result({"jobs": [{"id": 9003, "name": "statechart", "conclusion": "timed_out"}]}),
+    )
+
+    checks = actions.base_checks("owner/repo", "release/1")
+
+    assert checks == {
+        "test (3/3)": BaseCheck("test (3/3)", "failure", "503", "9001"),
+        "lint": BaseCheck("lint", "success", "503", "9002"),
+        "statechart": BaseCheck("statechart", "timed_out", "502", "9003"),
+    }
+    assert gh.count(base_jobs(501)) == 0
+
+
+def test_base_checks_never_reads_a_run_still_going_on_the_base_tip() -> None:
+    actions, gh = adapter()
+    gh.route(BASE_RUNS, json_result({"workflow_runs": [{"id": 501, "workflow_id": 1}]}))
+    gh.route(
+        base_jobs(501),
+        json_result({"jobs": [{"id": 9001, "name": "test (3/3)", "conclusion": "failure"}]}),
+    )
+
+    checks = actions.base_checks("owner/repo", "release/1")
+
+    assert checks == {"test (3/3)": BaseCheck("test (3/3)", "failure", "501", "9001")}
+    assert gh.keys() == [BASE_RUNS, base_jobs(501)]
+
+
+def test_base_checks_refuses_a_branch_that_is_not_a_plain_name() -> None:
+    actions, gh = adapter()
+
+    with pytest.raises(GitHubAdapterError):
+        actions.base_checks("owner/repo", "main..evil")
+    assert gh.calls == []

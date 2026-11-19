@@ -76,6 +76,7 @@ from urllib.parse import quote
 from lib.dispatch.helpers import _base_mismatch
 from lib.dispatch.types import (
     CHECK_FAILED,
+    BaseCheck,
     Cause,
     CheckRow,
     CIJobStatus,
@@ -890,6 +891,51 @@ class GitHubReviewActions:
         return self._call(
             f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
         )
+
+    def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
+        """The jobs of each workflow's latest completed push run on branch, by job name.
+
+        status=completed leaves out a run still going on the tip, so its
+        checks read as the run before it, never as green or red.
+        """
+        path = _repo_path(repo)
+        page = _object(
+            self._json(
+                f"{path}/actions/runs?branch={quote(_branch(branch), safe='')}"
+                "&event=push&status=completed&per_page=20"
+            )
+        )
+        runs = page.get("workflow_runs")
+        if not isinstance(runs, list):
+            raise GitHubAdapterError("workflow runs page has no workflow_runs list")
+        latest: dict[object, int] = {}
+        for run in map(_object, runs):
+            run_id = run.get("id")
+            if isinstance(run_id, bool) or not isinstance(run_id, int):
+                raise GitHubAdapterError("workflow run has no numeric id")
+            workflow = run.get("workflow_id")
+            latest[workflow] = max(latest.get(workflow, run_id), run_id)
+        checks: dict[str, BaseCheck] = {}
+        for run_id in sorted(latest.values(), reverse=True):
+            jobs = _object(
+                self._json(f"{path}/actions/runs/{run_id}/jobs?filter=latest&per_page=100")
+            ).get("jobs")
+            if not isinstance(jobs, list):
+                raise GitHubAdapterError("run jobs page has no jobs list")
+            for job in map(_object, jobs):
+                job_id, name, conclusion = job.get("id"), str(job.get("name")), job.get("conclusion")
+                if isinstance(job_id, bool) or not isinstance(job_id, int):
+                    raise GitHubAdapterError("run job has no numeric id")
+                checks.setdefault(
+                    name,
+                    BaseCheck(
+                        name,
+                        conclusion if isinstance(conclusion, str) else None,
+                        str(run_id),
+                        str(job_id),
+                    ),
+                )
+        return checks
 
     def rerun_failed_jobs(self, repo: str, run_id: str) -> None:
         if not run_id.isdigit():

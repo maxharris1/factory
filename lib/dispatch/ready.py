@@ -32,7 +32,14 @@ from lib.dispatch.helpers import (
     failed_checks,
 )
 from lib.dispatch.retry import _harness_job_active
-from lib.dispatch.types import BaseMismatch, CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.types import (
+    BaseCheck,
+    BaseMismatch,
+    CIResult,
+    Comment,
+    Registration,
+    TrackedTicket,
+)
 from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest, _job
@@ -718,6 +725,19 @@ class ReadyMixin:
                 if check.job_id is not None:
                     logs[check.job_id] = run_logs.get(check.name)
         return logs
+
+    def _base_checks_for(self, repo: str, base: str) -> Mapping[str, BaseCheck] | None:
+        """None when the read failed, so the failure is charged as today."""
+        key = (repo.lower(), base)
+        if key not in self._base_checks:
+            self._base_checks[key] = None
+            if self.ci_base_checks is not None:
+                try:
+                    self._base_checks[key] = self.ci_base_checks(repo, base)
+                except Exception as exc:
+                    if self.log is not None:
+                        self.log(f"ci base: {repo} {base} unavailable: {type(exc).__name__}")
+        return self._base_checks[key]
 
     def _unlogged_job_steps(
         self, repo: str, result: CIResult, logs: Mapping[str, str | None]

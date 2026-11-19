@@ -9,6 +9,7 @@ import pytest
 
 from lib.dispatch.constants import CI_RERUN_SETTLE_SECONDS, STOPPED_POLL_SECONDS
 from lib.dispatcher import CIResult, Dispatcher, FailedCheck
+from lib.dispatch.types import BaseCheck
 from lib.factory_md import HoldConfig
 from lib.github_actions import GitHubAdapterError, GitHubReviewActions, GhResult
 from lib.queue import SQLiteJobQueue
@@ -576,3 +577,29 @@ def test_the_adapter_reruns_only_the_failed_jobs_of_a_run() -> None:
     with pytest.raises(GitHubAdapterError):
         GitHubReviewActions(gh).rerun_failed_jobs("owner/repo", "../x")
     assert len(calls) == 1
+
+
+def test_the_base_branch_is_read_once_per_poll_for_every_ticket_on_it(tmp_path: Path) -> None:
+    board = RerunBoard(tmp_path)
+    red = {"test (3/3)": BaseCheck("test (3/3)", "failure", "900", "9001")}
+    reads: list[tuple[str, str]] = []
+
+    def base_checks(repo: str, base: str) -> dict[str, BaseCheck]:
+        reads.append((repo, base))
+        if base == "broken":
+            raise GitHubAdapterError("HTTP 502")
+        return red
+
+    board.dispatcher.ci_base_checks = base_checks
+    board.poll()
+    read = board.dispatcher._base_checks_for
+
+    assert [read("owner/repo", "main"), read("Owner/Repo", "main")] == [red, red]
+    assert [read("owner/repo", "broken"), read("owner/repo", "broken")] == [None, None]
+    assert reads == [("owner/repo", "main"), ("owner/repo", "broken")]
+    assert any("ci base: owner/repo broken unavailable" in line for line in board.log)
+
+    board.poll()
+    read("owner/repo", "main")
+
+    assert reads[2:] == [("owner/repo", "main")]

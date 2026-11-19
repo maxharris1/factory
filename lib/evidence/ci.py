@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from lib.dispatch.helpers import failed_checks
-from lib.dispatch.types import Cause, CIResult, FailedCheck, result_cause
+from lib.dispatch.types import CHECK_FAILED, BaseCheck, Cause, CIResult, FailedCheck, result_cause
 
 LOG_LINES = 150
 _ACTIONS_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
@@ -133,6 +133,35 @@ def failing_tests(log_text: str) -> list[str]:
             if len(found) == FAILING_TESTS:
                 break
     return list(found)
+
+
+def base_red(
+    failed: Sequence[FailedCheck],
+    pr_logs: Mapping[str, str | None],
+    base: Mapping[str, BaseCheck],
+    base_logs: Mapping[str, str | None],
+) -> bool:
+    """True when the base branch explains every failed PR check (#955).
+
+    With failing tests named on both sides, a check is explained only when
+    each of its tests also fails somewhere on the base: a shard can move a
+    test, and a PR that broke one test while the base flakes on another is
+    still charged. Without them, the same-named base check must have failed.
+    """
+    red = [check for check in base.values() if check.conclusion in CHECK_FAILED]
+    base_tests = {
+        test for check in red for test in failing_tests(base_logs.get(check.job_id) or "")
+    }
+
+    def explained(check: FailedCheck) -> bool:
+        text = pr_logs.get(check.job_id) if check.job_id is not None else None
+        tests = failing_tests(text or "")
+        if tests and base_tests:
+            return base_tests.issuperset(tests)
+        same = base.get(check.name)
+        return same is not None and same.conclusion in CHECK_FAILED
+
+    return bool(failed) and all(map(explained, failed))
 
 
 def _tail(text: str, limit: int) -> tuple[str, str | None]:
