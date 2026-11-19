@@ -124,6 +124,7 @@ One row per wake the dispatcher sends Grok Bot: each `action` in `lib.dispatch.c
 | `awaiting-ok` | `factory.md`'s `hold:` holds a `ship: merge` pull request. `detail` has `pr`, `head`, `approver`, `reasons` and `held_paths`. | Tell Max once that it waits on his `ok` or `/ok <sha>`. |
 | `qa-failed` | A primary QA `FAIL` with a `[blocking]` line at an approved head. `detail` has `finding` and `evidence_link`. | Tell Max once. Nothing waits on QA. |
 | `qa-env-failed` | Under `qa.gate: block`, QA at an approved head failed on its environment twice. | Tell Max once. |
+| `qa-skill-drift` | A primary QA `FAIL` with `[drift]` lines at an approved or revised head: the verify skill or its feature map no longer matches the app. `detail` has `verify`, `drift`, `evidence_link`, `link` and `ask`. Under `qa.gate: block` with an APPROVE and only drift, the ticket waits at `waiting-max` with QA paused. | Run `maintain-verification-skill` on `detail.verify` at the base branch, as `detail.ask` says. Never ask the builder for a product fix for a drift line. Tell Max once. |
 | `ci-rerun-refused` | A completed red run's rerun was refused and charged. | Tell Max once. |
 | `qa-head-moved` | A QA run's head moved, so it posted nothing. | Nothing to post. |
 | `ci-stale` | Two hours at one head in the CI state `detail.detail` names. | Run Stalled ticket. |

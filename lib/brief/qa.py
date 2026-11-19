@@ -301,7 +301,12 @@ def _driving(facts: LaneFacts) -> str:
         "The read-only diagnostics are:\n\n"
         "- reading the app's logs and the boot command's output;\n"
         "- a database query that reads and changes nothing.\n\n"
-        "Never write to the database, call the app's API directly, or change a file to make a scenario pass."
+        "Never write to the database, call the app's API directly, or change a file to make a scenario pass.\n\n"
+        "Give each failed scenario a `cause`. It is `product` when the app does not do what the criterion "
+        "says. It is `drift` when the app does what the criterion says, but the verify skill's steps, "
+        "selectors or feature map no longer match it. Only a lane whose method is the verify skill may "
+        "report `drift`. Under a fallback method every failure is `product`. Give a scenario that did not "
+        "fail no `cause`."
     )
 
 
@@ -404,6 +409,7 @@ def _result(facts: LaneFacts, kind: _Kind) -> str:
                 "id": scenario.id,
                 "criterion": scenario.criterion,
                 "result": "<verified|failed|inconclusive|needs-human>",
+                "cause": "<product|drift when failed, else null>",
                 "repeats": "<0 or 1>",
                 "artifacts": [
                     {"path": f"{scenario.id}/{name}", "sha256": "<hex>", "size": "<bytes, a number>"}

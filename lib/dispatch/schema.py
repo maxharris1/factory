@@ -639,6 +639,7 @@ class SchemaMixin:
                         state IN ('queued', 'running', 'reported', 'cancelled', 'stale')
                     ),
                     result TEXT CHECK (result IS NULL OR result IN ('PASS', 'FAIL', 'BLOCKED')),
+                    cause TEXT CHECK (cause IS NULL OR cause IN ('product', 'drift')),
                     reason TEXT,
                     comment_id TEXT,
                     started_at REAL NOT NULL,
@@ -660,6 +661,7 @@ class SchemaMixin:
                     "ruled_at": "REAL",
                     "ruling_reason": "TEXT",
                     "evidence_dir": "TEXT",
+                    "cause": "TEXT CHECK (cause IS NULL OR cause IN ('product', 'drift'))",
                 },
             )
             connection.execute(

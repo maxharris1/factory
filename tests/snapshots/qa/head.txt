@@ -63,6 +63,8 @@ Database reads and log reads are allowed as read-only diagnostics only, never as
 
 Never write to the database, call the app's API directly, or change a file to make a scenario pass.
 
+Give each failed scenario a `cause`. It is `product` when the app does not do what the criterion says. It is `drift` when the app does what the criterion says, but the verify skill's steps, selectors or feature map no longer match it. Only a lane whose method is the verify skill may report `drift`. Under a fallback method every failure is `product`. Give a scenario that did not fail no `cause`.
+
 ## Scenarios are fixed
 Run each scenario as written and judge it only by its pass test. Do not reinterpret a criterion. When a pass test and its criterion seem to disagree, report the pass test's result and say so. Each scenario names its fixture pack in `pack` and the files it saves in `save`.
 
@@ -145,6 +147,7 @@ When every scenario is done, write `/tmp/swarm-42/worker-1/result.json` in this 
       "id": "s-1",
       "criterion": "ac-1",
       "result": "<verified|failed|inconclusive|needs-human>",
+      "cause": "<product|drift when failed, else null>",
       "repeats": "<0 or 1>",
       "artifacts": [
         {
@@ -182,6 +185,7 @@ When every scenario is done, write `/tmp/swarm-42/worker-1/result.json` in this 
       "id": "s-2",
       "criterion": "ac-2",
       "result": "<verified|failed|inconclusive|needs-human>",
+      "cause": "<product|drift when failed, else null>",
       "repeats": "<0 or 1>",
       "artifacts": [
         {

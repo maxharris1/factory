@@ -179,10 +179,7 @@ class Lab:
             "base_commit": row.base_commit,
             "method": "fallback-playwright",
             "status": "PASS",
-            "scenarios": [
-                {"id": s_id(item), "criterion": "ac-1", "result": outcomes.get(item, "verified")}
-                for item in row.scenarios
-            ],
+            "scenarios": [scenario(s_id(item), outcomes.get(item, "verified")) for item in row.scenarios],
         }
         if (row.slice, row.attempt) in self.broken:
             self.broken[(row.slice, row.attempt)](result)
@@ -222,6 +219,10 @@ class Lab:
 
     def header(self) -> dict[str, str]:
         return parse_comment(self.only_comment()).as_dict()
+
+
+def scenario(sid: str, outcome: str) -> dict:
+    return {"id": sid, "criterion": "ac-1", "result": outcome, **({"cause": "product"} if outcome == "failed" else {})}
 
 
 def assert_no_signed_link(lab: Lab) -> None:
@@ -438,9 +439,82 @@ def test_failure_passing_on_base_is_blocking(tmp_path: Path) -> None:
     lab.tick(5)
 
     comment = lab.only_comment()
-    assert lab.header()["result"] == "FAIL"
+    assert (lab.header()["result"], lab.header()["cause"]) == ("FAIL", "product")
     assert "- [blocking] qa-2 (ac-2): failed at the head commit and not on the base commit" in comment
     assert "| qa-2 | ac-2 | Failed |" in comment and "| qa-1 | ac-1 | Verified |" in comment
+
+
+def with_verify(lab: Lab, verify: str = "verify-live") -> None:
+    factory = lab.run.thread.base.factory
+    lab.run.thread.base = replace(
+        lab.run.thread.base, factory=replace(factory, qa=replace(factory.qa, verify=verify))
+    )
+
+
+def drifted(index: int = 0, method: str = "verify-live") -> Callable[[dict], None]:
+    def change(result: dict) -> None:
+        result.update(status="ISSUES", doctor="PASS", method=method)
+        result["scenarios"][index].update(result="failed", cause="drift")
+
+    return change
+
+
+def test_drift_failure_is_a_drift_finding_with_no_base_check(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    with_verify(lab)
+    lab.enqueue(ids=2)
+    lab.broken[(0, 1)] = drifted(1)
+    lab.tick(5)
+
+    comment = lab.only_comment()
+    assert (lab.header()["result"], lab.header()["cause"]) == ("FAIL", "drift")
+    assert (
+        "- [drift] qa-2 (ac-2): the verify skill or its map no longer matches the app; "
+        "maintain-verification-skill owns it, not a product change"
+    ) in comment
+    assert "| qa-2 | ac-2 | Drift |" in comment and "| qa-1 | ac-1 | Verified |" in comment
+    assert "[blocking]" not in comment
+    assert [row[1] for row in lab.lanes()] == ["head"]
+
+
+def test_a_product_failure_beside_drift_makes_the_cause_product(tmp_path: Path) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    with_verify(lab)
+    lab.enqueue(ids=2)
+    lab.head_outcome["qa-2"] = "failed"
+    lab.broken[(0, 1)] = drifted(0)
+    lab.tick(6)
+
+    comment = lab.only_comment()
+    assert (lab.header()["result"], lab.header()["cause"]) == ("FAIL", "product")
+    assert "- [drift] qa-1 (ac-1)" in comment and "- [blocking] qa-2 (ac-2)" in comment
+    assert [row[1] for row in lab.lanes()] == ["head", "base-check"]
+    assert brief_ids(lab.launched()[-1].brief) == {"s-2"}
+
+
+def _no_cause(result: dict) -> None:
+    result["scenarios"][0].update(result="failed")
+    result["scenarios"][0].pop("cause", None)
+
+
+@pytest.mark.parametrize(
+    ("verify", "broken"),
+    [(None, _no_cause), ("verify-live", drifted(method="fallback-playwright"))],
+    ids=["failed-with-no-cause", "drift-under-a-fallback"],
+)
+def test_a_failed_scenario_without_a_legal_cause_is_rejected(
+    tmp_path: Path, verify: str | None, broken: Callable[[dict], None]
+) -> None:
+    lab = Lab(tmp_path, lanes=1)
+    if verify:
+        with_verify(lab, verify)
+    lab.enqueue(ids=2)
+    lab.broken[(0, 1)] = broken
+    lab.broken[(0, 2)] = broken
+    lab.tick(6)
+
+    assert [row[3:5] for row in lab.lanes()] == [("dropped", "wrong-cause"), ("gap", "dropped-twice:wrong-cause")]
+    assert lab.header()["result"] == "BLOCKED" and "cause" not in lab.header()
 
 
 def test_regression_result_spares_the_base_check(tmp_path: Path) -> None:
@@ -567,6 +641,7 @@ def test_comment_header_parses_for_every_outcome(tmp_path: Path, setup: Callable
     assert header == {
         "kind": "qa", "from": "grok-bot", "role": "qa", "head": HEAD_A, "result": result, "scope": "full",
         "lanes": "2", "env": "full-stack", "runner": "claude-cloud", "arm": "primary", "attempt": "1",
+        **({"cause": "product"} if result == "FAIL" else {}),
     }
     assert lab.only_comment().rstrip().endswith("<!-- qa-run run-784-claude-cloud -->")
     assert "(machine fake-4cpu-16gb, agent fake-1.0)" in lab.only_comment()
