@@ -840,7 +840,10 @@ def test_the_adapter_reruns_only_the_failed_jobs_of_a_completed_run() -> None:
     adapter, calls = rerun_adapter("completed")
 
     assert adapter.rerun_failed_jobs("owner/repo", [RUN]) == "requested"
-    assert calls == [["api", RUN_PATH], ["api", "-X", "POST", f"{RUN_PATH}/rerun-failed-jobs"]]
+    assert calls == [
+        ["api", "--include", RUN_PATH],
+        ["api", "-X", "POST", f"{RUN_PATH}/rerun-failed-jobs"],
+    ]
     with pytest.raises(GitHubAdapterError):
         adapter.rerun_failed_jobs("owner/repo", ["../x"])
     assert len(calls) == 2
@@ -850,7 +853,7 @@ def test_the_adapter_posts_nothing_while_a_run_is_in_progress() -> None:
     adapter, calls = rerun_adapter("in_progress")
 
     assert adapter.rerun_failed_jobs("owner/repo", [RUN]) == "running"
-    assert calls == [["api", RUN_PATH]]
+    assert calls == [["api", "--include", RUN_PATH]]
 
 
 @pytest.mark.parametrize(
@@ -876,7 +879,7 @@ def test_the_adapter_raises_a_refusal_of_a_completed_run() -> None:
     assert raised.value.http_status == 403
     assert raised.value.api_message == "Resource not accessible by integration"
     assert "not accessible" not in raised.value.safe_detail
-    assert calls[-1] == ["api", RUN_PATH]
+    assert calls[-1] == ["api", "--include", RUN_PATH]
 
 
 def check_runs_gh(posts: list[str], *, long_status: str):
@@ -981,6 +984,88 @@ def test_status_read_403_of_active_run_keeps_budget_retryable(tmp_path):
     assert len(calls) == 2
     assert board.state("42")["gate_count"] == 0
     assert board.jobs("fix") == []
+
+
+FORBIDDEN_WITH_QUOTA = GhResult(
+    1,
+    "HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 4999\r\n\r\n"
+    + json.dumps({"message": "Resource not accessible by integration"}),
+    "gh: Resource not accessible by integration (HTTP 403)",
+)
+
+
+def status_read_fails(reply: GhResult):
+    calls: list[list[str]] = []
+
+    def gh(argv, timeout: float) -> GhResult:
+        calls.append(list(argv))
+        return reply
+
+    return gh, calls
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        GhResult(
+            1,
+            json.dumps({"message": "API rate limit exceeded"}),
+            "gh: API rate limit exceeded (HTTP 403)",
+        ),
+        GhResult(
+            1,
+            json.dumps({"message": "You have exceeded a secondary rate limit"}),
+            "gh: You have exceeded a secondary rate limit (HTTP 403)",
+        ),
+        GhResult(1, "", "gh: Too Many Requests (HTTP 429)"),
+        GhResult(
+            1,
+            "HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\n\r\n"
+            + json.dumps({"message": "Forbidden"}),
+            "gh: Forbidden (HTTP 403)",
+        ),
+        GhResult(
+            1,
+            "HTTP/2.0 403 Forbidden\r\nRetry-After: 60\r\n\r\n"
+            + json.dumps({"message": "Forbidden"}),
+            "gh: Forbidden (HTTP 403)",
+        ),
+    ],
+    ids=["primary", "secondary", "429", "remaining-0", "retry-after"],
+)
+def test_the_adapter_reads_a_rate_limited_status_read_as_running(reply: GhResult) -> None:
+    gh, calls = status_read_fails(reply)
+
+    assert GitHubReviewActions(gh).rerun_failed_jobs("owner/repo", [RUN]) == "running"
+    assert posts(calls) == []
+
+
+def test_the_adapter_raises_a_permission_403_of_a_status_read_with_quota_left() -> None:
+    gh, _ = status_read_fails(FORBIDDEN_WITH_QUOTA)
+
+    with pytest.raises(GitHubAdapterError) as raised:
+        GitHubReviewActions(gh).rerun_failed_jobs("owner/repo", [RUN])
+
+    assert raised.value.http_status == 403
+    assert raised.value.api_message == "Resource not accessible by integration"
+
+
+def test_a_permission_403_of_a_status_read_spends_the_rerun_in_the_same_poll(
+    tmp_path: Path,
+) -> None:
+    board, pr = built(tmp_path)
+    board.red(pr, pr.head, "11")
+    gh, _ = status_read_fails(FORBIDDEN_WITH_QUOTA)
+    board.dispatcher.ci_rerun = GitHubReviewActions(gh).rerun_failed_jobs
+    ready = board.ready(pr, pr.head)
+    board.poll()
+
+    assert board.outcome(ready) == "queued-ci-fix"
+    [(head, status, jobs, _)] = board.reruns_table()
+    assert (head, status, jobs) == (pr.head, "refused", ["11"])
+    assert board.state("42")["gate_count"] == 1
+    assert len(board.jobs("fix")) == 1
+    assert len(board.attention("ci-rerun-refused")) == 1
 
 
 def test_the_adapter_raises_a_standing_refusal_of_a_status_read() -> None:
