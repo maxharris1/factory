@@ -379,9 +379,6 @@ def stop_facts(chart: dict | None, flow: dict, stored_state: str, stuck: bool) -
 
 
 def anchor_close(flow: dict, closed_at: float | None, now: float) -> dict:
-    """`flow` with its current `abandoned` visit started at `closed_at`, when
-    the PR or issue closed before the poller recorded the abandon. The
-    transitions keep their recorded times, which decide the visits' jobs."""
     if closed_at is None or flow["state"] != "abandoned":
         return flow
     age = int(max(0.0, now - closed_at))
