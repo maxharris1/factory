@@ -21,12 +21,9 @@ factory_in_host_pidns() (
     exit 1
 )
 
-# A host or WSL restart leaves the record naming a dead namespace. Only the
-# initial PID namespace, or one whose PID 1 is a system init (WSL's /init or
-# systemd), is a host: a sandbox's PID 1 is the command its runtime started,
-# and an unprivileged sandbox also has its own user namespace. Each retired
-# namespace is appended to ${file}-retired, so a record naming it in any
-# state directory is known dead.
+# A WSL2 distro runs in its own PID namespace with /init, or systemd when
+# enabled, as PID 1. An unprivileged process can create a PID namespace only
+# inside a new user namespace, so its uid_map is not "0 0 4294967295".
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
@@ -39,7 +36,8 @@ factory_refresh_host_pidns() (
     recorded="$(cat "$file" 2>/dev/null)" || exit 1
     current="$(readlink "${proc}/self/ns/pid" 2>/dev/null)" || exit 1
     [ -n "$recorded" ] && [ -n "$current" ] && [ "$recorded" != "$current" ] || exit 1
-    if [ "$current" != "pid:[4026531836]" ]; then
+    initial_pidns="pid:[4026531836]"
+    if [ "$current" != "$initial_pidns" ]; then
         init="$(tr '\000' '\n' <"${proc}/1/cmdline" 2>/dev/null | head -n 1)"
         case "${init##*/}" in
             init | systemd) ;;
