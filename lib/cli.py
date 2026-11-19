@@ -25,6 +25,7 @@ from typing import Any
 from lib import (
     codex_sandbox,
     containers,
+    exposure,
     health,
     job_detail,
     job_run,
@@ -2350,6 +2351,17 @@ def _job_run_command(argv: list[str]) -> int:
                     path.mkdir(mode=0o700, parents=True)
                     created.append(path)
             environment.update(dict.fromkeys(("TMPDIR", "TMP", "TEMP"), str(scratch)))
+        bot_harness = telemetry.HARNESS_BY_BOT.get(args.bot)
+        exposure.record(queue.connect, args.job_id, lambda: exposure.gather(
+            argv=command,
+            binary=codex_sandbox.for_device(command).argv[0] if placed.remote else command[0],
+            harness=telemetry.stream_flags(command, bot_harness).harness or bot_harness,
+            brief=brief[0] if placed.remote else exposure.brief_file(box_brief),
+            host=placed.device.name,
+            factory_root=factory_root,
+            shell=exposure.remote_shell(placed.transport, placed.target)
+            if placed.target is not None else exposure.local_shell(environment),
+        ), log)
         if args.worktree and placed.remote:
             # #94: the same --worktree, on the placed device: preflight and
             # checkout there before any worker is recorded or started.

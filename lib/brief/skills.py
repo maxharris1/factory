@@ -175,6 +175,23 @@ def section(router: Router) -> str:
     return "\n".join(lines)
 
 
+_PINNED_LINE = re.compile(r"^- `(/[^`]+)`$")
+
+
+def pinned_paths(brief: str) -> tuple[str, ...] | None:
+    """The paths `section` named in brief, in order; None when it names none."""
+    lines = brief.splitlines()
+    if "## Skills" not in lines:
+        return None
+    paths: list[str] = []
+    for line in lines[lines.index("## Skills") + 1 :]:
+        if line.startswith("## "):
+            break
+        if match := _PINNED_LINE.match(line):
+            paths.append(match.group(1))
+    return tuple(paths) or None
+
+
 def blocked_task_lines(reason: str) -> list[str]:
     return [
         f"Do not start the work. This brief cannot name the pinned skill files it needs: {reason}.",
