@@ -48,6 +48,7 @@ dashboard:
 # job_states:
 #   stale_minutes: 2
 #   release_claimed_minutes: 5
+#   driver_wake_minutes: 20   # clarify wake unanswered this long: re-wake, then needs attention
 # Optional approval credential (#122, docs/decisions/122-approver-credential.md)
 # and per-bot GitHub Apps (#170, docs/decisions/170-four-github-apps.md).
 # Each worker bot posts as its own App (#509); any bot may still have one.

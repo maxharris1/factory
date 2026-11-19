@@ -148,7 +148,7 @@ PULL_FINGERPRINT_FIELDS = """
       totalCount pageInfo { hasNextPage }
       nodes {
         __typename
-        ... on CheckRun { databaseId status conclusion }
+        ... on CheckRun { databaseId status conclusion title summary }
         ... on StatusContext { context state }
       }
     } } } } }

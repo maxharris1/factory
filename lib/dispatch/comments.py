@@ -160,16 +160,17 @@ class CommentsMixin:
             ):
                 self._reject_edited(ticket, comment)
                 continue
-            if (
-                fields is not None
-                and fields["kind"] == "answers"
-                and fields.get("state") == "abandoned"
-            ):
-                outcome = self._t5_abandoned(ticket, comment, fields)
-                if outcome.startswith("rejected-"):
-                    self._wake_comment_problem(ticket, comment, "rejected", outcome)
-                self._mark_handled(ticket, comment.id, outcome)
-                continue
+            if fields is not None and fields["kind"] == "answers":
+                settle = {
+                    "abandoned": self._t5_abandoned,
+                    "handed-off": self._t5_handed_off,
+                }.get(fields.get("state", ""))
+                if settle is not None:
+                    outcome = settle(ticket, comment, fields)
+                    if outcome.startswith("rejected-"):
+                        self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                    self._mark_handled(ticket, comment.id, outcome)
+                    continue
             hooked = self._run_hooks(ticket, comment, fields)
             if hooked is not None:
                 handled, outcome = hooked

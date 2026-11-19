@@ -137,8 +137,19 @@ def _processes_of(home: Path) -> list[int]:
     return found
 
 
+PF_FORKNOEXEC = 0x40
+
+
+def _ppid_and_flags(pid: int) -> tuple[int, int]:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()
+        return int(fields[1]), int(fields[6])
+    except (OSError, IndexError, ValueError):
+        return 0, 0
+
+
 def _loops(home: Path, mode: str) -> list[int]:
-    return [
+    matching = {
         pid
         for pid in _processes_of(home)
         if any(
@@ -146,7 +157,19 @@ def _loops(home: Path, mode: str) -> list[int]:
             for argv in [_argv(pid)]
             for i, arg in enumerate(argv)
         )
-    ]
+    }
+
+    def forked_from_a_loop(pid: int) -> bool:
+        pid, flags = _ppid_and_flags(pid)
+        if not flags & PF_FORKNOEXEC:
+            return False
+        while pid > 1:
+            if pid in matching:
+                return True
+            pid = _ppid_and_flags(pid)[0]
+        return False
+
+    return sorted(pid for pid in matching if not forked_from_a_loop(pid))
 
 
 def _calls(home: Path, name: str) -> list[str]:
@@ -298,6 +321,22 @@ def test_a_second_loop_exits_0_without_spawning_while_the_lock_is_held(
     assert pidfile.read_text() == "4242\n"
 
 
+def test_a_starting_loop_outlasts_a_momentary_hold_of_its_lock(home: Path) -> None:
+    lock = _state(home) / "linear-webhook-listener.lock"
+    with _held(lock):
+        loop = subprocess.Popen(
+            ["bash", str(SERVICE), "_listener-loop"], env=_env(home),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _wait_for(lambda: any(_argv(pid)[:1] == ["flock"] for pid in _processes_of(home)),
+                  what="the loop to wait for its lock")
+    try:
+        _wait_for(lambda: _calls(home, "orch"), what="serve once the lock is free")
+    finally:
+        loop.terminate()
+        loop.wait(timeout=10)
+
+
 def test_listener_never_starts_serve_while_the_port_has_a_listener(home: Path) -> None:
     with socket.socket() as busy:
         busy.bind(("127.0.0.1", 0))
@@ -341,6 +380,30 @@ def test_refused_forward_backs_off_doubling_to_the_cap(home: Path, tmp_path: Pat
                         out.read_text())
     assert delays[:4] == ["0.25", "0.5", "1", "1"]
     assert loop.returncode in (0, 143)
+
+
+def test_loop_count_sees_a_copy_a_loop_started_and_ignores_its_subshells(
+    home: Path, tmp_path: Path
+) -> None:
+    outer = tmp_path / "outer" / "linear-webhook-service.sh"
+    inner = tmp_path / "inner" / "linear-webhook-service.sh"
+    for script, body in ((outer, 'bash "$OTHER" _tunnel-loop &\n'), (inner, "")):
+        script.parent.mkdir()
+        script.write_text(f"#!/usr/bin/env bash\n{body}( sleep 300; : ) &\nwait\n")
+    loop = subprocess.Popen(
+        ["bash", str(outer), "_tunnel-loop"],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin", "OTHER": str(inner)},
+        start_new_session=True,
+    )
+    try:
+        _wait_for(
+            lambda: sum("_tunnel-loop" in _argv(pid) for pid in _processes_of(home)) >= 4,
+            what="two loops and their subshells",
+        )
+        assert len(_loops(home, "_tunnel-loop")) == 2
+    finally:
+        os.killpg(loop.pid, signal.SIGKILL)
+        loop.wait()
 
 
 def test_stop_ends_every_loop_including_old_copies_and_their_children(
@@ -651,6 +714,8 @@ def test_restart_and_stop_end_children_orphaned_by_a_killed_loop(
     assert _service(home, "ensure").returncode == 0
     _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
     orphans = _children(home)
+    _wait_for(lambda: _recorded(home, "listener") == orphans["serve"]
+              and _recorded(home, "tunnel") == orphans["ssh"], what="the child records")
     for mode in MODES:
         for loop in _loops(home, mode):
             os.kill(loop, signal.SIGKILL)
@@ -685,6 +750,10 @@ def _read_pid(path: Path) -> int | None:
         return None
 
 
+def _recorded(home: Path, mode: str) -> int | None:
+    return _read_pid(_state(home) / f"linear-webhook-{mode}-child.pid")
+
+
 def _forward_owner(home: Path) -> int | None:
     return _read_pid(home / "forward-owner")
 
@@ -698,6 +767,7 @@ def _orphan_an_ssh_that_closed_its_fds(home: Path) -> int:
     _wait_for(lambda: "ssh" in _children(home), what="ssh")
     orphan = _children(home)["ssh"]
     _wait_for(lambda: _forward_owner(home) == orphan, what="the forward")
+    _wait_for(lambda: _recorded(home, "tunnel") == orphan, what="the ssh record")
     (loop,) = _loops(home, MODES[1])
     os.kill(loop, signal.SIGKILL)
     _wait_for(lambda: not alive(loop), what="the killed tunnel loop")
@@ -846,19 +916,14 @@ def test_another_pid_namespace_keeps_the_record_of_an_orphaned_ssh_it_cannot_ver
 
 
 def test_child_records_name_the_running_serve_and_ssh(home: Path) -> None:
-    state = _state(home)
-
-    def recorded(mode: str) -> int | None:
-        return _read_pid(state / f"linear-webhook-{mode}-child.pid")
-
     assert _service(home, "ensure").returncode == 0
     _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
     children = _children(home)
-    _wait_for(lambda: recorded("listener") == children["serve"]
-              and recorded("tunnel") == children["ssh"], what="the child records")
+    _wait_for(lambda: _recorded(home, "listener") == children["serve"]
+              and _recorded(home, "tunnel") == children["ssh"], what="the child records")
     result = _service(home, "stop")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert recorded("listener") is None and recorded("tunnel") is None
+    assert _recorded(home, "listener") is None and _recorded(home, "tunnel") is None
 
 
 def _start_time(pid: int) -> int:

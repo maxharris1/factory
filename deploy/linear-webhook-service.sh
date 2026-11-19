@@ -40,7 +40,7 @@
 #   claim only their own sessions (issue #581).
 # Each loop holds an exclusive flock(1) on its own lock file for its whole
 # life (linear-webhook-listener.lock, linear-webhook-tunnel.lock) and exits 0
-# at once when the lock is already held. Locks belong to the open file, not
+# when the lock stays held for 2 seconds. Locks belong to the open file, not
 # to a pid, so they hold across PID namespaces (sandboxed bot shells share
 # the state directory but not pids). ensure, start and status decide from
 # the locks; the pidfiles are for people only. flock(1) is required.
@@ -291,7 +291,7 @@ become_loop() {
     local mode="$1"
     mkdir -p "$STATE"
     exec 8>>"$(lock_file "$mode")"
-    if ! flock -n 8; then
+    if ! flock -w 2 8; then
         say "_${mode}-loop already running (lock held); exiting"
         exit 0
     fi

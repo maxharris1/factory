@@ -1671,8 +1671,9 @@ def _wait_rows(tmp_path: Path) -> dict[str, dict]:
             add_ticket(connection, repo, ticket_id, state=state)
         add_ticket(connection, repo, "10", state="building", stuck=1, stuck_reason="job-failed-2")
         connection.executemany(
-            "UPDATE ticket_state SET paused_question_id = ? WHERE repo = ? AND ticket_id = ?",
-            [(f"60{n}", repo, str(n)) for n in (2, 3, 4, 5)],
+            "UPDATE ticket_state SET paused_question_id = ?, paused_action = ? WHERE repo = ? AND ticket_id = ?",
+            [(f"60{n}", action, repo, str(n))
+             for n, action in ((2, "build"), (3, "fix"), (4, "review"), (5, "build"))],
         )
         connection.execute(
             "UPDATE ticket_state SET stuck_source_comment_id = '6010' "
@@ -1710,16 +1711,16 @@ def test_each_waiting_ticket_says_why_it_waits_and_which_actions_apply(tmp_path:
         for ticket_id, row in rows["tickets"].items()
     }
     assert found == {
-        "1": (("awaiting-ok", "601"), ["ok", "close"]),
-        "2": (("plan-size", "602"), ["approve-plan", "split", "close"]),
-        "3": (("repeat-stop", "603"), ["another-round", "close"]),
-        "4": (("unsat", "604"), ["another-round", "close"]),
-        "5": (("question", "605"), ["answer", "close"]),
-        "6": (("capped", "606"), ["another-round", "close"]),
-        "7": (("blocked", "607"), ["resume", "close"]),
-        "8": (("waiting-external", None), ["close"]),
+        "1": (("awaiting-ok", "601"), ["ok", "close", "hand-off"]),
+        "2": (("plan-size", "602"), ["approve-plan", "split", "close", "hand-off"]),
+        "3": (("repeat-stop", "603"), ["another-round", "close", "hand-off"]),
+        "4": (("unsat", "604"), ["another-round", "close", "hand-off"]),
+        "5": (("question", "605"), ["answer", "close", "hand-off"]),
+        "6": (("capped", "606"), ["another-round", "close", "hand-off"]),
+        "7": (("blocked", "607"), ["resume", "close", "hand-off"]),
+        "8": (("waiting-external", None), ["close", "hand-off"]),
         "9": (None, []),
-        "10": (("stuck", "6010"), ["retry", "close"]),
+        "10": (("stuck", "6010"), ["retry", "close", "hand-off"]),
     }
     assert rows["tickets"]["10"]["wait"]["detail"] == "job-failed-2"
 

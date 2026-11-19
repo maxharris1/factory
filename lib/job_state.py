@@ -70,6 +70,7 @@ JOB_STATES = (CLAIMED, RUNNING, STALE, DEAD)
 DEFAULT_STALE_MINUTES = 2
 DEFAULT_RELEASE_CLAIMED_MINUTES = 5
 DEFAULT_UNREACHABLE_LOST_MINUTES = 10
+DEFAULT_DRIVER_WAKE_MINUTES = 20
 # `orch job run`'s default heartbeat (lib/job_run.py), well inside the
 # default 2-minute stale threshold.
 HEARTBEAT_SECONDS = 15.0
@@ -90,6 +91,7 @@ class JobStateConfig:
     stale_seconds: float = DEFAULT_STALE_MINUTES * 60.0
     release_claimed_seconds: float = DEFAULT_RELEASE_CLAIMED_MINUTES * 60.0
     unreachable_lost_seconds: float = DEFAULT_UNREACHABLE_LOST_MINUTES * 60.0
+    driver_wake_seconds: float = DEFAULT_DRIVER_WAKE_MINUTES * 60.0
 
 
 @dataclass(frozen=True)

@@ -128,6 +128,7 @@ class DispatcherBase:
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
+        self._fresh_reads: dict[tuple[str, str], TrackedTicket] = {}
         self._read_started: float | None = None
         # #109: tickets whose read the source reported failed, by error.
         self._source_errors: dict[tuple[str, str], str] = {}
@@ -301,7 +302,10 @@ class DispatcherBase:
         return None if fresh is None else self._routed(fresh)
 
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
-        if fresh is None or fresh.merged:
+        if fresh is None:
+            return None
+        self._fresh_reads[(fresh.repo.lower(), fresh.ticket_id)] = fresh
+        if fresh.merged:
             return fresh
         if fresh.closed:
             if self._closed_unfinished(fresh):

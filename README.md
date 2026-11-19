@@ -798,11 +798,12 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
 
 Each loop is a singleton per state directory: it holds an exclusive `flock`
 on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its
-whole life and exits 0 at once if the lock is held. Locks belong to the open
-file, not a pid, so they hold across PID namespaces (sandboxed bot shells
-share the state directory but not pids). `ensure`, `start` and `status`
-decide from the locks; the pidfiles are for people only. `flock(1)` is
-required.
+whole life and exits 0 if the lock stays held for 2 seconds, so a loop that
+starts while `lock_held` probes the lock waits the probe out. Locks belong to
+the open file, not a pid, so they hold across PID namespaces (sandboxed bot
+shells share the state directory but not pids). `ensure`, `start` and
+`status` decide from the locks; the pidfiles are for people only. `flock(1)`
+is required.
 
 Commands: `start` (clears a stop), `stop` (holds them stopped), `restart`,
 `status` (exit 3 unless every loop runs), `ensure` (start what is missing

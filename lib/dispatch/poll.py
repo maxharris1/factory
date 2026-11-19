@@ -68,6 +68,7 @@ class PollMixin:
         if begin is not None:
             begin()
         self._polled = {}
+        self._fresh_reads = {}
         self._ci_log_failures = set()
         self._ci_step_failures = set()
         self._base_checks = {}
@@ -149,21 +150,6 @@ class PollMixin:
                     self._record_poll_error(ticket, exc)
         with self._phase("linear-moves"):
             self._apply_linear_moves(only=self._polled)
-        with self._phase("ci-board"):
-            try:
-                ci_board.record(
-                    self._connect,
-                    [
-                        self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
-                        for ticket in tracked
-                    ],
-                    self.queue.now(),
-                    run_jobs=self.ci_runs,
-                    job_log=self.ci_job_log,
-                    log=self.log,
-                )
-            except Exception as exc:
-                self.record_poll_exception("ci-board", "-", exc)
         with self._phase("merge-queue"):
             self._advance_merge_queues()
         with self._phase("verify-handoffs"):
@@ -173,6 +159,27 @@ class PollMixin:
                 self.reconcile_jobs()
             finally:
                 self._read_started = None
+        with self._phase("ci-board"):
+            try:
+                ci_board.record(
+                    self._connect,
+                    list(
+                        (
+                            {
+                                key: self._polled.get(key, ticket)
+                                for ticket in tracked
+                                for key in [(ticket.repo.lower(), ticket.ticket_id)]
+                            }
+                            | self._fresh_reads
+                        ).values()
+                    ),
+                    self.queue.now(),
+                    run_jobs=self.ci_runs,
+                    job_log=self.ci_job_log,
+                    log=self.log,
+                )
+            except Exception as exc:
+                self.record_poll_exception("ci-board", "-", exc)
         with self._phase("factory-reads"):
             reads = self._record_factory_reads(source)
         with self._phase("ci-pool"):
