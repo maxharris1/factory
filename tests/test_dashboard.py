@@ -602,6 +602,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "relay",
         "ci_runs",
         "ci_pool",
+        "ci_attention",
         "qa",  # QA runs, lanes and queued qa jobs (#790)
         "ci_lane",
         "attention",

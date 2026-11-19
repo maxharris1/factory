@@ -70,6 +70,14 @@ CHECK_FAILED = (
 )
 
 
+@dataclass(frozen=True)
+class BaseCheck:
+    name: str
+    conclusion: str | None
+    run_id: str
+    job_id: str
+
+
 CIJobStatus = Literal["queued", "in_progress", "completed"]
 RunnerKind = Literal["self-hosted", "github-hosted", "none"]
 RunnerStatus = Literal["online", "offline"]

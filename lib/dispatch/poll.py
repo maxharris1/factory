@@ -71,6 +71,7 @@ class PollMixin:
         self._fresh_reads = {}
         self._ci_log_failures = set()
         self._ci_step_failures = set()
+        self._base_checks = {}
         self._read_started = None
         self._merged_repos = set()
         self.merged_this_poll = set()

@@ -229,6 +229,8 @@ SCRIPT = r"""
     var lh1 = add(head, el('div', 'lh1'));
     add(lh1, el('span', 'name', 'CI'));
     if (lane.failed_24h) add(lh1, chip(lane.failed_24h + ' failed in 24 h', 'bad'));
+    if (lane.base_red) add(lh1, chip('base red ' + lane.base_red, 'warn'));
+    if (lane.stale) add(lh1, chip('stale ' + lane.stale, 'bad'));
     var n = Math.max(1, lane.slots.length);
     var used = lane.slots.filter(function (s) { return s.state === 'lead' || s.state === 'cont' || s.state === 'busy'; }).length;
     var meter = add(lh1, el('div', 'lane-meter'));
@@ -494,6 +496,8 @@ def ci_lane_html(snapshot: dict) -> str:
     meter = px_strip("meter-ci", effect="meter", tint="#9ece6a", used=used, slots=max(1, len(slots)), seed=30,
                      height=8, still=not slots)
     failed = _chip(f"{lane['failed_24h']} failed in 24 h", "bad") if lane["failed_24h"] else ""
+    held = _chip(f"base red {lane['base_red']}", "warn") if lane["base_red"] else ""
+    stale = _chip(f"stale {lane['stale']}", "bad") if lane["stale"] else ""
     counts = f"{lane['running']} running · {lane['queued']} queued"
     seed = len(slots)
     groups = []
@@ -508,7 +512,7 @@ def ci_lane_html(snapshot: dict) -> str:
         )
     return (
         '<div class="lane" data-device="ci"><div class="lane-head"><div class="lh1"><span class="name">CI</span>'
-        f'{failed}<div class="lane-meter" aria-hidden="true" style="width:{12 * max(1, len(slots))}px">{meter}</div></div>'
+        f'{failed}{held}{stale}<div class="lane-meter" aria-hidden="true" style="width:{12 * max(1, len(slots))}px">{meter}</div></div>'
         f'<div class="lh2">{_span("sub", counts)}'
         f'{_span("harness", _pool_text(lane["pool"]))}</div></div>'
         f'<div class="ci-body"><div class="tiles">{"".join(_slot(s, lane, i + 1) for i, s in enumerate(slots))}</div>'

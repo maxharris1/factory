@@ -28,6 +28,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
+    BaseCheck,
     BaseMismatch,
     Comment,
     DeviceChecks,
@@ -74,6 +75,7 @@ class DispatcherBase:
         approvals: Approvals | None = None,
         ci_logs: Callable[[str, str], Mapping[str, str]] | None = None,
         ci_rerun: Callable[[str, str], None] | None = None,
+        ci_base_checks: Callable[[str, str], Mapping[str, BaseCheck]] | None = None,
         ci_runs: Callable[[str, str], Sequence[RunJob]] | None = None,
         ci_job_log: Callable[[str, str], str] | None = None,
         ci_pool: Callable[[str], Sequence[PoolRunner]] | None = None,
@@ -118,6 +120,8 @@ class DispatcherBase:
         self._ci_step_reads: dict[tuple[str, str, tuple[str, ...]], dict[str, int | None]] = {}
         self._ci_step_failures: set[tuple[str, str, tuple[str, ...]]] = set()
         self.ci_rerun = ci_rerun
+        self.ci_base_checks = ci_base_checks
+        self._base_checks: dict[tuple[str, str], Mapping[str, BaseCheck] | None] = {}
         self.ci_runs = ci_runs
         self.ci_job_log = ci_job_log
         self.ci_pool = ci_pool

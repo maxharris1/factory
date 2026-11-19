@@ -76,6 +76,7 @@ from urllib.parse import quote
 from lib.dispatch.helpers import _base_mismatch
 from lib.dispatch.types import (
     CHECK_FAILED,
+    BaseCheck,
     Cause,
     CheckRow,
     CIJobStatus,
@@ -893,6 +894,54 @@ class GitHubReviewActions:
         return self._call(
             f"{_repo_path(repo)}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"
         )
+
+    def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
+        path = _repo_path(repo)
+        page = _object(
+            self._json(
+                f"{path}/actions/runs?branch={quote(_branch(branch), safe='')}"
+                "&event=push&status=completed&per_page=20"
+            )
+        )
+        runs = page.get("workflow_runs")
+        if not isinstance(runs, list):
+            raise GitHubAdapterError("workflow runs page has no workflow_runs list")
+        latest: dict[object, int] = {}
+        for run in map(_object, runs):
+            run_id = run.get("id")
+            if isinstance(run_id, bool) or not isinstance(run_id, int):
+                raise GitHubAdapterError("workflow run has no numeric id")
+            workflow = run.get("workflow_id")
+            latest[workflow] = max(latest.get(workflow, run_id), run_id)
+        checks: dict[str, BaseCheck] = {}
+        for run_id in sorted(latest.values(), reverse=True):
+            for job in map(_object, self._run_jobs(f"{path}/actions/runs/{run_id}/jobs")):
+                job_id, name, conclusion = job.get("id"), str(job.get("name")), job.get("conclusion")
+                if isinstance(job_id, bool) or not isinstance(job_id, int):
+                    raise GitHubAdapterError("run job has no numeric id")
+                checks.setdefault(
+                    name,
+                    BaseCheck(
+                        name,
+                        conclusion if isinstance(conclusion, str) else None,
+                        str(run_id),
+                        str(job_id),
+                    ),
+                )
+        return checks
+
+    def _run_jobs(self, endpoint: str) -> list[object]:
+        jobs: list[object] = []
+        number = 1
+        while True:
+            page = _object(self._json(f"{endpoint}?filter=latest&per_page=100&page={number}"))
+            listed = page.get("jobs")
+            if not isinstance(listed, list):
+                raise GitHubAdapterError("run jobs page has no jobs list")
+            jobs.extend(listed)
+            if len(listed) < 100:
+                return jobs
+            number += 1
 
     def rerun_failed_jobs(self, repo: str, run_id: str) -> None:
         if not run_id.isdigit():

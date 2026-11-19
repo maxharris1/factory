@@ -77,6 +77,10 @@ offline. age_seconds is the age of the oldest repo's read. state is unread
 with no rows, live while age_seconds is at most CI_POOL_STALE_SECONDS,
 else stale.
 
+CI attention (#955): `ci_attention` is {base_red, stale}: base_red counts
+the open tickets whose red CI is held because the PR base fails the same
+check, stale the open tickets flagged needs-attention `ci-stale`.
+
 CI lane (#823): `ci_lane` is lib/ci_lane.ci_lane(snapshot): the runner
 slots, the GitHub-hosted, queued and failed groups and one card per ticket
 with its progress counts. The script draws it; the server render works it
@@ -175,7 +179,13 @@ from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry, ticket_totals
 from lib.dashboard_usage import read_usage
-from lib.dispatch.constants import CI_INFRA_BLOCKED_REASON, CI_WAIT_REASONS, HANDED_OFF_EXTERNALLY
+from lib.dispatch.constants import (
+    CI_BASE_RED,
+    CI_INFRA_BLOCKED_REASON,
+    CI_STALE_REASON,
+    CI_WAIT_REASONS,
+    HANDED_OFF_EXTERNALLY,
+)
 from lib.ci_lane import ci_lane
 from lib.dispatch.types import CHECK_FAILED
 from lib.dashboard_page import PAGES, render_pages
@@ -253,7 +263,7 @@ HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
 ATTENTION_REASONS = (
     "ship-failed", "dedupe-dropped", "edited-comment", "base-mismatch", "deploy-conflict",
-    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, *FEEDER_ATTENTION_REASONS,
+    SLOW_CYCLE, LOCK_ERRORS, CI_INFRA_BLOCKED_REASON, CI_STALE_REASON, *FEEDER_ATTENTION_REASONS,
 )
 
 HANDOFF_SAVINGS_DEFINITION = (
@@ -922,6 +932,7 @@ def collect_snapshot(
         "relay": db["relay"],
         "ci_runs": db["ci_runs"],
         "ci_pool": db["ci_pool"],
+        "ci_attention": db["ci_attention"],
         "qa": {**db["qa"], "cap": orch.qa.max_cloud_lanes if orch is not None else None},
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
@@ -1005,6 +1016,41 @@ def _ci_waits(connection: sqlite3.Connection, now: float) -> dict[tuple[str, str
             **({"round": int(row["next_round"])} if row["next_round"] is not None else {}),
         }
     return found
+
+
+def _ci_attention(connection: sqlite3.Connection, tables: set[str]) -> dict[str, int]:
+    open_ticket = (
+        """
+        NOT EXISTS (
+            SELECT 1 FROM ticket_state AS state
+            WHERE state.repo = row.repo AND state.ticket_id = row.ticket_id
+              AND COALESCE(state.workflow_state, '') IN ('merged', 'done')
+        )
+        """
+        if "ticket_state" in tables
+        else "1"
+    )
+    held = [
+        f"SELECT repo, ticket_id FROM {table} AS row WHERE {column} = ? AND {open_ticket}"
+        for table, column in (("ci_waits", "reason"), ("ci_stale", "state"))
+        if table in tables
+    ]
+    base_red = (
+        connection.execute(
+            f"SELECT COUNT(*) FROM ({' UNION '.join(held)})", (CI_BASE_RED,) * len(held)
+        ).fetchone()[0]
+        if held
+        else 0
+    )
+    stale = (
+        connection.execute(
+            f"SELECT COUNT(*) FROM needs_attention AS row WHERE reason = ? AND {open_ticket}",
+            (CI_STALE_REASON,),
+        ).fetchone()[0]
+        if "needs_attention" in tables
+        else 0
+    )
+    return {"base_red": int(base_red), "stale": int(stale)}
 
 
 def _no_ci_bases(connection: sqlite3.Connection) -> dict[tuple[str, str], dict]:
@@ -2133,6 +2179,7 @@ def _read_db(
         "linear_webhook": linear_webhook,
         "feeder": feeder,
         "attention_flags": attention_flags,
+        "ci_attention": _ci_attention(connection, tables),
         "held": held,
         "verdicts": verdicts,
         "relay": _relay(connection, tables, sources, handled, ticket_records, waiting_on, len(tickets), now),
