@@ -51,10 +51,11 @@ waiting_on} (who a held PR waits on, or None), or None for a ticket with
 no record. A running or queued job is not in `now`: the page joins it
 from `running` and `queued`.
 
-Exposure (#1014): each `running` row's `exposure` is its job_exposure row
-(lib/exposure.py), or None when none was recorded: {model, cli_version,
-brief_sha256, skill_paths, host, factory_revision}. skill_paths is a list,
-or "unknown". A digest is a list of 16-character parts the page joins,
+Exposure (#1014): each `running` row's `exposure`, and each job in a
+ticket flow visit's `jobs`, is its job_exposure row (lib/exposure.py):
+{model, cli_version, brief_sha256, skill_paths, host, factory_revision},
+every field "unknown" when none was recorded. skill_paths is a list, or
+"unknown". A digest is a list of 16-character parts the page joins,
 since a whole one reads as an opaque token and would be redacted; a value
 that is not a digest is one part.
 
@@ -1669,10 +1670,11 @@ def _digest(value: str) -> list[str]:
     return [value[i : i + 16] for i in range(0, len(value), 16)]
 
 
-def _exposure(connection: sqlite3.Connection, job_id: str) -> dict | None:
-    found = exposure.read(connection, job_id)
+def _exposure(found: exposure.Exposure | None) -> dict:
     if found is None:
-        return None
+        return dict.fromkeys(
+            ("model", "cli_version", "brief_sha256", "skill_paths", "host", "factory_revision"), exposure.UNKNOWN
+        )
     return {
         "model": _clean(found.model),
         "cli_version": _clean(found.cli_version),
@@ -1707,6 +1709,7 @@ def _read_db(
 ) -> dict:
     tables = _tables(connection)
     jobs = "jobs" in tables
+    exposures = exposure.read_all(connection)
     sources = read_sources(connection)
     if "tracked_tickets" in tables:
         for repo, ticket_id in connection.execute(
@@ -1817,7 +1820,7 @@ def _read_db(
                     "device": device,
                     "elapsed_seconds": _age(now, started) or 0,
                     "elapsed_from": elapsed_from,
-                    "exposure": _exposure(connection, str(row["id"])),
+                    "exposure": _exposure(exposures.get(str(row["id"]))),
                 }
                 running.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
@@ -1976,6 +1979,7 @@ def _read_db(
         chart,
         now,
         tables,
+        exposures,
     )
     for key, info in ticket_info.items():
         flows[key] = anchor_close(flows[key], info.closed_at, now)
@@ -2334,6 +2338,7 @@ def _ticket_flows(
     chart: dict | None,
     now: float,
     tables: set[str],
+    exposures: dict[str, exposure.Exposure],
 ) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], int], dict[tuple[str, str], float]]:
     """(flow, accepted retries, tracked_at) per ticket key (repo casefolded,
     ticket id). Each table is read once, whole, and kept for `keys` only: no
@@ -2351,7 +2356,7 @@ def _ticket_flows(
             for name in ("started_at", "finished_at")
         )
         for row in connection.execute(
-            "SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
+            "SELECT jobs.id, jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
             f"jobs.attempt, {times} "
             "FROM jobs "
             + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
@@ -2366,6 +2371,8 @@ def _ticket_flows(
                     _telemetry_time(row["started_at"]),
                     _telemetry_time(row["finished_at"]),
                     int(row["attempt"]),
+                    _clean(str(row["id"])[:8], 8),
+                    _exposure(exposures.get(str(row["id"]))),
                 ))
     recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in keys}
     if "ticket_transitions" in tables:

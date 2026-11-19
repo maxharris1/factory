@@ -190,6 +190,8 @@ class JobStep(NamedTuple):
     started_at: float | None
     finished_at: float | None
     attempt: int = 1
+    job: str = ""
+    exposure: dict | None = None
 
 
 class Visit(NamedTuple):
@@ -512,9 +514,10 @@ def job_flow(
     successors of the current state; `terminal` says the current state is
     finished (is_terminal). `visits` holds one entry per `path` state:
     {state, who, started_at, duration_seconds, time_known, off_chart,
-    reason, current}. A visit ends when the next one starts, else when its
-    last job finished; the current visit counts up to `now`. Unknown times
-    are None."""
+    reason, current, jobs}, where `jobs` is the visit's steps, oldest
+    first, as {job, action, recipient, exposure}. A visit ends when the
+    next one starts, else when its last job finished; the current visit
+    counts up to `now`. Unknown times are None."""
     steps = [(JOB_STATES[step.action], step) for step in history if step.action in JOB_STATES]
     if chart is not None and current is not None and current not in {
         state["name"] for state in chart["states"]
@@ -565,6 +568,10 @@ def job_flow(
             "off_chart": hop is not None and hop not in labels,
             "reason": None if hop is None else labels.get(hop, OFF_CHART),
             "current": i == at,
+            "jobs": [
+                {"job": step.job, "action": step.action, "recipient": step.recipient, "exposure": step.exposure}
+                for step in visit.steps
+            ],
         })
     return {
         "state": current,

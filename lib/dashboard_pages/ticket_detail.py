@@ -132,6 +132,10 @@ CSS = """\
 .runlog .dur{font-size:11px;color:var(--text-2)}
 .runlog .offchip{padding:0 6px;border:1px solid rgba(255,158,100,0.4);background:rgba(255,158,100,0.09);color:#ff9e64;font-size:11px;line-height:1.6;font-weight:500;white-space:nowrap}
 .runlog .note{display:block;font:12px/1.5 var(--sans);color:var(--text-2)}
+.runlog .exp{margin:0 8px 8px 38px;border-collapse:collapse;font:11px/1.5 var(--mono);color:var(--text-2)}
+.runlog .exp caption{text-align:left;color:var(--muted);padding:0 0 2px}
+.runlog .exp th{width:120px;padding:0 8px 0 0;text-align:left;font-weight:400;color:var(--muted);vertical-align:top}
+.runlog .exp td{padding:0;word-break:break-all}
 .jd-foot{margin:12px 0 0;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-box{position:relative;overflow-x:auto;box-shadow:var(--elev)}
 .jd-box canvas{display:block;width:1000px;max-width:none}
@@ -656,7 +660,13 @@ def _runlog_row(visit: dict, model: dict) -> str:
         f'<span class="main"><span class="top">{_span("name", name)}{_span("who", visit["who"])}'
         f'{_span("dur", _visit_dur(visit, model))}'
         + (_span("offchip", "off-chart") if visit["off_chart"] else "")
-        + f'</span>{_span("note", _reason(visit))}</span></button></li>'
+        + f'</span>{_span("note", _reason(visit))}</span></button>'
+        + "".join(
+            f'<table class="exp"><caption>{_e(job["job"])} · {_e(job["action"])}</caption>'
+            f'<tbody>{_exposure_rows(job["exposure"])}</tbody></table>'
+            for job in visit.get("jobs") or []
+        )
+        + "</li>"
     )
 
 
@@ -912,14 +922,16 @@ def _exposed(value: str | list[str], joiner: str) -> str:
     return value if isinstance(value, str) else joiner.join(value) or "none"
 
 
-def _exposure(row: dict) -> str:
-    found = row.get("exposure")
-    head = f'<section class="jd-panel jd-exp" data-sec="exposure"><h2>{_span("t", "Exposure")}{_span("count", EXPOSURE_SUB)}</h2>'
-    if not found:
-        return head + '<p class="empty">not recorded</p></section>'
-    rows = "".join(f'<tr><th scope="row">{label}</th><td>{_e(_exposed(found[key], joiner))}</td></tr>'
+def _exposure_rows(found: dict) -> str:
+    return "".join(f'<tr><th scope="row">{label}</th><td>{_e(_exposed(found[key], joiner))}</td></tr>'
                    for key, label, joiner in EXPOSURE_FIELDS)
-    return head + f'<table class="why-facts"><tbody>{rows}</tbody></table></section>'
+
+
+def _exposure(row: dict) -> str:
+    return (
+        f'<section class="jd-panel jd-exp" data-sec="exposure"><h2>{_span("t", "Exposure")}{_span("count", EXPOSURE_SUB)}</h2>'
+        f'<table class="why-facts"><tbody>{_exposure_rows(row["exposure"])}</tbody></table></section>'
+    )
 
 
 def _journey_label(model: dict) -> str:
@@ -1590,6 +1602,11 @@ _SCRIPT = r"""
         else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : dur(v.duration_seconds);
         if (v.off_chart) span(top, 'offchip', 'off-chart');
         span(main, 'note', reasonOf(v));
+        (v.jobs || []).forEach(function (j) {
+          var table = add(btn.parentNode, el('table', 'exp'));
+          add(table, el('caption', null, j.job + ' · ' + j.action));
+          exposureRows(add(table, el('tbody')), j.exposure);
+        });
       });
     }
     add(sec, el('p', 'jd-foot', 'Pick a step here or on the chart; both follow.'));
@@ -1815,16 +1832,16 @@ _SCRIPT = r"""
   }
   function exposurePanel(r) {
     var sec = jdPanel('jd-exp', 'exposure', 'Exposure', DETAIL.exposureSub);
-    var found = r.exposure;
-    if (!found) { add(sec, el('p', 'empty', 'not recorded')); return sec; }
-    var tbody = add(add(sec, el('table', 'why-facts')), el('tbody'));
+    exposureRows(add(add(sec, el('table', 'why-facts')), el('tbody')), r.exposure);
+    return sec;
+  }
+  function exposureRows(tbody, found) {
     DETAIL.exposure.forEach(function (f) {
       var v = found[f[0]];
       var tr = add(tbody, el('tr'));
       add(tr, el('th', null, f[1])).setAttribute('scope', 'row');
       add(tr, el('td', null, typeof v === 'string' ? v : v.join(f[2]) || 'none'));
     });
-    return sec;
   }
   function legendItem(parent, cls, tint, text, bg) {
     var s = span(parent, null);
