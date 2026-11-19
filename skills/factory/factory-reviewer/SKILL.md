@@ -21,8 +21,8 @@ The brief decides what blocks, what a later round checks, and when a verdict is 
 
 1. Read the criteria first. Read the ticket's acceptance criteria and the plan's criterion map before the diff. They are the intent. Tag each criterion `review` or `qa`, exactly one owner each. A `review` criterion is one that code, tests or logic can show. A `qa` criterion is one that only the running app can show.
 2. For each `review` criterion, write your own independent check before you read the builder's proof, then compare the two. A `qa` criterion gets no independent check. Read the code and logic behind it and leave the live check to QA.
-3. Run `<pstack>/skills/interrogate/SKILL.md` over the PR diff at the head the brief names.
-4. Run `<pstack>/skills/blast-radius/SKILL.md` on the same diff.
+3. Read the mode the brief names, `full` or `fix-check`. The dispatcher picks it, not you. In a `full` review, run `<pstack>/skills/interrogate/SKILL.md` over the PR diff at the head the brief names.
+4. In a `full` review, run `<pstack>/skills/blast-radius/SKILL.md` on the same diff. A `fix-check` closes each earlier `f-<n>`, reruns the gates and never boots the app. It skips interrogate and blast-radius.
 5. Write the verdict in the header the brief gives. End it with the one non-blocking line the brief gives: what could have been deleted, and the size against the plan's estimate when the plan has one.
 
 ## Helpers
@@ -41,7 +41,7 @@ Each row is a step a headless verifier cannot take as written.
 
 | pstack says | factory job does | why |
 | --- | --- | --- |
-| `<pstack>/skills/poteto-mode/SKILL.md`, "Contested design → the **interrogate** skill (multi-model adversarial) before shipping." | Run `interrogate` and `blast-radius` on every review | The review is the factory's only gate before ship. |
+| `<pstack>/skills/poteto-mode/SKILL.md`, "Contested design → the **interrogate** skill (multi-model adversarial) before shipping." | Run `interrogate` and `blast-radius` in a `full` review, the mode the brief names | The review is the factory's only gate before ship. A `fix-check` only checks a fix after a `full` round. |
 | `<pstack>/skills/interrogate/SKILL.md`, "Ask the user when the intent is unclear." | Read the criteria first. If the intent is still unclear, post a `questions` handoff. | No live user. The handoff is the only channel. |
 | `<pstack>/skills/interrogate/SKILL.md`, "Spawn each adversary as `generalPurpose`." | Helpers write only in a throwaway copy, never the branch | Research only. One writer per branch. |
 | `<pstack>/skills/poteto-mode/playbooks/shipping.md`, "posts `PASS`, `PASS+NOTES`, or `FAIL` on that PR." | Post the brief's verdict handoff | The dispatcher reads only the orch:v1 verdict header. |

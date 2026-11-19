@@ -63,6 +63,7 @@ The evidence bundle has no acceptance criteria, so take them from the ticket at 
 
 ## What to do
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
+Mode: `full`. Round 1 reviews the whole PR. A `full` review runs interrogate and blast-radius.
 1. Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, `unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the header. A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.
 2. QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. For each `review` criterion, write your own check (test, script or trace) before reading the builder's proof, then compare. A `qa` criterion gets none.
 3. The code at `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` was already reviewed and approved. This head brings `dev` in by merge commit `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`. Review only how that merge resolved conflicts (`git show --remerge-diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`) and whether the base changes break this PR: read the CI result on this head, and use `git range-diff` where useful. A finding in code unchanged since `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` is not blocking: tag it `[minor]`. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
@@ -93,7 +94,7 @@ Never edit a comment after you post it: the dispatcher refuses an edited `orch:v
 
 ## Review rules (docs/SPEC.md section 8)
 - One reviewer, from a different model family than the builder, gives the final factory verdict.
-- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius, and may run code in a throwaway copy, its containers labelled as the Rules say.
+- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius in a `full` review, not in a `fix-check`, and may run code in a throwaway copy, its containers labelled as the Rules say.
 - There is no second factory reviewer and no factory Judge.
 - Risk low: one review round; leftover minors are batched into a follow-up ticket. Risk high: up to three rounds; every extra round needs Max's own words.
 - Gate retries (CI red, then fix) are not review rounds. Three CI-red cycles in a row mark the ticket stuck.
@@ -227,6 +228,7 @@ The evidence bundle has no acceptance criteria, so take them from the ticket at 
 
 ## What to do
 Review the PR at head 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 against `dev`. You are the one cross-family reviewer. Follow the router in Skills above.
+Mode: `full`. Round 1 reviews the whole PR. A `full` review runs interrogate and blast-radius.
 1. Requirements first. Before the diff, tag each `ac-<n>` in **Acceptance criteria** above with one owner, `review` (code, tests or logic show it) or `qa` (only the running app can), and mark it `met`, `unmet`, `unverified` or `unsatisfiable` with evidence (file:line, test or run). `unsatisfiable` means no change to this PR can meet it, such as one about other PRs' state, and sets `unsat=<id>` in the header. A criterion needing a live provider without credentials here is `unverified`, not `verdict=BLOCKED`: name what is missing and the builder's live-run evidence or a human check. Never read, request or look for credentials. Count `unverified` and `unsatisfiable` as unmet for `ac`.
 2. QA owns live checks, so judge a `qa` criterion from its code, never `unverified` for lack of a live run. For each `review` criterion, write your own check (test, script or trace) before reading the builder's proof, then compare. A `qa` criterion gets none.
 3. The code at `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` was already reviewed and approved. This head brings `dev` in by merge commit `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`. Review only how that merge resolved conflicts (`git show --remerge-diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`) and whether the base changes break this PR: read the CI result on this head, and use `git range-diff` where useful. A finding in code unchanged since `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` is not blocking: tag it `[minor]`. A merge conflict with the base is `mergeable: no` in the verdict, not a finding.
@@ -264,7 +266,7 @@ ORCH-HANDOFF: failed
 
 ## Review rules (docs/SPEC.md section 8)
 - One reviewer, from a different model family than the builder, gives the final factory verdict.
-- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius, and may run code in a throwaway copy, its containers labelled as the Rules say.
+- That reviewer checks code and logic and never boots or drives the app: `review.verify` is `none`, whatever verify skill factory.md or Job data names. It runs interrogate and blast-radius in a `full` review, not in a `fix-check`, and may run code in a throwaway copy, its containers labelled as the Rules say.
 - There is no second factory reviewer and no factory Judge.
 - Risk low: one review round; leftover minors are batched into a follow-up ticket. Risk high: up to three rounds; every extra round needs Max's own words.
 - Gate retries (CI red, then fix) are not review rounds. Three CI-red cycles in a row mark the ticket stuck.

@@ -162,7 +162,7 @@ def task(brief: str) -> str:
     return brief.split("## What to do\n", 1)[1].split("\n## ", 1)[0]
 
 
-def merge_update_task(verify: str) -> str:
+def merge_update_task(verify: str, block_on: str = "user-impact") -> str:
     facts = {
         "base": "dev",
         "head": "d" * 40,
@@ -170,7 +170,7 @@ def merge_update_task(verify: str) -> str:
         "verify_unavailable": False,
         "round_number": 2,
         "followup_from": None,
-        "block_on": "user-impact",
+        "block_on": block_on,
         "update": {"last_reviewed_head": "a" * 40, "merge": "b" * 40, "commits": []},
         "rebase": None,
         "start_before_ci": False,
@@ -357,3 +357,66 @@ def test_the_review_rules_point_the_throwaway_copy_at_the_container_rule() -> No
 
 def test_the_review_task_still_forbids_merging_and_pushing() -> None:
     assert "Do not merge. Do not push to the PR." in review_brief("1/3")
+
+
+MODE_CASES = {
+    "round-one": ("full", lambda: task(review_brief("1/3"))),
+    "later-round": ("full", lambda: task(review_brief("3/3"))),
+    "user-impact-round-one": (
+        "full",
+        lambda: task(brief_from(snapshots.FACTORY_MD.replace("review:\n", USER_IMPACT), "1/3")),
+    ),
+    "user-impact-fix-round": ("fix-check", REVIEW_TASKS["user-impact-fix-round-none"]),
+    "user-impact-merge-update": ("fix-check", REVIEW_TASKS["user-impact-merge-update-none"]),
+    "any-failure-merge-update": ("full", lambda: merge_update_task("none", block_on="any-failure")),
+}
+FULL_GATE = "Run interrogate and blast-radius, and say which checks did not run."
+
+
+@pytest.mark.parametrize("case", list(MODE_CASES))
+def test_the_brief_names_one_mode_and_its_reason(case: str) -> None:
+    mode, make = MODE_CASES[case]
+    text = make()
+    named = re.findall(r"^Mode: `(fix-check|full)`\. (\S.*)$", text, re.MULTILINE)
+    assert [found for found, _ in named] == [mode]
+    assert len(named[0][1]) > len("Mode reason.")
+    assert "verify-fix" not in text
+    assert (FULL_GATE in text) is (mode == "full")
+
+
+@pytest.mark.parametrize("round_text", ["1/3", "2/3", "3/3"])
+def test_no_review_brief_says_verify_fix(round_text: str) -> None:
+    for md in (snapshots.FACTORY_MD, snapshots.FACTORY_MD.replace("review:\n", USER_IMPACT)):
+        assert "verify-fix" not in brief_from(md, round_text)
+
+
+@pytest.mark.parametrize("case", ["user-impact-fix-round", "user-impact-merge-update"])
+def test_a_fix_check_closes_each_finding_reruns_the_gates_and_never_boots_the_app(case: str) -> None:
+    text = MODE_CASES[case][1]()
+    assert "A `fix-check` closes each earlier `f-<n>`, reruns the gates and does not boot the app." in text
+    assert "Do not run interrogate or blast-radius: the dispatcher picked `fix-check`." in text
+    assert "blast-radius only when" not in text
+
+
+def test_a_fix_check_round_closes_findings_by_id_and_reruns_the_gates() -> None:
+    text = MODE_CASES["user-impact-fix-round"][1]()
+    assert (
+        "For each `f-<n>` in **Earlier rounds** above, and each earlier unmet `ac-<n>`, "
+        "say whether this head closes it."
+    ) in text
+    assert "Rerun the gates on this head" in text
+    assert "Do not boot or drive the app." in text
+
+
+def test_the_review_rules_leave_the_mode_to_the_dispatcher() -> None:
+    md = snapshots.FACTORY_MD.replace("review:\n", USER_IMPACT)
+    rules = brief_from(md, "2/3").split("## Review rules", 1)[1].split("\n## ", 1)[0]
+    assert "only for new behavior" not in rules
+    assert "interrogate and blast-radius in a `full` review, not in a `fix-check`" in rules
+
+
+def test_the_reviewer_skill_runs_interrogate_by_mode_not_on_every_review() -> None:
+    text = " ".join(SKILL.read_text().split())
+    assert "on every review" not in text
+    assert "verify-fix" not in text
+    assert "`fix-check`" in text and "`full`" in text
