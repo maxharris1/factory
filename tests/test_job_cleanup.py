@@ -8,7 +8,6 @@ device` runs from this checkout's bin/orch against a fixture work root.
 from __future__ import annotations
 
 import fcntl
-import functools
 import io
 import os
 import shutil
@@ -92,33 +91,39 @@ def _only_this_tests_processes(monkeypatch) -> None:
     monkeypatch.setattr(job_cleanup, "_mine", mine)
 
 
-@functools.cache
-def own_pid_namespace() -> tuple[str, ...]:
-    argv = ("unshare", "--map-current-user", "--pid", "--fork", "--mount-proc")
-    try:
-        works = subprocess.run([*argv, "true"], capture_output=True, timeout=30).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        works = False
-    return argv if works else ()
-
-
 def device_path() -> str:
     return (f"{Path(sys.executable).parent}:{Path(shutil.which('flock')).parent}"
             ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+
+
+DEVICE_ORCH = """import os, sys
+from pathlib import Path
+sys.path.insert(0, os.getcwd())
+from lib import job_cleanup
+from lib.cli import main
+job_cleanup.PROC = Path(os.environ["FAKE_PROC"])
+sys.exit(main())
+"""
 
 
 class ShellTransport:
     def __init__(self, home: Path):
         self.home = home
         self.offline: set[str] = set()
+        device = home / "shell-device"
+        self.proc = fake_proc(device, {"1": ("0", device)})
+        self.orch = device / "orch.py"
+        self.orch.write_text(DEVICE_ORCH)
 
     def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
         alias, script = argv[-2], argv[-1]
         if alias in self.offline:
             return Called(SSH_UNREACHABLE, "", "")
+        assert script.count("./bin/orch") == 1, script
         done = subprocess.run(
-            [*own_pid_namespace(), "sh", "-c", script], input=input or b"",
-            capture_output=True, timeout=timeout, env={"HOME": str(self.home), "PATH": device_path()},
+            ["sh", "-c", script.replace("./bin/orch", str(self.orch))], input=input or b"",
+            capture_output=True, timeout=timeout,
+            env={"HOME": str(self.home), "PATH": device_path(), "FAKE_PROC": str(self.proc)},
         )
         return Called(done.returncode, done.stdout.decode(), done.stderr.decode())
 
