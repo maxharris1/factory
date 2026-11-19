@@ -231,6 +231,31 @@ def test_a_pass_already_running_makes_once_exit_quietly(home: Path) -> None:
     assert _calls(home) == []
 
 
+def test_once_skips_the_pass_while_an_orch_move_export_drains(home: Path) -> None:
+    drain = home / STATE / "waiter-claude-bot.drain"
+    drain.parent.mkdir(parents=True)
+    drain.write_text("orch-move\n", encoding="utf-8")
+
+    result = _run(home, "once")
+
+    assert result.returncode == 0, result.stderr
+    assert not (home / "orch-order").exists()
+    assert drain.read_text(encoding="utf-8") == "orch-move\n"
+    assert f"skipping the pass: orch-move export is draining ({drain})" in _service_log(home)
+
+
+def test_once_heals_while_a_drain_file_names_a_commit(home: Path) -> None:
+    drain = home / STATE / "waiter-claude-bot.drain"
+    drain.parent.mkdir(parents=True)
+    drain.write_text("0123abc\n", encoding="utf-8")
+
+    result = _run(home, "once")
+
+    assert result.returncode == 0, result.stderr
+    assert len(_calls(home)) == 1
+    assert "skipping the pass" not in _service_log(home)
+
+
 def _pid(home: Path) -> int:
     return int((home / STATE / "self-heal.pid").read_text())
 

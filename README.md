@@ -1290,10 +1290,13 @@ deploy/orch-move.sh import box:<export>
 ```
 
 `export` writes `waiter-<bot>.drain` for the three bots, so no waiter claims a
-new job. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it writes back any
-drain file self-heal removed or replaced, copies `orch.db` with `orch
-backup-db` and asks `orch move-db drained` whether a job still runs or a
-device slot is still held. Once none is, it writes
+new job. A self-heal pass (the loop, the timer or `kick`)
+does nothing while any `waiter-<bot>.drain` reads `orch-move`. Before the
+drain starts, `export` runs `self-heal.sh wait-idle` once, so a pass already
+under way finishes first. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it
+writes the drain files again, copies `orch.db` with `orch backup-db` and asks
+`orch move-db drained` whether a job still runs or a device slot is still
+held. Once none is, it writes
 `~/.config/factory/orch-retired`. Only then does it stop the poller, the
 waiters, self-heal and the Linear listener through their service scripts.
 While `orch-retired` exists, the poller, waiter, self-heal and Linear service
@@ -1377,8 +1380,13 @@ Rollback is the same tool reversed. On the PC, run
 from `machines.<source>.yml` in the cutover export.
 
 An export that does not drain within `ORCH_MOVE_DRAIN_TIMEOUT` seconds
-(default 9000, 150 minutes) exits 75. It removes the drain files and their
-acks and stops nothing, so the host keeps running. A failure after
+(default 9000, 150 minutes) exits 75. Self-heal is never stopped before
+`orch-retired` is written. So on exit 75 (drain timeout), exit 1 (a failed
+probe or idle wait) or Ctrl-C, `export` removes the drain files and their
+acks and stops nothing. The host keeps running, and
+self-heal resumes on its next pass by itself. An export killed with SIGKILL
+leaves the drain files, and self-heal stays paused until someone removes
+`~/.local/state/factory/waiter-*.drain`. A failure after
 `orch-retired` is written leaves the host retired and stopped, which is the
 safe state. To undo it, remove `~/.config/factory/orch-retired` and start the
 services with `start`. `ORCH_MOVE_HOST` names this host (default
@@ -1624,7 +1632,9 @@ seconds (default 900) until none does, and exits 1 if one still does. On a
 host retired as the orch host (`~/.config/factory/orch-retired`, see *Move
 the orch host*), `once`, `kick`, `start`, `restart` and `ensure` exit 79 and
 run nothing. `factory-self-heal.service` counts that exit 79 as success
-(`SuccessExitStatus=79`), so the timer's unit is not marked failed there.
+(`SuccessExitStatus=79`), so the timer's unit is not marked failed there. A
+pass skips, exiting 0, while an orch-move export drains (see *Move the orch
+host*).
 
 ### Self-deploy
 

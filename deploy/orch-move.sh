@@ -8,8 +8,10 @@
 # export runs on the host giving orch.db up. It refuses (exit 79) on a host
 # already retired as the orch host (~/.config/factory/orch-retired). It
 # writes waiter-<bot>.drain ("orch-move") for claude-bot, codex-bot and
-# cursor-bot, so no waiter claims a job, and every ORCH_MOVE_POLL_SEC seconds
-# (default 30) writes back any drain file self-heal removed or replaced,
+# cursor-bot, so no waiter claims a job; every self-heal pass skips while
+# they read orch-move. It first runs `self-heal.sh wait-idle` once, so a
+# pass already under way finishes, then every ORCH_MOVE_POLL_SEC seconds
+# (default 30) writes the drain files again,
 # copies orch.db to <export>/probe.db with `orch backup-db` and asks
 # `orch move-db drained` whether a job still runs or a device slot is held.
 # Once none is, it writes orch-retired ("<host> <UTC time>"), and only then
@@ -34,11 +36,13 @@
 # the state directory, and must not exist yet.
 #
 # If the drain takes longer than ORCH_MOVE_DRAIN_TIMEOUT seconds (default
-# 9000), or a probe fails, export removes the drain files, their acks and
-# the probe, stops nothing, and exits 75 (1 for a failed probe): the host
-# keeps running. A failure after orch-retired is written leaves the host
-# retired and stopped and exits 1; to undo, remove orch-retired and start
-# the services. The host name is ORCH_MOVE_HOST, else hostname(1).
+# 9000), a probe or that first idle wait fails, or export is interrupted, it
+# removes the drain files, their acks and the probe, stops nothing, and exits
+# 75 (1 for a failed probe or idle wait, 130 on interrupt): the host keeps
+# running, and self-heal resumes on its next pass by itself. A failure after
+# orch-retired is written leaves the host retired and stopped and exits 1;
+# to undo, remove orch-retired and start the services. The host name is
+# ORCH_MOVE_HOST, else hostname(1).
 #
 # Both read orch.db's path from `run-poller.sh --print-db`, which answers on a
 # retired host too: the ORCH_DB the poller gets from its env files, else
@@ -174,7 +178,7 @@ assert_final_copy_drained() {
 }
 
 export_db() {
-    local to="" db line bot
+    local to="" db line bot status=0
     EXPORT=""
     while (($#)); do
         case "$1" in
@@ -195,6 +199,12 @@ export_db() {
 
     trap release_drains EXIT
     trap 'exit 130' INT TERM
+    assert_drains
+    "${HERE}/self-heal.sh" wait-idle || status=$?
+    if ((status != 0)); then
+        echo "orch-move: self-heal.sh wait-idle exited ${status}; removed the drain files, stopped nothing" >&2
+        exit 1
+    fi
     wait_for_drain "$db"
 
     line="${to} $(date -u +%Y-%m-%dT%H:%M:%SZ)"

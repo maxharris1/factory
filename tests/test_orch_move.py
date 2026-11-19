@@ -9,15 +9,19 @@ import subprocess
 import sys
 import fcntl
 import signal
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from lib import cli, health
+from lib.device_pool import DevicePool
+from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.state_backup import backup
-from tests.pool_helpers import pool_claim
+from tests.child_reaper import TAG
+from tests.pool_helpers import LOCAL_BOX_MACHINES, pool_claim
 from tests.procs import alive
 from tests.test_deploy import _orch_poll_tokens
 from tests.test_dispatcher import setup
@@ -169,7 +173,10 @@ def _drains_are(host: Host, text: str) -> bool:
     )
 
 
+PRE = "self-heal.sh wait-idle retired=no"
+
 STOPS = [
+    PRE,
     "poller-service.sh stop retired=yes",
     *(f"waiter-service.sh {bot} stop retired=yes" for bot in BOTS),
     "self-heal.sh stop retired=yes",
@@ -192,7 +199,7 @@ def test_export_waits_for_the_drain_then_retires_before_it_stops_anything(
         time.sleep(0.3)
         assert move.poll() is None, "export went on while a job was running"
         assert _drains_are(box, "orch-move\n")
-        assert box.calls() == []
+        assert box.calls() == [PRE]
         _finish_jobs(box.db)
         stdout, stderr = move.communicate(timeout=30)
     finally:
@@ -240,7 +247,7 @@ def test_export_that_never_drains_gives_up_and_leaves_the_host_running(
     assert move.returncode == 75, stderr
     assert sorted(path.name for path in box.state.glob("waiter-*")) == []
     assert not box.retired.exists()
-    assert box.calls() == []
+    assert box.calls() == [PRE]
     assert not (export / "probe.db").exists()
 
 
@@ -369,7 +376,7 @@ def test_export_stops_a_service_poller_whose_pidfile_is_beside_a_custom_orch_db(
     assert not (db.parent / "poller.pid").exists()
     assert (export / "manifest.json").exists()
     assert box.retired.exists()
-    assert box.calls() == STOPS[1:]
+    assert box.calls() == [PRE, *STOPS[2:]]
 
 
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
@@ -561,6 +568,8 @@ def test_readme_documents_the_move() -> None:
                  "ORCH_MOVE_DRAIN_TIMEOUT", "ORCH_DB_BACKUP_EVERY", "orch-retired"):
         assert text in section, text
     assert "same tool" in section
+    assert "does nothing while any `waiter-<bot>.drain` reads `orch-move`" in section
+    assert "self-heal resumes on its next pass" in section
 
 
 FAKE_SCP = """#!/bin/sh
@@ -944,7 +953,7 @@ elif sys.argv[1:3] == ["heal", "devices"]:
 """
 
 
-def test_export_waits_for_a_self_heal_pass_and_its_device_deploy_before_its_copy(
+def test_export_waits_for_a_self_heal_pass_and_its_device_deploy_before_its_drain(
     tmp_path: Path,
 ) -> None:
     box = Host(tmp_path, "box")
@@ -970,12 +979,12 @@ def test_export_waits_for_a_self_heal_pass_and_its_device_deploy_before_its_copy
 
         move = box.start_move("export", "--to", "pc", "--dir", str(export),
                               ORCH_BIN=str(heal_orch))
-        _until(lambda: box.retired.exists() and len(box.calls()) == 4,
-               "export never stopped the poller and the waiters")
+        _until(lambda: _drains_are(box, "orch-move\n"), "export never drained the waiters")
         time.sleep(0.5)
         assert move.poll() is None, "export went on while heal devices was still writing"
-        assert box.calls() == STOPS[:4]
-        assert not (export / "manifest.json").exists()
+        assert not (export / "probe.db").exists()
+        assert not box.retired.exists()
+        assert box.calls() == []
 
         (box.home / "devices-go").touch()
         _, stderr = move.communicate(timeout=30)
@@ -997,6 +1006,109 @@ def test_export_waits_for_a_self_heal_pass_and_its_device_deploy_before_its_copy
     assert refused.returncode == 79, refused.stderr
     assert "retired as the orch host" in refused.stderr
     assert heal_log.read_text(encoding="utf-8") == invoked
+
+
+def test_export_that_cannot_wait_out_a_self_heal_pass_drains_nothing(tmp_path: Path) -> None:
+    box = Host(tmp_path, "box")
+    _seed(tmp_path, box.db)
+    _executable(box.checkout / "deploy/self-heal.sh", FAKE_SERVICE + "exit 1\n")
+    export = tmp_path / "export"
+
+    result = box.move("export", "--to", "pc", "--dir", str(export))
+
+    assert result.returncode == 1, result.stderr
+    assert not box.retired.exists()
+    assert list(box.state.glob("waiter-*")) == []
+    assert box.calls() == [PRE]
+    assert not export.exists()
+
+
+FAKE_CLEANUP_ORCH = f"""#!{sys.executable}
+import os, sys
+from pathlib import Path
+
+if sys.argv[1:3] == ["health", "--json"]:
+    print('{{"known": true, "components": []}}')
+elif sys.argv[1:3] == ["heal", "--health-json"]:
+    sys.stdin.read()
+    for drain in Path(sys.argv[5]).glob("waiter-*.drain*"):
+        drain.unlink(missing_ok=True)
+"""
+
+
+def test_export_drains_while_the_self_heal_loop_runs(tmp_path: Path) -> None:
+    box = Host(tmp_path, "box")
+    for name in ("self-heal.sh", "host-pidns.sh"):
+        shutil.copy(ROOT / "deploy" / name, box.checkout / "deploy" / name)
+    cleanup_orch = tmp_path / "cleanup-orch"
+    _executable(cleanup_orch, FAKE_CLEANUP_ORCH)
+    _, seed = setup(tmp_path / "seed")
+    for recipient in ("claude", "codex"):
+        seed.enqueue(
+            JobRequest(repo="owner/repo", ticket_id="42", action="build", recipient=recipient,
+                       source_comment_id=f"go-{recipient}", timeout_seconds=3600),
+            dedupe_key=f"t1:{recipient}",
+        )
+    pool_claim(seed, "claude")
+    backup(seed.path, box.db)
+    export = tmp_path / "export"
+    service_log = box.state / "self-heal-service.log"
+    heal_env = box.env(ORCH_BIN=str(cleanup_orch), ORCH_HEAL_SECONDS="0.2",
+                       **{TAG: os.environ.get(TAG, "")})
+
+    def self_heal(command: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(box.checkout / "deploy/self-heal.sh"), command],
+                              env=heal_env, text=True, capture_output=True, timeout=60,
+                              check=False)
+
+    def skips() -> int:
+        text = service_log.read_text(encoding="utf-8") if service_log.exists() else ""
+        return text.count("skipping the pass: orch-move export is draining")
+
+    gaps: list[str] = []
+    claimed: list[int] = []
+    stop = threading.Event()
+
+    def waiter() -> None:
+        config, _ = load_machines_yml(LOCAL_BOX_MACHINES)
+        queue = SQLiteJobQueue(box.db, clock=time.time)
+        seen = False
+        while not stop.is_set():
+            if _drains_are(box, "orch-move\n"):
+                seen = True
+            elif seen:
+                gaps.append(time.strftime("%H:%M:%S"))
+                if not claimed and DevicePool(queue, config).claim("codex") is not None:
+                    claimed.append(1)
+            time.sleep(0.02)
+
+    started = self_heal("start")
+    assert started.returncode == 0, started.stderr
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    move = None
+    try:
+        move = box.start_move("export", "--to", "pc", "--dir", str(export),
+                              ORCH_BIN=str(cleanup_orch))
+        _until(lambda: skips() >= 3 or gaps, "self-heal never ran a pass during the drain")
+        assert gaps == [], "a self-heal pass removed the drain files"
+        assert move.poll() is None, "export went on while a job was running"
+        _finish_jobs(box.db)
+        _, stderr = move.communicate(timeout=30)
+        loop_after_export = self_heal("status").returncode
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        if move is not None and move.poll() is None:
+            move.kill()
+            move.communicate()
+        self_heal("stop")
+
+    assert move.returncode == 0, stderr
+    assert box.retired.exists()
+    assert gaps == [] and claimed == []
+    assert sorted(_job_states(export / "orch.db")) == ["done", "queued"]
+    assert loop_after_export == 3
 
 
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
