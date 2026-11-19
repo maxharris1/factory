@@ -21,10 +21,8 @@ from lib.device_pool import (
 )
 from lib.dispatch.constants import (
     HANDED_OFF_EXTERNALLY,
-    MAX_HANDOFF_FROM,
     SETTLE_CLEARS,
     STUCK_WAKE_FAILURE_LIMIT,
-    TERMINAL_STATES,
     _ABANDONED_JOB_DETAIL,
 )
 from lib.dispatch.helpers import (
@@ -47,7 +45,6 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.linear_states import NOT_STARTED
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     BaseMismatch,
@@ -87,6 +84,7 @@ from lib.job_state import (
     usage_limit_end,
 )
 from lib.machines_yml import orch_host
+from lib.max_actions import may_hand_off
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
     PRE_READY_FAILED,
@@ -124,19 +122,6 @@ def _harnesses_a_lagging_source_checkout_refuses_everywhere(
         if row.device == box
         and row.state == device_sync.LAGGING
         and Path(row.checkout).resolve() == source
-    )
-
-
-def _may_hand_off(state: str | None, stuck: bool, paused_action: str | None) -> bool:
-    if state == "waiting-max" and paused_action is None:
-        return False
-    if state in MAX_HANDOFF_FROM:
-        return True
-    return (
-        stuck
-        and state not in NOT_STARTED
-        and state not in TERMINAL_STATES
-        and state not in ("handed-off", HANDED_OFF_EXTERNALLY)
     )
 
 
@@ -190,16 +175,18 @@ class JobsMixin:
             ).fetchone()
         if row is None:
             return "rejected-handoff-state"
-        state, stuck = row["workflow_state"], bool(row["stuck"])
+        state, stuck, paused = row["workflow_state"], bool(row["stuck"]), row["paused_action"]
         if state == "handed-off":
             # A replay after the label write below failed.
             self._write_state_label(ticket, "handed-off")
             return "handed-off"
-        if not _may_hand_off(state, stuck, row["paused_action"]) or not self._settle(
-            repo,
-            ticket_id,
-            "handed-off",
-            lambda connection: write_workflow_state(
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            running = connection.execute(
+                "SELECT 1 FROM jobs WHERE lower(repo) = ? AND ticket_id = ? AND state = 'running'",
+                (repo, ticket_id),
+            ).fetchone()
+            return may_hand_off(state, stuck, paused, running is not None) and write_workflow_state(
                 connection,
                 repo,
                 ticket_id,
@@ -207,10 +194,11 @@ class JobsMixin:
                 source="answers-handoff",
                 at=self.queue.now(),
                 also=SETTLE_CLEARS,
-                guard="workflow_state = ? AND stuck = ?",
-                guard_args=(state, int(stuck)),
-            ),
-        ):
+                guard="workflow_state = ? AND stuck = ? AND paused_action IS ?",
+                guard_args=(state, int(stuck), paused),
+            )
+
+        if not self._settle(repo, ticket_id, "handed-off", settle):
             return "rejected-handoff-state"
         self._write_state_label(ticket, "handed-off")
         return "handed-off"

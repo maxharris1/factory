@@ -74,6 +74,7 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
 # that skips review never takes it. waiting-max -> ship reruns QA at a head
 # that already reached ship, so it too needs that approval.
 EARNED_IN = {("fixing", "ship"): "review", ("waiting-max", "ship"): "review"}
+NOT_FACTORY_STEPS = frozenset({"Max hands it off (answers state=handed-off)"})
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
 GLOSS = {
@@ -158,7 +159,8 @@ def load_chart(path: Path | None = None) -> dict | None:
 def _adjacency(chart: dict) -> dict[str, list[str]]:
     adjacency: dict[str, list[str]] = {state["name"]: [] for state in chart["states"]}
     for edge in chart["edges"]:
-        adjacency[edge["from"]].append(edge["to"])
+        if edge["label"] not in NOT_FACTORY_STEPS:
+            adjacency[edge["from"]].append(edge["to"])
     return adjacency
 
 

@@ -26,7 +26,7 @@ from tests.test_dashboard_system import CHROME, QuietHandler, _Chrome
 
 REPO = "maxharris1/factory"
 LABEL = {"ok": "Merge OK", "approve-plan": "Approve plan as-is", "split": "Split", "another-round": "Another round",
-         "answer": "Answer", "retry": "Requeue", "resume": "Resume", "close": "Close"}
+         "answer": "Answer", "retry": "Requeue", "resume": "Resume", "close": "Close", "hand-off": "Hand off"}
 # why, kind, state, ticket, source, pr, comment id, detail, actions as the snapshot lists them
 WAITS = (
     ("awaiting-ok", "paused", "awaiting-ok", "31", "#30", "31", "1001", None, ["ok", "close", "hand-off"]),

@@ -11,7 +11,7 @@ import pytest
 
 from lib.dispatcher import Dispatcher
 from lib.handoff import parse_comment
-from lib.max_actions import ACTIONS, applicable, wait_of
+from lib.max_actions import ACTIONS, applicable, may_hand_off, wait_of
 from lib.orch_yml import Approvals
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import (
@@ -44,23 +44,34 @@ HEAD = "a" * 40
 AT = datetime(2026, 11, 18, 20, 4, tzinfo=timezone.utc)
 
 
-@pytest.mark.parametrize("state,stuck,facts,actions", [
-    ("awaiting-ok", False, {"approve_comment_id": "5"}, ["ok", "close", "hand-off"]),
-    ("waiting-max", False, {"parked_outcome": "waiting-max-size", "question_id": "7"},
+PAUSED_BUILD = {"paused_action": "build"}
+
+
+@pytest.mark.parametrize("state,stuck,facts,paused,actions", [
+    ("awaiting-ok", False, {"approve_comment_id": "5"}, {}, ["ok", "close", "hand-off"]),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-size", "question_id": "7"}, PAUSED_BUILD,
      ["approve-plan", "split", "close", "hand-off"]),
-    ("waiting-max", False, {"parked_outcome": "waiting-max-repeat"}, ["another-round", "close", "hand-off"]),
-    ("waiting-max", False, {"parked_outcome": "waiting-max-unsat"}, ["another-round", "close", "hand-off"]),
-    ("waiting-max", False, {"question_id": "7"}, ["answer", "close", "hand-off"]),
-    ("capped", False, {}, ["another-round", "close", "hand-off"]),
-    ("blocked", False, {}, ["resume", "close", "hand-off"]),
-    ("fixing", True, {"stuck_reason": "job-failed-2"}, ["retry", "close", "hand-off"]),
-    ("building", True, {"stuck_reason": "ci-red-3"}, ["retry", "close", "hand-off"]),
-    ("waiting-max", True, {"stuck_reason": "job-failed-2"}, ["retry", "close", "hand-off"]),
-    ("waiting-external", False, {}, ["close", "hand-off"]),
-    ("building", False, {}, []),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-repeat"}, {"paused_action": "fix"},
+     ["another-round", "close", "hand-off"]),
+    ("waiting-max", False, {"parked_outcome": "waiting-max-unsat"}, {"paused_action": "review"},
+     ["another-round", "close", "hand-off"]),
+    ("waiting-max", False, {"question_id": "7"}, PAUSED_BUILD, ["answer", "close", "hand-off"]),
+    ("waiting-max", False, {"question_id": "7"}, {"paused_action": "clarify"}, ["answer", "close"]),
+    ("waiting-max", False, {"question_id": "7"}, {}, ["answer", "close"]),
+    ("capped", False, {}, {}, ["another-round", "close", "hand-off"]),
+    ("blocked", False, {}, {}, ["resume", "close", "hand-off"]),
+    ("fixing", True, {"stuck_reason": "job-failed-2"}, {}, ["retry", "close", "hand-off"]),
+    ("building", True, {"stuck_reason": "ci-red-3"}, {}, ["retry", "close", "hand-off"]),
+    ("waiting-max", True, {"stuck_reason": "job-failed-2"}, PAUSED_BUILD, ["retry", "close", "hand-off"]),
+    ("questions", True, {"stuck_reason": "job-failed-2"}, {}, ["retry", "close"]),
+    ("waiting-external", False, {}, {}, ["close", "hand-off"]),
+    ("awaiting-ok", False, {"approve_comment_id": "5"}, {"running": True}, ["ok", "close"]),
+    ("fixing", True, {"stuck_reason": "job-failed-2"}, {"running": True}, ["retry", "close"]),
+    ("building", False, {}, {}, []),
 ])
-def test_each_waiting_state_offers_exactly_its_actions(state, stuck, facts, actions) -> None:
-    assert applicable(wait_of(state, stuck, **facts)) == actions
+def test_each_waiting_state_offers_exactly_its_actions(state, stuck, facts, paused, actions) -> None:
+    hand_off = may_hand_off(state, stuck, paused.get("paused_action"), paused.get("running", False))
+    assert applicable(wait_of(state, stuck, **facts), hand_off=hand_off) == actions
 
 
 def test_the_server_knows_exactly_the_action_names() -> None:

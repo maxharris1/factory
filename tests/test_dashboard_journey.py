@@ -745,3 +745,10 @@ def test_snapshot_without_the_transitions_table(tmp_path: Path) -> None:
         ("review", NOW - 1000, 1000),
     ]
     assert job["flow"]["all_durations_known"] is False
+
+
+def test_max_hand_off_is_a_way_out_of_stuck_but_no_factory_step() -> None:
+    chart = _chart()
+    assert "handed-off" in flow.successors(chart, "stuck")
+    assert flow.hops_to_shipped(chart, "stuck") is None
+    assert flow.chart_path(chart, ["stuck", "review"]) == ["stuck", "review"]

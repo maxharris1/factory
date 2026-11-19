@@ -8,6 +8,7 @@ from typing import Literal
 from lib.dispatch.constants import HANDED_OFF_EXTERNALLY, SETTLE_CLEARS, TERMINAL_STATES
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import LinearState, LinearStateRead, PollSource, TicketRef
+from lib.max_actions import past_go
 
 LinearMove = Literal["hand-off", "resume", "done", "canceled"]
 _LINEAR_MOVES: dict[LinearMove, str] = {
@@ -17,7 +18,6 @@ _LINEAR_MOVES: dict[LinearMove, str] = {
     "canceled": "_linear_canceled",
 }
 
-NOT_STARTED = (None, "intake", "refused", "questions")
 HANDOFF_SOURCES = frozenset(
     {
         "planning",
@@ -41,9 +41,7 @@ def linear_move(
     linear: LinearState,
     processed: bool,
 ) -> LinearMove | None:
-    if workflow_state in NOT_STARTED or workflow_state in TERMINAL_STATES:
-        return None
-    if workflow_state == "waiting-max" and paused_action is None:
+    if not past_go(workflow_state, paused_action) or workflow_state in TERMINAL_STATES:
         return None
     if linear.type == "canceled":
         return "canceled"

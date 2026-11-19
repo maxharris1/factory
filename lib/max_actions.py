@@ -17,6 +17,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal
 
+from lib.dispatch.constants import HANDED_OFF_EXTERNALLY, NOT_STARTED, TERMINAL_STATES
+
 Why = Literal[
     "awaiting-ok",
     "plan-size",
@@ -82,10 +84,33 @@ class Wait:
         return {"why": self.why, "comment_id": self.comment_id, "detail": self.detail}
 
 
-def applicable(wait: Wait | None) -> list[ActionName]:
+HAND_OFF_FROM = ("waiting-max", "awaiting-ok", "capped", "blocked", "waiting-external")
+FIRST_QUESTIONS_PAUSE = (None, "clarify")
+
+
+def past_go(state: str | None, paused_action: str | None) -> bool:
+    if state in NOT_STARTED:
+        return False
+    return not (state == "waiting-max" and paused_action in FIRST_QUESTIONS_PAUSE)
+
+
+def may_hand_off(
+    state: str | None, stuck: bool, paused_action: str | None, job_in_flight: bool
+) -> bool:
+    if job_in_flight or not past_go(state, paused_action):
+        return False
+    if state in HAND_OFF_FROM:
+        return True
+    return stuck and state not in TERMINAL_STATES and state not in ("handed-off", HANDED_OFF_EXTERNALLY)
+
+
+def applicable(wait: Wait | None, *, hand_off: bool) -> list[ActionName]:
     if wait is None:
         return []
-    return [name for name, spec in ACTIONS.items() if wait.why in spec.applies]
+    return [
+        name for name, spec in ACTIONS.items()
+        if wait.why in spec.applies and (hand_off or name != "hand-off")
+    ]
 
 
 def wait_of(
@@ -147,6 +172,12 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
         if "review_events" in tables
         else "NULL"
     )
+    running = (
+        """(SELECT 1 FROM jobs WHERE lower(jobs.repo) = state.repo
+             AND jobs.ticket_id = state.ticket_id AND jobs.state = 'running' LIMIT 1)"""
+        if "jobs" in tables
+        else "NULL"
+    )
     facts: dict[tuple[str, str], dict[str, str | None]] = {}
     for row in connection.execute(
         f"""
@@ -155,7 +186,8 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
                {column("stuck_source_comment_id")} AS stuck_comment_id,
                {"parked.outcome" if parked else "NULL"} AS parked,
                {"hold.approve_comment_id" if holds else "NULL"} AS approve_comment_id,
-               {stop} AS stop_comment_id
+               {stop} AS stop_comment_id,
+               {running} AS running
         FROM ticket_state AS state
         {f'''LEFT JOIN ({parked}) AS parked
           ON parked.repo = state.repo AND parked.ticket_id = state.ticket_id
@@ -171,7 +203,7 @@ def wait_facts(connection: sqlite3.Connection) -> dict[tuple[str, str], dict[str
             key: None if value is None else str(value)
             for key, value in zip(
                 ("question_id", "stuck_comment_id", "parked", "approve_comment_id",
-                 "stop_comment_id"),
+                 "stop_comment_id", "running"),
                 tuple(row)[2:],
             )
         }

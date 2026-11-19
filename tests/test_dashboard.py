@@ -1670,8 +1670,9 @@ def _wait_rows(tmp_path: Path) -> dict[str, dict]:
             add_ticket(connection, repo, ticket_id, state=state)
         add_ticket(connection, repo, "10", state="building", stuck=1, stuck_reason="job-failed-2")
         connection.executemany(
-            "UPDATE ticket_state SET paused_question_id = ? WHERE repo = ? AND ticket_id = ?",
-            [(f"60{n}", repo, str(n)) for n in (2, 3, 4, 5)],
+            "UPDATE ticket_state SET paused_question_id = ?, paused_action = ? WHERE repo = ? AND ticket_id = ?",
+            [(f"60{n}", action, repo, str(n))
+             for n, action in ((2, "build"), (3, "fix"), (4, "review"), (5, "build"))],
         )
         connection.execute(
             "UPDATE ticket_state SET stuck_source_comment_id = '6010' "

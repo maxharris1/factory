@@ -169,6 +169,8 @@ def capped_and_stuck_review(tmp_path: Path):
         ("review", True, None, IN_REVIEW, True, "hand-off"),
         ("waiting-max", False, "build", RFR, True, "hand-off"),
         ("waiting-max", False, None, RFR, True, None),
+        ("waiting-max", False, "clarify", RFR, True, None),
+        ("waiting-max", False, "clarify", CANCELED, True, None),
         ("capped", False, None, LinearState("QA Review", "started", True), True, "hand-off"),
         ("capped", False, None, LinearState("Ready for Review", "started", False), True, None),
         ("building", False, None, RFR, False, None),
