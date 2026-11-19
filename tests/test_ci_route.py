@@ -192,8 +192,8 @@ def github_env(api_url: str) -> dict[str, str]:
 def run_router(tmp_path: Path, env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], str]:
     output = tmp_path / "github_output"
     output.touch()
-    result = subprocess.run([sys.executable, "-I", "lib/ci_route.py"], cwd=REPO_ROOT, capture_output=True,
-                            text=True, timeout=30, env={**env, "GITHUB_OUTPUT": str(output)})
+    result = subprocess.run([sys.executable, "-I", str(REPO_ROOT / "lib" / "ci_route.py")], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=30, env={**env, "GITHUB_OUTPUT": str(output)})
     return result, output.read_text()
 
 
@@ -220,6 +220,22 @@ def test_main_routes_from_the_runs_it_reads(tmp_path: Path, api: SimpleNamespace
     assert result.returncode == 0
     assert "::warning::" not in result.stdout
     assert output == f"hosted={json.dumps(list(expected), separators=(',', ':'))}\n"
+    assert api.methods and set(api.methods) == {"GET"}
+
+
+def test_main_writes_only_its_own_output(tmp_path: Path, api: SimpleNamespace) -> None:
+    serve_runs(api, [api_job("test (1/3)", "queued")])
+    env_file, summary = tmp_path / "github_env", tmp_path / "step_summary"
+    for path in (env_file, summary, tmp_path / "github_output"):
+        path.touch()
+    before = set(tmp_path.rglob("*"))
+    result, output = run_router(tmp_path, {**github_env(api.url), "GITHUB_ENV": str(env_file),
+                                           "GITHUB_STEP_SUMMARY": str(summary)})
+    assert result.returncode == 0
+    assert set(tmp_path.rglob("*")) == before
+    assert env_file.read_text() == ""
+    assert summary.read_text() == ""
+    assert len(output.splitlines()) == 1 and output.startswith("hosted=")
     assert api.methods and set(api.methods) == {"GET"}
 
 
