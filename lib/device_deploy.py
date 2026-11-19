@@ -277,12 +277,13 @@ def run_pass(
         connection.execute("BEGIN IMMEDIATE")
         device_sync.ensure(connection)
         device_sync.forget_except(connection, seen, (orch_host(config),))
+        known = {(row.device, row.bot): row for row in device_sync.read(connection)}
         when = now()
         for target in found:
             observed = seen[target.key]
             action = device_sync.step(observed, sha)
             if action == device_sync.OBSERVE_UNREACHABLE:
-                result = Result(target, device_sync.UNREACHABLE, "ssh failed", None)
+                result = _last_known(target, known.get(target.key))
             elif action == device_sync.KEEP_SYNCED:
                 result = Result(target, device_sync.SYNCED, "", observed.sha)
             elif dry_run:
@@ -320,6 +321,13 @@ def run_pass(
             _write(connection, results[target.key], sha, when)
         connection.commit()
     return [results[t.key] for t in found]
+
+
+def _last_known(target: Target, known: device_sync.Row | None) -> Result:
+    if known is not None and known.state in device_sync.BLOCKS_HARNESS:
+        return Result(target, known.state, known.detail, known.sha)
+    sha = None if known is None else known.sha
+    return Result(target, device_sync.UNREACHABLE, "ssh failed", sha)
 
 
 def _write(connection: sqlite3.Connection, result: Result, sha: str, now: float) -> None:

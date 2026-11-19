@@ -1444,6 +1444,7 @@ def _feeder(
         ),
         linear=linear,
         factory_for=source.factory_context,
+        head=lambda: health.checkout_sha(ROOT),
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
     )
 
@@ -1474,7 +1475,10 @@ def _device_pool(
 ) -> DevicePool:
     try:
         return retry_locked(
-            lambda: DevicePool(queue, machines, machines_path=_machines_path(path))
+            lambda: DevicePool(
+                queue, machines, machines_path=_machines_path(path),
+                head=lambda: health.checkout_sha(ROOT),
+            )
         )
     except (QueueError, sqlite3.Error, OSError) as exc:
         raise WaitError(f"cannot open the device pool: {' '.join(str(exc).split())}") from exc

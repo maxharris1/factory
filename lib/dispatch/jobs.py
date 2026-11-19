@@ -235,13 +235,17 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
-        blocked = placement_blocks(self.queue, config)
+        blocked = placement_blocks(self.queue, config, self._head())
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
             and free_slots(config, harness, used, blocked) == 0
         )
+
+    def _head(self) -> str | None:
+        pool = getattr(self.devices, "pool", None)
+        return None if pool is None else pool.head()
 
     def _serving(self) -> dict[str, frozenset[str]]:
         pool = getattr(self.devices, "pool", None)
@@ -261,7 +265,7 @@ class JobsMixin:
             return frozenset()
         with self.queue.connect() as connection:
             rows = device_sync.read(connection)
-        blocked = device_sync.blocked_by(rows)
+        blocked = device_sync.checkout_blocks(rows, self._head(), orch_host(config))
         refused_everywhere = _harnesses_a_lagging_source_checkout_refuses_everywhere(
             rows, orch_host(config)
         )
