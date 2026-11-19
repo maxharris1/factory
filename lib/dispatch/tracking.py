@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import replace
 from collections.abc import Callable, Collection, Mapping
+from dataclasses import replace
 
 from lib.dispatch.constants import (
     _NOT_FINISHED,
@@ -429,9 +429,7 @@ class TrackingMixin:
                     state in ("handed-off", *WATCHED_STATES)
                     and bool(row["replay"])
                 ),
-                pr_number=(
-                    str(row["ticket_id"]) if row["tracker"] == "github" else row["pr_number"]
-                ),
+                pr_number=row["pr_number"] if row["tracker"] == "linear" else None,
             )
             catching_up = (
                 bool(row["replay"]) or bool(row["unsettled"]) or bool(row["outbox"])

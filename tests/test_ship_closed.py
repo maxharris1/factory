@@ -407,11 +407,11 @@ def slow_source(now, seconds: float, budget: float = 10.0) -> LivePollSource:
 
 
 def active(number: str) -> TicketRef:
-    return TicketRef("acme/widgets", number, "github", pr_number=number)
+    return TicketRef("acme/widgets", number, "github")
 
 
 def closed(number: str) -> TicketRef:
-    return TicketRef("acme/widgets", number, "github", pr_number=number, closed=True)
+    return TicketRef("acme/widgets", number, "github", closed=True)
 
 
 def read_ids(source: LivePollSource, refs: tuple[TicketRef, ...]) -> list[str]:
