@@ -257,11 +257,26 @@ def model(argv: Sequence[str], harness: str | None, shell: Shell, launch_dir: st
     return found if isinstance(found, str) and found else UNKNOWN
 
 
+_RESOLVE_AS_IN_AN_EMPTY_LAUNCH_DIR = """\
+case $1 in
+  /*) ;;
+  */*) exit 1 ;;
+  *)
+    set -f; p=; IFS=:
+    for e in $PATH; do case $e in /*) p=$p${p:+:}$e ;; esac; done
+    [ -n "$p" ] || exit 1
+    PATH=$p ;;
+esac
+"""
+_CLI_VERSION = f"""\
+if [ -n "$2" ] && ! cd -- "$2" 2>/dev/null; then
+{_RESOLVE_AS_IN_AN_EMPTY_LAUNCH_DIR}fi
+exec "$1" --version
+"""
+
+
 def cli_version(binary: str, shell: Shell, launch_dir: str | None = None) -> str:
-    out = shell(
-        'case $1 in /*) ;; */*) [ -z "$2" ] || cd -- "$2" || exit 1 ;; esac; exec "$1" --version',
-        (binary, launch_dir or ""),
-    )
+    out = shell(_CLI_VERSION, (binary, launch_dir or ""))
     lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
     first = lines[0][:VERSION_LIMIT].rstrip() if lines else ""
     return first if _VERSION.fullmatch(first) else UNKNOWN

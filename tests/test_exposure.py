@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import exposure, telemetry
+from lib import exposure, job_run, telemetry
 from lib.brief import render_brief
 from lib.brief.skills import Router, pinned_paths, resolve, section
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -288,6 +289,43 @@ def test_a_relative_binary_is_versioned_in_the_launch_directory(
     assert exposure.cli_version(str(waiter / "harness"), shell, str(tmp_path / "gone")) == "harness-cli 1.0.0"
 
 
+@pytest.mark.parametrize("entry", [".", "", "bin"])
+def test_a_bare_binary_on_a_relative_path_entry_is_the_one_the_job_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    waiter, job = tmp_path / "waiter", tmp_path / "job"
+    for directory, version in ((waiter, "1.0.0"), (job, "2.0.0")):
+        (directory / entry).mkdir(parents=True, exist_ok=True)
+        _script(directory / entry, "harness", f"echo harness-cli {version}")
+    env = {**os.environ, "PATH": f"{entry}:/usr/bin:/bin"}
+    monkeypatch.chdir(waiter)
+    recorded: list[str] = []
+    launched: list[str] = []
+
+    def setup() -> Path:
+        recorded.append(exposure.cli_version("harness", exposure.local_shell(env), str(job)))
+        return job
+
+    code = job_run.run(["harness"], beat=lambda: None, interval=30, log=lambda _: None, env=env, setup=setup,
+                       output=lambda stream: launched.append(stream.read().decode().strip()))
+
+    assert (code, launched) == (0, ["harness-cli 2.0.0"])
+    assert recorded == launched
+
+
+def test_a_bare_binary_for_a_launch_directory_not_made_yet_skips_relative_path_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waiter, _job = _two_harnesses(tmp_path)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    _script(tools, "harness", "echo harness-cli 3.0.0")
+    monkeypatch.chdir(waiter)
+    gone = str(tmp_path / "gone")
+    assert exposure.cli_version("harness", exposure.local_shell({"PATH": f".::bin:{tools}"}), gone) == "harness-cli 3.0.0"
+    assert exposure.cli_version("harness", exposure.local_shell({"PATH": ".:bin"}), gone) == exposure.UNKNOWN
+
+
 def test_gather_reads_the_version_and_the_project_config_in_the_launch_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -322,6 +360,22 @@ def test_the_remote_shell_reads_a_relative_binary_in_the_job_directory_it_may_no
     Path(target.job_dir).parent.mkdir(parents=True)
     job.rename(target.job_dir)
     assert exposure.cli_version("./harness", shell, target.job_dir) == "harness-cli 2.0.0"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_the_remote_shell_reads_a_bare_binary_on_the_login_path_in_the_job_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waiter, job = _two_harnesses(tmp_path)
+    monkeypatch.chdir(waiter)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bash_profile").write_text("PATH=.:/usr/bin:/bin\n", encoding="utf-8")
+    target = RemoteTarget("pc", "pc-codex-bot", "codex-bot", str(tmp_path / "work"), "job1")
+    Path(target.job_dir).parent.mkdir(parents=True)
+    job.rename(target.job_dir)
+    shell = exposure.remote_shell(_Transport(env={"HOME": str(home), "PATH": "/usr/bin:/bin"}), target)
+    assert exposure.cli_version("harness", shell, target.job_dir) == "harness-cli 2.0.0"
 
 
 def test_the_local_shell_drops_the_proof_and_worker_tag(tmp_path: Path) -> None:
@@ -392,8 +446,9 @@ def test_gather_fills_every_field_and_says_unknown_where_it_cannot() -> None:
 
 
 class _Transport:
-    def __init__(self, reply: Exchanged | None = None):
+    def __init__(self, reply: Exchanged | None = None, env: dict[str, str] | None = None):
         self.reply = reply
+        self.env = env
         self.argvs: list[list[str]] = []
 
     def exchange(self, argv: Sequence[str], *, timeout: float, input: bytes = b"") -> Exchanged:
@@ -401,7 +456,7 @@ class _Transport:
         assert timeout == exposure.TIMEOUT_SECONDS
         if self.reply is not None:
             return self.reply
-        done = subprocess.run(["/bin/sh", "-c", argv[-1]], capture_output=True, timeout=30)
+        done = subprocess.run(["/bin/sh", "-c", argv[-1]], capture_output=True, timeout=30, env=self.env)
         return Exchanged(done.returncode, done.stdout, done.stderr.decode())
 
     def run(self, *args: object, **kwargs: object) -> object:
