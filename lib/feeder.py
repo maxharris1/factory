@@ -108,7 +108,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import NamedTuple, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -239,7 +239,7 @@ _OPS_ACTION = re.compile(
 
 @dataclass(frozen=True)
 class Defect:
-    code: str  # no-criteria, other-prs-criterion, no-risk, no-plan-first, no-depends-on, bad-type
+    code: Literal["no-criteria", "other-prs-criterion", "no-risk", "no-plan-first", "no-depends-on", "bad-type"]
     reason: str
 
 
@@ -253,7 +253,7 @@ class IntakeTemplate:
     risk_source: str | None = None  # "Risk line" or "risk:high label"
     plan_first: bool | None = None
     depends_on: str | None = None
-    ticket_type: str | None = None  # a PLAYBOOKS key; None when the template has no Type line
+    ticket_type: str | None = None
     defects: tuple[Defect, ...] = ()
 
 

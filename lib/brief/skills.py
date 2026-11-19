@@ -99,7 +99,6 @@ def builder_files(action: str, ticket_type: str | None) -> tuple[Pinned, ...]:
 
 
 def ticket_type_of(brief_text: str) -> str | None:
-    """The `- Type:` line in the feeder brief's header, above its first heading."""
     for line in brief_text.splitlines():
         if line.startswith("#"):
             break

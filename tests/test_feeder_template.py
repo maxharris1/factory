@@ -525,8 +525,6 @@ def test_ops_criteria_get_their_own_brief_section(tmp_path: Path) -> None:
     assert "Max restarts the poller." in ops
 
 
-# --- the ticket type picks the builder's playbook (#1022) ----------------------
-
 
 @pytest.mark.parametrize("value", ["feature", "bug-fix", "refactoring", "perf-issue"])
 def test_a_known_type_line_parses(value: str) -> None:
