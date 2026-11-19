@@ -1,5 +1,3 @@
-"""The F-04 decision record (#1017): one row per question an answer settled."""
-
 from __future__ import annotations
 
 import json
