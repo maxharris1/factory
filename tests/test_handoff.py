@@ -20,6 +20,7 @@ from lib.handoff import (
     labels_for,
     parse_comment,
     parse_header_line,
+    plan_estimate,
 )
 from lib.schema import AUT0_REPO
 
@@ -51,7 +52,6 @@ def test_kinds_and_example_keys_match_spec_section_5() -> None:
         "reviewer",
         "repeat",
         "unsat",
-        "lines",
         "result",
         "cause",
         "scope",
@@ -257,12 +257,7 @@ def test_labels_for_does_not_call_process_or_network(monkeypatch: pytest.MonkeyP
         ("<!-- orch:v1 -->", "missing required key 'kind'"),
         ("<!-- orch:v1 kind=ready head=3f9c2ab repeat=f-1 -->", "repeat is only valid on kind=verdict"),
         ("<!-- orch:v1 kind=ready head=3f9c2ab unsat=ac-1 -->", "unsat is only valid on kind=plan or kind=verdict"),
-        ("<!-- orch:v1 kind=ready head=3f9c2ab lines=12 -->", "lines is only valid on kind=plan"),
-        ("<!-- orch:v1 kind=verdict verdict=REVISE lines=12 -->", "lines is only valid on kind=plan"),
-        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=-1 -->", "bad lines '-1'"),
-        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=12a -->", "bad lines '12a'"),
-        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=012 -->", "bad lines '012'"),
-        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=1000000000 -->", "bad lines '1000000000'"),
+        ("<!-- orch:v1 kind=plan round=1/2 ac=met lines=12 -->", "unknown key 'lines'"),
         ("<!-- orch:v1 kind=plan round=1000000000/2 ac=met -->", "bad round '1000000000/2'"),
         ("<!-- orch:v1 kind=plan round=1/1000000000 ac=met -->", "bad round '1/1000000000'"),
         ("<!-- orch:v1 kind=verdict verdict=REVISE repeat=same -->", "bad repeat 'same'"),
@@ -275,18 +270,44 @@ def test_parser_rejects_bad_headers(line: str, message: str) -> None:
         parse_header_line(line)
 
 
-def test_plan_carries_lines_and_unsat() -> None:
+def test_plan_carries_unsat_and_an_estimate_line() -> None:
     text = (
         "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=unmet "
-        "unsat=ac-2 lines=760 -->\nThe plan.\n"
+        "unsat=ac-2 -->\nEstimate: 760\nThe plan.\n"
     )
     parsed = parse_comment(text)
-    assert parsed.as_dict()["lines"] == "760"
     assert parsed.as_dict()["unsat"] == "ac-2"
-    assert format_comment(parsed) == (
-        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=unmet "
-        "unsat=ac-2 lines=760 -->\nThe plan.\n"
-    )
+    assert plan_estimate(parsed.body) == 760
+    assert format_comment(parsed) == text
+
+
+@pytest.mark.parametrize(
+    ("body", "estimate"),
+    [
+        ("## Plan\nEstimate: 270\nEstimate: 900\n", 270),
+        ("  Estimate: 270.  Padded, about 365.\n", 270),
+        ("Estimate:0\n", 0),
+        ("Estimate: 999999999\n", 999_999_999),
+        ("Estimate: about 270\nEstimate: 300\n", 300),
+        ("Estimate: 012\n", None),
+        ("Estimate: about 270\n", None),
+        ("Estimate: 1234567890\n", None),
+        ("Estimate: -5\n", None),
+        ("Estimate: 270 lines\n", 270),
+        ("Estimate: 1,000\n", None),
+        ("Estimate: 1.000\n", None),
+        ("Estimate: 1 000\n", None),
+        ("Estimate: 1_000\n", None),
+        ("Estimate: 1k\n", None),
+        ("Estimate: 1.5\n", None),
+        ("Estimate: 1,000\nEstimate: 300\n", None),
+        ("We estimate: 270\n", None),
+        ("The plan.\n", None),
+        ("", None),
+    ],
+)
+def test_plan_estimate_reads_the_first_estimate_line(body: str, estimate: int | None) -> None:
+    assert plan_estimate(body) == estimate
 
 
 def test_decline_without_a_head_parses() -> None:

@@ -181,13 +181,13 @@ def test_review_brief_has_no_builder_notes() -> None:
 
 def test_plan_brief_asks_for_a_plan_comment_with_its_round() -> None:
     first = render_brief(job("plan"), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
-    assert "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=1/2 lines=<n> unsat=<id> -->" in first
+    assert "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=<met|unmet> round=1/2 unsat=<id> -->" in first
     second = render_brief(
         job("plan", instruction="round=2/2; previous plan https://x/1"),
         bot="claude-bot", factory_root=FACTORY_ROOT,
         context=None,
     )
-    assert "round=2/2 lines=<n> unsat=<id> -->" in second
+    assert "round=2/2 unsat=<id> -->" in second
 
 
 def test_merge_only_brief_merges_the_base_branch_without_rewriting_history() -> None:
@@ -211,7 +211,6 @@ def test_every_header_in_a_brief_parses_once_its_choices_are_filled(
             .replace("<pushed-head-sha>", "abcdef1")
             .replace("repeat=<id>", "repeat=f-1")
             .replace("unsat=<id>", "unsat=ac-1")
-            .replace("lines=<n>", "lines=40")
         )
         fields = parse_header_line(filled)
         assert fields["from"] == f"{recipient}-bot"

@@ -26,13 +26,14 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "proof: the test, command or observation that will show it is met. The plan lives in the "
         "plan handoff comment, never in a file in the repo.",
         *(live_lines("plan") if facts["qa"] else []),
-        "3. Estimate the changed lines the build will add and remove, tests and docs included, and "
-        "put the number in the header as `lines=<n>`. A plan without `lines=` counts as a plan "
-        "with a criterion left unmapped.",
-        f"4. When the estimate is over {facts['plan_max_lines']} lines, or the ticket has more than "
-        f"{facts['plan_max_criteria']} acceptance criteria, add a `## Proposed split` section that "
-        "names the smaller tickets, each with its criteria and its expected lines. Such a plan "
-        "does not start the build: it waits for Max, who answers or splits the ticket.",
+        "3. Estimate the changed lines the build will add and remove, tests and docs included. "
+        "Put the number on its own line in the plan body as `Estimate: <n>`, before any "
+        "`## Proposed split`. `orch job done` refuses a plan without it.",
+        "4. The size check multiplies the estimate by 1.35 and rounds up, because estimates run "
+        f"low. When that padded number is over {facts['plan_max_lines']} lines, or the ticket has "
+        f"more than {facts['plan_max_criteria']} acceptance criteria, add a `## Proposed split` "
+        "section that names the smaller tickets, each with its criteria and its expected lines. "
+        "Such a plan does not start the build: it waits for Max, who answers or splits the ticket.",
         f"5. Post the plan handoff below with `round={facts['plan_round']}/2`: "
         "`ac=met` when every criterion is mapped, `ac=unmet` when one is not. With `ac=unmet`, "
         "name the unmapped criterion as `unsat=<ac-n>`; leave `unsat=` out otherwise.",
@@ -60,11 +61,11 @@ def _first_plan_lines(facts: dict) -> list[str]:
 def handoff(bot: str, facts: dict) -> tuple[str, str]:
     header = (
         f"<!-- orch:v1 kind=plan from={bot} role=builder ac=<met|unmet> "
-        f"round={facts['plan_round']}/2 lines=<n> unsat=<id> -->"
+        f"round={facts['plan_round']}/2 unsat=<id> -->"
     )
     example = (
-        "The plan itself: the criterion-to-work map with each criterion's proof, the expected "
-        "size, and any proposed split, in at most "
+        "The plan itself: the `Estimate: <n>` line, the criterion-to-work map with each "
+        "criterion's proof, and any proposed split, in at most "
         f"{PLAN_HANDOFF_LIMIT:,} characters (GitHub caps a comment at 65,536)."
     )
     return header, example

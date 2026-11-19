@@ -34,9 +34,10 @@ itself while ticket_state.cap_extra is below it; after that the ticket
 waits for a person as before.
 
 plan.max_lines and plan.max_criteria are optional (issue #502): positive
-integers, default 400 and 5. A plan that expects more changed lines, or a
-ticket with more builder criteria, waits for Max instead of queuing the
-build.
+integers, default 400 and 5. A plan's Estimate is multiplied by 1.35 and
+rounded up before the comparison (issue #1021). A plan
+whose padded estimate is over max_lines, or a ticket with more builder
+criteria, waits for Max instead of queuing the build.
 
 review.start_before_ci is optional (issue #262): a boolean, default false.
 True queues the review as soon as a trusted ready lands while CI is still
@@ -109,9 +110,11 @@ at CONTEXT_LIMIT characters.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import yaml
@@ -172,6 +175,7 @@ _TOP_KEYS = {
 _CI_KEYS = {"branches", "local_checks"}
 _PLAN_KEYS = {"max_lines", "max_criteria"}
 DEFAULT_PLAN_MAX_LINES = 400
+PLAN_ESTIMATE_FACTOR = Fraction(27, 20)
 DEFAULT_PLAN_MAX_CRITERIA = 5
 _HOLD_KEYS = {"label", "approver", "paths"}
 TRUST_KEYS = ("hold", "ship", "finish_line", "builder", "reviewer", "ci", "qa")
@@ -331,6 +335,10 @@ def _typed(value: object) -> object:
     if isinstance(value, list):
         return [_typed(item) for item in value]
     return (type(value), value)
+
+
+def padded_estimate(estimate: int) -> int:
+    return math.ceil(estimate * PLAN_ESTIMATE_FACTOR)
 
 
 def default_finish_line(ship: str) -> str:

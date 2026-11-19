@@ -148,7 +148,7 @@ def test_a_met_plan_queues_a_build_that_carries_the_plan_text(tmp_path) -> None:
     with queue.connect() as connection:
         job_id, raw = connection.execute("SELECT id, detail FROM jobs WHERE action = 'build'").fetchone()
         detail = json.loads(job_detail.load_row(connection, job_id, raw))
-    assert detail["plan_text"] == "Plan."
+    assert detail["plan_text"] == "Estimate: 40\nPlan."
     assert detail["instruction"] == PLAN_URL
 
 
@@ -174,7 +174,7 @@ def test_a_build_resumed_after_answers_keeps_the_plan_text_and_link(tmp_path) ->
     resumed = queue.claim("claude")
     assert resumed is not None and resumed.request.action == "build"
     detail = json.loads(resumed.request.detail or "{}")
-    assert (detail["resume"], detail["instruction"], detail["plan_text"]) == (True, answers_url, "Plan.")
+    assert (detail["resume"], detail["instruction"], detail["plan_text"]) == (True, answers_url, "Estimate: 40\nPlan.")
     text = render_brief(resumed, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert f"The plan handoff is quoted in the Plan section below ({PLAN_URL}): it is the plan." in text
     assert "Plan." in text.split("## Plan\n", 1)[1]

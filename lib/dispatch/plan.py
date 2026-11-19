@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
-from lib.handoff import HandoffError, parse_comment
+from lib.factory_md import padded_estimate
+from lib.handoff import HandoffError, parse_comment, plan_estimate
 from lib.queue import JobRequest
 
 
@@ -52,9 +53,9 @@ class PlanMixin:
             )
             return True, settled
         plan_text = parse_comment(comment.body).body.strip()
-        lines = fields.get("lines")
-        mapped = ac == "met" and lines is not None
-        over_size = self._plan_over_size(ticket, int(lines)) if mapped else None
+        estimate = plan_estimate(plan_text)
+        mapped = ac == "met" and estimate is not None
+        over_size = self._plan_over_size(ticket, estimate) if mapped else None
         self._write_state_label(ticket, "plan-check")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -166,7 +167,7 @@ class PlanMixin:
                             ),
                             plan_round=2,
                             plan_text=plan_text,
-                            unmapped=_unmapped(fields),
+                            unmapped=_unmapped(fields, plan_text),
                         ),
                     ),
                     dedupe_key=(
@@ -234,7 +235,7 @@ class PlanMixin:
         self._write_state_label(ticket, next_state)
         return True, outcome
 
-    def _plan_over_size(self, ticket: TrackedTicket, lines: int) -> str | None:
+    def _plan_over_size(self, ticket: TrackedTicket, estimate: int) -> str | None:
         """Why the plan is over the line, or None when it is not."""
         from lib.evidence.criteria import criteria_evidence
 
@@ -252,10 +253,11 @@ class PlanMixin:
         )
         max_lines = ticket.factory.plan_max_lines
         max_criteria = ticket.factory.plan_max_criteria
-        if lines <= max_lines and criteria <= max_criteria:
+        padded = padded_estimate(estimate)
+        if padded <= max_lines and criteria <= max_criteria:
             return None
         return (
-            f"lines={lines} (line {max_lines}), "
+            f"estimate={estimate} x1.35={padded} (line {max_lines}), "
             f"criteria={criteria} (line {max_criteria})"
         )
 
@@ -377,13 +379,13 @@ def gap_of(comment: Comment) -> tuple[str, str] | None:
     fields = handoff.as_dict()
     if fields["kind"] != "plan":
         return None
-    return handoff.body.strip(), _unmapped(fields)
+    return handoff.body.strip(), _unmapped(fields, handoff.body)
 
 
-def _unmapped(fields: Mapping[str, str]) -> str:
+def _unmapped(fields: Mapping[str, str], body: str) -> str:
     if "unsat" in fields:
         return fields["unsat"]
-    return "expected size" if "lines" not in fields else "not named"
+    return "expected size" if plan_estimate(body) is None else "not named"
 
 
 def _proposed_split(plan_text: str) -> str:

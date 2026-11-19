@@ -16,7 +16,7 @@ from tests.test_approver_credential import MAX, load, orch_text
 from tests.test_dispatcher import ANSWERS, GO, QUESTIONS, FailOnceGrokDelivery, comment, handled_outcome
 from tests.test_driver_inbox import InboxIssue
 from tests.test_poll_once_errors import BrokenSource
-from tests.test_plan_size import SizeFlow
+from tests.test_plan_size import SizeFlow, estimated
 from tests.test_resume_plan import ResumeFlow
 from tests.test_rounds_and_caps import HEADS
 
@@ -362,7 +362,7 @@ def capped(tmp_path: Path) -> ResumeFlow:
 
 def parked_over_size(tmp_path: Path) -> ResumeFlow:
     flow = SizeFlow(tmp_path)
-    assert flow.plan("500", "ac=met lines=401") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(401)) == "waiting-max-size"
     return flow
 
 

@@ -16,7 +16,7 @@ OLD_NOBODY = "Nobody will message you about this job"
 PRINT_MODE = "Print mode stops background tasks"
 NOT_RUN = "say which checks did not run"
 USER_IMPACT = "review:\n  block_on: user-impact\n"
-SAMPLES = {"head": "3f9c2ab", "repeat": "f-1", "unsat": "ac-1", "lines": "40", "round": "1"}
+SAMPLES = {"head": "3f9c2ab", "repeat": "f-1", "unsat": "ac-1", "round": "1"}
 
 
 def snapshot_texts() -> list[str]:

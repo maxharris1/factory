@@ -301,7 +301,7 @@ def test_old_builder_retry_does_not_replace_new_plan_route(tmp_path: Path) -> No
     now[0] = 130
     plan_comment = comment(
         "new-plan",
-        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=met lines=40 -->\nGood",
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=met -->\nEstimate: 40\nGood",
         author="claude-login",
         created_at=130,
     )
@@ -344,7 +344,7 @@ def test_obsolete_retry_created_last_cannot_build_or_review(tmp_path: Path) -> N
     board.post(
         pr,
         "new-plan",
-        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=met lines=40 -->\nGood",
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=met -->\nEstimate: 40\nGood",
         "claude-login",
     )
     board.poll()
@@ -436,7 +436,8 @@ def test_closed_routed_pr_with_drift_still_ends_watch(tmp_path: Path) -> None:
 
 def _plan(builder: str) -> str:
     return (
-        f"<!-- orch:v1 kind=plan from={builder}-bot role=builder round=1/2 ac=met lines=40 -->\n"
+        f"<!-- orch:v1 kind=plan from={builder}-bot role=builder round=1/2 ac=met -->\n"
+        "Estimate: 40\n"
         "Good.\n"
     )
 

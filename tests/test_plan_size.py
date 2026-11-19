@@ -9,6 +9,7 @@ import pytest
 from lib.brief import render_brief
 from lib.dispatch.plan import _proposed_split
 from lib.evidence import TEXT_LIMIT
+from lib.factory_md import padded_estimate
 from lib.queue import Job
 from tests.test_approver_credential import APP_BOT, MAX, grok_wakes
 from tests.test_brief import FACTORY_ROOT
@@ -17,6 +18,10 @@ from tests.test_resume_plan import PR, ResumeFlow
 
 SPLIT = "## Proposed split\n1. `brief half` (ac-1, ac-2): about 200 lines.\n2. `dispatch half` (ac-3): about 300 lines.\n"
 PLAN_BODY = f"## Plan\n- ac-1: the brief. Proof: a snapshot.\n\n{SPLIT}\n## Out of scope\nNothing.\n"
+
+
+def estimated(estimate: int, body: str = PLAN_BODY) -> str:
+    return f"Estimate: {estimate}\n\n{body}"
 
 
 def plan_header(fields: str, plan_round: int = 1) -> str:
@@ -37,7 +42,7 @@ class SizeFlow(ResumeFlow):
         self.comments.append(comment("brief-1", brief(criteria, pad), author="grok-login", created_at=self.now[0]))
         assert self.say("1", GO.format(state="planning"), "grok-login") == "queued-plan"
 
-    def plan(self, comment_id: str, fields: str, body: str = PLAN_BODY, plan_round: int = 1) -> str:
+    def plan(self, comment_id: str, fields: str, body: str, plan_round: int = 1) -> str:
         self.finish_with(comment_id)
         return self.say(comment_id, plan_header(fields, plan_round) + body, "claude-login")
 
@@ -51,18 +56,23 @@ def size_wakes(flow: SizeFlow) -> list[dict]:
     return [json.loads(row["detail"]) for row in grok_wakes(flow, "clarify") if row["source_comment_id"] == "500"]
 
 
+def test_the_estimate_is_padded_by_1_35_and_rounded_up() -> None:
+    assert (padded_estimate(296), padded_estimate(297), padded_estimate(300)) == (400, 401, 405)
+    assert (padded_estimate(0), padded_estimate(1)) == (0, 2)
+
+
 @pytest.mark.parametrize(
-    ("lines", "outcome"),
-    [("400", "queued-plan-build"), ("401", "waiting-max-size")],
+    ("estimate", "outcome"),
+    [(296, "queued-plan-build"), (297, "waiting-max-size")],
 )
-def test_the_line_sits_between_400_and_401_expected_lines(tmp_path: Path, lines: str, outcome: str) -> None:
+def test_the_line_sits_between_estimates_296_and_297(tmp_path: Path, estimate: int, outcome: str) -> None:
     flow = SizeFlow(tmp_path)
 
-    assert flow.plan("500", f"ac=met lines={lines}") == outcome
+    assert flow.plan("500", "ac=met", estimated(estimate)) == outcome
 
     if outcome == "queued-plan-build":
         assert flow.state()["workflow_state"] == "building"
-        assert json.loads(flow.claim("build").request.detail)["plan_text"] == PLAN_BODY.strip()
+        assert json.loads(flow.claim("build").request.detail)["plan_text"] == estimated(estimate).strip()
         assert size_wakes(flow) == []
         return
     state = flow.state()
@@ -71,7 +81,7 @@ def test_the_line_sits_between_400_and_401_expected_lines(tmp_path: Path, lines:
     assert job_count(flow.queue, "build") == 0
     [wake] = size_wakes(flow)
     assert wake["detail"] == (
-        f"plan-over-size: lines=401 (line 400), criteria=2 (line 5), {PR}500\n{SPLIT.strip()}"
+        f"plan-over-size: estimate=297 x1.35=401 (line 400), criteria=2 (line 5), {PR}500\n{SPLIT.strip()}"
     )
 
 
@@ -79,14 +89,14 @@ def test_the_line_sits_between_400_and_401_expected_lines(tmp_path: Path, lines:
 def test_more_than_five_criteria_waits_at_any_size(tmp_path: Path, criteria: int, outcome: str) -> None:
     flow = SizeFlow(tmp_path, criteria=criteria)
 
-    assert flow.plan("500", "ac=met lines=10") == outcome
+    assert flow.plan("500", "ac=met", estimated(10)) == outcome
     assert job_count(flow.queue, "build") == (outcome == "queued-plan-build")
 
 
 def test_criteria_cut_from_a_long_brief_still_count(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path, criteria=6, pad=" " + "x" * (TEXT_LIMIT // 5))
 
-    assert flow.plan("500", "ac=met lines=40") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(40)) == "waiting-max-size"
     assert job_count(flow.queue, "build") == 0
     [wake] = size_wakes(flow)
     assert "criteria=6 (line 5)" in wake["detail"]
@@ -95,10 +105,10 @@ def test_criteria_cut_from_a_long_brief_still_count(tmp_path: Path) -> None:
 def test_the_project_sets_its_own_line(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path, max_lines=50, max_criteria=1)
 
-    assert flow.plan("500", "ac=met lines=60", body="Plan.\n") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(40, "Plan.\n")) == "waiting-max-size"
     [wake] = size_wakes(flow)
     assert wake["detail"] == (
-        f"plan-over-size: lines=60 (line 50), criteria=2 (line 1), {PR}500\nno split proposed"
+        f"plan-over-size: estimate=40 x1.35=54 (line 50), criteria=2 (line 1), {PR}500\nno split proposed"
     )
 
 
@@ -109,13 +119,13 @@ def test_the_project_sets_its_own_line(tmp_path: Path) -> None:
 )
 def test_answers_or_an_approver_go_build_with_the_plan(tmp_path: Path, author: str, body: str) -> None:
     flow = SizeFlow(tmp_path)
-    assert flow.plan("500", "ac=met lines=760") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(760)) == "waiting-max-size"
 
     assert flow.say("501", body, author) == "resumed-build"
 
     assert flow.state()["workflow_state"] == "building"
     build = flow.claim("build")
-    assert json.loads(build.request.detail)["plan_text"] == PLAN_BODY.strip()
+    assert json.loads(build.request.detail)["plan_text"] == estimated(760).strip()
     task = render_brief(build, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "## Proposed split" in task.split("## Plan\n", 1)[1]
 
@@ -127,38 +137,49 @@ def test_an_edit_after_the_size_wait_does_not_change_the_plan_that_builds(
     tmp_path: Path, author: str, body: str
 ) -> None:
     flow = SizeFlow(tmp_path)
-    assert flow.plan("500", "ac=met lines=760") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(760)) == "waiting-max-size"
     flow.comments[-1] = replace(
         flow.comments[-1],
-        body=plan_header("ac=met lines=760") + "REPLACEMENT plan not present in the size wake.",
+        body=plan_header("ac=met") + estimated(760, "REPLACEMENT plan not present in the size wake."),
         edited_at=flow.now[0] + 1,
     )
 
     assert flow.say("501", body, author) == "resumed-build"
 
-    assert json.loads(flow.claim("build").request.detail)["plan_text"] == PLAN_BODY.strip()
+    assert json.loads(flow.claim("build").request.detail)["plan_text"] == estimated(760).strip()
     assert flow.state()["paused_plan_text"] is None
 
 
-def test_an_estimate_past_nine_digits_is_ignored_and_nine_digits_park(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("estimate", "outcome"),
+    [("9" * 4301, "queued-plan-gap"), ("999999999", "waiting-max-size")],
+    ids=["past-nine-digits", "nine-digits"],
+)
+def test_an_estimate_past_nine_digits_is_no_estimate_and_nine_digits_park(
+    tmp_path: Path, estimate: str, outcome: str
+) -> None:
     flow = SizeFlow(tmp_path)
-    flow.finish_with("500")
-    flow.now[0] += 10
-    flow.comments.append(
-        comment("500", plan_header("ac=met lines=" + "9" * 4301) + PLAN_BODY, author="claude-login", created_at=flow.now[0])
-    )
 
-    flow.dispatcher.process(flow.snapshot())
-    flow.dispatcher.process(flow.snapshot())
+    assert flow.plan("500", "ac=met", f"Estimate: {estimate}\n\n{PLAN_BODY}") == outcome
 
-    assert flow.state()["workflow_state"] == "planning"
     assert job_count(flow.queue, "build") == 0
-    assert flow.say("501", plan_header("ac=met lines=999999999") + PLAN_BODY, "claude-login") == "waiting-max-size"
+    if outcome == "queued-plan-gap":
+        assert json.loads(flow.claim("plan").request.detail)["unmapped"] == "expected size"
+
+
+@pytest.mark.parametrize("estimate", ["1,000", "1 000", "1.000", "1k"])
+def test_a_malformed_estimate_never_builds_on_its_prefix(tmp_path: Path, estimate: str) -> None:
+    flow = SizeFlow(tmp_path)
+
+    assert flow.plan("500", "ac=met", f"Estimate: {estimate}\n\n{PLAN_BODY}") == "queued-plan-gap"
+
+    assert job_count(flow.queue, "build") == 0
+    assert json.loads(flow.claim("plan").request.detail)["unmapped"] == "expected size"
 
 
 def test_a_go_from_a_bot_leaves_the_size_wait(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path)
-    assert flow.plan("500", "ac=met lines=760") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(760)) == "waiting-max-size"
 
     assert flow.say("501", GO.format(state="building"), APP_BOT) == "go-not-from-approver"
 
@@ -168,7 +189,7 @@ def test_a_go_from_a_bot_leaves_the_size_wait(tmp_path: Path) -> None:
 
 def test_a_replayed_over_size_plan_queues_nothing_new(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path)
-    assert flow.plan("500", "ac=met lines=760") == "waiting-max-size"
+    assert flow.plan("500", "ac=met", estimated(760)) == "waiting-max-size"
     with flow.queue.connect() as connection:
         connection.execute("DELETE FROM handled_comments WHERE comment_id = '500'")
         jobs = connection.execute("SELECT count(*) FROM jobs").fetchone()[0]
@@ -181,10 +202,10 @@ def test_a_replayed_over_size_plan_queues_nothing_new(tmp_path: Path) -> None:
     assert len(size_wakes(flow)) == 1
 
 
-def test_a_plan_without_lines_is_a_plan_with_a_gap(tmp_path: Path) -> None:
+def test_a_plan_without_an_estimate_is_a_plan_with_a_gap(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path)
 
-    assert flow.plan("500", "ac=met") == "queued-plan-gap"
+    assert flow.plan("500", "ac=met", PLAN_BODY) == "queued-plan-gap"
 
     second = flow.claim("plan")
     detail = json.loads(second.request.detail)
@@ -197,7 +218,7 @@ def test_a_plan_without_lines_is_a_plan_with_a_gap(tmp_path: Path) -> None:
 def test_a_round_2_plan_brief_names_the_unmapped_criterion_and_quotes_the_first_plan(tmp_path: Path) -> None:
     flow = SizeFlow(tmp_path)
 
-    assert flow.plan("500", "ac=unmet lines=120 unsat=ac-2") == "queued-plan-gap"
+    assert flow.plan("500", "ac=unmet unsat=ac-2", estimated(120)) == "queued-plan-gap"
 
     task = render_brief(flow.claim("plan"), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "The first plan left `ac-2` unmapped." in task
