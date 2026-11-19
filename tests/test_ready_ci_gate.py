@@ -676,6 +676,34 @@ def test_an_infra_wait_past_its_limit_raises_one_flag_naming_the_cause_and_head(
     assert needs_attention(board) == []
 
 
+def test_a_rejected_ready_keeps_the_infra_flag_of_the_active_wait(tmp_path: Path) -> None:
+    board, pr, ready = after_a_ci_fix(tmp_path, steps=0)
+    board.now[0] += CI_INFRA_WAIT_SECONDS
+    board.poll()
+    board.poll()
+    with board.queue.connect() as connection:
+        raised = connection.execute("SELECT raised_at FROM needs_attention").fetchall()
+    flagged = needs_attention(board)
+    assert [reason for reason, _ in flagged] == [CI_INFRA_BLOCKED_REASON]
+
+    reviewer_ready(board, pr)
+    board.now[0] += 60
+    board.poll()
+
+    assert board.outcome("ready-other") == "rejected-ready-author"
+    assert needs_attention(board) == flagged
+    board.poll()
+    with board.queue.connect() as connection:
+        assert connection.execute("SELECT raised_at FROM needs_attention").fetchall() == raised
+    assert [row["reason"] for row in ci_waits(board)] == ["ci-infra-wait"]
+
+    pr.ci[pr.head] = "success"
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    assert needs_attention(board) == []
+
+
 @pytest.mark.parametrize(
     ("steps", "log"),
     [(3, "test\tRun tests\t2026-11-18T10:00:00.0000000Z FAILED tests/test_x.py::test_y - assert 1\n"),
