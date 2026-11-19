@@ -7,11 +7,20 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from lib.ci_lane import ci_lane
-from lib.dashboard import _ci_pool, _ci_runs
+from lib.dashboard import _ci_pool, _ci_runs, collect_snapshot
 from lib.dashboard_pages.ci import ci_popup
 from lib.dispatch.cycle_clock import CycleClock
-from lib.dispatch.types import CheckRow, CIResult, PoolRunner, RunJob, TrackedTicket
+from lib.dispatch.types import (
+    CheckRow,
+    CIResult,
+    PoolRunner,
+    RunJob,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.dispatcher import Dispatcher
 from lib.github_actions import GitHubReviewActions
 from lib.project_rules import FactoryRead
@@ -501,6 +510,55 @@ def test_an_open_pr_never_shows_the_failure_of_a_head_it_replaced(tmp_path: Path
     board.cycle(green)
 
     assert_no_stale_ci(board)
+
+
+class FreshSource(FakeSource):
+    def __init__(self, fresh: TrackedTicket, *tickets: TrackedTicket) -> None:
+        super().__init__(*tickets)
+        self.fresh = fresh
+
+    def fresh_ticket(self, ref: TicketRef) -> TrackedTicket | None:
+        return self.fresh
+
+
+@pytest.mark.parametrize(
+    ("observed", "state", "rows"),
+    [
+        ("new head", "merge-queue", [(NEW_HEAD, "success")]),
+        ("merged", "merged", []),
+        ("closed", "abandoned", []),
+    ],
+)
+def test_a_head_or_end_seen_late_in_the_cycle_replaces_the_old_heads_failure(
+    tmp_path: Path, observed: str, state: str, rows: list[tuple[str, str]]
+) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    red = pr("1", HEAD, check("pytest", "completed", "failure"))
+    red = replace(red, factory=replace(red.factory, finish_line="merge"))
+    green = replace(
+        pr("1", NEW_HEAD, check("pytest", "completed", "success", run="901", job="2")),
+        factory=red.factory,
+        merged=observed == "merged",
+        closed=observed == "closed",
+    )
+    with board.queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state
+                (repo, ticket_id, workflow_state, approved_head, approved_at, approve_comment_id)
+            VALUES (?, '1', 'merge-queue', ?, 0, 'approval')
+            """,
+            (REPO.lower(), HEAD),
+        )
+
+    board.dispatcher.poll_once(FreshSource(green, red))
+
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poll.log", now=board.now[0])
+    assert [ticket["state"] for ticket in snapshot["tickets"]] == [state]
+    assert snapshot["ci_runs"]["failures"] == []
+    assert ci_lane(snapshot)["cards"] == {}
+    assert [(row["head"], row["conclusion"]) for row in board.rows()] == rows
 
 
 def test_a_rerun_at_the_same_head_replaces_the_row_and_its_lookups(tmp_path: Path) -> None:
