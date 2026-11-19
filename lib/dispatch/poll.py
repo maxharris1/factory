@@ -162,11 +162,16 @@ class PollMixin:
             try:
                 ci_board.record(
                     self._connect,
-                    [
-                        self._fresh_reads.get(key) or self._polled.get(key, ticket)
-                        for ticket in tracked
-                        for key in [(ticket.repo.lower(), ticket.ticket_id)]
-                    ],
+                    list(
+                        (
+                            {
+                                key: self._polled.get(key, ticket)
+                                for ticket in tracked
+                                for key in [(ticket.repo.lower(), ticket.ticket_id)]
+                            }
+                            | self._fresh_reads
+                        ).values()
+                    ),
                     self.queue.now(),
                     run_jobs=self.ci_runs,
                     job_log=self.ci_job_log,

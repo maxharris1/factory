@@ -561,6 +561,110 @@ def test_a_head_or_end_seen_late_in_the_cycle_replaces_the_old_heads_failure(
     assert [(row["head"], row["conclusion"]) for row in board.rows()] == rows
 
 
+class UntrackedFreshSource(FakeSource):
+    def __init__(self, fresh: TrackedTicket | None) -> None:
+        super().__init__()
+        self.fresh = fresh
+        self.fresh_reads: list[str] = []
+
+    def fresh_ticket(self, ref: TicketRef) -> TrackedTicket | None:
+        self.fresh_reads.append(ref.ticket_id)
+        return self.fresh
+
+
+@pytest.mark.parametrize("fresh_read", [True, False])
+def test_a_ticket_only_a_fresh_read_saw_this_cycle_drops_its_old_heads_failure(
+    tmp_path: Path, fresh_read: bool
+) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
+    board.queue.enqueue(
+        JobRequest(
+            repo=REPO,
+            ticket_id="1",
+            action="plan",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=600,
+            head=HEAD,
+        ),
+        dedupe_key="plan-1",
+    )
+    plan = board.queue.claim("claude")
+    assert plan is not None
+    board.queue.finish(plan.id, owner="claude", handoff_comment_id=None)
+    green = pr("1", NEW_HEAD, check("pytest", "completed", "success", run="901", job="2"))
+    source = UntrackedFreshSource(green if fresh_read else None)
+
+    board.now[0] += 60
+    board.dispatcher.poll_once(source)
+
+    assert source.fresh_reads == ["1"]
+    if fresh_read:
+        assert_no_stale_ci(board)
+        assert [(row["head"], row["conclusion"]) for row in board.rows()] == [
+            (NEW_HEAD, "success")
+        ]
+    else:
+        assert [(row["head"], row["conclusion"]) for row in board.rows()] == [(HEAD, "failure")]
+        assert [failure["job_id"] for failure in board.dashboard()["failures"]] == ["1"]
+
+
+@pytest.mark.parametrize(
+    "end", [{"merged": True}, {"closed": True, "pr_commits": 0}], ids=["merged", "closed-empty"]
+)
+def test_an_ended_ticket_only_a_fresh_read_saw_leaves_no_failure(
+    tmp_path: Path, end: dict[str, object]
+) -> None:
+    board = Board(tmp_path)
+    board.track("1")
+    board.cycle(pr("1", HEAD, check("pytest", "completed", "failure", job="1")))
+    with board.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, '1', 'planning')",
+            (REPO.lower(),),
+        )
+    board.queue.enqueue(
+        JobRequest(
+            repo=REPO,
+            ticket_id="1",
+            action="plan",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=600,
+            head=HEAD,
+        ),
+        dedupe_key="plan-1",
+    )
+    plan = board.queue.claim("claude")
+    assert plan is not None
+    board.queue.finish(plan.id, owner="claude", handoff_comment_id=None)
+    board.now[0] += DAY + 60
+    ended = replace(
+        pr(
+            "1",
+            NEW_HEAD,
+            check(
+                "optional",
+                "completed",
+                "failure",
+                run="901",
+                job="2",
+                completed=board.now[0] - 5,
+            ),
+        ),
+        **end,
+    )
+    source = UntrackedFreshSource(ended)
+
+    board.dispatcher.poll_once(source)
+
+    assert source.fresh_reads == ["1"]
+    assert board.rows() == []
+    assert_no_stale_ci(board)
+
+
 def test_a_rerun_at_the_same_head_replaces_the_row_and_its_lookups(tmp_path: Path) -> None:
     board = Board(tmp_path)
     board.track("1")

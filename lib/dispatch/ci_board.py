@@ -112,6 +112,14 @@ def _prune(
             for ticket in tickets
         ],
     )
+    connection.executemany(
+        "DELETE FROM ci_jobs WHERE repo = ? AND ticket_id = ?",
+        [
+            (ticket.repo.lower(), ticket.ticket_id)
+            for ticket in tickets
+            if ticket.merged or ticket.closed
+        ],
+    )
     connection.execute(
         """
         DELETE FROM ci_jobs
