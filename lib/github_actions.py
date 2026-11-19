@@ -47,7 +47,7 @@ clone and no cache.
   T4 queues a re-review, on any gh error, an empty diff, a diff naming a
   binary file (GitHub's diff omits binary content, so two heads differing
   only there would match), or a git failure or timeout.
-- file_issue and comment_once (issue #259): GET issues?state=all&since=
+- file_repo_issue and comment_once (issue #259): GET issues?state=all&since=
   (the row's time less an hour, for clock skew) or the PR's comments, and
   return the earlier write when a body carries the marker line; only then
   POST. Only an issue (not a PR) or comment that the gh login (GET user,
@@ -533,7 +533,18 @@ class GitHubReviewActions:
         marker: str,
         since: float,
     ) -> int:
-        issues = _repo_path(ticket.repo) + "/issues"
+        return self.file_repo_issue(ticket.repo, title, body, labels, marker, since)
+
+    def file_repo_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+        since: float,
+    ) -> int:
+        issues = _repo_path(repo) + "/issues"
         after = datetime.fromtimestamp(since - 3600, tz=timezone.utc)
         listing = f"{issues}?state=all&since={after:%Y-%m-%dT%H:%M:%SZ}&per_page=100"
         for page in self._pages(listing):
@@ -553,6 +564,12 @@ class GitHubReviewActions:
         for label in labels:
             args.extend(("-f", f"labels[]={label}"))
         return _issue_number(_object(self._json(*args)).get("number"))
+
+    def issue_state(self, repo: str, number: int) -> str:
+        state = _object(self._json(f"{_repo_path(repo)}/issues/{_issue_number(number)}")).get("state")
+        if not isinstance(state, str):
+            raise GitHubAdapterError("issue state is not readable")
+        return state
 
     def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
         self._comment_once(ticket.repo, _pr_number(ticket), body, marker)

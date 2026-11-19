@@ -2356,6 +2356,25 @@ def test_file_issue_creates_the_issue_when_only_someone_else_carries_the_marker(
     assert gh.count(CREATE_ISSUE) == 1
 
 
+def test_file_repo_issue_returns_the_marked_issue_without_posting() -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUES, issues_page("unrelated", f"findings\n\n{FOLLOWUP_MARKER}"))
+
+    number = actions.file_repo_issue(
+        "owner/repo", "Main is red", "body", ("factory:ready",), FOLLOWUP_MARKER, FOLLOWUP_SINCE
+    )
+
+    assert number == 101
+    assert not any("POST" in key for key in gh.keys())
+
+
+@pytest.mark.parametrize("state", ["open", "closed"])
+def test_issue_state_reads_the_issue(state: str) -> None:
+    actions, gh = adapter()
+    gh.route((f"{REPO}/issues/307",), GhResult(0, json.dumps({"number": 307, "state": state}), ""))
+    assert actions.issue_state("owner/repo", 307) == state
+
+
 def pr_comment(comment_id: int, body: str, login: str = OWN_LOGIN) -> dict[str, object]:
     return {
         "id": comment_id,
