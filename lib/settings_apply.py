@@ -34,8 +34,9 @@ not seen:
   service_argv) with heal's scrubbed environment, after the lock
   is released; services another account owns are listed as pending, and the
   result is then `pending`, not `applied`. A failed restart restores the
-  backup under the same lock (not when that would disable a device now
-  holding a job), restarts them again and records `failed`.
+  backup under the same lock and writes it into the shared settings row (not
+  when that would disable a device now holding a job), restarts them again
+  and records `failed`.
 * Every outcome is one AuditEntry line in `<state>/settings-audit.jsonl`. An
   id already there is never applied again, so a pass is safe to repeat.
 """
@@ -681,6 +682,7 @@ class Applier:
                     if running:
                         return f"not restored: {request.device} holds {running} running job(s)"
                 _replace(self.machines, old_bytes, mode)
+                held.commit_version(self.machines)
         except sqlite3.Error:
             return "not restored: cannot read running jobs"
         return None
