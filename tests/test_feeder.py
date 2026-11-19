@@ -25,11 +25,13 @@ from lib.feeder import (
     FEEDER_TABLE,
     Feeder,
     IntakeIssue,
+    ensure_tables,
     feeder_counts,
     feeder_items,
     go_state_for,
 )
 from lib.feeder_gates import Progress, Ref, RefStatus
+from lib.followups import has_marker
 from lib.handoff import Handoff, format_comment, parse_comment
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -62,6 +64,8 @@ Project rule for every brief: run the suite with `make test`.
 LINEAR_FACTORY_MD = FACTORY_MD.replace("base_branch: main", "base_branch: dev").replace(
     "tickets: github", "tickets: linear"
 ).replace("ship: merge", "ship: handoff")
+
+REQUIRED_MD = FACTORY_MD.replace("feeder:\n", "feeder:\n  required_checks: [\"test (*)\"]\n")
 
 BASE_SHA = "a" * 40
 
@@ -151,7 +155,10 @@ class FakeGitHub:
         self.status_reads: list[frozenset[Ref]] = []
         self.main_checks: dict[tuple[str, str], dict[str, BaseCheck]] = {}
         self.check_reads: list[tuple[str, str]] = []
+        self.filed: dict[tuple[str, int], dict] = {}
+        self.run_logs: dict[tuple[str, str], dict[str, str]] = {}
         self._next_pr = 500
+        self._next_issue = 899
         self._next_comment = 9000
 
     def _maybe_fail(self, step: str) -> None:
@@ -262,6 +269,36 @@ class FakeGitHub:
         self.check_reads.append((repo, branch))
         self._maybe_fail("base_checks")
         return dict(self.main_checks.get((repo, branch), {}))
+
+    def file_repo_issue(self, repo: str, title: str, body: str, labels, marker: str,
+                        since: float) -> int:
+        self._maybe_fail("file_issue")
+        for (filed_repo, number), item in sorted(self.filed.items()):
+            if filed_repo == repo and has_marker(item["body"], marker):
+                return number
+        self._next_issue += 1
+        number = self._next_issue
+        self.filed[(repo, number)] = {"title": title, "body": body, "labels": tuple(labels),
+                                      "state": "open"}
+        if "factory:ready" in labels:
+            self.issues.setdefault(repo, []).append(
+                IntakeIssue(repo=repo, tracker="github", key=str(number), title=title, body=body,
+                            labels=tuple(labels), created_at=since, applied_by="maxharris1",
+                            url=f"https://github.com/{repo}/issues/{number}")
+            )
+        self._maybe_fail("file_issue_after")
+        return number
+
+    def close_issue(self, repo: str, number: int) -> None:
+        self.filed[(repo, number)]["state"] = "closed"
+        self.issues[repo] = [item for item in self.issues[repo] if item.key != str(number)]
+
+    def issue_state(self, repo: str, number: int) -> str:
+        return self.filed[(repo, number)]["state"]
+
+    def failed_run_logs(self, repo: str, run_id: str) -> dict[str, str]:
+        self._maybe_fail("run_logs")
+        return dict(self.run_logs.get((repo, run_id), {}))
 
     def post_comment(self, repo: str, number: int, body: str) -> str:
         self._maybe_fail("comment")
@@ -1195,3 +1232,148 @@ def test_a_queued_review_only_another_device_can_run_leaves_the_builder_room(tmp
     assert feeder.machines is not None, findings
     _review(queue, "codex")
     assert feeder._room({"claude", "codex"}, 10_000.0) == {"claude": 2, "codex": 0}
+
+
+# --- #1061: one main-fix issue per red main streak ------------------------------
+
+RED_SHA = "c0ffee12" + "0" * 32
+MAIN = ("owner/app", "main")
+RED_LOG = "\n".join(
+    ["collected 3 items", *(f"step {i}" for i in range(300)), "FAILED tests/test_x.py::test_y - boom"]
+)
+
+
+def red_main(github: FakeGitHub, head: str = RED_SHA, run_id: str = "900") -> None:
+    github.main_checks[MAIN] = {"test (2/3)": BaseCheck("test (2/3)", "failure", run_id, "1", head)}
+    github.run_logs[("owner/app", run_id)] = {"test (2/3)": RED_LOG}
+
+
+def main_fix_rows(db: Path) -> list[tuple[str, int | None]]:
+    with sqlite3.connect(db) as connection:
+        return connection.execute(
+            "SELECT state, issue FROM feeder_main_fix ORDER BY filed_at"
+        ).fetchall()
+
+
+def main_fixes(github: FakeGitHub) -> list[int]:
+    return sorted(number for _, number in github.filed)
+
+
+def test_a_red_main_files_one_main_fix_that_feeds_as_one_build_job(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    github.issues["owner/app"] = [issue(1), issue(2)]
+    red_main(github)
+    dispatcher = dispatcher_for(tmp_path, queue, feeder)
+    source = FeederSource(github)
+
+    dispatcher.poll_once(source)
+
+    assert main_fixes(github) == [900]
+    assert github.filed[MAIN[0], 900]["labels"] == ("factory:ready", "factory:main-fix")
+    jobs = [job for job in queue.outstanding() if job.request.recipient == "claude"]
+    assert [(job.request.ticket_id, job.request.action) for job in jobs] == [("501", "build")]
+    assert github.pulls[MAIN[0], 501]["head"] == "factory/issue-900"
+    assert {"factory:main-fix", "orch:state/building"} <= set(github.labels[MAIN[0], 501])
+    brief, go = github.posted[MAIN[0], 501]
+    assert "FAILED tests/test_x.py::test_y - boom" in brief.body
+    assert parse_comment(go.body).as_dict()["state"] == "building"
+    assert [rows(tmp_path / "orch.db")[key]["state"] for key in ("1", "2")] == ["waiting-blocked"] * 2
+
+    dispatcher.poll_once(source)
+
+    assert main_fixes(github) == [900]
+    assert len([job for job in queue.outstanding() if job.request.recipient == "claude"]) == 1
+
+
+def test_a_closed_main_fix_with_main_still_red_files_one_new_issue(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    feeder.feed_once()
+    github.close_issue("owner/app", 900)
+    for _ in range(2):
+        now[0] += 60
+        feeder.feed_once()
+
+    assert main_fixes(github) == [900, 901]
+    first, second = (github.filed[MAIN[0], n]["body"].splitlines()[0] for n in (900, 901))
+    assert first != second
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900), ("open", 901)]
+
+
+@pytest.mark.parametrize("step", ["file_issue", "file_issue_after"])
+def test_a_crash_around_the_post_leaves_one_issue_after_the_next_poll(
+    tmp_path: Path, step: str
+) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+    github.fail[step] = 1
+    assert feeder.feed_once().errors == 1
+    assert main_fix_rows(tmp_path / "orch.db") == [("filing", None)]
+    now[0] += 60
+
+    assert feeder.feed_once().errors == 0
+
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+
+
+def test_two_feeders_on_one_database_file_one_issue(tmp_path: Path) -> None:
+    feeder, queue, github, linear = make_feeder(tmp_path, factory_text=REQUIRED_MD)
+    other = Feeder(queue, feeder.config, feeder.machines, github=github, linear=linear,
+                   factory_for=feeder.factory_for, head=lambda: None)
+    red_main(github)
+    post = github.file_repo_issue
+
+    def racing(*args):
+        github.file_repo_issue = post
+        other.feed_once()
+        return post(*args)
+
+    github.file_repo_issue = racing
+    feeder.feed_once()
+
+    assert main_fixes(github) == [900]
+    assert main_fix_rows(tmp_path / "orch.db") == [("open", 900)]
+    assert len(github.pulls) == 1
+
+
+def test_one_base_has_one_active_main_fix_row(tmp_path: Path) -> None:
+    insert = (
+        "INSERT INTO feeder_main_fix (repo, base, marker, state, issue, last_head, filed_at) "
+        "VALUES ('owner/app', ?, ?, ?, NULL, 'h', 1)"
+    )
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        ensure_tables(connection)
+        connection.execute(insert, ("main", "a", "open"))
+        connection.execute(insert, ("main", "b", "closed"))
+        connection.execute(insert, ("dev", "c", "filing"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, ("main", "d", "filing"))
+
+
+def test_a_failed_main_read_files_and_retires_nothing_and_green_ends_the_streak(
+    tmp_path: Path,
+) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, factory_text=REQUIRED_MD, now=now)
+    red_main(github)
+
+    def poll(*, fail: bool = False) -> int:
+        now[0] += 60
+        github.fail["base_checks"] = int(fail)
+        return feeder.feed_once().errors
+
+    assert poll(fail=True) == 1
+    assert main_fixes(github) == []
+    poll()
+    assert poll(fail=True) == 1
+    poll()
+    assert main_fixes(github) == [900]
+    github.main_checks[MAIN] = {"test (2/3)": BaseCheck("test (2/3)", "success", "950", "1", "d" * 40)}
+    poll()
+    assert main_fix_rows(tmp_path / "orch.db") == [("closed", 900)]
+    red_main(github, head="e" * 40, run_id="960")
+    poll()
+    assert main_fixes(github) == [900, 901]
