@@ -9,7 +9,6 @@ from lib.queue import Job, SQLiteJobQueue
 from tests.test_brief import job as brief_job
 from tests.test_dispatcher import ANSWERS, BRIEF, GO, QUESTIONS, comment, setup, ticket
 
-# 2026-11-19 14:00 UTC
 T = 1795096800.0
 HEAD = "a" * 40
 QUESTION_TEXT = "Which export format ships first?"
@@ -42,7 +41,6 @@ def decision_rows(queue: SQLiteJobQueue) -> list[dict]:
 
 
 def answered(tmp_path: Path, answer_body: str, *, answerer: str = "grok-login"):
-    """A build paused on a builder's questions, then the answers comment processed."""
     dispatcher, queue = setup(tmp_path, now=[T + 100])
     base = (
         comment("brief-1", BRIEF, author="grok-login", created_at=T + 1),
@@ -124,7 +122,6 @@ def test_resumed_build_brief_quotes_the_decision_once(tmp_path: Path) -> None:
 
 
 def next_round(tmp_path: Path) -> tuple[str, str]:
-    """The review after the resumed build, then the fix its REVISE verdict queues."""
     dispatcher, queue, comments = answered(tmp_path, ANSWERS_BODY)
     resumed = queue.claim("claude")
     assert resumed is not None

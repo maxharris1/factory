@@ -40,13 +40,11 @@ _REFUSED_VERDICT_OUTCOMES = (
     "refused-",
     "woke-grok-unparsed",
 )
-# lib/orchestrate.py answers_comment and answers_for write these blocks.
 _QUESTION_ANSWER = re.compile(
     r"^\*\*Question\*\*\n(.+?)\n+\*\*Answer\*\*\n(.*?)(?=^\*\*Question\*\*$|\Z)",
     re.M | re.S,
 )
 _LIST_ITEM = re.compile(r"^(\s*)(?:[-*]|[0-9]+[.)])\s+(\S.*?)\s*$")
-# The dashboard's words_block (deploy/factory-dashboard-http.py).
 _MAX_WORDS = "**Max's words**"
 
 
@@ -63,7 +61,6 @@ class Decision:
 
 
 def decisions_of(question: Comment | None, answer: Comment) -> list[Decision]:
-    """The operator's decisions in one answers comment to the paused question."""
     body = parse_comment(answer.body).body
     asked = _handoff_body(question)
     pairs = [(text.strip(), choice.strip()) for text, choice in _QUESTION_ANSWER.findall(body)]
@@ -88,7 +85,6 @@ def _handoff_body(comment: Comment | None) -> str:
 
 
 def _options(text: str, question: str | None) -> tuple[str, ...]:
-    """The list items under the line that asks question, else every list item."""
     lines = text.splitlines()
     every = tuple(item.group(2) for line in lines if (item := _LIST_ITEM.match(line)))
     if question is None:

@@ -445,7 +445,6 @@ def answers_lines(detail: dict[str, object]) -> list[str]:
 
 
 def decisions(detail: dict[str, object]) -> list[dict]:
-    """The well-formed operator decisions in the job detail, oldest first."""
     entries = detail.get("decisions")
     if not isinstance(entries, list):
         return []
