@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from collections.abc import Callable, Collection, Mapping
 
 from lib.dispatch.constants import (
@@ -321,12 +322,12 @@ class TrackingMixin:
     ) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled, outbox, qa_open, read_at
+                       unsettled, outbox, qa_open, read_at, pr_number
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                           state.workflow_state, reads.read_at,
+                           state.workflow_state, reads.read_at, sources.pr_number,
                            COALESCE(state.stuck, 0) AS stuck,
                            EXISTS (
                                SELECT 1
@@ -396,6 +397,9 @@ class TrackingMixin:
                     LEFT JOIN ticket_reads AS reads
                       ON reads.repo = LOWER(tracked.repo)
                      AND reads.ticket_id = tracked.ticket_id
+                    LEFT JOIN {SOURCES_TABLE} AS sources
+                      ON sources.repo = LOWER(tracked.repo)
+                     AND sources.ticket_id = tracked.ticket_id
                 )
                 WHERE COALESCE(workflow_state, '') != ?
                   AND (
@@ -425,6 +429,9 @@ class TrackingMixin:
                     state in ("handed-off", *WATCHED_STATES)
                     and bool(row["replay"])
                 ),
+                pr_number=(
+                    str(row["ticket_id"]) if row["tracker"] == "github" else row["pr_number"]
+                ),
             )
             catching_up = (
                 bool(row["replay"]) or bool(row["unsettled"]) or bool(row["outbox"])
@@ -442,7 +449,11 @@ class TrackingMixin:
             refs.append(ref)
         if held and closed is not None:
             shut = closed(tuple(held))
-            refs.extend(ref for ref in held if (ref.repo.lower(), ref.ticket_id) in shut)
+            refs.extend(
+                replace(ref, closed=True)
+                for ref in held
+                if (ref.repo.lower(), ref.ticket_id) in shut
+            )
         if first_reads:
             with self._connect() as connection:
                 connection.executemany(

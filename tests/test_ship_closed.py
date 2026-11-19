@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from lib.dashboard import _read_db
 from lib.github_actions import GitHubAdapterError
+from lib.poll_source import HTTPResult, LivePollSource
+from lib.pr_title import SOURCES_TABLE
 from tests.merge_queue_support import APPROVE, PR, Board, sha
 from tests.test_dispatcher import (
     BASE_705,
@@ -17,6 +20,14 @@ from tests.test_dispatcher import (
     _running_build_705,
     comment,
     setup,
+)
+from tests.test_live_poll import (
+    FACTORY,
+    FakeGh,
+    config,
+    linear_issue,
+    linear_search_page,
+    linear_states_page,
 )
 
 UNSAT = APPROVE.replace("verdict=APPROVE", "verdict=REVISE unsat=ac-1")
@@ -188,3 +199,132 @@ def test_the_closed_probe_reads_only_each_pulls_state(monkeypatch) -> None:
     assert actions.closed_pulls("owner/repo", ["1", "2", "3", "4"]) == {"2", "3"}
     assert len(queries) == 1
     assert "fragment pull on PullRequest { state }" in queries[0]
+
+
+def live_source(dispatcher, gh, now, requests=None, **kwargs) -> LivePollSource:
+    def transport(url, headers, body, timeout):
+        request = json.loads(body)
+        if requests is not None:
+            requests.append(request)
+        query = request["query"]
+        if query.startswith("query FactoryStates"):
+            return linear_states_page(request["variables"])
+        if query.startswith("query FactoryPoll"):
+            return linear_search_page([])
+        return HTTPResult(200, json.dumps({"data": {"issue": linear_issue()}}))
+
+    return LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "test-only"},
+        gh_runner=gh,
+        linear_transport=transport,
+        terminal_sink=dispatcher.record_terminal,
+        error_sink=dispatcher.record_poll_error,
+        clock=lambda: now[0],
+        sleep=lambda _: None,
+        **kwargs,
+    )
+
+
+def hold(queue, ticket_id: str, tracker: str, now: float, pr_number: str | None = None) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES ('acme/widgets', ?, ?, 0)", (ticket_id, tracker)
+        )
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+            "VALUES ('acme/widgets', ?, 'blocked')",
+            (ticket_id,),
+        )
+        connection.execute("INSERT INTO ticket_reads VALUES ('acme/widgets', ?, ?)", (ticket_id, now))
+        if pr_number is not None:
+            connection.execute(
+                f"INSERT INTO {SOURCES_TABLE} (repo, ticket_id, source, pr_number) "
+                "VALUES ('acme/widgets', ?, ?, ?)",
+                (ticket_id, ticket_id, pr_number),
+            )
+
+
+def outcome(queue, ticket_id: str) -> tuple[str, list[tuple[str, str]]]:
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state FROM ticket_state WHERE ticket_id = ?", (ticket_id,)
+        ).fetchone()[0]
+        transitions = connection.execute(
+            "SELECT to_state, source FROM ticket_transitions WHERE ticket_id = ? ORDER BY id",
+            (ticket_id,),
+        ).fetchall()
+    return str(state), [tuple(row) for row in transitions]
+
+
+def linear_gh(state: str) -> FakeGh:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.pull = {"state": state, "merged": False, "commits": 1}
+    gh.branch_pulls = [
+        {
+            "number": 12,
+            "state": state,
+            "head": {"ref": "max/aut-42-fixture", "repo": {"full_name": "acme/widgets"}},
+        }
+    ]
+    return gh
+
+
+def branch_lookups(gh: FakeGh) -> list[list[str]]:
+    return [call for call in gh.calls if "repos/acme/widgets/pulls" in call]
+
+
+def pull_reads(gh: FakeGh) -> list[list[str]]:
+    return [call for call in gh.calls if "repos/acme/widgets/pulls/12" in call]
+
+
+def state_probes(gh: FakeGh) -> list[list[str]]:
+    return [call for call in gh.calls if "graphql" in call]
+
+
+ABANDONED = ("abandoned", [("abandoned", "closed-unmerged")])
+
+
+def test_a_held_linear_ticket_whose_pr_closed_ends_on_the_first_poll(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0])
+    gh = linear_gh("closed")
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert outcome(queue, "AUT-42") == ABANDONED
+
+
+def test_a_held_linear_ticket_with_a_stored_pr_is_probed_by_number(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0], pr_number="12")
+    gh = linear_gh("closed")
+
+    dispatcher.poll_once(live_source(dispatcher, gh, now))
+
+    assert outcome(queue, "AUT-42") == ABANDONED
+    assert state_probes(gh)
+    assert gh.calls.index(state_probes(gh)[0]) < gh.calls.index(branch_lookups(gh)[0])
+    assert len(branch_lookups(gh)) == 1
+
+
+def test_a_held_linear_ticket_with_an_open_pr_keeps_its_cadence(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    hold(queue, "AUT-42", "linear", now[0])
+    gh = linear_gh("open")
+    requests: list[dict] = []
+    source = live_source(dispatcher, gh, now, requests)
+
+    dispatcher.poll_once(source)
+    now[0] = 160.0
+    dispatcher.poll_once(source)
+
+    assert outcome(queue, "AUT-42") == ("blocked", [])
+    assert not [r for r in requests if r["query"].startswith("query FactoryIssue")]
+    assert pull_reads(gh) == []
+    assert len(branch_lookups(gh)) == 1
+    assert len(state_probes(gh)) == 1
+

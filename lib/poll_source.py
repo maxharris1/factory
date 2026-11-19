@@ -136,7 +136,7 @@ query FactoryStates($team: String!, $numbers: [Float!]!, $first: Int!) {
     first: $first,
     filter: { team: { key: { eq: $team } }, number: { in: $numbers } }
   ) {
-    nodes { identifier state { name type } }
+    nodes { identifier branchName state { name type } }
   }
 }
 """.strip()
@@ -161,6 +161,7 @@ LINEAR_SEARCH_COMPLEXITY = 116
 LINEAR_ISSUE_COMPLEXITY = 779
 LINEAR_STATES_COMPLEXITY = 250
 LINEAR_STATES_PAGE = 100
+BRANCH_LOOKUPS_PER_REPO = 10
 ORCHESTRATOR = "grok-bot"
 RISKY_PATH = re.compile(r"migration|realtime")
 RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
@@ -534,6 +535,8 @@ class LivePollSource:
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
         self._last_reads: dict[tuple[str, str], LastRead] = {}
+        self._linear_branches: dict[str, str] = {}
+        self._linear_branch_pulls: dict[str, str | None] = {}
         self._backoff_until = 0.0
         self._linear_backoff_until = 0.0
         self._linear_requests = 0
@@ -626,6 +629,7 @@ class LivePollSource:
         self._factory_cache.clear()
         self._ticket_cache.clear()
         self._linear_issue_cache.clear()
+        self._linear_branches.clear()
         self._linear_due = self._cycles_until_linear <= 0
         if self._linear_due:
             self._cycles_until_linear = self._linear_every
@@ -1066,20 +1070,51 @@ class LivePollSource:
 
     def closed_pulls(self, refs: tuple[TicketRef, ...]) -> frozenset[tuple[str, str]]:
         projects = {project.repo.lower(): project for project in self.config.projects}
-        wanted: dict[str, list[str]] = {}
+        wanted: dict[str, dict[str, list[str]]] = {}
+        lookups: dict[str, int] = {}
+        closed: set[tuple[str, str]] = set()
         for ref in refs:
             repo = ref.repo.lower()
-            if ref.tracker == "github" and repo in projects:
-                wanted.setdefault(repo, []).append(ref.ticket_id)
-        closed: set[tuple[str, str]] = set()
+            project = projects.get(repo)
+            if project is None or ref.tracker not in ("github", "linear"):
+                continue
+            number = self._probe_number(project.repo, ref)
+            if number is not None:
+                wanted.setdefault(repo, {}).setdefault(number, []).append(ref.ticket_id)
+            elif (
+                ref.ticket_id in self._linear_branches
+                and ref.ticket_id not in self._linear_branch_pulls
+                and lookups.get(repo, 0) < BRANCH_LOOKUPS_PER_REPO
+            ):
+                lookups[repo] = lookups.get(repo, 0) + 1
+                if self._branch_pull_closed(project.repo, ref.ticket_id):
+                    closed.add((repo, ref.ticket_id))
         for repo, numbers in wanted.items():
             try:
-                found = self.github.closed_pulls(projects[repo].repo, numbers)
+                found = self.github.closed_pulls(projects[repo].repo, list(numbers))
             except Exception:
                 self._defer(f"GitHub closed probe failed for {projects[repo].repo}")
                 continue
-            closed.update((repo, number) for number in found)
+            closed.update((repo, ticket_id) for number in found for ticket_id in numbers[number])
         return frozenset(closed)
+
+    def _probe_number(self, repo: str, ref: TicketRef) -> str | None:
+        if ref.tracker == "github":
+            return ref.ticket_id
+        return (
+            ref.pr_number
+            or self.fed_pulls.get(repo, ref.ticket_id)
+            or self._linear_branch_pulls.get(ref.ticket_id)
+        )
+
+    def _branch_pull_closed(self, repo: str, identifier: str) -> bool:
+        try:
+            pull = self._branch_pull(repo, self._linear_branches[identifier], fresh=True)
+        except Exception:
+            self._defer(f"GitHub branch lookup failed for {repo}")
+            return False
+        self._linear_branch_pulls[identifier] = None if pull is None else str(pull["number"])
+        return pull is not None and pull.get("state") != "open"
 
     def linear_states(self, refs: tuple[TicketRef, ...]) -> LinearStateRead | None:
         if not self._linear_due:
@@ -1148,6 +1183,9 @@ class LivePollSource:
                 ref = numbered.get(parsed) if parsed and parsed[0] == team else None
                 if ref is None or not isinstance(state, dict):
                     continue
+                branch = node.get("branchName")
+                if isinstance(branch, str) and branch:
+                    self._linear_branches[ref.ticket_id] = branch
                 name, kind = state.get("name"), state.get("type")
                 if isinstance(name, str) and isinstance(kind, str):
                     states[ref.ticket_id] = LinearState(
@@ -1981,6 +2019,7 @@ class LivePollSource:
         )
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
+        self._linear_branch_pulls.pop(identifier, None)
         pr_number = self._factory_pr_number(
             project.repo,
             identifier,
@@ -2176,6 +2215,10 @@ class LivePollSource:
         branch = _optional_string(issue.get("gitBranchName"))
         if branch is None:
             return None
+        factory_pull = self._branch_pull(repo, branch, fresh=fresh)
+        return None if factory_pull is None else str(factory_pull["number"])
+
+    def _branch_pull(self, repo: str, branch: str, *, fresh: bool) -> dict[str, Any] | None:
         pulls = _array(
             _json(
                 self._gh_call(
@@ -2192,12 +2235,11 @@ class LivePollSource:
             ),
             "GitHub branch pulls",
         )
-        factory_pull = max(
+        return max(
             (item for item in pulls if isinstance(item, dict) and _on_branch(item, repo, branch)),
             key=_open_then_newest,
             default=None,
         )
-        return None if factory_pull is None else str(factory_pull["number"])
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
