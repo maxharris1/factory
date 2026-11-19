@@ -87,11 +87,14 @@ ready queues review, so a branch stacked during its build waits there too.
 The branch is compared against its open PR's base, or against the recorded
 base when it has no PR.
 
-Priority order (#258, lib/queue.py rank): a ticket's tier first (the first of
-the project's `priority_labels` it carries, or its Linear priority when the
-project sets `priority_from_linear`; no tier sorts after every tier), then
+Priority order (#258, #1050, lib/queue.py rank): a ticket's tier first, then
 urgent, then bug, then how many of this poll's candidates it unblocks
 (critical_path_counts; 0 with `critical_path_order: false`), then the oldest.
+A ticket's own tier is the first of the project's `priority_labels` it
+carries, or its Linear priority when the project sets `priority_from_linear`,
+or 0 when it has neither and is urgent. It ranks on its effective tier: the
+best own tier of itself and every candidate it transitively unblocks through
+Blocked by / Depends on (effective_tiers). No tier sorts after every tier.
 
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
 the feeder has a ticket id for, so a label or blocker change after the feed
@@ -187,6 +190,7 @@ _COLUMNS = (
     ("tier", "INTEGER"),
     ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
     ("base_branch", "TEXT"),
+    ("own_tier", "INTEGER"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -503,6 +507,7 @@ class _Candidate:
     lines: GateLines = GateLines()
     template: IntakeTemplate = IntakeTemplate()
     unblocks: int = 0
+    effective_tier: int | None = None
 
     @property
     def harness(self) -> str:
@@ -516,7 +521,7 @@ class _Candidate:
         return self.project.base_for(self.issue.linear_project) or self.context.config.base_branch
 
     @property
-    def tier(self) -> int | None:
+    def own_tier(self) -> int | None:
         intake = self.project.intake
         assert intake is not None
         labels = {label.lower() for label in self.issue.labels}
@@ -525,7 +530,7 @@ class _Candidate:
                 return index
         if intake.priority_from_linear and self.issue.priority in LINEAR_PRIORITIES:
             return LINEAR_PRIORITIES.index(self.issue.priority)
-        return None
+        return 0 if self.issue.urgent else None
 
     @property
     def ref(self) -> Ref:
@@ -533,7 +538,7 @@ class _Candidate:
 
     def order(self) -> tuple[bool, int, int, int, float, tuple[int, int, str]]:
         return (
-            *rank(tier=self.tier, urgent=self.issue.urgent, resume=False, bug=self.issue.bug,
+            *rank(tier=self.effective_tier, urgent=self.issue.urgent, resume=False, bug=self.issue.bug,
                   unblocks=self.unblocks),
             self.issue.created_at,
             _key_order(self.issue.key),
@@ -652,6 +657,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             capped_release INTEGER NOT NULL DEFAULT 0,
             tier INTEGER,
             unblocks INTEGER NOT NULL DEFAULT 0,
+            own_tier INTEGER,
             PRIMARY KEY (repo, issue)
         )
         """
@@ -697,7 +703,7 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0", "fed_at": "NULL"}
+    defaults = {"waiting_reason": "NULL", "tier": "NULL", "own_tier": "NULL", "unblocks": "0", "fed_at": "NULL"}
     optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
     cursor = connection.execute(
         f"""
@@ -770,9 +776,10 @@ class Feeder:
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
-        waits, holds, capped, gate_read, unblocks = self._gates(candidates, states, refused)
+        waits, holds, capped, gate_read, unblocks, tiers = self._gates(candidates, states, refused)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
+            candidate.effective_tier = tiers[candidate.ref]
         self._record_priority(candidates, now)
         if gate_read:
             self._sync_attention(waits, read_repos, now)
@@ -948,11 +955,11 @@ class Feeder:
         candidates: Sequence[_Candidate],
         states: Mapping[Ref, str],
         refused: Collection[Ref] = frozenset(),
-    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool, dict[Ref, int]]:
+    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool, dict[Ref, int], dict[Ref, int | None]]:
         """Blocker waits, the holds of tickets in flight, the holders that
         hold as capped, whether the status read (when one was needed)
-        succeeded, and how many tickets each candidate unblocks. A ticket
-        refused at intake is not gated."""
+        succeeded, how many tickets each candidate unblocks, and each
+        candidate's effective tier. A ticket refused at intake is not gated."""
         rows = self._feeder_rows()
         unstarted = [
             c for c in candidates if states[c.ref] in UNSTARTED and c.ref not in refused
@@ -1034,8 +1041,10 @@ class Feeder:
         self._release(released)
         self._flip_capped(flips)
         shared = {repo: policy.shared for repo, policy in holds.policies.items()}
-        unblocks = critical_path_counts(candidates, gated, {c.ref for c in unstarted}, pull_of, shared)
-        return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks
+        blocks = _blocker_graph(candidates, gated, pull_of)
+        unblocks = critical_path_counts(candidates, blocks, {c.ref for c in unstarted}, shared)
+        tiers = effective_tiers(candidates, blocks)
+        return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks, tiers
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
         """Tickets fed or feeding."""
@@ -1190,10 +1199,10 @@ class Feeder:
                 connection.execute(
                     f"""
                     INSERT INTO {FEEDER_TABLE} (
-                        repo, issue, tracker, title, harness, state, urgent, bug, tier,
+                        repo, issue, tracker, title, harness, state, urgent, bug, tier, own_tier,
                         risk, issue_created_at, first_seen_at, seen_at, touches, conflicts,
                         base_branch
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
                         touches = excluded.touches,
@@ -1201,6 +1210,7 @@ class Feeder:
                         urgent = excluded.urgent,
                         bug = excluded.bug,
                         tier = excluded.tier,
+                        own_tier = excluded.own_tier,
                         risk = CASE WHEN state IN ({unstarted}) THEN excluded.risk
                                     ELSE risk END,
                         base_branch = CASE WHEN {FEED_NOT_BEGUN} THEN excluded.base_branch
@@ -1217,7 +1227,8 @@ class Feeder:
                         candidate.harness,
                         int(issue.urgent),
                         int(issue.bug),
-                        candidate.tier,
+                        candidate.own_tier,
+                        candidate.own_tier,
                         candidate.template.risk or "unset",
                         issue.created_at,
                         now,
@@ -1247,17 +1258,17 @@ class Feeder:
         )
 
     def _record_priority(self, candidates: Sequence[_Candidate], now: float) -> None:
-        """Each ticket's unblocks count, and the claim order of every ticket
-        with a ticket id, so a label or blocker change after the feed still
-        moves its queued job."""
+        """Each ticket's unblocks count and effective tier, and the claim
+        order of every ticket with a ticket id, so a label or blocker change
+        after the feed still moves its queued job."""
 
         def work(connection: sqlite3.Connection) -> None:
             for candidate in candidates:
                 issue = candidate.issue
                 where = (issue.repo.lower(), issue.key)
                 connection.execute(
-                    f"UPDATE {FEEDER_TABLE} SET unblocks = ? WHERE repo = ? AND issue = ?",
-                    (candidate.unblocks, *where),
+                    f"UPDATE {FEEDER_TABLE} SET unblocks = ?, tier = ? WHERE repo = ? AND issue = ?",
+                    (candidate.unblocks, candidate.effective_tier, *where),
                 )
                 ticket = connection.execute(
                     f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?", where
@@ -1265,7 +1276,8 @@ class Feeder:
                 if ticket is not None:
                     set_ticket_priority(
                         connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
-                        tier=candidate.tier, unblocks=candidate.unblocks, at=now,
+                        tier=candidate.effective_tier, own_tier=candidate.own_tier,
+                        unblocks=candidate.unblocks, at=now,
                     )
 
         bookkeeping_write(self.queue.connect, work, site="_record_priority", ledger=self.ledger)
@@ -1414,7 +1426,8 @@ class Feeder:
         with self.queue.connect() as connection:
             set_ticket_priority(
                 connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug,
-                tier=candidate.tier, unblocks=candidate.unblocks, at=now,
+                tier=candidate.effective_tier, own_tier=candidate.own_tier,
+                unblocks=candidate.unblocks, at=now,
             )
         linear = issue.tracker == "linear"
         if not linear and config.tickets == "github":
@@ -1558,13 +1571,10 @@ class Feeder:
         return f"factory/issue-{issue.key}"
 
 
-def critical_path_counts(
-    candidates: Sequence[_Candidate],
-    eligible_gates: Mapping[Ref, GateLines],
-    unstarted: Collection[Ref],
-    pull_of: Mapping[Ref, Ref],
-    shared: Mapping[str, Collection[str]],
-) -> dict[Ref, int]:
+def _blocker_graph(
+    candidates: Sequence[_Candidate], eligible_gates: Mapping[Ref, GateLines], pull_of: Mapping[Ref, Ref]
+) -> dict[Ref, set[Ref]]:
+    """Each candidate's direct dependents through Blocked by / Depends on."""
     owner = {c.ref: c.ref for c in candidates}
     owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
     blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
@@ -1572,6 +1582,26 @@ def critical_path_counts(
         for blocker in lines.blocked_by:
             if owner.get(blocker, dependent) != dependent:
                 blocks[owner[blocker]].add(dependent)
+    return blocks
+
+
+def _dependents(blocks: Mapping[Ref, set[Ref]], seed: set[Ref]) -> set[Ref]:
+    """The seed and every ticket it transitively unblocks."""
+    found = set(seed)
+    pending = list(found)
+    while pending:
+        for dependent in blocks[pending.pop()] - found:
+            found.add(dependent)
+            pending.append(dependent)
+    return found
+
+
+def critical_path_counts(
+    candidates: Sequence[_Candidate],
+    blocks: Mapping[Ref, set[Ref]],
+    unstarted: Collection[Ref],
+    shared: Mapping[str, Collection[str]],
+) -> dict[Ref, int]:
     counts: dict[Ref, int] = {}
     for c in candidates:
         assert c.project.intake is not None
@@ -1579,21 +1609,29 @@ def critical_path_counts(
             counts[c.ref] = 0
             continue
         own = shared.get(c.ref.repo, ())
-        found = blocks[c.ref] | {
+        found = _dependents(blocks, blocks[c.ref] | {
             other.ref
             for other in candidates
             if other.ref in unstarted
             and other.ref.repo == c.ref.repo
             and _paths_meet(c.lines.touches, other.lines.touches, own)
-        }
-        pending = list(found)
-        while pending:
-            for dependent in blocks[pending.pop()] - found:
-                found.add(dependent)
-                pending.append(dependent)
+        })
         found.discard(c.ref)
         counts[c.ref] = len(found)
     return counts
+
+
+def effective_tiers(
+    candidates: Sequence[_Candidate], blocks: Mapping[Ref, set[Ref]]
+) -> dict[Ref, int | None]:
+    """The best own tier of each candidate and every candidate it
+    transitively unblocks, so a blocker never ranks below what it gates."""
+    own = {c.ref: c.own_tier for c in candidates}
+    tiers: dict[Ref, int | None] = {}
+    for c in candidates:
+        found = [own[ref] for ref in _dependents(blocks, {c.ref})]
+        tiers[c.ref] = min((tier for tier in found if tier is not None), default=None)
+    return tiers
 
 
 def _paths_meet(first: Collection[str], second: Collection[str], shared: Collection[str]) -> bool:

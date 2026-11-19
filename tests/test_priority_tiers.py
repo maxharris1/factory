@@ -16,7 +16,7 @@ import pytest
 from lib.dashboard import collect_snapshot, render_pages
 from lib.feeder import ensure_tables, feeder_items
 from lib.orch_yml import load_orch_yml
-from lib.queue import JobRequest, SQLiteJobQueue, claim_order
+from lib.queue import JobRequest, SQLiteJobQueue, claim_order, priority_marks
 from lib.status import SQLiteStatusReader, build_status, render
 from tests.test_feeder import (
     GITHUB_ORCH,
@@ -98,7 +98,7 @@ def _enqueue(queue: SQLiteJobQueue, now: list[float], *tickets: str) -> None:
                                  source_comment_id=ticket, timeout_seconds=600), dedupe_key=ticket)
 
 
-def test_a_newer_p0_ticket_takes_a_freed_path_before_an_older_urgent_one(tmp_path: Path) -> None:
+def test_a_newer_p0_ticket_takes_a_freed_path_before_an_older_urgent_p1_one(tmp_path: Path) -> None:
     feeder, _, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=3)
     holder = issue(1, created_at=1.0, body="Touches: lib/x.py")
     github.issues[HOME] = [holder]
@@ -106,7 +106,7 @@ def test_a_newer_p0_ticket_takes_a_freed_path_before_an_older_urgent_one(tmp_pat
     feeder.feed_once()
     github.issues[HOME] = [
         holder,
-        issue(2, labels=(READY, "urgent"), created_at=2.0, body="Touches: lib/x.py"),
+        issue(2, labels=(READY, "urgent", "priority:p1"), created_at=2.0, body="Touches: lib/x.py"),
         issue(3, labels=(READY, "priority:p0"), created_at=3.0, body="Touches: lib/x.py"),
     ]
     assert feeder.feed_once().fed == ()
@@ -142,6 +142,78 @@ def test_linear_priority_sets_the_tier_only_when_the_project_opts_in(
     feeder, _, _, _ = make_feeder(tmp_path, orch=orch, box=1, linear=linear,
                                   factory_text=LINEAR_FACTORY_MD)
     assert [item.ticket_id for item in feeder.feed_once().fed] == [first]
+
+
+def _tiers(queue: SQLiteJobQueue) -> dict[str, tuple[object, object]]:
+    with queue.connect() as connection:
+        return {str(item["issue"]): (item["tier"], item["own_tier"]) for item in feeder_items(connection)}
+
+
+def test_an_urgent_ticket_with_no_tier_ranks_as_tier_zero_in_the_feeder_and_the_claim_order(
+    tmp_path: Path,
+) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=4, now=now)
+    github.issues[HOME] = [
+        issue(1, created_at=1.0),
+        issue(2, labels=(READY, "priority:p1"), created_at=2.0),
+        issue(3, labels=(READY, "priority:p0"), created_at=3.0),
+        issue(4, labels=(READY, "urgent"), created_at=4.0),
+    ]
+    order = ["factory/issue-4", "factory/issue-3", "factory/issue-2", "factory/issue-1"]
+    assert fed_heads(github, feeder.feed_once()) == order
+    assert _tiers(queue) == {"4": (0, 0), "3": (0, 0), "2": (1, 1), "1": (None, None)}
+    pull = {key: row["ticket_id"] for key, row in rows(tmp_path / "orch.db").items()}
+    _enqueue(queue, now, pull["1"], pull["2"], pull["3"], pull["4"])
+    assert _claim_tickets(queue) == [pull["4"], pull["3"], pull["2"], pull["1"]]
+
+
+def test_an_explicit_tier_beats_the_urgent_label(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=2)
+    github.issues[HOME] = [issue(1, labels=(READY, "urgent", "priority:p2"), created_at=1.0),
+                           issue(2, labels=(READY, "priority:p1"), created_at=2.0)]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2", "factory/issue-1"]
+    assert _tiers(queue)["1"] == (2, 2)
+
+
+def test_linear_urgent_priority_is_tier_zero_without_priority_from_linear(tmp_path: Path) -> None:
+    linear = FakeLinear()
+    linear.issues = [linear_issue("AUT-1", priority=2, created_at=1.0),
+                     linear_issue("AUT-2", priority=1, created_at=2.0)]
+    feeder, queue, _, _ = make_feeder(tmp_path, orch=LINEAR_ORCH, box=1, linear=linear,
+                                      factory_text=LINEAR_FACTORY_MD)
+    assert [item.ticket_id for item in feeder.feed_once().fed] == ["AUT-2"]
+    assert _tiers(queue) == {"AUT-2": (0, 0), "AUT-1": (None, None)}
+
+
+def test_a_blocker_takes_the_best_tier_of_the_tickets_it_gates(tmp_path: Path) -> None:
+    """#2 (p1) blocks #3 (p0); #1 is an older, unrelated p1. Inheritance holds
+    with critical_path_order off, so the unblocks count cannot decide it."""
+    lines = TIERS + "      critical_path_order: false\n"
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, lines), box=1)
+    github.statuses = {ref(2): OPEN}
+    github.issues[HOME] = [
+        issue(1, labels=(READY, "priority:p1"), created_at=1.0),
+        issue(2, labels=(READY, "priority:p1"), created_at=2.0),
+        issue(3, labels=(READY, "priority:p0"), created_at=3.0, body="Blocked by: #2"),
+    ]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
+    assert _tiers(queue) == {"2": (0, 1), "3": (0, 0), "1": (1, 1)}
+    pull = rows(tmp_path / "orch.db")["2"]["ticket_id"]
+    with queue.connect() as connection:
+        mark = priority_marks(connection)[(HOME, pull)]
+    assert (mark.tier, mark.own_tier) == (0, 1)
+
+
+def test_a_blocker_cycle_ends_and_both_take_the_better_tier(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=2)
+    github.statuses = {ref(1): OPEN, ref(2): OPEN}
+    github.issues[HOME] = [
+        issue(1, labels=(READY, "priority:p2"), created_at=1.0, body="Blocked by #2"),
+        issue(2, labels=(READY, "priority:p0"), created_at=2.0, body="Blocked by #1"),
+    ]
+    assert feeder.feed_once().fed == ()
+    assert _tiers(queue) == {"1": (0, 2), "2": (0, 0)}
 
 
 
@@ -271,6 +343,50 @@ def test_the_script_draws_the_same_tier_chips(tmp_path: Path) -> None:
     assert out["html"]["lanes"].count(CHIP) == _section(server, "queue").count(CHIP) == 1
 
 
+def _fed_inherited(tmp_path: Path) -> Path:
+    """#1 (p1) blocks #2 (p0); #1 is fed and queued as PR 501 at tier 0."""
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=1, now=now)
+    dispatcher_for(tmp_path, queue)
+    github.statuses = {ref(1): OPEN}
+    github.issues[HOME] = [issue(1, labels=(READY, "priority:p1"), created_at=1.0),
+                           issue(2, labels=(READY, "priority:p0"), created_at=2.0, body="Blocked by #1")]
+    feeder.feed_once()
+    _enqueue(queue, now, "501")
+    return tmp_path / "orch.db"
+
+
+def test_orch_status_names_the_own_tier_of_a_ticket_that_inherited_one(tmp_path: Path) -> None:
+    reader = SQLiteStatusReader(_fed_inherited(tmp_path))
+    text = render(build_status(reader, reader, clock=lambda: 20_000.0,
+                               feeder=reader.feeder(), attention=reader.attention()))
+    assert "  owner/app#1 tier 0 (own 1) fed -> PR #501\n" in text
+    assert "  owner/app#2 tier 0 waiting on #1\n" in text
+
+
+INHERITED = '<span class="chip accent">tier 0 (own 1)</span>'
+
+
+def test_the_dashboard_names_the_own_tier_of_a_ticket_that_inherited_one(tmp_path: Path) -> None:
+    snapshot = collect_snapshot(_fed_inherited(tmp_path), tmp_path / "none.log", now=20_000.0)
+    assert [(item["issue"], item["tier"], item["own_tier"]) for item in snapshot["feeder"]["items"]] == [
+        ("1", 0, 1), ("2", 0, 0)
+    ]
+    assert [(row["ticket_id"], row["tier"], row["own_tier"]) for row in snapshot["queued"]] == [("501", 0, 1)]
+    index = _no_script(render_pages(snapshot)["index.html"])
+    assert _section(index, "intake").count(INHERITED) == 1
+    assert _section(index, "queue").count(INHERITED) == 1
+
+
+@needs_node
+def test_the_script_draws_the_same_inherited_tier_chips(tmp_path: Path) -> None:
+    snapshot = collect_snapshot(_fed_inherited(tmp_path), tmp_path / "none.log", now=20_000.0)
+    out = _run_page(tmp_path, snapshot, "main", ["intake", "lanes"])
+    assert out["html"]["intake"].count(INHERITED) == 1
+    assert out["html"]["lanes"].count(INHERITED) == 1
+
+
+
 # The two tables exactly as they were before issue #258.
 OLD_PRIORITY = """
 CREATE TABLE ticket_priority (
@@ -333,16 +449,16 @@ def test_a_database_from_before_tiers_still_reads_and_then_migrates(tmp_path: Pa
     with sqlite3.connect(db) as connection:
         connection.row_factory = sqlite3.Row
         assert [row["ticket_id"] for row in claim_order(connection, "claude", now=0.0)] == ["8", "7"]
-        assert [(item["issue"], item["tier"], item["unblocks"]) for item in feeder_items(connection)] == [
-            ("8", None, 0)
-        ]
+        assert [(item["issue"], item["tier"], item["own_tier"], item["unblocks"])
+                for item in feeder_items(connection)] == [("8", None, None, 0)]
+        assert priority_marks(connection)[(HOME, "8")].own_tier is None
     SQLiteJobQueue(db, clock=lambda: now[0])
     with sqlite3.connect(db) as connection:
         ensure_tables(connection)
     with sqlite3.connect(db) as connection:
-        assert list(connection.execute("SELECT ticket_id, urgent, tier, unblocks FROM ticket_priority")) == [
-            ("8", 1, None, 0)
-        ]
-        assert list(connection.execute("SELECT issue, urgent, tier, unblocks FROM feeder_items")) == [
-            ("8", 1, None, 0)
+        assert list(connection.execute(
+            "SELECT ticket_id, urgent, tier, own_tier, unblocks FROM ticket_priority"
+        )) == [("8", 1, None, None, 0)]
+        assert list(connection.execute("SELECT issue, urgent, tier, own_tier, unblocks FROM feeder_items")) == [
+            ("8", 1, None, None, 0)
         ]

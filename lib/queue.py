@@ -11,7 +11,9 @@ a ticket marked urgent, then a job resuming a paused step (its detail says
 unblocks more open intake tickets, then the oldest. `ticket_priority` holds
 those marks (the backlog feeder writes them each poll); a database without
 that table orders on resume and age alone, and one without the tier and
-unblocks columns orders as if no ticket had them.
+unblocks columns orders as if no ticket had them. The tier is the ticket's
+effective tier (decision 1050): the best of its own and those of the tickets
+it gates, with an urgent ticket that has no tier at tier 0.
 A queued job on a ticket whose `ticket_state` is abandoned (issue #109) or
 handed-off-externally (issue #749) is never claimed.
 
@@ -73,7 +75,9 @@ SLOTS_TABLE = "device_slots"
 # Urgent and bug marks (issue #85), tier and unblocks (#258) per ticket for
 # the claim order.
 PRIORITY_TABLE = "ticket_priority"
-_PRIORITY_COLUMNS = (("tier", "INTEGER"), ("unblocks", "INTEGER NOT NULL DEFAULT 0"))
+_PRIORITY_COLUMNS = (
+    ("tier", "INTEGER"), ("unblocks", "INTEGER NOT NULL DEFAULT 0"), ("own_tier", "INTEGER")
+)
 SUBMITTED_INVALID = "submitted-invalid"
 PRE_READY_FAILED = "pre-ready-failed"
 PRE_READY_PASSED = "pre-ready-passed"
@@ -752,6 +756,7 @@ def ensure_priority_table(connection: sqlite3.Connection) -> None:
             updated_at REAL NOT NULL,
             tier INTEGER,
             unblocks INTEGER NOT NULL DEFAULT 0,
+            own_tier INTEGER,
             PRIMARY KEY (repo, ticket_id)
         )
         """
@@ -771,18 +776,19 @@ def set_ticket_priority(
     bug: bool,
     at: float,
     tier: int | None = None,
+    own_tier: int | None = None,
     unblocks: int = 0,
 ) -> None:
     """Record a ticket's marks for the claim order."""
     connection.execute(
         f"""
-        INSERT INTO {PRIORITY_TABLE} (repo, ticket_id, urgent, bug, tier, unblocks, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO {PRIORITY_TABLE} (repo, ticket_id, urgent, bug, tier, own_tier, unblocks, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repo, ticket_id) DO UPDATE SET
             urgent = excluded.urgent, bug = excluded.bug, tier = excluded.tier,
-            unblocks = excluded.unblocks, updated_at = excluded.updated_at
+            own_tier = excluded.own_tier, unblocks = excluded.unblocks, updated_at = excluded.updated_at
         """,
-        (repo.lower(), ticket_id, int(urgent), int(bug), tier, unblocks, at),
+        (repo.lower(), ticket_id, int(urgent), int(bug), tier, own_tier, unblocks, at),
     )
 
 
@@ -792,6 +798,7 @@ class PriorityMark:
     bug: bool = False
     tier: int | None = None
     unblocks: int = 0
+    own_tier: int | None = None
 
 
 def priority_marks(connection: sqlite3.Connection) -> dict[tuple[str, str], PriorityMark]:
@@ -801,13 +808,15 @@ def priority_marks(connection: sqlite3.Connection) -> dict[tuple[str, str], Prio
         return {}
     present = _columns(connection, PRIORITY_TABLE)
     tier = "tier" if "tier" in present else "NULL"
+    own_tier = "own_tier" if "own_tier" in present else "NULL"
     unblocks = "unblocks" if "unblocks" in present else "0"
     return {
         (str(repo), str(ticket_id)): PriorityMark(
-            bool(urgent), bool(bug), None if level is None else int(level), int(count)
+            bool(urgent), bool(bug), None if level is None else int(level), int(count),
+            None if own is None else int(own),
         )
-        for repo, ticket_id, urgent, bug, level, count in connection.execute(
-            f"SELECT repo, ticket_id, urgent, bug, {tier}, {unblocks} FROM {PRIORITY_TABLE}"
+        for repo, ticket_id, urgent, bug, level, count, own in connection.execute(
+            f"SELECT repo, ticket_id, urgent, bug, {tier}, {unblocks}, {own_tier} FROM {PRIORITY_TABLE}"
         )
     }
 

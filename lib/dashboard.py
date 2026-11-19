@@ -1799,7 +1799,7 @@ def _read_db(
                 age = _age(now, row["last_activity_at"]) or 0
                 mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
                 item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age,
-                        "tier": mark.tier}
+                        "tier": mark.tier, "own_tier": mark.own_tier}
                 queued.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
             # Stuck / overdue: past the timeout, or (#75) a running job whose
@@ -2050,6 +2050,7 @@ def _read_db(
                     "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
                     "fed_age_seconds": _age(now, item["fed_at"]),
                     "tier": None if item["tier"] is None else int(item["tier"]),
+                    "own_tier": None if item["own_tier"] is None else int(item["own_tier"]),
                 }
                 for item in items
             ],
