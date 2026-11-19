@@ -905,8 +905,6 @@ class GitHubReviewActions:
         )
 
     def rerun_failed_jobs(self, repo: str, run_ids: Sequence[str]) -> RerunOutcome:
-        """GitHub refuses a rerun while any workflow run of the commit is in
-        progress, so "running" asks the caller to try again on a later poll."""
         if not all(run_id.isdigit() for run_id in run_ids):
             raise GitHubAdapterError("Actions run id is not a number")
         if not all(self._run_completed(repo, run_id) for run_id in run_ids):

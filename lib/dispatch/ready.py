@@ -477,7 +477,7 @@ class ReadyMixin:
                         return None
                     outcome = "requested"
                 except Exception as exc:
-                    outcome, detail, why = "refused", *_refusal(exc)
+                    outcome, detail, why = "refused", *_safe_refusal(exc)
         if not rerun or outcome != "requested":
             logs = self._failed_job_logs(ticket.repo, result)
             result = classify_logged(
@@ -1341,10 +1341,7 @@ def _at_base(ticket: TrackedTicket, head: str) -> bool:
     return ticket.pr_commits == 0 and _matching_head(head, ticket.current_head) is not None
 
 
-def _refusal(exc: Exception) -> tuple[str, str]:
-    """The ci_reruns detail and the needs-attention suffix for a refused
-    rerun. Only an adapter error's safe fields are kept: any other error's
-    message may hold whatever gh printed."""
+def _safe_refusal(exc: Exception) -> tuple[str, str]:
     status = getattr(exc, "http_status", None)
     message = getattr(exc, "api_message", None) or getattr(exc, "safe_detail", None)
     http = f"HTTP {status}" if status is not None else ""
