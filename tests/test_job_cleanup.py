@@ -532,19 +532,114 @@ NON_DUMPABLE = (
 )
 
 
+def add_process(proc: Path, pid: str, parent: str, cwd: Path | None, *, name: str = "p",
+                uid: int | None = None) -> Path:
+    uid = os.getuid() if uid is None else uid
+    process = proc / pid
+    (process / "fd").mkdir(parents=True)
+    (process / "cwd").symlink_to(cwd or proc)
+    (process / "status").write_text(f"Name:\t{name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nVmSize:\t1 kB\n")
+    (process / "stat").write_text(f"{pid} ({name}) S {parent} 1 1 0\n")
+    if cwd is None:
+        (process / "fd").chmod(0)
+    return process
+
+
 def fake_proc(tmp_path: Path, processes: dict[str, tuple[str, Path | None]]) -> Path:
     proc = tmp_path / "proc"
-    uid = os.getuid()
     for pid, (parent, cwd) in processes.items():
-        process = proc / pid
-        (process / "fd").mkdir(parents=True)
-        (process / "cwd").symlink_to(cwd or tmp_path)
-        (process / "status").write_text(f"Name:\tp\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nVmSize:\t1 kB\n")
-        (process / "stat").write_text(f"{pid} (p) S {parent} 1 1 0\n")
-        if cwd is None:
-            (process / "fd").chmod(0)
+        add_process(proc, pid, parent, cwd)
     (proc / "self").symlink_to(proc / "1")
     return proc
+
+
+ROOT_UID = 0 if os.getuid() else 1
+
+
+def roots_init(tmp_path: Path) -> Path:
+    proc = tmp_path / "proc"
+    add_process(proc, "1", "0", tmp_path, name="systemd", uid=ROOT_UID)
+    (proc / "self").symlink_to(proc / "1")
+    return proc
+
+
+def hidden_cwd(monkeypatch: pytest.MonkeyPatch, proc: Path) -> None:
+    real_readlink = os.readlink
+
+    def readlink(path, *args, **kwargs):
+        link = Path(path)
+        if link.name == "cwd" and not os.access(link.parent / "fd", os.R_OK):
+            raise PermissionError("non-dumpable")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", readlink)
+    monkeypatch.setattr(job_cleanup, "PROC", proc)
+    monkeypatch.setattr(job_cleanup, "runner_locks", lambda: True)
+
+
+def unhide(proc: Path) -> None:
+    for fd in proc.glob("*/fd"):
+        fd.chmod(0o700)
+
+
+def test_a_hidden_orphan_of_roots_init_keeps_every_folder_through_hold_and_finish(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = work_root(tmp_path)
+    for job_id in ("held", "free"):
+        job_folder(root, job_id)
+    jobs = root / "jobs"
+    proc = roots_init(tmp_path)
+    hidden_cwd(monkeypatch, proc)
+    named = frozenset({"held", "free"})
+    try:
+        add_process(proc, "11", "1", jobs / "held" / "repo")
+        (proc / "11" / "fd").chmod(0)
+        if os.access(proc / "11" / "fd", os.R_OK):
+            pytest.skip("this user can read a directory with no permissions (root)")
+        hold = job_cleanup.device_step(root, Plan(named, NOW - 6 * HOUR, False))
+        assert hold.held == () and hold.kept == {"held": "held-open", "free": "held-open"}
+
+        unhide(proc)
+        shutil.rmtree(proc / "11")
+        hold = job_cleanup.device_step(root, Plan(named, NOW - 6 * HOUR, False))
+        assert hold.held == ("free", "held")
+        add_process(proc, "11", "1", jobs / "held.cleanup" / "repo")
+        (proc / "11" / "fd").chmod(0)
+        done = job_cleanup.device_step(
+            root, Plan(frozenset(hold.held), NOW - 6 * HOUR, False, job_cleanup.FINISH))
+    finally:
+        unhide(proc)
+
+    assert done.removed == {} and done.kept == {"held": "held-open", "free": "held-open"}
+    assert (jobs / "held" / "repo" / "README").exists()
+    assert (jobs / "free" / "repo" / "README").exists()
+
+
+@pytest.mark.parametrize("session", ["sshd", "sshd-session"])
+def test_the_ssh_session_running_cleanup_does_not_hold_every_folder(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str) -> None:
+    root = work_root(tmp_path)
+    for job_id in ("held", "free"):
+        job_folder(root, job_id)
+    jobs = root / "jobs"
+    proc = roots_init(tmp_path)
+    add_process(proc, "5", "1", tmp_path, name="sshd", uid=ROOT_UID)
+    add_process(proc, "20", "5", None, name=session)
+    add_process(proc, "21", "20", tmp_path, name="sh")
+    add_process(proc, "22", "21", jobs / "held" / "repo", name="python3")
+    add_process(proc, "30", "1", None, name="systemd")
+    add_process(proc, "31", "30", None, name="(sd-pam)")
+    hidden_cwd(monkeypatch, proc)
+    try:
+        if os.access(proc / "20" / "fd", os.R_OK):
+            pytest.skip("this user can read a directory with no permissions (root)")
+        assert job_cleanup.jobs_held_open(jobs) == {"held"}
+        report = device_pass(root, Plan(frozenset({"held", "free"}), NOW - 6 * HOUR, False))
+    finally:
+        unhide(proc)
+
+    assert set(report.removed) == {"free"} and report.kept == {"held": "held-open"}
+    assert (jobs / "held" / "repo" / "README").exists()
 
 
 def test_a_hidden_process_keeps_every_folder_and_does_not_stop_the_scan(
