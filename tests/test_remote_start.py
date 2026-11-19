@@ -22,10 +22,11 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_monitor, exposure, job_run, live_settings, process_tree, remote
+from lib import device_monitor, exposure, job_run, live_settings, process_tree, remote, telemetry
 from lib.device_monitor import DeviceMonitor, remote_target, stranded
 from lib.device_pool import DevicePool
 from lib.dispatcher import Dispatcher
+from lib.harness_env import account_tokens, harness_env
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import WaitError, deliver, wait_for_job
@@ -3089,6 +3090,113 @@ def _token_target(tmp_path: Path) -> remote.RemoteTarget:
         job_id="abc123",
         tag=uuid.uuid4().hex,
     )
+
+
+ACCOUNT_HOME_VARIABLE = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+ACCOUNT_TOKENS = {
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+}
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param("export {name}={value}", id="export"),
+        pytest.param(
+            "declare -nrx {name}={value}",
+            id="nameref",
+            marks=pytest.mark.skipif(not _BASH_HAS_NAMEREFS, reason="this bash has no name references"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("harness", sorted(ACCOUNT_TOKENS))
+def test_an_account_start_runs_from_its_home_and_never_passes_an_account_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str, declare: str
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    account_home = str(home / ".factory-accounts" / f"{harness}-a")
+    sentinel = f"sk_SYNTHETIC_{uuid.uuid4().hex}"
+    for name in ACCOUNT_TOKENS[harness]:
+        monkeypatch.setenv(name, sentinel)
+    (home / ".bash_profile").write_text(
+        "".join(declare.format(name=name, value=sentinel) + "\n" for name in ACCOUNT_TOKENS[harness]),
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    dump = f"import json, os\njson.dump(dict(os.environ), open({str(report)!r}, 'w'))\n"
+    target = _token_target(tmp_path)
+    script = remote.start_script(
+        target,
+        [sys.executable, "-c", dump],
+        harness_env(harness, account_home),
+        unset=account_tokens(harness, account_home),
+        report_env=True,
+    )
+    argv = remote.ssh_argv(target, script)
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=30,
+        env={**os.environ, **ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    assert seen[ACCOUNT_HOME_VARIABLE[harness]] == account_home
+    assert not set(ACCOUNT_TOKENS[harness]) & set(seen)
+    [line] = [line for line in result.stdout.splitlines() if line.startswith(remote.WORKER_ENV_MARK)]
+    reported = telemetry.worker_environ(line.encode())
+    assert reported is not None
+    assert reported[ACCOUNT_HOME_VARIABLE[harness]] == account_home
+    assert sentinel not in script
+    assert sentinel not in " ".join(argv)
+    assert sentinel not in result.stderr
+    assert sentinel not in result.stdout + "".join(reported.values())
+
+
+@pytest.mark.parametrize(
+    ("harness", "name"), [(harness, name) for harness, names in ACCOUNT_TOKENS.items() for name in names]
+)
+def test_an_account_start_refuses_when_a_profile_account_token_cannot_be_dropped(
+    tmp_path: Path, harness: str, name: str
+) -> None:
+    ssh = Ssh(tmp_path)
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(f"export {name}=profile-sentinel; readonly {name}\n", encoding="utf-8")
+    account_home = str(home / ".factory-accounts" / f"{harness}-a")
+    ran = tmp_path / "ran"
+    target = _token_target(tmp_path)
+    script = remote.start_script(
+        target,
+        [sys.executable, "-c", f"open({str(ran)!r}, 'w')"],
+        harness_env(harness, account_home),
+        unset=account_tokens(harness, account_home),
+    )
+    result = subprocess.run(
+        remote.ssh_argv(target, script), capture_output=True, text=True, timeout=30,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert result.returncode == remote.START_REFUSED, result.stderr
+    assert not ran.exists()
+
+
+@pytest.mark.parametrize(
+    ("env", "unset"),
+    [
+        pytest.param({"OPENAI_API_KEY": "x"}, ("OPENAI_API_KEY",), id="set-and-unset"),
+        pytest.param({}, ("openai_api_key",), id="lowercase"),
+        pytest.param({}, ("OPENAI-API-KEY",), id="dash"),
+        pytest.param({}, ("A B",), id="space"),
+        pytest.param({}, ("$(touch pwn)",), id="substitution"),
+        pytest.param({}, ("",), id="empty"),
+    ],
+)
+def test_a_start_refuses_an_unset_name_that_is_not_plain_or_is_also_set(
+    tmp_path: Path, env: dict[str, str], unset: tuple[str, ...]
+) -> None:
+    with pytest.raises(remote.RemoteError):
+        remote.start_script(_token_target(tmp_path), ["codex"], env, unset=unset)
 
 
 def test_remote_start_runs_a_harness_whose_path_holds_an_equals_sign(tmp_path: Path) -> None:

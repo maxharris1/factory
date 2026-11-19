@@ -10,7 +10,7 @@ import pytest
 
 from lib import github_app_token as broker
 from lib.brief.rules import SECRET_RULE, rules
-from lib.harness_env import harness_environ
+from lib.harness_env import account_tokens, harness_env, harness_environ
 from lib.queue import SQLiteJobQueue
 from lib.waiter import HarnessCommand, Waiter
 from tests.test_approver_credential import approvals_for
@@ -86,3 +86,36 @@ def test_the_brief_and_the_grok_skill_state_one_secret_rule() -> None:
     lines = GROK_SKILL.read_text(encoding="utf-8").splitlines()
     assert f"- {SECRET_RULE}" in lines
     assert [line for line in lines if "credentials" in line and "Never read" in line] == [f"- {SECRET_RULE}"]
+
+
+ACCOUNT_HOME = "/home/claude-bot/.factory-accounts/acct-a"
+
+
+@pytest.mark.parametrize(
+    ("harness", "env", "tokens"),
+    [
+        (
+            "claude",
+            {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0", "CLAUDE_CONFIG_DIR": ACCOUNT_HOME},
+            ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+        ),
+        ("codex", {"CODEX_HOME": ACCOUNT_HOME}, ("OPENAI_API_KEY", "CODEX_API_KEY")),
+    ],
+)
+def test_an_account_home_names_its_folder_and_the_tokens_to_drop(
+    harness: str, env: dict[str, str], tokens: tuple[str, ...]
+) -> None:
+    assert harness_env(harness, ACCOUNT_HOME) == env
+    assert account_tokens(harness, ACCOUNT_HOME) == tokens
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "cursor"])
+def test_without_a_home_nothing_is_dropped(harness: str) -> None:
+    assert account_tokens(harness) == ()
+
+
+def test_a_home_for_a_harness_without_account_isolation_is_refused() -> None:
+    with pytest.raises(ValueError):
+        harness_env("cursor", ACCOUNT_HOME)
+    with pytest.raises(ValueError):
+        account_tokens("cursor", ACCOUNT_HOME)

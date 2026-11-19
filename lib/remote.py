@@ -209,7 +209,6 @@ START_REFUSED = 125
 # job's and the worker's environment values to stderr, so the start turns it
 # off first.
 _UNTRACE = "set +xvT; trap - DEBUG; "
-_DROP_PROFILE_TOKENS = f"unset {' '.join(TOKEN_VARIABLES)} || exit {START_REFUSED}; "
 _REPORT_ENV = (
     f'printf "%s " {WORKER_ENV_MARK}; '
     'names=$(compgen -e) && { for n in $names; do printf "%s=%s\\0" "$n" "${!n}"; done; '
@@ -649,6 +648,7 @@ def start_script(
     cd: str | None = None,
     report_env: bool = False,
     env_file: str | None = None,
+    unset: Sequence[str] = (),
 ) -> str:
     """The remote script that runs command as the job's tagged worker.
 
@@ -658,7 +658,9 @@ def start_script(
     directory the command resolves it against, itself relative to the job
     directory) when one is given. With none, the command runs as given.
     With report_env, the start first prints the WORKER_ENV_MARK line, or
-    writes it to env_file (mode 600) when one is given.
+    writes it to env_file (mode 600) when one is given. Each name in unset
+    is dropped after the profile, as TOKEN_VARIABLES are; one the profile
+    cannot drop refuses the start.
     """
     tag = target.require_tag()
     if not command:
@@ -668,6 +670,10 @@ def start_script(
     for name in env:
         if not _ENV_NAME.fullmatch(name) or name == TAG_ENV:
             raise RemoteError(f"environment name {name!r} is not plain")
+    for name in unset:
+        if not _ENV_NAME.fullmatch(name) or name in env:
+            raise RemoteError(f"cannot drop environment name {name!r}")
+    dropped = (*TOKEN_VARIABLES, *unset)
     assignments = [f"{name}={shlex.quote(value)}" for name, value in sorted(env.items())]
     assignments += ['ORCH_JOB_WORKDIR="$d"', f"{TAG_ENV}={tag}"]
     count = len(assignments)
@@ -689,7 +695,7 @@ def start_script(
     script = (
         ("exec 1>&3 3>&-; " if report_env else "")
         + f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; shift; '
-        + _DROP_PROFILE_TOKENS
+        + f"unset {' '.join(dropped)} || exit {START_REFUSED}; "
         + f'export "${{@:1:{count}}}" || exit {START_REFUSED}; '
         + f'set -- "${{@:{count + 1}}}" "${{@:1:{count}}}"; '
         + (_GUARD_DIRS if guarded_dirs else "")
@@ -698,7 +704,7 @@ def start_script(
         + f"echo {tag} > {shlex.quote(launch_record(target))} || exit {START_REFUSED}; "
         + (_report_env(env_file) if report_env else "")
         + "exec /usr/bin/env "
-        + "".join(f"-u {name} " for name in TOKEN_VARIABLES)
+        + "".join(f"-u {name} " for name in dropped)
         + f'"${{@: -{count}}}" /bin/sh -c \'exec "$@"\' sh "${{@:1:$#-{count}}}"'
     )
     login = (
