@@ -186,22 +186,45 @@ class JobsMixin:
                 "SELECT 1 FROM jobs WHERE lower(repo) = ? AND ticket_id = ? AND state = 'running'",
                 (repo, ticket_id),
             ).fetchone()
-            return may_hand_off(state, stuck, paused, running is not None) and write_workflow_state(
-                connection,
-                repo,
-                ticket_id,
-                "handed-off",
-                source="answers-handoff",
-                at=self.queue.now(),
-                also=SETTLE_CLEARS,
-                guard="workflow_state = ? AND stuck = ? AND paused_action IS ?",
-                guard_args=(state, int(stuck), paused),
-            )
+            if not (
+                may_hand_off(state, stuck, paused, running is not None)
+                and write_workflow_state(
+                    connection,
+                    repo,
+                    ticket_id,
+                    "handed-off",
+                    source="answers-handoff",
+                    at=self.queue.now(),
+                    also=SETTLE_CLEARS,
+                    guard="workflow_state = ? AND stuck = ? AND paused_action IS ?",
+                    guard_args=(state, int(stuck), paused),
+                )
+            ):
+                return False
+            self._settle_unhandled_failures(connection, repo, ticket_id)
+            return True
 
         if not self._settle(repo, ticket_id, "handed-off", settle):
             return "rejected-handoff-state"
         self._write_state_label(ticket, "handed-off")
         return "handed-off"
+
+    def _settle_unhandled_failures(
+        self, connection: sqlite3.Connection, repo: str, ticket_id: str
+    ) -> None:
+        """#891: a job that failed before T6 read it gets no retry behind a hand-off."""
+        now = self.queue.now()
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE lower(repo) = ? AND ticket_id = ?"
+            " AND state = 'failed' AND failure_handled = 0",
+            (repo, ticket_id),
+        ).fetchall()
+        for row in rows:
+            job = _job(row, connection)
+            connection.execute("UPDATE jobs SET failure_handled = 1 WHERE id = ?", (job.id,))
+            self._record_job_event(
+                connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
+            )
 
     def _busy_recipients(self) -> frozenset[str]:
         """#18: harnesses whose every schedulable slot is in use.

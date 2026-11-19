@@ -164,6 +164,33 @@ def test_a_hand_off_is_refused_while_a_job_runs(tmp_path: Path, ends: str) -> No
     assert workflow_state(queue) == "awaiting-ok"
 
 
+@pytest.mark.parametrize("read", ["poll", "process-then-reconcile"])
+def test_a_hand_off_settles_a_job_that_failed_before_t6_saw_it(tmp_path: Path, read: str) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="awaiting-ok")
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+                           "VALUES ('owner/repo', '42', 'github', 0)")
+    queue.enqueue(JobRequest(repo="owner/repo", ticket_id="42", action="fix", recipient="claude",
+                             source_comment_id="approve-1", timeout_seconds=5400),
+                  dedupe_key="held-fix")
+    running = queue.claim("claude")
+    assert running is not None
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
+
+    current = ticket(comment("handoff-1", HANDOFF, author="maxharris1", created_at=9))
+    if read == "poll":
+        dispatcher.poll_once(FakeSource(current))
+    else:
+        dispatcher.process(current)
+        dispatcher.reconcile_jobs()
+
+    assert (workflow_state(queue), handled_outcome(queue, "handoff-1")) == ("handed-off", "handed-off")
+    assert [(job["state"], job["attempt"], job["failure_handled"]) for job in jobs_of(queue, "fix")] == [
+        ("failed", 1, 1)]
+    assert queue.claim("claude") is None
+
+
 def test_the_first_questions_before_go_are_not_handed_off(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     brief = comment("brief-1", BRIEF, author="grok-login", created_at=1)
