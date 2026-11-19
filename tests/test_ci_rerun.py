@@ -14,7 +14,13 @@ from lib.github_actions import GitHubAdapterError, GitHubReviewActions, GhResult
 from lib.queue import SQLiteJobQueue
 from lib.update_check import RebaseScope
 from tests.merge_queue_support import PR, Board, sha
-from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
+from tests.test_dispatcher import (
+    READY,
+    RETRY,
+    TRUSTED_LOGINS,
+    FakeGrokDelivery,
+    FakeReviewActions,
+)
 from tests.test_hold_merge_queue import APPROVER
 
 RUN = "777"
@@ -514,6 +520,65 @@ def test_an_unannounced_green_head_past_the_cap_flags_and_wakes_once(tmp_path: P
     assert len(rows) == 1
     assert sha(2)[:12] in rows[0]["detail"]
     assert len(board.wakes("capped")) == 1
+
+
+def test_an_unannounced_green_head_after_the_build_queues_the_first_review(
+    tmp_path: Path,
+) -> None:
+    board, pr = built(tmp_path)
+    board.poll()
+    assert board.jobs("review") == []
+
+    pr.push(sha(2))
+    board.poll()
+
+    reviews = board.jobs("review")
+    assert [job["head"] for job in reviews] == [sha(2)]
+    assert json.loads(reviews[0]["detail"])["round"] == "1/3"
+    assert board.state("42")["workflow_state"] == "review"
+
+
+def test_a_failed_state_write_after_the_unannounced_review_is_retried(tmp_path: Path) -> None:
+    board, pr, _ready = fixing(tmp_path)
+    pr.push(sha(2))
+    set_state = board.actions.set_state
+    failed: list[str] = []
+
+    def flaky(ticket, state: str) -> None:
+        if state == "review" and not failed:
+            failed.append(state)
+            raise RuntimeError("transient tracker failure")
+        set_state(ticket, state)
+
+    board.actions.set_state = flaky
+    board.poll()
+    assert failed == ["review"]
+    board.poll()
+    assert board.state("42")["workflow_state"] == "review"
+
+    board.finish("codex")
+    verdict = board.revise(pr, "2/3")
+    board.poll()
+    assert board.outcome(verdict) == "queued-review-fix"
+    assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
+
+
+def test_an_untrusted_ready_naming_the_head_does_not_hold_its_review(tmp_path: Path) -> None:
+    board, pr, _ready = fixing(tmp_path)
+    pr.push(sha(2))
+    board.post(pr, "outsider-ready", READY.format(head=pr.head), "outsider-login")
+    with board.queue.connect() as connection:
+        connection.execute("UPDATE ticket_state SET stuck = 1 WHERE ticket_id = '42'")
+    stopped_poll(board)
+    assert [job["head"] for job in board.jobs("review")] == [sha(1)]
+
+    board.post(pr, "retry", RETRY.format(reason="Runner restored."), "grok-login")
+    stopped_poll(board)
+    assert board.state("42")["stuck"] == 0
+    board.finish("claude")
+    board.poll()
+
+    assert [job["head"] for job in board.jobs("review")] == [sha(1), sha(2)]
 
 
 def before_ci(tmp_path: Path) -> tuple[RerunBoard, PR]:

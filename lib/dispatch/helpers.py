@@ -216,13 +216,17 @@ def _detail_round_number(detail: str | None) -> int | None:
 
 def _detail_round(detail: str | None) -> str | None:
     """The round field a job's detail JSON carries ("N/CAP")."""
+    return _detail_field(detail, "round")
+
+
+def _detail_field(detail: str | None, name: str) -> str | None:
     if not detail:
         return None
     try:
         context = json.loads(detail)
     except ValueError:
         return None
-    value = context.get("round") if isinstance(context, dict) else None
+    value = context.get(name) if isinstance(context, dict) else None
     return value if isinstance(value, str) else None
 
 

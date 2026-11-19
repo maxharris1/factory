@@ -683,6 +683,8 @@ class DetailMixin:
             context["instruction"] = instruction
         if source is not None:
             context["source"] = source
+        if action == "build" and ticket.current_head is not None:
+            context["start_head"] = ticket.current_head
         if action in ("plan", "build") and ticket.brief_text:
             context.update(brief_text=ticket.brief_text, brief_url=ticket.brief_url)
         if plan_text is not None:

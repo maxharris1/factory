@@ -24,6 +24,7 @@ from lib.dispatch.helpers import (
     _answering_outcome,
     _comment_link,
     _comment_order,
+    _detail_field,
     _detail_project_bot,
     _detail_round_number,
     _has_questions,
@@ -46,6 +47,7 @@ _CI_RED_READY = frozenset({"queued-ci-fix", "ci-red-in-flight"})
 _RERUN_STATES = (None, "building", "fixing", "review")
 _AFTER_BUILD_STATES = frozenset({"review", "fixing", "awaiting-ok", "handed-off", "merge-queue"})
 _UNANNOUNCED_GREEN_STATES = frozenset({"building", "fixing", "review"})
+_UNANNOUNCED_GREEN_SOURCE = "unannounced-green-head"
 _CI_LOG_READS = 64
 
 
@@ -432,6 +434,8 @@ class ReadyMixin:
                 continue
             if fields["kind"] not in kinds or _matching_head(fields.get("head", ""), head) is None:
                 continue
+            if not self._trusted_session(ticket, comment, fields):
+                continue
             outcome = self._handled_outcome(ticket, comment.id)
             if outcome is None or not outcome.startswith("rejected-"):
                 return True
@@ -564,8 +568,7 @@ class ReadyMixin:
         if head is None or result is None or result.status != "success":
             return
         state, completed = self._review_context(ticket)
-        builder_owns_first_review = completed == 0
-        if state not in _UNANNOUNCED_GREEN_STATES or builder_owns_first_review:
+        if state not in _UNANNOUNCED_GREEN_STATES:
             return
         if self._is_stuck(ticket) or self._names_head(ticket, head, ("ready", "verdict")):
             return
@@ -578,16 +581,34 @@ class ReadyMixin:
                 """,
                 key,
             ).fetchone()
-            reviewed = connection.execute(
+            jobs = connection.execute(
                 """
-                SELECT head FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                SELECT action, head, state, detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action IN ('build', 'review')
                 """,
                 key,
             ).fetchall()
-            if held or _harness_job_active(connection, key):
-                return
-        if any(_matching_head(str(row["head"] or ""), head) for row in reviewed):
+            active = _harness_job_active(connection, key)
+        if held:
+            return
+        reviews = [
+            row
+            for row in jobs
+            if row["action"] == "review" and _matching_head(str(row["head"] or ""), head)
+        ]
+        if reviews:
+            if state != "review" and any(
+                row["state"] in ("queued", "running")
+                and _detail_field(row["detail"], "source") == _UNANNOUNCED_GREEN_SOURCE
+                for row in reviews
+            ):
+                self._set_workflow_state(ticket, "review")
+            return
+        if active or any(
+            row["action"] == "build"
+            and _matching_head(str(_detail_field(row["detail"], "start_head") or ""), head)
+            for row in jobs
+        ):
             return
         if self._open_job_at(ticket, head):
             return
@@ -625,7 +646,7 @@ class ReadyMixin:
                 source,
                 head=head,
                 generation=self._generation(ticket.repo, ticket.ticket_id),
-                source="unannounced-green-head",
+                source=_UNANNOUNCED_GREEN_SOURCE,
             )
             self._set_workflow_state(ticket, "review")
             outcome = f"review round {review_round} queued"
