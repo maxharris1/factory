@@ -665,16 +665,68 @@ def test_the_map_is_read_where_the_verify_skill_lives_at_the_base(tmp_path: Path
     github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
     report = feeder.feed_once()
     assert len(report.fed) == 1 and report.refused == 0
-    assert github.tree_reads == [(HOME, BASE_SHA)]
+    assert github.tree_reads == [(HOME, BASE_SHA, "")]
     assert github.dir_reads == [(HOME, f"{skill}/features", BASE_SHA)]
 
 
-def test_a_truncated_tree_finds_the_verify_skill_in_a_known_skill_folder(tmp_path: Path) -> None:
+NESTED = "apps/web/.cursor/skills/verify-app"
+
+
+def truncated_monorepo(tmp_path: Path):
+    feeder, github = map_feeder(tmp_path, skill=NESTED)
+    github.trees[HOME] = (("README.md",), True)
+    github.dirs[(HOME, "")] = ("README.md", "apps/", "docs/")
+    github.trees[(HOME, "apps")] = (("web/package.json",), True)
+    github.dirs[(HOME, "apps")] = ("web/",)
+    github.trees[(HOME, "apps/web")] = (
+        ("package.json", ".cursor/skills/verify-app/SKILL.md", ".cursor/skills/verify-app/features/search.md"),
+        False,
+    )
+    return feeder, github
+
+
+def test_a_truncated_tree_is_walked_to_a_nested_verify_skill(tmp_path: Path) -> None:
+    feeder, github = truncated_monorepo(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    report = feeder.feed_once()
+    assert len(report.fed) == 1 and report.refused == 0
+    assert github.dir_reads[-1] == (HOME, f"{NESTED}/features", BASE_SHA)
+
+
+def test_a_walked_map_refuses_a_new_id_it_already_has(tmp_path: Path) -> None:
+    feeder, github = truncated_monorepo(tmp_path)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("new:search"))]
+    report = feeder.feed_once()
+    assert report.fed == () and report.refused == 1
+    assert json.loads(wakes(tmp_path)[0]["detail"])["defects"] == ["features-exists"]
+
+
+def test_a_truncated_tree_finds_a_skill_folder_too_big_to_read_whole(tmp_path: Path) -> None:
     feeder, github = map_feeder(tmp_path, skill=".cursor/skills/verify-app")
     github.trees[HOME] = (("README.md",), True)
-    github.dirs[(HOME, ".cursor/skills/verify-app")] = ("SKILL.md",)
+    github.dirs[(HOME, "")] = ("README.md", ".cursor/")
+    github.trees[(HOME, ".cursor")] = ((), True)
+    github.dirs[(HOME, ".cursor")] = ("skills/",)
+    github.trees[(HOME, ".cursor/skills")] = ((), True)
+    github.dirs[(HOME, ".cursor/skills")] = ("verify-app/",)
+    github.trees[(HOME, ".cursor/skills/verify-app")] = ((), True)
+    github.dirs[(HOME, ".cursor/skills/verify-app")] = ("SKILL.md", "features/")
     github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
     assert len(feeder.feed_once().fed) == 1
+
+
+def test_a_skill_the_walk_cannot_reach_leaves_the_ticket_eligible(tmp_path: Path) -> None:
+    feeder, github = map_feeder(tmp_path, skill=NESTED)
+    github.trees[HOME] = (("README.md",), True)
+    github.dirs[(HOME, "")] = tuple(f"pkg{n}/" for n in range(500))
+    for n in range(500):
+        github.trees[(HOME, f"pkg{n}")] = ((), True)
+    github.issues[HOME] = [issue(7, template=False, body=journey_ticket("search"))]
+    report = feeder.feed_once()
+    assert report.fed == () and report.refused == 0 and report.errors == 1
+    assert nothing_written(github)
+    assert rows(tmp_path / "orch.db")["7"]["state"] == "eligible"
+    assert wakes(tmp_path) == [] and flags(tmp_path) == set()
 
 
 def test_a_verify_skill_missing_at_the_base_has_an_empty_map(tmp_path: Path) -> None:

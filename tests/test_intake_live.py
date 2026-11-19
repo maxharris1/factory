@@ -75,6 +75,18 @@ def test_tree_paths_lists_the_files_at_a_sha() -> None:
     assert GitHubIntakeClient(gh).tree_paths("owner/app", sha) == ((".cursor/skills/verify-app/SKILL.md",), False)
 
 
+def test_tree_paths_reads_one_folder_relative_to_it() -> None:
+    gh = RecordedGh()
+    sha = "a" * 40
+    gh.route((f"{REPO}/git/trees/{sha}:apps/web?recursive=1",), ok({"truncated": False, "tree": [
+        {"path": ".cursor/skills/verify-app", "type": "tree"},
+        {"path": ".cursor/skills/verify-app/SKILL.md", "type": "blob"},
+    ]}))
+    assert GitHubIntakeClient(gh).tree_paths("owner/app", sha, "apps/web") == (
+        (".cursor/skills/verify-app/SKILL.md",), False,
+    )
+
+
 def test_tree_paths_says_when_the_tree_is_truncated() -> None:
     gh = RecordedGh()
     sha = "a" * 40
@@ -106,7 +118,7 @@ def test_dir_names_lists_one_folder_at_a_sha() -> None:
         {"name": "search.md", "type": "file"},
         {"name": "drafts", "type": "dir"},
     ]))
-    assert GitHubIntakeClient(gh).dir_names("owner/app", FEATURES, sha) == ("README.md", "search.md")
+    assert GitHubIntakeClient(gh).dir_names("owner/app", FEATURES, sha) == ("README.md", "search.md", "drafts/")
 
 
 def test_dir_names_is_empty_for_a_missing_folder() -> None:

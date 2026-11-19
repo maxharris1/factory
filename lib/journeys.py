@@ -86,9 +86,6 @@ def problems(
     return found
 
 
-SKILL_ROOTS = (".claude/skills", ".cursor/skills", ".agents/skills", ".codex/skills")
-
-
 def skill_dir(paths: Iterable[str], verify: str) -> str | None:
     tail = f"/{verify}/SKILL.md"
     found = min((path for path in paths if path.endswith(tail)), default=None)

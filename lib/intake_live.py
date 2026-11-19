@@ -20,10 +20,12 @@ Reads:
   state (assigned to a listed user, for a project with linear_assignees),
   every page of them, and for each, who moved it there: the actor of the
   latest history entry whose toState is that state;
-* tree_paths: every file path at a commit (one recursive `git/trees` read)
-  and whether GitHub truncated it, to find the verify skill (#1029);
-* dir_names: the file names in one repo folder at a commit (`contents/`),
-  for the feature map check (#1029).
+* tree_paths: every file path at a commit, or under one folder of it
+  (one recursive `git/trees` read of `<sha>` or `<sha>:<folder>`), and
+  whether GitHub truncated it, to find the verify skill (#1029);
+* dir_names: the file names, and the subfolder names with a trailing `/`,
+  in one repo folder at a commit (`contents/`), for the feature map check
+  and the truncated tree walk (#1029).
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -312,10 +314,11 @@ class GitHubIntakeClient(GitHubReviewActions):
             raise GitHubAdapterError(f"ref heads/{branch} has no commit sha")
         return sha
 
-    def tree_paths(self, repo: str, sha: str) -> tuple[tuple[str, ...], bool]:
+    def tree_paths(self, repo: str, sha: str, path: str = "") -> tuple[tuple[str, ...], bool]:
         if not _SHA.fullmatch(sha):
             raise GitHubAdapterError("tree read sha is not a full sha")
-        tree = self._json(f"{_repo_path(repo)}/git/trees/{sha}?recursive=1")
+        tree_ish = f"{sha}:{quote(path)}" if path else sha
+        tree = self._json(f"{_repo_path(repo)}/git/trees/{tree_ish}?recursive=1")
         entries = tree.get("tree") if isinstance(tree, dict) else None
         if not isinstance(entries, list):
             raise GitHubAdapterError(f"tree {sha} has no entries")
@@ -337,8 +340,8 @@ class GitHubIntakeClient(GitHubReviewActions):
         if not isinstance(entries, list):
             raise GitHubAdapterError(f"{path} is not a folder")
         return tuple(
-            entry["name"] for entry in entries
-            if isinstance(entry, dict) and entry.get("type") == "file" and isinstance(entry.get("name"), str)
+            entry["name"] + ("/" if entry.get("type") == "dir" else "") for entry in entries
+            if isinstance(entry, dict) and entry.get("type") in ("file", "dir") and isinstance(entry.get("name"), str)
         )
 
     def create_start_commit(self, repo: str, base_sha: str, message: str) -> str:

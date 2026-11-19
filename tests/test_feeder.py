@@ -153,8 +153,8 @@ class FakeGitHub:
         self.check_reads: list[tuple[str, str]] = []
         self.dirs: dict[tuple[str, str], tuple[str, ...]] = {}
         self.dir_reads: list[tuple[str, str, str]] = []
-        self.trees: dict[str, tuple[tuple[str, ...], bool]] = {}
-        self.tree_reads: list[tuple[str, str]] = []
+        self.trees: dict[str | tuple[str, str], tuple[tuple[str, ...], bool]] = {}
+        self.tree_reads: list[tuple[str, str, str]] = []
         self._next_pr = 500
         self._next_comment = 9000
 
@@ -267,10 +267,10 @@ class FakeGitHub:
         self._maybe_fail("base_checks")
         return dict(self.main_checks.get((repo, branch), {}))
 
-    def tree_paths(self, repo: str, sha: str) -> tuple[tuple[str, ...], bool]:
-        self.tree_reads.append((repo, sha))
+    def tree_paths(self, repo: str, sha: str, path: str = "") -> tuple[tuple[str, ...], bool]:
+        self.tree_reads.append((repo, sha, path))
         self._maybe_fail("tree_paths")
-        return self.trees.get(repo, ((), False))
+        return self.trees.get((repo, path) if path else repo, ((), False))
 
     def dir_names(self, repo: str, path: str, sha: str) -> tuple[str, ...]:
         self.dir_reads.append((repo, path, sha))

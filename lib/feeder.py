@@ -133,6 +133,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import deque
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal, NamedTuple, Protocol
@@ -172,7 +173,6 @@ from lib.feeder_gates import (
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.journeys import (
-    SKILL_ROOTS,
     Journey,
     NO_VERIFY,
     JourneyCode,
@@ -258,6 +258,7 @@ _FED_WITHOUT_JOB = f"""
       )
 """
 BODY_LIMIT = 20_000
+SKILL_WALK_READS = 64
 
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
@@ -543,7 +544,7 @@ class GitHubIntake(Protocol):
 
     def base_checks(self, repo: str, branch: str) -> Mapping[str, BaseCheck]: ...
 
-    def tree_paths(self, repo: str, sha: str) -> tuple[Sequence[str], bool]: ...
+    def tree_paths(self, repo: str, sha: str, path: str = "") -> tuple[Sequence[str], bool]: ...
 
     def dir_names(self, repo: str, path: str, sha: str) -> Sequence[str]: ...
 
@@ -1074,15 +1075,26 @@ class Feeder:
         return None
 
     def _skill_dir(self, repo: str, verify: str, sha: str) -> str | None:
-        paths, truncated = self.github.tree_paths(repo, sha)
-        found = skill_dir(paths, verify)
-        if found is not None or not truncated:
-            return found
-        return next(
-            (folder for folder in (f"{root}/{verify}" for root in SKILL_ROOTS)
-             if "SKILL.md" in self.github.dir_names(repo, folder, sha)),
-            None,
-        )
+        folders = deque([""])
+        reads = 0
+        while folders:
+            if reads == SKILL_WALK_READS:
+                raise RuntimeError(f"verify skill {verify} not found in {SKILL_WALK_READS} tree reads")
+            folder = folders.popleft()
+            prefix = f"{folder}/" if folder else ""
+            tree, truncated = self.github.tree_paths(repo, sha, folder)
+            reads += 1
+            paths = list(tree)
+            if truncated:
+                for name in self.github.dir_names(repo, folder, sha):
+                    if name.endswith("/"):
+                        folders.append(prefix + name[:-1])
+                    else:
+                        paths.append(name)
+            found = skill_dir((prefix + path for path in paths), verify)
+            if found is not None:
+                return found
+        return None
 
     def _sync_intake_attention(
         self, refused: Sequence[_Candidate], repos: set[str], now: float
