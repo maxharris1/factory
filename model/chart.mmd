@@ -28,12 +28,12 @@ stateDiagram-v2
   s9: plan-check
   s10: review
   s11: blocked
-  s12: post-merge
-  s13: ship
-  s14: stuck
-  s15: fixing
-  s16: awaiting-ok
-  s17: handed-off
+  s12: handed-off
+  s13: post-merge
+  s14: ship
+  s15: stuck
+  s16: fixing
+  s17: awaiting-ok
   s18: merge-queue
   s19: waiting-external
   s20: handed-off-externally
@@ -51,40 +51,43 @@ stateDiagram-v2
   s5 --> s1: Max answers
   s5 --> s6: Max drops it
   s5 --> s3: answer, same step resumes
+  s5 --> s12: Max hands it off (answers state=handed-off)
   s8 --> s7: merged
-  s8 --> s12: project has a post-merge check
+  s8 --> s13: project has a post-merge check
   s9 --> s5: plan over the size line, the split goes to Max
   s9 --> s3: every acceptance criterion mapped
   s9 --> s4: an acceptance criterion is unmapped
   s10 --> s11: BLOCKED
-  s10 --> s13: APPROVE on the current head
-  s10 --> s15: APPROVE on red CI, CI fix or REVISE, under the round cap
+  s10 --> s14: APPROVE on the current head
+  s10 --> s16: APPROVE on red CI, CI fix or REVISE, under the round cap
   s10 --> s5: REVISE with unsat=, the criterion goes to Max
-  s3 --> s14: job dies twice (T6) or CI red three times
-  s4 --> s14: job dies twice (T6)
+  s3 --> s15: job dies twice (T6) or CI red three times
+  s4 --> s15: job dies twice (T6)
   s11 --> s10: approver's go, fresh review at the same round
-  s12 --> s7: post-merge fails, follow-up filed or post-merge passes
-  s13 --> s10: head changed and the patch differs
-  s13 --> s16: ship = merge or handoff and the PR is held, QA covers the head
-  s13 --> s17: ship = handoff, QA covers the head
-  s13 --> s18: APPROVE, finish_line merge, QA covers the head
-  s13 --> s8: ship = merge, QA covers the head
-  s13 --> s19: ship = after an approver, QA covers the head
-  s10 --> s14: job dies twice (T6)
-  s14 --> s20: Max moves the Linear issue to a handoff state
-  s15 --> s10: ready, CI green
-  s15 --> s13: ready at the approved patch, CI green
-  s15 --> s5: a product question
+  s11 --> s12: Max hands it off (answers state=handed-off)
+  s12 --> s8: PR merged
+  s12 --> s10: trusted ready at a new head, within the effective cap
+  s13 --> s7: post-merge fails, follow-up filed or post-merge passes
+  s14 --> s10: head changed and the patch differs
+  s14 --> s17: ship = merge or handoff and the PR is held, QA covers the head
+  s14 --> s12: ship = handoff, QA covers the head
+  s14 --> s18: APPROVE, finish_line merge, QA covers the head
+  s14 --> s8: ship = merge, QA covers the head
+  s14 --> s19: ship = after an approver, QA covers the head
+  s10 --> s15: job dies twice (T6)
+  s15 --> s12: Max hands it off (answers state=handed-off)
+  s15 --> s20: Max moves the Linear issue to a handoff state
+  s16 --> s10: ready, CI green
+  s16 --> s14: ready at the approved patch, CI green
+  s16 --> s5: a product question
   s5 --> s10: answer, same step resumes
-  s5 --> s15: approver's building go on an unsat= REVISE, fix round or answer, same step resumes
-  s16 --> s10: head changed and the patch differs
-  s16 --> s15: REVISE, under the round cap or PR dirty or behind, base update
-  s16 --> s5: REVISE with unsat=, the criterion goes to Max
-  s16 --> s17: approver's OK at the head, ship = handoff, finish_line ready-for-review
-  s16 --> s18: approver's OK at the head, finish_line merge
-  s16 --> s8: approver's OK at the head, or approver removes a label-only hold
-  s17 --> s8: PR merged
-  s17 --> s10: trusted ready at a new head, within the effective cap
+  s5 --> s16: approver's building go on an unsat= REVISE, fix round or answer, same step resumes
+  s17 --> s10: head changed and the patch differs
+  s17 --> s16: REVISE, under the round cap or PR dirty or behind, base update
+  s17 --> s5: REVISE with unsat=, the criterion goes to Max
+  s17 --> s12: approver's OK at the head, ship = handoff, finish_line ready-for-review or Max hands it off (answers state=handed-off)
+  s17 --> s18: approver's OK at the head, finish_line merge
+  s17 --> s8: approver's OK at the head, or approver removes a label-only hold
   s18 --> s3: trusted kind=go, queue build
   s18 --> s4: trusted kind=go, queue plan
   s18 --> s6: PR closed unmerged
@@ -92,27 +95,29 @@ stateDiagram-v2
   s18 --> s10: trusted ready at a new head, within the effective cap
   s18 --> s21: PR conflicts with base, update-from-main queued
   s19 --> s8: OK names the previewed SHA
-  s19 --> s15: declined
+  s19 --> s12: Max hands it off (answers state=handed-off)
+  s19 --> s16: declined
   s20 --> s6: Linear Canceled
   s20 --> s7: Linear Done, PR not merged
   s20 --> s8: Linear Done, PR merged
-  s20 --> s14: Linear back to a started state, the prior state resumes
-  s9 --> s14: gaps a second time
-  s15 --> s14: CI red three times or job dies twice (T6)
+  s20 --> s15: Linear back to a started state, the prior state resumes
+  s9 --> s15: gaps a second time
+  s16 --> s15: CI red three times or job dies twice (T6)
   s21 --> s10: non-trivial update, cross-family re-review
   s21 --> s18: trivial update, approval carried
-  s13 --> s5: QA environment fails twice at one head
-  s21 --> s14: two failed updates (update-failed-2)
+  s14 --> s5: QA environment fails twice at one head
+  s21 --> s15: two failed updates (update-failed-2)
   s10 --> s22: REVISE at the cap
+  s12 --> s16: approver's go at the cap, one more round
+  s22 --> s12: Max hands it off (answers state=handed-off)
   s22 --> s20: Max moves the Linear issue to a handoff state
-  s22 --> s15: Max okays one more round
-  s5 --> s13: answer, QA runs again at the same head
-  s16 --> s22: REVISE at the cap
-  s17 --> s15: approver's go at the cap, one more round
+  s22 --> s16: Max okays one more round
+  s5 --> s14: answer, QA runs again at the same head
+  s17 --> s22: REVISE at the cap
   s20 --> s22: Linear back to a started state, the prior state resumes
-  s19 --> s14: 3rd decline
+  s19 --> s15: 3rd decline
   s3 --> s3: CI red, fix
-  s15 --> s15: CI red, fix
+  s16 --> s16: CI red, fix
   class s0 blue
   class s1 blue
   class s2 tan
@@ -127,9 +132,9 @@ stateDiagram-v2
   class s11 tan
   class s12 teal
   class s13 teal
-  class s14 tan
-  class s15 orange
-  class s16 teal
+  class s14 teal
+  class s15 tan
+  class s16 orange
   class s17 teal
   class s18 teal
   class s19 teal

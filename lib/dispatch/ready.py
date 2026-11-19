@@ -509,6 +509,8 @@ class ReadyMixin:
             return
         if self._review_context(ticket)[0] not in _AFTER_BUILD_STATES or self._is_stuck(ticket):
             return
+        if self._handed_off_by_max(*key):
+            return
         if self._names_head(ticket, head, ("ready", "verdict")):
             return
         with self._connect() as connection:

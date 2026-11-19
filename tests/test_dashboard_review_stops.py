@@ -61,7 +61,7 @@ def test_a_ready_after_the_cap_keeps_the_capped_actions_in_attention(tmp_path: P
         item for item in snap["attention"]["items"]
         if item.get("repo") == "owner/repo" and item.get("ticket_id") == "42"
     ]
-    assert row["actions"] == ["another-round", "close"]
+    assert row["actions"] == ["another-round", "close", "hand-off"]
     assert [(item["kind"], item.get("wait"), item.get("actions")) for item in items] == [
         ("needs-attention", row["wait"], row["actions"]),
     ]

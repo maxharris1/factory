@@ -214,6 +214,7 @@ grep -q 'kind=go, queue build' "$RUN_OUT/chart.mmd" || fail "chart is missing ki
 grep -q 'kind=go, queue plan' "$RUN_OUT/chart.mmd" || fail "chart is missing kind=go plan"
 grep -q 'trusted builder posts kind=plan' "$RUN_OUT/chart.mmd" || fail "chart is missing kind=plan"
 grep -q 'project has a post-merge check' "$RUN_OUT/chart.mmd" || fail "chart is missing T9"
+grep -q 'Max hands it off' "$RUN_OUT/chart.mmd" || fail "chart is missing Max's hand-off"
 drawn=$(mktemp)
 add_ci_red_self_loops "$RUN_OUT/chart.mmd" >"$drawn"
 diff -u "$root/model/chart.mmd" "$drawn" || fail "model/chart.mmd is not the section 4.1 chart"

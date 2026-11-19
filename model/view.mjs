@@ -41,6 +41,7 @@ export const step = (action, from, to) => {
   if (action === "T5Answer" && to.state === "questions") return "Max answers";
   if (action === "T5Answer") return "answer, same step resumes";
   if (action === "T5Abandon") return "Max drops it";
+  if (action === "T5Handoff") return "Max hands it off (answers state=handed-off)";
   if (action === "T1KindGoPlan") return "kind=go, queue plan";
   if (action === "T1KindGoBuild") return "kind=go, queue build";
   if (action === "T1PPlanPosted") return "trusted builder posts kind=plan";
