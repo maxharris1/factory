@@ -106,8 +106,7 @@ list. The rest are lifetime counts:
 - tokens per job kind (plan, build, fix, review), over the same jobs:
   uncached input (tokens_in less tokens_cached), cached input and output
   summed from job_telemetry. A job with no telemetry row, tokens_unknown
-  set, or a NULL tokens_unknown and no tokens (a row from before the flag,
-  read as lib/dashboard_telemetry.py reads it) is counted in
+  set, or a NULL tokens_unknown and no tokens is counted in
   tokens-unmeasured-<kind> and left out of the sums; a
   kind with no measured job, or a snapshot from before tokens_unknown,
   prints unrecorded

@@ -11,13 +11,13 @@ MAX_BYTES from its end, and returns the last `token_count` event's
 timestamp (`rate_limits` None when that event's is null or missing: no
 reading, never an older event's). `tokens` is the last `total_token_usage`
 that holds a number, kept to the numeric fields in TOKEN_KEYS, summed with
-the same total of every helper agent the thread spawned (#1015). A helper
-is a rollout no older than the job's whose first line, its `session_meta`,
-names the job's thread, or another helper's, as its parent; only that
-first line of the other rollouts is read. Every other key and line is
-dropped unread: a tail line is decoded only when it holds `"token_count"`.
-A symlink, a non-regular file or a path outside `sessions/` is never
-opened, and no other file is.
+the same total of every helper agent the thread spawned. A helper is a
+rollout no older than the job's whose first line, its `session_meta`,
+names the job's thread, or another helper's, as its parent. Of any other
+rollout no older than the job's, only that first line is decoded. Every
+other key and line is dropped unread: a tail line is decoded only when it
+holds `"token_count"`. A symlink, a non-regular file or a path outside
+`sessions/` is never opened, and no other file is.
 
 The file is stdlib only and has no repo imports: for a job on a remote
 device, lib/usage_probe.py sends this source to the device as
@@ -124,7 +124,6 @@ def _reading(line: bytes) -> dict | None:
 
 
 def _parent(line: bytes) -> tuple[str, str] | None:
-    """(thread id, parent thread id) from a helper rollout's `session_meta` line."""
     try:
         event = json.loads(line)
     except ValueError:
@@ -147,7 +146,6 @@ def _parent(line: bytes) -> tuple[str, str] | None:
 
 
 def _helpers(home: str, path: str, thread_id: str) -> list[str]:
-    """Every rollout descended from the job's thread through `session_meta` parents."""
     sessions = os.path.realpath(os.path.join(home, "sessions"))
     day = os.path.relpath(os.path.realpath(os.path.dirname(path)), sessions).split(os.sep)
     oldest = os.path.basename(path)[: -len(f"-{thread_id}.jsonl")]
@@ -164,7 +162,8 @@ def _helpers(home: str, path: str, thread_id: str) -> list[str]:
             except OSError:
                 continue
             if found is not None:
-                children.setdefault(found[1], []).append((found[0], candidate))
+                thread, parent = found
+                children.setdefault(parent, []).append((thread, candidate))
     helpers, queue, seen = [], [thread_id], {thread_id}
     while queue:
         for child, candidate in children.get(queue.pop(), []):
