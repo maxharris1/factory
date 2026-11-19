@@ -655,6 +655,7 @@ class DetailMixin:
         ci_failure: tuple[str, ...] = (),
         unmapped: str | None = None,
         qa_findings: QaFix | None = None,
+        source: str | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -680,6 +681,10 @@ class DetailMixin:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if source is not None:
+            context["source"] = source
+        if action == "build" and ticket.current_head is not None:
+            context["start_head"] = ticket.current_head
         if action in ("plan", "build") and ticket.brief_text:
             context.update(brief_text=ticket.brief_text, brief_url=ticket.brief_url)
         if plan_text is not None:

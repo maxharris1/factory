@@ -7003,8 +7003,8 @@ def test_71_a_failed_review_of_a_replaced_head_is_not_retried(tmp_path: Path) ->
     assert review is not None
     now[0] = 150
     queue.finish(review.id, owner="codex", handoff_comment_id=None)
-    poll(ready, head=NEW_HEAD_71)  # the builder pushed; no ready for it yet
-    assert _reviews_71(queue) == [(HEAD_71, "failed", 1)]
+    poll(ready, head=NEW_HEAD_71)
+    assert _reviews_71(queue) == [(HEAD_71, "failed", 1), (NEW_HEAD_71, "queued", 1)]
     assert queue.unhandled_failures() == ()
     with queue.connect() as connection:
         events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
@@ -7051,7 +7051,7 @@ def test_357_a_lagging_review_of_a_replaced_head_is_not_retried(
     _refuse_lagging(queue, review.id, "codex")
     now[0] += after
     poll(ready, head=NEW_HEAD_71)
-    assert _reviews_71(queue) == [(HEAD_71, "failed", 1)]
+    assert _reviews_71(queue) == [(HEAD_71, "failed", 1), (NEW_HEAD_71, "queued", 1)]
     assert queue.unhandled_failures() == ()
     with queue.connect() as connection:
         events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]

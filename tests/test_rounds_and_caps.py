@@ -331,7 +331,11 @@ def test_ready_naming_a_head_the_fresh_read_lacks_is_stale(tmp_path: Path) -> No
     flow, cached, _fresh = _newer_ready(tmp_path)
     flow.dispatcher.poll_once(FreshSource(cached, cached))
     assert handled_outcome(flow.queue, "ready-new") == "stale-ready-head"
-    assert job_count(flow.queue, "review") == 0
+    with flow.queue.connect() as connection:
+        reviews = connection.execute("SELECT head, detail FROM jobs WHERE action = 'review'").fetchall()
+    assert [(row["head"], json.loads(row["detail"])["source"]) for row in reviews] == [
+        (HEADS[1], "unannounced-green-head")
+    ]
 
 
 def test_a_failed_fresh_read_leaves_the_ready_for_the_next_poll(tmp_path: Path) -> None:

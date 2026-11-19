@@ -24,6 +24,7 @@ CI_INFRA_BLOCKED_REASON = "ci-infra-blocked"
 # status on its head before the ticket needs attention as ci-silent.
 CI_SILENT_SECONDS = 600.0
 CI_SILENT_REASON = "ci-silent"
+UNANNOUNCED_AFTER_CAP = "unannounced-head-after-cap"
 CI_RERUN_REFUSED = "ci-rerun-refused"
 ORCHESTRATOR = "grok-bot"
 # #170: the kinds a worker bot's App login may post once the switch is on.
