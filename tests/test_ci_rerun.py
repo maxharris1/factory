@@ -953,6 +953,36 @@ def test_a_failed_status_read_of_a_run_keeps_the_rerun_for_a_later_poll(tmp_path
     assert board.attention("ci-rerun-refused") == []
 
 
+def test_status_read_403_of_active_run_keeps_budget_retryable(tmp_path):
+    board, pr = built(tmp_path)
+    board.red(pr, pr.head, "11")
+    calls = []
+
+    def gh(argv, timeout):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            return GhResult(
+                1,
+                json.dumps({"message": "API rate limit exceeded"}),
+                "gh: API rate limit exceeded (HTTP 403)",
+            )
+        return GhResult(0, json.dumps({"status": "in_progress"}), "")
+
+    board.dispatcher.ci_rerun = GitHubReviewActions(gh).rerun_failed_jobs
+    ready = board.ready(pr, pr.head)
+    board.poll()
+    board.poll()
+    print("status reads after two polls:", len(calls))
+    print("outcome:", board.outcome(ready))
+    print("rerun rows:", board.reruns_table())
+    print("gate count:", board.state("42")["gate_count"])
+    print("fix jobs:", len(board.jobs("fix")))
+    assert board.reruns_table() == []
+    assert len(calls) == 2
+    assert board.state("42")["gate_count"] == 0
+    assert board.jobs("fix") == []
+
+
 def test_the_adapter_raises_a_standing_refusal_of_a_status_read() -> None:
     def gh(argv, timeout: float) -> GhResult:
         return GhResult(1, json.dumps({"message": "Not Found"}), "gh: Not Found (HTTP 404)")
