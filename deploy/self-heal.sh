@@ -15,8 +15,10 @@
 #   self-heal.sh status            exit 0 if the loop runs, 3 if not
 #   self-heal.sh ensure            start unless running or held stopped; prints
 #                                  nothing when running (what autostart runs)
-#   self-heal.sh wait-idle         wait until no pass and none of its
-#                                  detached work runs (orch-move.sh export)
+#   self-heal.sh wait-idle [cmd]   wait until no pass and none of its
+#                                  detached work runs (orch-move.sh export),
+#                                  then run cmd, if given, before any pass
+#                                  can start
 #   self-heal.sh install-autostart run `once` on a timer (see below)
 #   self-heal.sh remove-autostart  turn that off
 #
@@ -62,9 +64,11 @@
 # dashboard push` inherit it, so it is held until the last of them exits.
 # `wait-idle` takes that lock exclusively, waiting up to ORCH_HEAL_IDLE_WAIT
 # seconds (default 900): exit 0 once nothing holds it, 1 on timeout, and 1
-# without flock(1), which cannot tell. A pass checks orch-retired again once
-# it holds the shared lock, so after orch-move.sh export writes orch-retired
-# and `wait-idle` returns, no pass writes to orch.db.
+# without flock(1), which cannot tell. Given a command, it runs it while it
+# still holds the lock and exits with its status; orch-move.sh export writes
+# its drain files that way. A pass checks orch-retired again once it holds
+# the shared lock, so after orch-move.sh export writes orch-retired and
+# `wait-idle` returns, no pass writes to orch.db.
 #
 # `kick` starts factory-self-heal.service with --no-block where the systemd
 # user timer is installed, and otherwise a detached `once` in its own
@@ -138,7 +142,7 @@ export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 say() { printf '%s self-heal: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 usage() {
-    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|wait-idle|install-autostart|remove-autostart}" >&2
+    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|wait-idle [cmd]|install-autostart|remove-autostart}" >&2
     exit 2
 }
 
@@ -441,6 +445,7 @@ wait_idle() {
         echo "self-heal: a pass or its detached work still holds ${WORK_LOCK} after ${IDLE_WAIT}s" >&2
         return 1
     fi
+    (($# == 0)) || "$@" 7>&-
 }
 
 ensure() {
@@ -562,7 +567,7 @@ case "$COMMAND" in
     restart) factory_host_pidns_or_refuse restart && not_from_a_job restart && refuse_if_retired restart && service_lock && refuse_if_retired restart && stop && start ;;
     status) status ;;
     ensure) factory_host_pidns_or_refuse ensure && not_from_a_job ensure && refuse_if_retired ensure && service_lock && refuse_if_retired ensure && ensure ;;
-    wait-idle) wait_idle ;;
+    wait-idle) shift && wait_idle "$@" ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

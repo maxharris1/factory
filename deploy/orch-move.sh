@@ -10,8 +10,9 @@
 # writes waiter-<bot>.drain ("orch-move") for claude-bot, codex-bot and
 # cursor-bot, so no waiter claims a job; every self-heal pass skips while
 # they read orch-move. It first runs `self-heal.sh wait-idle` once, so a
-# pass already under way finishes, then every ORCH_MOVE_POLL_SEC seconds
-# (default 30) writes the drain files again,
+# pass already under way finishes, and writes the drain files again before
+# that wait lets a new pass start. Then every ORCH_MOVE_POLL_SEC seconds
+# (default 30) it writes the drain files again,
 # copies orch.db to <export>/probe.db with `orch backup-db` and asks
 # `orch move-db drained` whether a job still runs or a device slot is held.
 # Once none is, it writes orch-retired ("<host> <UTC time>"), and only then
@@ -178,7 +179,7 @@ assert_final_copy_drained() {
 }
 
 export_db() {
-    local to="" db line bot status=0
+    local to="" db line bot status=0 drains=()
     EXPORT=""
     while (($#)); do
         case "$1" in
@@ -200,7 +201,10 @@ export_db() {
     trap release_drains EXIT
     trap 'exit 130' INT TERM
     assert_drains
-    "${HERE}/self-heal.sh" wait-idle || status=$?
+    for bot in "${BOTS[@]}"; do
+        drains+=("$(drain_file "$bot")")
+    done
+    printf '%s\n' "$DRAIN_MARK" | "${HERE}/self-heal.sh" wait-idle tee "${drains[@]}" >/dev/null || status=$?
     if ((status != 0)); then
         echo "orch-move: self-heal.sh wait-idle exited ${status}; removed the drain files, stopped nothing" >&2
         exit 1

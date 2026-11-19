@@ -1293,7 +1293,9 @@ deploy/orch-move.sh import box:<export>
 new job. A self-heal pass (the loop, the timer or `kick`)
 does nothing while any `waiter-<bot>.drain` reads `orch-move`. Before the
 drain starts, `export` runs `self-heal.sh wait-idle` once, so a pass already
-under way finishes first. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it
+under way finishes first. That pass may have removed the drain files, so
+`export` writes them again while `wait-idle` still holds
+`self-heal-work.lock`, and every later pass finds them. Every `ORCH_MOVE_POLL_SEC` seconds (default 30) it
 writes the drain files again, copies `orch.db` with `orch backup-db` and asks
 `orch move-db drained` whether a job still runs or a device slot is still
 held. Once none is, it writes
@@ -1628,7 +1630,9 @@ so the services it restarts outlive the run. Otherwise it writes
 `remove-autostart`. Passes never overlap: `self-heal.lock` makes a second
 pass exit at once. Each pass and the device deploy it starts detached hold
 `self-heal-work.lock` shared. `wait-idle` waits up to `ORCH_HEAL_IDLE_WAIT`
-seconds (default 900) until none does, and exits 1 if one still does. On a
+seconds (default 900) until none does, and exits 1 if one still does.
+`wait-idle <command>` then runs the command before releasing the lock, so no
+pass starts until it returns, and exits with its status. On a
 host retired as the orch host (`~/.config/factory/orch-retired`, see *Move
 the orch host*), `once`, `kick`, `start`, `restart` and `ensure` exit 79 and
 run nothing. `factory-self-heal.service` counts that exit 79 as success

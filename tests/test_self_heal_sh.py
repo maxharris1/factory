@@ -641,3 +641,13 @@ def test_wait_idle_returns_when_idle_and_times_out_while_a_pass_holds_the_work_l
     assert "still holds" in busy.stderr
     assert 0.9 <= waited < 10
     assert _run(home, "wait-idle", ORCH_HEAL_IDLE_WAIT="1").returncode == 0
+
+
+def test_wait_idle_runs_its_command_before_any_pass_can_take_the_work_lock(home: Path) -> None:
+    lock = home / STATE / "self-heal-work.lock"
+    probe = f"flock -n -s {lock} true"
+
+    assert _run(home, "wait-idle", "sh", "-c", probe).returncode == 1
+    assert _run(home, "wait-idle", "sh", "-c", "exit 7").returncode == 7
+    assert _run(home, "wait-idle", "true").returncode == 0
+    assert subprocess.run(["sh", "-c", probe], check=False).returncode == 0

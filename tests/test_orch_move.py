@@ -110,7 +110,8 @@ class Host:
         )
 
     def calls(self) -> list[str]:
-        return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+        text = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+        return text.replace(str(self.state), "$STATE").splitlines()
 
 
 def _executable(path: Path, text: str) -> None:
@@ -173,7 +174,8 @@ def _drains_are(host: Host, text: str) -> bool:
     )
 
 
-PRE = "self-heal.sh wait-idle retired=no"
+PRE = ("self-heal.sh wait-idle tee "
+       + " ".join(f"$STATE/waiter-{bot}.drain" for bot in BOTS) + " retired=no")
 
 STOPS = [
     PRE,
@@ -1271,3 +1273,102 @@ raise SystemExit(cli.main(sys.argv[1:]))
         gate.touch()
         waiter.kill()
         waiter.wait(timeout=10)
+
+
+GATED_HEAL_ORCH = f"""#!{sys.executable}
+import json, os, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+from lib.heal import Facts, Webhook, heal
+home = Path(os.environ["HOME"])
+if sys.argv[1:3] == ["health", "--json"]:
+    print('{{"known": true, "components": []}}')
+elif sys.argv[1:3] == ["heal", "--health-json"]:
+    report = json.load(sys.stdin)
+    counter = home / "passes"
+    n = 1 + (int(counter.read_text()) if counter.exists() else 0)
+    counter.write_text(str(n))
+    (home / f"pass-{{n}}-ready").touch()
+    while not (home / f"cleanup-{{n}}-go").exists():
+        time.sleep(0.01)
+    heal(report, facts=Facts(device="box", owned=frozenset("waiter:" + b for b in
+         ("claude-bot", "codex-bot", "cursor-bot"))), state_dir=Path(sys.argv[5]),
+         deploy=home / "unused", webhook=Webhook(), environ={{}}, now=time.time())
+"""
+
+
+def test_no_self_heal_pass_slips_in_between_the_idle_wait_and_the_drain_files(
+    tmp_path: Path,
+) -> None:
+    from tests.test_waiter import FakeSpawn, enqueue, make_waiter
+
+    box = Host(tmp_path, "box")
+    for name in ("self-heal.sh", "host-pidns.sh"):
+        shutil.copy(ROOT / "deploy" / name, box.checkout / "deploy" / name)
+    real_heal = box.checkout / "deploy/self-heal-real.sh"
+    (box.checkout / "deploy/self-heal.sh").rename(real_heal)
+    _executable(box.checkout / "deploy/self-heal.sh", f"""#!/bin/sh
+if [ "$1" = wait-idle ] && [ ! -e "$HOME/.config/factory/orch-retired" ]; then
+    bash {str(real_heal)!r} "$@" || exit $?
+    touch "$HOME/idle-returned"
+    while [ ! -e "$HOME/resume-export" ]; do sleep 0.01; done
+    exit 0
+fi
+exec bash {str(real_heal)!r} "$@"
+""")
+    _, seed = setup(tmp_path / "seed")
+    enqueue(seed, "running")
+    pool_claim(seed, "claude")
+    enqueue(seed, "must-stay-queued")
+    backup(seed.path, box.db)
+    gated = tmp_path / "gated-orch"
+    _executable(gated, GATED_HEAL_ORCH)
+    env = box.env(ORCH_BIN=str(gated))
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path / "waiter", SQLiteJobQueue(box.db, clock=time.time), box.db,
+                         spawn)
+    waiter.drain = box.drain("claude-bot")
+    export = tmp_path / "export"
+    processes: list[subprocess.Popen] = []
+
+    def once() -> subprocess.Popen:
+        process = subprocess.Popen(["bash", str(real_heal), "once"], env=env)
+        processes.append(process)
+        return process
+
+    try:
+        first = once()
+        _until(lambda: (box.home / "pass-1-ready").exists(), "the first pass never reached heal")
+        move = box.start_move("export", "--to", "pc", "--dir", str(export),
+                              ORCH_BIN=str(gated), ORCH_MOVE_POLL_SEC="0.5")
+        processes.append(move)
+        _until(lambda: _drains_are(box, "orch-move\n"), "export never wrote the drain files")
+        (box.home / "cleanup-1-go").touch()
+        _until(lambda: (box.home / "idle-returned").exists(), "the idle wait never returned")
+        assert first.wait(timeout=20) == 0
+
+        second = once()
+        _until(lambda: second.poll() is not None or (box.home / "pass-2-ready").exists(),
+               "the second pass neither skipped nor reached heal")
+        (box.home / "resume-export").touch()
+        _until(lambda: (export / "probe.db").exists(), "export never probed the drain")
+        (box.home / "cleanup-2-go").touch()
+        assert second.wait(timeout=20) == 0
+
+        assert _drains_are(box, "orch-move\n"), "a pass removed the drain files"
+        assert waiter.step() is None and spawn.calls == [], "a waiter claimed during the drain"
+        assert not (box.home / "pass-2-ready").exists(), "a pass healed during the drain"
+        assert move.poll() is None and not box.retired.exists()
+
+        _finish_jobs(box.db)
+        _, stderr = move.communicate(timeout=30)
+        assert move.returncode == 0, stderr
+        assert box.retired.exists()
+    finally:
+        for gate in ("cleanup-1-go", "cleanup-2-go", "resume-export"):
+            (box.home / gate).touch()
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+        spawn.end_runners()
