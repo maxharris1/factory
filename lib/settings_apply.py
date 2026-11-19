@@ -540,7 +540,7 @@ def claim_lock(db: Path) -> ClaimLock:
 
             def commit_version(machines: Path) -> int | None:
                 try:
-                    live = live_settings.recorded(connection, machines)
+                    live = live_settings.requested(connection, machines)
                     connection.execute("COMMIT")
                 except sqlite3.Error:
                     return None

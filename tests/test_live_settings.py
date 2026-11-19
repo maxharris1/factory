@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -86,6 +87,21 @@ def narrow(connection: sqlite3.Connection, machines: Path) -> Live:
         return live_settings.recorded(connection, machines)
     finally:
         connection.execute("COMMIT")
+
+
+def request(connection: sqlite3.Connection, machines: Path) -> Live:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        return live_settings.requested(connection, machines)
+    finally:
+        connection.execute("COMMIT")
+
+
+def checkouts(tmp_path: Path, *names: str) -> list[Path]:
+    paths = [tmp_path / name / "machines.yml" for name in names]
+    for path in paths:
+        path.parent.mkdir()
+    return paths
 
 
 @pytest.mark.parametrize(
@@ -326,3 +342,92 @@ def test_a_device_only_one_file_lists_does_not_hold_placement_off_the_adopted(
     pc = live.placement_config(loaded).device("pc")
     assert pc is not None and not pc.enabled
     assert live.places_by_adopted()
+
+
+def test_a_poller_on_another_checkout_keeps_the_requested_file_in_the_meet(
+    tmp_path: Path, db
+) -> None:
+    settings, stale = checkouts(tmp_path, "settings", "stale")
+    write(stale, text(box_slots=6))
+    loaded = write(settings, text(box_slots=1))
+    request(db, settings)
+
+    live, _ = adopt(db, stale)
+
+    assert live.switches["box"] == Switch(True, False, 1), "the Settings limit holds"
+    assert live.placement_config(loaded).device("box").slot_max == 1
+    assert live.adopted_holds("box", "slot_max", 6)
+    assert not live.adopted_holds("box", "slot_max", 1)
+
+
+def test_requested_pins_a_file_already_recorded_unchanged(tmp_path: Path, db) -> None:
+    settings, stale = checkouts(tmp_path, "settings", "stale")
+    write(stale, text(box_slots=6))
+    write(settings, text(box_slots=1))
+    recorded = narrow(db, settings)
+
+    pinned = request(db, settings)
+
+    assert pinned.written == recorded.written + 1, "the pin is a new version"
+    assert request(db, settings) == pinned, "pinning again writes nothing"
+    assert adopt(db, stale)[0].switches["box"].slot_max == 1
+
+
+def test_a_later_request_from_another_file_moves_the_pin(tmp_path: Path, db) -> None:
+    first, second, stale = checkouts(tmp_path, "first", "second", "stale")
+    write(stale, text(box_slots=6))
+    write(first, text(box_slots=1))
+    write(second, text(box_slots=4))
+    request(db, first)
+    request(db, second)
+
+    live, _ = adopt(db, stale)
+
+    assert live.switches["box"].slot_max == 4, "only the latest Settings file stays"
+
+
+@pytest.mark.parametrize("refresh", [narrow, lambda connection, path: adopt(connection, path)[0]],
+                         ids=["recorded", "adopted"])
+def test_rereading_the_pinned_file_keeps_its_pin_with_the_new_switches(
+    tmp_path: Path, db, refresh
+) -> None:
+    settings, stale = checkouts(tmp_path, "settings", "stale")
+    write(stale, text(box_slots=6))
+    write(settings, text(box_slots=1))
+    request(db, settings)
+    write(settings, text(box_slots=4))
+    refresh(db, settings)
+
+    live, _ = adopt(db, stale)
+
+    assert live.switches["box"].slot_max == 4
+
+
+def test_a_row_written_before_pins_reads_every_file_unpinned(tmp_path: Path, db) -> None:
+    settings, stale = checkouts(tmp_path, "settings", "stale")
+    write(stale, text(box_slots=6))
+    write(settings, text(box_slots=1))
+    request(db, settings)
+    (sources,) = db.execute(f"SELECT sources FROM {live_settings.TABLE}").fetchone()
+    legacy = {path: {"key": source["key"], "switches": source["switches"]}
+              for path, source in json.loads(sources).items()}
+    db.execute(f"UPDATE {live_settings.TABLE} SET sources = ?", (json.dumps(legacy),))
+
+    live, _ = adopt(db, stale)
+
+    assert live.switches["box"].slot_max == 6, "nothing pinned, so only the poller's file is left"
+
+
+@pytest.mark.parametrize(
+    ("device", "name", "value", "holds"),
+    [("box", "slot_max", 2, True), ("box", "enabled", True, True), ("box", "drain", False, True),
+     ("box", "slot_max", 3, False), ("gone", "slot_max", 2, False), ("box", "harnesses", 2, False)],
+)
+def test_adopted_holds_reads_one_field_of_the_adopted_switches(
+    tmp_path: Path, db, device: str, name: str, value: object, holds: bool
+) -> None:
+    machines = tmp_path / "machines.yml"
+    write(machines, text())
+    live, _ = adopt(db, machines)
+
+    assert live.adopted_holds(device, name, value) is holds

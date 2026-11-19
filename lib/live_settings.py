@@ -12,25 +12,30 @@ is enabled only if the adopted switches and every file say so, drained if
 any does, and its slot_max is the lowest. A device the poller has not
 adopted is closed, so nothing is placed before the first adopt.
 
-* `recorded` runs inside every claim's BEGIN IMMEDIATE (and the settings
-  applier's). When the caller's file changed since its entry was written, it
-  replaces that entry. A narrowing in any file reaches placement at once; an
-  entry that widens lets placement widen only as far as the adopted
-  switches and every other file allow.
+* `recorded` runs inside every claim's BEGIN IMMEDIATE. When the caller's
+  file changed since its entry was written, it replaces that entry. A
+  narrowing in any file reaches placement at once; an entry that widens lets
+  placement widen only as far as the adopted switches and every other file
+  allow.
 * `adopted` is called by the poller only, inside its own BEGIN IMMEDIATE. It
   sets the adopted switches and the poller's own entry to the file, drops
-  every other file's entry, and returns the parse it wrote, which the
-  monitor installs as its view before it next reconciles. It is the only way
-  a widening reaches the adopted switches, so a claim can land on a device
-  only once the poller already treats that device as enabled.
+  every other file's entry but the pinned one, and returns the parse it
+  wrote, which the monitor installs as its view before it next reconciles.
+  It is the only way a widening reaches the adopted switches, so a claim can
+  land on a device only once the poller already treats that device as
+  enabled.
+* `requested` is the settings applier's `recorded`. It also pins its file's
+  entry and unpins every other, so the file of the latest Settings write
+  stays in the meet.
 
 `written` counts the file versions the row has seen and `adopted` the last
 of them the poller acted on, with `adopted_digest` the digest of the
 switches it adopted. The settings applier records `written` right after its
 write as the change's `version`; the change is applied once `adopted`
-reaches it (`peek`, read by the dashboard) and every waiter it names has
-recorded `seen` at that version, which a claim does only when placement
-uses exactly the adopted switches (`Live.places_by_adopted`).
+reaches it, the adopted switches hold the requested value
+(`Live.adopted_holds`; both read by the dashboard through `peek`) and every
+waiter it names has recorded `seen` at that version, which a claim does only
+when placement uses exactly the adopted switches (`Live.places_by_adopted`).
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 from lib.config_overlay import overlay_path
@@ -66,6 +71,7 @@ class Switch:
 
 
 CLOSED = Switch(enabled=False, drain=True, slot_max=0)
+_FIELDS = tuple(item.name for item in fields(Switch))
 
 
 @dataclass(frozen=True)
@@ -75,6 +81,7 @@ class Live:
     adopted: int
     adopted_digest: str = ""
     seen: Mapping[str, int] = field(default_factory=dict)
+    adopted_switches: Mapping[str, Switch] = field(default_factory=dict)
 
     def placement_config(self, config: MachinesConfig) -> MachinesConfig:
         devices = []
@@ -87,6 +94,10 @@ class Live:
     def is_applied(self, version: int) -> bool:
         return self.adopted >= version
 
+    def adopted_holds(self, device: str, name: str, value: object) -> bool:
+        switch = self.adopted_switches.get(device)
+        return switch is not None and name in _FIELDS and getattr(switch, name) == value
+
     def places_by_adopted(self) -> bool:
         return self.adopted > 0 and _digest(self.switches) == self.adopted_digest
 
@@ -95,6 +106,7 @@ class Live:
 class _Source:
     key: str
     switches: Mapping[str, Switch]
+    pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,7 +124,8 @@ class _Row:
                 name: switch.meet(source.switches.get(name, CLOSED))
                 for name, switch in switches.items()
             }
-        return Live(switches, self.written, self.adopted, self.adopted_digest)
+        return Live(switches, self.written, self.adopted, self.adopted_digest,
+                    adopted_switches=self.adopted_switches)
 
 
 EMPTY = _Row({}, written=0, adopted=0, adopted_digest="", sources={})
@@ -126,18 +139,30 @@ def file_key(machines: Path) -> str:
 def recorded(connection: sqlite3.Connection, machines: Path) -> Live:
     """The caller holds BEGIN IMMEDIATE. An invalid file writes nothing and
     leaves the row as it was."""
+    return _record(connection, machines, pin=False)
+
+
+def requested(connection: sqlite3.Connection, machines: Path) -> Live:
+    """Settings applier only; `recorded`, and the file's entry is pinned."""
+    return _record(connection, machines, pin=True)
+
+
+def _record(connection: sqlite3.Connection, machines: Path, *, pin: bool) -> Live:
     _create(connection)
     path = os.path.abspath(machines)
     key = file_key(machines)
     row = _read(connection) or EMPTY
     source = row.sources.get(path)
-    if source is not None and source.key == key:
+    pinned = pin or (source is not None and source.pinned)
+    if source is not None and source.key == key and source.pinned == pinned:
         return row.live()
     config = _load(machines)
     if config is None:
         return row.live()
+    sources = {name: replace(item, pinned=item.pinned and not pin)
+               for name, item in row.sources.items()}
     row = replace(row, written=row.written + 1,
-                  sources={**row.sources, path: _Source(key, _switches(config))})
+                  sources={**sources, path: _Source(key, _switches(config), pinned)})
     _write(connection, row)
     return row.live()
 
@@ -156,15 +181,14 @@ def adopted(connection: sqlite3.Connection, machines: Path) -> tuple[Live, Machi
     if config is None or errors:
         detail = errors[0].message if errors else "invalid machines.yml"
         raise ValueError(f"{machines}: {detail}")
-    found = _read(connection)
-    if found is None:
-        written = 1
-    else:
-        prior = found.sources.get(path)
-        written = found.written + (prior is None or prior.key != key)
+    found = _read(connection) or EMPTY
+    prior = found.sources.get(path)
+    written = found.written + (prior is None or prior.key != key)
     switches = _switches(config)
+    kept = {name: item for name, item in found.sources.items() if item.pinned}
+    own = _Source(key, switches, prior is not None and prior.pinned)
     row = _Row(switches, written=written, adopted=written, adopted_digest=_digest(switches),
-               sources={path: _Source(key, switches)})
+               sources={**kept, path: own})
     _write(connection, row)
     return row.live(), config
 
@@ -263,7 +287,8 @@ def _read(connection: sqlite3.Connection) -> _Row | None:
     if row is None:
         return None
     sources = {
-        str(path): _Source(str(source["key"]), _parsed(source["switches"]))
+        str(path): _Source(str(source["key"]), _parsed(source["switches"]),
+                           bool(source.get("pinned", False)))
         for path, source in json.loads(row[4]).items()
     }
     return _Row(_parsed(json.loads(row[0])), int(row[1]), int(row[2]), str(row[3]), sources)
@@ -279,7 +304,7 @@ def _seen(connection: sqlite3.Connection) -> dict[str, int]:
 
 def _write(connection: sqlite3.Connection, row: _Row) -> None:
     sources = {
-        path: {"key": source.key, "switches": _plain(source.switches)}
+        path: {"key": source.key, "switches": _plain(source.switches), "pinned": source.pinned}
         for path, source in sorted(row.sources.items())
     }
     connection.execute(
