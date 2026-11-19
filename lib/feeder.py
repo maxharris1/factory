@@ -714,11 +714,13 @@ class Feeder:
         github: GitHubIntake,
         linear: LinearIntake | None,
         factory_for: Callable[[Project], FactoryContext],
+        head: Callable[[], str | None],
         log: Log | None = None,
     ):
         self.queue = queue
         self.config = config
         self.machines = machines
+        self.head = head
         self.github = github
         self.linear = linear
         self.factory_for = factory_for
@@ -1137,7 +1139,7 @@ class Feeder:
             if live is not None and machines is not None:
                 machines = live.placement_config(machines)
             used = slots_in_use(connection, machines)
-            blocked = placement_blocked(connection, now, machines)
+            blocked = placement_blocked(connection, now, machines, self.head())
             for harness in harnesses:
                 free = free_slots(machines, harness, used, blocked) if machines else 0
                 queued = connection.execute(

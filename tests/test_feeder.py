@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import device_sync
 from lib.branch_stack import OpenPull
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
@@ -347,6 +348,7 @@ def make_feeder(tmp_path: Path, *, orch=GITHUB_ORCH, box=3, pc=0, mac=0,
         github=github,
         linear=linear,
         factory_for=lambda project: context_for(factory_text),
+        head=lambda: None,
         log=lambda line: None,
     )
     return feeder, queue, github, linear
@@ -612,7 +614,8 @@ def test_one_pr_per_issue_even_with_two_feeders_on_one_database(tmp_path: Path) 
     feeder, queue, github, linear = make_feeder(tmp_path)
     github.issues["owner/app"] = [issue(85)]
     other = Feeder(queue, feeder.config, feeder.machines, github=github, linear=linear,
-                   factory_for=lambda project: context_for(FACTORY_MD), log=lambda line: None)
+                   factory_for=lambda project: context_for(FACTORY_MD), head=lambda: None,
+                   log=lambda line: None)
     feeder.feed_once()
     other.feed_once()
     assert len(github.pulls) == 1
@@ -631,6 +634,20 @@ def test_feeding_is_capped_at_the_harness_free_slots(tmp_path: Path) -> None:
     assert sorted(key for key, value in states.items() if value == "waiting-capacity") == ["4", "5"]
     # Fed items with no job yet still count, so the next poll feeds nothing.
     assert feeder.feed_once().fed == ()
+
+
+def test_a_remote_checkout_behind_the_box_head_adds_no_room(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=2, pc=1)
+    feeder.head = lambda: "b" * 40
+    with queue.connect() as connection:
+        device_sync.upsert(
+            connection, device="pc", bot="claude-bot", harness="claude",
+            checkout="/home/claude-bot/factory", target="a" * 40, sha="a" * 40,
+            state=device_sync.SYNCED, detail="", now=1.0,
+        )
+        connection.commit()
+    github.issues["owner/app"] = [issue(n, created_at=float(n)) for n in range(1, 6)]
+    assert len(feeder.feed_once().fed) == 2
 
 
 def test_queued_jobs_for_the_harness_use_up_capacity(tmp_path: Path) -> None:

@@ -1444,6 +1444,7 @@ def _feeder(
         ),
         linear=linear,
         factory_for=source.factory_context,
+        head=lambda: health.checkout_sha(ROOT),
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
     )
 

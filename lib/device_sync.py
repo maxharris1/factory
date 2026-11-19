@@ -18,8 +18,7 @@ States:
 * refused: the deploy would discard local work (staged or modified files,
   an untracked or ignored file in the checkout's way, a merge or rebase in
   progress, local commits) or failed. Escalated once.
-* unreachable: ssh failed. Not a placement block: the device probe and the
-  start's own preflight already cover an offline device.
+* unreachable: ssh failed.
 * held: the box runs at `sha` on purpose because self-deploy could not
   reach `target` (origin/main); `detail` names why. Not a placement block:
   the start's preflight accepts a box HEAD behind origin/main while it
@@ -40,7 +39,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 TABLE = "device_sync"
 
@@ -164,14 +163,16 @@ def blocked(connection: sqlite3.Connection) -> Blocked:
     return blocked_by(read(connection))
 
 
-def remotes_behind(rows: Iterable[Row], head: str | None, box: str) -> Blocked:
-    """Synced remote checkouts at a sha other than the box HEAD."""
+def checkout_blocks(rows: Iterable[Row], head: str | None, box: str) -> Blocked:
+    rows = list(rows)
+    blocked = blocked_by(rows)
     if head is None:
-        return NOTHING_BLOCKED
-    return Blocked(frozenset(
+        return blocked
+    behind = {
         (row.device, row.harness) for row in rows
-        if row.device != box and row.state == SYNCED and row.sha != head
-    ))
+        if row.device != box and row.sha is not None and row.sha != head
+    }
+    return replace(blocked, pairs=blocked.pairs | behind)
 
 
 def upsert(
