@@ -91,6 +91,15 @@ its state, a failed first attempt included) is `waiting-blocked` with the red
 checks and head, unless it is labelled `factory:main-fix`. A begun feed, and
 its jobs, go on.
 
+Main-fix filing (#1061, lib/main_fix.py): the first red read of a streak files
+one issue labelled with the intake label and `factory:main-fix`, carrying the
+red checks and their log tails, and the same poll feeds it as `building`. A
+`feeder_main_fix` row per streak and a marker in the issue body keep it to one
+issue across crashes and feeders; a green read ends the streak, and an issue
+closed while main stays red starts a new one. The row stores the title and body
+rendered from the streak's first red read, and a feeder posts or retires it
+only while it holds the row's claim, which lapses after CLAIM_SECONDS.
+
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
 that PR merges, with one Grok `blocked` wake per set of such PRs. The branch
@@ -130,8 +139,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
+import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Literal, NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
@@ -143,13 +154,14 @@ from lib.brief_comment import FACTORY_MD_HEADING
 from lib.device_pool import free_slots, placement_blocked, slots_in_use
 from lib.device_sync import Blocked
 from lib.dispatch.bookkeeping import LockLedger, bookkeeping_write, must_write
-from lib.dispatch.types import BaseCheck
+from lib.dispatch.types import BaseCheck, FailedCheck
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
-from lib.evidence.ci import main_red
+from lib.evidence.ci import MainRed, ci_evidence, main_red
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
     ATTENTION_CRITICAL_PATH,
     FILE_PATH,
+    MAIN_FIX_LABEL,
     WAIT_REASONS,
     GateLines,
     Holds,
@@ -160,6 +172,7 @@ from lib.feeder_gates import (
     Wait,
     blocker_waits,
     github_ref,
+    is_main_fix,
     labels,
     line_stop,
     linear_status,
@@ -167,7 +180,19 @@ from lib.feeder_gates import (
     path_matches,
     paths_collide,
 )
+from lib.github_actions import TIMEOUT_SECONDS
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
+from lib.main_fix import (
+    MAIN_FIX_TABLE,
+    File,
+    MainFixRow,
+    MainRead,
+    Retire,
+    decide,
+    issue_body,
+    issue_title,
+    marker,
+)
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 from lib.pr_title import prefixed, read_sources
@@ -242,6 +267,7 @@ _FED_WITHOUT_JOB = f"""
       )
 """
 BODY_LIMIT = 20_000
+CLAIM_SECONDS = 15 * TIMEOUT_SECONDS
 
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
@@ -512,6 +538,30 @@ class GitHubIntake(Protocol):
 
     def base_checks(self, repo: str, branch: str) -> Mapping[str, BaseCheck]: ...
 
+    def file_repo_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+        since: float,
+        *,
+        before_post: Callable[[], None],
+    ) -> int: ...
+
+    def marked_issues(self, repo: str, marker: str, since: float) -> tuple[int, ...]: ...
+
+    def close_issue(self, repo: str, number: int, comment: str) -> None: ...
+
+    def issue_state(self, repo: str, number: int) -> str: ...
+
+    def failed_run_logs(self, repo: str, run_id: str) -> Mapping[str, str]: ...
+
+
+class _ClaimLost(Exception):
+    pass
+
 
 class LinearIntake(Protocol):
     def linear_intake(
@@ -534,6 +584,14 @@ class FeedReport:
     blocked: int = 0
     errors: int = 0
     refused: int = 0
+
+
+@dataclass(frozen=True)
+class _MainLine:
+    project: Project
+    label: str
+    required: tuple[str, ...]
+    read: MainRead
 
 
 @dataclass
@@ -714,6 +772,27 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
     ensure_priority_table(connection)
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {MAIN_FIX_TABLE} (
+            marker TEXT PRIMARY KEY,
+            repo TEXT NOT NULL,
+            base TEXT NOT NULL,
+            state TEXT NOT NULL,
+            issue INTEGER,
+            last_head TEXT NOT NULL,
+            filed_at REAL NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            claimed_by TEXT,
+            claimed_at REAL
+        )
+        """
+    )
+    connection.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {MAIN_FIX_TABLE}_active ON {MAIN_FIX_TABLE} "
+        "(repo, base) WHERE state IN ('filing', 'open')"
+    )
 
 
 def feeder_counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -803,7 +882,11 @@ class Feeder:
 
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
-        candidates, read_repos, read_errors = self._candidates()
+        contexts, context_errors = self._contexts()
+        mains, main_errors = self._main_reads(contexts)
+        main_errors += self._file_main_fixes(mains, now)
+        candidates, read_repos, read_errors = self._candidates(contexts)
+        read_errors += context_errors + main_errors
         if not self._record_seen(candidates, now):
             self.log("feeder: intake not recorded, orch.db is locked; feeding next poll")
             return FeedReport(eligible=len(candidates), errors=read_errors + 1)
@@ -822,7 +905,7 @@ class Feeder:
         waits, critical, holds, capped, gate_read, unblocks, tiers = self._gates(
             candidates, states, refused
         )
-        stops, stop_errors = self._line_stops(candidates, begun, refused)
+        stops, stop_errors = self._line_stops(candidates, begun, refused, mains)
         for candidate in candidates:
             candidate.unblocks = unblocks[candidate.ref]
             candidate.effective_tier = tiers[candidate.ref]
@@ -908,16 +991,28 @@ class Feeder:
             refused=len(refused),
         )
 
-    def _candidates(self) -> tuple[list[_Candidate], set[str], int]:
+    def _contexts(self) -> tuple[list[tuple[Project, FactoryContext]], int]:
+        found: list[tuple[Project, FactoryContext]] = []
+        errors = 0
+        for project in self.projects:
+            try:
+                found.append((project, self.factory_for(project)))
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read intake for {project.repo}: {safe_ship_error(exc)}")
+        return found, errors
+
+    def _candidates(
+        self, contexts: Sequence[tuple[Project, FactoryContext]]
+    ) -> tuple[list[_Candidate], set[str], int]:
         found: list[_Candidate] = []
         read: set[str] = set()
         errors = 0
         started = self._started()
-        for project in self.projects:
+        for project, context in contexts:
             intake = project.intake
             assert intake is not None
             try:
-                context = self.factory_for(project)
                 if project.linear_project_ids:
                     if self.linear is None or intake.linear_state is None:
                         continue
@@ -1004,15 +1099,190 @@ class Feeder:
         with self.queue.connect() as connection:
             attention.sync(connection, (INTAKE_REFUSED,), repos, flags, now)
 
+    def _main_reads(
+        self, contexts: Sequence[tuple[Project, FactoryContext]]
+    ) -> tuple[dict[tuple[str, str], _MainLine], int]:
+        lines: dict[tuple[str, str], _MainLine] = {}
+        errors = 0
+        for project, context in contexts:
+            intake = project.intake
+            assert intake is not None
+            config = context.config
+            if (
+                project.linear_project_ids
+                or intake.label is None
+                or intake.base_branches
+                or config.tickets != "github"
+                or not config.required_checks
+            ):
+                continue
+            base = project.base_for(None) or config.base_branch
+            try:
+                red = main_red(self.github.base_checks(project.repo, base), config.required_checks)
+                read = MainRead(red, False)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: cannot read main CI for {project.repo}@{base}: {safe_ship_error(exc)}")
+                read = MainRead(None, True)
+            lines[(project.repo.lower(), base)] = _MainLine(
+                project, intake.label, tuple(config.required_checks), read
+            )
+        return lines, errors
+
+    def _file_main_fixes(self, lines: Mapping[tuple[str, str], _MainLine], now: float) -> int:
+        errors = 0
+        for (repo, base), line in lines.items():
+            row = self._main_fix_row(repo, base)
+            issue_open: bool | None = None
+            if row is not None and row.issue is not None and line.read.red is not None:
+                try:
+                    issue_open = self.github.issue_state(line.project.repo, row.issue) == "open"
+                except Exception as exc:
+                    self.log(f"feeder: cannot read main-fix {repo}#{row.issue}: {safe_ship_error(exc)}")
+            try:
+                for action in decide(row, line.read, issue_open=issue_open):
+                    if isinstance(action, File):
+                        claimed = self._claim_main_fix(line, repo, base, action.red, now)
+                        if claimed is not None:
+                            self._post_main_fix(line, *claimed)
+                        continue
+                    claim = None
+                    if action.row.state == "filing":
+                        claim = self._take_main_fix(action.row.marker)
+                        if claim is None:
+                            continue
+                    if isinstance(action, Retire):
+                        self._retire_main_fix(action.row.marker)
+                    elif claim is not None:
+                        self._post_main_fix(line, action.row, claim)
+            except Exception as exc:
+                errors += 1
+                self.log(f"feeder: main-fix for {repo}@{base} not filed yet: {safe_ship_error(exc)}")
+        return errors
+
+    def _main_fix_row(self, repo: str, base: str) -> MainFixRow | None:
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT {', '.join(MainFixRow.__dataclass_fields__)} FROM {MAIN_FIX_TABLE} "
+                "WHERE repo = ? AND base = ? AND state IN ('filing', 'open')",
+                (repo, base),
+            ).fetchone()
+        return None if row is None else MainFixRow(*row)
+
+    def _claim_main_fix(
+        self, line: _MainLine, repo: str, base: str, red: MainRed, now: float
+    ) -> tuple[MainFixRow, str] | None:
+        tag = marker(repo, base, now)
+        body = self._main_fix_body(line, base, red, tag)
+        row = MainFixRow(repo, base, tag, "filing", None, red.head, now, issue_title(red), body)
+        claim = uuid.uuid4().hex
+        try:
+            with self.queue.connect() as connection:
+                values = {**asdict(row), "claimed_by": claim, "claimed_at": self.queue.now()}
+                connection.execute(
+                    f"INSERT INTO {MAIN_FIX_TABLE} ({', '.join(values)}) "
+                    f"VALUES ({', '.join(':' + name for name in values)})",
+                    values,
+                )
+        except sqlite3.IntegrityError:
+            return None
+        return row, claim
+
+    def _take_main_fix(self, marker: str) -> str | None:
+        claim = uuid.uuid4().hex
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            taken = connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = ?, claimed_at = ? "
+                "WHERE marker = ? AND state = 'filing' AND (claimed_by IS NULL OR claimed_at <= ?)",
+                (claim, now, marker, now - CLAIM_SECONDS),
+            ).rowcount
+        return claim if taken == 1 else None
+
+    def _renew_main_fix(self, marker: str, claim: str) -> None:
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            renewed = connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET claimed_at = ? "
+                "WHERE marker = ? AND state = 'filing' AND claimed_by = ? AND claimed_at > ?",
+                (now, marker, claim, now - CLAIM_SECONDS),
+            ).rowcount
+        if renewed != 1:
+            raise _ClaimLost(marker)
+
+    def _retire_main_fix(self, marker: str) -> None:
+        with self.queue.connect() as connection:
+            connection.execute(f"UPDATE {MAIN_FIX_TABLE} SET state = 'closed' WHERE marker = ?", (marker,))
+
+    def _main_fix_body(self, line: _MainLine, base: str, red: MainRed, tag: str) -> str:
+        repo = line.project.repo
+        logs: dict[str, str | None] = {}
+        for run_id in dict.fromkeys(check.run_id for check in red.checks):
+            try:
+                run_logs = self.github.failed_run_logs(repo, run_id)
+            except Exception as exc:
+                self.log(f"feeder: {repo} run {run_id} log unavailable: {safe_ship_error(exc)}")
+                continue
+            for check in red.checks:
+                if check.run_id == run_id:
+                    logs[check.job_id] = run_logs.get(check.name)
+        failed = [
+            FailedCheck(check.name, check.run_id, check.job_id,
+                        f"https://github.com/{repo}/actions/runs/{check.run_id}")
+            for check in red.checks
+        ]
+        evidence = ci_evidence(failed=failed, logs=logs, limit=sys.maxsize)
+        return issue_body(repo, base, line.required, red, evidence, tag)
+
+    def _post_main_fix(self, line: _MainLine, row: MainFixRow, claim: str) -> None:
+        repo = line.project.repo
+        try:
+            number = self.github.file_repo_issue(
+                repo, row.title, row.body, (line.label, MAIN_FIX_LABEL), row.marker, row.filed_at,
+                before_post=lambda: self._renew_main_fix(row.marker, claim),
+            )
+        except _ClaimLost:
+            self.log(f"feeder: main-fix for {repo}@{row.base} left to the feeder now holding it")
+            return
+        except Exception:
+            with self.queue.connect() as connection:
+                connection.execute(
+                    f"UPDATE {MAIN_FIX_TABLE} SET claimed_by = NULL WHERE marker = ? AND claimed_by = ?",
+                    (row.marker, claim),
+                )
+            raise
+        keep = self._close_main_fix_duplicates(repo, row, number)
+        with self.queue.connect() as connection:
+            connection.execute(
+                f"UPDATE {MAIN_FIX_TABLE} SET state = 'open', issue = ? WHERE marker = ? AND state != 'closed'",
+                (keep, row.marker),
+            )
+        self.log(f"feeder: filed main-fix {repo}#{keep} for red {row.base} at {row.last_head[:8]}")
+
+    def _close_main_fix_duplicates(self, repo: str, row: MainFixRow, posted: int) -> int:
+        found = (posted, *self.github.marked_issues(repo, row.marker, row.filed_at))
+        keep = min(found)
+        for duplicate in sorted(set(found) - {keep}):
+            self.github.close_issue(
+                repo, duplicate, f"Closing as a duplicate of #{keep}, the main-fix issue for this red streak."
+            )
+        return keep
+
     def _line_stops(
         self,
         candidates: Sequence[_Candidate],
         begun: Collection[Ref],
         refused: Collection[Ref],
+        mains: Mapping[tuple[str, str], _MainLine],
     ) -> tuple[dict[tuple[str, str | None], Wait | None], int]:
         """Why each base stops the line, read once per poll, and how many
         reads failed. A failed read stops the line on that base."""
         stops: dict[tuple[str, str | None], Wait | None] = {}
+        for key, main in mains.items():
+            if main.read.failed:
+                stops[key] = Wait(f"main CI unreadable for {key[1]}")
+            else:
+                stops[key] = None if main.read.red is None else main.read.red.wait
         errors = 0
         for candidate in candidates:
             required = candidate.context.config.required_checks
@@ -1567,7 +1837,8 @@ class Feeder:
         if risk not in ("low", "high"):
             raise ValueError(f"ticket risk {risk!r} is not low or high")
         template = candidate.template
-        state = go_state_for(issue.body, template.plan_first)
+        main_fix = is_main_fix(issue.labels)
+        state = "building" if main_fix else go_state_for(issue.body, template.plan_first)
         self._record(candidate, branch=branch, base_branch=base)
         if number is None:
             if not branch_found:
@@ -1593,7 +1864,10 @@ class Feeder:
             )
         linear = issue.tracker == "linear"
         if not linear and config.tickets == "github":
-            self.github.add_labels(repo, number, [FACTORY_LABEL, f"orch:state/{state}"])
+            self.github.add_labels(
+                repo, number,
+                [FACTORY_LABEL, f"orch:state/{state}", *([MAIN_FIX_LABEL] if main_fix else [])],
+            )
         if linear:
             if self.linear is None or issue.linear_id is None:
                 raise ValueError("Linear issue has no id to comment on")
@@ -1875,7 +2149,9 @@ def _brief(
     if len(body) > BODY_LIMIT:
         body = body[:BODY_LIMIT] + f"\n[cut at {BODY_LIMIT} characters]"
     fence = _fence(body)
-    if state == "planning" and template.plan_first:
+    if is_main_fix(issue.labels):
+        why = "it is a main-fix ticket, so it starts building"
+    elif state == "planning" and template.plan_first:
         why = "the ticket says Plan first: yes"
     elif state == "planning":
         why = "the ticket names more than 3 files, so it starts with a plan"
