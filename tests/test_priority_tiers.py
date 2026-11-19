@@ -187,10 +187,8 @@ def test_linear_urgent_priority_is_tier_zero_without_priority_from_linear(tmp_pa
 
 
 def test_a_blocker_takes_the_best_tier_of_the_tickets_it_gates(tmp_path: Path) -> None:
-    """#2 (p1) blocks #3 (p0); #1 is an older, unrelated p1. Inheritance holds
-    with critical_path_order off, so the unblocks count cannot decide it."""
-    lines = TIERS + "      critical_path_order: false\n"
-    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, lines), box=1)
+    no_critical_path = TIERS + "      critical_path_order: false\n"
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, no_critical_path), box=1)
     github.statuses = {ref(2): OPEN}
     github.issues[HOME] = [
         issue(1, labels=(READY, "priority:p1"), created_at=1.0),
@@ -344,7 +342,6 @@ def test_the_script_draws_the_same_tier_chips(tmp_path: Path) -> None:
 
 
 def _fed_inherited(tmp_path: Path) -> Path:
-    """#1 (p1) blocks #2 (p0); #1 is fed and queued as PR 501 at tier 0."""
     now = [10_000.0]
     feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=1, now=now)
     dispatcher_for(tmp_path, queue)

@@ -1041,7 +1041,7 @@ class Feeder:
         self._release(released)
         self._flip_capped(flips)
         shared = {repo: policy.shared for repo, policy in holds.policies.items()}
-        blocks = _blocker_graph(candidates, gated, pull_of)
+        blocks = _dependents_by_blocker(candidates, gated, pull_of)
         unblocks = critical_path_counts(candidates, blocks, {c.ref for c in unstarted}, shared)
         tiers = effective_tiers(candidates, blocks)
         return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks, tiers
@@ -1571,10 +1571,9 @@ class Feeder:
         return f"factory/issue-{issue.key}"
 
 
-def _blocker_graph(
+def _dependents_by_blocker(
     candidates: Sequence[_Candidate], eligible_gates: Mapping[Ref, GateLines], pull_of: Mapping[Ref, Ref]
 ) -> dict[Ref, set[Ref]]:
-    """Each candidate's direct dependents through Blocked by / Depends on."""
     owner = {c.ref: c.ref for c in candidates}
     owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
     blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
@@ -1585,8 +1584,7 @@ def _blocker_graph(
     return blocks
 
 
-def _dependents(blocks: Mapping[Ref, set[Ref]], seed: set[Ref]) -> set[Ref]:
-    """The seed and every ticket it transitively unblocks."""
+def _with_dependents(blocks: Mapping[Ref, set[Ref]], seed: set[Ref]) -> set[Ref]:
     found = set(seed)
     pending = list(found)
     while pending:
@@ -1609,7 +1607,7 @@ def critical_path_counts(
             counts[c.ref] = 0
             continue
         own = shared.get(c.ref.repo, ())
-        found = _dependents(blocks, blocks[c.ref] | {
+        found = _with_dependents(blocks, blocks[c.ref] | {
             other.ref
             for other in candidates
             if other.ref in unstarted
@@ -1624,12 +1622,10 @@ def critical_path_counts(
 def effective_tiers(
     candidates: Sequence[_Candidate], blocks: Mapping[Ref, set[Ref]]
 ) -> dict[Ref, int | None]:
-    """The best own tier of each candidate and every candidate it
-    transitively unblocks, so a blocker never ranks below what it gates."""
     own = {c.ref: c.own_tier for c in candidates}
     tiers: dict[Ref, int | None] = {}
     for c in candidates:
-        found = [own[ref] for ref in _dependents(blocks, {c.ref})]
+        found = [own[ref] for ref in _with_dependents(blocks, {c.ref})]
         tiers[c.ref] = min((tier for tier in found if tier is not None), default=None)
     return tiers
 
