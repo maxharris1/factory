@@ -21,9 +21,12 @@ factory_in_host_pidns() (
     exit 1
 )
 
-# An unprivileged sandbox must unshare its user namespace to get its own PID
-# namespace, so a one-field NSpid in the initial user namespace is the host
-# after a restart.
+# A host or WSL restart leaves the record naming a dead namespace. Only the
+# initial PID namespace, or one whose PID 1 is a system init (WSL's /init or
+# systemd), is a host: a sandbox's PID 1 is the command its runtime started,
+# and an unprivileged sandbox also has its own user namespace. Each retired
+# namespace is appended to ${file}-retired, so a record naming it in any
+# state directory is known dead.
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
@@ -36,6 +39,13 @@ factory_refresh_host_pidns() (
     recorded="$(cat "$file" 2>/dev/null)" || exit 1
     current="$(readlink "${proc}/self/ns/pid" 2>/dev/null)" || exit 1
     [ -n "$recorded" ] && [ -n "$current" ] && [ "$recorded" != "$current" ] || exit 1
+    if [ "$current" != "pid:[4026531836]" ]; then
+        init="$(tr '\000' '\n' <"${proc}/1/cmdline" 2>/dev/null | head -n 1)"
+        case "${init##*/}" in
+            init | systemd) ;;
+            *) exit 1 ;;
+        esac
+    fi
     for pidfile in "$state"/*.pid; do
         [ -r "$pidfile" ] || continue
         pid="$(awk 'NR == 1 { print $1 }' "$pidfile")"
@@ -45,12 +55,14 @@ factory_refresh_host_pidns() (
             exit 2
         fi
     done
-    for pidfile in "$state"/*.pid; do
-        [ "$(awk 'NR == 1 { print $3 }' "$pidfile" 2>/dev/null)" != "$recorded" ] || rm -f "$pidfile"
-    done
+    printf '%s\n' "$recorded" >>"${file}-retired" || exit 1
     printf '%s\n' "$current" >"$file" || exit 1
     echo "refreshed ${file}: pid namespace ${recorded} -> ${current}" >&2
 )
+
+factory_host_pidns_retired() {
+    grep -qxF -- "$1" "${2:-${HOME}/.config/factory/host-pidns}-retired" 2>/dev/null
+}
 
 factory_may_autostart() {
     [ -z "${ORCH_JOB_PROOF:-}" ] && [ -z "${CODEX_SANDBOX:-}" ] && factory_in_host_pidns "$@"

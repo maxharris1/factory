@@ -1211,10 +1211,12 @@ def test_install_records_the_host_pid_namespace(tmp_path: Path) -> None:
         ("1728748\t61", "pid:[1]", {}),
         ("61", "pid:[4026532782]", {}),
         ("61", "pid:[4026532782]", {"uid_map": "         0       1000          1\n"}),
+        ("61", "pid:[4026532782]", {"uid_map": INITIAL_USERNS}),
         ("4484", None, {"ORCH_JOB_PROOF": "x"}),
         ("4484", None, {"CODEX_SANDBOX": "seatbelt"}),
     ],
-    ids=["two-field-nspid", "own-proc-mount", "own-user-namespace", "job", "codex-sandbox"],
+    ids=["two-field-nspid", "own-proc-mount", "own-user-namespace", "privileged-sandbox", "job",
+         "codex-sandbox"],
 )
 def test_install_update_keeps_the_host_record_outside_the_host(
     tmp_path: Path, nspid: str, ns: str | None, extra: dict[str, str],

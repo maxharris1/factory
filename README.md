@@ -1146,11 +1146,14 @@ writes its own pids into the host's pidfiles. A host or WSL restart renumbers
 namespaces (issue #932). The profile hook, the service scripts and
 `install.sh` then rewrite the record when the shell is not a factory job, its
 `NSpid` has one entry, it runs in the initial user namespace
-(`/proc/self/uid_map` is `0 0 4294967295`), and no pid in a state-directory
-`*.pid` file still runs in the recorded namespace. The refresh also removes
-the Linear child records that name the old namespace. An unprivileged sandbox
-has to unshare its user namespace to get its own PID namespace, so it never
-moves the record. While a service still runs in the recorded namespace,
+(`/proc/self/uid_map` is `0 0 4294967295`), its PID namespace is the initial
+one or has a system init (`init` or `systemd`, as in a WSL distro) as PID 1,
+and no pid in a state-directory `*.pid` file still runs in the recorded
+namespace. A sandbox's PID 1 is the command its runtime started, and an
+unprivileged sandbox has its own user namespace, so neither moves the record.
+The refresh appends the old namespace to `~/.config/factory/host-pidns-retired`,
+and the Linear service drops a child record naming a retired namespace in any
+state directory. While a service still runs in the recorded namespace,
 `install.sh` and the service scripts refuse with exit 4 and keep the record.
 
 It also retires the launchers that lived outside the repository (issue

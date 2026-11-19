@@ -20,12 +20,14 @@ HELPER = ROOT / "deploy" / "host-pidns.sh"
 HOST_NS = "pid:[4026531836]"
 SANDBOX_NS = "pid:[4026532782]"
 OLD_NS = "pid:[4026531111]"
+WSL_NS = "pid:[4026532216]"
 INITIAL_USERNS = "         0          0 4294967295\n"
 SANDBOX_USERNS = "         0       1000          1\n"
 
 
 def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
-              uid_map: str | None = None, pids: dict[int, str] | None = None) -> Path:
+              uid_map: str | None = None, pids: dict[int, str] | None = None,
+              init: str | None = None) -> Path:
     proc = tmp_path / "proc"
     (proc / "self" / "ns").mkdir(parents=True)
     lines = "Name:\tsh\n" + (f"NSpid:\t{nspid}\n" if nspid is not None else "")
@@ -36,6 +38,9 @@ def fake_proc(tmp_path: Path, nspid: str | None, ns: str = HOST_NS,
     for pid, pid_ns in (pids or {}).items():
         (proc / str(pid) / "ns").mkdir(parents=True)
         (proc / str(pid) / "ns" / "pid").symlink_to(pid_ns)
+    if init is not None:
+        (proc / "1").mkdir(exist_ok=True)
+        (proc / "1" / "cmdline").write_text(init.replace(" ", "\0") + "\0", encoding="utf-8")
     return proc
 
 
@@ -158,7 +163,20 @@ def test_service_refreshes_a_stale_record_after_a_restart(tmp_path: Path,
     assert "refusing" not in result.stderr
 
 
-def test_refresh_forgets_child_records_of_the_dead_namespace(tmp_path: Path) -> None:
+@pytest.mark.parametrize("init", ["/init", "/sbin/init", "/usr/lib/systemd/systemd --system"])
+def test_wsl_distro_refreshes_a_stale_record_after_a_restart(tmp_path: Path, init: str) -> None:
+    home = tmp_path / "home"
+    (home / ".local" / "state" / "factory").mkdir(parents=True)
+    path = record(home, OLD_NS)
+    proc = fake_proc(tmp_path, "4484", WSL_NS, INITIAL_USERNS, init=init)
+
+    result = _run(REFRESHING["helper"], home, proc)
+
+    assert result.returncode == 0, result.stderr
+    assert path.read_text(encoding="utf-8") == WSL_NS + "\n"
+
+
+def test_linear_forgets_child_records_of_a_retired_namespace(tmp_path: Path) -> None:
     home = tmp_path / "home"
     state = home / ".local" / "state" / "factory"
     state.mkdir(parents=True)
@@ -169,11 +187,14 @@ def test_refresh_forgets_child_records_of_the_dead_namespace(tmp_path: Path) -> 
     record(home, OLD_NS)
     proc = fake_proc(tmp_path, "4484", HOST_NS, INITIAL_USERNS)
 
-    result = _run(REFRESHING["helper"], home, proc)
+    refreshed = _run(REFRESHING["helper"], home, proc)
+    stopped = _run(_service("linear-webhook-service.sh", "stop"), home, proc)
 
-    assert result.returncode == 0, result.stderr
-    assert not stale.exists()
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert stale.exists(), refreshed.stderr
+    assert not stale.exists(), stopped.stderr
     assert other.read_text(encoding="utf-8") == f"4343 200 {SANDBOX_NS}\n"
+    assert f"{other} names a process in another PID namespace" in stopped.stderr
 
 
 def _free_port() -> int:
@@ -182,10 +203,15 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def test_linear_listener_starts_after_a_restart_left_its_child_record(tmp_path: Path) -> None:
+@pytest.mark.parametrize("custom_state", [False, True], ids=["own-state", "custom-state"])
+def test_linear_listener_starts_after_a_restart_left_its_child_record(
+    tmp_path: Path, custom_state: bool,
+) -> None:
     home = tmp_path / "home"
-    state = home / ".local" / "state" / "factory"
-    state.mkdir(parents=True)
+    default_state = home / ".local" / "state" / "factory"
+    default_state.mkdir(parents=True)
+    state = home / "custom-state" if custom_state else default_state
+    state.mkdir(exist_ok=True)
     (state / "linear-webhook-listener-child.pid").write_text(f"4242 100 {OLD_NS}\n",
                                                              encoding="utf-8")
     record(home, OLD_NS)
@@ -197,6 +223,10 @@ def test_linear_listener_starts_after_a_restart_left_its_child_record(tmp_path: 
     extra = {"ORCH_BIN": str(serve), "LINEAR_WEBHOOK_TUNNEL_HOST": "",
              "LINEAR_WEBHOOK_PORT": str(_free_port()), "LINEAR_WEBHOOK_START_WAIT": "2",
              "LINEAR_WEBHOOK_RETRY_SEC": "0.1", "LINEAR_WEBHOOK_RETRY_MAX_SEC": "0.1"}
+    if custom_state:
+        refreshed = _run(REFRESHING["helper"], home, proc)
+        assert refreshed.returncode == 0, refreshed.stderr
+        extra["ORCH_STATE_DIR"] = str(state)
 
     try:
         result = _run(_service("linear-webhook-service.sh", "ensure"), home, proc, **extra)
@@ -237,18 +267,24 @@ def test_service_refuses_while_a_service_lives_in_the_recorded_namespace(
 
 
 @pytest.mark.parametrize(
-    ("nspid", "uid_map", "extra"),
+    ("nspid", "uid_map", "init", "extra"),
     [
-        ("4484", INITIAL_USERNS, {"ORCH_JOB_PROOF": "x"}),
-        ("4484", INITIAL_USERNS, {"CODEX_SANDBOX": "seatbelt"}),
-        ("1728748\t61", INITIAL_USERNS, {}),
-        ("61", SANDBOX_USERNS, {}),
-        ("61", None, {}),
+        ("4484", INITIAL_USERNS, "/init", {"ORCH_JOB_PROOF": "x"}),
+        ("4484", INITIAL_USERNS, "/init", {"CODEX_SANDBOX": "seatbelt"}),
+        ("1728748\t61", INITIAL_USERNS, "/init", {}),
+        ("61", SANDBOX_USERNS, "/init", {}),
+        ("61", None, "/init", {}),
+        ("61", INITIAL_USERNS, None, {}),
+        ("61", INITIAL_USERNS, "/bin/sh -c poller-service.sh stop", {}),
+        ("61", INITIAL_USERNS, "/sbin/docker-init -- sh", {}),
+        ("61", INITIAL_USERNS, "bwrap --unshare-pid sh", {}),
     ],
-    ids=["job", "codex-sandbox", "two-field-nspid", "own-proc-sandbox", "no-uid-map"],
+    ids=["job", "codex-sandbox", "two-field-nspid", "own-proc-sandbox", "no-uid-map",
+         "privileged-sandbox-no-pid1", "privileged-sandbox-shell", "privileged-docker-init",
+         "privileged-bwrap"],
 )
 def test_refresh_never_runs_outside_the_host(
-    tmp_path: Path, nspid: str, uid_map: str | None, extra: dict[str, str],
+    tmp_path: Path, nspid: str, uid_map: str | None, init: str | None, extra: dict[str, str],
 ) -> None:
     home = tmp_path / "home"
     state = home / ".local" / "state" / "factory"
@@ -256,7 +292,7 @@ def test_refresh_never_runs_outside_the_host(
     child = state / "linear-webhook-listener-child.pid"
     child.write_text(f"4242 100 {OLD_NS}\n", encoding="utf-8")
     path = record(home, OLD_NS)
-    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map)
+    proc = fake_proc(tmp_path, nspid, SANDBOX_NS, uid_map, init=init)
 
     result = _run(_service("poller-service.sh", "stop"), home, proc, **extra)
 
@@ -264,6 +300,8 @@ def test_refresh_never_runs_outside_the_host(
     assert "refusing to stop from a non-host PID namespace" in result.stderr
     assert path.read_text(encoding="utf-8") == OLD_NS + "\n"
     assert child.read_text(encoding="utf-8") == f"4242 100 {OLD_NS}\n"
+    assert not (state / "poller.stopped").exists()
+    assert not (home / ".config" / "factory" / "host-pidns-retired").exists()
 
 
 def test_waiter_status_still_answers_outside_the_host_pid_namespace(tmp_path: Path) -> None:
