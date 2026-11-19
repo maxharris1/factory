@@ -1642,6 +1642,18 @@ def test_card_says_handed_off_in_linear_with_time(tmp_path: Path) -> None:
     assert "handed off in Linear 2h 00m ago · In Review · 6 revise rounds" in tile
 
 
+def test_a_database_without_close_times_ages_abandoned_from_the_transition(tmp_path: Path) -> None:
+    db, log = _linear_db(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("ALTER TABLE ticket_state DROP COLUMN closed_at")
+        add_ticket(connection, "maxharris1/cleffy", "98", state="abandoned")
+        connection.execute(
+            "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+            "VALUES ('maxharris1/cleffy', '98', 'review', 'abandoned', ?, 'closed-unmerged')", (NOW - 600,))
+    [row] = collect_snapshot(db, log, now=NOW)["tickets"]
+    assert (row["state"], row["state_age_seconds"]) == ("abandoned", 600)
+
+
 def test_linear_settled_ticket_shows_merged_done_abandoned(tmp_path: Path) -> None:
     db, log = _linear_db(tmp_path)
     with sqlite3.connect(db) as connection:

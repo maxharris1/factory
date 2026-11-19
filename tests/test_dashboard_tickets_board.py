@@ -519,6 +519,68 @@ def test_script_stopped_column_matches_the_server(tmp_path: Path, snapshot: dict
     assert out["html"]["pipeline"] == _server(snapshot)["pipeline"]
 
 
+HOUR = 3600
+CLOSED_LONG_AGO = ("maxharris1/cleffy", "98")
+CLOSED_RECENTLY = ("maxharris1/cleffy", "103")
+RECORDED_LONG_AGO = ("maxharris1/factory", "939")
+RECORDED_RECENTLY = ("maxharris1/factory", "940")
+OLD_CAPPED = ("maxharris1/factory", "941")
+OLD_STUCK = ("maxharris1/factory", "942")
+OLD_MERGED = ("maxharris1/factory", "984")
+
+
+def closed_snapshot(tmp_path: Path) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    with sqlite3.connect(db) as connection:
+        def ticket(key: tuple[str, str], state: str, moved: str, at: float, closed_at: float | None = None,
+                   **kw) -> None:
+            add_ticket(connection, *key, state=state, **kw)
+            connection.execute("UPDATE ticket_state SET closed_at = ? WHERE repo = ? AND ticket_id = ?",
+                               (closed_at, *key))
+            connection.execute(
+                "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+                "VALUES (?, ?, 'review', ?, ?, ?)", (*key, state, at, moved))
+
+        ticket(CLOSED_LONG_AGO, "abandoned", "closed-unmerged", NOW - HOUR, NOW - 25 * HOUR)
+        ticket(CLOSED_RECENTLY, "abandoned", "closed-unmerged", NOW - HOUR, NOW - 23 * HOUR)
+        ticket(RECORDED_LONG_AGO, "abandoned", "closed-unmerged", NOW - 25 * HOUR)
+        ticket(RECORDED_RECENTLY, "abandoned", "closed-unmerged", NOW - 23 * HOUR)
+        ticket(OLD_CAPPED, "capped", "poller", NOW - 48 * HOUR)
+        ticket(OLD_STUCK, "building", "poller", NOW - 48 * HOUR, stuck=1, stuck_reason="job-timeout")
+        ticket(OLD_MERGED, "merged", "poller", NOW - 48 * HOUR)
+    log = tmp_path / "poller.log"
+    log.write_text("cycle\n", encoding="utf-8")
+    return collect_snapshot(db, log, now=NOW, chart_path=CHART)
+
+
+def _check_closed(markup: dict[str, str]) -> None:
+    stopped = _placed_in(_column(markup["pipeline"], "Stop"))
+    assert sorted(stopped) == sorted(
+        "#".join(key) for key in (CLOSED_RECENTLY, RECORDED_RECENTLY, OLD_CAPPED, OLD_STUCK))
+    assert _placed_in(_dom(markup["shipped"])) == ["#".join(OLD_MERGED)]
+    assert _text(_one(_dom(markup["pipeline"]), _cls("count"))) == "7 tracked · 4 open · 1 shipped"
+    recent = _card(markup["pipeline"], "#".join(CLOSED_RECENTLY))
+    assert _text(_one(recent, _cls("tk-in"))) == "in abandoned 23h 00m"
+
+
+def test_an_abandoned_card_leaves_stopped_a_day_after_its_close(tmp_path: Path) -> None:
+    snapshot = closed_snapshot(tmp_path)
+    ages = {_key(row): row["state_age_seconds"] for row in snapshot["tickets"]}
+    assert ages["#".join(CLOSED_RECENTLY)] == 23 * HOUR
+    assert ages["#".join(CLOSED_LONG_AGO)] == 25 * HOUR
+    _check_closed(_server(snapshot))
+
+
+@layout.needs_node
+def test_script_drops_closed_abandoned_cards_like_the_server(tmp_path: Path) -> None:
+    snapshot = closed_snapshot(tmp_path)
+    out = _script(tmp_path, snapshot)
+    _check_closed(out["html"])
+    for ident in BOARD:
+        assert out["html"][ident] == _server(snapshot)[ident], ident
+
+
 def test_every_card_id_links_its_ticket_page(snapshot: dict) -> None:
     _check_id_links(_server(snapshot)["pipeline"], snapshot["tickets"])
 

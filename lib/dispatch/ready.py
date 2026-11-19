@@ -21,6 +21,7 @@ from lib.dispatch.constants import (
     CI_WAIT_REASONS,
     TERMINAL_STATES,
     UNANNOUNCED_AFTER_CAP,
+    CIHold,
 )
 from lib.dispatch.helpers import (
     _HANDOFF_UNREAD,
@@ -559,7 +560,7 @@ class ReadyMixin:
 
     def _settled_red(
         self, ticket: TrackedTicket, comment: Comment, head: str, result: CIResult
-    ) -> CIResult | str:
+    ) -> CIResult | CIHold:
         if result.status != "failure":
             return result
         key = (ticket.repo.lower(), ticket.ticket_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Final, Literal
 
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -10,8 +11,9 @@ GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 FINISHED_STATES = ("merged", "done")
 TERMINAL_STATES = frozenset({"merged", "done", "refused", "abandoned"})
 CI_INFRA_WAIT = "ci-infra-wait"
-CI_RERUN = "ci-rerun"
-CI_BASE_RED = "ci-base-red"
+CI_RERUN: Final = "ci-rerun"
+CI_BASE_RED: Final = "ci-base-red"
+CIHold = Literal["ci-rerun", "ci-base-red"]
 CI_WAIT_REASONS = ("ci-pending", "approved-ci-pending", CI_RERUN, CI_INFRA_WAIT, CI_BASE_RED)
 CI_RERUN_SETTLE_SECONDS = 900.0
 CI_INFRA_WAIT_SECONDS = 1800.0

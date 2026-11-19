@@ -115,6 +115,7 @@ STATE_LABEL_PREFIX = "orch:state/"
 PULL_FILES_LIMIT = 3000
 GH_DRAIN_SECONDS = 2.0
 ANNOTATION_MEMO = 1024
+BASE_RUN_PAGES = 3
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
@@ -897,22 +898,25 @@ class GitHubReviewActions:
 
     def base_checks(self, repo: str, branch: str) -> dict[str, BaseCheck]:
         path = _repo_path(repo)
-        page = _object(
-            self._json(
-                f"{path}/actions/runs?branch={quote(_branch(branch), safe='')}"
-                "&event=push&status=completed&per_page=20"
-            )
-        )
-        runs = page.get("workflow_runs")
-        if not isinstance(runs, list):
-            raise GitHubAdapterError("workflow runs page has no workflow_runs list")
         latest: dict[object, int] = {}
-        for run in map(_object, runs):
-            run_id = run.get("id")
-            if isinstance(run_id, bool) or not isinstance(run_id, int):
-                raise GitHubAdapterError("workflow run has no numeric id")
-            workflow = run.get("workflow_id")
-            latest[workflow] = max(latest.get(workflow, run_id), run_id)
+        for number in range(1, BASE_RUN_PAGES + 1):
+            page = _object(
+                self._json(
+                    f"{path}/actions/runs?branch={quote(_branch(branch), safe='')}"
+                    f"&event=push&status=completed&per_page=100&page={number}"
+                )
+            )
+            runs = page.get("workflow_runs")
+            if not isinstance(runs, list):
+                raise GitHubAdapterError("workflow runs page has no workflow_runs list")
+            for run in map(_object, runs):
+                run_id = run.get("id")
+                if isinstance(run_id, bool) or not isinstance(run_id, int):
+                    raise GitHubAdapterError("workflow run has no numeric id")
+                workflow = run.get("workflow_id")
+                latest[workflow] = max(latest.get(workflow, run_id), run_id)
+            if len(runs) < 100:
+                break
         checks: dict[str, BaseCheck] = {}
         for run_id in sorted(latest.values(), reverse=True):
             for job in map(_object, self._run_jobs(f"{path}/actions/runs/{run_id}/jobs")):

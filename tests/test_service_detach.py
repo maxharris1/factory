@@ -15,6 +15,7 @@ from tests import test_self_heal_sh as self_heal
 from tests import test_waiter_service as waiter
 from tests.fake_path import link_path_without
 from tests.procs import alive
+from tests.test_runner_pool_sync import sync_loops
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
@@ -90,7 +91,7 @@ class Service:
 
     def pids(self) -> list[int]:
         if not self.pidfiles:
-            return self._sync_loops()
+            return sync_loops(self.home)
         found = self._listed()
         return found if len(found) == len(self.pidfiles) and all(map(alive, found)) else []
 
@@ -101,19 +102,6 @@ class Service:
                 found.append(int((self.home / STATE / name).read_text().split()[0]))
             except (OSError, ValueError, IndexError):
                 pass
-        return found
-
-    def _sync_loops(self) -> list[int]:
-        script, home = str(DEPLOY / "runner-pool-sync.sh"), f"HOME={self.home}".encode()
-        found = []
-        for entry in Path("/proc").glob("[1-9]*"):
-            try:
-                argv = (entry / "cmdline").read_bytes().decode().split("\0")
-                environ = (entry / "environ").read_bytes().split(b"\0")
-            except OSError:
-                continue
-            if script in argv and "loop" in argv and home in environ and alive(int(entry.name)):
-                found.append(int(entry.name))
         return found
 
     def status_ok(self) -> bool:

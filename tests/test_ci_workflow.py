@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -22,7 +20,6 @@ MACOS_LABELS = ["self-hosted", "macOS", "factory-mac"]
 OVERFLOW = re.compile(
     r"^\$\{\{ fromJSON\(vars\.\w+ \|\| '(?P<fallback>\[[^']*\])'\) \}\}$"
 )
-SYNC_SCRIPT = ROOT / "deploy/runner-pool-sync.sh"
 
 
 def _workflow() -> dict:
@@ -394,199 +391,6 @@ def test_every_linux_job_defaults_to_the_ci_runner_pool_and_macos_stays_on_the_m
             assert _labels(job) == pool, name
 
 
-def test_the_sync_script_flips_between_the_same_pool_and_ubuntu_latest() -> None:
-    text = SYNC_SCRIPT.read_text(encoding="utf-8")
-    pool = json.dumps(_ci_runner_pool(), separators=(",", ":"))
-    assert f"POOL='{pool}'" in text
-    assert """HOSTED='"ubuntu-latest"'""" in text
-    assert "VAR=FACTORY_LINUX_RUNNER" in text
-
-
-FAKE_SYNC_GH = """#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$GH_LOG"
-case "$*" in
-  *actions/runners*)
-    n=$(grep -c 'actions/runners' "$GH_LOG")
-    line=$(sed -n "${n}p" "$GH_RESPONSES")
-    if [[ -z "$line" ]]; then touch "$HOME/.config/factory/runner-pool-sync-hold"; exit 1; fi
-    [[ "$line" == FAIL ]] && exit 1
-    echo "$line" ;;
-  *"--jq .value") cat "$GH_VALUE" ;;
-esac
-"""
-
-
-def _sync_env(tmp_path: Path, start: str, counts: list[str]) -> dict[str, str]:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "gh").write_text(FAKE_SYNC_GH, encoding="utf-8")
-    (bin_dir / "gh").chmod(0o755)
-    (tmp_path / ".config/factory").mkdir(parents=True)
-    (tmp_path / "responses").write_text("".join(f"{line}\n" for line in counts), encoding="utf-8")
-    (tmp_path / "value").write_text(start, encoding="utf-8")
-    log = tmp_path / "gh.log"
-    log.write_text("", encoding="utf-8")
-    env = {
-        **os.environ,
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "HOME": str(tmp_path),
-        "EVERY": "0",
-        "GH_LOG": str(log),
-        "GH_RESPONSES": str(tmp_path / "responses"),
-        "GH_VALUE": str(tmp_path / "value"),
-        "LOG": str(tmp_path / "sync.log"),
-    }
-    return env
-
-
-def _run_sync(tmp_path: Path, start: str, counts: list[str]) -> list[str]:
-    env = _sync_env(tmp_path, start, counts)
-    result = subprocess.run(
-        ["bash", str(SYNC_SCRIPT), "loop"], env=env, capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    return [
-        call.split("value=", 1)[1]
-        for call in Path(env["GH_LOG"]).read_text(encoding="utf-8").splitlines()
-        if call.startswith("api -X PATCH repos/maxharris1/factory/actions/variables/FACTORY_LINUX_RUNNER ")
-    ]
-
-
-POOL_VALUE = '["self-hosted","Linux","X64","factory-linux"]'
-
-
-@pytest.mark.parametrize(
-    ("start", "counts", "writes"),
-    [
-        (POOL_VALUE, ["4 1", "4 0", "4 1", "4 0"], []),
-        (POOL_VALUE, ["4 0", "4 0", "4 0", "4 2"], ['"ubuntu-latest"', POOL_VALUE]),
-        (POOL_VALUE, ["0 0", "0 0"], ['"ubuntu-latest"']),
-        (POOL_VALUE, ["4 0", "FAIL", "4 0"], ['"ubuntu-latest"']),
-        ('"ubuntu-latest"', ["4 1"], [POOL_VALUE]),
-        ("", ["4 1"], [POOL_VALUE]),
-    ],
-    ids=["one-busy-check-stays", "two-busy-checks-overflow-then-return", "none-online",
-         "failed-list-keeps-count", "idle-returns", "unset-sets-pool"],
-)
-def test_the_sync_loop_overflows_only_after_two_full_checks(
-    tmp_path: Path, start: str, counts: list[str], writes: list[str]
-) -> None:
-    assert _run_sync(tmp_path, start, counts) == writes
-
-
-def _runner_reads(env: dict[str, str]) -> list[str]:
-    return [line for line in Path(env["GH_LOG"]).read_text(encoding="utf-8").splitlines()
-            if "actions/runners" in line]
-
-
-def _ensure(env: dict[str, str]) -> None:
-    result = subprocess.run(
-        ["bash", str(SYNC_SCRIPT), "ensure"], env=env, capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_ensure_starts_the_loop_when_an_old_pidfile_names_an_unrelated_live_process(
-    tmp_path: Path,
-) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
-    state = tmp_path / ".local/state/factory"
-    state.mkdir(parents=True)
-    hold = tmp_path / ".config/factory/runner-pool-sync-hold"
-    with subprocess.Popen(["sleep", "30"]) as reused:
-        try:
-            (state / "runner-pool-sync.pid").write_text(f"{reused.pid}\n", encoding="utf-8")
-            _ensure(env)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and not (
-                hold.exists()
-                and subprocess.run(["flock", "-n", str(state / "runner-pool-sync.lock"), "true"]).returncode == 0
-            ):
-                time.sleep(0.05)
-        finally:
-            reused.kill()
-    assert _runner_reads(env), "ensure left the overflow loop stopped"
-
-
-def test_a_running_loop_keeps_ensure_and_a_second_loop_from_starting(tmp_path: Path) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
-    lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
-    lock.parent.mkdir(parents=True)
-    with lock.open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        _ensure(env)
-        time.sleep(0.5)
-        second = subprocess.run(["bash", str(SYNC_SCRIPT), "loop"], env=env, timeout=30)
-    assert second.returncode == 0
-    assert _runner_reads(env) == []
-
-
-def test_a_loop_outwaits_the_lock_probe_ensure_runs_while_it_starts(tmp_path: Path) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, ["4 1"])
-    lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
-    lock.parent.mkdir(parents=True)
-    with lock.open("a") as probe:
-        fcntl.flock(probe, fcntl.LOCK_EX)
-        loop = subprocess.Popen(["bash", str(SYNC_SCRIPT), "loop"], env=env)
-        time.sleep(0.3)
-    assert loop.wait(timeout=30) == 0
-    assert _runner_reads(env), "the loop gave up on a lock that ensure held for a moment"
-
-
-def test_the_checklist_states_how_long_a_second_loop_waits_for_the_lock() -> None:
-    wait = re.search(r"^flock -w (\d+) 9 \|\| exit 0$", SYNC_SCRIPT.read_text(encoding="utf-8"), re.M)
-    assert wait, "the loop no longer takes its lock with a bounded wait"
-    text = " ".join((ROOT / "docs/F2-03-RUNNER-CHECKLIST.md").read_text(encoding="utf-8").split())
-    assert f"A second loop waits up to {wait.group(1)} seconds for the lock" in text
-    assert "exits at once" not in text
-
-
-STALLING_SYNC_GH = """#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$GH_LOG"
-if [[ "$*" == *"$STALL"* && ! -e "$STALLED" ]]; then touch "$STALLED"; exec sleep 30; fi
-case "$*" in
-  *actions/runners*) touch "$HOME/.config/factory/runner-pool-sync-hold"; echo '4 1' ;;
-  *"--jq .value") echo '["self-hosted","Linux","X64","factory-linux"]' ;;
-esac
-"""
-
-
-@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
-@pytest.mark.parametrize("stall", ["actions/runners", "--jq .value"], ids=["runner-list", "variable-read"])
-def test_a_loop_killed_during_a_stalled_request_frees_the_lock_and_ensure_restarts_it(
-    tmp_path: Path, stall: str
-) -> None:
-    env = _sync_env(tmp_path, POOL_VALUE, [])
-    (tmp_path / "bin/gh").write_text(STALLING_SYNC_GH, encoding="utf-8")
-    stalled = tmp_path / "stalled"
-    env |= {"STALL": stall, "STALLED": str(stalled)}
-    lock = tmp_path / ".local/state/factory/runner-pool-sync.lock"
-    loop = subprocess.Popen(
-        ["bash", str(SYNC_SCRIPT), "loop"], env=env, start_new_session=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    try:
-        deadline = time.monotonic() + 5
-        while not stalled.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert stalled.exists(), "the loop never made the stalling request"
-        reads_before = len(_runner_reads(env))
-        loop.kill()
-        loop.wait()
-        time.sleep(0.1)
-        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0, "a request child kept the lock"
-        _ensure(env)
-        deadline = time.monotonic() + 5
-        while len(_runner_reads(env)) <= reads_before and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert len(_runner_reads(env)) > reads_before, "ensure left the overflow loop stopped"
-    finally:
-        try:
-            os.killpg(loop.pid, 9)
-        except ProcessLookupError:
-            pass
-
-
 @pytest.mark.parametrize(
     "doc", ["docs/F2-03-RUNNER-CHECKLIST.md", "docs/decisions/711-self-hosted-runners.md"]
 )
@@ -594,6 +398,19 @@ def test_the_runner_docs_name_a_dedicated_user_for_the_mac_and_no_bot_runner(doc
     text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
     assert "`maxs-macbook-pro` runs as `gharunner`" in text
     assert re.search(r"runs as `(claude|codex|cursor|grok)-bot`", text) is None
+
+
+@pytest.mark.parametrize(
+    "doc", ["docs/F2-03-RUNNER-CHECKLIST.md", "docs/decisions/711-self-hosted-runners.md"]
+)
+def test_the_runner_docs_put_the_sync_on_the_pc_and_no_box_runner_in_the_pool(doc: str) -> None:
+    text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+    assert "runs on the orch host (the PC) as the `factory` user" in text
+    assert "crontab" in text
+    assert "`pc-wsl-bots-1` to `-3`" in text
+    assert "`maxs-macbook-pro`" in text
+    for gone in ("box-1", "factory-box", "box-runner-ensure"):
+        assert gone not in text, gone
 
 
 def test_no_ci_job_uses_a_github_hosted_runner() -> None:
