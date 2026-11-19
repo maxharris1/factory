@@ -21,6 +21,7 @@ from lib.device_pool import (
 )
 from lib.dispatch.constants import (
     HANDED_OFF_EXTERNALLY,
+    SETTLE_CLEARS,
     STUCK_WAKE_FAILURE_LIMIT,
     _ABANDONED_JOB_DETAIL,
 )
@@ -83,6 +84,7 @@ from lib.job_state import (
     usage_limit_end,
 )
 from lib.machines_yml import orch_host
+from lib.max_actions import may_hand_off
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
     PRE_READY_FAILED,
@@ -151,6 +153,77 @@ class JobsMixin:
         self._log_abandoned_jobs(closed)
         self._write_state_label(ticket, "abandoned")
         return "abandoned"
+
+    def _t5_handed_off(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> str:
+        """#891: an approver's answers state=handed-off hands off a ticket that waits on Max."""
+        if not (
+            self.approvals.may_approve(comment.author)
+            and self._trusted(ticket, comment, fields, "grok-bot", role="orchestrator")
+        ):
+            return "rejected-handoff-author"
+        repo, ticket_id = ticket.repo.lower(), ticket.ticket_id
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_state, stuck, paused_action FROM ticket_state"
+                " WHERE repo = ? AND ticket_id = ?",
+                (repo, ticket_id),
+            ).fetchone()
+        if row is None:
+            return "rejected-handoff-state"
+        state, stuck, paused = row["workflow_state"], bool(row["stuck"]), row["paused_action"]
+        if state == "handed-off":
+            # A replay after the label write below failed.
+            self._write_state_label(ticket, "handed-off")
+            return "handed-off"
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            running = connection.execute(
+                "SELECT 1 FROM jobs WHERE lower(repo) = ? AND ticket_id = ? AND state = 'running'",
+                (repo, ticket_id),
+            ).fetchone()
+            if not (
+                may_hand_off(state, stuck, paused, running is not None)
+                and write_workflow_state(
+                    connection,
+                    repo,
+                    ticket_id,
+                    "handed-off",
+                    source="answers-handoff",
+                    at=self.queue.now(),
+                    also=SETTLE_CLEARS,
+                    guard="workflow_state = ? AND stuck = ? AND paused_action IS ?",
+                    guard_args=(state, int(stuck), paused),
+                )
+            ):
+                return False
+            self._settle_failures_for_handoff(connection, repo, ticket_id)
+            return True
+
+        if not self._settle(repo, ticket_id, "handed-off", settle):
+            return "rejected-handoff-state"
+        self._write_state_label(ticket, "handed-off")
+        return "handed-off"
+
+    def _settle_failures_for_handoff(
+        self, connection: sqlite3.Connection, repo: str, ticket_id: str
+    ) -> None:
+        now = self.queue.now()
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE lower(repo) = ? AND ticket_id = ?"
+            " AND state = 'failed' AND failure_handled = 0 AND recipient != ?",
+            (repo, ticket_id, QA_RECIPIENT),
+        ).fetchall()
+        for row in rows:
+            job = _job(row, connection)
+            connection.execute("UPDATE jobs SET failure_handled = 1 WHERE id = ?", (job.id,))
+            self._record_job_event(
+                connection, job, "handed-off", "Max handed the ticket off; no T6 retry", now
+            )
 
     def _busy_recipients(self) -> frozenset[str]:
         """#18: harnesses whose every schedulable slot is in use.
@@ -1039,6 +1112,15 @@ class JobsMixin:
             return False
         self._done_from_handoff(job, answer)
         return True
+
+    def _handed_off_by_max(self, repo: str, ticket_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT to_state, source FROM ticket_transitions WHERE repo = ? AND ticket_id = ?"
+                " ORDER BY id DESC LIMIT 1",
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return row is not None and (row["to_state"], row["source"]) == ("handed-off", "answers-handoff")
 
     def _waiting_max(self, job: Job) -> bool:
         with self._connect() as connection:

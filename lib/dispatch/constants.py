@@ -26,6 +26,7 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 HANDED_OFF_EXTERNALLY = "handed-off-externally"
+NOT_STARTED = (None, "intake", "refused", "questions")
 SETTLE_CLEARS = {
     "stuck": 0,
     "stuck_reason": None,
