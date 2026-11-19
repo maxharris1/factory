@@ -463,6 +463,8 @@ class QuestionsMixin:
         ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
         if self._is_stuck(ticket) or self._review_context(ticket)[0] in FINISHED_STATES:
             return
+        if self._handed_off_by_max(ticket.repo, ticket.ticket_id):
+            return
         sources = {comment.id: comment for comment in ticket.comments}
         with self._connect() as connection:
             rows = connection.execute(

@@ -9,6 +9,7 @@ from lib.dispatcher import Dispatcher
 from lib.dispatch.types import RetryableStateError
 from lib.orch_yml import Approvals
 from lib.queue import JobRequest, SQLiteJobQueue
+from lib.state_backup import RESTORED
 from tests.test_dispatcher import (
     BRIEF,
     READY,
@@ -188,6 +189,36 @@ def test_a_hand_off_settles_a_job_that_failed_before_t6_saw_it(tmp_path: Path, r
     assert (workflow_state(queue), handled_outcome(queue, "handoff-1")) == ("handed-off", "handed-off")
     assert [(job["state"], job["attempt"], job["failure_handled"]) for job in jobs_of(queue, "fix")] == [
         ("failed", 1, 1)]
+    assert queue.claim("claude") is None
+
+
+def test_a_red_head_after_the_hand_off_queues_no_fix(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed(queue, "capped")
+    hand_off(dispatcher)
+    red = "c" * 40
+
+    dispatcher.process(ticket(comment("handoff-1", HANDOFF, author="maxharris1", created_at=9),
+                              head=red, ci={red: CIResult("failure")}))
+
+    assert workflow_state(queue) == "handed-off"
+    assert [job["state"] for job in jobs_of(queue, "fix")] == ["cancelled"]
+    assert queue.claim("claude") is None
+
+
+def test_a_step_held_by_a_restore_stays_held_after_the_hand_off(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    seed_state(queue, state="waiting-max", paused_action="build", paused_recipient="claude")
+    held = queue.enqueue(JobRequest(repo="owner/repo", ticket_id="42", action="build",
+                                    recipient="claude", source_comment_id="go-restored",
+                                    timeout_seconds=5400), dedupe_key="restored-build")
+    queue.cancel(held.id, RESTORED)
+
+    hand_off(dispatcher)
+
+    assert workflow_state(queue) == "handed-off"
+    assert [job["state"] for job in jobs_of(queue, "build")] == ["done", "cancelled"]
     assert queue.claim("claude") is None
 
 

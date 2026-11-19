@@ -201,7 +201,7 @@ class JobsMixin:
                 )
             ):
                 return False
-            self._settle_unhandled_failures(connection, repo, ticket_id)
+            self._settle_failures_for_handoff(connection, repo, ticket_id)
             return True
 
         if not self._settle(repo, ticket_id, "handed-off", settle):
@@ -209,15 +209,14 @@ class JobsMixin:
         self._write_state_label(ticket, "handed-off")
         return "handed-off"
 
-    def _settle_unhandled_failures(
+    def _settle_failures_for_handoff(
         self, connection: sqlite3.Connection, repo: str, ticket_id: str
     ) -> None:
-        """#891: a job that failed before T6 read it gets no retry behind a hand-off."""
         now = self.queue.now()
         rows = connection.execute(
             "SELECT * FROM jobs WHERE lower(repo) = ? AND ticket_id = ?"
-            " AND state = 'failed' AND failure_handled = 0",
-            (repo, ticket_id),
+            " AND state = 'failed' AND failure_handled = 0 AND recipient != ?",
+            (repo, ticket_id, QA_RECIPIENT),
         ).fetchall()
         for row in rows:
             job = _job(row, connection)
@@ -1113,6 +1112,15 @@ class JobsMixin:
             return False
         self._done_from_handoff(job, answer)
         return True
+
+    def _handed_off_by_max(self, repo: str, ticket_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT to_state, source FROM ticket_transitions WHERE repo = ? AND ticket_id = ?"
+                " ORDER BY id DESC LIMIT 1",
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return row is not None and (row["to_state"], row["source"]) == ("handed-off", "answers-handoff")
 
     def _waiting_max(self, job: Job) -> bool:
         with self._connect() as connection:
