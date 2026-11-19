@@ -545,8 +545,7 @@ GIT_ENV = {
 TAG = "0123456789abcdef" * 2
 
 
-def days_ago(days: float = 3) -> float:
-    """Real script runs stamp their files with the wall clock, not NOW."""
+def wall_clock_days_ago(days: float = 3) -> float:
     return time.time() - days * 86400
 WORKER = (
     'printf "%s %s\\n" "$(test -d .git && echo True || echo False)" '
@@ -555,8 +554,6 @@ WORKER = (
 
 
 class Runner:
-    """The real checkout and start scripts, run under `sh -c` as sshd would."""
-
     def __init__(self, tmp_path: Path, root: Path, job_id: str):
         self.tmp = tmp_path
         self.target = RemoteTarget("pc", "pc-claude-bot", "claude-bot", str(root), job_id, TAG)
@@ -604,7 +601,7 @@ def checkout_folder(tmp_path: Path, root: Path, job_id: str) -> Runner:
     jobs = root / "jobs"
     (jobs / f"{job_id}.launched").write_text("launched\n")
     for path in jobs.iterdir():
-        age(path, days_ago())
+        age(path, wall_clock_days_ago())
     return runner
 
 
@@ -643,7 +640,7 @@ def test_a_job_claimed_during_the_pass_keeps_its_checkout_and_its_worker_sees_it
     root = work_root(tmp_path)
     jobs = root / "jobs"
     runner = checkout_folder(tmp_path, root, "j")
-    db = database(tmp_path, [("j", "t1", "cancelled", days_ago())])
+    db = database(tmp_path, [("j", "t1", "cancelled", wall_clock_days_ago())])
     transport = ClaimAndStart(root, db, runner, when=when)
 
     [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), transport,
@@ -682,22 +679,22 @@ def test_a_checkout_waits_while_cleanup_holds_the_job_lock(tmp_path: Path) -> No
             env={"HOME": str(tmp_path), "PATH": device_path(), **GIT_ENV})
         time.sleep(0.5)
         assert checkout.poll() is None
-        assert (jobs / "j.claimed").stat().st_mtime < days_ago(1) and not (jobs / "j").exists()
+        assert (jobs / "j.claimed").stat().st_mtime < wall_clock_days_ago(1) and not (jobs / "j").exists()
     out, _ = checkout.communicate(timeout=60)
 
     assert checkout.returncode == 0 and "reused" in out
     assert (jobs / "j" / "README").exists() and not (jobs / "j.cleanup").exists()
-    assert (jobs / "j.claimed").stat().st_mtime > days_ago(1 / 24)
+    assert (jobs / "j.claimed").stat().st_mtime > wall_clock_days_ago(1 / 24)
 
 
 def test_the_hold_waits_for_a_claim_in_progress_and_keeps_the_folder(tmp_path: Path) -> None:
     root = work_root(tmp_path)
-    folder = job_folder(root, "j", when=days_ago())
+    folder = job_folder(root, "j", when=wall_clock_days_ago())
     jobs = root / "jobs"
     holder = hold_lock(jobs / "j.lock", 1.0, then_touch=jobs / "j.claimed")
     began = time.monotonic()
 
-    hold = job_cleanup.device_step(root, Plan(frozenset({"j"}), days_ago(0.25), False))
+    hold = job_cleanup.device_step(root, Plan(frozenset({"j"}), wall_clock_days_ago(0.25), False))
 
     assert time.monotonic() - began >= 0.8
     holder.wait(timeout=10)

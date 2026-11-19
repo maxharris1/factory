@@ -726,7 +726,7 @@ def start_script(
     )
     inner = (
         f"d={directory}; "
-        f"lk=$({_FIND_FLOCK}); {_CLAIM} || exit {START_REFUSED}; "
+        f"lk=$({_FLOCK_ON_START_OR_LOGIN_PATH}); {_CLAIM} || exit {START_REFUSED}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
         f"{_CAN_SCAN} || exit {START_REFUSED}; "
         f"[ -r /proc/self/environ ] || exit {START_REFUSED}; "
@@ -1158,9 +1158,7 @@ _CLAIM = (
     'mkdir -p -- "${d%/*}" && if [ -n "$lk" ]; then { "$lk" -w 600 9 && claim; } 9>>"$d.lock"; '
     "else claim; fi; }"
 )
-# The start's own shell is not a login shell, so it also asks the login
-# shell, whose PATH cleanup's `flock` check sees.
-_FIND_FLOCK = (
+_FLOCK_ON_START_OR_LOGIN_PATH = (
     f"command -v flock 2>/dev/null || {LOGIN_SHELL} -lc 'command -v flock | sed s/^/orch-flock:/' "
     "< /dev/null 2> /dev/null | sed -n 's/^orch-flock://p' | tail -n 1"
 )
