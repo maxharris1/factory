@@ -37,3 +37,19 @@ These are the defaults the builder picked for issue #204. They are listed in the
 - **Decision:** `orch status` and the dashboard show the raw state `refused-intake` until they get a label for it. That label is left for a follow-up, because `lib/status.py` and `lib/dashboard_page.py` are outside this ticket's Touches list, and #205 works in the same lane.
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/285
+
+- **Decision:** A ticket can name QA journeys on an optional `Features:` line, such as `Features: create-note, search, new:bulk-export`. The journeys come from the project's feature map, the `features/` folder next to its `qa.verify` skill's `SKILL.md` (`<skill-folder>/features/<id>.md`). The skill folder is found on the base branch the way the QA lane finds it, `*/<qa.verify>/SKILL.md` at any depth, such as `.claude/skills/`, `.cursor/skills/` or `.agents/skills/`; when several match, the first `SKILL.md` path in `git ls-files` order wins. Ids match `[a-z0-9][a-z0-9-]{0,63}`, split on commas or spaces. `Features: none`, or no line, names no journey. A plain id must be in the map on the base branch. `new:<id>` is how a ticket adds a journey: the id must not be in the map yet, and the builder writes `features/<id>.md` (the four H2s) and its README index row in the PR.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1093
+
+- **Decision:** An acceptance criterion tagged `qa:`, `(qa)` or `[qa]` is a QA criterion. `qa(<id>, ...):` binds it to some of the journeys on the `Features:` line, and a bare tag binds it to all of them. Unlike `ops:`, the criterion stays a builder criterion and stays in the brief as written, even when its text reads as an operator action ("the operator runs"): a `qa` tag is read before that guess. Tagging is optional: an untagged criterion keeps the owner the reviewer assigns (#1023). A `Features:` line with no `qa:` criteria is accepted and gets no QA scenarios.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1093
+
+- **Decision:** Five defects refuse a ticket through the same `refused-intake` flow as the others: `features-unknown` (an id outside the grammar, or a plain id the map lacks), `features-exists` (a `new:` id the map already has), `features-no-verify` (a `Features:` line on a project whose factory.md sets no `qa.verify`, so factory's own tickets are refused until F-15, #1034), `features-unbound` (a `qa(<id>)` naming an id the `Features:` line does not list) and `qa-no-features` (`qa:` criteria with no `Features:` line). Max could ask for `features-no-verify` to only warn.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1093
+
+- **Decision:** The map is read only for an unstarted ticket with a `Features:` line, once per repo, base and verify skill per poll: the base branch's sha, one recursive tree read at that sha to find the verify skill, then one GitHub contents read of its features folder. When GitHub truncates a tree read, the feeder lists that folder and reads each subfolder's tree, breadth first, up to 64 tree reads, and takes the first match. A walk that hits the cap is a failed read under the retry rule below, never an empty map. A skill or features folder missing at the base is an empty map. A failed read never refuses a ticket: it stays `eligible`, is not fed that poll, and is checked again on the next one.
+- **When:** 2026-11-19 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/1093

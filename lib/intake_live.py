@@ -19,7 +19,13 @@ Reads:
 * linear_intake: issues in any of a repo's projects and in the workflow
   state (assigned to a listed user, for a project with linear_assignees),
   every page of them, and for each, who moved it there: the actor of the
-  latest history entry whose toState is that state.
+  latest history entry whose toState is that state;
+* tree_paths: every file path at a commit, or under one folder of it
+  (one recursive `git/trees` read of `<sha>` or `<sha>:<folder>`), and
+  whether GitHub truncated it, to find the verify skill (#1029);
+* dir_names: the file names, and the subfolder names with a trailing `/`,
+  in one repo folder at a commit (`contents/`), for the feature map check
+  and the truncated tree walk (#1029).
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -307,6 +313,36 @@ class GitHubIntakeClient(GitHubReviewActions):
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise GitHubAdapterError(f"ref heads/{branch} has no commit sha")
         return sha
+
+    def tree_paths(self, repo: str, sha: str, path: str = "") -> tuple[tuple[str, ...], bool]:
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("tree read sha is not a full sha")
+        tree_ish = f"{sha}:{quote(path)}" if path else sha
+        tree = self._json(f"{_repo_path(repo)}/git/trees/{tree_ish}?recursive=1")
+        entries = tree.get("tree") if isinstance(tree, dict) else None
+        if not isinstance(entries, list):
+            raise GitHubAdapterError(f"tree {sha} has no entries")
+        paths = tuple(
+            entry["path"] for entry in entries
+            if isinstance(entry, dict) and entry.get("type") == "blob" and isinstance(entry.get("path"), str)
+        )
+        return paths, tree.get("truncated") is True
+
+    def dir_names(self, repo: str, path: str, sha: str) -> tuple[str, ...]:
+        if not _SHA.fullmatch(sha):
+            raise GitHubAdapterError("folder read sha is not a full sha")
+        try:
+            entries = self._json(f"{_repo_path(repo)}/contents/{quote(path)}?ref={sha}")
+        except GitHubAdapterError as exc:
+            if _status(exc) == 404:
+                return ()
+            raise
+        if not isinstance(entries, list):
+            raise GitHubAdapterError(f"{path} is not a folder")
+        return tuple(
+            entry["name"] + ("/" if entry.get("type") == "dir" else "") for entry in entries
+            if isinstance(entry, dict) and entry.get("type") in ("file", "dir") and isinstance(entry.get("name"), str)
+        )
 
     def create_start_commit(self, repo: str, base_sha: str, message: str) -> str:
         if not _SHA.fullmatch(base_sha):

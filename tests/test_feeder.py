@@ -158,6 +158,10 @@ class FakeGitHub:
         self.status_reads: list[frozenset[Ref]] = []
         self.main_checks: dict[tuple[str, str], dict[str, BaseCheck]] = {}
         self.check_reads: list[tuple[str, str]] = []
+        self.dirs: dict[tuple[str, str], tuple[str, ...]] = {}
+        self.dir_reads: list[tuple[str, str, str]] = []
+        self.trees: dict[str | tuple[str, str], tuple[tuple[str, ...], bool]] = {}
+        self.tree_reads: list[tuple[str, str, str]] = []
         self.filed: dict[tuple[str, int], dict] = {}
         self.run_logs: dict[tuple[str, str], dict[str, str]] = {}
         self._next_pr = 500
@@ -272,6 +276,16 @@ class FakeGitHub:
         self.check_reads.append((repo, branch))
         self._maybe_fail("base_checks")
         return dict(self.main_checks.get((repo, branch), {}))
+
+    def tree_paths(self, repo: str, sha: str, path: str = "") -> tuple[tuple[str, ...], bool]:
+        self.tree_reads.append((repo, sha, path))
+        self._maybe_fail("tree_paths")
+        return self.trees.get((repo, path) if path else repo, ((), False))
+
+    def dir_names(self, repo: str, path: str, sha: str) -> tuple[str, ...]:
+        self.dir_reads.append((repo, path, sha))
+        self._maybe_fail("dir_names")
+        return self.dirs.get((repo, path), ())
 
     def file_repo_issue(self, repo: str, title: str, body: str, labels, marker: str,
                         since: float, *, before_post=lambda: None) -> int:
