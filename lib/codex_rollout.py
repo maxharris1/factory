@@ -1,17 +1,20 @@
-"""The rate limits in one Codex job's own session rollout (issue #151, option B).
+"""The rate limits and token total in one Codex job's own session rollout
+(issues #151 and #1015).
 
 Codex CLI writes each session to
 `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`, and
-its `token_count` events carry `rate_limits.{primary,secondary}`.
+its `token_count` events carry `rate_limits.{primary,secondary}` and
+`info.total_token_usage`, Codex's own running total for the session.
 `latest(home, thread_id)` opens only the rollout named by the job's own
 thread id (from the `thread.started` event of `codex exec --json`), reads at
 most MAX_BYTES from its end, and returns the last `token_count` event's
-`rate_limits` with only the numeric fields in KEPT, plus the event's
-timestamp (`rate_limits` None when that event's is null or missing: no
-reading, never an older event's). Every other key and line is dropped
-unread: a line is decoded only when it holds `"token_count"`. A symlink, a
-non-regular file or a path outside `sessions/` is never opened, and no
-other file is.
+`rate_limits` with only the numeric fields in KEPT, its `total_token_usage`
+as `tokens` with only the numeric fields in TOKEN_KEYS, plus the event's
+timestamp (`rate_limits` or `tokens` None when that event's is null or
+missing: no reading, never an older event's). Every other key and line is
+dropped unread: a line is decoded only when it holds `"token_count"`. A
+symlink, a non-regular file or a path outside `sessions/` is never opened,
+and no other file is.
 
 The file is stdlib only and has no repo imports: for a job on a remote
 device, lib/usage_probe.py sends this source to the device as
@@ -32,6 +35,7 @@ import sys
 MAX_BYTES = 4 * 1024 * 1024
 MAX_LINE_BYTES = 256 * 1024
 KEPT = ("used_percent", "window_minutes", "resets_at", "resets_in_seconds")
+TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens")
 THREAD_ID = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
 
@@ -80,7 +84,13 @@ def _finite(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _limits(line: bytes) -> dict | None:
+def _numbers(source: object, keys: tuple[str, ...]) -> dict | None:
+    if not isinstance(source, dict):
+        return None
+    return {name: source[name] for name in keys if _finite(source.get(name))}
+
+
+def _reading(line: bytes) -> dict | None:
     if len(line) > MAX_LINE_BYTES or b'"token_count"' not in line:
         return None
     try:
@@ -92,23 +102,21 @@ def _limits(line: bytes) -> dict | None:
         return None
     stamp = event.get("timestamp")
     stamp = stamp if isinstance(stamp, str) and len(stamp) <= 64 else None
+    info = payload.get("info")
+    tokens = _numbers(info.get("total_token_usage"), TOKEN_KEYS) if isinstance(info, dict) else None
     limits = payload.get("rate_limits")
-    if not isinstance(limits, dict):
-        return {"rate_limits": None, "timestamp": stamp}
-    kept = {}
-    for key in ("primary", "secondary"):
-        window = limits.get(key)
-        if isinstance(window, dict):
-            kept[key] = {
-                name: window[name]
-                for name in KEPT
-                if _finite(window.get(name))
-            }
-    return {"rate_limits": kept, "timestamp": stamp}
+    kept = None
+    if isinstance(limits, dict):
+        kept = {}
+        for key in ("primary", "secondary"):
+            window = _numbers(limits.get(key), KEPT)
+            if window is not None:
+                kept[key] = window
+    return {"rate_limits": kept, "tokens": tokens, "timestamp": stamp}
 
 
 def latest(home: str, thread_id: str) -> dict | None:
-    """The last `token_count` rate limits in the thread's rollout, or None."""
+    """The last `token_count` rate limits and token total in the thread's rollout, or None."""
     path = rollout_path(home, thread_id)
     if path is None:
         return None
@@ -117,7 +125,7 @@ def latest(home: str, thread_id: str) -> dict | None:
     except OSError:
         return None
     for line in reversed(data.splitlines()):
-        found = _limits(line)
+        found = _reading(line)
         if found is not None:
             return found
     return None

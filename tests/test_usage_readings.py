@@ -216,13 +216,14 @@ def test_a_streamed_rate_limit_event_is_stored_on_flush(tmp_path: Path) -> None:
 # --- Codex: the session rollout ----------------------------------------------------------
 
 
-def test_the_rollout_reader_returns_only_the_last_rate_limit_numbers(tmp_path: Path) -> None:
+def test_the_rollout_reader_returns_only_the_last_rate_limit_and_token_numbers(tmp_path: Path) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path)), THREAD)
     assert found == {
         "rate_limits": {
             "primary": {"used_percent": 12.5, "window_minutes": 300, "resets_at": FIVE_HOUR_RESET},
             "secondary": {"used_percent": 34.5, "window_minutes": 10080, "resets_in_seconds": 531270},
         },
+        "tokens": {"input_tokens": 2200, "cached_input_tokens": 1300, "output_tokens": 60, "total_tokens": 2260},
         "timestamp": "2026-11-14T16:25:30.000Z",
     }
     assert "TEST VALUE" not in json.dumps(found)
@@ -266,9 +267,27 @@ LATER = CAPTURED + 28  # 2026-11-14T16:26:00Z
 @pytest.mark.parametrize("last", [TOKEN_COUNT_NULL, TOKEN_COUNT_MISSING])
 def test_a_last_token_count_without_rate_limits_is_no_reading_not_an_older_one(tmp_path: Path, last: bytes) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + last)), THREAD)
-    assert found == {"rate_limits": None, "timestamp": "2026-11-14T16:26:00.000Z"}
+    assert found == {"rate_limits": None, "tokens": None, "timestamp": "2026-11-14T16:26:00.000Z"}
     assert parse_codex(found, CAPTURED + 60) == [
         Reading("five_hour", None, None, LATER, 0, LATER), Reading("seven_day", None, None, LATER, 0, LATER)]
+
+
+@pytest.mark.parametrize(
+    ("info", "tokens"),
+    [
+        ({"total_token_usage": {"input_tokens": "5", "cached_input_tokens": True, "output_tokens": 7,
+                                "total_tokens": None, "reasoning_output_tokens": 3, "note": 1}},
+         {"output_tokens": 7}),
+        ({"total_token_usage": None}, None),
+        ({"last_token_usage": {"input_tokens": 9}}, None),
+        ([], None),
+    ],
+)
+def test_the_reader_keeps_only_numeric_session_totals(tmp_path: Path, info: object, tokens: object) -> None:
+    line = {"timestamp": "2026-11-14T16:26:00.000Z", "type": "event_msg",
+            "payload": {"type": "token_count", "info": info, "rate_limits": None}}
+    found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + json.dumps(line).encode() + b"\n")), THREAD)
+    assert found is not None and found["tokens"] == tokens
 
 
 def test_the_reader_opens_only_the_jobs_own_regular_rollout(tmp_path: Path) -> None:
@@ -488,17 +507,32 @@ def test_the_remote_probe_runs_claude_under_the_bots_login_shell() -> None:
         usage_probe.claude_remote(object(), TARGET)
 
 
-def test_a_remote_codex_read_sends_the_reader_and_parses_its_line(tmp_path: Path) -> None:
+def test_a_remote_codex_read_sends_the_reader_and_returns_its_line(tmp_path: Path) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path)), THREAD)
     transport = FakeTransport(Exchanged(0, json.dumps(found).encode() + b"\n", ""))
-    readings = usage_probe.remote_codex(transport, TARGET, "codex", THREAD, CAPTURED)
-    assert [r.window for r in readings] == ["five_hour", "seven_day"]
+    assert usage_probe.remote_codex(transport, TARGET, "codex", THREAD) == found
     [(argv, _data)] = transport.calls
     assert THREAD in argv[-1] and "def latest" in argv[-1]
-    assert usage_probe.remote_codex(transport, TARGET, "codex", None, CAPTURED) == []
-    assert usage_probe.remote_codex(transport, TARGET, "claude", THREAD, CAPTURED) == []
-    assert usage_probe.remote_codex(transport, TARGET, "codex", "../x", CAPTURED) == []
-    assert usage_probe.remote_codex(FakeTransport(Exchanged(0, b"garbage", "")), TARGET, "codex", THREAD, CAPTURED) == []
+    assert usage_probe.remote_codex(transport, TARGET, "codex", None) is None
+    assert usage_probe.remote_codex(transport, TARGET, "claude", THREAD) is None
+    assert usage_probe.remote_codex(transport, TARGET, "codex", "../x") is None
+    assert usage_probe.remote_codex(FakeTransport(Exchanged(0, b"garbage", "")), TARGET, "codex", THREAD) is None
+    assert usage_probe.remote_codex(FakeTransport(Exchanged(255, b"", "down")), TARGET, "codex", THREAD) is None
+
+
+def test_a_remote_codex_job_stores_its_rollout_readings_and_session_total(tmp_path: Path) -> None:
+    found = codex_rollout.latest(str(codex_home(tmp_path)), THREAD)
+    transport = FakeTransport(Exchanged(0, json.dumps(found).encode() + b"\n", ""))
+    session = _start(tmp_path, WRAPPER, "codex-bot", {}, worker_env=True)
+    session.clock = lambda: CAPTURED
+    session.consume(io.BytesIO(CODEX_EXEC))
+    session.add_rollout(usage_probe.remote_codex(transport, TARGET, session.harness, session.summary.thread_id))
+    session.finish(0)
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        tokens = connection.execute(
+            "SELECT tokens_in, tokens_cached, tokens_out, tokens_unknown FROM job_telemetry").fetchone()
+    assert tokens == (2200, 1300, 60, 0)
+    assert [row[3] for row in _stored(tmp_path / "orch.db")] == ["five_hour", "seven_day"]
 
 
 def test_the_claude_probe_thread_hands_its_readings_to_the_session(tmp_path: Path) -> None:
