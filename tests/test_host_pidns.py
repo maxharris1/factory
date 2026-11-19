@@ -159,11 +159,9 @@ def test_service_refreshes_a_stale_record_after_a_reboot(tmp_path: Path,
     assert "refusing" not in result.stderr
 
 
-GATED = [
-    *[(s, [*a, c]) for s, a in [("waiter-service.sh", ["claude-bot"]), ("poller-service.sh", []),
-                                ("linear-webhook-service.sh", []), ("self-heal.sh", [])]
-      for c in ["start", "ensure"]],
-]
+GATED = [(s, [*a, c]) for s, a in [("waiter-service.sh", ["claude-bot"]), ("poller-service.sh", []),
+                                   ("linear-webhook-service.sh", []), ("self-heal.sh", [])]
+         for c in ["start", "ensure"]]
 
 
 @pytest.mark.parametrize(("script", "args"), GATED, ids=[f"{s}-{a[-1]}" for s, a in GATED])

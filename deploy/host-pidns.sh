@@ -35,9 +35,7 @@ factory_record_host_pidns() (
     fi
 )
 
-# A reboot renumbers namespaces. A sandbox on the same kernel sees the same
-# boot id, and a live service in the recorded namespace means the host is
-# still up, so neither may move the record.
+# boot_id is per kernel: a sandbox on this kernel sees the host's, and only a reboot changes it.
 factory_refresh_host_pidns() (
     proc="${ORCH_PROC_DIR:-/proc}"
     file="${1:-${HOME}/.config/factory/host-pidns}"
