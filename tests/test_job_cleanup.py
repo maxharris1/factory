@@ -55,6 +55,13 @@ class InProcessTransport:
         return Called(0, f"{job_cleanup.MARK} {report.to_json()}\n", "")
 
 
+def device_pass(root: Path, plan: Plan, scan=job_cleanup.jobs_held_open) -> job_cleanup.Report:
+    hold = job_cleanup.device_step(root, plan, scan=scan)
+    done = job_cleanup.device_step(
+        root, Plan(frozenset(hold.held), plan.cutoff, False, job_cleanup.FINISH), scan=scan)
+    return job_cleanup.Report(done.removed, {**hold.kept, **done.kept}, False)
+
+
 def machines(tmp_path: Path, *names: str) -> MachinesConfig:
     return MachinesConfig(devices=tuple(
         Device(
@@ -252,7 +259,7 @@ def test_device_guards_keep_recent_held_and_unscannable_folders(tmp_path: Path) 
     plan = Plan(frozenset({"launched", "worker", "held", "free"}), NOW - 6 * HOUR, False)
     sleeper = subprocess.Popen(["sleep", "60"], cwd=jobs / "held" / "repo")
     try:
-        report = job_cleanup.device_step(root, plan)
+        report = device_pass(root, plan)
         assert (jobs / "held" / "repo" / "README").exists()
     finally:
         sleeper.kill()
@@ -261,8 +268,8 @@ def test_device_guards_keep_recent_held_and_unscannable_folders(tmp_path: Path) 
     assert report.kept == {"launched": "recent", "worker": "recent", "held": "held-open"}
     assert set(report.removed) == {"free"}
     job_folder(root, "free2")
-    blind = job_cleanup.device_step(root, Plan(frozenset({"free2"}), NOW - 6 * HOUR, False),
-                                    scan=lambda _: None)
+    blind = device_pass(root, Plan(frozenset({"free2"}), NOW - 6 * HOUR, False),
+                        scan=lambda _: None)
     assert blind.kept["free2"] == "cannot-scan" and blind.removed == {}
     assert (jobs / "free2" / "repo" / "README").exists()
 
@@ -274,8 +281,7 @@ def test_held_open_scan_sees_through_a_symlinked_work_root(tmp_path: Path) -> No
     linked.symlink_to(real)
     sleeper = subprocess.Popen(["sleep", "60"], cwd=real / "jobs" / "held" / "repo")
     try:
-        report = job_cleanup.device_step(
-            linked, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
+        report = device_pass(linked, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
     finally:
         sleeper.kill()
         sleeper.wait()
@@ -350,3 +356,122 @@ def test_a_failing_target_does_not_stop_the_others(tmp_path: Path, capsys, monke
     assert any(line.startswith("mac claude-bot") and "removed 1" in line for line in lines)
     assert (work_root(tmp_path, "pc") / "jobs" / "done1" / "repo").exists()
     assert not (work_root(tmp_path, "mac") / "jobs" / "done1" / "repo").exists()
+
+
+class RequeueAndClaim:
+    """Requeues and claims the job just before or just after the hold step."""
+
+    def __init__(self, root: Path, db: Path, job_id: str, *, when: str):
+        self.device = InProcessTransport(root)
+        self.queue = SQLiteJobQueue(db, clock=lambda: NOW)
+        self.job_id = job_id
+        self.when = when
+        with self.queue.connect() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS job_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "job_id TEXT NOT NULL, repo TEXT NOT NULL, ticket_id TEXT NOT NULL, "
+                "action TEXT NOT NULL, recipient TEXT NOT NULL, event TEXT NOT NULL, "
+                "detail TEXT NOT NULL, recorded_at REAL NOT NULL)")
+
+    def claim(self) -> None:
+        with self.queue.connect() as connection:
+            assert self.queue.requeue(self.job_id, "answer-rejected:c1", connection=connection)
+        claimed = self.queue.claim("claude")
+        assert (claimed.id, claimed.state) == (self.job_id, "running")
+
+    def call(self, argv, *, timeout: float, input: bytes | None = None) -> Called:
+        hold = Plan.parse(input.decode()).step == job_cleanup.HOLD
+        if hold and self.when == "before the hold":
+            self.claim()
+        said = self.device.call(argv, timeout=timeout, input=input)
+        if hold and self.when == "after the hold":
+            self.claim()
+        return said
+
+
+@pytest.mark.parametrize("when", ["before the hold", "after the hold"])
+def test_a_job_claimed_after_the_host_read_keeps_its_folder(tmp_path: Path, when: str) -> None:
+    root = work_root(tmp_path)
+    folder = job_folder(root, "j")
+    contents = sorted(path.relative_to(folder) for path in folder.rglob("*"))
+    db = database(tmp_path, [("j", "t1", "cancelled", OLD)])
+    transport = RequeueAndClaim(root, db, "j", when=when)
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), transport,
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert job_cleanup.read_jobs(db)[0].state == "running"
+    assert report.removed == {} and report.kept == {"j": "live"}
+    assert sorted(path.relative_to(folder) for path in folder.rglob("*")) == contents
+    assert not (root / "jobs" / "j.cleanup").exists()
+
+
+def test_a_launch_after_the_confirming_read_gets_a_fresh_folder_the_finish_leaves(
+    tmp_path: Path,
+) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "j")
+    jobs = root / "jobs"
+    plan = Plan(frozenset({"j"}), NOW - 6 * HOUR, False)
+    hold = job_cleanup.device_step(root, plan)
+    assert hold.held == ("j",) and not (jobs / "j").exists()
+    (jobs / "j").mkdir()
+    (jobs / "j" / "new-run").write_text("work of the next run\n")
+
+    done = job_cleanup.device_step(
+        root, Plan(frozenset({"j"}), plan.cutoff, False, job_cleanup.FINISH))
+
+    assert (jobs / "j" / "new-run").read_text() == "work of the next run\n"
+    assert done.removed == {} and done.kept["j"].startswith("error: j was made again")
+    assert sorted(path.name for path in (jobs / "j.cleanup").iterdir()) == [
+        ".orch-worker-abc.tree.pid", ".orch-worker.pid"]
+
+
+def test_a_folder_left_aside_by_an_interrupted_pass_is_settled_by_the_next(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "gone")
+    job_folder(root, "back")
+    jobs = root / "jobs"
+    job_cleanup.device_step(root, Plan(frozenset({"gone", "back"}), NOW - 6 * HOUR, False))
+    assert sorted(path.name for path in jobs.glob("*.cleanup")) == ["back.cleanup", "gone.cleanup"]
+    db = database(tmp_path, [("gone", "t1", "done", OLD), ("back", "t2", "queued", None)])
+
+    [(_, report)] = job_cleanup.run(db, machines(tmp_path, "pc"), InProcessTransport(root),
+                                    now=NOW, grace_hours=6, dry_run=False)
+
+    assert set(report.removed) == {"gone"} and report.kept == {"back": "live"}
+    assert (jobs / "back" / "repo" / "README").exists()
+    assert not (jobs / "gone" / "repo").exists() and not list(jobs.glob("*.cleanup"))
+
+
+NON_DUMPABLE = (
+    "import ctypes, sys, time; "
+    "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0; "
+    "print('ready', flush=True); time.sleep(60)"
+)
+
+
+@pytest.mark.skipif(not Path("/proc/self/cwd").exists(), reason="needs Linux /proc")
+def test_a_live_process_of_this_user_that_hides_its_cwd_keeps_every_folder(tmp_path: Path) -> None:
+    root = work_root(tmp_path)
+    job_folder(root, "held")
+    jobs = root / "jobs"
+    child = subprocess.Popen([sys.executable, "-c", NON_DUMPABLE], cwd=jobs / "held" / "repo",
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        try:
+            os.readlink(f"/proc/{child.pid}/cwd")
+            pytest.skip("this user can read a non-dumpable process's cwd (root or CAP_SYS_PTRACE)")
+        except PermissionError:
+            pass
+        assert job_cleanup.jobs_held_open(jobs) is None
+        report = device_pass(root, Plan(frozenset({"held"}), NOW - 6 * HOUR, False))
+        assert child.poll() is None
+    finally:
+        child.kill()
+        child.wait()
+
+    assert report.removed == {} and report.kept == {"held": "cannot-scan"}
+    assert (jobs / "held" / "repo" / "README").exists()
+    assert job_cleanup.jobs_held_open(jobs) == set()

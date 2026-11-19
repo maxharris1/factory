@@ -10,13 +10,18 @@ The orch host decides and the device acts. `orch cleanup run` reads orch.db
 once and names the finished jobs: done, failed or cancelled before the
 cutoff (now minus the grace period), except a failed job whose ticket still
 has a queued or running job (a retry may still need it). It sends that list
-to every device target over ssh. `orch cleanup device` then empties each
-named folder there, keeping only its `.orch-worker*` records, unless the
-folder or its launch or worker records changed after the cutoff (a requeue
-racing the pass), a worktree record sits beside it, or a process of this
-user has its cwd or an open file inside it. A device that cannot scan for
-such processes removes nothing. A folder the host did not name is never
-touched; the host labels each one live, recent, retry-held or unknown.
+to every device target over ssh. `orch cleanup device` then moves each
+named folder aside to `<job-id>.cleanup`, unless the folder or its launch
+or worker records changed after the cutoff, a worktree record sits beside
+it, or a process of this user has its cwd or an open file inside it. The
+host reads orch.db again and confirms only the ids still finished, so a
+job requeued and claimed since the first read is moved back; a launch
+after that makes a fresh `jobs/<job-id>/`. The device empties each
+confirmed folder, keeping only its `.orch-worker*` records, and moves it
+back. A device that cannot scan for such processes, or finds one of this
+user's it cannot inspect, removes nothing. A folder the host did not name
+is never touched; the host labels each one live, recent, retry-held or
+unknown.
 """
 
 from __future__ import annotations
@@ -53,6 +58,9 @@ NOT_NAMED = "not-finished"
 HELD_OPEN = "held-open"
 CANNOT_SCAN = "cannot-scan"
 WORKTREE_RECORD = "worktree-record"
+HOLD = "hold"
+FINISH = "finish"
+SET_ASIDE = ".cleanup"
 
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -104,10 +112,12 @@ class Plan:
     finished: frozenset[str]
     cutoff: float
     dry_run: bool
+    step: str = HOLD
 
     def to_json(self) -> str:
         return json.dumps(
-            {"finished": sorted(self.finished), "cutoff": self.cutoff, "dry_run": self.dry_run}
+            {"finished": sorted(self.finished), "cutoff": self.cutoff, "dry_run": self.dry_run,
+             "step": self.step}
         )
 
     @classmethod
@@ -118,7 +128,10 @@ class Plan:
             isinstance(item, str) and _JOB_ID.fullmatch(item) for item in finished
         ):
             raise ValueError("finished must be a list of plain job ids")
-        return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]))
+        step = data.get("step", HOLD)
+        if step not in (HOLD, FINISH):
+            raise ValueError(f"unknown step {step!r}")
+        return cls(frozenset(finished), float(data["cutoff"]), bool(data["dry_run"]), step)
 
 
 @dataclass(frozen=True)
@@ -126,6 +139,7 @@ class Report:
     removed: dict[str, int]
     kept: dict[str, str]
     dry_run: bool
+    held: tuple[str, ...] = ()
 
     @property
     def bytes_freed(self) -> int:
@@ -134,7 +148,7 @@ class Report:
     def to_json(self) -> str:
         return json.dumps(
             {"removed": self.removed, "kept": self.kept, "dry_run": self.dry_run,
-             "bytes_freed": self.bytes_freed}
+             "held": list(self.held), "bytes_freed": self.bytes_freed}
         )
 
     @classmethod
@@ -144,6 +158,7 @@ class Report:
             {str(k): int(v) for k, v in data["removed"].items()},
             {str(k): str(v) for k, v in data["kept"].items()},
             bool(data["dry_run"]),
+            tuple(str(job_id) for job_id in data.get("held", ())),
         )
 
 
@@ -171,24 +186,82 @@ def disk_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
+def _mine(process: Path) -> bool | None:
+    try:
+        status = (process / "status").read_text().splitlines()
+    except OSError:
+        return None
+    if not any(line.startswith("VmSize:") for line in status):
+        return None
+    uids = next((line.split()[1:] for line in status if line.startswith("Uid:")), [])
+    return str(os.getuid()) in uids
+
+
+def _parent(process: Path) -> Path | None:
+    try:
+        stat = (process / "stat").read_text()
+    except OSError:
+        return None
+    return process.with_name(stat.rsplit(")", 1)[1].split()[1])
+
+
+def _started_by_another_user(process: Path) -> bool:
+    """Walk up through this user's processes we cannot inspect.
+
+    Root starts sshd's session process, `systemd --user` and `(sd-pam)` and
+    then drops them to this user, which leaves them non-dumpable, so their
+    cwd cannot be read. Reaching another user's process means the line was
+    started by it; reaching one of ours we can inspect means a process of
+    this user hid itself, and the scan cannot vouch for it.
+    """
+    seen = {process.name}
+    while (parent := _parent(process)) is not None and parent.name not in seen:
+        seen.add(parent.name)
+        if parent.name == "0":
+            return True
+        mine = _mine(parent)
+        if mine is None:
+            return False
+        if not mine:
+            return True
+        if _process_paths(parent) is not None:
+            return False
+        process = parent
+    return _mine(process) is None
+
+
+def _process_paths(process: Path) -> list[str] | None:
+    try:
+        links = [process / "cwd", *(process / "fd").iterdir()]
+    except (FileNotFoundError, ProcessLookupError):
+        return []
+    except OSError:
+        return None
+    paths = []
+    for link in links:
+        try:
+            paths.append(os.readlink(link).removesuffix(" (deleted)"))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            return None
+    return paths
+
+
 def jobs_held_open(jobs: Path) -> set[str] | None:
     prefix = f"{os.path.realpath(jobs)}/"
     proc = Path("/proc")
     if (proc / "self" / "cwd").exists():
         paths = []
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
+        for process in proc.iterdir():
+            if not process.name.isdigit():
                 continue
-            links = [entry / "cwd"]
-            try:
-                links.extend((entry / "fd").iterdir())
-            except OSError:
-                pass
-            for link in links:
-                try:
-                    paths.append(os.readlink(link).removesuffix(" (deleted)"))
-                except OSError:
-                    continue
+            found = _process_paths(process)
+            if found is None:
+                if _mine(process) and not _started_by_another_user(process):
+                    return None
+                continue
+            paths.extend(found)
     else:
         try:
             found = subprocess.run(
@@ -197,7 +270,7 @@ def jobs_held_open(jobs: Path) -> set[str] | None:
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
-        if found.returncode not in (0, 1):
+        if found.returncode != 0:
             return None
         paths = [line[1:] for line in found.stdout.splitlines() if line.startswith("n")]
     return {path[len(prefix):].split("/", 1)[0] for path in paths if path.startswith(prefix)}
@@ -210,19 +283,27 @@ def _newer(path: Path, cutoff: float) -> bool:
         return False
 
 
-def _device_reason(folder: Path, cutoff: float, scan: Callable[[Path], set[str] | None]) -> str | None:
-    jobs = folder.parent
-    if (jobs / f"{folder.name}.json").exists():
-        return WORKTREE_RECORD
+def _launched_since(folder: Path, job_id: str, cutoff: float) -> bool:
     records = [path for path in folder.iterdir() if path.name.startswith(WORKER_RECORD)]
-    if any(_newer(path, cutoff) for path in (folder, jobs / f"{folder.name}.launched", *records)):
-        return RECENT
-    held = scan(jobs)
+    launch = folder.parent / f"{job_id}.launched"
+    return any(_newer(path, cutoff) for path in (launch, *records))
+
+
+def _in_use(folder: Path, scan: Callable[[Path], set[str] | None]) -> str | None:
+    held = scan(folder.parent)
     if held is None:
         return CANNOT_SCAN
     if folder.name in held:
         return HELD_OPEN
     return None
+
+
+def _device_reason(folder: Path, cutoff: float, scan: Callable[[Path], set[str] | None]) -> str | None:
+    if (folder.parent / f"{folder.name}.json").exists():
+        return WORKTREE_RECORD
+    if _newer(folder, cutoff) or _launched_since(folder, folder.name, cutoff):
+        return RECENT
+    return _in_use(folder, scan)
 
 
 def _removable(folder: Path) -> list[Path]:
@@ -245,33 +326,81 @@ def _empty(entries: Iterable[Path]) -> str | None:
     return None
 
 
-def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = jobs_held_open) -> Report:
+def _job_folders(jobs: Path, suffix: str = "") -> dict[str, Path]:
+    found = {}
+    for path in jobs.iterdir() if jobs.is_dir() else ():
+        job_id = path.name.removesuffix(suffix) if suffix else path.name
+        if (path.name.endswith(suffix) and _JOB_ID.fullmatch(job_id) and path.is_dir()
+                and not path.is_symlink()):
+            found[job_id] = path
+    return dict(sorted(found.items()))
+
+
+def _put_back(aside: Path, job_id: str) -> str | None:
+    home = aside.with_name(job_id)
+    if home.exists() or home.is_symlink():
+        return f"error: {job_id} was made again, left {aside.name}"
+    aside.rename(home)
+    return None
+
+
+def _hold(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
     jobs = root / "jobs"
-    folders = sorted(
-        path for path in (jobs.iterdir() if jobs.is_dir() else ())
-        if path.is_dir() and not path.is_symlink() and _JOB_ID.fullmatch(path.name)
-    )
     removed: dict[str, int] = {}
     kept: dict[str, str] = {}
-    for folder in folders:
-        if folder.name not in plan.finished:
-            kept[folder.name] = NOT_NAMED
+    held = list(_job_folders(jobs, SET_ASIDE))
+    for job_id, folder in _job_folders(jobs).items():
+        if job_id not in plan.finished:
+            kept[job_id] = NOT_NAMED
             continue
         try:
             reason = _device_reason(folder, plan.cutoff, scan)
             if reason is not None:
-                kept[folder.name] = reason
-                continue
-            entries = _removable(folder)
-            size = disk_bytes(entries)
-            failed = None if plan.dry_run else _empty(entries)
+                kept[job_id] = reason
+            elif plan.dry_run:
+                removed[job_id] = disk_bytes(_removable(folder))
+            elif job_id in held:
+                kept[job_id] = f"error: {job_id}{SET_ASIDE} is still there"
+            else:
+                aside = folder.with_name(job_id + SET_ASIDE)
+                folder.rename(aside)
+                if _launched_since(aside, job_id, plan.cutoff):
+                    kept[job_id] = _put_back(aside, job_id) or RECENT
+                else:
+                    held.append(job_id)
         except OSError as exc:
-            failed = f"could not read {folder}: {exc}"
-        if failed is None:
-            removed[folder.name] = size
+            kept[job_id] = f"error: could not set aside {folder}: {exc}".splitlines()[0]
+    return Report(removed, kept, plan.dry_run, tuple(sorted(held)))
+
+
+def _finish(root: Path, plan: Plan, scan: Callable[[Path], set[str] | None]) -> Report:
+    removed: dict[str, int] = {}
+    kept: dict[str, str] = {}
+    for job_id, aside in _job_folders(root / "jobs", SET_ASIDE).items():
+        try:
+            reason = NOT_NAMED if job_id not in plan.finished else _in_use(aside, scan)
+            size = failed = None
+            if reason is None:
+                entries = _removable(aside)
+                size = disk_bytes(entries)
+                failed = _empty(entries)
+            back = _put_back(aside, job_id)
+        except OSError as exc:
+            failed = f"could not read {aside}: {exc}"
+            back = None
+        if failed is not None:
+            kept[job_id] = f"error: {failed.splitlines()[0]}"
+        elif back is not None:
+            kept[job_id] = back
+        elif reason is not None:
+            kept[job_id] = reason
         else:
-            kept[folder.name] = f"error: {failed.splitlines()[0]}"
-    return Report(removed, kept, plan.dry_run)
+            removed[job_id] = size
+    return Report(removed, kept, False)
+
+
+def device_step(root: Path, plan: Plan, *, scan: Callable[[Path], set[str] | None] = jobs_held_open) -> Report:
+    return (_finish if plan.step == FINISH else _hold)(root, plan, scan)
 
 
 def label_unnamed(report: Report, reasons: Mapping[str, str | None]) -> Report:
@@ -305,7 +434,7 @@ def device_script(checkout: str, workdir_root: str) -> str:
     return _login(body, "orch-cleanup", (checkout, workdir_root))
 
 
-def clean_target(transport: CaptureTransport, target: Target, plan: Plan) -> Report | str:
+def _device_call(transport: CaptureTransport, target: Target, plan: Plan) -> Report | str:
     try:
         result = transport.call(
             ssh_argv(target.remote, device_script(target.checkout, target.remote.workdir_root)),
@@ -326,6 +455,22 @@ def clean_target(transport: CaptureTransport, target: Target, plan: Plan) -> Rep
         return "device step printed an unreadable report"
 
 
+def clean_target(transport: CaptureTransport, target: Target, db: Path, plan: Plan,
+                 reasons: Mapping[str, str | None]) -> Report | str:
+    hold = _device_call(transport, target, plan)
+    if isinstance(hold, str):
+        return hold
+    first = label_unnamed(hold, reasons)
+    if plan.dry_run or not hold.held:
+        return first
+    fresh = keep_reasons(read_jobs(db), plan.cutoff)
+    still = frozenset(i for i in hold.held if i in fresh and fresh[i] is None)
+    done = _device_call(transport, target, Plan(still, plan.cutoff, False, FINISH))
+    if isinstance(done, str):
+        return f"set aside {len(hold.held)} checkouts, then {done}"
+    return Report(done.removed, {**first.kept, **label_unnamed(done, fresh).kept}, False)
+
+
 def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_hours: float,
         dry_run: bool) -> list[tuple[Target, Report | str]]:
     cutoff = now - grace_hours * 3600
@@ -336,11 +481,8 @@ def run(db: Path, machines, transport: CaptureTransport, *, now: float, grace_ho
     if not work:
         return []
     with ThreadPoolExecutor(max_workers=len(work)) as pool:
-        outcomes = pool.map(lambda t: clean_target(transport, t, plan), work)
-        return [
-            (target, outcome if isinstance(outcome, str) else label_unnamed(outcome, reasons))
-            for target, outcome in zip(work, outcomes)
-        ]
+        return list(zip(work, pool.map(
+            lambda t: clean_target(transport, t, db, plan, reasons), work)))
 
 
 USAGE = """\
