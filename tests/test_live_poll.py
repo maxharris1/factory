@@ -1091,8 +1091,8 @@ def test_github_rate_limit_enters_backoff() -> None:
 
     def runner(argv, timeout):
         nonlocal calls
-        del argv, timeout
-        calls += 1
+        del timeout
+        calls += "rate_limit" not in argv
         return GhResult(1, "", "rate limited (HTTP 429)")
 
     source = LivePollSource(
@@ -1131,8 +1131,8 @@ def test_rate_limit_403_backs_off_github_reads() -> None:
 
     def runner(argv, timeout):
         nonlocal calls
-        del argv, timeout
-        calls += 1
+        del timeout
+        calls += "rate_limit" not in argv
         return GhResult(
             1,
             "HTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\n\r\n",
